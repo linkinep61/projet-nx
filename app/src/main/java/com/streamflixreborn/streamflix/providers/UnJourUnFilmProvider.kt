@@ -1156,12 +1156,12 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         // Legacy fallback: old DooPlay player options (pre-redesign)
         if (servers.isEmpty() && apiUrl.isEmpty() && onregardeUrl.isEmpty()) {
-            val oldServers = document.selectFirst("ul#playeroptionsul")?.select("li.dooplay_player_option")
-                ?.mapIndexedNotNull { idx, it ->
-                    val nume = it.attr("data-nume")
-                    val post = it.attr("data-post")
+            val playerOptions = document.selectFirst("ul#playeroptionsul")?.select("li.dooplay_player_option")
+            playerOptions?.forEachIndexed { idx, element ->
+                try {
+                    val nume = element.attr("data-nume")
+                    val post = element.attr("data-post")
                     val isEpisode = videoType is Video.Type.Episode
-                    val link = service.getServers(num=nume, post=post, type=if (isEpisode) "tv" else "movie")
+                    val link = service.getServers(num = nume, post = post, type = if (isEpisode) "tv" else "movie")
 
-                    if (link.embed_url.isNullOrEmpty() ||
-                        ignoreSource("", link.e
+                    if (link.embed_url.isNullOrEmpty(
