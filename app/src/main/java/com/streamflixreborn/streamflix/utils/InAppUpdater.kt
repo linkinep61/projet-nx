@@ -80,9 +80,4 @@ object InAppUpdater {
             intent.data = FileProvider.getUriForFile(
                 context,
                 BuildConfig.APPLICATION_ID + ".provider",
-                File(uri.path!!)
-            )
-        }
-        context.startActivity(intent)
-    }
-}
+                File(uri.

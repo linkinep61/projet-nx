@@ -1342,4 +1342,3 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         ): Document
     }
 }
-  
