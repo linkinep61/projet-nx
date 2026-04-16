@@ -664,8 +664,12 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     urlMatch?.groupValues?.get(1)?.toIntOrNull() ?: (idx + 1)
                 }
 
+                // Extract relative path from full URL (e.g. "saisons/slug")
+                // getSeason() uses @GET("{slug}") with encoded=true, so slashes are preserved
+                val seasonSlug = href.substringAfter("://").substringAfter("/").trimEnd('/')
+
                 Season(
-                    id = href.substringBeforeLast("/").substringAfterLast("/"),
+                    id = seasonSlug,
                     number = seasonNumber,
                     title = seasonTitle.ifBlank { "Saison $seasonNumber" },
                     poster = seasonCard.selectFirst("img")?.attr("src")
