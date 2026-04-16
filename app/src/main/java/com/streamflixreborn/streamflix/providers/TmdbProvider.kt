@@ -737,10 +737,22 @@ class TmdbProvider(override val language: String) : Provider {
                 VideasyExtractor().server(videoType, language)?.let { servers.add(it) }
             }
             "fr" -> {
-                // Solo server francesi
-                servers.addAll(FrembedExtractor(UserPreferences.getProviderCache(FrembedProvider, UserPreferences.PROVIDER_URL)).servers(videoType))
-                servers.addAll(AfterDarkExtractor(UserPreferences.getProviderCache(AfterDarkProvider, UserPreferences.PROVIDER_URL)).servers(videoType))
+                // Server francesi
+                val frembedUrl = UserPreferences.getProviderCache(FrembedProvider, UserPreferences.PROVIDER_URL).ifEmpty { FrembedProvider.defaultBaseUrl }
+                val afterDarkUrl = UserPreferences.getProviderCache(AfterDarkProvider, UserPreferences.PROVIDER_URL).ifEmpty { AfterDarkProvider.defaultBaseUrl }
+                try { servers.addAll(FrembedExtractor(frembedUrl).servers(videoType)) } catch (_: Exception) {}
+                try { servers.addAll(AfterDarkExtractor(afterDarkUrl).servers(videoType)) } catch (_: Exception) {}
                 VideasyExtractor().server(videoType, language)?.let { servers.add(it) }
+                // Toujours ajouter les serveurs globaux en complément
+                servers.add(VixSrcExtractor().server(videoType))
+                servers.add(TwoEmbedExtractor().server(videoType))
+                servers.add(VidsrcNetExtractor().server(videoType))
+                servers.add(VidLinkExtractor().server(videoType))
+                servers.add(VidsrcRuExtractor().server(videoType))
+                servers.add(VidflixExtractor().server(videoType))
+                servers.addAll(VidrockExtractor().servers(videoType))
+                servers.addAll(VidzeeExtractor().servers(videoType))
+                servers.addAll(PrimeSrcExtractor().servers(videoType))
             }
             "es" -> {
                 // TMDB Spagnolo: Utilizza ESCLUSIVAMENTE server certificati con audio spagnolo ([LAT] o [CAST])

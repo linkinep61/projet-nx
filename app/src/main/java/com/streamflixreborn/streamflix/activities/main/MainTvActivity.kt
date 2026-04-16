@@ -25,6 +25,7 @@ import com.streamflixreborn.streamflix.fragments.player.PlayerTvFragment
 import com.streamflixreborn.streamflix.ui.UpdateAppTvDialog
 import com.streamflixreborn.streamflix.providers.Provider
 import com.streamflixreborn.streamflix.providers.Cine24hProvider
+import com.streamflixreborn.streamflix.providers.WiflixProvider
 import com.streamflixreborn.streamflix.utils.AppLanguageManager
 import com.streamflixreborn.streamflix.utils.ThemeManager
 import com.streamflixreborn.streamflix.utils.UserPreferences
@@ -52,7 +53,8 @@ class MainTvActivity : FragmentActivity() {
         
         // Inizializza il provider con il context dell'attività per gestire eventuali bypass visibili
         Cine24hProvider.init(this)
-        
+        WiflixProvider.init(this)
+
         _binding = ActivityMainTvBinding.inflate(layoutInflater)
         setContentView(binding.root)
         applyThemeNavigationChrome()

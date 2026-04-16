@@ -246,6 +246,17 @@ class BypassWebViewActivity : AppCompatActivity() {
     private fun isAllowedBypassHost(url: String): Boolean {
         val host = runCatching { Uri.parse(url).host.orEmpty() }.getOrDefault("")
         return host.equals("s.to", ignoreCase = true) ||
-            host.equals("challenges.cloudflare.com", ignoreCase = true)
+            host.equals("challenges.cloudflare.com", ignoreCase = true) ||
+            host.endsWith("flemmix.farm", ignoreCase = true) ||
+            host.endsWith("flemmix.upns.pro", ignoreCase = true) ||
+            host.endsWith("wiflix.zone", ignoreCase = true) ||
+            host.endsWith("wiflix.dev", ignoreCase = true) ||
+            host.endsWith("wiflix.fun", ignoreCase = true) ||
+            host.endsWith("flemmix.golf", ignoreCase = true) ||
+            host.endsWith("flemmix.irish", ignoreCase = true) ||
+            host.endsWith("flemmix.town", ignoreCase = true) ||
+            host.endsWith("flemmix.vip", ignoreCase = true) ||
+            host.endsWith("wiflix.red", ignoreCase = true) ||
+            host.endsWith("wiflix.re", ignoreCase = true)
     }
 }

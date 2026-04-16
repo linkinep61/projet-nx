@@ -34,6 +34,7 @@ class MainViewModel : ViewModel() {
 
 
     fun checkUpdate() = viewModelScope.launch(Dispatchers.IO) {
+        return@launch // Updates disabled for custom build
         if (!UserPreferences.updateCheckEnabled) return@launch
         _state.emit(State.CheckingUpdate)
 
