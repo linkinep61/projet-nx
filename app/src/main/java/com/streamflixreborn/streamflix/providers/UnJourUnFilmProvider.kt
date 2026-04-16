@@ -1203,14 +1203,14 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun onChangeUrl(forceRefresh: Boolean): String {
         changeUrlMutex.withLock {
-            if (forceRefresh || UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_AUTOUPDATE) \!= "false") {
+            if (forceRefresh || UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
                 val addressService = Service.buildAddressFetcher()
                 try {
                     val document = addressService.getHome()
 
                     val newUrl = document.html().substringAfter("window.location.href = \"").substringBefore("\"")
                         .trim()
-                    if (\!newUrl.isNullOrEmpty()) {
+                    if (!newUrl.isNullOrEmpty()) {
                         val newIcon = document.selectFirst("link[rel=apple-touch-icon]")
                             ?.attr("href")
                             ?: "$defaultPortalUrl/wp-content/uploads/2025/07/1J1F-150x150.jpg"
@@ -1342,3 +1342,4 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         ): Document
     }
 }
+  

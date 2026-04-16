@@ -1007,21 +1007,21 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 val epsDataRegex = Regex("""j1fEpsData\s*=\s*(\[.*?]);\s*""", RegexOption.DOT_MATCHES_ALL)
                 val epsMatch = epsDataRegex.find(seasonHtml)
 
-                if (epsMatch \!= null) {
+                if (epsMatch != null) {
                     try {
                         val jsonArray = JSONArray(epsMatch.groupValues[1])
                         if (epIndex < jsonArray.length()) {
                             val epObj = jsonArray.getJSONObject(epIndex)
                             val epServers = epObj.optJSONArray("servers")
 
-                            if (epServers \!= null) {
+                            if (epServers != null) {
                                 for (i in 0 until epServers.length()) {
                                     val srv = epServers.getJSONObject(i)
                                     val label = srv.optString("label", "")
                                     val url = srv.optString("url", "")
                                     val flags = srv.optString("flags", "")
 
-                                    if (url.isNotEmpty() && \!ignoreSource("", url)) {
+                                    if (url.isNotEmpty() && !ignoreSource("", url)) {
                                         val displayName = if (flags.isNotEmpty()) "$flags $label" else label
 
                                         if (url.startsWith(apivoirfilm.mainUrl)) {
@@ -1068,7 +1068,7 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         val srvRegex = Regex("""J1F_SRV\s*=\s*(\[.*?]);""", RegexOption.DOT_MATCHES_ALL)
         val match = srvRegex.find(jsContent)
 
-        if (match \!= null) {
+        if (match != null) {
             try {
                 val jsonArrayStr = match.groupValues[1]
                 val jsonArray = JSONArray(jsonArrayStr)
@@ -1078,7 +1078,7 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     val label = serverObj.optString("label", "")
                     val url = serverObj.optString("url", "")
 
-                    if (url.isNotEmpty() && \!ignoreSource("", url)) {
+                    if (url.isNotEmpty() && !ignoreSource("", url)) {
                         if (url.startsWith(apivoirfilm.mainUrl)) {
                             apiUrl = url
                         } else if (url.startsWith(onregadeou.mainUrl)) {
@@ -1187,14 +1187,14 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun onChangeUrl(forceRefresh: Boolean): String {
         changeUrlMutex.withLock {
-            if (forceRefresh || UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_AUTOUPDATE) \!= "false") {
+            if (forceRefresh || UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
                 val addressService = Service.buildAddressFetcher()
                 try {
                     val document = addressService.getHome()
 
                     val newUrl = document.html().substringAfter("window.location.href = \"").substringBefore("\"")
                         .trim()
-                    if (\!newUrl.isNullOrEmpty()) {
+                    if (!newUrl.isNullOrEmpty()) {
                         val newIcon = document.selectFirst("link[rel=apple-touch-icon]")
                             ?.attr("href")
                             ?: "$defaultPortalUrl/wp-content/uploads/2025/07/1J1F-150x150.jpg"
@@ -1312,17 +1312,4 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         ): itemLink
 
         @GET("genre/{genre}/page/{page}/")
-        suspend fun getGenre(
-            @Path("genre") genre: String,
-            @Path("page") page: Int,
-            @Header("User-agent") user_agent: String = USER_AGENT
-        ): Document
-
-        @GET("cast/{id}/page/{page}")
-        suspend fun getPeople(
-            @Path("id") id: String,
-            @Path("page") page: Int,
-            @Header("User-agent") user_agent: String = USER_AGENT
-        ): Document
-    }
-}
+        suspend fun getG
