@@ -898,4 +898,431 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
         }
 
-        return e
+        return episodes
+    }
+
+    override suspend fun getGenre(id: String, page: Int): Genre {
+        initializeService()
+
+        val document = try {
+            service.getGenre(id, page)
+        } catch (e: HttpException) {
+            when (e.code()) {
+                404 -> return Genre(id, "")
+                else -> throw e
+            }
+        }
+
+        val genre = Genre(
+            id = id,
+            name = "",
+            shows = document.select("div.items.full > article.item.movies, article.item.tvshows")
+                .mapNotNull {
+                    val link = it.selectFirst("div.data")?.selectFirst("a")
+                    val fhref = link?.attr("href") ?: ""
+                    val href = fhref.substringBeforeLast("/").substringAfterLast("/")
+                    if (fhref.contains("films/")) {
+                        Movie(
+                            href,
+                            title = link?.text() ?: "",
+                            poster = it.selectFirst("img")?.attr("src")
+                        )
+                    } else if (fhref.contains("tvshows/")) {
+                        TvShow(
+                            id = href,
+                            title = link?.text() ?: "",
+                            poster = it.selectFirst("img")?.attr("src")
+                        )
+                    } else {
+                        null
+                    }
+                }
+        )
+
+        return genre
+    }
+
+    override suspend fun getPeople(id: String, page: Int): People {
+        initializeService()
+
+        val document = try {
+            service.getPeople(id, page)
+        } catch (e: HttpException) {
+            when (e.code()) {
+                404 -> return People(id, "")
+                else -> throw e
+            }
+        }
+
+        val people = People(
+            id = id,
+            name = "",
+            filmography = document.select("div.items.full > article.item.movies, article.item.tvshows")
+                .mapNotNull {
+                    val link = it.selectFirst("div.data")?.selectFirst("a")
+                    val fhref = link?.attr("href") ?: ""
+                    val href = fhref.substringBeforeLast("/").substringAfterLast("/")
+                    if (fhref.contains("/films/")) {
+                        Movie(
+                            href,
+                            title = link?.text() ?: "",
+                            poster = it.selectFirst("img")?.attr("src")
+                        )
+                    } else if (fhref.contains("/tvshows/")) {
+                        TvShow(
+                            id = href,
+                            title = link?.text() ?: "",
+                            poster = it.selectFirst("img")?.attr("src")
+                        )
+                    } else {
+                        null
+                    }
+                }
+        )
+
+        return people
+    }
+
+    override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        initializeService()
+
+        val apivoirfilm = ApiVoirFilmExtractor()
+        val onregadeou = OnRegardeOuExtractor()
+        var apiUrl = ""
+        var onregardeUrl = ""
+
+        val servers = mutableListOf<Video.Server>()
+
+        // Handle new season-based episode format: SEASON:seasonSlug:epIndex
+        if (id.startsWith("SEASON:")) {
+            val parts = id.split(":")
+            if (parts.size >= 3) {
+                val seasonSlug = parts[1]
+                val epIndex = parts[2].toIntOrNull() ?: 0
+
+                val seasonDocument = service.getSeason(seasonSlug)
+                val decodedScripts = extractDecodedScripts(seasonDocument)
+                val seasonHtml = decodedScripts.ifEmpty { seasonDocument.html() }
+
+                val epsDataRegex = Regex("""j1fEpsData\s*=\s*(\[.*?]);\s*""", RegexOption.DOT_MATCHES_ALL)
+                val epsMatch = epsDataRegex.find(seasonHtml)
+
+                if (epsMatch \!= null) {
+                    try {
+                        val jsonArray = JSONArray(epsMatch.groupValues[1])
+                        if (epIndex < jsonArray.length()) {
+                            val epObj = jsonArray.getJSONObject(epIndex)
+                            val epServers = epObj.optJSONArray("servers")
+
+                            if (epServers \!= null) {
+                                for (i in 0 until epServers.length()) {
+                                    val srv = epServers.getJSONObject(i)
+                                    val label = srv.optString("label", "")
+                                    val url = srv.optString("url", "")
+                                    val flags = srv.optString("flags", "")
+
+                                    if (url.isNotEmpty() && \!ignoreSource("", url)) {
+                                        val displayName = if (flags.isNotEmpty()) "$flags $label" else label
+
+                                        if (url.startsWith(apivoirfilm.mainUrl)) {
+                                            apiUrl = url
+                                        } else if (url.startsWith(onregadeou.mainUrl)) {
+                                            onregardeUrl = url
+                                        } else {
+                                            servers.add(
+                                                Video.Server(
+                                                    id = "srv$i",
+                                                    name = displayName.ifBlank { "Server ${i + 1}" },
+                                                    src = url
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch (_: Exception) { }
+                }
+
+                val other = if (apiUrl.isNotEmpty())
+                    apivoirfilm.expand(apiUrl, baseUrl, "FR ")
+                else if (onregardeUrl.isNotEmpty())
+                    onregadeou.expand(onregardeUrl, baseUrl, "FR ")
+                else
+                    emptyList()
+
+                return servers + other
+            }
+        }
+
+        // Fetch the page (movie or episode)
+        val document = when (videoType) {
+            is Video.Type.Episode -> service.getEpisode(id)
+            is Video.Type.Movie -> service.getMovie(id)
+        }
+
+        // Try to extract J1F_SRV servers from the page
+        val decodedMovieScripts = extractDecodedScripts(document)
+        val rawHtml = document.html()
+        val jsContent = decodedMovieScripts.ifEmpty { rawHtml }
+        val srvRegex = Regex("""J1F_SRV\s*=\s*(\[.*?]);""", RegexOption.DOT_MATCHES_ALL)
+        val match = srvRegex.find(jsContent)
+
+        if (match \!= null) {
+            try {
+                val jsonArrayStr = match.groupValues[1]
+                val jsonArray = JSONArray(jsonArrayStr)
+
+                for (i in 0 until jsonArray.length()) {
+                    val serverObj = jsonArray.getJSONObject(i)
+                    val label = serverObj.optString("label", "")
+                    val url = serverObj.optString("url", "")
+
+                    if (url.isNotEmpty() && \!ignoreSource("", url)) {
+                        if (url.startsWith(apivoirfilm.mainUrl)) {
+                            apiUrl = url
+                        } else if (url.startsWith(onregadeou.mainUrl)) {
+                            onregardeUrl = url
+                        } else {
+                            servers.add(
+                                Video.Server(
+                                    id = "srv${servers.size}",
+                                    name = label.ifBlank { "Server ${servers.size + 1}" },
+                                    src = url
+                                )
+                            )
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // JSON parsing failed
+            }
+        }
+
+        // Fallback: extract post ID and probe DooPlay AJAX
+        if (servers.isEmpty() && apiUrl.isEmpty() && onregardeUrl.isEmpty()) {
+            val postIdMatch = Regex("""postid-(\d+)""").find(rawHtml)
+            val postId = postIdMatch?.groupValues?.get(1) ?: ""
+            val isEpisode = videoType is Video.Type.Episode
+
+            if (postId.isNotEmpty()) {
+                for (nume in 1..10) {
+                    try {
+                        val link = service.getServers(
+                            num = nume.toString(),
+                            post = postId,
+                            type = if (isEpisode) "tv" else "movie"
+                        )
+                        if (link.embed_url.isNullOrEmpty()) break
+
+                        if (ignoreSource("", link.embed_url)) continue
+
+                        if (link.embed_url.startsWith(apivoirfilm.mainUrl)) {
+                            apiUrl = link.embed_url
+                            continue
+                        }
+                        if (link.embed_url.startsWith(onregadeou.mainUrl)) {
+                            onregardeUrl = link.embed_url
+                            continue
+                        }
+
+                        servers.add(
+                            Video.Server(
+                                id = "srv$nume",
+                                name = "Serveur $nume",
+                                src = link.embed_url
+                            )
+                        )
+                    } catch (_: Exception) { break }
+                }
+            }
+        }
+
+        // Legacy fallback: old DooPlay player options
+        if (servers.isEmpty() && apiUrl.isEmpty() && onregardeUrl.isEmpty()) {
+            val playerOptions = document.selectFirst("ul#playeroptionsul")?.select("li.dooplay_player_option")
+            playerOptions?.forEachIndexed { idx, element ->
+                try {
+                    val nume = element.attr("data-nume")
+                    val post = element.attr("data-post")
+                    val isEpisode = videoType is Video.Type.Episode
+                    val link = service.getServers(num = nume, post = post, type = if (isEpisode) "tv" else "movie")
+
+                    if (link.embed_url.isNullOrEmpty() || ignoreSource("", link.embed_url)) return@forEachIndexed
+
+                    if (link.embed_url.startsWith(apivoirfilm.mainUrl)) {
+                        apiUrl = link.embed_url
+                        return@forEachIndexed
+                    }
+                    if (link.embed_url.startsWith(onregadeou.mainUrl)) {
+                        onregardeUrl = link.embed_url
+                        return@forEachIndexed
+                    }
+
+                    val title = element.selectFirst("span.title")?.text() ?: "Server $idx"
+                    servers.add(
+                        Video.Server(
+                            id = "srv$idx",
+                            name = title,
+                            src = link.embed_url
+                        )
+                    )
+                } catch (_: Exception) { }
+            }
+        }
+
+        val other = if (apiUrl.isNotEmpty())
+            apivoirfilm.expand(apiUrl, baseUrl, "FR ")
+        else if (onregardeUrl.isNotEmpty())
+            onregadeou.expand(onregardeUrl, baseUrl, "FR ")
+        else
+            emptyList()
+
+        return servers + other
+    }
+
+    override suspend fun getVideo(server: Video.Server): Video {
+        return Extractor.extract(server.src)
+    }
+
+    override suspend fun onChangeUrl(forceRefresh: Boolean): String {
+        changeUrlMutex.withLock {
+            if (forceRefresh || UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_AUTOUPDATE) \!= "false") {
+                val addressService = Service.buildAddressFetcher()
+                try {
+                    val document = addressService.getHome()
+
+                    val newUrl = document.html().substringAfter("window.location.href = \"").substringBefore("\"")
+                        .trim()
+                    if (\!newUrl.isNullOrEmpty()) {
+                        val newIcon = document.selectFirst("link[rel=apple-touch-icon]")
+                            ?.attr("href")
+                            ?: "$defaultPortalUrl/wp-content/uploads/2025/07/1J1F-150x150.jpg"
+                        val finalUrl = if (newUrl.endsWith("/")) newUrl else "$newUrl/"
+                        UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_URL, finalUrl)
+                        UserPreferences.setProviderCache(
+                            this,
+                            UserPreferences.PROVIDER_LOGO,
+                            newIcon
+                        )
+                    }
+                } catch (e: Exception) {
+                    // In case of failure, use the default URL
+                }
+            }
+            service = Service.build(baseUrl)
+            serviceInitialized = true
+        }
+        return baseUrl
+    }
+
+    private suspend fun initializeService() {
+        initializationMutex.withLock {
+            if (serviceInitialized) return
+            onChangeUrl()
+        }
+    }
+
+    private interface Service {
+
+        companion object {
+            private val client = OkHttpClient.Builder()
+                .readTimeout(30, TimeUnit.SECONDS)
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .dns(DnsResolver.doh)
+                .build()
+
+            fun buildAddressFetcher(): Service {
+                val addressRetrofit = Retrofit.Builder()
+                    .baseUrl(portalUrl)
+                    .addConverterFactory(JsoupConverterFactory.create())
+                    .client(client)
+                    .build()
+
+                return addressRetrofit.create(Service::class.java)
+            }
+
+            fun build(baseUrl: String): Service {
+                val retrofit = Retrofit.Builder()
+                    .baseUrl(baseUrl)
+                    .addConverterFactory(JsoupConverterFactory.create())
+                    .addConverterFactory(GsonConverterFactory.create())
+                    .client(client)
+                    .build()
+
+                return retrofit.create(Service::class.java)
+            }
+        }
+
+        @GET(".")
+        suspend fun getHome(
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("/")
+        suspend fun search(
+            @Query("s") query: String,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("films/page/{page}/")
+        suspend fun getMovies(
+            @Path("page") page: Int,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("tvshows/page/{page}/")
+        suspend fun getTvShows(
+            @Path("page") page: Int,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("films/{id}/")
+        suspend fun getMovie(
+            @Path("id") id: String,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("tvshows/{id}/")
+        suspend fun getTvShow(
+            @Path("id") id: String,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("episodes/{id}/")
+        suspend fun getEpisode(
+            @Path("id") id: String,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("{slug}")
+        suspend fun getSeason(
+            @Path("slug", encoded = true) slug: String,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @POST("wp-admin/admin-ajax.php")
+        @FormUrlEncoded
+        suspend fun getServers(
+            @Field("action") action: String = "doo_player_ajax",
+            @Field("post") post: String,
+            @Field("nume") num: String,
+            @Field("type") type: String = "movie",
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): itemLink
+
+        @GET("genre/{genre}/page/{page}/")
+        suspend fun getGenre(
+            @Path("genre") genre: String,
+            @Path("page") page: Int,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("cast/{id}/page/{page}")
+        suspend fun getPeople(
+            @Path("id") id: String,
+            @Path("page") page: Int,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+    }
+}
