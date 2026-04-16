@@ -34,7 +34,7 @@ class MainViewModel : ViewModel() {
 
 
     fun checkUpdate() = viewModelScope.launch(Dispatchers.IO) {
-        if (!UserPreferences.updateCheckEnabled) return@launch
+        if (\!UserPreferences.updateCheckEnabled) return@launch
         _state.emit(State.CheckingUpdate)
 
         try {
@@ -47,7 +47,7 @@ class MainViewModel : ViewModel() {
                     when (BuildConfig.APP_LAYOUT) {
                         "mobile" -> it.name.endsWith("-mobile.apk")
                         "tv" -> it.name.endsWith("-tv.apk")
-                        else -> !it.name.endsWith("-mobile.apk") && !it.name.endsWith("-tv.apk")
+                        else -> \!it.name.endsWith("-mobile.apk") && \!it.name.endsWith("-tv.apk")
                     }
                 }
                 ?: throw Exception("Can't find update APK")
@@ -85,4 +85,8 @@ class MainViewModel : ViewModel() {
             InAppUpdater.installApk(context, Uri.fromFile(apk))
         } catch (e: Exception) {
             Log.e("MainViewModel", "installUpdate: ", e)
-            _state.emit(State.Failed
+            _state.emit(State.FailedUpdate(e))
+        }
+    }
+}
+
