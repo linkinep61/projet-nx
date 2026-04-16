@@ -106,9 +106,11 @@ class WebViewResolver(private val context: Context) {
                 ?.replace("\\u003C", "<")?.replace("\\\"", "\"")?.replace("\\n", "\n") ?: ""
             
             val isChallenge = challengeKeywords.any { cleanHtml.contains(it, ignoreCase = true) }
-            val hasContent = cleanHtml.contains("article") || cleanHtml.contains("iframe") || 
-                             cleanHtml.contains("TPost") || cleanHtml.contains("grid-item") || 
-                             cleanHtml.contains("optnslst") // Rilevamento server Cine24h (come da registro)
+            val hasContent = cleanHtml.contains("article") || cleanHtml.contains("iframe") ||
+                             cleanHtml.contains("TPost") || cleanHtml.contains("grid-item") ||
+                             cleanHtml.contains("optnslst") || // Rilevamento server Cine24h (come da registro)
+                             cleanHtml.contains("block-main") || cleanHtml.contains("mov-t") ||
+                             cleanHtml.contains("mov-list") || cleanHtml.contains("posterimg") // Wiflix
 
             Log.d(TAG, "[WebView] Status -> Challenge: $isChallenge, Content: $hasContent, Clearance: $hasClearance, Polling: $pollingCount")
 

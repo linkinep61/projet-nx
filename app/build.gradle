@@ -60,6 +60,15 @@ android {
         jvmTarget = '17'
     }
 
+    signingConfigs {
+        release {
+            storeFile file("${project.rootDir}/streamflix-release.jks")
+            storePassword "streamflix2024"
+            keyAlias "streamflix"
+            keyPassword "streamflix2024"
+        }
+    }
+
     buildTypes {
         debug {
             minifyEnabled false
@@ -69,6 +78,7 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
         }
     }
 

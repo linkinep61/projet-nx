@@ -1,5 +1,7 @@
 package com.streamflixreborn.streamflix.providers
 
+import android.content.Context
+import android.util.Log
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.Extractor
@@ -12,10 +14,15 @@ import com.streamflixreborn.streamflix.models.Season
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
+import com.streamflixreborn.streamflix.utils.NetworkClient
+import com.streamflixreborn.streamflix.utils.WebViewResolver
+import com.streamflixreborn.streamflix.StreamFlixApp
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import retrofit2.HttpException
 import retrofit2.Retrofit
@@ -38,7 +45,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             return cachePortalURL.ifEmpty{ field }
         }
 
-    override val defaultBaseUrl: String = "http://flemmix.best/"
+    override val defaultBaseUrl: String = "https://flemmix.farm/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
@@ -58,13 +65,116 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private var serviceInitialized = false
     private val initializationMutex = Mutex()
 
+    // Cloudflare bypass via WebViewResolver (same pattern as Cine24hProvider)
+    private var webViewResolver: WebViewResolver? = null
+    private const val TAG = "WiflixBypass"
+
+    // In-memory document cache to avoid redundant Cloudflare bypasses.
+    // Key = URL, Value = (Document, timestampMs)
+    private const val CACHE_TTL_MS = 5 * 60 * 1000L // 5 minutes
+    private val documentCache = mutableMapOf<String, Pair<Document, Long>>()
+
+    private fun getCachedDocument(url: String): Document? {
+        val entry = documentCache[url] ?: return null
+        if (System.currentTimeMillis() - entry.second > CACHE_TTL_MS) {
+            documentCache.remove(url)
+            return null
+        }
+        return entry.first
+    }
+
+    private fun cacheDocument(url: String, doc: Document) {
+        // Keep cache size reasonable
+        if (documentCache.size > 20) {
+            val now = System.currentTimeMillis()
+            documentCache.entries.removeAll { now - it.value.second > CACHE_TTL_MS }
+        }
+        documentCache[url] = Pair(doc, System.currentTimeMillis())
+    }
+
+    private fun getResolver(): WebViewResolver {
+        return webViewResolver ?: WebViewResolver(StreamFlixApp.instance).also {
+            webViewResolver = it
+        }
+    }
+
+    fun init(context: Context) {
+        webViewResolver = WebViewResolver(context)
+    }
+
+    private val challengeKeywords = listOf(
+        "Just a moment...", "cf-browser-verification", "challenge-running",
+        "Checking your browser", "cf-turnstile"
+    )
+
+    /**
+     * Fetches a document with automatic Cloudflare bypass.
+     * First checks the in-memory cache. Then tries OkHttp (with cookies
+     * from previous WebView bypasses). If Cloudflare is still detected,
+     * falls back to WebViewResolver which opens a real WebView.
+     */
+    private suspend fun getDocument(url: String): Document {
+        // Check cache first
+        getCachedDocument(url)?.let {
+            Log.d(TAG, "[Provider] Cache HIT for $url")
+            return it
+        }
+
+        try {
+            val client = NetworkClient.default.newBuilder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(15, TimeUnit.SECONDS)
+                .writeTimeout(10, TimeUnit.SECONDS)
+                .build()
+
+            val request = Request.Builder()
+                .url(url)
+                .header("Referer", baseUrl)
+                .header("User-Agent", NetworkClient.USER_AGENT)
+                .build()
+
+            val response = client.newCall(request).execute()
+
+            if (response.isSuccessful) {
+                val html = response.body?.string() ?: ""
+                if (challengeKeywords.none { html.contains(it, ignoreCase = true) }) {
+                    val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+                    cacheDocument(url, doc)
+                    return doc
+                }
+                Log.d(TAG, "[Provider] Cloudflare challenge detected in HTML for $url")
+            } else {
+                Log.d(TAG, "[Provider] HTTP ${response.code} for $url")
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "[Provider] OkHttp failed for $url: ${e.message}")
+        }
+
+        // OkHttp failed or Cloudflare detected -> use WebView bypass
+        Log.d(TAG, "[Provider] Launching WebView Bypass for $url")
+        val html = getResolver().get(url)
+        val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+        cacheDocument(url, doc)
+        return doc
+    }
+
     // Flag to track if more search results are available. Set to false when API returns fewer items than requested.
     // This prevents querying non-existent pages that could return random/incorrect results.
     private var hasMore = true
 
     override suspend fun getHome(): List<Category> {
         initializeService()
-        val document = service.getHome()
+        val document = try {
+            val doc = service.getHome()
+            val html = doc.html()
+            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) {
+                Log.d(TAG, "[getHome] Cloudflare challenge in Retrofit response, using bypass")
+                getDocument(baseUrl)
+            } else doc
+        } catch (e: Exception) {
+            Log.d(TAG, "[getHome] Retrofit failed: ${e.message}, using bypass")
+            getDocument(baseUrl)
+        }
 
         val categories = mutableListOf<Category>()
 
@@ -135,7 +245,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         initializeService()
 
         if (query.isEmpty()) {
-            val document = service.getHome()
+            val document = try {
+                val doc = service.getHome()
+                val html = doc.html()
+                if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument(baseUrl) else doc
+            } catch (e: Exception) { getDocument(baseUrl) }
 
             val genres = document.select("div.side-b").getOrNull(1)?.select("ul li")?.map {
                 Genre(
@@ -153,11 +267,19 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         if (page > 1 && !hasMore) return emptyList()
 
-        val document = service.search(
-            story = query,
-            searchStart = page,
-            resultFrom = 1 + 20 * (page - 1)
-        )
+        val document = try {
+            val doc = service.search(
+                story = query,
+                searchStart = page,
+                resultFrom = 1 + 20 * (page - 1)
+            )
+            val html = doc.html()
+            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) {
+                getDocument("${baseUrl}index.php?do=search&subaction=search&story=$query&search_start=$page&result_from=${1 + 20 * (page - 1)}")
+            } else doc
+        } catch (e: Exception) {
+            getDocument("${baseUrl}index.php?do=search&subaction=search&story=$query&search_start=$page&result_from=${1 + 20 * (page - 1)}")
+        }
 
         document.selectFirst("div.berrors")?.text()?.let { resultText ->
             val totalResults = resultText.substringAfter("trouvé ")
@@ -206,7 +328,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun getMovies(page: Int): List<Movie> {
         initializeService()
-        val document = service.getMovies(page)
+        val document = try {
+            val doc = service.getMovies(page)
+            val html = doc.html()
+            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}film-en-streaming/page/$page") else doc
+        } catch (e: Exception) { getDocument("${baseUrl}film-en-streaming/page/$page") }
 
         val movies = document.select("div.mov").map {
             Movie(
@@ -226,7 +352,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
         initializeService()
-        val document = service.getTvShows(page)
+        val document = try {
+            val doc = service.getTvShows(page)
+            val html = doc.html()
+            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}serie-en-streaming/page/$page") else doc
+        } catch (e: Exception) { getDocument("${baseUrl}serie-en-streaming/page/$page") }
 
         val tvShows = document.select("div.mov").map {
             TvShow(
@@ -247,7 +377,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun getMovie(id: String): Movie {
         initializeService()
-        val document = service.getMovie(id)
+        val document = try {
+            val doc = service.getMovie(id)
+            val html = doc.html()
+            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}film-en-streaming/$id") else doc
+        } catch (e: Exception) { getDocument("${baseUrl}film-en-streaming/$id") }
 
         val movie = Movie(
             id = id,
@@ -352,7 +486,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun getTvShow(id: String): TvShow {
         initializeService()
-        val document = service.getTvShow(id)
+        val document = try {
+            val doc = service.getTvShow(id)
+            val html = doc.html()
+            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}serie-en-streaming/$id") else doc
+        } catch (e: Exception) { getDocument("${baseUrl}serie-en-streaming/$id") }
         val title = document.selectFirst("header.full-title h1")
             ?.text()
             ?: ""
@@ -459,7 +597,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         initializeService()
         val (tvShowId, className) = seasonId.split("/")
 
-        val document = service.getTvShow(tvShowId)
+        val document = try {
+            val doc = service.getTvShow(tvShowId)
+            val html = doc.html()
+            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}serie-en-streaming/$tvShowId") else doc
+        } catch (e: Exception) { getDocument("${baseUrl}serie-en-streaming/$tvShowId") }
 
         val episodes = document.select("div.$className ul.eplist li").map {
             Episode(
@@ -474,7 +616,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun getGenre(id: String, page: Int): Genre {
         initializeService()
-        val document = service.getGenre(id, page)
+        val document = try {
+            val doc = service.getGenre(id, page)
+            val html = doc.html()
+            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}film-en-streaming/$id/page/$page") else doc
+        } catch (e: Exception) { getDocument("${baseUrl}film-en-streaming/$id/page/$page") }
 
         val genre = Genre(
             id = id,
@@ -500,13 +646,15 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     override suspend fun getPeople(id: String, page: Int): People {
         initializeService()
         val document = try {
-            service.getPeople(id, page)
+            val doc = service.getPeople(id, page)
+            val html = doc.html()
+            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}xfsearch/acteurs/$id/page/$page") else doc
         } catch (e: HttpException) {
             when (e.code()) {
                 404 -> return People(id, "")
-                else -> throw e
+                else -> getDocument("${baseUrl}xfsearch/acteurs/$id/page/$page")
             }
-        }
+        } catch (e: Exception) { getDocument("${baseUrl}xfsearch/acteurs/$id/page/$page") }
 
 
         val people = People(
@@ -555,7 +703,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             is Video.Type.Episode -> {
                 val (tvShowId, rel) = id.split("/")
 
-                val document = service.getTvShow(tvShowId)
+                val document = try {
+                    val doc = service.getTvShow(tvShowId)
+                    val html = doc.html()
+                    if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}serie-en-streaming/$tvShowId") else doc
+                } catch (e: Exception) { getDocument("${baseUrl}serie-en-streaming/$tvShowId") }
 
                 document.select("div.$rel a").
                     filter { ignoreSource(it.text().trim() ) == false }.
@@ -568,13 +720,17 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                                 ?.text()
                                 ?: "",
                             src = it.attr("onclick")
-                                .substringAfter("loadVideo('").substringBeforeLast("')"),
+                                .substringAfter("loadVideo('").substringBefore("'"),
                     )
                 }
             }
 
             is Video.Type.Movie -> {
-                val document = service.getMovie(id)
+                val document = try {
+                    val doc = service.getMovie(id)
+                    val html = doc.html()
+                    if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}film-en-streaming/$id") else doc
+                } catch (e: Exception) { getDocument("${baseUrl}film-en-streaming/$id") }
 
                 document.select("div.tabs-sel a").
                     filter { ignoreSource(it.text().trim() ) == false }.
@@ -587,7 +743,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                                 ?.text()
                                 ?: "",
                             src = it.attr("onclick")
-                                .substringAfter("loadVideo('").substringBeforeLast("')"),
+                                .substringAfter("loadVideo('").substringBefore("'"),
                     )
                 }
             }
@@ -662,10 +818,13 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private interface Service {
 
         companion object {
-            private val client = OkHttpClient.Builder()
+            // Use NetworkClient.default as base — it already has the correct
+            // User-Agent, Sec-Fetch headers, cookie jar, and DNS-over-HTTPS
+            // that Cloudflare expects.  This means after a single WebView
+            // bypass, subsequent Retrofit calls succeed with the cf_clearance cookie.
+            private val client = NetworkClient.default.newBuilder()
                 .readTimeout(30, TimeUnit.SECONDS)
                 .connectTimeout(30, TimeUnit.SECONDS)
-                .dns(DnsResolver.doh)
                 .build()
 
             fun buildAddressFetcher(): Service {

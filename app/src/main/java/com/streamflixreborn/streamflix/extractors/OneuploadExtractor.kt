@@ -11,7 +11,7 @@ class OneuploadExtractor : Extractor() {
 
     override val name = "OneUpload"
     override val mainUrl = "https://oneupload.net"
-    override val aliasUrls = listOf("https://tipfly.xyz")
+    override val aliasUrls = listOf("https://tipfly.xyz", "https://oneupload.to")
 
     override suspend fun extract(link: String): Video {
         val service = Service.build(mainUrl)
