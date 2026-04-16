@@ -1156,12 +1156,189 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         // Legacy fallback: old DooPlay player options (pre-redesign)
         if (servers.isEmpty() && apiUrl.isEmpty() && onregardeUrl.isEmpty()) {
-            val playerOptions = document.selectFirst("ul#playeroptionsul")?.select("li.dooplay_player_option")
-            playerOptions?.forEachIndexed { idx, element ->
-                try {
-                    val nume = element.attr("data-nume")
-                    val post = element.attr("data-post")
+            val oldServers = document.selectFirst("ul#playeroptionsul")?.select("li.dooplay_player_option")
+                ?.mapIndexedNotNull { idx, it ->
+                    val nume = it.attr("data-nume")
+                    val post = it.attr("data-post")
                     val isEpisode = videoType is Video.Type.Episode
-                    val link = service.getServers(num = nume, post = post, type = if (isEpisode) "tv" else "movie")
+                    val link = service.getServers(num=nume, post=post, type=if (isEpisode) "tv" else "movie")
 
-                    if (link.embed_url.isNullOrEmpty(
+                    if (link.embed_url.isNullOrEmpty() ||
+                        ignoreSource("", link.embed_url))
+                        return@mapIndexedNotNull null
+
+                    if (link.embed_url.startsWith(apivoirfilm.mainUrl)) {
+                        apiUrl = link.embed_url
+                        return@mapIndexedNotNull null
+                    }
+                    if (link.embed_url.startsWith(onregadeou.mainUrl)) {
+                        onregardeUrl = link.embed_url
+                        return@mapIndexedNotNull null
+                    }
+
+                    val title = it.selectFirst("span.title")?.text() ?: "Server $idx"
+
+                    Video.Server(
+                        id = "srv$idx",
+                        name = title,
+                        src = link.embed_url
+                    )
+                } ?: emptyList()
+            servers.addAll(oldServers)
+        }
+
+        val other = if (apiUrl.isNotEmpty())
+            apivoirfilm.expand(apiUrl, baseUrl, "FR ")
+        else if (onregardeUrl.isNotEmpty())
+            onregadeou.expand(onregardeUrl, baseUrl, "FR ")
+        else
+            emptyList()
+
+        return servers + other
+    }
+
+    override suspend fun getVideo(server: Video.Server): Video {
+        return Extractor.extract(server.src)
+    }
+
+    override suspend fun onChangeUrl(forceRefresh: Boolean): String {
+        changeUrlMutex.withLock {
+            if (forceRefresh || UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_AUTOUPDATE) \!= "false") {
+                val addressService = Service.buildAddressFetcher()
+                try {
+                    val document = addressService.getHome()
+
+                    val newUrl = document.html().substringAfter("window.location.href = \"").substringBefore("\"")
+                        .trim()
+                    if (\!newUrl.isNullOrEmpty()) {
+                        val newIcon = document.selectFirst("link[rel=apple-touch-icon]")
+                            ?.attr("href")
+                            ?: "$defaultPortalUrl/wp-content/uploads/2025/07/1J1F-150x150.jpg"
+                        val finalUrl = if (newUrl.endsWith("/")) newUrl else "$newUrl/"
+                        UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_URL, finalUrl)
+                        UserPreferences.setProviderCache(
+                            this,
+                            UserPreferences.PROVIDER_LOGO,
+                            newIcon
+                        )
+                    }
+                } catch (e: Exception) {
+                    // In case of failure, use the default URL
+                }
+            }
+            service = Service.build(baseUrl)
+            serviceInitialized = true
+        }
+        return baseUrl
+    }
+
+    private suspend fun initializeService() {
+        initializationMutex.withLock {
+            if (serviceInitialized) return
+            onChangeUrl()
+        }
+    }
+
+    private interface Service {
+
+        companion object {
+            private val client = OkHttpClient.Builder()
+                .readTimeout(30, TimeUnit.SECONDS)
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .dns(DnsResolver.doh)
+                .build()
+
+            fun buildAddressFetcher(): Service {
+                val addressRetrofit = Retrofit.Builder()
+                    .baseUrl(portalUrl)
+                    .addConverterFactory(JsoupConverterFactory.create())
+                    .client(client)
+                    .build()
+
+                return addressRetrofit.create(Service::class.java)
+            }
+
+            fun build(baseUrl: String): Service {
+                val retrofit = Retrofit.Builder()
+                    .baseUrl(baseUrl)
+                    .addConverterFactory(JsoupConverterFactory.create())
+                    .addConverterFactory(GsonConverterFactory.create())
+                    .client(client)
+                    .build()
+
+                return retrofit.create(Service::class.java)
+            }
+        }
+
+        @GET(".")
+        suspend fun getHome(
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("/")
+        suspend fun search(
+            @Query("s") query: String,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("films/page/{page}/")
+        suspend fun getMovies(
+            @Path("page") page: Int,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("tvshows/page/{page}/")
+        suspend fun getTvShows(
+            @Path("page") page: Int,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("films/{id}/")
+        suspend fun getMovie(
+            @Path("id") id: String,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("tvshows/{id}/")
+        suspend fun getTvShow(
+            @Path("id") id: String,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("episodes/{id}/")
+        suspend fun getEpisode(
+            @Path("id") id: String,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("{slug}")
+        suspend fun getSeason(
+            @Path("slug", encoded = true) slug: String,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @POST("wp-admin/admin-ajax.php")
+        @FormUrlEncoded
+        suspend fun getServers(
+            @Field("action") action: String = "doo_player_ajax",
+            @Field("post") post: String,
+            @Field("nume") num: String,
+            @Field("type") type: String = "movie",
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): itemLink
+
+        @GET("genre/{genre}/page/{page}/")
+        suspend fun getGenre(
+            @Path("genre") genre: String,
+            @Path("page") page: Int,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("cast/{id}/page/{page}")
+        suspend fun getPeople(
+            @Path("id") id: String,
+            @Path("page") page: Int,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+    }
+}
