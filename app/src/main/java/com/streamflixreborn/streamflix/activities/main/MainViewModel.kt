@@ -85,7 +85,4 @@ class MainViewModel : ViewModel() {
             InAppUpdater.installApk(context, Uri.fromFile(apk))
         } catch (e: Exception) {
             Log.e("MainViewModel", "installUpdate: ", e)
-            _state.emit(State.FailedUpdate(e))
-        }
-    }
-}
+            _state.emit(State.Failed

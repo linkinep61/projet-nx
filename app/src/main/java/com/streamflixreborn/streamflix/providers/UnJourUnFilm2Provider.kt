@@ -1312,4 +1312,17 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         ): itemLink
 
         @GET("genre/{genre}/page/{page}/")
-        suspend fun getG
+        suspend fun getGenre(
+            @Path("genre") genre: String,
+            @Path("page") page: Int,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("cast/{id}/page/{page}")
+        suspend fun getPeople(
+            @Path("id") id: String,
+            @Path("page") page: Int,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+    }
+}
