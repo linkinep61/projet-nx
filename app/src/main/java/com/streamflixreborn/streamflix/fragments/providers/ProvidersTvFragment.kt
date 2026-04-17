@@ -86,6 +86,8 @@ class ProvidersTvFragment : Fragment() {
 
 
     private fun initializeProviders() {
+        // Hide language spinner - FR only
+        binding.sProvidersLanguage.visibility = android.view.View.GONE
         binding.sProvidersLanguage.apply {
             class Language(
                 val code: String,
@@ -150,16 +152,4 @@ class ProvidersTvFragment : Fragment() {
             addItemDecoration(
                 SpacingItemDecoration(
                     requireContext().resources.getDimension(R.dimen.providers_spacing).toInt()
-                )
-            )
-        }
-    }
-
-    private fun displayProviders(providers: List<ModelProvider>) {
-        appAdapter.submitList(providers.onEach {
-            it.itemType = AppAdapter.Type.PROVIDER_TV_ITEM
-        })
-
-        binding.rvProviders.requestFocus()
-    }
-}
+                )

@@ -960,29 +960,4 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             @Path("page") page: Int,
         ): Document
 
-        @GET("engine/ajax/episodes_np.php")
-        suspend fun getEpisodesData(
-            @Query("id") id: String,
-            @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("X-Requested-With") requestedWith: String = "XMLHttpRequest"
-        ): EpisodesData
-
-        @GET("engine/ajax/film_api.php")
-        suspend fun getFilmData(
-            @Query("id") id: String,
-            @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("X-Requested-With") requestedWith: String = "XMLHttpRequest"
-        ): FilmData
-
-        @POST("engine/ajax/get_seasons.php")
-        @FormUrlEncoded
-        suspend fun getSeasonsData(
-            @Field("serie_tag") id: String,
-            @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("X-Requested-With") requestedWith: String = "XMLHttpRequest"
-        ): List<SeasonData>
-
-        @GET
-        suspend fun getRedirectLink(@Url url: String): Response<ResponseBody>
-    }
-}
+        @GET("engine/ajax

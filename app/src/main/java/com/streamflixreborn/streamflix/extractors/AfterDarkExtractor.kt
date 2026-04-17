@@ -423,12 +423,4 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
         // No servers at all — try gate bypass synchronously as last resort
         if (!gateAttempted) {
             gateAttempted = true
-            lastGateAttemptTime = System.currentTimeMillis()
-            Log.d(TAG, "No servers from ungated API — trying synchronous gate bypass...")
-
-            if (solveGate()) {
-                gateSolved = true
-                val (retryData, _) = fetchSources(apiUrl)
-                if (retryData != null) {
-                    val retryServers = parseServers(retryData)
-                    if (retryServers.isNotEmpty()) return retr
+            lastGa

@@ -23,7 +23,7 @@
     <string name="app_layout_tv">TV layout</string> 
     <string name="app_layout_apply">Apply</string>
 
-    <string name="providers_all_languages">All languages</string>
+    <string name="providers_all_languages">Français</string>
     <string name="providers_choose_title">Choose a provider</string>
 
     <string name="main_menu_change_provider">Change provider</string>
@@ -493,9 +493,4 @@
     <string name="settings_parental_pin_hint">4 digits or more</string>
     <string name="settings_parental_pin_too_short">Use a PIN with at least 4 digits.</string>
     <string name="settings_parental_locked_temporary">Too many wrong PIN attempts. Try again in %1$d minutes.</string>
-    <string name="settings_parental_locked_hard">Parental controls are locked. Use the admin PIN to unlock them.</string>
-    <string name="settings_parental_unlocked">Parental controls unlocked.</string>
-    <string name="settings_parental_tmdb_disable_blocked">You must unlock parental controls before disabling TMDb.</string>
-    <string name="settings_force_extra_buffer_title">Global Extra Buffering</string>
-    <string name="settings_force_extra_buffer_summary">Enable extra buffering for all servers by default</string>
-</resources>
+    <string name="settings_parental_locked_hard">P
