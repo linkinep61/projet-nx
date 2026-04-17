@@ -253,13 +253,4 @@ class PlayerViewModel(
         data class FailedSubDLSubtitles(val error: Exception) : SubtitleState()
         data object DownloadingSubDLSubtitle : SubtitleState()
         data class SuccessDownloadingSubDLSubtitle(val subtitle: SubDL.Subtitle, val uri: Uri) : SubtitleState()
-        data class FailedDownloadingSubDLSubtitle(val error: Exception, val subtitle: SubDL.Subtitle) : SubtitleState()
-    }
-    private var lastVideoType: Video.Type? = null
-    private var lastId: String? = null
-    fun reloadServersAfterBypass() {
-        val type = lastVideoType ?: return
-        val id = lastId ?: return
-        getServers(type, id)
-    }
-}
+        data class FailedDownloadingSubDLSubtitle(val error: Exception, val subtitle: SubDL.Subtitle) : Subtitl

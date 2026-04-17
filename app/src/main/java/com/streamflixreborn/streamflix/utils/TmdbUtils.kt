@@ -623,21 +623,4 @@ object TmdbUtils {
 
         return when (normalized) {
             "TV-MA", "MA", "MATURE", "X", "RX", "C" -> 18
-            "NC-17", "R" -> 17
-            "TV-14" -> 14
-            "PG-13" -> 13
-            "TV-PG", "PG" -> 10
-            "TV-Y7", "TV-Y7-FV" -> 7
-            "TV-G", "TV-Y", "G", "U", "A", "AL", "ATP", "TP", "L", "T", "ALL" -> 0
-            "NR", "UR", "UNRATED", "NOT RATED", "N/A" -> null
-            else -> when {
-                normalized.contains("TOUS PUBLICS") -> 0
-                normalized.contains("APTA") -> 0
-                normalized.contains("TODOS") -> 0
-                normalized.contains("MA") -> 17
-                normalized.contains("PG") -> 10
-                else -> null
-            }
-        }
-    }
-}
+            

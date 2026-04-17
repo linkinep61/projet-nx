@@ -551,28 +551,4 @@ object UserPreferences {
 
         fun setInt(value: Int?) = value?.let {
             with(prefs.edit()) {
-                putInt(name, value)
-                apply()
-            }
-        } ?: remove()
-
-        fun setLong(value: Long?) = value?.let {
-            with(prefs.edit()) {
-                putLong(name, value)
-                apply()
-            }
-        } ?: remove()
-
-        fun setString(value: String?) = value?.let {
-            with(prefs.edit()) {
-                putString(name, value)
-                apply()
-            }
-        } ?: remove()
-
-        fun remove() = with(prefs.edit()) {
-            remove(name)
-            apply()
-        }
-    }
-}
+                p

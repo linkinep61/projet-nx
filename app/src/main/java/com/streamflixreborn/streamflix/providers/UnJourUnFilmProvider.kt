@@ -1262,36 +1262,4 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         @GET("{slug}")
         suspend fun getSeason(
             @Path("slug", encoded = true) slug: String,
-            @Header("User-agent") user_agent: String = USER_AGENT
-        ): Document
-
-        @POST("wp-admin/admin-ajax.php")
-        @FormUrlEncoded
-        suspend fun getCatalogue(
-            @Field("action") action: String = "j1f_catalogue",
-            @Field("type") type: String,
-            @Field("page") page: Int,
-            @Field("genre") genre: String = "",
-            @Field("annee") annee: String = "",
-            @Field("qualite") qualite: String = "",
-            @Field("reseau") reseau: String = "",
-            @Field("tri") tri: String = "date",
-            @Field("search") search: String = "",
-            @Header("User-agent") user_agent: String = USER_AGENT
-        ): CatalogueResponse
-
-        @POST("wp-admin/admin-ajax.php")
-        @FormUrlEncoded
-        suspend fun getServers(
-            @Field("action") action: String = "doo_player_ajax",
-            @Field("post") post: String,
-            @Field("nume") num: String,
-            @Field("type") type: String = "movie",
-            @Header("User-agent") user_agent: String = USER_AGENT
-        ): itemLink
-
-        @GET("genre/{genre}/page/{page}/")
-        suspend fun getGenre(
-            @Path("genre") genre: String,
-            @Path("page") page: Int,
-            @Header
+        

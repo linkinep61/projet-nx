@@ -85,6 +85,8 @@ class ProvidersMobileFragment : Fragment() {
 
 
     private fun initializeProviders() {
+        // Hide language spinner - FR only
+        binding.sProvidersLanguage.visibility = View.GONE
         binding.sProvidersLanguage.apply {
             class Language(
                 val code: String,
@@ -148,14 +150,4 @@ class ProvidersMobileFragment : Fragment() {
                 stateRestorationPolicy = RecyclerView.Adapter.StateRestorationPolicy.PREVENT_WHEN_EMPTY
             }
             addItemDecoration(
-                SpacingItemDecoration(32.dp(requireContext()))
-            )
-        }
-    }
-
-    private fun displayProviders(providers: List<ModelProvider>) {
-        appAdapter.submitList(providers.onEach {
-            it.itemType = AppAdapter.Type.PROVIDER_MOBILE_ITEM
-        })
-    }
-}
+                SpacingItemDecoration(
