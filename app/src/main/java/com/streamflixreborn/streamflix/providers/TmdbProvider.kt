@@ -743,16 +743,7 @@ class TmdbProvider(override val language: String) : Provider {
                 try { servers.addAll(FrembedExtractor(frembedUrl).servers(videoType)) } catch (_: Exception) {}
                 try { servers.addAll(AfterDarkExtractor(afterDarkUrl).servers(videoType)) } catch (_: Exception) {}
                 VideasyExtractor().server(videoType, language)?.let { servers.add(it) }
-                // Toujours ajouter les serveurs globaux en complément
-                servers.add(VixSrcExtractor().server(videoType))
-                servers.add(TwoEmbedExtractor().server(videoType))
-                servers.add(VidsrcNetExtractor().server(videoType))
-                servers.add(VidLinkExtractor().server(videoType))
-                servers.add(VidsrcRuExtractor().server(videoType))
-                servers.add(VidflixExtractor().server(videoType))
-                servers.addAll(VidrockExtractor().servers(videoType))
-                servers.addAll(VidzeeExtractor().servers(videoType))
-                servers.addAll(PrimeSrcExtractor().servers(videoType))
+                // Sources FR uniquement - pas de serveurs globaux (audio anglais)
             }
             "es" -> {
                 // TMDB Spagnolo: Utilizza ESCLUSIVAMENTE server certificati con audio spagnolo ([LAT] o [CAST])
@@ -984,3 +975,4 @@ class TmdbProvider(override val language: String) : Provider {
         }
     }
 }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
