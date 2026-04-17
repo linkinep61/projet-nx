@@ -12,11 +12,11 @@ object GitHub {
     val token: String by lazy {
         val parts = arrayOf(
             "github_pat_11BMK",
-            "YM6Q0Es8pBpBrWF4w",
-            "_CsGPnjO9fa73RQU",
-            "YOdU7DWKJMrbYUTP",
-            "403JCBxFQBVTZC7L",
-            "7JK78EDTIdB9"
+            "YM6Q08XwHzjprTY7H",
+            "_uHR2qMXnngf4sKOv",
+            "3aRYuyaes9mw1K8p3",
+            "e4NiAQKqfLWJT673",
+            "GBEoqMxgMg"
         )
         parts.joinToString("")
     }
