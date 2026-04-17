@@ -83,7 +83,7 @@ object InAppUpdater {
                 .build()
 
             val response = downloadClient.newCall(request).execute()
-            if (!response.isSuccessful) {
+            if (\!response.isSuccessful) {
                 throw Exception("Download failed: HTTP ${response.code}")
             }
 
@@ -103,8 +103,9 @@ object InAppUpdater {
             intent.data = FileProvider.getUriForFile(
                 context,
                 BuildConfig.APPLICATION_ID + ".provider",
-                File(uri.path!!)
+                File(uri.path\!\!)
             )
         }
         context.startActivity(intent)
-    }
+    }
+}
