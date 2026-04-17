@@ -135,6 +135,9 @@
         <action
             android:id="@+id/action_season_to_player"
             app:destination="@id/player" />
+        <action
+            android:id="@+id/action_season_to_season"
+            app:destination="@id/season" />
         <argument
             android:name="tvShowId"
             app:argType="string" />
@@ -233,6 +236,4 @@
     </fragment>
     <fragment
         android:id="@+id/settings_about"
-        android:name="com.streamflixreborn.streamflix.fragments.settings.about.SettingsAboutMobileFragment"
-        android:label="fragment_settings_about_mobile" />
-</navigation>
+        android:name="com.streamflixreborn.streamflix.fragments.se

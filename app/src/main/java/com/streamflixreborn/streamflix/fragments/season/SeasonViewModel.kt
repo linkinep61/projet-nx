@@ -82,32 +82,31 @@ class SeasonViewModel(
             val episodes = UserPreferences.currentProvider!!
                 .getEpisodesBySeason(seasonId)
                 .sortedBy { it.number }
-            val ids = episodes.map { it.id }
-            val episodeMap = episodes.associateBy { it.id }
 
-            ids.chunked(400).forEach { chunk ->
-                database.episodeDao()
-                    .getByIds(chunk)
-                    .forEach { episodeDb ->
-                        episodeMap[episodeDb.id]?.merge(episodeDb)
-                    }
+            val isSubfolder = episodes.any { it.overview == "@subfolder" }
+
+            if (!isSubfolder) {
+                val ids = episodes.map { it.id }
+                val episodeMap = episodes.associateBy { it.id }
+
+                ids.chunked(400).forEach { chunk ->
+                    database.episodeDao()
+                        .getByIds(chunk)
+                        .forEach { episodeDb ->
+                            episodeMap[episodeDb.id]?.merge(episodeDb)
+                        }
+                }
+
+                val tvShow = TvShow(tvShowId)
+                val season = Season(seasonId)
+                episodes.forEach { episode ->
+                    episode.tvShow = tvShow
+                    episode.season = season
+                }
+
+                database.episodeDao().insertAll(episodes)
+
+                EpisodeManager.addEpisodes(EpisodeManager.convertToVideoTypeEpisodes(episodes, database, seasonNumber))
             }
 
-            val tvShow = TvShow(tvShowId)
-            val season = Season(seasonId)
-            episodes.forEach { episode ->
-                episode.tvShow = tvShow
-                episode.season = season
-            }
-
-            database.episodeDao().insertAll(episodes)
-
-            EpisodeManager.addEpisodes(EpisodeManager.convertToVideoTypeEpisodes(episodes, database, seasonNumber))
-            _state.emit(State.SuccessLoadingEpisodes(episodes))
-        } catch (e: Exception) {
-            Log.e("SeasonViewModel", "getSeasonEpisodes: ", e)
-            _state.emit(State.FailedLoadingEpisodes(e))
-        }
-    }
-
-}
+            _state.emit(State.SuccessLoadin
