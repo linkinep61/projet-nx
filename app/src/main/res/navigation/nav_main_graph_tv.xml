@@ -225,4 +225,6 @@
     </fragment>
     <fragment
         android:id="@+id/settings"
-        android:name="com.streamflixrebor
+        android:name="com.streamflixreborn.streamflix.fragments.settings.SettingsTvFragment"
+        android:label="fragment_settings_tv" />
+</navigation>
