@@ -11,7 +11,13 @@ object AppLanguageManager {
     const val SYSTEM_LANGUAGE = "system"
 
     private val preferredLanguageOrder = listOf(
+        "en",
+        "ar",
+        "de",
+        "es",
         "fr",
+        "it",
+        "pl",
     )
 
     fun wrap(context: Context): Context {
@@ -117,4 +123,7 @@ object AppLanguageManager {
                         char.titlecase(displayLocale)
                     } else {
                         char.toString()
-             
+                    }
+                }
+    }
+}

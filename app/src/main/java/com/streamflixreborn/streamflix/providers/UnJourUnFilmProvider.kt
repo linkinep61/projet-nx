@@ -18,7 +18,6 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import retrofit2.HttpException
 import retrofit2.Retrofit
@@ -36,9 +35,6 @@ import kotlin.collections.map
 import kotlin.collections.mapNotNull
 import kotlin.collections.mapIndexed
 import kotlin.math.round
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import retrofit2.http.Field
 import retrofit2.http.FormUrlEncoded
 import retrofit2.http.POST
@@ -313,74 +309,178 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         return results
     }
 
-    private suspend fun fetchCatalogue(type: String, page: Int): String? {
-        val url = baseUrl + "wp-admin/admin-ajax.php"
-        val body = okhttp3.FormBody.Builder()
-            .add("action", "j1f_catalogue")
-            .add("type", type)
-            .add("page", page.toString())
-            .add("genre", "")
-            .add("annee", "")
-            .add("qualite", "")
-            .add("reseau", "")
-            .add("tri", "date")
-            .add("search", "")
-            .build()
-        val request = okhttp3.Request.Builder()
-            .url(url)
-            .post(body)
-            .header("User-agent", USER_AGENT)
-            .build()
-        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            val response = Service.client.newCall(request).execute()
-            val responseBody = response.body?.string() ?: return@withContext null
-            try {
-                val json = org.json.JSONObject(responseBody)
-                if (json.optBoolean("success", false)) {
-                    json.optJSONObject("data")?.optString("html")
-                } else null
-            } catch (e: Exception) { null }
-        }
-    }
-
     override suspend fun getMovies(page: Int): List<Movie> {
         initializeService()
 
-        val html = fetchCatalogue("movies", page) ?: return emptyList()
+        val document = service.getMovies(page)
 
-        val document = Jsoup.parse(html)
-        return document.select("a.j1f-card")
-            .mapNotNull { card ->
-                val href = card.attr("href")
-                if (!href.contains("/films/")) return@mapNotNull null
+        var movies: List<Movie> = emptyList()
+        if (page == 1) {
+            movies = document.select("div#slider-movies").getOrNull(0)?.select("article.item")
+                ?.map {
+                    Movie(
+                        id = it.selectFirst("a")
+                            ?.attr("href")?.substringBeforeLast("/")?.substringAfterLast("/")
+                            ?: "",
+                        title = it.selectFirst("h3.title")
+                            ?.text()
+                            ?: "",
+                        poster = it.selectFirst("img")?.let { img ->
+                            img.attr("src").ifBlank { img.attr("data-src") }
+                        } ?: "",
+                    )
+                } ?: emptyList();
 
-                val title = (card.selectFirst(".j1f-card__title") ?: card.selectFirst(".card-title"))?.text() ?: ""
-                val posterImg = card.selectFirst(".j1f-card__poster img") ?: card.selectFirst(".card-poster img")
-                val poster = posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
-                val id = href.substringBeforeLast("/").substringAfterLast("/")
+            val items = document.selectFirst("div.items.featured")
+                ?.select("article.item")
+                            ?.mapNotNull { item ->
+                                val link = item.selectFirst("a") ?: return@mapNotNull null
+                                val img = item.selectFirst("img")
 
-                Movie(id = id, title = title, poster = poster)
+                                    Movie(
+                                        id = link.attr("href"),
+                                        title = img?.attr("alt") ?: "",
+                                        poster = img?.let { img ->
+                                            img.attr("src").ifBlank { img.attr("data-src") }
+                                        } ?: ""
+                                    )
+                            }
+                ?: emptyList()
+
+            if (items.isNotEmpty()) {
+                movies = movies + items
             }
+        }
+
+        var itemsRec = document.selectFirst("div.items.full")
+            ?.select("article.item")
+            ?.mapNotNull { item ->
+                val link = item.selectFirst("a") ?: return@mapNotNull null
+                val img = item.selectFirst("img")
+
+                Movie(
+                    id = link.attr("href"),
+                    title = img?.attr("alt") ?: "",
+                    poster = img?.let { img ->
+                        img.attr("src").ifBlank { img.attr("data-src") }
+                    } ?: ""
+                )
+            }
+            ?: emptyList()
+
+        // Fallback to new card structure if old selectors returned nothing
+        if (itemsRec.isEmpty()) {
+            itemsRec = document.select("a.j1f-card")
+                .mapNotNull { card ->
+                    val href = card.attr("href")
+
+                    if (!href.contains("/films/")) return@mapNotNull null
+
+                    val title = card.selectFirst(".j1f-card__title")?.text() ?: ""
+                    val posterImg = card.selectFirst(".j1f-card__poster img")
+                    val poster = posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
+                    val id = href.substringBeforeLast("/").substringAfterLast("/")
+
+                    Movie(
+                        id = id,
+                        title = title,
+                        poster = poster
+                    )
+                }
+        }
+
+        if (itemsRec.isNotEmpty()) {
+            movies = movies + itemsRec
+        }
+
+        return movies
     }
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
         initializeService()
+        val document = service.getTvShows(page)
 
-        val html = fetchCatalogue("tvshows", page) ?: return emptyList()
+        var tvshows: List<TvShow> = emptyList()
 
-        val document = Jsoup.parse(html)
-        return document.select("a.j1f-card")
-            .mapNotNull { card ->
-                val href = card.attr("href")
-                if (!href.contains("/tvshows/")) return@mapNotNull null
+        if (page == 1) {
+            tvshows = document.select("div#slider-tvshows").getOrNull(0)?.select("article.item")
+                ?.map {
+                    TvShow(
+                        id = it.selectFirst("a")
+                            ?.attr("href")?.substringBeforeLast("/")?.substringAfterLast("/")
+                            ?: "",
+                        title = it.selectFirst("h3.title")
+                            ?.text()
+                            ?: "",
+                        poster = it.selectFirst("img")?.let { img ->
+                            img.attr("src").ifBlank { img.attr("data-src") }
+                        } ?: "",
+                    )
+                } ?: emptyList();
 
-                val title = (card.selectFirst(".j1f-card__title") ?: card.selectFirst(".card-title"))?.text() ?: ""
-                val posterImg = card.selectFirst(".j1f-card__poster img") ?: card.selectFirst(".card-poster img")
-                val poster = posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
-                val id = href.substringBeforeLast("/").substringAfterLast("/")
+            val items = document.selectFirst("div.items.featured")
+                ?.select("article.item")
+                ?.mapNotNull { item ->
+                    val link = item.selectFirst("a") ?: return@mapNotNull null
+                    val img = item.selectFirst("img")
 
-                TvShow(id = id, title = title, poster = poster)
+                    TvShow(
+                        id = link.attr("href"),
+                        title = img?.attr("alt") ?: "",
+                        poster = img?.let { img ->
+                            img.attr("src").ifBlank { img.attr("data-src") }
+                        } ?: ""
+                    )
+                }
+                ?: emptyList()
+
+            if (items.isNotEmpty()) {
+                tvshows = tvshows + items
             }
+        }
+
+        var itemsRec = document.selectFirst("div.items.full")
+            ?.select("article.item")
+            ?.mapNotNull { item ->
+                val link = item.selectFirst("a") ?: return@mapNotNull null
+                val img = item.selectFirst("img")
+
+                TvShow(
+                    id = link.attr("href"),
+                    title = img?.attr("alt") ?: "",
+                    poster = img?.let { img ->
+                        img.attr("src").ifBlank { img.attr("data-src") }
+                    } ?: ""
+                )
+            }
+            ?: emptyList()
+
+        // Fallback to new card structure if old selectors returned nothing
+        if (itemsRec.isEmpty()) {
+            itemsRec = document.select("a.j1f-card")
+                .mapNotNull { card ->
+                    val href = card.attr("href")
+
+                    if (!href.contains("/tvshows/")) return@mapNotNull null
+
+                    val title = card.selectFirst(".j1f-card__title")?.text() ?: ""
+                    val posterImg = card.selectFirst(".j1f-card__poster img")
+                    val poster = posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
+                    val id = href.substringBeforeLast("/").substringAfterLast("/")
+
+                    TvShow(
+                        id = id,
+                        title = title,
+                        poster = poster
+                    )
+                }
+        }
+
+        if (itemsRec.isNotEmpty()) {
+            tvshows = tvshows + itemsRec
+        }
+
+        return tvshows
     }
 
     suspend fun getRating(votes: Element): Double {
@@ -405,34 +505,12 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     fun decodeHtml(s: String): String {
         @Suppress("DEPRECATION")
         val text = Html.fromHtml(s).toString()
-        return try {
-            val escaped = text
-                .replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t")
-            JSONObject("""{"v":"$escaped"}""").getString("v")
-        } catch (_: Exception) {
-            text
-        }
+        return JSONObject("""{"v":"$text"}""").getString("v")
     }
 
     data class itemLink(
         val embed_url: String?,
         val type: String?
-    )
-
-    data class CatalogueResponse(
-        val success: Boolean,
-        val data: CatalogueData?
-    )
-
-    data class CatalogueData(
-        val html: String?,
-        val total: Int?,
-        val page: Int?,
-        val pages: Int?
     )
 
     override suspend fun getMovie(id: String): Movie {
@@ -992,7 +1070,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 else
                     emptyList()
 
-                return sortVfFirst(servers + other)
+                return servers + other
             }
         }
 
@@ -1048,42 +1126,34 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             val isEpisode = videoType is Video.Type.Episode
 
             if (postId.isNotEmpty()) {
-                // Parallel probe: fire all 10 AJAX calls at once instead of sequentially
-                val results = coroutineScope {
-                    (1..10).map { nume ->
-                        async {
-                            try {
-                                val link = service.getServers(
-                                    num = nume.toString(),
-                                    post = postId,
-                                    type = if (isEpisode) "tv" else "movie"
-                                )
-                                if (link.embed_url.isNullOrEmpty()) null
-                                else Pair(nume, link.embed_url)
-                            } catch (_: Exception) { null }
-                        }
-                    }.awaitAll().filterNotNull()
-                }
-
-                for ((nume, embedUrl) in results) {
-                    if (ignoreSource("", embedUrl)) continue
-
-                    if (embedUrl.startsWith(apivoirfilm.mainUrl)) {
-                        apiUrl = embedUrl
-                        continue
-                    }
-                    if (embedUrl.startsWith(onregadeou.mainUrl)) {
-                        onregardeUrl = embedUrl
-                        continue
-                    }
-
-                    servers.add(
-                        Video.Server(
-                            id = "srv$nume",
-                            name = "Serveur $nume",
-                            src = embedUrl
+                for (nume in 1..10) {
+                    try {
+                        val link = service.getServers(
+                            num = nume.toString(),
+                            post = postId,
+                            type = if (isEpisode) "tv" else "movie"
                         )
-                    )
+                        if (link.embed_url.isNullOrEmpty()) break
+
+                        if (ignoreSource("", link.embed_url)) continue
+
+                        if (link.embed_url.startsWith(apivoirfilm.mainUrl)) {
+                            apiUrl = link.embed_url
+                            continue
+                        }
+                        if (link.embed_url.startsWith(onregadeou.mainUrl)) {
+                            onregardeUrl = link.embed_url
+                            continue
+                        }
+
+                        servers.add(
+                            Video.Server(
+                                id = "srv$nume",
+                                name = "Serveur $nume",
+                                src = link.embed_url
+                            )
+                        )
+                    } catch (_: Exception) { break }
                 }
             }
         }
@@ -1128,21 +1198,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         else
             emptyList()
 
-        return sortVfFirst(servers + other)
-    }
-
-    /**
-     * Sort servers so VOSTFR-only sources appear at the end.
-     * Sources containing VF (including "VF + VOSTFR") stay at the top.
-     */
-    private fun sortVfFirst(servers: List<Video.Server>): List<Video.Server> {
-        return servers.sortedBy { server ->
-            val name = server.name.uppercase()
-            when {
-                name.contains("VOSTFR") && !name.contains("VF") -> 1
-                else -> 0
-            }
-        }
+        return servers + other
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
@@ -1190,7 +1246,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private interface Service {
 
         companion object {
-            val client = OkHttpClient.Builder()
+            private val client = OkHttpClient.Builder()
                 .readTimeout(30, TimeUnit.SECONDS)
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .dns(DnsResolver.doh)
@@ -1262,4 +1318,31 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         @GET("{slug}")
         suspend fun getSeason(
             @Path("slug", encoded = true) slug: String,
-        
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @POST("wp-admin/admin-ajax.php")
+        @FormUrlEncoded
+        suspend fun getServers(
+            @Field("action") action: String = "doo_player_ajax",
+            @Field("post") post: String,
+            @Field("nume") num: String,
+            @Field("type") type: String = "movie",
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): itemLink
+
+        @GET("genre/{genre}/page/{page}/")
+        suspend fun getGenre(
+            @Path("genre") genre: String,
+            @Path("page") page: Int,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("cast/{id}/page/{page}")
+        suspend fun getPeople(
+            @Path("id") id: String,
+            @Path("page") page: Int,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+    }
+}

@@ -273,11 +273,8 @@ class PlayerMobileFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch { 
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.CREATED).collect { state ->
                 when (state) {
-                    PlayerViewModel.State.LoadingServers -> {
-                        binding.pbLoadingServers.visibility = android.view.View.VISIBLE
-                    }
+                    PlayerViewModel.State.LoadingServers -> {}
                     is PlayerViewModel.State.SuccessLoadingServers -> {
-                        binding.pbLoadingServers.visibility = android.view.View.GONE
                         servers = state.servers
                         val sToServer = servers.firstOrNull {
                             isSerienStreamBypassUrl(it.id)
@@ -336,7 +333,6 @@ class PlayerMobileFragment : Fragment() {
                     }
 
                     is PlayerViewModel.State.FailedLoadingServers -> {
-                        binding.pbLoadingServers.visibility = android.view.View.GONE
                         Toast.makeText(
                             requireContext(),
                             state.error.message ?: "",
@@ -1345,3 +1341,44 @@ class PlayerMobileFragment : Fragment() {
             mediaSession.release()
         }
     }
+
+    private fun isSerienStreamBypassUrl(url: String): Boolean {
+        return runCatching {
+            Uri.parse(url).host.equals("s.to", ignoreCase = true)
+        }.getOrDefault(false)
+    }
+
+    private fun buildSerienStreamBypassUrl(): String? {
+        val provider = UserPreferences.currentProvider ?: return null
+        if (provider != SerienStreamProvider) return null
+
+        val episodeId = when (val type = args.videoType) {
+            is Video.Type.Episode -> type.id
+            is Video.Type.Movie -> return null
+        }
+
+        return "${SerienStreamProvider.baseUrl}serie/$episodeId"
+    }
+
+    private fun applyBypassCookies(url: String, cookieHeader: String) {
+        val host = runCatching { Uri.parse(url).host.orEmpty() }.getOrDefault("")
+        val targets = linkedSetOf<String>().apply {
+            add(url)
+            if (host.isNotBlank()) {
+                add("https://$host/")
+                add("http://$host/")
+            }
+        }
+
+        val cookieManager = CookieManager.getInstance()
+        cookieHeader.split(";")
+            .map { it.trim() }
+            .filter { it.contains("=") }
+            .forEach { cookie ->
+                targets.forEach { target ->
+                    cookieManager.setCookie(target, cookie)
+                }
+            }
+        cookieManager.flush()
+    }
+}

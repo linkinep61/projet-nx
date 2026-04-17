@@ -37,39 +37,6 @@ object UserPreferences {
 
     lateinit var providerCache: JSONObject
 
-    // ── Système de score serveur (priorise les serveurs qui marchent) ──
-    private var serverScores: JSONObject = JSONObject()
-    private const val SERVER_SCORES_KEY = "SERVER_SCORES"
-
-    fun initServerScores() {
-        if (::prefs.isInitialized) {
-            val json = prefs.getString(SERVER_SCORES_KEY, "{}") ?: "{}"
-            serverScores = runCatching { JSONObject(json) }.getOrDefault(JSONObject())
-        }
-    }
-
-    fun recordServerSuccess(serverName: String) {
-        val current = serverScores.optInt(serverName, 0)
-        serverScores.put(serverName, (current + 2).coerceAtMost(20)) // +2 par succès, max 20
-        saveServerScores()
-    }
-
-    fun recordServerFailure(serverName: String) {
-        val current = serverScores.optInt(serverName, 0)
-        serverScores.put(serverName, (current - 3).coerceAtLeast(-10)) // -3 par échec, min -10
-        saveServerScores()
-    }
-
-    fun getServerScore(serverName: String): Int {
-        return serverScores.optInt(serverName, 0)
-    }
-
-    private fun saveServerScores() {
-        if (::prefs.isInitialized) {
-            prefs.edit().putString(SERVER_SCORES_KEY, serverScores.toString()).apply()
-        }
-    }
-
     private inline fun debugLog(message: () -> String) {
         if (BuildConfig.DEBUG) {
             Log.d(TAG, message())
@@ -87,7 +54,6 @@ object UserPreferences {
 
             val jsonString = Key.PROVIDER_CACHE.getString() ?: "{}"
             providerCache = runCatching { JSONObject(jsonString) }.getOrDefault(JSONObject())
-            initServerScores()
         }
     }
 
@@ -551,4 +517,28 @@ object UserPreferences {
 
         fun setInt(value: Int?) = value?.let {
             with(prefs.edit()) {
-                p
+                putInt(name, value)
+                apply()
+            }
+        } ?: remove()
+
+        fun setLong(value: Long?) = value?.let {
+            with(prefs.edit()) {
+                putLong(name, value)
+                apply()
+            }
+        } ?: remove()
+
+        fun setString(value: String?) = value?.let {
+            with(prefs.edit()) {
+                putString(name, value)
+                apply()
+            }
+        } ?: remove()
+
+        fun remove() = with(prefs.edit()) {
+            remove(name)
+            apply()
+        }
+    }
+}

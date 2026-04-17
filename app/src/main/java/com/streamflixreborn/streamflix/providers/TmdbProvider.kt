@@ -38,7 +38,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
@@ -719,163 +718,42 @@ class TmdbProvider(override val language: String) : Provider {
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         val servers = mutableListOf<Video.Server>()
+        val lang = language.lowercase().substringBefore("-")
 
-        Log.d("TmdbProvider", "getServers: lang=$language — FR only mode")
+        Log.d("TmdbProvider", "getServers: lang=$language, simplifiedLang=$lang")
 
-        // ── FR ONLY ──
-        run {
+        when (lang) {
+            "it" -> {
+                // Se la lingua è italiano, includiamo solo i server noti per l'italiano.
+                servers.add(VixSrcExtractor().server(videoType))
+                VideasyExtractor().server(videoType, language)?.let { servers.add(it) }
+            }
+            "de" -> {
+                // Solo server tedeschi
+                servers.addAll(0, MoflixExtractor().servers(videoType))
+                if (videoType is Video.Type.Movie) {
+                    servers.add(EinschaltenExtractor().server(videoType))
+                }
+                VideasyExtractor().server(videoType, language)?.let { servers.add(it) }
+            }
+            "fr" -> {
+                // Server francesi
                 val frembedUrl = UserPreferences.getProviderCache(FrembedProvider, UserPreferences.PROVIDER_URL).ifEmpty { FrembedProvider.defaultBaseUrl }
                 val afterDarkUrl = UserPreferences.getProviderCache(AfterDarkProvider, UserPreferences.PROVIDER_URL).ifEmpty { AfterDarkProvider.defaultBaseUrl }
-
-                val targetTitle = when (videoType) {
-                    is Video.Type.Movie -> videoType.title
-                    is Video.Type.Episode -> videoType.tvShow.title
-                }
-                val seasonNumber = if (videoType is Video.Type.Episode) videoType.season.number else 0
-
-                Log.i("StreamFlixFR", "[SEARCH START] -> Target: $targetTitle (${if (videoType is Video.Type.Movie) "Movie" else "TV Show S${seasonNumber}E${(videoType as? Video.Type.Episode)?.number}"})")
-
-                fun isMatchFr(item: AppAdapter.Item, target: String): Boolean {
-                    val isCorrectType = if (videoType is Video.Type.Movie) item is Movie else item is TvShow
-                    if (!isCorrectType) return false
-
-                    val itemTitle = if (item is Movie) item.title else (item as TvShow).title
-
-                    // Pour les séries : vérifier que la saison correspond
-                    if (videoType is Video.Type.Episode && seasonNumber > 0) {
-                        val itemLower = itemTitle.lowercase()
-                        val hasSeason = itemLower.contains("saison") || itemLower.contains("season") || itemLower.contains("s${seasonNumber}")
-                        if (hasSeason) {
-                            // Extraire le numéro de saison du titre
-                            val saisonRegex = Regex("""(?:saison|season)\s*(\d+)|s(\d+)""", RegexOption.IGNORE_CASE)
-                            val saisonMatch = saisonRegex.find(itemTitle)
-                            val itemSeason = saisonMatch?.let { (it.groupValues[1].ifEmpty { it.groupValues[2] }).toIntOrNull() }
-                            if (itemSeason != null && itemSeason != seasonNumber) {
-                                return false // Mauvaise saison
-                            }
-                        }
-                    }
-
-                    val nItem = itemTitle.lowercase().replace(Regex("[^a-z0-9àâäéèêëïîôùûüÿçœæ]"), "")
-                    val nTarget = target.lowercase().replace(Regex("[^a-z0-9àâäéèêëïîôùûüÿçœæ]"), "")
-
-                    if (nItem == nTarget) return true
-
-                    if (nItem.contains(nTarget) || nTarget.contains(nItem)) {
-                        val diff = Math.abs(nItem.length - nTarget.length)
-                        if (diff <= 5) return true
-                    }
-
-                    val cleanWords: (String) -> Set<String> = { s ->
-                        s.lowercase()
-                            .replace(Regex("[^a-z0-9àâäéèêëïîôùûüÿçœæ ]"), " ")
-                            .split(Regex("\\s+"))
-                            .filter { it.length > 2 }
-                            .toSet()
-                    }
-                    val nItemWords = cleanWords(itemTitle)
-                    val nTargetWords = cleanWords(target)
-
-                    if (nItemWords.isEmpty() || nTargetWords.isEmpty()) return false
-                    if (nTargetWords.size == 1) return nItemWords.contains(nTargetWords.first())
-                    return nItemWords.containsAll(nTargetWords) || nTargetWords.containsAll(nItemWords)
-                }
-
-                // ── UNIQUEMENT des serveurs français (timeout global 15s) ──
-                val allResults = withTimeoutOrNull(15_000L) {
-                    coroutineScope {
-                        // Groupe 1 : Extracteurs directs FR (Frembed, AfterDark)
-                        val directExtractors = async {
-                            val results = mutableListOf<Video.Server>()
-                            try { results.addAll(FrembedExtractor(frembedUrl).servers(videoType)) } catch (_: Exception) {}
-                            try { results.addAll(AfterDarkExtractor(afterDarkUrl).servers(videoType)) } catch (_: Exception) {}
-                            Log.i("StreamFlixFR", "[EXTRACTORS] -> ${results.size} direct FR extractor servers")
-                            results
-                        }
-
-                        // Groupe 2 : Recherche multi-providers français (ordre de priorité)
-                        val providerSearch = async {
-                            val frProviders = mutableListOf<Pair<Provider, Int>>(
-                                Pair(FrenchStreamProvider, 100),
-                                Pair(UnJourUnFilmProvider, 80),
-                                Pair(UnJourUnFilm2Provider, 60),
-                                Pair(FrembedProvider, 40)
-                            ).apply {
-                                if (videoType is Video.Type.Movie) {
-                                    add(Pair(KidrazProvider, 20))
-                                    add(Pair(aploufProvider, 15))
-                                }
-                            }
-                            coroutineScope {
-                                frProviders.map { (provider, priority) ->
-                                    async {
-                                        try {
-                                            val searchResults = provider.search(targetTitle, 1)
-                                            val bestMatch = searchResults.firstOrNull { isMatchFr(it, targetTitle) }
-                                            val matchId = if (bestMatch is Movie) bestMatch.id else (bestMatch as? TvShow)?.id
-
-                                            if (matchId != null) {
-                                                val matchTitle = if (bestMatch is Movie) bestMatch.title else (bestMatch as? TvShow)?.title
-                                                Log.i("StreamFlixFR", "[MATCH] -> ${provider.name}: '$matchTitle' (ID: $matchId)")
-
-                                                val serverId = if (videoType is Video.Type.Episode) {
-                                                    when (provider) {
-                                                        is FrenchStreamProvider -> "$matchId/${videoType.number}"
-                                                        else -> matchId
-                                                    }
-                                                } else {
-                                                    matchId
-                                                }
-
-                                                val allServers = provider.getServers(serverId, videoType)
-                                                Log.i("StreamFlixFR", "[SERVERS] -> ${provider.name}: ${allServers.size} servers")
-                                                allServers.map { Triple(it, provider.name, priority) }
-                                            } else {
-                                                Log.d("StreamFlixFR", "[NO MATCH] -> ${provider.name}")
-                                                emptyList()
-                                            }
-                                        } catch (e: Exception) {
-                                            Log.e("StreamFlixFR", "[ERROR] -> ${provider.name}: ${e.message}")
-                                            emptyList()
-                                        }
-                                    }
-                                }.awaitAll().flatten()
-                            }
-                        }
-
-                        // Attendre les 2 groupes
-                        val direct = directExtractors.await()
-                        val providerResults = providerSearch.await()
-
-                        // Trier les providers par priorité (FrenchStream=100 en premier)
-                        val sortedProviders = providerResults
-                            .sortedByDescending { it.third }
-                            .map { (server, provName, _) -> server.copy(name = "🇫🇷 $provName · ${server.name}") }
-
-                        val taggedDirect = direct.map { it.copy(name = "🇫🇷 ${it.name}") }
-
-                        // Ordre final : VF d'abord, VOSTFR en dernier
-                        // Au sein de chaque groupe, trier par score historique
-                        val allFrServers = (sortedProviders + taggedDirect).sortedWith(
-                            compareBy<Video.Server> {
-                                // VOSTFR en dernier (1), tout le reste en premier (0)
-                                if (it.name.contains("VOSTFR", ignoreCase = true)) 1 else 0
-                            }.thenByDescending {
-                                UserPreferences.getServerScore(it.name.substringAfter("🇫🇷 "))
-                            }
-                        )
-
-                        Log.i("StreamFlixFR", "[TOTAL] -> ${sortedProviders.size} providers + ${taggedDirect.size} direct = ${allFrServers.size} serveurs FR uniquement")
-                        allFrServers
-                    }
-                }
-                if (allResults != null) {
-                    servers.addAll(allResults)
-                } else {
-                    Log.w("StreamFlixFR", "[TIMEOUT] -> Global timeout 12s reached")
-                }
+                try { servers.addAll(FrembedExtractor(frembedUrl).servers(videoType)) } catch (_: Exception) {}
+                try { servers.addAll(AfterDarkExtractor(afterDarkUrl).servers(videoType)) } catch (_: Exception) {}
+                VideasyExtractor().server(videoType, language)?.let { servers.add(it) }
+                // Toujours ajouter les serveurs globaux en complément
+                servers.add(VixSrcExtractor().server(videoType))
+                servers.add(TwoEmbedExtractor().server(videoType))
+                servers.add(VidsrcNetExtractor().server(videoType))
+                servers.add(VidLinkExtractor().server(videoType))
+                servers.add(VidsrcRuExtractor().server(videoType))
+                servers.add(VidflixExtractor().server(videoType))
+                servers.addAll(VidrockExtractor().servers(videoType))
+                servers.addAll(VidzeeExtractor().servers(videoType))
+                servers.addAll(PrimeSrcExtractor().servers(videoType))
             }
-            /* Non-FR providers disabled
             "es" -> {
                 // TMDB Spagnolo: Utilizza ESCLUSIVAMENTE server certificati con audio spagnolo ([LAT] o [CAST])
                 
@@ -981,10 +859,33 @@ class TmdbProvider(override val language: String) : Provider {
                     servers.addAll(1, VideasyExtractor().servers(videoType, language))
                 }
             }
-        } End of non-FR providers */
+        }
 
-        Log.i("StreamFlixFR", "[SERVERS LIST] -> Found ${servers.size} servers: ${servers.joinToString { it.name }}")
-        return servers.distinctBy { it.id }
+        // ORDINE PRIORITÀ FINALE: Portiamo i server con audio Spagnolo e Filemoon in cima
+        val finalServers = if (language.startsWith("es")) {
+            servers.sortedByDescending { server ->
+                val n = server.name.uppercase()
+                when {
+                    // Filemoon e tag audio spagnoli hanno la massima priorità
+                    n.contains("FILEMOON") -> 110
+                    n.contains("[CAS]") || n.contains("[LAT]") || n.contains("[ES]") || n.contains("SPAIN") || n.contains("[CAST]") ||
+                    n.contains("LATINO") || n.contains("SPANISH") || n.contains("CASTELLANO") || n.contains("(LAT)") || n.contains("(ESP)") -> 100
+                    
+                    // Altri aggregatori multi-lingua
+                    n.contains("VIDSRC") || n.contains("VIDLINK") -> 80
+                    
+                    // Sottotitoli o inglese
+                    n.contains("[EN]") || n.contains("[SUB]") || n.contains("(EN)") || n.contains("(SUB)") -> 50
+                    
+                    else -> 0
+                }
+            }
+        } else {
+            servers
+        }
+
+        Log.i("StreamFlixES", "[SERVERS LIST] -> Found ${finalServers.size} servers: ${finalServers.joinToString { it.name }}")
+        return finalServers.distinctBy { it.id }
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
@@ -1083,4 +984,3 @@ class TmdbProvider(override val language: String) : Provider {
         }
     }
 }
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                

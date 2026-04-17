@@ -261,11 +261,8 @@ class PlayerTvFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.CREATED).collect { state ->
                 when (state) {
-                    PlayerViewModel.State.LoadingServers -> {
-                        binding.pbLoadingServers.visibility = android.view.View.VISIBLE
-                    }
+                    PlayerViewModel.State.LoadingServers -> {}
                     is PlayerViewModel.State.SuccessLoadingServers -> {
-                        binding.pbLoadingServers.visibility = android.view.View.GONE
                         servers = state.servers
 
                         val sToServer = servers.firstOrNull {
@@ -364,7 +361,6 @@ class PlayerTvFragment : Fragment() {
 
                     }
                         is PlayerViewModel.State.FailedLoadingServers -> {
-                            binding.pbLoadingServers.visibility = android.view.View.GONE
                             Toast.makeText(
                                 requireContext(),
                                 state.error.message ?: "",
@@ -1674,4 +1670,60 @@ class PlayerTvFragment : Fragment() {
                         .build(),
                     true,
                 )
-    
+            }
+
+        // Bind new player to UI view
+        binding.pvPlayer.player = player
+        binding.settings.player = player
+        binding.settings.subtitleView = binding.pvPlayer.subtitleView
+
+        bypassDone = true
+        waitingForBypass = false
+        activeBypassSession = null
+
+        clearBypassSession(dismissDialog = true)
+        applyBypassCookies(session.serverUrl, cookies)
+
+        lifecycleScope.launch {
+            delay(300)
+
+            // 🔴 restore episode context BEFORE reload
+            when (val type = args.videoType) {
+                is Video.Type.Episode -> {
+                    EpisodeManager.setCurrentEpisode(type)
+                }
+                else -> {}
+            }
+
+            viewModel.reloadServersAfterBypass()
+        }
+    }
+
+    private fun applyBypassCookies(url: String, cookieHeader: String?) {
+        val cookies = cookieHeader?.trim().orEmpty()
+        if (cookies.isBlank()) return
+
+        val host = runCatching { Uri.parse(url).host.orEmpty() }.getOrDefault("")
+        val targets = linkedSetOf<String>().apply {
+            if (url.isNotBlank()) add(url)
+            if (host.isNotBlank()) {
+                add("https://$host/")
+                add("http://$host/")
+            }
+        }
+        if (targets.isEmpty()) return
+
+        val cookieManager = CookieManager.getInstance()
+        cookies.split(";")
+            .map { it.trim() }
+            .filter { it.contains("=") }
+            .forEach { cookie ->
+                targets.forEach { target ->
+                    cookieManager.setCookie(target, cookie)
+                }
+            }
+        cookieManager.flush()
+    }
+
+
+    }
