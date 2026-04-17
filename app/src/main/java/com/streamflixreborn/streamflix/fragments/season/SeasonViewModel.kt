@@ -109,4 +109,11 @@ class SeasonViewModel(
                 EpisodeManager.addEpisodes(EpisodeManager.convertToVideoTypeEpisodes(episodes, database, seasonNumber))
             }
 
-            _state.emit(State.SuccessLoadin
+            _state.emit(State.SuccessLoadingEpisodes(episodes))
+        } catch (e: Exception) {
+            Log.e("SeasonViewModel", "getSeasonEpisodes: ", e)
+            _state.emit(State.FailedLoadingEpisodes(e))
+        }
+    }
+
+}

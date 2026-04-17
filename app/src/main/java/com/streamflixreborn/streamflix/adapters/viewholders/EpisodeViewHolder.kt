@@ -485,4 +485,56 @@ class EpisodeViewHolder(
                 else -> 0
             }
             visibility = when {
-            
+                watchHistory != null -> View.VISIBLE
+                episode.isWatched -> View.VISIBLE
+                else -> View.GONE
+            }
+        }
+
+        binding.tvEpisodeTvShowTitle.text = episode.tvShow?.title ?: ""
+
+        binding.tvEpisodeInfo.text = episode.season?.takeIf { it.number != 0 }?.let { season ->
+            context.getString(
+                R.string.episode_item_info,
+                season.number,
+                episode.number,
+                episode.title ?: context.getString(
+                    R.string.episode_number,
+                    episode.number
+                )
+            )
+        } ?: context.getString(
+            R.string.episode_item_info_episode_only,
+            episode.number,
+            episode.title ?: context.getString(
+                R.string.episode_number,
+                episode.number
+            )
+        )
+    }
+
+    private fun ImageView.loadContinueWatchingArtwork(withFallback: Boolean = false) {
+        val tvShow = episode.tvShow
+        if (tvShow == null) {
+            Glide.with(context)
+                .load(episode.poster)
+                .error(R.drawable.glide_fallback_cover)
+                .apply {
+                    if (withFallback) fallback(R.drawable.glide_fallback_cover)
+                }
+                .centerCrop()
+                .transition(DrawableTransitionOptions.withCrossFade())
+                .into(this)
+            return
+        }
+
+        loadTvShowCardArtwork(tvShow) {
+            error(R.drawable.glide_fallback_cover)
+            apply {
+                if (withFallback) fallback(R.drawable.glide_fallback_cover)
+            }
+            centerCrop()
+            transition(DrawableTransitionOptions.withCrossFade())
+        }
+    }
+}

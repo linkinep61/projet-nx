@@ -156,4 +156,8 @@ class ProvidersMobileFragment : Fragment() {
     }
 
     private fun displayProviders(providers: List<ModelProvider>) {
-        app
+        appAdapter.submitList(providers.onEach {
+            it.itemType = AppAdapter.Type.PROVIDER_MOBILE_ITEM
+        })
+    }
+}

@@ -159,4 +159,9 @@ class ProvidersTvFragment : Fragment() {
 
     private fun displayProviders(providers: List<ModelProvider>) {
         appAdapter.submitList(providers.onEach {
-  
+            it.itemType = AppAdapter.Type.PROVIDER_TV_ITEM
+        })
+
+        binding.rvProviders.requestFocus()
+    }
+}

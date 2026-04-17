@@ -157,4 +157,9 @@ object GitHub {
         @SerializedName("-1") val minus1: Int,
         @SerializedName("laugh") val laugh: Int,
         @SerializedName("confused") val confused: Int,
-        @SerializedName("hea
+        @SerializedName("heart") val heart: Int,
+        @SerializedName("hooray") val hooray: Int,
+        @SerializedName("eyes") val eyes: Int,
+        @SerializedName("rocket") val rocket: Int,
+    )
+}

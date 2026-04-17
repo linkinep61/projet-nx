@@ -7,9 +7,11 @@ import androidx.core.content.FileProvider
 import com.streamflixreborn.streamflix.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
-import java.net.URL
+import java.util.concurrent.TimeUnit
 import kotlin.math.max
 
 object InAppUpdater {
@@ -51,6 +53,14 @@ object InAppUpdater {
         return newReleases
     }
 
+    private val downloadClient = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.MINUTES)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+
     suspend fun downloadApk(context: Context, asset: GitHub.Release.Asset): File {
         context.cacheDir.listFiles()
             ?.filter { it.extension == "apk" }
@@ -59,14 +69,27 @@ object InAppUpdater {
         val apk = withContext(Dispatchers.IO) {
             File.createTempFile(
                 "${File(asset.name).nameWithoutExtension}-",
-                ".${File(asset.name).extension}"
+                ".${File(asset.name).extension}",
+                context.cacheDir
             )
         }
 
         withContext(Dispatchers.IO) {
-            URL(asset.browserDownloadUrl).openStream()
-        }.use { input ->
-            FileOutputStream(apk).use { output -> input.copyTo(output) }
+            // Use the GitHub API asset URL with auth token for private/public repos
+            val request = Request.Builder()
+                .url(asset.url)
+                .addHeader("Accept", "application/octet-stream")
+                .addHeader("Authorization", "Bearer ${GitHub.token}")
+                .build()
+
+            val response = downloadClient.newCall(request).execute()
+            if (!response.isSuccessful) {
+                throw Exception("Download failed: HTTP ${response.code}")
+            }
+
+            response.body?.byteStream()?.use { input ->
+                FileOutputStream(apk).use { output -> input.copyTo(output) }
+            } ?: throw Exception("Download failed: empty response body")
         }
 
         return apk
