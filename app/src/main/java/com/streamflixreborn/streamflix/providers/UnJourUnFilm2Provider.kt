@@ -1051,7 +1051,7 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 else
                     emptyList()
 
-                return servers + other
+                return sortVfFirst(servers + other)
             }
         }
 
@@ -1178,7 +1178,17 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         else
             emptyList()
 
-        return servers + other
+        return sortVfFirst(servers + other)
+    }
+
+    private fun sortVfFirst(servers: List<Video.Server>): List<Video.Server> {
+        return servers.sortedBy { server ->
+            val name = server.name.uppercase()
+            when {
+                name.contains("VOSTFR") && !name.contains("VF") -> 1
+                else -> 0
+            }
+        }
     }
 
     override suspend fun getVideo(server: Video.Server): Video {

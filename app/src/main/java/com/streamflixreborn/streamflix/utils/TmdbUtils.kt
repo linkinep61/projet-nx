@@ -281,6 +281,8 @@ object TmdbUtils {
                 queryTitle = rawTitle,
                 year = year,
                 candidateYear = extractYear(movie.releaseDate),
+                originalLanguage = movie.originalLanguage,
+                providerLanguage = language,
             )
         }
 
@@ -317,6 +319,8 @@ object TmdbUtils {
                 queryTitle = rawTitle,
                 year = year,
                 candidateYear = extractYear(tv.firstAirDate),
+                originalLanguage = tv.originalLanguage,
+                providerLanguage = language,
             )
         }
 
@@ -343,7 +347,8 @@ object TmdbUtils {
 
     private suspend fun searchMovieCandidates(rawTitle: String, language: String?): List<TMDb3.Movie> {
         val variants = buildTitleVariants(rawTitle)
-        val languages = listOfNotNull(language).plus(null).distinct()
+        val fullLocale = expandLanguageToLocale(language)
+        val languages = listOfNotNull(fullLocale).plus(null).distinct()
 
         return languages
             .flatMap { searchLanguage ->
@@ -356,7 +361,8 @@ object TmdbUtils {
 
     private suspend fun searchTvCandidates(rawTitle: String, language: String?): List<TMDb3.Tv> {
         val variants = buildTitleVariants(rawTitle)
-        val languages = listOfNotNull(language).plus(null).distinct()
+        val fullLocale = expandLanguageToLocale(language)
+        val languages = listOfNotNull(fullLocale).plus(null).distinct()
 
         return languages
             .flatMap { searchLanguage ->
@@ -434,6 +440,8 @@ object TmdbUtils {
         queryTitle: String,
         year: Int?,
         candidateYear: Int?,
+        originalLanguage: String? = null,
+        providerLanguage: String? = null,
     ): Int {
         val queryVariants = buildTitleVariants(queryTitle).map(::normalizeTitle)
         val candidateVariants = candidateTitles
@@ -461,7 +469,15 @@ object TmdbUtils {
             else -> -25
         }
 
-        return titleScore + yearScore
+        // Boost results whose original language matches the provider's language.
+        // This prioritizes e.g. French movies on French providers.
+        val langBonus = when {
+            providerLanguage.isNullOrBlank() || originalLanguage.isNullOrBlank() -> 0
+            originalLanguage.equals(providerLanguage.substringBefore('-'), ignoreCase = true) -> 15
+            else -> 0
+        }
+
+        return titleScore + yearScore + langBonus
     }
 
     private fun buildTitleVariants(title: String): List<String> {
@@ -504,6 +520,24 @@ object TmdbUtils {
 
         val overlap = leftWords.intersect(rightWords).size.toDouble()
         return overlap / max(leftWords.size, rightWords.size).toDouble()
+    }
+
+    /**
+     * Expand a bare language code (e.g. "fr") to a full TMDB locale ("fr-FR")
+     * so that TMDB returns properly localized metadata (titles, overviews, posters).
+     */
+    private fun expandLanguageToLocale(language: String?): String? {
+        if (language.isNullOrBlank()) return null
+        if (language.contains('-')) return language  // already a full locale
+        val regionMap = mapOf(
+            "fr" to "fr-FR",
+            "de" to "de-DE",
+            "es" to "es-ES",
+            "it" to "it-IT",
+            "pt" to "pt-BR",
+            "en" to "en-US",
+        )
+        return regionMap[language.lowercase()] ?: language
     }
 
     private fun buildLookupCacheKey(type: String, title: String, year: Int?, language: String?): String {

@@ -54,8 +54,10 @@ class MainViewModel : ViewModel() {
 
             _state.emit(State.SuccessCheckingUpdate(newReleases, asset))
         } catch (e: Exception) {
-            Log.e("MainViewModel", "checkUpdate: ", e)
-            _state.emit(State.FailedUpdate(e))
+            // Update check is a background task — failures should be silent.
+            // Emitting FailedUpdate here caused a persistent toast (e.g. "HTTP 404")
+            // on every provider opening because StateFlow replays the last value.
+            Log.w("MainViewModel", "checkUpdate failed (silent): ${e.message}")
         }
     }
 

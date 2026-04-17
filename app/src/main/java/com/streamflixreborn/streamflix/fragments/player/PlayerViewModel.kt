@@ -138,9 +138,13 @@ class PlayerViewModel(
             }
 
             Log.d("PlayerViewModel", "Estrazione video completata con successo")
+            val cleanName = server.name.removePrefix("🇫🇷 ").removePrefix("🌐 ")
+            UserPreferences.recordServerSuccess(cleanName)
             _state.emit(State.SuccessLoadingVideo(video, server))
         } catch (e: Exception) {
             Log.e("PlayerViewModel", "Errore estrazione video: ", e)
+            val cleanName = server.name.removePrefix("🇫🇷 ").removePrefix("🌐 ")
+            UserPreferences.recordServerFailure(cleanName)
             _state.emit(State.FailedLoadingVideo(e, server))
         }
     }
