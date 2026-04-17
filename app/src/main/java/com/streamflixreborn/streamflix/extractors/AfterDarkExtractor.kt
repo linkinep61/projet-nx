@@ -35,12 +35,22 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
         const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         private const val TAG = "AfterDarkExtractor"
         private const val TURNSTILE_SITEKEY = "0x4AAAAAACtM3fCPnvQcAGIA"
+        private const val GATE_RETRY_COOLDOWN_MS = 3 * 60 * 1000L // 3 minutes avant retry
 
-        // Gate state shared across instances — only attempt once per session
+        // Gate state shared across instances
         @Volatile
         private var gateAttempted = false
         @Volatile
         private var gateSolved = false
+        @Volatile
+        private var lastGateAttemptTime = 0L
+
+        fun resetGateIfCooldownExpired() {
+            if (gateAttempted && !gateSolved && System.currentTimeMillis() - lastGateAttemptTime > GATE_RETRY_COOLDOWN_MS) {
+                Log.d(TAG, "[Gate] Cooldown expired — resetting gate state for retry")
+                gateAttempted = false
+            }
+        }
     }
 
     override suspend fun extract(link: String): Video {
@@ -255,9 +265,10 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
                         }
                     }
 
-                    // Create a minimal dialog with the WebView — Turnstile needs to be rendered
-                    // in a real, layout-attached view hierarchy to solve.
-                    // We use a tiny 1x1 dialog positioned off-screen to avoid visual artifacts.
+                    // Create a small but VISIBLE dialog with the WebView.
+                    // Turnstile REQUIRES the WebView to be visible and laid out
+                    // at ≥320×80 to solve. We use a low-opacity dialog at the
+                    // bottom of the screen so it's barely noticeable.
                     try {
                         val container = FrameLayout(activity).apply {
                             setBackgroundColor(Color.TRANSPARENT)
@@ -272,20 +283,20 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
 
                         dialog?.show()
 
-                        // Make the dialog window tiny and move it off-screen
+                        // Keep the dialog small but ON-SCREEN and visible enough
+                        // for Turnstile to render and auto-solve
                         dialog?.window?.let { w ->
                             w.setBackgroundDrawableResource(android.R.color.transparent)
                             w.setDimAmount(0f) // no background dim
                             val lp = w.attributes
-                            lp.width = 1
-                            lp.height = 1
-                            lp.x = -9999
-                            lp.y = -9999
-                            lp.alpha = 0.01f
+                            lp.width = 340
+                            lp.height = 90
+                            lp.gravity = android.view.Gravity.BOTTOM or android.view.Gravity.END
+                            lp.alpha = 0.05f  // barely visible but enough for Turnstile
                             w.attributes = lp
                         }
 
-                        Log.d(TAG, "[Gate] Dialog shown (minimal) — loading $baseUrl")
+                        Log.d(TAG, "[Gate] Dialog shown (visible for Turnstile) — loading $baseUrl")
                     } catch (e: Exception) {
                         Log.e(TAG, "[Gate] Failed to show dialog: ${e.message}")
                         if (continuation.isActive) continuation.resume(false)
@@ -372,6 +383,9 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
     suspend fun servers(videoType: Video.Type): List<Video.Server> {
         val apiUrl = buildApiUrl(videoType)
 
+        // Reset gate si le cooldown est expiré (permet de retenter)
+        resetGateIfCooldownExpired()
+
         // First attempt — may return limited sources without gate cookie
         val (data, hasFullAccess) = fetchSources(apiUrl)
 
@@ -389,6 +403,7 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
                 // Fire gate bypass in background for subsequent calls
                 if (!gateAttempted) {
                     gateAttempted = true
+                    lastGateAttemptTime = System.currentTimeMillis()
                     Log.d(TAG, "Returning ${servers.size} ungated servers now; gate bypass running in background")
                     CoroutineScope(Dispatchers.IO).launch {
                         try {
@@ -408,6 +423,7 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
         // No servers at all — try gate bypass synchronously as last resort
         if (!gateAttempted) {
             gateAttempted = true
+            lastGateAttemptTime = System.currentTimeMillis()
             Log.d(TAG, "No servers from ungated API — trying synchronous gate bypass...")
 
             if (solveGate()) {
@@ -415,12 +431,4 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
                 val (retryData, _) = fetchSources(apiUrl)
                 if (retryData != null) {
                     val retryServers = parseServers(retryData)
-                    if (retryServers.isNotEmpty()) return retryServers
-                }
-            }
-        }
-
-        // Fallback: return whatever the first attempt gave us
-        return data?.let { parseServers(it) } ?: emptyList()
-    }
-}
+                    if (retryServers.isNotEmpty()) return retr

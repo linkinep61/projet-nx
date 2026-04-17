@@ -273,8 +273,11 @@ class PlayerMobileFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch { 
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.CREATED).collect { state ->
                 when (state) {
-                    PlayerViewModel.State.LoadingServers -> {}
+                    PlayerViewModel.State.LoadingServers -> {
+                        binding.pbLoadingServers.visibility = android.view.View.VISIBLE
+                    }
                     is PlayerViewModel.State.SuccessLoadingServers -> {
+                        binding.pbLoadingServers.visibility = android.view.View.GONE
                         servers = state.servers
                         val sToServer = servers.firstOrNull {
                             isSerienStreamBypassUrl(it.id)
@@ -333,6 +336,7 @@ class PlayerMobileFragment : Fragment() {
                     }
 
                     is PlayerViewModel.State.FailedLoadingServers -> {
+                        binding.pbLoadingServers.visibility = android.view.View.GONE
                         Toast.makeText(
                             requireContext(),
                             state.error.message ?: "",

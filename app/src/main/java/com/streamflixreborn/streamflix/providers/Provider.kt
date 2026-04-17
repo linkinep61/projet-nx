@@ -104,7 +104,7 @@ interface Provider {
             FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true),
             UnJourUnFilm2Provider to ProviderSupport(movies = true, tvShows = true),
             aploufProvider to ProviderSupport(movies = true, tvShows = false),
-            AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true)
+            AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true),
         )
 
         // Helper functions to check support

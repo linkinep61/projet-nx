@@ -703,10 +703,13 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         val servers = when (videoType) {
             is Video.Type.Episode -> {
-                val (tvShowId, tvShowNumber) = id.split("/")
+                val parts = id.split("/")
+                val tvShowId = parts.getOrElse(0) { id }
+                val tvShowNumber = parts.getOrElse(1) { "1" }
                 val episodesData = try {
                     service.getEpisodesData(tvShowId)
                 } catch (e: Exception) {
+                    android.util.Log.e("FrenchStream", "[EPISODES] Error fetching episodes for '$tvShowId': ${e.message}")
                     null
                 }
                 val tvShowServers = mutableListOf<Video.Server>()
@@ -740,6 +743,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 val filmData = try {
                     service.getFilmData(itemId)
                 } catch (e: Exception) {
+                    android.util.Log.e("FrenchStream", "[FILM] Error fetching film data for '$itemId': ${e.message}")
                     null
                 }
                 var serverIndex = 0
