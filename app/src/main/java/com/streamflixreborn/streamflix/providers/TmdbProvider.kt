@@ -763,9 +763,9 @@ class TmdbProvider(override val language: String) : Provider {
                     return nItemWords.containsAll(nTargetWords) || nTargetWords.containsAll(nItemWords)
                 }
 
-                // Tous les providers FR sauf Wiflix - priorité : UnJourUnFilm, FrenchStream
+                // Providers FR : UnJourUnFilm, FrenchStream, Kidraz
                 coroutineScope {
-                    val frProviders = listOf(UnJourUnFilmProvider, FrenchStreamProvider, UnJourUnFilm2Provider, FrenchAnimeProvider, FrenchMangaProvider, AnimeSamaProvider, aploufProvider, KidrazProvider)
+                    val frProviders = listOf(UnJourUnFilmProvider, FrenchStreamProvider, KidrazProvider)
                     val deferred = frProviders.map { provider ->
                         async {
                             try {
@@ -788,13 +788,12 @@ class TmdbProvider(override val language: String) : Provider {
                     servers.addAll(deferred.awaitAll().flatten())
                 }
 
-                // Extracteurs directs FR (Frembed, AfterDark, Videasy)
+                // Extracteurs directs FR
                 val frembedUrl = UserPreferences.getProviderCache(FrembedProvider, UserPreferences.PROVIDER_URL).ifEmpty { FrembedProvider.defaultBaseUrl }
-                val afterDarkUrl = UserPreferences.getProviderCache(AfterDarkProvider, UserPreferences.PROVIDER_URL).ifEmpty { AfterDarkProvider.defaultBaseUrl }
                 try { servers.addAll(FrembedExtractor(frembedUrl).servers(videoType)) } catch (_: Exception) {}
+                val afterDarkUrl = UserPreferences.getProviderCache(AfterDarkProvider, UserPreferences.PROVIDER_URL).ifEmpty { AfterDarkProvider.defaultBaseUrl }
                 try { servers.addAll(AfterDarkExtractor(afterDarkUrl).servers(videoType)) } catch (_: Exception) {}
-                VideasyExtractor().server(videoType, language)?.let { servers.add(it) }
-                // Sources FR uniquement - pas de serveurs globaux (audio anglais)
+                // Sources FR uniquement - pas de serveurs globaux
             }
             "es" -> {
                 // TMDB Spagnolo: Utilizza ESCLUSIVAMENTE server certificati con audio spagnolo ([LAT] o [CAST])
@@ -951,4 +950,11 @@ class TmdbProvider(override val language: String) : Provider {
 
                 if (isSpanish && isForced) {
                     sub.default = true
-    
+                    forcedFound = true
+                    Log.i("StreamFlixES", "[SUBTITLE] -> TMDb (es): Selected FORCED subtitle: ${sub.label}")
+                } else {
+                    sub.default = false
+                }
+            }
+            
+     

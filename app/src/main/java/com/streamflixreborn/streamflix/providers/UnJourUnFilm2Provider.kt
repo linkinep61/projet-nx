@@ -505,7 +505,11 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     fun decodeHtml(s: String): String {
         @Suppress("DEPRECATION")
         val text = Html.fromHtml(s).toString()
-        return JSONObject("""{"v":"$text"}""").getString("v")
+        return try {
+            JSONObject().put("v", text).getString("v")
+        } catch (_: Exception) {
+            text
+        }
     }
 
     data class itemLink(
@@ -1332,7 +1336,4 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         suspend fun getPeople(
             @Path("id") id: String,
             @Path("page") page: Int,
-            @Header("User-agent") user_agent: String = USER_AGENT
-        ): Document
-    }
-}
+            @Header(
