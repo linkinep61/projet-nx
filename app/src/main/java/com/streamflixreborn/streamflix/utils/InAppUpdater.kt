@@ -17,7 +17,7 @@ import kotlin.math.max
 object InAppUpdater {
 
     private const val GITHUB_OWNER = "Xx-nanico-xX"
-    private const val GITHUB_REPO = "StreamfliX"
+    private const val GITHUB_REPO = "mobile-client-v2"
 
     private data class Version(val name: String) : Comparable<Version> {
         override operator fun compareTo(other: Version): Int {
@@ -107,6 +107,4 @@ object InAppUpdater {
             )
         }
         context.startActivity(intent)
-    }
-}
-
+    }
