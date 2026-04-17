@@ -492,4 +492,8 @@
     <string name="player_settings_software_decoder_auto_on">Actif (par défaut)</string>
     <string name="player_settings_software_decoder_auto_off">Désactivé (par défaut)</string>
     <string name="settings_refresh_cache_title">Actualiser le cache depuis la base de données</string>
-    <string 
+    <string name="settings_refresh_cache_summary">Recharger l\'historique de visionnage et les données de l\'application depuis la base de données</string>
+    <string name="settings_refresh_cache_confirm">Actualiser le cache ?</string>
+    <string name="settings_refresh_cache_message">Cela rechargera l\'historique de visionnage et les données de l\'application depuis la base de données.</string>
+    <string name="settings_refresh_cache_success">Cache actualisé avec succès</string>
+</resources>
