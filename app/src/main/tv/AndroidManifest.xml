@@ -37,6 +37,7 @@
 
         <activity
             android:name=".activities.main.MainTvActivity"
+            android:banner="@mipmap/ic_banner"
             android:exported="true"
             android:theme="@style/AppTheme.Tv">
             <intent-filter>
@@ -55,8 +56,4 @@
             <meta-data
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/provider_paths" />
-        </provider>
-
-    </application>
-
-</manifest>
+     

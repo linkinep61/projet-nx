@@ -335,25 +335,19 @@ object AnimeSamaProvider : Provider {
         val animePoster = "${IMG_BASE}${id}.jpg"
 
         if (langSeasons.size > 1) {
-            // Multiple languages: show separate seasons per language
-            // e.g. "VOSTFR Saison 1", "VOSTFR Saison 2", "VF Saison 1"
+            // Multiple languages: show language folders (VOSTFR / VF)
             var idx = 0
             for (lang in languages) {
                 val nums = langSeasons[lang] ?: continue
                 val label = langLabels[lang] ?: lang.uppercase()
-                for (num in nums) {
-                    idx++
-                    val seasonId = if (num == 0) "$id/$lang" else "$id/saison$num/$lang"
-                    val seasonTitle = if (nums.size == 1 && num == 0) label
-                        else if (nums.size == 1) "$label"
-                        else "$label Saison $num"
-                    seasons.add(Season(
-                        id = seasonId,
-                        number = idx,
-                        title = seasonTitle,
-                        poster = animePoster,
-                    ))
-                }
+                idx++
+                val folderId = "$id/@$lang/${nums.joinToString(",")}"
+                seasons.add(Season(
+                    id = folderId,
+                    number = idx,
+                    title = label,
+                    poster = animePoster,
+                ))
             }
         } else if (langSeasons.size == 1) {
             // Single language: show seasons directly
@@ -399,39 +393,26 @@ object AnimeSamaProvider : Provider {
         val episodePoster = "${IMG_BASE}${animeSlug}.jpg"
 
         if (langMatch != null) {
-            // Language folder mode: aggregate episodes from all seasons
+            // Language folder mode: return sub-seasons as fake episodes
             val slug = langMatch.groupValues[1]
             val lang = langMatch.groupValues[2]
             val seasonNums = langMatch.groupValues[3].split(",").mapNotNull { it.toIntOrNull() }
             Log.d(TAG, "[Episodes] Language folder: lang=$lang, seasons=$seasonNums")
 
             val episodes = mutableListOf<Episode>()
-            for (num in seasonNums) {
-                val jsPath = if (num == 0) "$slug/$lang" else "$slug/saison$num/$lang"
-                val url = "${baseUrl}catalogue/$jsPath/episodes.js"
-
-                val episodesJs = try {
-                    val text = fetchText(url)
-                    if (text.contains("var eps1")) text else ""
-                } catch (_: Exception) { "" }
-                if (episodesJs.isBlank()) continue
-
-                val eps1Regex = Regex("""var\s+eps1\s*=\s*\[([^\]]*)\]""")
-                val eps1Content = eps1Regex.find(episodesJs)?.groupValues?.get(1) ?: ""
-                val urlRegex = Regex("""['"]((https?://[^'"]+))['"]""")
-                val urls = urlRegex.findAll(eps1Content).map { it.groupValues[1] }.toList()
-
-                val seasonLabel = if (seasonNums.size > 1) "S$num " else ""
-                urls.forEachIndexed { index, _ ->
-                    episodes.add(Episode(
-                        id = "$jsPath/${index + 1}",
-                        number = episodes.size + 1,
-                        title = "${seasonLabel}Episode ${index + 1}",
-                        poster = episodePoster,
-                    ))
-                }
+            for ((idx, num) in seasonNums.withIndex()) {
+                val seasonId = if (num == 0) "$slug/$lang" else "$slug/saison$num/$lang"
+                val title = if (seasonNums.size == 1 && num == 0) "Épisodes"
+                    else "Saison $num"
+                episodes.add(Episode(
+                    id = "@subfolder:$seasonId",
+                    number = idx + 1,
+                    title = title,
+                    poster = episodePoster,
+                    overview = "@subfolder",
+                ))
             }
-            Log.d(TAG, "[Episodes] Language folder total: ${episodes.size} episodes")
+            Log.d(TAG, "[Episodes] Language folder: ${episodes.size} sub-seasons")
             return episodes
         }
 
@@ -657,3 +638,4 @@ object AnimeSamaProvider : Provider {
         suspend fun getPage(@Url url: String): Document
     }
 }
+                                                                                                                                                                                                                                                                                                                                                                                                           

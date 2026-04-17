@@ -55,6 +55,22 @@ class EpisodeViewHolder(
     private fun displayMobileItem(binding: ItemEpisodeMobileBinding) {
         binding.root.apply {
             setOnClickListener {
+                // Sub-folder: navigate to Season instead of Player
+                if (episode.overview == "@subfolder") {
+                    val realSeasonId = episode.id.removePrefix("@subfolder:")
+                    findNavController().navigate(
+                        SeasonMobileFragmentDirections.actionSeasonToSeason(
+                            tvShowId = episode.tvShow?.id ?: "",
+                            tvShowTitle = episode.tvShow?.title ?: "",
+                            tvShowPoster = episode.tvShow?.poster,
+                            tvShowBanner = episode.tvShow?.banner,
+                            seasonId = realSeasonId,
+                            seasonNumber = episode.number,
+                            seasonTitle = episode.title,
+                        )
+                    )
+                    return@setOnClickListener
+                }
                 findNavController().navigate(
                     SeasonMobileFragmentDirections.actionSeasonToPlayer(
                         id = episode.id,
@@ -154,6 +170,22 @@ class EpisodeViewHolder(
     private fun displayTvItem(binding: ItemEpisodeTvBinding) {
         binding.root.apply {
             setOnClickListener {
+                // Sub-folder: navigate to Season instead of Player
+                if (episode.overview == "@subfolder") {
+                    val realSeasonId = episode.id.removePrefix("@subfolder:")
+                    findNavController().navigate(
+                        SeasonTvFragmentDirections.actionSeasonToSeason(
+                            tvShowId = episode.tvShow?.id ?: "",
+                            tvShowTitle = episode.tvShow?.title ?: "",
+                            tvShowPoster = episode.tvShow?.poster,
+                            tvShowBanner = episode.tvShow?.banner,
+                            seasonId = realSeasonId,
+                            seasonNumber = episode.number,
+                            seasonTitle = episode.title,
+                        )
+                    )
+                    return@setOnClickListener
+                }
                 findNavController().navigate(
                     SeasonTvFragmentDirections.actionSeasonToPlayer(
                         id = episode.id,
@@ -453,56 +485,4 @@ class EpisodeViewHolder(
                 else -> 0
             }
             visibility = when {
-                watchHistory != null -> View.VISIBLE
-                episode.isWatched -> View.VISIBLE
-                else -> View.GONE
-            }
-        }
-
-        binding.tvEpisodeTvShowTitle.text = episode.tvShow?.title ?: ""
-
-        binding.tvEpisodeInfo.text = episode.season?.takeIf { it.number != 0 }?.let { season ->
-            context.getString(
-                R.string.episode_item_info,
-                season.number,
-                episode.number,
-                episode.title ?: context.getString(
-                    R.string.episode_number,
-                    episode.number
-                )
-            )
-        } ?: context.getString(
-            R.string.episode_item_info_episode_only,
-            episode.number,
-            episode.title ?: context.getString(
-                R.string.episode_number,
-                episode.number
-            )
-        )
-    }
-
-    private fun ImageView.loadContinueWatchingArtwork(withFallback: Boolean = false) {
-        val tvShow = episode.tvShow
-        if (tvShow == null) {
-            Glide.with(context)
-                .load(episode.poster)
-                .error(R.drawable.glide_fallback_cover)
-                .apply {
-                    if (withFallback) fallback(R.drawable.glide_fallback_cover)
-                }
-                .centerCrop()
-                .transition(DrawableTransitionOptions.withCrossFade())
-                .into(this)
-            return
-        }
-
-        loadTvShowCardArtwork(tvShow) {
-            error(R.drawable.glide_fallback_cover)
-            apply {
-                if (withFallback) fallback(R.drawable.glide_fallback_cover)
-            }
-            centerCrop()
-            transition(DrawableTransitionOptions.withCrossFade())
-        }
-    }
-}
+            

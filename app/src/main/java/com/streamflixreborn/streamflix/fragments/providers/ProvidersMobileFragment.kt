@@ -85,6 +85,8 @@ class ProvidersMobileFragment : Fragment() {
 
 
     private fun initializeProviders() {
+        // Hide language selector (all providers are French)
+        binding.sProvidersLanguage.visibility = View.GONE
         binding.sProvidersLanguage.apply {
             class Language(
                 val code: String,
@@ -154,8 +156,4 @@ class ProvidersMobileFragment : Fragment() {
     }
 
     private fun displayProviders(providers: List<ModelProvider>) {
-        appAdapter.submitList(providers.onEach {
-            it.itemType = AppAdapter.Type.PROVIDER_MOBILE_ITEM
-        })
-    }
-}
+        app
