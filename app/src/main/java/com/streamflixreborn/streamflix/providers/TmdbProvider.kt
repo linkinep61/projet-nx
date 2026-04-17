@@ -737,7 +737,58 @@ class TmdbProvider(override val language: String) : Provider {
                 VideasyExtractor().server(videoType, language)?.let { servers.add(it) }
             }
             "fr" -> {
-                // Server francesi
+                // Sources FR : priorité 1jour1film et FrenchStream, puis extracteurs directs
+                val targetTitle = when (videoType) {
+                    is Video.Type.Movie -> videoType.title
+                    is Video.Type.Episode -> videoType.tvShow.title
+                }
+
+                fun isMatchFR(item: AppAdapter.Item, target: String): Boolean {
+                    val isCorrectType = if (videoType is Video.Type.Movie) item is Movie else item is TvShow
+                    if (!isCorrectType) return false
+                    val itemTitle = if (item is Movie) item.title else (item as TvShow).title
+                    val nItem = itemTitle.lowercase().replace(Regex("[^a-z0-9]"), "")
+                    val nTarget = target.lowercase().replace(Regex("[^a-z0-9]"), "")
+                    if (nItem == nTarget) return true
+                    if (nItem.contains(nTarget) || nTarget.contains(nItem)) {
+                        if (Math.abs(nItem.length - nTarget.length) <= 5) return true
+                    }
+                    val cleanWords: (String) -> Set<String> = { s ->
+                        s.lowercase().replace(Regex("[^a-z0-9 ]"), " ").split(Regex("\\s+")).filter { it.length > 2 }.toSet()
+                    }
+                    val nItemWords = cleanWords(itemTitle)
+                    val nTargetWords = cleanWords(target)
+                    if (nItemWords.isEmpty() || nTargetWords.isEmpty()) return false
+                    if (nTargetWords.size == 1) return nItemWords.contains(nTargetWords.first())
+                    return nItemWords.containsAll(nTargetWords) || nTargetWords.containsAll(nItemWords)
+                }
+
+                // Tous les providers FR sauf Wiflix - priorité : UnJourUnFilm, FrenchStream
+                coroutineScope {
+                    val frProviders = listOf(UnJourUnFilmProvider, FrenchStreamProvider, UnJourUnFilm2Provider, FrenchAnimeProvider, FrenchMangaProvider, AnimeSamaProvider, aploufProvider, KidrazProvider)
+                    val deferred = frProviders.map { provider ->
+                        async {
+                            try {
+                                val searchResults = provider.search(targetTitle, 1)
+                                val bestMatch = searchResults.firstOrNull { isMatchFR(it, targetTitle) }
+                                val id = if (bestMatch is Movie) bestMatch.id else (bestMatch as? TvShow)?.id
+                                if (id != null) {
+                                    Log.i("StreamFlixFR", "[MATCH] ${provider.name} -> '$targetTitle' id=$id")
+                                    provider.getServers(id, videoType)
+                                } else {
+                                    Log.d("StreamFlixFR", "[NO MATCH] ${provider.name} pour '$targetTitle'")
+                                    emptyList()
+                                }
+                            } catch (e: Exception) {
+                                Log.e("StreamFlixFR", "[ERROR] ${provider.name}: ${e.message}")
+                                emptyList()
+                            }
+                        }
+                    }
+                    servers.addAll(deferred.awaitAll().flatten())
+                }
+
+                // Extracteurs directs FR (Frembed, AfterDark, Videasy)
                 val frembedUrl = UserPreferences.getProviderCache(FrembedProvider, UserPreferences.PROVIDER_URL).ifEmpty { FrembedProvider.defaultBaseUrl }
                 val afterDarkUrl = UserPreferences.getProviderCache(AfterDarkProvider, UserPreferences.PROVIDER_URL).ifEmpty { AfterDarkProvider.defaultBaseUrl }
                 try { servers.addAll(FrembedExtractor(frembedUrl).servers(videoType)) } catch (_: Exception) {}
@@ -900,78 +951,4 @@ class TmdbProvider(override val language: String) : Provider {
 
                 if (isSpanish && isForced) {
                     sub.default = true
-                    forcedFound = true
-                    Log.i("StreamFlixES", "[SUBTITLE] -> TMDb (es): Selected FORCED subtitle: ${sub.label}")
-                } else {
-                    sub.default = false
-                }
-            }
-            
-            if (!forcedFound) {
-                video.subtitles.forEach { it.default = false }
-                Log.i("StreamFlixES", "[SUBTITLE] -> TMDb (es): No forced subs found, keeping them OFF")
-            }
-        }
-        
-        Log.i("StreamFlixES", "[VIDEO] -> Final source: ${video.source}")
-        return video
-    }
-
-    private fun getTranslation(key: String): String {
-        return when (language) {
-            "it" -> when (key) {
-                "Trending" -> "Di tendenza"
-                "Popular Movies" -> "Film popolari"
-                "Popular TV Shows" -> "Serie TV popolari"
-                "Popular Anime" -> "Anime popolari"
-                "Popular on Netflix" -> "Popolari su Netflix"
-                "Popular on Amazon" -> "Popolari su Amazon"
-                "Popular on Disney+" -> "Popolari su Disney+"
-                "Popular on Hulu" -> "Popolari su Hulu"
-                "Popular on Apple TV+" -> "Popolari su Apple TV+"
-                "Popular on HBO" -> "Popolari su HBO"
-                else -> key
-            }
-            "es" -> when (key) {
-                "Trending" -> "Tendencias"
-                "Popular Movies" -> "Películas populares"
-                "Popular TV Shows" -> "Series de TV populares"
-                "Popular Anime" -> "Anime populares"
-                "Popular on Netflix" -> "Popular en Netflix"
-                "Popular on Amazon" -> "Popular en Amazon"
-                "Popular on Disney+" -> "Popular en Disney+"
-                "Popular on Hulu" -> "Popular en Hulu"
-                "Popular on Apple TV+" -> "Popular en Apple TV+"
-                "Popular on HBO" -> "Popular en HBO"
-                else -> key
-            }
-            "de" -> when (key) {
-                "Trending" -> "Trends"
-                "Popular Movies" -> "Beliebte Filme"
-                "Popular TV Shows" -> "Beliebte Serien"
-                "Popular Anime" -> "Beliebte Anime"
-                "Popular on Netflix" -> "Beliebt bei Netflix"
-                "Popular on Amazon" -> "Beliebt bei Amazon"
-                "Popular on Disney+" -> "Beliebt bei Disney+"
-                "Popular on Hulu" -> "Beliebt bei Hulu"
-                "Popular on Apple TV+" -> "Beliebt bei Apple TV+"
-                "Popular on HBO" -> "Beliebt bei HBO"
-                else -> key
-            }
-            "fr" -> when (key) {
-                "Trending" -> "Tendances"
-                "Popular Movies" -> "Films populaires"
-                "Popular TV Shows" -> "Séries populaires"
-                "Popular Anime" -> "Animes populaires"
-                "Popular on Netflix" -> "Populaire sur Netflix"
-                "Popular on Amazon" -> "Populaire sur Amazon"
-                "Popular on Disney+" -> "Populaire sur Disney+"
-                "Popular on Hulu" -> "Populaire sur Hulu"
-                "Popular on Apple TV+" -> "Populaire sur Apple TV+"
-                "Popular on HBO" -> "Populaire sur HBO"
-                else -> key
-            }
-            else -> key
-        }
-    }
-}
+    
