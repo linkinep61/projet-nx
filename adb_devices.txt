@@ -1,4 +1,0 @@
-List of devices attached
-adb-33311HFDD8N2PQ-a4QqY3._adb-tls-connect._tcp	device
-emulator-5554	device
-

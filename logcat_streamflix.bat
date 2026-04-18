@@ -1,9 +1,0 @@
-@echo off
-cd /d "C:\Users\guill\AppData\Local\Android\Sdk\platform-tools"
-echo [1/3] Nettoyage logcat...
-adb -s emulator-5554 logcat -c
-echo [2/3] Attente 30 secondes - va sur un film et clique Watch Now...
-timeout /t 30 /nobreak
-echo [3/3] Dump des logs...
-adb -s emulator-5554 logcat -d > "C:\Users\guill\StudioProjects\streamflix\logcat_output.txt" 2>&1
-echo DONE > "C:\Users\guill\StudioProjects\streamflix\logcat_done3.txt"
