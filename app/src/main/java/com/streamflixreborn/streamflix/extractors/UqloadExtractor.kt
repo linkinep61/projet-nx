@@ -25,11 +25,25 @@ class UqloadExtractor : Extractor() {
         val scriptContent = scripts.find { it.html().contains("sources:") }?.html()
             ?: throw Exception("Script with sources not found")
         
-        val sourcesRegex = Regex("""sources:\s*\["([^"]+)"]""")
-        val match = sourcesRegex.find(scriptContent)
-            ?: throw Exception("Sources not found in script")
+        // Try multiple regex patterns for different Uqload page versions
+        val regexPatterns = listOf(
+            Regex("""sources:\s*\["([^"]+)"]"""),
+            Regex("""sources:\s*\[\{[^}]*file\s*:\s*"([^"]+)"[^}]*}]"""),
+            Regex("""sources:\s*\[\{[^}]*src\s*:\s*"([^"]+)"[^}]*}]"""),
+            Regex("""file\s*:\s*"(https?://[^"]+\.mp4[^"]*)""""),
+            Regex("""src\s*:\s*"(https?://[^"]+\.mp4[^"]*)"""")
+        )
 
-        val sourceUrl = match.groupValues[1]
+        var sourceUrl: String? = null
+        for (regex in regexPatterns) {
+            val match = regex.find(scriptContent)
+            if (match != null) {
+                sourceUrl = match.groupValues[1]
+                break
+            }
+        }
+
+        if (sourceUrl == null) throw Exception("Sources not found in script")
 
         return Video(
             source = sourceUrl,

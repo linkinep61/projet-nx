@@ -29,6 +29,7 @@ import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.TMDb3.original
 import com.streamflixreborn.streamflix.utils.TMDb3.w500
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import kotlinx.coroutines.withTimeoutOrNull
 import retrofit2.converter.scalars.ScalarsConverterFactory
 import retrofit2.http.Header
 import kotlin.collections.map
@@ -663,39 +664,46 @@ object AfterDarkProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
      */
     override suspend fun onChangeUrl(forceRefresh: Boolean): String {
         changeUrlMutex.withLock {
-            if (forceRefresh || UserPreferences.getProviderCache(this,UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
-                val addressService = Service.buildAddressFetcher()
-                try {
-                    val document = addressService.getPortalHome()
-                    var html = document.body()
+            // Global timeout to prevent blocking the UI for too long when site is unreachable
+            withTimeoutOrNull(20_000L) {
+                if (forceRefresh || UserPreferences.getProviderCache(this@AfterDarkProvider, UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
+                    val addressService = Service.buildAddressFetcher()
+                    try {
+                        val document = addressService.getPortalHome()
+                        var html = document.body()
 
-                    val urlRegex = Regex("""slug:"afterdark".*?domain:"([^"]+)"""")
-                    var matchUrl = urlRegex.find(html ?: "")
-                    val newUrl = matchUrl?.groupValues?.get(1)
+                        val urlRegex = Regex("""slug:"afterdark".*?domain:"([^"]+)"""")
+                        var matchUrl = urlRegex.find(html ?: "")
+                        val newUrl = matchUrl?.groupValues?.get(1)
 
-                    if (!newUrl.isNullOrEmpty()) {
-                        val newUrl = if (newUrl.endsWith("/")) newUrl else "$newUrl/"
-                        UserPreferences.setProviderCache(this,UserPreferences.PROVIDER_URL, newUrl)
-                        UserPreferences.setProviderCache(
-                            this,
-                            UserPreferences.PROVIDER_LOGO,
-                            newUrl + "logo.png"
-                        )
+                        if (!newUrl.isNullOrEmpty()) {
+                            val newUrl = if (newUrl.endsWith("/")) newUrl else "$newUrl/"
+                            UserPreferences.setProviderCache(this@AfterDarkProvider, UserPreferences.PROVIDER_URL, newUrl)
+                            UserPreferences.setProviderCache(
+                                this@AfterDarkProvider,
+                                UserPreferences.PROVIDER_LOGO,
+                                newUrl + "logo.png"
+                            )
+                        }
+                    } catch (e: Exception) {
+                        Log.w("AfterDark", "Portal fetch failed: ${e.message}")
                     }
-                } catch (e: Exception) {
-                    // In case of failure, we'll use the default URL
-                    // No need to throw as we already have a fallback URL
                 }
-            }
-            service = Service.build(baseUrl)
+                service = Service.build(baseUrl)
 
-            try {
-                homeUrls = getRealUrlsFor("")
-                movieUrls = getRealUrlsFor("movies")
-                tvUrls = getRealUrlsFor("series")
+                try {
+                    homeUrls = getRealUrlsFor("")
+                    movieUrls = getRealUrlsFor("movies")
+                    tvUrls = getRealUrlsFor("series")
+                    serviceInitialized = true
+                } catch (e: Exception) {
+                    Log.e("AfterDark", "CANNOT INITIALIZE: ${e.message}")
+                }
+            } ?: run {
+                // Timeout expired — initialize service with defaults so app isn't stuck
+                Log.w("AfterDark", "onChangeUrl timed out after 20s — using cached/default URL")
+                service = Service.build(baseUrl)
                 serviceInitialized = true
-            } catch (e: Exception) {
-                Log.e("ERROR", "CANNOT INITIALIZE")
             }
         }
         return baseUrl
@@ -712,8 +720,8 @@ object AfterDarkProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         companion object {
             private val client = OkHttpClient.Builder()
-                .readTimeout(30, TimeUnit.SECONDS)
-                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(15, TimeUnit.SECONDS)
+                .connectTimeout(10, TimeUnit.SECONDS)
                 .dns(DnsResolver.doh)
                 .build()
 

@@ -3,6 +3,7 @@ package com.streamflixreborn.streamflix.extractors
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.StringConverterFactory
+import com.streamflixreborn.streamflix.utils.DnsResolver
 import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import retrofit2.Response
@@ -28,7 +29,8 @@ open class DoodLaExtractor : Extractor() {
     private val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val linkBaseUrl = getBaseUrl(link)
+        val service = Service.build(linkBaseUrl)
 
         val embedUrl = link.replace("/d/", "/e/")
         val response = service.get(embedUrl, link)
@@ -82,6 +84,9 @@ open class DoodLaExtractor : Extractor() {
         companion object {
             fun build(baseUrl: String): Service {
                 val client = OkHttpClient.Builder()
+                    .dns(DnsResolver.doh)
+                    .followRedirects(true)
+                    .followSslRedirects(true)
                     .build()
 
                 val retrofit = Retrofit.Builder()

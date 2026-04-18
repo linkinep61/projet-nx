@@ -703,7 +703,13 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         val servers = when (videoType) {
             is Video.Type.Episode -> {
-                val (tvShowId, tvShowNumber) = id.split("/")
+                val parts = id.split("/")
+                val tvShowId = parts.getOrElse(0) { id }
+                // Épisode index : depuis l'ID (format showId/epNum) ou depuis videoType
+                val tvShowNumber = parts.getOrElse(1) {
+                    // Fallback : utiliser le numéro d'épisode du videoType (index base 0)
+                    (videoType.number - 1).coerceAtLeast(0).toString()
+                }
                 val episodesData = try {
                     service.getEpisodesData(tvShowId)
                 } catch (e: Exception) {

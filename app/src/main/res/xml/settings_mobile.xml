@@ -404,21 +404,9 @@
             app:iconSpaceReserved="false" />
 
         <Preference
-            android:icon="@drawable/ic_telegram"
-            android:key="p_settings_telegram"
-            android:title="@string/settings_telegram"
-            app:iconSpaceReserved="false" />
-
-        <Preference
             android:icon="@drawable/ic_settings_about"
             android:key="p_settings_about"
             android:title="@string/settings_about"
-            app:iconSpaceReserved="false" />
-
-        <Preference
-            android:icon="@drawable/ic_settings_help"
-            android:key="p_settings_help"
-            android:title="@string/settings_help"
             app:iconSpaceReserved="false" />
     </PreferenceCategory>
 

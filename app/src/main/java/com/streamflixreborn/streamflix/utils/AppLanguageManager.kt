@@ -41,7 +41,7 @@ object AppLanguageManager {
             .getString("CURRENT_LANGUAGE", null)
             ?.takeIf { it == SYSTEM_LANGUAGE || it in getAvailableLanguageTags(context) }
 
-        return storedLanguage ?: SYSTEM_LANGUAGE
+        return storedLanguage ?: "fr"
     }
 
     fun setSelectedLanguage(languageTag: String?) {

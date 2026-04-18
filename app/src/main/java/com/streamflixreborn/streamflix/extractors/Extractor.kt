@@ -59,6 +59,7 @@ abstract class Extractor {
             VidMoLyExtractor(),
             VidMoLyExtractor.ToDomain(),
             VideoSibNetExtractor(),
+            LpayerExtractor(),
             SaveFilesExtractor(),
             BigWarpExtractor(),
             DoodLaExtractor.DoodExtractor(),

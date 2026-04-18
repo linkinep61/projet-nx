@@ -36,11 +36,26 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
         private const val TAG = "AfterDarkExtractor"
         private const val TURNSTILE_SITEKEY = "0x4AAAAAACtM3fCPnvQcAGIA"
 
-        // Gate state shared across instances — only attempt once per session
+        // Gate state shared across instances — retry after cooldown on failure
+        private const val GATE_RETRY_COOLDOWN_MS = 3 * 60 * 1000L // 3 minutes before retrying a failed gate
+
         @Volatile
         private var gateAttempted = false
         @Volatile
         private var gateSolved = false
+        @Volatile
+        private var gateLastAttemptTime = 0L
+
+        /** Reset gate state so next call will retry. Called when gate fails or after cooldown. */
+        fun resetGateIfStale() {
+            if (gateAttempted && !gateSolved) {
+                val elapsed = System.currentTimeMillis() - gateLastAttemptTime
+                if (elapsed > GATE_RETRY_COOLDOWN_MS) {
+                    Log.d(TAG, "Gate cooldown expired (${elapsed}ms) — resetting for retry")
+                    gateAttempted = false
+                }
+            }
+        }
     }
 
     override suspend fun extract(link: String): Video {
@@ -66,13 +81,25 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
                 .url(apiUrl)
                 .header("User-Agent", USER_AGENT)
                 .header("Referer", "$mainUrl/")
+                .header("Accept", "application/json, text/plain, */*")
+                .header("Origin", mainUrl.trimEnd('/'))
                 .build()
 
             val response = NetworkClient.default.newCall(request).execute()
+            val code = response.code
             val body = response.body?.string() ?: return Pair(null, false)
 
+            if (code != 200) {
+                val preview = body.take(300)
+                Log.w(TAG, "API returned HTTP $code — blocked or error. Body preview: $preview")
+                return Pair(null, false)
+            }
+
             val json = JSONObject(body)
-            val data = json.optJSONObject("data") ?: return Pair(null, false)
+            val data = json.optJSONObject("data") ?: run {
+                Log.w(TAG, "API response has no 'data' key: ${body.take(200)}")
+                return Pair(null, false)
+            }
 
             // Check if we have categories beyond the ungated ones
             val categories = mutableListOf<String>()
@@ -372,6 +399,9 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
     suspend fun servers(videoType: Video.Type): List<Video.Server> {
         val apiUrl = buildApiUrl(videoType)
 
+        // Allow retry if previous gate attempt failed and cooldown expired
+        resetGateIfStale()
+
         // First attempt — may return limited sources without gate cookie
         val (data, hasFullAccess) = fetchSources(apiUrl)
 
@@ -389,12 +419,15 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
                 // Fire gate bypass in background for subsequent calls
                 if (!gateAttempted) {
                     gateAttempted = true
+                    gateLastAttemptTime = System.currentTimeMillis()
                     Log.d(TAG, "Returning ${servers.size} ungated servers now; gate bypass running in background")
                     CoroutineScope(Dispatchers.IO).launch {
                         try {
                             if (solveGate()) {
                                 gateSolved = true
                                 Log.d(TAG, "Background gate bypass succeeded — next call will have full access")
+                            } else {
+                                Log.w(TAG, "Background gate bypass failed — will retry after cooldown")
                             }
                         } catch (e: Exception) {
                             Log.e(TAG, "Background gate bypass error: ${e.message}")
@@ -403,11 +436,14 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
                 }
                 return servers
             }
+        } else {
+            Log.w(TAG, "fetchSources returned null — site may be blocked or unreachable")
         }
 
         // No servers at all — try gate bypass synchronously as last resort
         if (!gateAttempted) {
             gateAttempted = true
+            gateLastAttemptTime = System.currentTimeMillis()
             Log.d(TAG, "No servers from ungated API — trying synchronous gate bypass...")
 
             if (solveGate()) {
@@ -417,6 +453,8 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
                     val retryServers = parseServers(retryData)
                     if (retryServers.isNotEmpty()) return retryServers
                 }
+            } else {
+                Log.w(TAG, "Synchronous gate bypass failed — will retry after ${GATE_RETRY_COOLDOWN_MS / 1000}s cooldown")
             }
         }
 

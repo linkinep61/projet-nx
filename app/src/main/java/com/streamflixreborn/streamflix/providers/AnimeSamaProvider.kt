@@ -13,7 +13,10 @@ import com.streamflixreborn.streamflix.models.Season
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
+import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
@@ -26,12 +29,25 @@ import retrofit2.http.Path
 import retrofit2.http.Url
 import java.util.concurrent.TimeUnit
 
-object AnimeSamaProvider : Provider {
+object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
 
     override val name = "AnimeSama"
-    override val baseUrl = "https://anime-sama.to/"
-    override val logo = "https://anime-sama.to/img/icon.png"
+    override val defaultBaseUrl: String = "https://anime-sama.to/"
+    override val baseUrl: String = defaultBaseUrl
+        get() {
+            val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
+            return cacheURL.ifEmpty { field }
+        }
+    override val defaultPortalUrl: String = "https://anime-sama.pw/"
+    override val portalUrl: String = defaultPortalUrl
+        get() {
+            val cachePortalURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_PORTAL_URL)
+            return cachePortalURL.ifEmpty { field }
+        }
+    override val logo: String
+        get() = "${baseUrl}img/icon.png"
     override val language = "fr"
+    override val changeUrlMutex = Mutex()
 
     private const val TAG = "AnimeSama"
     private const val IMG_BASE = "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/"
@@ -41,16 +57,12 @@ object AnimeSamaProvider : Provider {
         .dns(DnsResolver.doh)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        .followRedirects(true)
         .build()
 
-    private val service: Service by lazy {
-        Retrofit.Builder()
-            .baseUrl(baseUrl)
-            .client(client)
-            .addConverterFactory(JsoupConverterFactory.create())
-            .build()
-            .create(Service::class.java)
-    }
+    private var serviceInitialized = false
+
+    private var service: Service = Service.build(baseUrl)
 
     private suspend fun fetchDocument(url: String): Document = withContext(Dispatchers.IO) {
         val request = Request.Builder()
@@ -97,6 +109,7 @@ object AnimeSamaProvider : Provider {
     // ========== HOME ==========
 
     override suspend fun getHome(): List<Category> {
+        initializeService()
         val document = fetchDocument(baseUrl)
         val categories = mutableListOf<Category>()
 
@@ -176,11 +189,39 @@ object AnimeSamaProvider : Provider {
             }
         }
 
-        // Reorder: put "Derniers épisodes ajoutés" and "Derniers contenus sortis" first
+        // FEATURED: Build hero slider from "Derniers contenus sortis"
+        val derniersContenus = categories.firstOrNull {
+            it.name.lowercase().contains("derniers contenus")
+        }
+        if (derniersContenus != null) {
+            val featured = derniersContenus.list.take(6).map { item ->
+                when (item) {
+                    is Movie -> Movie(
+                        id = item.id,
+                        title = item.title,
+                        banner = item.poster, // Use poster as banner
+                        poster = item.poster
+                    )
+                    is TvShow -> TvShow(
+                        id = item.id,
+                        title = item.title,
+                        banner = item.poster, // Use poster as banner
+                        poster = item.poster
+                    )
+                    else -> item
+                }
+            }
+            if (featured.isNotEmpty()) {
+                categories.add(0, Category(name = Category.FEATURED, list = featured))
+            }
+        }
+
+        // Reorder: put FEATURED first, then "Derniers épisodes ajoutés" and "Derniers contenus sortis"
         val priority = listOf("derniers épisodes", "derniers contenus")
         val sorted = categories.sortedWith(compareByDescending { cat ->
             val lower = cat.name.lowercase()
             when {
+                cat.name == Category.FEATURED -> 100
                 priority.any { lower.contains(it) } -> priority.indexOfFirst { lower.contains(it) }.let { 10 - it }
                 else -> 0
             }
@@ -546,6 +587,8 @@ object AnimeSamaProvider : Provider {
                 it.name.contains("Sibnet", ignoreCase = true) -> 3
                 it.name.contains("SendVid", ignoreCase = true) -> 2
                 it.name.contains("VidMoLy", ignoreCase = true) -> 1
+                // Lpayer en dernier: WebView + décryptage = lent (~5-10s)
+                it.name.contains("Lpayer", ignoreCase = true) -> -1
                 else -> 0
             }
         })
@@ -628,6 +671,68 @@ object AnimeSamaProvider : Provider {
         return People(id = id, name = id)
     }
 
+    // ========== URL MANAGEMENT ==========
+
+    override suspend fun onChangeUrl(forceRefresh: Boolean): String {
+        changeUrlMutex.withLock {
+            if (forceRefresh || UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
+                try {
+                    Log.d(TAG, "Refreshing URL from portal: $portalUrl")
+                    // Fetch the portal page at anime-sama.pw
+                    val portalDoc = withContext(Dispatchers.IO) {
+                        val request = Request.Builder()
+                            .url(portalUrl)
+                            .header("User-Agent", USER_AGENT)
+                            .build()
+                        val response = client.newCall(request).execute()
+                        val html = response.body?.string() ?: ""
+                        Jsoup.parse(html)
+                    }
+
+                    // Extract the redirect link from "Accéder à Anime-Sama" button
+                    val redirectLink = portalDoc.selectFirst("a.btn-primary[href*=anime-sama]")
+                        ?.attr("href")
+
+                    if (!redirectLink.isNullOrEmpty()) {
+                        // Follow the redirect to get the final active domain
+                        val finalUrl = withContext(Dispatchers.IO) {
+                            val request = Request.Builder()
+                                .url(redirectLink)
+                                .header("User-Agent", USER_AGENT)
+                                .build()
+                            val response = client.newCall(request).execute()
+                            // The response URL after following redirects is the active domain
+                            val url = response.request.url.toString()
+                            response.close()
+                            url
+                        }
+
+                        if (finalUrl.contains("anime-sama")) {
+                            val normalizedUrl = if (finalUrl.endsWith("/")) finalUrl else "$finalUrl/"
+                            Log.d(TAG, "Resolved active URL: $normalizedUrl")
+                            UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_URL, normalizedUrl)
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to refresh URL from portal: ${e.message}")
+                    // Keep using current URL on failure
+                }
+            }
+            service = Service.build(baseUrl)
+            serviceInitialized = true
+        }
+        return baseUrl
+    }
+
+    private val initializationMutex = Mutex()
+
+    private suspend fun initializeService() {
+        initializationMutex.withLock {
+            if (serviceInitialized) return
+            onChangeUrl()
+        }
+    }
+
     // ========== SERVICE INTERFACE ==========
 
     private interface Service {
@@ -636,5 +741,16 @@ object AnimeSamaProvider : Provider {
 
         @GET
         suspend fun getPage(@Url url: String): Document
+
+        companion object {
+            fun build(baseUrl: String): Service {
+                return Retrofit.Builder()
+                    .baseUrl(baseUrl)
+                    .client(client)
+                    .addConverterFactory(JsoupConverterFactory.create())
+                    .build()
+                    .create(Service::class.java)
+            }
+        }
     }
 }
