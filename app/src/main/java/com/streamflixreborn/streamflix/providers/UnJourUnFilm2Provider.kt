@@ -1415,4 +1415,23 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         suspend fun getTvShowsApi(
             @Query("per_page") perPage: Int = 24,
             @Query("page") page: Int,
-            @Query("_fields") fields: String = "i
+            @Query("_fields") fields: String = "id,slug,title,featured_media,_links",
+            @Query("_embed") embed: String = "wp:featuredmedia",
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): okhttp3.ResponseBody
+
+        @GET("genre/{genre}/page/{page}/")
+        suspend fun getGenre(
+            @Path("genre") genre: String,
+            @Path("page") page: Int,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+
+        @GET("cast/{id}/page/{page}")
+        suspend fun getPeople(
+            @Path("id") id: String,
+            @Path("page") page: Int,
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+    }
+}
