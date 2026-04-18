@@ -1,0 +1,784 @@
+--------- beginning of main
+04-17 18:02:47.844 11015 11015 I artd    : GetBestInfo: odex next to the dex file (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/oat/x86_64/base.odex) is kOatUpToDate with filter 'speed-profile' executable 'false'
+04-17 18:02:47.846 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_AdsDynamite_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:47.848 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_CronetDynamite_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:47.850 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_DynamiteLoader_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:47.853 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_DynamiteModulesA_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:47.857 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_DynamiteModulesC_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:47.859 11015 13941 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_GoogleCertificates_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:47.862 11015 13941 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_MapsDynamite_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:47.864 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_MeasurementDynamite_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:47.866 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_all_locale_splits.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:47.869 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000001/CronetDynamite.apk has no usable artifacts
+04-17 18:02:47.872 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000016/dl-MlkitOcrCommon.optional_261332100800.apk has no usable artifacts
+04-17 18:02:47.874 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/0000000b/dl-TfliteDynamiteDynamite.integ_252130102100800.apk has no usable artifacts
+04-17 18:02:47.874 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000002/DynamiteLoader.apk has no usable artifacts
+04-17 18:02:47.876 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000012/dl-Appsearch.optional_261332100800.apk has no usable artifacts
+04-17 18:02:47.878 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000013/dl-PlayCloudSearch.optional_261332100000.apk has no usable artifacts
+04-17 18:02:47.878 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000005/GoogleCertificates.apk has no usable artifacts
+04-17 18:02:47.881 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/0000000f/dl-MlkitBarcodeUi.optional_260235100800.apk has no usable artifacts
+04-17 18:02:47.882 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000014/dl-MlkitBarcodeUi.optional_261332100800.apk has no usable artifacts
+04-17 18:02:47.886 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000010/dl-PlayCloudSearch.optional_260235100000.apk has no usable artifacts
+04-17 18:02:47.889 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000008/dl-VisionOcr.optional_260235100000.apk has no usable artifacts
+04-17 18:02:47.897 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/0000000c/dl-Appsearch.optional_260235100800.apk has no usable artifacts
+04-17 18:02:47.899 11015 13941 I artd    : GetBestInfo: vdex next to the dex file (/data/user/0/com.google.android.gms/app_dg_cache/BB2AE5A47BB198AF36C19CFD2B6407061A1BAF30/oat/x86_64/the.vdex) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:47.901 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000011/dl-VisionOcr.optional_261332100000.apk has no usable artifacts
+04-17 18:02:47.904 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000009/dl-MlkitOcrCommon.optional_260235100800.apk has no usable artifacts
+04-17 18:02:47.906 11015 13941 I artd    : GetBestInfo: vdex next to the dex file (/data/user/0/com.google.android.gms/app_dg_cache/CE973E4DE823F0AA69070767A9FABB590DDD455C/oat/x86_64/the.vdex) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:47.908 11015 13941 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000007/MeasurementDynamite.apk has no usable artifacts
+--------- beginning of system
+04-17 18:02:48.791 10277 10510 I AdbWifiNetworkMonitor: Wi-Fi network available
+04-17 18:02:48.793 10277 10510 I AdbWifiNetworkMonitor: Received the same Wi-Fi SSID. Ignoring.
+04-17 18:02:48.797 10277 10481 I HalDevMgr: bestIfaceCreationProposal is null, requestIface=STA, existingIface=[name=wlan0 type=STA]
+04-17 18:02:48.799 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:02:48.799 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:02:48.799 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:02:48.799 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:02:48.804 10871 13355 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+04-17 18:02:48.804 10871 13355 W libbinder.Binder: Large reply transaction of 1056768 bytes, interface descriptor , function: UNKNOWN_FUNCTION_NAME, code: 1, flags: 17
+04-17 18:02:49.104   591 27282 D AidlBufferPool: bufferpool2 0x7df4cec22de8 : 11(45056 size) total buffers - 6(24576 size) used buffers - 6179/6203 (recycle/alloc) - 54/6202 (fetch/transfer)
+04-17 18:02:49.786 10277 11933 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./84 (userId=0) playbackState=PlaybackState {state=PLAYING(3), position=133553, buffered position=190041, speed=1.0, updated=191250330, actions=7339995, custom actions=[], active item id=0, error=null}
+04-17 18:02:49.789 13623 13623 E MediaControlProfile: onCurrentPlayerStateUpdated: base actions not supported, player actions= 6fffdb, expected at least= 7f
+04-17 18:02:49.789 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:02:49.790 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:02:49.790 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:02:49.790 13623 13623 W MediaControlGattService: Feature TRACK_POSITION support: true
+04-17 18:02:49.790 13623 13623 W MediaControlGattService: Feature TRACK_POSITION_NOTIFY support: true
+04-17 18:02:49.790 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:49.790 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:49.792 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:02:49.792 13623 13623 W MediaControlGattService: Feature PLAYER_NAME support: true
+04-17 18:02:49.792 13623 13623 W MediaControlGattService: Feature MEDIA_CONTROL_POINT_OPCODES_SUPPORTED support: true
+04-17 18:02:49.792 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:49.792 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:49.793 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:02:49.793 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:02:49.793 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:02:49.796 13623 13623 I bluetooth: system/btif/avrcp/avrcp_service.cc:533 SendMediaUpdate: track_changed=false :  play_state=true :  queue=false
+04-17 18:02:50.243 26417 27280 D AidlBufferPool: bufferpool2 0x76a31a1ef268 : 5(40960 size) total buffers - 1(8192 size) used buffers - 6253/6264 (recycle/alloc) - 15/6257 (fetch/transfer)
+04-17 18:02:50.780 26417 26787 D AidlBufferPool: bufferpool2 0x76a31a1e69f8 : 5(31457280 size) total buffers - 5(31457280 size) used buffers - 3723/3729 (recycle/alloc) - 11/3727 (fetch/transfer)
+04-17 18:02:51.008 10277 11590 W AppOps  : Noting op not finished: uid 10218 pkg com.google.android.gms code 113 startTime of in progress event=1776444175975
+04-17 18:02:51.021 10277 11946 W AppOps  : Noting op not finished: uid 10218 pkg com.google.android.gms code 79 startTime of in progress event=1776444175973
+04-17 18:02:51.028 10871 12016 I ActivityScheduler: nextTriggerTime: 191489673, in 238100ms, detectorType: 39, FULL_TYPE alarmWindowMillis: 80000
+04-17 18:02:51.807 10277 10481 I HalDevMgr: bestIfaceCreationProposal is null, requestIface=STA, existingIface=[name=wlan0 type=STA]
+04-17 18:02:52.009 10277 11749 W AppOps  : Noting op not finished: uid 10218 pkg com.google.android.gms code 113 startTime of in progress event=1776444175975
+04-17 18:02:52.787 10277 11749 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./84 (userId=0) playbackState=PlaybackState {state=PLAYING(3), position=136554, buffered position=190041, speed=1.0, updated=191253331, actions=7339995, custom actions=[], active item id=0, error=null}
+04-17 18:02:52.791 13623 13623 I bluetooth: system/btif/avrcp/avrcp_service.cc:533 SendMediaUpdate: track_changed=false :  play_state=true :  queue=false
+04-17 18:02:52.793 13623 13623 E MediaControlProfile: onCurrentPlayerStateUpdated: base actions not supported, player actions= 6fffdb, expected at least= 7f
+04-17 18:02:52.794 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:02:52.794 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:02:52.794 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:02:52.794 13623 13623 W MediaControlGattService: Feature TRACK_POSITION support: true
+04-17 18:02:52.794 13623 13623 W MediaControlGattService: Feature TRACK_POSITION_NOTIFY support: true
+04-17 18:02:52.794 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:52.794 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:52.796 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:02:52.796 13623 13623 W MediaControlGattService: Feature PLAYER_NAME support: true
+04-17 18:02:52.797 13623 13623 W MediaControlGattService: Feature MEDIA_CONTROL_POINT_OPCODES_SUPPORTED support: true
+04-17 18:02:52.797 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:52.797 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:52.797 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:02:52.797 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:02:52.797 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:02:53.437 10569 10569 I wpa_supplicant: wlan0: CTRL-EVENT-BEACON-LOSS 
+04-17 18:02:53.670 10740 10889 D SatelliteController: isInCarrierRoamingNbIotNtn: satellite is disabled
+04-17 18:02:53.670 10740 10889 D SatelliteController: getCarrierRoamingNtnConnectType: Checking connect type from PLMN config for subId: 1
+04-17 18:02:53.670 10740 10889 D SatelliteController: getSatellitePerPlmnConfiguration: invalid subId or not supported via carrier.
+04-17 18:02:53.670 10740 10889 D SatelliteController: getCarrierRoamingNtnConnectType: config: null
+04-17 18:02:53.671 10740 10889 D SatelliteController: getCarrierRoamingNtnConnectType: Falling back to global carrier config connect type: 0
+04-17 18:02:53.671 10740 10889 D SatelliteController: updateLastNotifiedCarrierRoamingNtnSignalStrengthAndNotify(1)
+04-17 18:02:53.671 10740 10889 D SatelliteController: updateLastNotifiedCarrierRoamingNtnSignalStrengthAndNotify(1) lastNotifiedSignalStrength level: 0
+04-17 18:02:53.671 10740 10889 D SatelliteController: updateLastNotifiedCarrierRoamingNtnSignalStrengthAndNotify(1) currSignalStrength level: 0
+04-17 18:02:54.267   591 27282 D AidlBufferPool: bufferpool2 0x7df4cec22de8 : 11(45056 size) total buffers - 6(24576 size) used buffers - 6401/6425 (recycle/alloc) - 55/6424 (fetch/transfer)
+04-17 18:02:54.812 10277 10510 I AdbWifiNetworkMonitor: Wi-Fi network available
+04-17 18:02:54.812 10277 10510 I AdbWifiNetworkMonitor: Received the same Wi-Fi SSID. Ignoring.
+04-17 18:02:54.816 10277 10481 I HalDevMgr: bestIfaceCreationProposal is null, requestIface=STA, existingIface=[name=wlan0 type=STA]
+04-17 18:02:54.819 10871 12807 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+04-17 18:02:54.819 10871 12807 W libbinder.Binder: Large reply transaction of 1056768 bytes, interface descriptor , function: UNKNOWN_FUNCTION_NAME, code: 1, flags: 17
+04-17 18:02:54.821 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:02:54.821 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:02:54.821 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:02:54.821 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:02:54.823 10695 10880 D IpClient/wlan0: interfaceLinkStateChanged: ifindex 16 up
+04-17 18:02:54.831 10695 10880 D IpClient/wlan0: interfaceLinkStateChanged: ifindex 16 up
+04-17 18:02:55.407 10277 10434 D ActivityManager: freezing 17524 com.android.settings
+04-17 18:02:55.408 10277 10434 D ActivityManager: freezing 11557 com.android.keychain
+04-17 18:02:55.410 10277 10434 D ActivityManager: freezing 12307 com.android.dynsystem:dynsystem
+04-17 18:02:55.413 10277 10434 D ActivityManager: freezing 12279 com.android.dynsystem
+04-17 18:02:55.414 10277 10434 D ActivityManager: freezing 11819 com.android.localtransport
+04-17 18:02:55.660 26417 27280 D AidlBufferPool: bufferpool2 0x76a31a1ef268 : 5(40960 size) total buffers - 1(8192 size) used buffers - 6487/6498 (recycle/alloc) - 15/6491 (fetch/transfer)
+04-17 18:02:55.790 10277 11933 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./84 (userId=0) playbackState=PlaybackState {state=PLAYING(3), position=139552, buffered position=190041, speed=1.0, updated=191256334, actions=7339995, custom actions=[], active item id=0, error=null}
+04-17 18:02:55.793 13623 13623 E MediaControlProfile: onCurrentPlayerStateUpdated: base actions not supported, player actions= 6fffdb, expected at least= 7f
+04-17 18:02:55.793 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:02:55.794 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:02:55.794 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:02:55.794 13623 13623 W MediaControlGattService: Feature TRACK_POSITION support: true
+04-17 18:02:55.794 13623 13623 W MediaControlGattService: Feature TRACK_POSITION_NOTIFY support: true
+04-17 18:02:55.794 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:55.794 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:55.796 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:02:55.796 13623 13623 W MediaControlGattService: Feature PLAYER_NAME support: true
+04-17 18:02:55.796 13623 13623 W MediaControlGattService: Feature MEDIA_CONTROL_POINT_OPCODES_SUPPORTED support: true
+04-17 18:02:55.796 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:55.796 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:55.796 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:02:55.796 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:02:55.797 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:02:55.800 13623 13623 I bluetooth: system/btif/avrcp/avrcp_service.cc:533 SendMediaUpdate: track_changed=false :  play_state=true :  queue=false
+04-17 18:02:55.896 26417 26725 D AidlBufferPool: bufferpool2 0x76a31a1e69f8 : 5(31457280 size) total buffers - 5(31457280 size) used buffers - 3846/3852 (recycle/alloc) - 11/3850 (fetch/transfer)
+04-17 18:02:56.244 26417 27266 D Cine24hBypass: [OkHttp] --> GET https://v6.vidzy.live/hls2/04/00044/zwgy2v81l1t3_n/seg-20-v1-a1.ts?t=w7G5fJWSzNkNvLms2X8czdrBXpktChlfiXuenX8SAD0&s=1776448886&e=172800&f=223898&i=0.0&sp=0
+04-17 18:02:56.244 26417 27266 D Cine24hBypass: [OkHttp] User-Agent: okhttp/4.12.0
+04-17 18:02:56.244 26417 27266 D Cine24hBypass: [OkHttp] Referer: https://vidzy.org
+04-17 18:02:56.244 26417 27266 D Cine24hBypass: [OkHttp] Accept-Encoding: identity
+04-17 18:02:56.244 26417 27266 D Cine24hBypass: [OkHttp] Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8
+04-17 18:02:56.244 26417 27266 D Cine24hBypass: [OkHttp] Accept-Language: it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7
+04-17 18:02:56.244 26417 27266 D Cine24hBypass: [OkHttp] Sec-Fetch-Dest: document
+04-17 18:02:56.244 26417 27266 D Cine24hBypass: [OkHttp] Sec-Fetch-Mode: navigate
+04-17 18:02:56.244 26417 27266 D Cine24hBypass: [OkHttp] Sec-Fetch-Site: none
+04-17 18:02:56.244 26417 27266 D Cine24hBypass: [OkHttp] Upgrade-Insecure-Requests: 1
+04-17 18:02:56.244 26417 27266 D Cine24hBypass: [OkHttp] --> END GET
+04-17 18:02:56.253 10695 10880 D IpClient/wlan0: addressUpdated: fec0::97dc:50b7:df5d:546e/64 on ifindex 16 flags 0x00000900 scope 200
+04-17 18:02:56.255 10695 10880 D IpClient/wlan0: addressUpdated: fec0::6c88:d6b4:7722:6058/64 on ifindex 16 flags 0x00000001 scope 200
+04-17 18:02:56.256 10695 10880 W AlarmManager: Unrecognized alarm listener com.android.networkstack.android.net.ip.IpClientLinkObserver$Dhcp6PdPreferredPrefixAlarmListener@56116ef
+04-17 18:02:56.257 10695 10880 D ApfFilter: (wlan0): Ignoring RA RA fe80::2 -> ff02::1 1800s fec0::/64 86400s/14400s DNS 1200000s fec0::3  which matches RA fe80::2 -> ff02::1 1800s fec0::/64 86400s/14400s DNS 1200000s fec0::3 
+04-17 18:02:56.511 26417 27266 D Cine24hBypass: [OkHttp] <-- 200 OK https://v6.vidzy.live/hls2/04/00044/zwgy2v81l1t3_n/seg-20-v1-a1.ts?t=w7G5fJWSzNkNvLms2X8czdrBXpktChlfiXuenX8SAD0&s=1776448886&e=172800&f=223898&i=0.0&sp=0 (266ms)
+04-17 18:02:56.512 26417 27266 D Cine24hBypass: [OkHttp] Server: nginx
+04-17 18:02:56.512 26417 27266 D Cine24hBypass: [OkHttp] Date: Fri, 17 Apr 2026 18:02:55 GMT
+04-17 18:02:56.512 26417 27266 D Cine24hBypass: [OkHttp] Content-Type: video/MP2T
+04-17 18:02:56.512 26417 27266 D Cine24hBypass: [OkHttp] Content-Length: 791480
+04-17 18:02:56.512 26417 27266 D Cine24hBypass: [OkHttp] Connection: keep-alive
+04-17 18:02:56.512 26417 27266 D Cine24hBypass: [OkHttp] ETag: "-1-c13b8"
+04-17 18:02:56.512 26417 27266 D Cine24hBypass: [OkHttp] Last-Modified: Sun, 19 Nov 2000 08:52:00 GMT
+04-17 18:02:56.512 26417 27266 D Cine24hBypass: [OkHttp] Expires: Sun, 26 Jul 2026 18:02:55 GMT
+04-17 18:02:56.512 26417 27266 D Cine24hBypass: [OkHttp] Cache-Control: max-age=8640000
+04-17 18:02:56.512 26417 27266 D Cine24hBypass: [OkHttp] Cache-Control: public, no-transform
+04-17 18:02:56.512 26417 27266 D Cine24hBypass: [OkHttp] Access-Control-Allow-Origin: *
+04-17 18:02:56.512 26417 27266 D Cine24hBypass: [OkHttp] Accept-Ranges: bytes
+04-17 18:02:56.513 26417 27266 D Cine24hBypass: [OkHttp] <-- END HTTP
+04-17 18:02:56.638 26417 27361 W PesReader: Unexpected start code prefix: 3212363
+04-17 18:02:56.638 26417 27361 W PesReader: Unexpected start code prefix: 2163787
+04-17 18:02:56.639 26417 27361 W PesReader: Unexpected start code prefix: 0
+04-17 18:02:57.744 11015 11015 I artd    : GetBestInfo: odex next to the dex file (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/oat/x86_64/base.odex) is kOatUpToDate with filter 'speed-profile' executable 'false'
+04-17 18:02:57.747 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_AdsDynamite_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:57.749 11015 13941 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_CronetDynamite_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:57.751 11015 13941 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_DynamiteLoader_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:57.754 11015 13941 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_DynamiteModulesA_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:57.756 11015 13941 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_DynamiteModulesC_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:57.757 11015 13941 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_GoogleCertificates_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:57.758 11015 13941 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_MapsDynamite_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:57.759 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_MeasurementDynamite_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:57.760 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_all_locale_splits.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:57.762 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000001/CronetDynamite.apk has no usable artifacts
+04-17 18:02:57.764 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000016/dl-MlkitOcrCommon.optional_261332100800.apk has no usable artifacts
+04-17 18:02:57.766 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/0000000b/dl-TfliteDynamiteDynamite.integ_252130102100800.apk has no usable artifacts
+04-17 18:02:57.769 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000002/DynamiteLoader.apk has no usable artifacts
+04-17 18:02:57.770 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000012/dl-Appsearch.optional_261332100800.apk has no usable artifacts
+04-17 18:02:57.773 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000013/dl-PlayCloudSearch.optional_261332100000.apk has no usable artifacts
+04-17 18:02:57.776 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000005/GoogleCertificates.apk has no usable artifacts
+04-17 18:02:57.778 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/0000000f/dl-MlkitBarcodeUi.optional_260235100800.apk has no usable artifacts
+04-17 18:02:57.780 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000014/dl-MlkitBarcodeUi.optional_261332100800.apk has no usable artifacts
+04-17 18:02:57.781 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000010/dl-PlayCloudSearch.optional_260235100000.apk has no usable artifacts
+04-17 18:02:57.784 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000008/dl-VisionOcr.optional_260235100000.apk has no usable artifacts
+04-17 18:02:57.786 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/0000000c/dl-Appsearch.optional_260235100800.apk has no usable artifacts
+04-17 18:02:57.791 11015 11015 I artd    : GetBestInfo: vdex next to the dex file (/data/user/0/com.google.android.gms/app_dg_cache/BB2AE5A47BB198AF36C19CFD2B6407061A1BAF30/oat/x86_64/the.vdex) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:57.798 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000011/dl-VisionOcr.optional_261332100000.apk has no usable artifacts
+04-17 18:02:57.802 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000009/dl-MlkitOcrCommon.optional_260235100800.apk has no usable artifacts
+04-17 18:02:57.804 11015 11015 I artd    : GetBestInfo: vdex next to the dex file (/data/user/0/com.google.android.gms/app_dg_cache/CE973E4DE823F0AA69070767A9FABB590DDD455C/oat/x86_64/the.vdex) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:02:57.806 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000007/MeasurementDynamite.apk has no usable artifacts
+04-17 18:02:57.818 10277 10510 I AdbWifiNetworkMonitor: Wi-Fi network available
+04-17 18:02:57.818 10277 10510 I AdbWifiNetworkMonitor: Received the same Wi-Fi SSID. Ignoring.
+04-17 18:02:57.824 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:02:57.825 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:02:57.825 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:02:57.825 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:02:57.828 10277 10481 I HalDevMgr: bestIfaceCreationProposal is null, requestIface=STA, existingIface=[name=wlan0 type=STA]
+04-17 18:02:57.833 10871 12158 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+04-17 18:02:57.834 10871 12158 W libbinder.Binder: Large reply transaction of 1056768 bytes, interface descriptor , function: UNKNOWN_FUNCTION_NAME, code: 1, flags: 17
+04-17 18:02:59.278   591 27282 D AidlBufferPool: bufferpool2 0x7df4cec22de8 : 11(45056 size) total buffers - 6(24576 size) used buffers - 6617/6641 (recycle/alloc) - 57/6640 (fetch/transfer)
+04-17 18:02:59.645 10277 11598 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./84 (userId=0) playbackState=PlaybackState {state=PLAYING(3), position=143414, buffered position=200041, speed=1.0, updated=191260189, actions=7339995, custom actions=[], active item id=0, error=null}
+04-17 18:02:59.647 13623 13623 I bluetooth: system/btif/avrcp/avrcp_service.cc:533 SendMediaUpdate: track_changed=false :  play_state=true :  queue=false
+04-17 18:02:59.648 13623 13623 E MediaControlProfile: onCurrentPlayerStateUpdated: base actions not supported, player actions= 6fffdb, expected at least= 7f
+04-17 18:02:59.650 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:02:59.650 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:02:59.650 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:02:59.650 13623 13623 W MediaControlGattService: Feature TRACK_POSITION support: true
+04-17 18:02:59.650 13623 13623 W MediaControlGattService: Feature TRACK_POSITION_NOTIFY support: true
+04-17 18:02:59.650 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:59.652 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:59.653 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:02:59.654 13623 13623 W MediaControlGattService: Feature PLAYER_NAME support: true
+04-17 18:02:59.654 13623 13623 W MediaControlGattService: Feature MEDIA_CONTROL_POINT_OPCODES_SUPPORTED support: true
+04-17 18:02:59.654 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:59.654 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:02:59.654 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:02:59.654 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:02:59.654 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:03:00.057 10210 10253 D AF::Track: interceptBuffer: took 1152us to intercept 0 tracks
+04-17 18:03:00.823   482 27277 E C2IgbaBuffer: Waiting a sync fence failed 110 aidl(0: 1)
+04-17 18:03:00.838 10277 10481 I HalDevMgr: bestIfaceCreationProposal is null, requestIface=STA, existingIface=[name=wlan0 type=STA]
+04-17 18:03:00.855 10695 10880 D IpClient/wlan0: interfaceLinkStateChanged: ifindex 16 up
+04-17 18:03:00.869 10695 10880 D IpClient/wlan0: interfaceLinkStateChanged: ifindex 16 up
+04-17 18:03:00.869 10695 10880 D IpClient/wlan0: interfaceLinkStateChanged: ifindex 16 up
+04-17 18:03:00.882   482 27277 E C2IgbaBuffer: Waiting a sync fence failed 110 aidl(0: 1)
+04-17 18:03:01.001 26417 27275 D AidlBufferPool: bufferpool2 0x76a31a1e69f8 : 5(31457280 size) total buffers - 4(25165824 size) used buffers - 3968/3974 (recycle/alloc) - 11/3973 (fetch/transfer)
+04-17 18:03:01.194 26417 27280 D AidlBufferPool: bufferpool2 0x76a31a1ef268 : 5(40960 size) total buffers - 1(8192 size) used buffers - 6725/6736 (recycle/alloc) - 15/6729 (fetch/transfer)
+04-17 18:03:01.203   482 27277 E C2IgbaBuffer: Waiting a sync fence failed 110 aidl(0: 1)
+04-17 18:03:01.253   482 27277 E C2IgbaBuffer: Waiting a sync fence failed 110 aidl(0: 1)
+04-17 18:03:01.371 10569 10569 I wpa_supplicant: wlan0: CTRL-EVENT-BEACON-LOSS 
+04-17 18:03:01.790 10277 10299 I DisplayDeviceRepository: Display device changed render timings: "Built-in Screen", renderFrameRate=60.000004, presentationDeadlineNanos=16666666, appVsyncOffsetNanos=1000000, frameRateOverrides=[]
+04-17 18:03:01.894 10277 11749 W AS.PlaybackActivityMon: No piid assigned for invalid/internal port id 36
+04-17 18:03:01.896 10277 11946 W AS.PlaybackActivityMon: No piid assigned for invalid/internal port id 36
+04-17 18:03:02.649 10277 11946 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./84 (userId=0) playbackState=PlaybackState {state=PLAYING(3), position=146410, buffered position=200041, speed=1.0, updated=191263193, actions=7339995, custom actions=[], active item id=0, error=null}
+04-17 18:03:02.654 13623 13623 E MediaControlProfile: onCurrentPlayerStateUpdated: base actions not supported, player actions= 6fffdb, expected at least= 7f
+04-17 18:03:02.654 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:03:02.654 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:03:02.654 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:03:02.654 13623 13623 W MediaControlGattService: Feature TRACK_POSITION support: true
+04-17 18:03:02.654 13623 13623 W MediaControlGattService: Feature TRACK_POSITION_NOTIFY support: true
+04-17 18:03:02.654 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:02.654 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:02.656 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:02.657 13623 13623 W MediaControlGattService: Feature PLAYER_NAME support: true
+04-17 18:03:02.658 13623 13623 W MediaControlGattService: Feature MEDIA_CONTROL_POINT_OPCODES_SUPPORTED support: true
+04-17 18:03:02.658 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:02.658 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:02.658 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:03:02.658 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:03:02.658 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:03:02.660 13623 13623 I bluetooth: system/btif/avrcp/avrcp_service.cc:533 SendMediaUpdate: track_changed=false :  play_state=true :  queue=false
+04-17 18:03:03.252 10210 10253 D AF::Track: interceptBuffer: took 1921us to intercept 0 tracks
+04-17 18:03:03.673 10740 10889 D SatelliteController: isInCarrierRoamingNbIotNtn: satellite is disabled
+04-17 18:03:03.673 10740 10889 D SatelliteController: getCarrierRoamingNtnConnectType: Checking connect type from PLMN config for subId: 1
+04-17 18:03:03.681 10740 10889 D SatelliteController: getSatellitePerPlmnConfiguration: invalid subId or not supported via carrier.
+04-17 18:03:03.681 10740 10889 D SatelliteController: getCarrierRoamingNtnConnectType: config: null
+04-17 18:03:03.682 10740 10889 D SatelliteController: getCarrierRoamingNtnConnectType: Falling back to global carrier config connect type: 0
+04-17 18:03:03.684 10740 10889 D SatelliteController: updateLastNotifiedCarrierRoamingNtnSignalStrengthAndNotify(1)
+04-17 18:03:03.687 10740 10889 D SatelliteController: updateLastNotifiedCarrierRoamingNtnSignalStrengthAndNotify(1) lastNotifiedSignalStrength level: 0
+04-17 18:03:03.687 10740 10889 D SatelliteController: updateLastNotifiedCarrierRoamingNtnSignalStrengthAndNotify(1) currSignalStrength level: 0
+04-17 18:03:03.854 10277 10481 I HalDevMgr: bestIfaceCreationProposal is null, requestIface=STA, existingIface=[name=wlan0 type=STA]
+04-17 18:03:03.884 10210 10253 D AudioFlinger: mixer(0x76f86a063790) throttle end: throttle time(4)
+04-17 18:03:04.309   591 27282 D AidlBufferPool: bufferpool2 0x7df4cec22de8 : 12(49152 size) total buffers - 6(24576 size) used buffers - 6833/6858 (recycle/alloc) - 59/6857 (fetch/transfer)
+04-17 18:03:04.708 10277 11590 W AS.PlaybackActivityMon: No piid assigned for invalid/internal port id 36
+04-17 18:03:04.710 10277 11598 W AS.PlaybackActivityMon: No piid assigned for invalid/internal port id 36
+04-17 18:03:04.711 10277 11598 E AppOps  : attributionTag  not declared in manifest of com.streamfr.app
+04-17 18:03:04.712 10277 11590 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./84 (userId=0) playbackState=PlaybackState {state=PAUSED(2), position=148474, buffered position=200041, speed=0.0, updated=191265254, actions=7339997, custom actions=[], active item id=0, error=null}
+04-17 18:03:04.713 10277 11598 E AppOps  : attributionTag  not declared in manifest of com.streamfr.app
+04-17 18:03:04.715 10277 11590 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./84 (userId=0) playbackState=PlaybackState {state=PAUSED(2), position=148474, buffered position=200041, speed=0.0, updated=191265258, actions=7339997, custom actions=[], active item id=0, error=null}
+04-17 18:03:04.724 13623 13623 W MediaPlayerWrapper: onPlaybackStateChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:04.727 26417 26417 D CACHE_PATH: /data/user/0/com.streamfr.app/files/user-data-cache/TMDb_fr_.json
+04-17 18:03:04.729 13623 13623 I bluetooth: system/btif/avrcp/avrcp_service.cc:533 SendMediaUpdate: track_changed=false :  play_state=true :  queue=false
+04-17 18:03:04.733 26417 26417 D CACHE_PATH: /data/user/0/com.streamfr.app/files/user-data-cache/TMDb_fr_.json
+04-17 18:03:04.736 13623 13623 E MediaControlProfile: onCurrentPlayerStateUpdated: base actions not supported, player actions= 6fffdd, expected at least= 7f
+04-17 18:03:04.737 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:03:04.737 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:03:04.737 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:03:04.737 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED_NOTIFY support: true
+04-17 18:03:04.740 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:04.741 13623 13623 W MediaControlGattService: Feature TRACK_POSITION support: true
+04-17 18:03:04.741 13623 13623 W MediaControlGattService: Feature TRACK_POSITION_NOTIFY support: true
+04-17 18:03:04.742 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:04.743 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:04.745 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:04.746 13623 13623 W MediaControlGattService: Feature PLAYER_NAME support: true
+04-17 18:03:04.746 13623 13623 W MediaControlGattService: Feature MEDIA_CONTROL_POINT_OPCODES_SUPPORTED support: true
+04-17 18:03:04.746 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:04.746 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:04.748 26417 27275 I Surface : Creating surface for consumer unnamed-26417-7 with slotExpansion=0 for 64 slots
+04-17 18:03:04.748 26417 27275 D SurfaceUtils: connecting to surface 0x76a25a1de960, reason connectToSurface
+04-17 18:03:04.748 26417 27275 I MediaCodec: [c2.goldfish.h264.decoder] setting surface generation to 27051012
+04-17 18:03:04.748 26417 27275 D SurfaceUtils: disconnecting from surface 0x76a25a1de960, reason connectToSurface(reconnect)
+04-17 18:03:04.748 26417 27275 D SurfaceUtils: connecting to surface 0x76a25a1de950, reason connectToSurface(reconnect-with-listener)
+04-17 18:03:04.748 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:04.749 26417 27275 D Codec2Client: setOutputSurface -- failed to set consumer usage (6/BAD_INDEX)
+04-17 18:03:04.750 26417 27275 D LegacyGraphicsTracker: new surface in configuration: maxDequeueRequested(0), maxDequeueCommitted(12)
+04-17 18:03:04.750 26417 27275 D LegacyGraphicsTracker: new surface configured with id:113460151058439 gen:27051012 maxDequeue:12
+04-17 18:03:04.750 26417 27275 D LegacyGraphicsTracker: maxDequeueCount is already 12
+04-17 18:03:04.750 26417 27275 D Codec2Client: setOutputSurface -- generation=27051012 consumer usage=0x900
+04-17 18:03:04.750 26417 27275 D SurfaceUtils: disconnecting from surface 0x76a25a07d540, reason disconnectFromSurface
+04-17 18:03:04.751 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:04.753 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:03:04.754 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:03:04.754 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:03:04.754 13623 13623 W MediaPlayerWrapper: onPlaybackStateChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:04.761 26417 26417 D InsetsController: Setting requestedVisibleTypes to 503 (was 496)
+04-17 18:03:04.763 10277 11590 I ImeTracker: system_server:1dc736a8: onRequestHide at ORIGIN_SERVER reason IME_REQUESTED_CHANGED_LISTENER fromUser false displayId 0
+04-17 18:03:04.766 10277 10299 I ImeTracker: system_server:1dc736a8: onCancelled at PHASE_SERVER_SHOULD_HIDE
+04-17 18:03:04.769 26417 26417 I ExoPlayerImpl: Release b6ddd09 [AndroidXMedia3/1.8.0] [emu64xa16k, sdk_gphone16k_x86_64, Google, 37] [media3.common, media3.ui, media3.exoplayer, media3.decoder, media3.session, media3.exoplayer.hls, media3.datasource, media3.datasource.okhttp, media3.extractor]
+04-17 18:03:04.779 26417 27241 D MediaCodec: keep callback message for reclaim
+04-17 18:03:04.782   482 27277 W SimpleC2Component: unknown frame index: 4053
+04-17 18:03:04.782 26417 27275 I CCodecConfig: query failed after returning 14 values (BAD_INDEX)
+04-17 18:03:04.782   482 27277 D SimpleC2Component: work form old generation: was 3 now 2
+04-17 18:03:04.783 26417 27276 D CCodecBufferChannel: [c2.goldfish.h264.decoder#502] flushed work; ignored.
+04-17 18:03:04.785 26417 27276 D CCodecBufferChannel: [c2.goldfish.h264.decoder#502] Discard frames from previous generation.
+04-17 18:03:04.790 26417 27241 D MediaCodec: keep callback message for reclaim
+04-17 18:03:04.790 26417 27280 I CCodecConfig: query failed after returning 21 values (BAD_INDEX)
+04-17 18:03:04.795 26417 27275 I MediaCodec: [c2.goldfish.h264.decoder] connecting to the same surface. Nothing to do.
+04-17 18:03:04.795 26417 27275 D CCodecBufferChannel: [c2.goldfish.h264.decoder#502] MediaCodec discarded an unknown buffer
+04-17 18:03:04.795 26417 27275 D CCodecBufferChannel: [c2.goldfish.h264.decoder#502] MediaCodec discarded an unknown buffer
+04-17 18:03:04.795 26417 27275 D CCodecBufferChannel: [c2.goldfish.h264.decoder#502] MediaCodec discarded an unknown buffer
+04-17 18:03:04.795 26417 27275 D CCodecBufferChannel: [c2.goldfish.h264.decoder#502] MediaCodec discarded an unknown buffer
+04-17 18:03:04.796 26417 27434 D CCodec  : hold CodecLooper(1) until release
+04-17 18:03:04.798 26417 27275 D SurfaceUtils: disconnecting from surface 0x76a25a1de960, reason disconnectFromSurface
+04-17 18:03:04.803 26417 27280 D CCodecBufferChannel: [c2.android.aac.decoder#871] MediaCodec discarded an unknown buffer
+04-17 18:03:04.804 26417 27280 D CCodecBufferChannel: [c2.android.aac.decoder#871] MediaCodec discarded an unknown buffer
+04-17 18:03:04.804 26417 27280 D CCodecBufferChannel: [c2.android.aac.decoder#871] MediaCodec discarded an unknown buffer
+04-17 18:03:04.804 26417 27280 D CCodecBufferChannel: [c2.android.aac.decoder#871] MediaCodec discarded an unknown buffer
+04-17 18:03:04.804 26417 27435 D CCodec  : hold CodecLooper(1) until release
+04-17 18:03:04.807   591 18689 I libbinder.BpBinder: onLastStrongRef automatically unlinking death recipients for binder (0x7df4eec0e520) with descriptor: 'android.hardware.media.bufferpool2.IClientManager'
+04-17 18:03:04.808   591 18689 D AidlBufferPool: bufferpool2 0x7df4cec24758 : 0(0 size) total buffers - 0(0 size) used buffers - 0/0 (recycle/alloc) - 0/0 (fetch/transfer)
+04-17 18:03:04.808   591 18689 D AidlBufferPool: Destruction - bufferpool2 0x7df4cec24758 cached: 0/0M, 0/0% in use; allocs: 0, 0% recycled; transfers: 0, 0% unfetched
+04-17 18:03:04.814 10277 11749 I MediaFocusControl: abandonAudioFocus() from uid/pid 10241/26417 clientId=android.media.AudioManager@23789f8androidx.media3.exoplayer.AudioFocusManager$$ExternalSyntheticLambda0@d55df65 callingPack=com.streamfr.app
+04-17 18:03:04.818 26417 26417 I MediaSessionImpl: Release 5160b0e [AndroidXMedia3/1.8.0] [emu64xa16k, sdk_gphone16k_x86_64, Google, 37] [media3.common, media3.ui, media3.exoplayer, media3.decoder, media3.session, media3.exoplayer.hls, media3.datasource, media3.datasource.okhttp, media3.extractor]
+04-17 18:03:04.820 10277 11749 I MediaSessionStack: removeSession | record: com.streamfr.app/androidx.media3.session.id./84 (userId=0)
+04-17 18:03:04.820 10277 11749 D MediaSessionService: Media button session is changed to null
+04-17 18:03:04.821 10277 11749 D MediaSessionService: destroySessionLocked: record=com.streamfr.app/androidx.media3.session.id./84 (userId=0)
+04-17 18:03:04.825 13623 13623 I PlayerSettingsManager: activePlayerChanged - current active app uid=10241 isNotFrozen=true
+04-17 18:03:04.825 13623 13623 I PlayerSettingsManager: activePlayerChanged - New player is null, removed active player
+04-17 18:03:04.825 13623 13623 I PlayerSettingsManager: getPlayerRepeatMode - no active player
+04-17 18:03:04.825 13623 13623 I PlayerSettingsManager: getPlayerShuffleMode - no active player
+04-17 18:03:04.825 10277 11590 W MediaSessionRecord: Ignoring call to destroyed session
+04-17 18:03:04.825 13623 13623 I PlayerSettingsManager: updateRemoteDevice: repeat (STATE_REPEAT_OFF -> STATE_REPEAT_OFF), shuffle (STATE_SHUFFLE_OFF -> STATE_SHUFFLE_OFF)
+04-17 18:03:04.827 10277 10524 D MediaSessionService: setFgsIfNoSessionIsLinkedToNotification: record=com.streamfr.app/androidx.media3.session.id./84 (userId=0)
+04-17 18:03:04.829 13623 13623 I PlayerSettingsManager: activePlayerChanged - New player is null, removed active player
+04-17 18:03:04.829 13623 13623 I PlayerSettingsManager: getPlayerRepeatMode - no active player
+04-17 18:03:04.829 13623 13623 I PlayerSettingsManager: getPlayerShuffleMode - no active player
+04-17 18:03:04.829 13623 13623 I PlayerSettingsManager: updateRemoteDevice: repeat (STATE_REPEAT_OFF -> STATE_REPEAT_OFF), shuffle (STATE_SHUFFLE_OFF -> STATE_SHUFFLE_OFF)
+04-17 18:03:04.830 26417 26417 D VRI[MainMobileActivity]: WindowInsets changed: statusBars:[0,156,0,0] navigationBars:[0,0,144,0] 
+04-17 18:03:04.833 13623 13623 W MediaPlayerWrapper: The session was destroyed com.streamfr.app
+04-17 18:03:04.833 10277 11598 W MediaSessionRecord: Ignoring call to destroyed session
+04-17 18:03:04.837 13623 13623 I bluetooth: system/btif/avrcp/avrcp_service.cc:533 SendMediaUpdate: track_changed=true :  play_state=true :  queue=false
+04-17 18:03:04.841 13623 13623 W MediaPlayerWrapper: The session was destroyed com.streamfr.app
+04-17 18:03:04.841 10277 11946 W MediaSessionRecord: Ignoring call to destroyed session
+04-17 18:03:04.844 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:04.847 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:04.847 13623 13623 W MediaControlGattService: Feature PLAYER_NAME support: true
+04-17 18:03:04.849 13623 13623 W MediaControlGattService: Feature PLAYER_ICON_URL support: false
+04-17 18:03:04.849 13623 13623 W MediaControlGattService: Feature PLAYER_ICON_OBJ_ID support: false
+04-17 18:03:04.849 13623 13623 W MediaControlGattService: Feature CURRENT_TRACK_SEGMENT_OBJ_ID support: false
+04-17 18:03:04.850 13623 13623 W MediaControlGattService: Feature CURRENT_TRACK_OBJ_ID support: false
+04-17 18:03:04.850 13623 13623 W MediaControlGattService: Feature NEXT_TRACK_OBJ_ID support: false
+04-17 18:03:04.850 13623 13623 W MediaControlGattService: Feature CURRENT_GROUP_OBJ_ID support: false
+04-17 18:03:04.850 13623 13623 W MediaControlGattService: Feature PARENT_GROUP_OBJ_ID support: false
+04-17 18:03:04.850 13623 13623 W MediaControlGattService: Feature SEARCH_RESULT_OBJ_ID support: false
+04-17 18:03:04.850 13623 13623 W MediaControlGattService: Feature TRACK_TITLE support: true
+04-17 18:03:04.852 13623 13623 W MediaControlGattService: Feature TRACK_DURATION support: true
+04-17 18:03:04.852 13623 13623 W MediaControlGattService: Feature TRACK_POSITION support: true
+04-17 18:03:04.852 13623 13623 W MediaControlGattService: Feature TRACK_POSITION_NOTIFY support: true
+04-17 18:03:04.852 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:04.854 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:04.855 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:03:04.855 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:03:04.855 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:03:04.855 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:03:04.855 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:03:04.855 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:03:04.855 13623 13623 W MediaControlGattService: Feature PLAYING_ORDER_SUPPORTED support: true
+04-17 18:03:04.855 13623 13623 W MediaControlGattService: Feature PLAYING_ORDER support: true
+04-17 18:03:04.855 13623 13623 W MediaControlGattService: Feature MEDIA_CONTROL_POINT_OPCODES_SUPPORTED support: true
+04-17 18:03:04.855 13623 13623 W MediaControlGattService: Feature TRACK_POSITION support: true
+04-17 18:03:04.855 13623 13623 W MediaControlGattService: Feature TRACK_POSITION_NOTIFY support: true
+04-17 18:03:04.855 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:04.858 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:04.858 13623 13623 W MediaControlGattService: Feature TRACK_TITLE support: true
+04-17 18:03:04.858 13623 13623 W MediaControlGattService: Feature TRACK_TITLE support: true
+04-17 18:03:04.858 13623 13623 W MediaControlGattService: Feature TRACK_TITLE_NOTIFY support: true
+04-17 18:03:04.860 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:04.861 13623 13623 W MediaControlGattService: Feature TRACK_DURATION support: true
+04-17 18:03:04.861 13623 13623 W MediaControlGattService: Feature TRACK_DURATION support: true
+04-17 18:03:04.861 13623 13623 W MediaControlGattService: Feature TRACK_DURATION_NOTIFY support: true
+04-17 18:03:04.863 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:04.864 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:04.864 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:04.864 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:04.865 13623 13623 W MediaControlGattService: Feature TRACK_CHANGED support: true
+04-17 18:03:04.868 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:04.894 26417 26417 I ViewTarget: Glide treats LayoutParams.WRAP_CONTENT as a request for an image the size of this device's screen dimensions. If you want to load the original image and are ok with the corresponding memory cost and OOMs (depending on the input size), use override(Target.SIZE_ORIGINAL). Otherwise, use LayoutParams.MATCH_PARENT, set layout_width and layout_height to fixed dimension, or use .override() with fixed dimensions.
+04-17 18:03:04.898 26417 27436 I okhttp.OkHttpClient: --> GET https://image.tmdb.org/t/p/w500//hetHB9L84jOLxajKZLKgaNBRDJ9.jpg
+04-17 18:03:04.902 26417 27436 D DnsResolver: Resolving host: image.tmdb.org using provider: https://cloudflare-dns.com/dns-query
+04-17 18:03:04.906 26417 27105 I okhttp.OkHttpClient: --> GET https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAAcAAE
+04-17 18:03:04.906 26417 27439 I okhttp.OkHttpClient: --> GET https://image.tmdb.org/t/p/w500//kKeiG40MdXkJsI3Fdxf1FmOUvUn.jpg
+04-17 18:03:04.908 26417 27439 D DnsResolver: Resolving host: image.tmdb.org using provider: https://cloudflare-dns.com/dns-query
+04-17 18:03:04.911 26417 27441 I okhttp.OkHttpClient: --> GET https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAABAAE
+04-17 18:03:04.912 26417 27101 I okhttp.OkHttpClient: --> GET https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAABAAE
+04-17 18:03:04.917 26417 27442 I okhttp.OkHttpClient: --> GET https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAAcAAE
+04-17 18:03:04.918 26417 27437 I okhttp.OkHttpClient: --> GET https://image.tmdb.org/t/p/w500//iqNEMdDEuwJSjSCdPRFHatKpWgU.jpg
+04-17 18:03:04.920 26417 27437 D DnsResolver: Resolving host: image.tmdb.org using provider: https://cloudflare-dns.com/dns-query
+04-17 18:03:04.922 26417 27443 I okhttp.OkHttpClient: --> GET https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAABAAE
+04-17 18:03:04.923 26417 27438 I okhttp.OkHttpClient: --> GET https://image.tmdb.org/t/p/w500//lkYOD4vYsuhRKQ8grKjUY9acWdF.jpg
+04-17 18:03:04.926 26417 27440 I okhttp.OkHttpClient: --> GET https://image.tmdb.org/t/p/w500//itUAkQmihFmRxMYTa3AkvIzMCV4.jpg
+04-17 18:03:04.930 26417 27438 D DnsResolver: Resolving host: image.tmdb.org using provider: https://cloudflare-dns.com/dns-query
+04-17 18:03:04.932 26417 27440 D DnsResolver: Resolving host: image.tmdb.org using provider: https://cloudflare-dns.com/dns-query
+04-17 18:03:04.952 10210 10246 I APM_AudioPolicyManager: getNewOutputDevices io 13 recent device override {AUDIO_DEVICE_OUT_SPEAKER, @:}
+04-17 18:03:05.093 10277 11933 I ImeTracker: system_server:6974381d: onRequestHide at ORIGIN_SERVER reason IME_REQUESTED_CHANGED_LISTENER fromUser false displayId 0
+04-17 18:03:05.093 10277 10299 I ImeTracker: system_server:6974381d: onCancelled at PHASE_SERVER_SHOULD_HIDE
+04-17 18:03:05.506 26417 27105 I okhttp.OkHttpClient: <-- 200 https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAAcAAE (595ms, 99-byte body)
+04-17 18:03:05.507 26417 27442 I okhttp.OkHttpClient: <-- 200 https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAAcAAE (587ms, 99-byte body)
+04-17 18:03:05.507 26417 27447 I okhttp.OkHttpClient: --> GET https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAAcAAE
+04-17 18:03:05.507 26417 27441 I okhttp.OkHttpClient: <-- 200 https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAABAAE (595ms, 87-byte body)
+04-17 18:03:05.507 26417 27101 I okhttp.OkHttpClient: <-- 200 https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAABAAE (595ms, 87-byte body)
+04-17 18:03:05.508 26417 27439 D DnsResolver: Resolved image.tmdb.org to: 2400:52e0:1a01::852:1, 143.244.50.211
+04-17 18:03:05.508 26417 27436 D DnsResolver: Resolved image.tmdb.org to: 2400:52e0:1a01::852:1, 143.244.50.211
+04-17 18:03:05.508 26417 27105 I okhttp.OkHttpClient: --> GET https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAABAAE
+04-17 18:03:05.508 26417 27442 I okhttp.OkHttpClient: --> GET https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAAcAAE
+04-17 18:03:05.508 26417 27443 I okhttp.OkHttpClient: <-- 200 https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAABAAE (585ms, 87-byte body)
+04-17 18:03:05.509 26417 27441 I okhttp.OkHttpClient: --> GET https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAABAAE
+04-17 18:03:05.517 26417 27101 I okhttp.OkHttpClient: --> GET https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAAcAAE
+04-17 18:03:05.522 26417 27447 I okhttp.OkHttpClient: <-- 200 https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAAcAAE (14ms, 99-byte body)
+04-17 18:03:05.523 26417 27437 D DnsResolver: Resolved image.tmdb.org to: 143.244.50.211, 2400:52e0:1a01::852:1
+04-17 18:03:05.529 26417 27441 I okhttp.OkHttpClient: <-- 200 https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAABAAE (19ms, 87-byte body)
+04-17 18:03:05.529 26417 27442 I okhttp.OkHttpClient: <-- 200 https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAAcAAE (20ms, 99-byte body)
+04-17 18:03:05.530 26417 27105 I okhttp.OkHttpClient: <-- 200 https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAABAAE (20ms, 87-byte body)
+04-17 18:03:05.531 26417 27101 I okhttp.OkHttpClient: <-- 200 https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAABWltYWdlBHRtZGIDb3JnAAAcAAE (12ms, 99-byte body)
+04-17 18:03:05.533 26417 27438 D DnsResolver: Resolved image.tmdb.org to: 143.244.50.211, 2400:52e0:1a01::852:1
+04-17 18:03:05.534 26417 27440 D DnsResolver: Resolved image.tmdb.org to: 143.244.50.211, 2400:52e0:1a01::852:1
+04-17 18:03:05.847 26417 27437 I okhttp.OkHttpClient: <-- 200 https://image.tmdb.org/t/p/w500//iqNEMdDEuwJSjSCdPRFHatKpWgU.jpg (927ms, 150838-byte body)
+04-17 18:03:05.869 26417 27451 I okhttp.OkHttpClient: --> GET https://image.tmdb.org/t/p/w500//4TPCzvOoQmmParPjgHCiqqiVYIJ.jpg
+04-17 18:03:06.171 26417 27440 I okhttp.OkHttpClient: <-- 200 https://image.tmdb.org/t/p/w500//itUAkQmihFmRxMYTa3AkvIzMCV4.jpg (1244ms, 114236-byte body)
+04-17 18:03:06.172 26417 27437 I okhttp.OkHttpClient: --> GET https://image.tmdb.org/t/p/w500//82dbqeFOA2iPhwWuciZItw1ELew.jpg
+04-17 18:03:06.205 26417 27438 I okhttp.OkHttpClient: <-- 200 https://image.tmdb.org/t/p/w500//lkYOD4vYsuhRKQ8grKjUY9acWdF.jpg (1276ms, 48739-byte body)
+04-17 18:03:06.212 26417 27436 I okhttp.OkHttpClient: <-- 200 https://image.tmdb.org/t/p/w500//hetHB9L84jOLxajKZLKgaNBRDJ9.jpg (1313ms, 96248-byte body)
+04-17 18:03:06.216 26417 27439 I okhttp.OkHttpClient: <-- 200 https://image.tmdb.org/t/p/w500//kKeiG40MdXkJsI3Fdxf1FmOUvUn.jpg (1310ms, 96332-byte body)
+04-17 18:03:06.220 26417 27451 I okhttp.OkHttpClient: <-- 200 https://image.tmdb.org/t/p/w500//4TPCzvOoQmmParPjgHCiqqiVYIJ.jpg (351ms, 82438-byte body)
+04-17 18:03:06.360 26417 27437 I okhttp.OkHttpClient: <-- 200 https://image.tmdb.org/t/p/w500//82dbqeFOA2iPhwWuciZItw1ELew.jpg (187ms, 108421-byte body)
+04-17 18:03:06.862 10277 10510 I AdbWifiNetworkMonitor: Wi-Fi network available
+04-17 18:03:06.864 10277 10510 I AdbWifiNetworkMonitor: Received the same Wi-Fi SSID. Ignoring.
+04-17 18:03:06.866 10277 10481 I HalDevMgr: bestIfaceCreationProposal is null, requestIface=STA, existingIface=[name=wlan0 type=STA]
+04-17 18:03:06.869 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:03:06.869 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:03:06.869 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:03:06.869 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:03:06.873 10871 12158 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+04-17 18:03:06.874 10871 12158 W libbinder.Binder: Large reply transaction of 1056768 bytes, interface descriptor , function: UNKNOWN_FUNCTION_NAME, code: 1, flags: 17
+04-17 18:03:06.878 10695 10880 D IpClient/wlan0: interfaceLinkStateChanged: ifindex 16 up
+04-17 18:03:06.883 10695 10880 D IpClient/wlan0: interfaceLinkStateChanged: ifindex 16 up
+04-17 18:03:07.750 11015 11015 I artd    : GetBestInfo: odex next to the dex file (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/oat/x86_64/base.odex) is kOatUpToDate with filter 'speed-profile' executable 'false'
+04-17 18:03:07.753 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_AdsDynamite_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:03:07.755 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_CronetDynamite_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:03:07.757 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_DynamiteLoader_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:03:07.760 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_DynamiteModulesA_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:03:07.763 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_DynamiteModulesC_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:03:07.766 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_GoogleCertificates_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:03:07.768 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_MapsDynamite_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:03:07.770 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_MeasurementDynamite_installtime.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:03:07.772 11015 11015 I artd    : GetBestInfo: dm (/data/app/~~48cEr4byYH3R-9QT5iFVtA==/com.google.android.gms-i2guM4qPU0t7p7dUqYHUig==/split_all_locale_splits.dm) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:03:07.774 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000001/CronetDynamite.apk has no usable artifacts
+04-17 18:03:07.778 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000016/dl-MlkitOcrCommon.optional_261332100800.apk has no usable artifacts
+04-17 18:03:07.781 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/0000000b/dl-TfliteDynamiteDynamite.integ_252130102100800.apk has no usable artifacts
+04-17 18:03:07.782 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000002/DynamiteLoader.apk has no usable artifacts
+04-17 18:03:07.784 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000012/dl-Appsearch.optional_261332100800.apk has no usable artifacts
+04-17 18:03:07.785 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000013/dl-PlayCloudSearch.optional_261332100000.apk has no usable artifacts
+04-17 18:03:07.787 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000005/GoogleCertificates.apk has no usable artifacts
+04-17 18:03:07.789 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/0000000f/dl-MlkitBarcodeUi.optional_260235100800.apk has no usable artifacts
+04-17 18:03:07.792 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000014/dl-MlkitBarcodeUi.optional_261332100800.apk has no usable artifacts
+04-17 18:03:07.795 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000010/dl-PlayCloudSearch.optional_260235100000.apk has no usable artifacts
+04-17 18:03:07.797 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000008/dl-VisionOcr.optional_260235100000.apk has no usable artifacts
+04-17 18:03:07.799 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/0000000c/dl-Appsearch.optional_260235100800.apk has no usable artifacts
+04-17 18:03:07.801 11015 11015 I artd    : GetBestInfo: vdex next to the dex file (/data/user/0/com.google.android.gms/app_dg_cache/BB2AE5A47BB198AF36C19CFD2B6407061A1BAF30/oat/x86_64/the.vdex) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:03:07.803 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000011/dl-VisionOcr.optional_261332100000.apk has no usable artifacts
+04-17 18:03:07.805 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000009/dl-MlkitOcrCommon.optional_260235100800.apk has no usable artifacts
+04-17 18:03:07.807 11015 11015 I artd    : GetBestInfo: vdex next to the dex file (/data/user/0/com.google.android.gms/app_dg_cache/CE973E4DE823F0AA69070767A9FABB590DDD455C/oat/x86_64/the.vdex) is kOatUpToDate with filter 'verify' executable 'false'
+04-17 18:03:07.809 11015 11015 I artd    : GetBestInfo: /data/user_de/0/com.google.android.gms/app_chimera/m/00000007/MeasurementDynamite.apk has no usable artifacts
+04-17 18:03:07.820 10214 13402 D android.hardware.audio@7.1-impl.ranchu: threadLoop: entering standby, frames: 736553152
+04-17 18:03:07.821 10214 13402 D android.hardware.audio@7.1-impl.ranchu: ~TinyalsaSink: joining consumeThread
+04-17 18:03:07.822 10214 27363 D android.hardware.audio@7.1-impl.ranchu: consumeThread: exiting
+04-17 18:03:07.822 10214 13402 D android.hardware.audio@7.1-impl.ranchu: ~TinyalsaSink: stopping PCM stream
+04-17 18:03:08.330 13928 13928 D StatsLog: LAUNCHER_TASKBAR_BACK_BUTTON_TAP
+04-17 18:03:08.334 10277 11946 D CoreBackPreview: startBackNavigation currentTask=Task{a3abcb7 #190 type=standard A=10241:com.streamfr.app}, topRunningActivity=ActivityRecord{52369334 u0 com.streamfr.app/com.streamflixreborn.streamflix.activities.main.MainMobileActivity t190}, callbackInfo=OnBackInvokedCallbackInfo{mCallback=android.window.IOnBackInvokedCallback$Stub$Proxy@e5a7ca3, mPriority=0, mIsAnimationCallback=false, mOverrideBehavior=0}, currentFocus=Window{5809fa5 u0 com.streamfr.app/com.streamflixreborn.streamflix.activities.main.MainMobileActivity}, embedded=false
+04-17 18:03:08.335 10592 10614 D ShellBackPreview: Received backNavigationInfo:BackNavigationInfo{mType=TYPE_CALLBACK (4), mOnBackNavigationDone=android.os.RemoteCallback@67def1a, mOnBackInvokedCallback=android.window.IOnBackInvokedCallback$Stub$Proxy@a94ea4b, mPrepareRemoteAnimation=false, mAnimationCallback=false, mCustomizeAnimationInfo=null}
+04-17 18:03:08.337 10277 11941 W AS.PlaybackActivityMon: No piid assigned for invalid/internal port id 36
+04-17 18:03:08.339 10210 10253 D AF::Track: interceptBuffer: took 678us to intercept 0 tracks
+04-17 18:03:08.343 10277 11933 W AS.PlaybackActivityMon: No piid assigned for invalid/internal port id 36
+04-17 18:03:08.343 10592 10614 D ShellBackPreview: Finishing gesture with event action: 1
+04-17 18:03:08.344 10592 10614 D ShellBackPreview: onGestureFinished() mTriggerBack == true
+04-17 18:03:08.344 10592 10614 D ShellBackPreview: Trigger back without dispatching to animator.
+04-17 18:03:08.345 10592 10614 D ShellBackPreview: BackAnimationController: finishBackNavigation()
+04-17 18:03:08.347 10277 11598 D CoreBackPreview: onBackNavigationDone backType=4, triggerBack=true
+04-17 18:03:08.348 11273 11273 I StylusModule: StylusModule.onUpdateToolType():774 Update tool type = 0
+04-17 18:03:08.397 10210 10253 D AudioFlinger: mixer(0x76f86a063790) throttle end: throttle time(31)
+04-17 18:03:08.513 10210 10246 I APM_AudioPolicyManager: getNewOutputDevices io 13 recent device override {AUDIO_DEVICE_OUT_SPEAKER, @:}
+04-17 18:03:08.516 26417 26424 I om.streamfr.app: Background young concurrent mark compact GC freed 17MB AllocSpace bytes, 43(2832KB) LOS objects, 37% free, 30MB/48MB, paused 2.119ms,17.766ms total 75.105ms
+04-17 18:03:08.633 26417 27437 I okhttp.OkHttpClient: --> GET https://image.tmdb.org/t/p/w500//aOXBLBRg7M5D2Zrs5luKD5cDB8O.jpg
+04-17 18:03:08.635 26417 27436 I okhttp.OkHttpClient: --> GET https://image.tmdb.org/t/p/w500//rZan9uyHoK5jY0DtN5w4XgwN362.jpg
+04-17 18:03:08.639 26417 27439 I okhttp.OkHttpClient: --> GET https://image.tmdb.org/t/p/w500//h2HFhwgU7xcIEpgDuuPHfh5NOVZ.jpg
+04-17 18:03:08.639 26417 27438 I okhttp.OkHttpClient: --> GET https://image.tmdb.org/t/p/w500//1bFcDD83b0cW0nQ7wr6EHsUCZPE.jpg
+04-17 18:03:08.646 26417 27451 I okhttp.OkHttpClient: --> GET https://image.tmdb.org/t/p/w500//4Tw8TB9ikrcgzJgR0LOvgfnXD74.jpg
+04-17 18:03:08.758 26417 27436 I okhttp.OkHttpClient: <-- 200 https://image.tmdb.org/t/p/w500//rZan9uyHoK5jY0DtN5w4XgwN362.jpg (122ms, 96823-byte body)
+04-17 18:03:08.808 26417 27439 I okhttp.OkHttpClient: <-- 200 https://image.tmdb.org/t/p/w500//h2HFhwgU7xcIEpgDuuPHfh5NOVZ.jpg (168ms, 64147-byte body)
+04-17 18:03:08.844 26417 27451 I okhttp.OkHttpClient: <-- 200 https://image.tmdb.org/t/p/w500//4Tw8TB9ikrcgzJgR0LOvgfnXD74.jpg (197ms, 65055-byte body)
+04-17 18:03:08.877 26417 27438 I okhttp.OkHttpClient: <-- 200 https://image.tmdb.org/t/p/w500//1bFcDD83b0cW0nQ7wr6EHsUCZPE.jpg (237ms, 74962-byte body)
+04-17 18:03:08.881 26417 27437 I okhttp.OkHttpClient: <-- 200 https://image.tmdb.org/t/p/w500//aOXBLBRg7M5D2Zrs5luKD5cDB8O.jpg (247ms, 111335-byte body)
+04-17 18:03:09.260 26417 26424 I om.streamfr.app: Background young concurrent mark compact GC freed 15MB AllocSpace bytes, 3(432KB) LOS objects, 36% free, 31MB/48MB, paused 1.033ms,14.020ms total 28.279ms
+04-17 18:03:09.308 10569 10569 I wpa_supplicant: wlan0: CTRL-EVENT-BEACON-LOSS 
+04-17 18:03:09.671 26417 26775 D AidlBufferPool: bufferpool2 0x76a31a1ef268 : 0(0 size) total buffers - 0(0 size) used buffers - 6884/6895 (recycle/alloc) - 15/6884 (fetch/transfer)
+04-17 18:03:09.671 26417 26775 D AidlBufferPoolAcc: evictor expired: 1, evicted: 1
+04-17 18:03:09.877 10871 11548 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+04-17 18:03:09.877 10871 11548 W libbinder.Binder: Large reply transaction of 1056768 bytes, interface descriptor , function: UNKNOWN_FUNCTION_NAME, code: 1, flags: 17
+04-17 18:03:09.878 10277 10481 I HalDevMgr: bestIfaceCreationProposal is null, requestIface=STA, existingIface=[name=wlan0 type=STA]
+04-17 18:03:09.878 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:03:09.878 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:03:09.878 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:03:09.878 10277 10487 W libbinder.IPCThreadState: Sending oneway calls to frozen process.
+04-17 18:03:09.881 10277 10510 I AdbWifiNetworkMonitor: Wi-Fi network available
+04-17 18:03:09.882 10277 10510 I AdbWifiNetworkMonitor: Received the same Wi-Fi SSID. Ignoring.
+04-17 18:03:09.922 26417 26424 I om.streamfr.app: Background young concurrent mark compact GC freed 15MB AllocSpace bytes, 9(2080KB) LOS objects, 35% free, 31MB/48MB, paused 1.057ms,16.497ms total 31.114ms
+04-17 18:03:09.996 26417 27437 I okhttp.OkHttpClient: --> GET https://image.tmdb.org/t/p/original//2VHbof9yaNhovEnaancBkXEULCT.jpg
+04-17 18:03:10.105 26417 27437 I okhttp.OkHttpClient: <-- 200 https://image.tmdb.org/t/p/original//2VHbof9yaNhovEnaancBkXEULCT.jpg (108ms, 715192-byte body)
+04-17 18:03:10.663   591   641 D AidlBufferPool: bufferpool2 0x7df4cec22de8 : 0(0 size) total buffers - 0(0 size) used buffers - 6853/6878 (recycle/alloc) - 59/6878 (fetch/transfer)
+04-17 18:03:10.663   591   641 D AidlBufferPoolAcc: evictor expired: 2, evicted: 1
+04-17 18:03:10.672 26417 26775 D AidlBufferPool: bufferpool2 0x76a31a1e69f8 : 0(0 size) total buffers - 0(0 size) used buffers - 4061/4067 (recycle/alloc) - 11/4065 (fetch/transfer)
+04-17 18:03:10.672 26417 26775 D AidlBufferPoolAcc: evictor expired: 1, evicted: 1
+04-17 18:03:11.391 10214 13402 D android.hardware.audio@7.1-impl.ranchu: threadLoop: entering standby, frames: 736702208
+04-17 18:03:11.391 10214 13402 D android.hardware.audio@7.1-impl.ranchu: ~TinyalsaSink: joining consumeThread
+04-17 18:03:11.393 10214 27458 D android.hardware.audio@7.1-impl.ranchu: consumeThread: exiting
+04-17 18:03:11.393 10214 13402 D android.hardware.audio@7.1-impl.ranchu: ~TinyalsaSink: stopping PCM stream
+04-17 18:03:12.881 10277 11598 W AS.PlaybackActivityMon: No piid assigned for invalid/internal port id 36
+04-17 18:03:12.882 10277 11946 W AS.PlaybackActivityMon: No piid assigned for invalid/internal port id 36
+04-17 18:03:12.889 10277 10481 I HalDevMgr: bestIfaceCreationProposal is null, requestIface=STA, existingIface=[name=wlan0 type=STA]
+04-17 18:03:12.908 26417 26417 I ExoPlayerImpl: Init b03ad95 [AndroidXMedia3/1.8.0] [emu64xa16k, sdk_gphone16k_x86_64, Google, 37]
+04-17 18:03:12.912 26417 26417 I MediaSessionImpl: Init 5b27eaa [AndroidXMedia3/1.8.0] [emu64xa16k, sdk_gphone16k_x86_64, Google, 37]
+04-17 18:03:12.915 26417 26417 I MediaSessionCompat: Couldn't find a unique registered media button receiver in the given context.
+04-17 18:03:12.915 10277 11925 I MediaSessionStack: addSession to bottom of stack | record: com.streamfr.app/androidx.media3.session.id./85 (userId=0)
+04-17 18:03:12.915 10277 11925 D MediaSessionService: Media button session is changed to com.streamfr.app/androidx.media3.session.id./85 (userId=0)
+04-17 18:03:12.920 13623 13623 W MediaPlayerList: onMediaKeyEventSessionChanged(Token): Addressed Player changed to a player we didn't have a session for
+04-17 18:03:12.922 13623 13623 I MediaPlayerList: Adding wrapped media player: com.streamfr.app at key: 1
+04-17 18:03:12.922 13623 13623 I MediaPlayerList: onMediaKeyEventSessionChanged: token=com.streamfr.app
+04-17 18:03:12.925 13623 13623 I MediaPlayerList: sendMediaUpdate: Creating a one item queue for a player with no queue
+04-17 18:03:12.925 13623 13623 W MediaControlGattService: Feature PLAYER_NAME support: true
+04-17 18:03:12.925 13623 13623 W MediaControlGattService: Feature PLAYER_NAME support: true
+04-17 18:03:12.925 10277 11925 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./85 (userId=0) playbackState=PlaybackState {state=NONE(0), position=0, buffered position=0, speed=0.0, updated=191273469, actions=7339653, custom actions=[], active item id=0, error=null}
+04-17 18:03:12.925 13623 13623 W MediaControlGattService: Feature PLAYER_NAME_NOTIFY support: true
+04-17 18:03:12.926 10277 10524 D MediaSessionService: setFgsIfSessionIsLinkedToNotification: record=com.streamfr.app/androidx.media3.session.id./85 (userId=0)
+04-17 18:03:12.928 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:12.928 10277 11925 D MediaSessionService: onSessionActiveStateChanged: record=com.streamfr.app/androidx.media3.session.id./85 (userId=0) active=true
+04-17 18:03:12.929 13623 13623 W MediaControlGattService: Feature MEDIA_CONTROL_POINT_OPCODES_SUPPORTED support: true
+04-17 18:03:12.929 13623 13623 W MediaControlGattService: Feature PLAYING_ORDER_SUPPORTED support: true
+04-17 18:03:12.929 13623 13623 W MediaControlGattService: Feature PLAYING_ORDER support: true
+04-17 18:03:12.929 13623 13623 W MediaControlGattService: Feature PLAYER_ICON_OBJ_ID support: false
+04-17 18:03:12.929 13623 13623 W MediaControlGattService: Feature PLAYER_ICON_URL support: false
+04-17 18:03:12.929 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:12.929 13623 13623 W MediaControlGattService: Feature PLAYING_ORDER_SUPPORTED support: true
+04-17 18:03:12.930 13623 13623 W MediaControlGattService: Feature PLAYING_ORDER support: true
+04-17 18:03:12.930 13623 13623 W MediaControlGattService: Feature PLAYING_ORDER_NOTIFY support: true
+04-17 18:03:12.930 10277 11946 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./85 (userId=0) playbackState=PlaybackState {state=NONE(0), position=0, buffered position=0, speed=0.0, updated=191273474, actions=7339653, custom actions=[], active item id=0, error=null}
+04-17 18:03:12.932 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:12.932 13623 13623 W MediaControlGattService: Feature TRACK_DURATION support: true
+04-17 18:03:12.933 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:12.933 13623 13623 W MediaControlProfile: MCS service state fields left unhandled: 
+04-17 18:03:12.933 13623 13623 W MediaControlProfile:    > PLAYBACK_STATE
+04-17 18:03:12.933 13623 13623 W MediaControlProfile:    > OPCODES_SUPPORTED
+04-17 18:03:12.933 13623 13623 W MediaControlProfile: MCS service state fields left unhandled: 
+04-17 18:03:12.933 13623 13623 W MediaControlProfile:    > PLAYBACK_STATE
+04-17 18:03:12.933 13623 13623 W MediaControlProfile:    > OPCODES_SUPPORTED
+04-17 18:03:12.935 26417 26417 D InsetsController: Setting requestedVisibleTypes to 496 (was 503)
+04-17 18:03:12.936 13623 13623 W MediaPlayerList: onMediaKeyEventSessionChanged(Token): Addressed Player changed to a player we didn't have a session for
+04-17 18:03:12.938 10277 11946 I ImeTracker: system_server:5b8d286: onRequestHide at ORIGIN_SERVER reason IME_REQUESTED_CHANGED_LISTENER fromUser false displayId 0
+04-17 18:03:12.940 26417 27429 D PlayerViewModel: Inizio ricerca server per ID: 1171145
+04-17 18:03:12.940 26417 27430 D PlayerViewModel: Inizio ricerca sottotitoli
+04-17 18:03:12.941 26417 27429 D TmdbProvider: getServers: lang=fr, simplifiedLang=fr
+04-17 18:03:12.941 26417 27430 D PlayerViewModel: Inizio ricerca SubDL
+04-17 18:03:12.941 26417 27430 D PlayerViewModel: Ricerca SubDL completata: 0 risultati
+04-17 18:03:12.942 26417 27430 D PlayerViewModel: Inizio ricerca OpenSubtitles
+04-17 18:03:12.943 10277 10299 I ImeTracker: system_server:5b8d286: onCancelled at PHASE_SERVER_SHOULD_HIDE
+04-17 18:03:12.945 13623 13623 I MediaPlayerList: Adding wrapped media player: com.streamfr.app at key: 1
+04-17 18:03:12.946 13623 13623 I MediaPlayerList: onMediaKeyEventSessionChanged: token=com.streamfr.app
+04-17 18:03:12.948 13623 13623 I PlayerSettingsManager: activePlayerChanged to com.streamfr.app
+04-17 18:03:12.952 26417 27429 D Cine24hBypass: [OkHttp] --> GET https://afterdark.best/api/v1/sources?tmdbId=1171145&type=movie&imdbId=&title=Crime%20101&releaseYear=2026
+04-17 18:03:12.952 26417 27429 D Cine24hBypass: [OkHttp] User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36
+04-17 18:03:12.952 26417 27429 D Cine24hBypass: [OkHttp] Referer: https://afterdark.best//
+04-17 18:03:12.954 26417 27429 D Cine24hBypass: [OkHttp] Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8
+04-17 18:03:12.954 26417 27429 D Cine24hBypass: [OkHttp] Accept-Language: it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7
+04-17 18:03:12.954 26417 27429 D Cine24hBypass: [OkHttp] Sec-Fetch-Dest: document
+04-17 18:03:12.954 26417 27429 D Cine24hBypass: [OkHttp] Sec-Fetch-Mode: navigate
+04-17 18:03:12.954 26417 27429 D Cine24hBypass: [OkHttp] Sec-Fetch-Site: none
+04-17 18:03:12.954 26417 27429 D Cine24hBypass: [OkHttp] Upgrade-Insecure-Requests: 1
+04-17 18:03:12.954 26417 27429 D Cine24hBypass: [OkHttp] --> END GET
+04-17 18:03:12.957 13623 13623 I PlayerSettingsManager: updateRemoteDevice: repeat (STATE_REPEAT_OFF -> STATE_REPEAT_OFF), shuffle (STATE_SHUFFLE_OFF -> STATE_SHUFFLE_OFF)
+04-17 18:03:12.957 13623 13623 I MediaPlayerList: sendMediaUpdate: Creating a one item queue for a player with no queue
+04-17 18:03:12.958 13623 13623 I bluetooth: system/btif/avrcp/avrcp_service.cc:533 SendMediaUpdate: track_changed=false :  play_state=true :  queue=false
+04-17 18:03:12.958 10277 11933 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./85 (userId=0) playbackState=PlaybackState {state=NONE(0), position=0, buffered position=0, speed=0.0, updated=191273502, actions=7339653, custom actions=[], active item id=0, error=null}
+04-17 18:03:12.963 13623 13623 I PlayerSettingsManager: activePlayerChanged - current active app uid=10241 isNotFrozen=true
+04-17 18:03:12.963 13623 13623 I PlayerSettingsManager: activePlayerChanged - New player is null, removed active player
+04-17 18:03:12.963 13623 13623 I PlayerSettingsManager: getPlayerRepeatMode - no active player
+04-17 18:03:12.963 13623 13623 I PlayerSettingsManager: getPlayerShuffleMode - no active player
+04-17 18:03:12.963 13623 13623 I PlayerSettingsManager: updateRemoteDevice: repeat (STATE_REPEAT_OFF -> STATE_REPEAT_OFF), shuffle (STATE_SHUFFLE_OFF -> STATE_SHUFFLE_OFF)
+04-17 18:03:12.963 13623 13623 I PlayerSettingsManager: activePlayerChanged - New player is null, removed active player
+04-17 18:03:12.963 13623 13623 I PlayerSettingsManager: getPlayerRepeatMode - no active player
+04-17 18:03:12.963 13623 13623 I PlayerSettingsManager: getPlayerShuffleMode - no active player
+04-17 18:03:12.963 13623 13623 I PlayerSettingsManager: updateRemoteDevice: repeat (STATE_REPEAT_OFF -> STATE_REPEAT_OFF), shuffle (STATE_SHUFFLE_OFF -> STATE_SHUFFLE_OFF)
+04-17 18:03:12.969 26417 26417 D VRI[MainMobileActivity]: WindowInsets changed: statusBars:null navigationBars:null 
+04-17 18:03:12.972 26417 27485 D DnsResolver: Resolving host: frembed.cyou using provider: https://cloudflare-dns.com/dns-query
+04-17 18:03:12.976 26417 26417 I Surface : Creating surface for consumer unnamed-26417-6 with slotExpansion=1 for 64 slots
+04-17 18:03:12.977 26417 26417 I Surface : Creating surface for consumer SurfaceTexture-0-26417-2 with slotExpansion=0 for 64 slots
+04-17 18:03:12.977 26417 26417 I Surface : Creating surface for consumer SurfaceTexture-0-26417-2 with slotExpansion=0 for 64 slots
+04-17 18:03:12.981 26417 27429 D Cine24hBypass: [OkHttp] <-- 403 https://afterdark.best/api/v1/sources?tmdbId=1171145&type=movie&imdbId=&title=Crime%20101&releaseYear=2026 (25ms)
+04-17 18:03:12.981 26417 27429 D Cine24hBypass: [OkHttp] date: Fri, 17 Apr 2026 18:03:12 GMT
+04-17 18:03:12.981 26417 27429 D Cine24hBypass: [OkHttp] content-type: text/html; charset=UTF-8
+04-17 18:03:12.981 26417 27429 D Cine24hBypass: [OkHttp] cache-control: private, max-age=0, no-store, no-cache, must-revalidate, post-check=0, pre-check=0
+04-17 18:03:12.982 26417 27429 D Cine24hBypass: [OkHttp] expires: Thu, 01 Jan 1970 00:00:01 GMT
+04-17 18:03:12.982 26417 27429 D Cine24hBypass: [OkHttp] referrer-policy: same-origin
+04-17 18:03:12.983 26417 27429 D Cine24hBypass: [OkHttp] server-timing: cfEdge;dur=2,cfOrigin;dur=0
+04-17 18:03:12.984 26417 27429 D Cine24hBypass: [OkHttp] x-frame-options: SAMEORIGIN
+04-17 18:03:12.984 26417 27429 D Cine24hBypass: [OkHttp] report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=yxi3E3uNxb6gVv6rkI2XUH0CwrPwkNkOdPp1wogwWiwVCwdoX6YlrDTcKg85a86izSJlIX%2FbZrrNouJBk%2BQ%2BwmPenW2eEpaPTJVPG5fqZwXCHxg4GqDU6eF7z%2Bm7dLbVvA%3D%3D"}]}
+04-17 18:03:12.984 26417 27429 D Cine24hBypass: [OkHttp] nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
+04-17 18:03:12.984 26417 27429 D Cine24hBypass: [OkHttp] server: cloudflare
+04-17 18:03:12.984 26417 27429 D Cine24hBypass: [OkHttp] cf-ray: 9edd585afc70298e-PPT
+04-17 18:03:12.984 26417 27429 D Cine24hBypass: [OkHttp] alt-svc: h3=":443"; ma=86400
+04-17 18:03:12.984 26417 27429 D Cine24hBypass: [OkHttp] <-- END HTTP
+04-17 18:03:12.986 26417 27429 E AfterDarkExtractor: Error fetching sources: Value <!DOCTYPE of type java.lang.String cannot be converted to JSONObject
+04-17 18:03:12.987 26417 27429 I StreamFlixFR: [SERVERS] AfterDark -> 0 serveurs
+04-17 18:03:12.990 26417 27429 I StreamFlixFR: [MATCH] Kidraz -> 'Crime 101' id=/saby1jy/b/kidraz/11480674420
+04-17 18:03:12.994 13623 13623 I MediaPlayerList: sendMediaUpdate: Creating a one item queue for a player with no queue
+04-17 18:03:12.995 13623 13623 E MediaControlProfile: onCurrentPlayerStateUpdated: base actions not supported, player actions= 6ffe85, expected at least= 7f
+04-17 18:03:12.995 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:12.997 26417 27101 I okhttp.OkHttpClient: --> GET https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAAB2ZyZW1iZWQEY3lvdQAAAQAB
+04-17 18:03:12.997 26417 27442 I okhttp.OkHttpClient: --> GET https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAAB2ZyZW1iZWQEY3lvdQAAHAAB
+04-17 18:03:12.999 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:13.001 13623 13623 W MediaControlGattService: Feature PLAYER_NAME support: true
+04-17 18:03:13.001 13623 13623 W MediaControlGattService: Feature PLAYER_ICON_URL support: false
+04-17 18:03:13.001 13623 13623 W MediaControlGattService: Feature PLAYER_ICON_OBJ_ID support: false
+04-17 18:03:13.001 13623 13623 W MediaControlGattService: Feature CURRENT_TRACK_SEGMENT_OBJ_ID support: false
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature CURRENT_TRACK_OBJ_ID support: false
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature NEXT_TRACK_OBJ_ID support: false
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature CURRENT_GROUP_OBJ_ID support: false
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature PARENT_GROUP_OBJ_ID support: false
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature SEARCH_RESULT_OBJ_ID support: false
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature TRACK_TITLE support: true
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature TRACK_DURATION support: true
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature TRACK_POSITION support: true
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature TRACK_POSITION_NOTIFY support: true
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature PLAYBACK_SPEED support: true
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature SEEKING_SPEED support: true
+04-17 18:03:13.007 13623 13623 W MediaControlGattService: Feature PLAYING_ORDER_SUPPORTED support: true
+04-17 18:03:13.008 13623 13623 W MediaControlGattService: Feature PLAYING_ORDER support: true
+04-17 18:03:13.011 26417 27101 I okhttp.OkHttpClient: <-- 200 https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAAB2ZyZW1iZWQEY3lvdQAAAQAB (13ms, 62-byte body)
+04-17 18:03:13.012 13623 13623 W MediaControlGattService: Feature MEDIA_CONTROL_POINT_OPCODES_SUPPORTED support: true
+04-17 18:03:13.012 13623 13623 W MediaControlGattService: Feature PLAYER_NAME support: true
+04-17 18:03:13.012 13623 13623 W MediaControlGattService: Feature PLAYER_NAME support: true
+04-17 18:03:13.012 13623 13623 W MediaControlGattService: Feature PLAYER_NAME_NOTIFY support: true
+04-17 18:03:13.020 26417 27442 I okhttp.OkHttpClient: <-- 200 https://cloudflare-dns.com/dns-query?dns=AAABAAABAAAAAAAAB2ZyZW1iZWQEY3lvdQAAHAAB (22ms, 86-byte body)
+04-17 18:03:13.023 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:13.023 13623 13623 W MediaControlGattService: Feature MEDIA_CONTROL_POINT_OPCODES_SUPPORTED support: true
+04-17 18:03:13.023 13623 13623 W MediaControlGattService: Feature PLAYING_ORDER_SUPPORTED support: true
+04-17 18:03:13.023 13623 13623 W MediaControlGattService: Feature PLAYING_ORDER support: true
+04-17 18:03:13.023 13623 13623 W MediaControlGattService: Feature PLAYER_ICON_OBJ_ID support: false
+04-17 18:03:13.023 13623 13623 W MediaControlGattService: Feature PLAYER_ICON_URL support: false
+04-17 18:03:13.023 13623 13623 W MediaControlGattService: Feature MEDIA_CONTROL_POINT_OPCODES_SUPPORTED support: true
+04-17 18:03:13.024 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:13.024 13623 13623 W MediaControlGattService: Feature PLAYING_ORDER_SUPPORTED support: true
+04-17 18:03:13.024 13623 13623 W MediaControlGattService: Feature PLAYING_ORDER support: true
+04-17 18:03:13.024 13623 13623 W MediaControlGattService: Feature PLAYING_ORDER_NOTIFY support: true
+04-17 18:03:13.028 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:13.028 13623 13623 W MediaControlGattService: Feature TRACK_DURATION support: true
+04-17 18:03:13.028 13623 13623 W MediaControlGattService: Feature TRACK_DURATION support: true
+04-17 18:03:13.028 13623 13623 W MediaControlGattService: Feature TRACK_DURATION_NOTIFY support: true
+04-17 18:03:13.031 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:13.031 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:13.031 13623 13623 W MediaControlGattService: Feature TRACK_CHANGED support: true
+04-17 18:03:13.033 26417 27485 D DnsResolver: Resolved frembed.cyou to: 104.21.53.91, 172.67.211.13, 2606:4700:3036::6815:355b, 2606:4700:3033::ac43:d30d
+04-17 18:03:13.033 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:13.045 10210 10246 I APM_AudioPolicyManager: getNewOutputDevices io 13 recent device override {AUDIO_DEVICE_OUT_SPEAKER, @:}
+04-17 18:03:13.048 13623 13623 I PlayerSettingsManager: activePlayerChanged to com.streamfr.app
+04-17 18:03:13.054 13623 13623 I PlayerSettingsManager: updateRemoteDevice: repeat (STATE_REPEAT_OFF -> STATE_REPEAT_OFF), shuffle (STATE_SHUFFLE_OFF -> STATE_SHUFFLE_OFF)
+04-17 18:03:13.058 13623 13623 I MediaPlayerList: sendMediaUpdate: Creating a one item queue for a player with no queue
+04-17 18:03:13.064 13623 13623 I PlayerSettingsManager: updateRemoteDevice: repeat (STATE_REPEAT_OFF -> STATE_REPEAT_OFF), shuffle (STATE_SHUFFLE_OFF -> STATE_SHUFFLE_OFF)
+04-17 18:03:13.070 13623 13623 I PlayerSettingsManager: updateRemoteDevice: repeat (STATE_REPEAT_OFF -> STATE_REPEAT_OFF), shuffle (STATE_SHUFFLE_OFF -> STATE_SHUFFLE_OFF)
+04-17 18:03:13.141 26417 27444 I StreamFlixFR: [SERVERS] Kidraz -> 1 serveurs
+04-17 18:03:13.303 10277 11749 I ImeTracker: system_server:9400087: onRequestHide at ORIGIN_SERVER reason IME_REQUESTED_CHANGED_LISTENER fromUser false displayId 0
+04-17 18:03:13.304 10277 10299 I ImeTracker: system_server:9400087: onCancelled at PHASE_SERVER_SHOULD_HIDE
+04-17 18:03:13.534 26417 27444 D PlayerViewModel: Ricerca OpenSubtitles completata: 8 risultati
+04-17 18:03:13.671 10740 10889 D SatelliteController: isInCarrierRoamingNbIotNtn: satellite is disabled
+04-17 18:03:13.672 10740 10889 D SatelliteController: getCarrierRoamingNtnConnectType: Checking connect type from PLMN config for subId: 1
+04-17 18:03:13.676 10740 10889 D SatelliteController: getSatellitePerPlmnConfiguration: invalid subId or not supported via carrier.
+04-17 18:03:13.676 10740 10889 D SatelliteController: getCarrierRoamingNtnConnectType: config: null
+04-17 18:03:13.676 10740 10889 D SatelliteController: getCarrierRoamingNtnConnectType: Falling back to global carrier config connect type: 0
+04-17 18:03:13.678 10740 10889 D SatelliteController: updateLastNotifiedCarrierRoamingNtnSignalStrengthAndNotify(1)
+04-17 18:03:13.679 10740 10889 D SatelliteController: updateLastNotifiedCarrierRoamingNtnSignalStrengthAndNotify(1) lastNotifiedSignalStrength level: 0
+04-17 18:03:13.679 10740 10889 D SatelliteController: updateLastNotifiedCarrierRoamingNtnSignalStrengthAndNotify(1) currSignalStrength level: 0
+04-17 18:03:13.761 26417 27429 I StreamFlixFR: [MATCH] FrenchStream -> 'Crime 101' id=15125421-crime-101.html
+04-17 18:03:14.033 26417 27429 I StreamFlixFR: [SERVERS] FrenchStream -> 18 serveurs
+04-17 18:03:14.877 26417 27343 D StreamFlixFR: [NO MATCH] 1Jour1Film pour 'Crime 101'
+04-17 18:03:14.970 26417 27475 I StreamFlixFR: [SERVERS] Frembed -> 8 serveurs
+04-17 18:03:14.971 26417 27475 I StreamFlixFR: [TOTAL] 27 serveurs (15 VF + 12 VOSTFR)
+04-17 18:03:14.972 26417 27475 I StreamFlixES: [SERVERS LIST] -> Found 27 servers: Premium (French), Premium (TrueFrench), Vidzy (French), Vidzy (TrueFrench), Uqload (French), Uqload (TrueFrench), Dood (French), Dood (TrueFrench), Filmoon (French), Filmoon (TrueFrench), sharecloudy, Playmogo (French), Netu (French), Jefferycontrolmodel (French), Uqload (French), Premium (VOSTFR), Vidzy (VOSTFR), Uqload (VOSTFR), Dood (VOSTFR), Voe (VOSTFR), Voe (French), Voe (TrueFrench), Filmoon (VOSTFR), Playmogo (VOSTFR), Netu (VOSTFR), Jefferycontrolmodel (VOSTFR), Uqload (VOSTFR)
+04-17 18:03:14.972 26417 27475 I StreamFlixES: [SERVERS LIST] -> Provider: TMDb (fr)
+04-17 18:03:14.972 26417 27475 I StreamFlixES: [SERVERS LIST] -> Found 27 servers: Premium (French), Premium (TrueFrench), Vidzy (French), Vidzy (TrueFrench), Uqload (French), Uqload (TrueFrench), Dood (French), Dood (TrueFrench), Filmoon (French), Filmoon (TrueFrench), sharecloudy, Playmogo (French), Netu (French), Jefferycontrolmodel (French), Uqload (French), Premium (VOSTFR), Vidzy (VOSTFR), Uqload (VOSTFR), Dood (VOSTFR), Voe (VOSTFR), Voe (French), Voe (TrueFrench), Filmoon (VOSTFR), Playmogo (VOSTFR), Netu (VOSTFR), Jefferycontrolmodel (VOSTFR), Uqload (VOSTFR)
+04-17 18:03:14.972 26417 27475 D PlayerViewModel: Ricerca server completata: 27 server trovati
+04-17 18:03:14.975 26417 27475 D PlayerViewModel: Inizio estrazione video dal server: Premium (French)
+04-17 18:03:14.975 26417 27475 I StreamFlixES: [SERVER] -> Using: Premium (French) (URL: https://fsvid.lol/embed-9dbb5j845ler.html)
+04-17 18:03:14.980 13623 13623 W MediaPlayerWrapper: onQueueChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:14.980 10277 11925 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./85 (userId=0) playbackState=PlaybackState {state=NONE(0), position=0, buffered position=0, speed=0.0, updated=191275524, actions=7339669, custom actions=[], active item id=0, error=null}
+04-17 18:03:14.982 10277 11749 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./85 (userId=0) playbackState=PlaybackState {state=NONE(0), position=0, buffered position=0, speed=0.0, updated=191275525, actions=7339669, custom actions=[], active item id=0, error=null}
+04-17 18:03:14.985 13623 13623 W MediaPlayerWrapper: onQueueChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:14.986 26417 27475 I StreamFlixES: [EXTRACTOR] -> Starting: FSVid (URL: https://fsvid.lol/embed-9dbb5j845ler.html)
+04-17 18:03:14.989 13623 13623 W MediaControlGattService: Feature TRACK_POSITION support: true
+04-17 18:03:14.989 13623 13623 W MediaControlGattService: Feature TRACK_POSITION_NOTIFY support: true
+04-17 18:03:14.990 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:14.990 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:14.993 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:14.993 13623 13623 W MediaControlGattService: Feature PLAYER_NAME support: true
+04-17 18:03:14.993 13623 13623 W MediaControlGattService: Feature TRACK_TITLE support: true
+04-17 18:03:14.993 13623 13623 W MediaControlGattService: Feature TRACK_TITLE support: true
+04-17 18:03:14.993 13623 13623 W MediaControlGattService: Feature TRACK_TITLE_NOTIFY support: true
+04-17 18:03:14.996 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:14.996 13623 13623 W MediaControlGattService: Feature TRACK_DURATION support: true
+04-17 18:03:14.997 13623 13623 W MediaControlGattService: Feature TRACK_DURATION support: true
+04-17 18:03:14.997 13623 13623 W MediaControlGattService: Feature TRACK_DURATION_NOTIFY support: true
+04-17 18:03:14.998 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:14.999 13623 13623 W MediaControlGattService: Feature MEDIA_STATE support: true
+04-17 18:03:15.000 13623 13623 W MediaControlGattService: Feature TRACK_CHANGED support: true
+04-17 18:03:15.003 13623 13759 I BluetoothAdapterProperties: getBondedDevices: length=0
+04-17 18:03:15.006 13623 13623 I bluetooth: system/btif/avrcp/avrcp_service.cc:533 SendMediaUpdate: track_changed=true :  play_state=false :  queue=false
+04-17 18:03:15.006 13623 13623 W MediaPlayerWrapper: onPlaybackStateChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.008 13623 13623 W MediaPlayerWrapper: onPlaybackStateChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.009 13623 13623 W MediaPlayerWrapper: onPlaybackStateChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.011 13623 13623 W MediaPlayerWrapper: onPlaybackStateChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.505 26417 27475 E PlayerViewModel: Errore estrazione video: 
+04-17 18:03:15.505 26417 27475 E PlayerViewModel: retrofit2.HttpException: HTTP 403 
+04-17 18:03:15.505 26417 27475 E PlayerViewModel: 	at retrofit2.KotlinExtensions$await$2$2.onResponse(KotlinExtensions.kt:53)
+04-17 18:03:15.505 26417 27475 E PlayerViewModel: 	at retrofit2.OkHttpCall$1.onResponse(OkHttpCall.java:164)
+04-17 18:03:15.505 26417 27475 E PlayerViewModel: 	at okhttp3.internal.connection.RealCall$AsyncCall.run(RealCall.kt:519)
+04-17 18:03:15.505 26417 27475 E PlayerViewModel: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
+04-17 18:03:15.505 26417 27475 E PlayerViewModel: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
+04-17 18:03:15.505 26417 27475 E PlayerViewModel: 	at java.lang.Thread.run(Thread.java:1572)
+04-17 18:03:15.506 26417 27475 D PlayerViewModel: Inizio estrazione video dal server: Premium (TrueFrench)
+04-17 18:03:15.507 26417 27475 I StreamFlixES: [SERVER] -> Using: Premium (TrueFrench) (URL: https://fsvid.lol/embed-a3xegcqceqh4.html)
+04-17 18:03:15.512 26417 27475 I StreamFlixES: [EXTRACTOR] -> Starting: FSVid (URL: https://fsvid.lol/embed-a3xegcqceqh4.html)
+04-17 18:03:15.513 10277 11749 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./85 (userId=0) playbackState=PlaybackState {state=NONE(0), position=0, buffered position=0, speed=0.0, updated=191276057, actions=7339669, custom actions=[], active item id=0, error=null}
+04-17 18:03:15.517 10277 11749 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./85 (userId=0) playbackState=PlaybackState {state=NONE(0), position=0, buffered position=0, speed=0.0, updated=191276060, actions=7339669, custom actions=[], active item id=0, error=null}
+04-17 18:03:15.517 13623 13623 W MediaPlayerWrapper: onQueueChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.520 13623 13623 W MediaPlayerWrapper: onQueueChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.520 13623 13623 W MediaPlayerWrapper: onPlaybackStateChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.523 13623 13623 W MediaPlayerWrapper: onPlaybackStateChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.524 13623 13623 W MediaPlayerWrapper: onPlaybackStateChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.526 13623 13623 W MediaPlayerWrapper: onPlaybackStateChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.774 26417 27475 E PlayerViewModel: Errore estrazione video: 
+04-17 18:03:15.774 26417 27475 E PlayerViewModel: retrofit2.HttpException: HTTP 403 
+04-17 18:03:15.774 26417 27475 E PlayerViewModel: 	at retrofit2.KotlinExtensions$await$2$2.onResponse(KotlinExtensions.kt:53)
+04-17 18:03:15.774 26417 27475 E PlayerViewModel: 	at retrofit2.OkHttpCall$1.onResponse(OkHttpCall.java:164)
+04-17 18:03:15.774 26417 27475 E PlayerViewModel: 	at okhttp3.internal.connection.RealCall$AsyncCall.run(RealCall.kt:519)
+04-17 18:03:15.774 26417 27475 E PlayerViewModel: 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
+04-17 18:03:15.774 26417 27475 E PlayerViewModel: 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
+04-17 18:03:15.774 26417 27475 E PlayerViewModel: 	at java.lang.Thread.run(Thread.java:1572)
+04-17 18:03:15.776 26417 27475 D PlayerViewModel: Inizio estrazione video dal server: Vidzy (French)
+04-17 18:03:15.776 26417 27475 I StreamFlixES: [SERVER] -> Using: Vidzy (French) (URL: https://vidzy.live/embed-lqzi3ctpxfwt.html)
+04-17 18:03:15.781 10277 11749 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./85 (userId=0) playbackState=PlaybackState {state=NONE(0), position=0, buffered position=0, speed=0.0, updated=191276325, actions=7339669, custom actions=[], active item id=0, error=null}
+04-17 18:03:15.783 13623 13623 W MediaPlayerWrapper: onQueueChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.786 13623 13623 W MediaPlayerWrapper: onQueueChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.786 10277 11749 D MediaSessionService: onSessionPlaybackStateChanged: record=com.streamfr.app/androidx.media3.session.id./85 (userId=0) playbackState=PlaybackState {state=NONE(0), position=0, buffered position=0, speed=0.0, updated=191276330, actions=7339669, custom actions=[], active item id=0, error=null}
+04-17 18:03:15.786 13623 13623 W MediaPlayerWrapper: onPlaybackStateChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.787 13623 13623 W MediaPlayerWrapper: onPlaybackStateChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.789 13623 13623 W MediaPlayerWrapper: onPlaybackStateChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.791 13623 13623 W MediaPlayerWrapper: onPlaybackStateChanged(): com.streamfr.app tried to update with no new data
+04-17 18:03:15.802 26417 27475 I StreamFlixES: [EXTRACTOR] -> Starting: Vidzy (URL: https://vidzy.live/embed-lqzi3ctpxfwt.html)
+04-17 18:03:15.898 10277 10481 I HalDevMgr: bestIfaceCreationProposal is null, requestIface=STA, existingIface=[name=wlan0 type=STA]
+04-17 18:03:15.934 10214 13402 D android.hardware.audio@7.1-impl.ranchu: threadLoop: entering standby, frames: 736851264
+04-17 18:03:15.934 10214 13402 D android.hardware.audio@7.1-impl.ranchu: ~TinyalsaSink: joining consumeThread
+04-17 18:03:15.935 10214 27482 D android.hardware.audio@7.1-impl.ranchu: consumeThread: exiting
+04-17 18:03:15.935 10214 13402 D android.hardware.audio@7.1-impl.ranchu: ~TinyalsaSink: stopping PCM stream
+04-17 18:03:16.018 10277 10299 I DisplayDeviceRepository: Display device changed render timings: "Built-in Screen", renderFrameRate=60.000004, presentationDeadlineNanos=16666666, appVsyncOffsetNanos=1000000, frameRateOverrides=[{uid=10241 frameRateHz=60.000004}]

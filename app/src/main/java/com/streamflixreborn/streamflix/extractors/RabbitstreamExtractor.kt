@@ -34,13 +34,26 @@ open class RabbitstreamExtractor : Extractor() {
     protected open val key = "https://keys4.fun"
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val httpUrl = link.toHttpUrl()
+        val hostUrl = "${httpUrl.scheme}://${httpUrl.host}"
+        val service = Service.build(hostUrl)
 
         val sourceId = link.substringAfterLast("/").substringBefore("?")
 
-        val response = service.getSources(
-            url = BuildConfig.RABBITSTREAM_SOURCE_API + sourceId,
-        )
+        val apiBase = BuildConfig.RABBITSTREAM_SOURCE_API
+        val response = if (apiBase.isNotEmpty()) {
+            service.getSources(
+                url = apiBase + sourceId,
+            )
+        } else {
+            // Fallback when RABBITSTREAM_SOURCE_API is not configured
+            service.getSources(
+                url = "$hostUrl/$embed/getSources",
+                id = sourceId,
+                token = null,
+                referer = link,
+            )
+        }
 
         val sources = when (response) {
             is Service.Sources -> response
@@ -192,6 +205,55 @@ open class RabbitstreamExtractor : Extractor() {
     class PremiumEmbedingExtractor : RabbitstreamExtractor() {
         override val name = "PremiumEmbeding"
         override val mainUrl = "https://premiumembeding.cloud"
+
+        override suspend fun extract(link: String): Video {
+            // Build API URL from the embed link itself instead of relying on RABBITSTREAM_SOURCE_API
+            val httpUrl = link.toHttpUrl()
+            val hostUrl = "${httpUrl.scheme}://${httpUrl.host}"
+            val sourceId = httpUrl.pathSegments.lastOrNull { it.isNotEmpty() }
+                ?: link.substringAfterLast("/").substringBefore("?")
+
+            val service = Service.build(hostUrl)
+
+            // Try the standard rabbitstream getSources endpoint
+            val apiUrl = "$hostUrl/$embed/getSources"
+
+            val response = try {
+                service.getSources(
+                    url = apiUrl,
+                    id = sourceId,
+                    token = null,
+                    referer = link,
+                )
+            } catch (e: Exception) {
+                // Fallback: try without embed path
+                service.getSources(
+                    url = "$hostUrl/getSources",
+                    id = sourceId,
+                    token = null,
+                    referer = link,
+                )
+            }
+
+            val sources = when (response) {
+                is Service.Sources -> response
+                is Service.Sources.Encrypted -> response.decrypt(
+                    key = service.getSourceEncryptedKey(key).rabbitstream.keys.key,
+                )
+            }
+
+            return Video(
+                source = sources.sources.map { it.file }.firstOrNull() ?: "",
+                subtitles = sources.tracks
+                    .filter { it.kind == "captions" }
+                    .map {
+                        Video.Subtitle(
+                            label = it.label,
+                            file = it.file,
+                        )
+                    }
+            )
+        }
     }
 
 

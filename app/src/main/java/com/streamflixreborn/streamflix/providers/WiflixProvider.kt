@@ -55,7 +55,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     override val logo: String
         get() {
             var cacheLogo = UserPreferences.getProviderCache(this,UserPreferences.PROVIDER_LOGO)
-            return cacheLogo.ifEmpty { "" }
+            return cacheLogo.ifEmpty { "$baseUrl/favicon.ico" }
         }
 
     override val language = "fr"
@@ -522,18 +522,24 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             poster = document.selectFirst("img#posterimg")
                 ?.attr("src")?.let { baseUrl + it },
 
-            seasons = listOfNotNull(
-                Season(
-                    id = "$id/blocvostfr",
-                    title = "Épisodes - VOSTFR",
-                    number = seasonNumber
-                ).takeIf { document.select("div.blocvostfr ul.eplist li").size > 0 },
-                Season(
-                    id = "$id/blocfr",
-                    title = "Épisodes - VF",
-                    number = seasonNumber
-                ).takeIf { document.select("div.blocfr ul.eplist li").size > 0 },
-            ),
+            seasons = run {
+                val seasonPoster = document.selectFirst("img#posterimg")
+                    ?.attr("src")?.let { baseUrl + it }
+                listOfNotNull(
+                    Season(
+                        id = "$id/blocvostfr",
+                        title = "Épisodes - VOSTFR",
+                        number = seasonNumber,
+                        poster = seasonPoster,
+                    ).takeIf { document.select("div.blocvostfr ul.eplist li").size > 0 },
+                    Season(
+                        id = "$id/blocfr",
+                        title = "Épisodes - VF",
+                        number = seasonNumber,
+                        poster = seasonPoster,
+                    ).takeIf { document.select("div.blocfr ul.eplist li").size > 0 },
+                )
+            },
             directors = document.select("ul.mov-list li")
                 .find { it.selectFirst("div.mov-label")?.text()?.contains("ALISATEUR") == true }
                 ?.selectFirst("div.mov-desc span")
@@ -603,11 +609,16 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}serie-en-streaming/$tvShowId") else doc
         } catch (e: Exception) { getDocument("${baseUrl}serie-en-streaming/$tvShowId") }
 
+        // Use the show poster as episode thumbnail
+        val showPoster = document.selectFirst("img#posterimg")
+            ?.attr("src")?.let { baseUrl + it }
+
         val episodes = document.select("div.$className ul.eplist li").map {
             Episode(
                 id = "$tvShowId/${it.attr("rel")}",
                 number = it.text().substringAfter("Episode ").toIntOrNull() ?: 0,
                 title = it.text(),
+                poster = showPoster,
             )
         }
 

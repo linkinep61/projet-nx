@@ -376,9 +376,10 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
                     if (!href.contains("/films/")) return@mapNotNull null
 
-                    val title = card.selectFirst(".j1f-card__title")?.text() ?: ""
-                    val posterImg = card.selectFirst(".j1f-card__poster img")
-                    val poster = posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
+                    // Try both old and new card inner selectors
+                    val title = (card.selectFirst(".j1f-card__title") ?: card.selectFirst(".card-title"))?.text() ?: ""
+                    val posterImg = card.selectFirst(".j1f-card__poster img") ?: card.selectFirst(".card-poster img")
+                    val poster = posterImg?.attr("src")?.ifBlank { posterImg?.attr("data-src") } ?: ""
                     val id = href.substringBeforeLast("/").substringAfterLast("/")
 
                     Movie(
@@ -391,6 +392,11 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         if (itemsRec.isNotEmpty()) {
             movies = movies + itemsRec
+        }
+
+        // REST API fallback: catalogue pages are now JS-rendered, Jsoup sees nothing
+        if (movies.isEmpty()) {
+            movies = getMoviesFromApi(page)
         }
 
         return movies
@@ -463,9 +469,10 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
                     if (!href.contains("/tvshows/")) return@mapNotNull null
 
-                    val title = card.selectFirst(".j1f-card__title")?.text() ?: ""
-                    val posterImg = card.selectFirst(".j1f-card__poster img")
-                    val poster = posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
+                    // Try both old and new card inner selectors
+                    val title = (card.selectFirst(".j1f-card__title") ?: card.selectFirst(".card-title"))?.text() ?: ""
+                    val posterImg = card.selectFirst(".j1f-card__poster img") ?: card.selectFirst(".card-poster img")
+                    val poster = posterImg?.attr("src")?.ifBlank { posterImg?.attr("data-src") } ?: ""
                     val id = href.substringBeforeLast("/").substringAfterLast("/")
 
                     TvShow(
@@ -478,6 +485,11 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         if (itemsRec.isNotEmpty()) {
             tvshows = tvshows + itemsRec
+        }
+
+        // REST API fallback: catalogue pages are now JS-rendered, Jsoup sees nothing
+        if (tvshows.isEmpty()) {
+            tvshows = getTvShowsFromApi(page)
         }
 
         return tvshows
@@ -503,13 +515,13 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     }
 
     fun decodeHtml(s: String): String {
-        @Suppress("DEPRECATION")
-        val text = Html.fromHtml(s).toString()
-        return try {
-            JSONObject().put("v", text).getString("v")
-        } catch (_: Exception) {
-            text
+        // Decode JSON unicode escapes (\uXXXX) first
+        val unescaped = s.replace(Regex("\\\\u([0-9a-fA-F]{4})")) { mr ->
+            val code = mr.groupValues[1].toInt(16)
+            code.toChar().toString()
         }
+        @Suppress("DEPRECATION")
+        return Html.fromHtml(unescaped).toString()
     }
 
     data class itemLink(
@@ -523,10 +535,16 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         val scriptdoc = document.head().selectFirst("script[type=application/ld+json]:not([class])")?.data().orEmpty()
 
-        val title = scriptdoc.substringAfter("name\":\"").substringBefore("\",")
-        val overview = decodeHtml(scriptdoc.substringAfter("description\":\"").substringBefore("\",")).substringAfter(": ").substringBeforeLast(" Voir ")
+        // Parse JSON-LD properly instead of naive string manipulation
+        val jsonLd = try { JSONObject(scriptdoc) } catch (_: Exception) { JSONObject() }
+        val title = decodeHtml(jsonLd.optString("name", "")).ifBlank {
+            document.selectFirst("h1.entry-title, h1, .data h1")?.text() ?: ""
+        }
+        val overview = decodeHtml(jsonLd.optString("description", "")).substringAfter(": ").substringBeforeLast(" Voir ")
         val released = id.substringAfterLast("-")
-        val strTrailerURL = scriptdoc.substringAfter("\"embedUrl\":").substringBefore(",").replace("\"","")
+        val strTrailerURL = jsonLd.optString("embedUrl", "").ifBlank {
+            scriptdoc.substringAfter("\"embedUrl\":").substringBefore(",").replace("\"","")
+        }
 
         val trailerURL: String? = strTrailerURL.takeIf { it != "null" && it.isNotEmpty() }
                                     ?.substringBefore("?")
@@ -556,8 +574,8 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         val quality = document.selectFirst("div.fakeplayer span.quality")?.text()
             ?: document.selectFirst("span.quality")?.text()
 
-        // Resilient genres extraction with fallback
-        val genres = document.select("div.sgeneros").select("a")
+        // Resilient genres extraction with fallback + dedup
+        val genres = (document.select("div.sgeneros").select("a")
             .takeIf { it.isNotEmpty() }
             ?.mapNotNull {
                 Genre(
@@ -570,7 +588,7 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     id = it.attr("href").substringBeforeLast("/").substringAfterLast("/"),
                     name = it.text(),
                 )
-            }
+            }).distinctBy { it.name }
 
         // Resilient directors extraction with fallback
         val directors = document.select("div.persons > div.person[itemprop=director]").map { it ->
@@ -640,7 +658,11 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         val scriptdoc = document.head().selectFirst("script[type=application/ld+json]:not([class])")?.data().orEmpty()
 
-        val title = scriptdoc.substringAfter("name\":\"").substringBefore("\",")
+        // Parse JSON-LD properly instead of naive string manipulation
+        val jsonLdTv = try { JSONObject(scriptdoc) } catch (_: Exception) { JSONObject() }
+        val title = decodeHtml(jsonLdTv.optString("name", "")).ifBlank {
+            document.selectFirst("h1.entry-title, h1, .data h1")?.text() ?: ""
+        }
         var overview = decodeHtml(document.selectFirst("div.wp-content")?.text()?:"")
         if (overview.startsWith("Regarder ")) {
             overview = overview.substringAfter(": ")
@@ -668,8 +690,12 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     urlMatch?.groupValues?.get(1)?.toIntOrNull() ?: (idx + 1)
                 }
 
+                // Extract relative path from full URL (e.g. "saisons/slug")
+                // getSeason() uses @GET("{slug}") with encoded=true, so slashes are preserved
+                val seasonSlug = href.substringAfter("://").substringAfter("/").trimEnd('/')
+
                 Season(
-                    id = href.substringBeforeLast("/").substringAfterLast("/"),
+                    id = seasonSlug,
                     number = seasonNumber,
                     title = seasonTitle.ifBlank { "Saison $seasonNumber" },
                     poster = seasonCard.selectFirst("img")?.attr("src")
@@ -704,8 +730,8 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             ?: document.selectFirst(".j1f-hero img, img[class*=poster]")?.attr("src")
             ?: "")
 
-        // Resilient genres extraction with fallback
-        val genres = document.select("div.sgeneros").select("a")
+        // Resilient genres extraction with fallback + dedup
+        val genres = (document.select("div.sgeneros").select("a")
             .takeIf { it.isNotEmpty() }
             ?.mapNotNull {
                 Genre(
@@ -718,7 +744,7 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     id = it.attr("href").substringBeforeLast("/").substringAfterLast("/"),
                     name = it.text(),
                 )
-            }
+            }).distinctBy { it.name }
 
         // Resilient directors extraction with fallback
         val directors = document.select("div.persons > div.person[itemprop=director]").map { it ->
@@ -782,6 +808,10 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     /**
      * Decode all base64 data-URL scripts from a Jsoup document.
+     * The 1jour1film site embeds JS variables (j1fEpsData, J1F_SRV, J1F, etc.)
+     * inside <script src="data:text/javascript;base64,..."> tags.
+     * Jsoup treats these as external scripts so their content is NOT in document.html().
+     * This helper extracts and decodes them so we can regex-search the JS code.
      */
     private fun extractDecodedScripts(document: Document): String {
         val sb = StringBuilder()
@@ -806,6 +836,7 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         // New format: fetch season page and parse j1fEpsData JS variable
         try {
             val seasonDocument = service.getSeason(seasonId)
+            // j1fEpsData is in base64-encoded data URL scripts, decode them
             val decodedScripts = extractDecodedScripts(seasonDocument)
             val html = seasonDocument.html()
             val searchText = decodedScripts.ifEmpty { html }
@@ -912,7 +943,7 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             service.getGenre(id, page)
         } catch (e: HttpException) {
             when (e.code()) {
-                404 -> return Genre(id, "")
+                   404 -> return Genre(id, "")
                 else -> throw e
             }
         }
@@ -923,18 +954,23 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             shows = document.select("div.items.full > article.item.movies, article.item.tvshows")
                 .mapNotNull {
                     val link = it.selectFirst("div.data")?.selectFirst("a")
-                    val fhref = link?.attr("href") ?: ""
+                    val fhref = link
+                        ?.attr("href")?:""
                     val href = fhref.substringBeforeLast("/").substringAfterLast("/")
                     if (fhref.contains("films/")) {
                         Movie(
                             href,
-                            title = link?.text() ?: "",
+                            title = link
+                                ?.text()
+                                ?: "",
                             poster = it.selectFirst("img")?.attr("src")
                         )
                     } else if (fhref.contains("tvshows/")) {
                         TvShow(
                             id = href,
-                            title = link?.text() ?: "",
+                            title = link
+                                ?.text()
+                                ?: "",
                             poster = it.selectFirst("img")?.attr("src")
                         )
                     } else {
@@ -957,25 +993,29 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 else -> throw e
             }
         }
-
         val people = People(
             id = id,
             name = "",
             filmography = document.select("div.items.full > article.item.movies, article.item.tvshows")
                 .mapNotNull {
                     val link = it.selectFirst("div.data")?.selectFirst("a")
-                    val fhref = link?.attr("href") ?: ""
+                    val fhref = link
+                        ?.attr("href")?:""
                     val href = fhref.substringBeforeLast("/").substringAfterLast("/")
                     if (fhref.contains("/films/")) {
                         Movie(
                             href,
-                            title = link?.text() ?: "",
+                            title = link
+                                ?.text()
+                                ?: "",
                             poster = it.selectFirst("img")?.attr("src")
                         )
                     } else if (fhref.contains("/tvshows/")) {
                         TvShow(
                             id = href,
-                            title = link?.text() ?: "",
+                            title = link
+                                ?.text()
+                                ?: "",
                             poster = it.selectFirst("img")?.attr("src")
                         )
                     } else {
@@ -1048,6 +1088,7 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     } catch (_: Exception) { }
                 }
 
+                // Return early with season-based results
                 val other = if (apiUrl.isNotEmpty())
                     apivoirfilm.expand(apiUrl, baseUrl, "FR ")
                 else if (onregardeUrl.isNotEmpty())
@@ -1055,7 +1096,7 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 else
                     emptyList()
 
-                return sortVfFirst(servers + other)
+                return servers + other
             }
         }
 
@@ -1066,6 +1107,7 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
 
         // Try to extract J1F_SRV servers from the page
+        // Data is in base64-encoded data URL scripts
         val decodedMovieScripts = extractDecodedScripts(document)
         val rawHtml = document.html()
         val jsContent = decodedMovieScripts.ifEmpty { rawHtml }
@@ -1099,18 +1141,18 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     }
                 }
             } catch (e: Exception) {
-                // JSON parsing failed
+                // JSON parsing failed, try fallback method
             }
         }
 
-        // Fallback: extract post ID and probe DooPlay AJAX
+        // Fallback: extract post ID from body class and probe DooPlay AJAX
         if (servers.isEmpty() && apiUrl.isEmpty() && onregardeUrl.isEmpty()) {
             val postIdMatch = Regex("""postid-(\d+)""").find(rawHtml)
             val postId = postIdMatch?.groupValues?.get(1) ?: ""
             val isEpisode = videoType is Video.Type.Episode
 
             if (postId.isNotEmpty()) {
-                for (nume in 1..10) {
+                for (nume in 1..30) {
                     try {
                         val link = service.getServers(
                             num = nume.toString(),
@@ -1142,37 +1184,37 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
         }
 
-        // Legacy fallback: old DooPlay player options
+        // Legacy fallback: old DooPlay player options (pre-redesign)
         if (servers.isEmpty() && apiUrl.isEmpty() && onregardeUrl.isEmpty()) {
-            val playerOptions = document.selectFirst("ul#playeroptionsul")?.select("li.dooplay_player_option")
-            playerOptions?.forEachIndexed { idx, element ->
-                try {
-                    val nume = element.attr("data-nume")
-                    val post = element.attr("data-post")
+            val oldServers = document.selectFirst("ul#playeroptionsul")?.select("li.dooplay_player_option")
+                ?.mapIndexedNotNull { idx, it ->
+                    val nume = it.attr("data-nume")
+                    val post = it.attr("data-post")
                     val isEpisode = videoType is Video.Type.Episode
-                    val link = service.getServers(num = nume, post = post, type = if (isEpisode) "tv" else "movie")
+                    val link = service.getServers(num=nume, post=post, type=if (isEpisode) "tv" else "movie")
 
-                    if (link.embed_url.isNullOrEmpty() || ignoreSource("", link.embed_url)) return@forEachIndexed
+                    if (link.embed_url.isNullOrEmpty() ||
+                        ignoreSource("", link.embed_url))
+                        return@mapIndexedNotNull null
 
                     if (link.embed_url.startsWith(apivoirfilm.mainUrl)) {
                         apiUrl = link.embed_url
-                        return@forEachIndexed
+                        return@mapIndexedNotNull null
                     }
                     if (link.embed_url.startsWith(onregadeou.mainUrl)) {
                         onregardeUrl = link.embed_url
-                        return@forEachIndexed
+                        return@mapIndexedNotNull null
                     }
 
-                    val title = element.selectFirst("span.title")?.text() ?: "Server $idx"
-                    servers.add(
-                        Video.Server(
-                            id = "srv$idx",
-                            name = title,
-                            src = link.embed_url
-                        )
+                    val title = it.selectFirst("span.title")?.text() ?: "Server $idx"
+
+                    Video.Server(
+                        id = "srv$idx",
+                        name = title,
+                        src = link.embed_url
                     )
-                } catch (_: Exception) { }
-            }
+                } ?: emptyList()
+            servers.addAll(oldServers)
         }
 
         val other = if (apiUrl.isNotEmpty())
@@ -1182,17 +1224,7 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         else
             emptyList()
 
-        return sortVfFirst(servers + other)
-    }
-
-    private fun sortVfFirst(servers: List<Video.Server>): List<Video.Server> {
-        return servers.sortedBy { server ->
-            val name = server.name.uppercase()
-            when {
-                name.contains("VOSTFR") && !name.contains("VF") -> 1
-                else -> 0
-            }
-        }
+        return servers + other
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
@@ -1228,6 +1260,51 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             serviceInitialized = true
         }
         return baseUrl
+    }
+
+    /**
+     * Fallback: fetch movies from the WordPress REST API when the catalogue
+     * pages are JS-rendered and Jsoup cannot parse them.
+     */
+    private suspend fun getMoviesFromApi(page: Int): List<Movie> {
+        return try {
+            val response = service.getMoviesApi(page = page)
+            val jsonArray = JSONArray(response.string())
+            (0 until jsonArray.length()).mapNotNull { i ->
+                val obj = jsonArray.getJSONObject(i)
+                val slug = obj.optString("slug", "")
+                val title = obj.optJSONObject("title")?.optString("rendered", "") ?: ""
+                val poster = try {
+                    obj.getJSONObject("_embedded")
+                        .getJSONArray("wp:featuredmedia")
+                        .getJSONObject(0)
+                        .optString("source_url", "")
+                } catch (_: Exception) { "" }
+                if (slug.isNotEmpty()) Movie(id = slug, title = decodeHtml(title), poster = poster) else null
+            }
+        } catch (_: Exception) { emptyList() }
+    }
+
+    /**
+     * Fallback: fetch TV shows from the WordPress REST API.
+     */
+    private suspend fun getTvShowsFromApi(page: Int): List<TvShow> {
+        return try {
+            val response = service.getTvShowsApi(page = page)
+            val jsonArray = JSONArray(response.string())
+            (0 until jsonArray.length()).mapNotNull { i ->
+                val obj = jsonArray.getJSONObject(i)
+                val slug = obj.optString("slug", "")
+                val title = obj.optJSONObject("title")?.optString("rendered", "") ?: ""
+                val poster = try {
+                    obj.getJSONObject("_embedded")
+                        .getJSONArray("wp:featuredmedia")
+                        .getJSONObject(0)
+                        .optString("source_url", "")
+                } catch (_: Exception) { "" }
+                if (slug.isNotEmpty()) TvShow(id = slug, title = decodeHtml(title), poster = poster) else null
+            }
+        } catch (_: Exception) { emptyList() }
     }
 
     private suspend fun initializeService() {
@@ -1325,6 +1402,24 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             @Header("User-agent") user_agent: String = USER_AGENT
         ): itemLink
 
+        @GET("wp-json/wp/v2/movies")
+        suspend fun getMoviesApi(
+            @Query("per_page") perPage: Int = 24,
+            @Query("page") page: Int,
+            @Query("_fields") fields: String = "id,slug,title,featured_media,_links",
+            @Query("_embed") embed: String = "wp:featuredmedia",
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): okhttp3.ResponseBody
+
+        @GET("wp-json/wp/v2/tvshows")
+        suspend fun getTvShowsApi(
+            @Query("per_page") perPage: Int = 24,
+            @Query("page") page: Int,
+            @Query("_fields") fields: String = "id,slug,title,featured_media,_links",
+            @Query("_embed") embed: String = "wp:featuredmedia",
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): okhttp3.ResponseBody
+
         @GET("genre/{genre}/page/{page}/")
         suspend fun getGenre(
             @Path("genre") genre: String,
@@ -1336,4 +1431,7 @@ object UnJourUnFilm2Provider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         suspend fun getPeople(
             @Path("id") id: String,
             @Path("page") page: Int,
-            @Header(
+            @Header("User-agent") user_agent: String = USER_AGENT
+        ): Document
+    }
+}

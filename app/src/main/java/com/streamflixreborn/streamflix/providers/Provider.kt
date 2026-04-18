@@ -57,17 +57,18 @@ interface Provider {
             val tvShows: Boolean
         )
 
-        val providers = mapOf(
+        val providers: Map<Provider, ProviderSupport> = mapOf(
             // French providers only
             WiflixProvider to ProviderSupport(movies = true, tvShows = true),
             FrenchStreamProvider to ProviderSupport(movies = true, tvShows = true),
             FrenchAnimeProvider to ProviderSupport(movies = true, tvShows = true),
             FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true),
             FrembedProvider to ProviderSupport(movies = true, tvShows = true),
-            AfterDarkProvider to ProviderSupport(movies = true, tvShows = true),
+
             KidrazProvider to ProviderSupport(movies = true, tvShows = false),
             UnJourUnFilmProvider to ProviderSupport(movies = true, tvShows = true),
-            UnJourUnFilm2Provider to ProviderSupport(movies = true, tvShows = true),
+            // UnJourUnFilm2Provider désactivé — miroir de UnJourUnFilm, tombe en panne en même temps
+            // UnJourUnFilm2Provider to ProviderSupport(movies = true, tvShows = true),
             aploufProvider to ProviderSupport(movies = true, tvShows = false),
             AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true),
         )
