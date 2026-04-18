@@ -496,5 +496,4 @@
     <string name="settings_refresh_cache_summary">Recharger l\'historique de visionnage et les données de l\'application depuis la base de données</string>
     <string name="settings_refresh_cache_confirm">Actualiser le cache ?</string>
     <string name="settings_refresh_cache_message">Cela rechargera l\'historique de visionnage et les données de l\'application depuis la base de données.</string>
-    <string name="settings_refresh_cache_success">Cache actualisé avec succès</string>
-</resources>
+    <string name="settings
