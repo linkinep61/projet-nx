@@ -15,7 +15,7 @@ class VidozaExtractor : Extractor() {
     override val aliasUrls = listOf<String>("https://videzz.net")
 
     override suspend fun extract(link: String): Video {
-        val service = VoeExtractorService.build(mainUrl)
+        val service = VidozaService.build(mainUrl)
         val source = service.getSource(link.replace(mainUrl, ""))
         val videoUrl = source.select("source").attr("src")
         return Video(
@@ -25,16 +25,16 @@ class VidozaExtractor : Extractor() {
     }
 
 
-    private interface VoeExtractorService {
+    private interface VidozaService {
 
         companion object {
-            fun build(baseUrl: String): VoeExtractorService {
+            fun build(baseUrl: String): VidozaService {
                 val retrofit = Retrofit.Builder()
                     .baseUrl(baseUrl)
                     .addConverterFactory(JsoupConverterFactory.create())
                     .build()
 
-                return retrofit.create(VoeExtractorService::class.java)
+                return retrofit.create(VidozaService::class.java)
             }
         }
 

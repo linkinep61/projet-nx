@@ -74,6 +74,7 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         "14" to "Fantasy",
         "36" to "History",
         "27" to "Horror",
+        "k-drama" to "K-Drama",
         "10402" to "Music",
         "9648" to "Mystery",
         "10749" to "Romance",

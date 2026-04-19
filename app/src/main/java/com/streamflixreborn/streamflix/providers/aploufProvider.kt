@@ -189,7 +189,13 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     name = name,
                     id = "$name|$catid"
                 )
+            }.toMutableList()
+
+            // Ajouter K-Drama (recherche par mots-clés via GenreViewModel)
+            if (genres.none { (it as? Genre)?.id?.contains("k-drama", ignoreCase = true) == true }) {
+                genres.add(Genre(id = "k-drama", name = "K-Drama"))
             }
+
             return@coroutineScope genres
         }
 

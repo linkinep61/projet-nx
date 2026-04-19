@@ -37,6 +37,8 @@
 
     <string name="search_input_hint">Rechercher des films, séries TV</string>
     <string name="global_search">Recherche globale</string>
+    <string name="global_search_films">Recherche globale films et séries</string>
+    <string name="global_search_anime">Recherche globale anime</string>
     <string name="searching">Recherche en cours...</string>
     <string name="search_error">Erreur</string>
     <string name="result">Résultat</string>
@@ -93,7 +95,7 @@
     <string name="people_biography">Biographie</string>
     <string name="people_read_more">Voir plus &gt;</string>
 
-    <string name="genre_header_name">%s Films et séries TV</string>
+    <string name="genre_header_name">%s</string>
 
     <string name="player_subtitle_tv_show">S%d E%d • %s</string>
     <string name="player_subtitle_tv_show_episode_only">E%d • %s</string>

@@ -10,6 +10,7 @@ import com.streamflixreborn.streamflix.models.Category
 import com.streamflixreborn.streamflix.models.Episode
 import com.streamflixreborn.streamflix.models.Genre
 import com.streamflixreborn.streamflix.models.Movie
+import com.streamflixreborn.streamflix.models.Show
 import com.streamflixreborn.streamflix.models.People
 import com.streamflixreborn.streamflix.models.Season
 import com.streamflixreborn.streamflix.models.TvShow
@@ -230,21 +231,27 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         if (page > 1) return emptyList()
         initializeService()
         if (query.isEmpty()) {
-            val document = service.getHome()
-
-            val genres = document.selectFirst("ul.mega-sub-menu:has(li.mega-menu-item-object-genres)")
-                    ?.select("li.mega-menu-item-object-genres")
-                    ?.mapNotNull {
-                        val a = it.selectFirst(">a")
-                        if (a == null) return@mapNotNull null
-
-                        Genre(
-                            id = a.attr("href").substringBeforeLast("/").substringAfterLast("/"),
-                            name = a.text(),
-                        )
-                    } ?: emptyList()
-
-            return genres
+            return listOf(
+                "Action" to "action",
+                "Animation" to "animation",
+                "Aventure" to "aventure",
+                "Comédie" to "comedie",
+                "Crime" to "crime",
+                "Documentaire" to "documentaire",
+                "Drame" to "drame",
+                "K-Drama" to "drama-coreen",
+                "Familial" to "familial",
+                "Fantastique" to "fantastique",
+                "Guerre" to "guerre",
+                "Histoire" to "histoire",
+                "Horreur" to "horreur",
+                "Musique" to "musique",
+                "Mystère" to "mystere",
+                "Romance" to "romance",
+                "Science-Fiction" to "science-fiction",
+                "Thriller" to "thriller",
+                "Western" to "western",
+            ).map { (name, slug) -> Genre(id = slug, name = name) }
         }
 
         val document = service.search( query )
@@ -286,6 +293,35 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     val title = card.selectFirst(".j1f-card__title")?.text() ?: ""
                     val posterImg = card.selectFirst(".j1f-card__poster img")
                     val poster = posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
+                    val id = href.substringBeforeLast("/").substringAfterLast("/")
+
+                    if (href.contains("/films/")) {
+                        Movie(
+                            id = id,
+                            title = title,
+                            poster = poster
+                        )
+                    } else if (href.contains("/tvshows/")) {
+                        TvShow(
+                            id = id,
+                            title = title,
+                            poster = poster
+                        )
+                    } else {
+                        null
+                    }
+                }
+        }
+
+        // Fallback to search card structure (used on search results pages)
+        if (results.isEmpty()) {
+            results = document.select("a.j1f-search-card")
+                .mapNotNull { card ->
+                    val href = card.attr("href")
+
+                    val title = card.selectFirst(".j1f-search-card__title")?.text() ?: ""
+                    val posterImg = card.selectFirst(".j1f-search-card__poster img")
+                    val poster = posterImg?.attr("data-src")?.ifBlank { posterImg.attr("src") } ?: ""
                     val id = href.substringBeforeLast("/").substringAfterLast("/")
 
                     if (href.contains("/films/")) {
@@ -948,35 +984,66 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
         }
 
-        val genre = Genre(
-            id = id,
-            name = "",
-            shows = document.select("div.items.full > article.item.movies, article.item.tvshows")
+        // Nouvelle structure j1f-card
+        var shows = document.select("a.j1f-card")
+            .mapNotNull { card ->
+                val href = card.attr("href")
+                val posterImg = card.selectFirst(".j1f-card__poster img")
+                    ?: card.selectFirst("img")
+                val poster = posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
+                val itemId = href.substringBeforeLast("/").substringAfterLast("/")
+                val title = card.selectFirst(".j1f-card__title")?.text()?.ifBlank { null }
+                    ?: card.selectFirst(".j1f-card__info")?.text()?.ifBlank { null }
+                    ?: card.attr("title").ifBlank { null }
+                    ?: posterImg?.attr("alt")?.ifBlank { null }
+                    ?: itemId.replace("-", " ").replaceFirstChar { it.uppercase() }
+
+                if (href.contains("/films/")) {
+                    Movie(
+                        id = itemId,
+                        title = title,
+                        poster = poster
+                    )
+                } else if (href.contains("/tvshows/")) {
+                    TvShow(
+                        id = itemId,
+                        title = title,
+                        poster = poster
+                    )
+                } else {
+                    null
+                }
+            }
+
+        // Fallback ancienne structure
+        if (shows.isEmpty()) {
+            shows = document.select("div.items.full > article.item.movies, div.items.full > article.item.tvshows")
                 .mapNotNull {
                     val link = it.selectFirst("div.data")?.selectFirst("a")
-                    val fhref = link
-                        ?.attr("href")?:""
-                    val href = fhref.substringBeforeLast("/").substringAfterLast("/")
+                    val fhref = link?.attr("href") ?: ""
+                    val itemId = fhref.substringBeforeLast("/").substringAfterLast("/")
                     if (fhref.contains("films/")) {
                         Movie(
-                            href,
-                            title = link
-                                ?.text()
-                                ?: "",
+                            id = itemId,
+                            title = link?.text() ?: "",
                             poster = it.selectFirst("img")?.attr("src")
                         )
                     } else if (fhref.contains("tvshows/")) {
                         TvShow(
-                            id = href,
-                            title = link
-                                ?.text()
-                                ?: "",
+                            id = itemId,
+                            title = link?.text() ?: "",
                             poster = it.selectFirst("img")?.attr("src")
                         )
                     } else {
                         null
                     }
                 }
+        }
+
+        val genre = Genre(
+            id = id,
+            name = "",
+            shows = shows
         )
 
         return genre
@@ -1096,7 +1163,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 else
                     emptyList()
 
-                return servers + other
+                return sortServersByLanguage(servers + other)
             }
         }
 
@@ -1224,7 +1291,26 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         else
             emptyList()
 
-        return servers + other
+        return sortServersByLanguage(servers + other)
+    }
+
+    /**
+     * Sort servers so that FR/VF sources appear first and VOSTFR sources appear last.
+     * Priority: VFF > VF > FR > (no tag) > VOSTFR > VO
+     */
+    private fun sortServersByLanguage(servers: List<Video.Server>): List<Video.Server> {
+        return servers.sortedWith(compareBy { server ->
+            val name = server.name.uppercase()
+            when {
+                name.contains("VFF") -> 0
+                name.contains("VF") && !name.contains("VOSTFR") -> 1
+                name.contains("FR") && !name.contains("VOSTFR") -> 2
+                name.contains("VF") && name.contains("VOSTFR") -> 3  // "VF + VOSTFR" → dernier des FR
+                name.contains("VOSTFR") || name.contains("VOST") -> 5
+                name.contains("VO") -> 6
+                else -> 4
+            }
+        })
     }
 
     override suspend fun getVideo(server: Video.Server): Video {

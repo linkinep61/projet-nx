@@ -58,6 +58,10 @@ object UserPreferences {
     }
 
 
+    // Flag pour la recherche globale de genres (set par SearchFragment, lu par GenreViewHolder)
+    @Volatile
+    var isGlobalSearchEnabled: Boolean = false
+
     var currentProvider: Provider?
         get() {
             val providerName = Key.CURRENT_PROVIDER.getString()

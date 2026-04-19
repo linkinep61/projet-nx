@@ -177,6 +177,7 @@ class SearchTvFragment : Fragment() {
 
         binding.llGlobalSearch.setOnClickListener {
             isGlobalSearchChecked = !isGlobalSearchChecked
+            UserPreferences.isGlobalSearchEnabled = isGlobalSearchChecked
             binding.ivGlobalSearchSwitch.setImageResource(
                 if (isGlobalSearchChecked) R.drawable.ic_switch_on else R.drawable.ic_switch_off
             )

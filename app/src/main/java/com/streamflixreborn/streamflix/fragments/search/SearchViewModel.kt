@@ -152,12 +152,18 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
     }
 
     // FUNCIÓN DE BÚSQUEDA GLOBAL AÑADIDA
-    fun searchGlobal(query: String, currentLanguage: String) = viewModelScope.launch(Dispatchers.IO) {
+    fun searchGlobal(query: String, currentLanguage: String, group: Provider.Companion.ProviderGroup? = null) = viewModelScope.launch(Dispatchers.IO) {
         _state.emit(State.GlobalSearching)
 
-        val targetProviders = Provider.providers.keys
-            .filter { it.language == currentLanguage }
-            .toList()
+        // Filtrer par groupe (si spécifié) ET par langue
+        val targetProviders = if (group != null) {
+            Provider.getProvidersByGroup(group)
+                .filter { it.language == currentLanguage }
+        } else {
+            Provider.providers.keys
+                .filter { it.language == currentLanguage }
+                .toList()
+        }
 
         if (targetProviders.isEmpty()) {
             _state.emit(State.SuccessGlobalSearching(emptyList()))

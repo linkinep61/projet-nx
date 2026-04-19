@@ -1,0 +1,108 @@
+== SERVEURS HS - Ecris ici les serveurs cassés ==
+== Je surveille ce fichier et je répare au fur et à mesure ==
+
+Exemple de format:
+- vidsonic.net : cassé
+- playmogo.com : pas d'extracteur
+
+Ecris en dessous:
+---
+
+TOTAL EXTRACTEURS: 94
+
+Liste complète:
+1. RabbitstreamExtractor
+2. MegacloudExtractor
+3. DokicloudExtractor
+4. PremiumEmbedingExtractor
+5. UpzoneExtractor
+6. StreamhubExtractor
+7. VtubeExtractor
+8. VoeExtractor
+9. StreamtapeExtractor
+10. VidozaExtractor
+11. VidsrcToExtractor
+12. VidplayExtractor
+13. FilemoonExtractor
+14. VidplayExtractor.MyCloud
+15. VidplayExtractor.VidplayOnline
+16. MyFileStorageExtractor
+17. MoflixExtractor
+18. MStreamDayExtractor
+19. MStreamClickExtractor
+20. VidsrcNetExtractor
+21. StreamWishExtractor
+22. StreamWishExtractor.UqloadsXyz
+23. StreamWishExtractor.SwishExtractor
+24. StreamWishExtractor.HlswishExtractor
+25. StreamWishExtractor.PlayerwishExtractor
+26. StreamWishExtractor.SwiftPlayersExtractor
+27. TwoEmbedExtractor
+28. ChillxExtractor
+29. ChillxExtractor.JeanExtractor
+30. MoviesapiExtractor
+31. CloseloadExtractor
+32. LuluVdoExtractor
+33. DoodLaExtractor
+34. DoodLaExtractor.DoodLiExtractor
+35. VidPlyExtractor
+36. MagaSavorExtractor
+37. VidMoLyExtractor
+38. VidMoLyExtractor.ToDomain
+39. VideoSibNetExtractor
+40. LpayerExtractor
+41. SaveFilesExtractor
+42. BigWarpExtractor
+43. DoodLaExtractor.DoodExtractor
+44. LoadXExtractor
+45. VidHideExtractor
+46. VeevExtractor
+47. RidooExtractor
+48. USTRExtractor
+49. VidGuardExtractor
+50. OkruExtractor
+51. VixSrcExtractor
+52. GoodstreamExtractor
+53. LamovieExtractor
+54. UqloadExtractor
+55. MailRuExtractor
+56. MixDropExtractor
+57. SupervideoExtractor
+58. DroploadExtractor
+59. RpmvidExtractor
+60. YourUploadExtractor
+61. PlusPomlaExtractor
+62. OneuploadExtractor
+63. FsvidExtractor
+64. GoogleDriveExtractor
+65. PcloudExtractor
+66. AmazonDriveExtractor
+67. VidzyExtractor
+68. GuploadExtractor
+69. StreamUpExtractor
+70. EinschaltenExtractor
+71. VidLinkExtractor
+72. VidsrcRuExtractor
+73. VidflixExtractor
+74. VidrockExtractor
+75. VideasyExtractor
+76. VidzeeExtractor
+77. VidnestExtractor
+78. PrimeSrcExtractor
+79. VidoraExtractor
+80. GxPlayerExtractor
+81. UpZurExtractor
+82. DailymotionExtractor
+83. ApiVoirFilmExtractor
+84. StreamixExtractor
+85. ShareCloudyExtractor
+86. StreamrubyExtractor
+87. VidaraExtractor
+88. VidsonicExtractor
+89. HxfileExtractor
+90. ZillaExtractor
+91. PDrainExtractor
+92. KakaflixExtractor
+93. NetuExtractor
+94. SeekPlaysExtractor
+

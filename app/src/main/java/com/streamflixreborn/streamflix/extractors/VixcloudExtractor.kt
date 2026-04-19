@@ -1,7 +1,6 @@
 package com.streamflixreborn.streamflix.extractors
 
 import android.util.Base64
-import android.util.Log
 import androidx.media3.common.MimeTypes
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
@@ -72,8 +71,6 @@ class VixcloudExtractor(
     }
 
     override suspend fun extract(link: String): Video {
-        Log.d("VixcloudDebug", "Extracting link: $link with preferredLanguage: $preferredLanguage")
-        
         val uri = link.toHttpUrlOrNull() ?: throw Exception("Invalid Vixcloud link")
         val currentMainUrl = "${uri.scheme}://${uri.host}/"
         val referer = customReferer ?: currentMainUrl
@@ -82,7 +79,6 @@ class VixcloudExtractor(
         val source = try {
             service.getSource(uri.encodedPath + if (uri.encodedQuery != null) "?" + uri.encodedQuery else "", referer = referer)
         } catch (e: Exception) {
-            Log.e("VixcloudDebug", "Failed to get source from $link: ${e.message}")
             throw e
         }
 
@@ -107,7 +103,7 @@ class VixcloudExtractor(
             if (!videoJson.startsWith("{") && videoJson.contains(":")) videoJson = "{$videoJson"
             if (!videoJson.endsWith("}") && videoJson.contains(":")) videoJson = "$videoJson}"
         } else {
-            Log.e("VixcloudDebug", "Could not find window.video in script")
+            // window.video not found in script
         }
 
         val paramsObjectContent = scriptText
@@ -191,8 +187,6 @@ class VixcloudExtractor(
                         val altLangCode = if (langCode == "en") "eng" else if (langCode == "it") "ita" else langCode
                         val baseUri = response.request.url
                         
-                        Log.d("SmartSubtitleLog", "--- Vixcloud Subtitle Processing START ($langCode) ---")
-
                         val lines = playlistContent.lines()
                         val finalLines = mutableListOf<String>()
                         val uriRegex = """URI=["']([^"']+)["']""".toRegex()
@@ -242,23 +236,20 @@ class VixcloudExtractor(
                                 if (isForced && isRightLanguage) {
                                     patchedLine = patchedLine.replace("DEFAULT=NO", "DEFAULT=YES")
                                                              .replace("AUTOSELECT=NO", "AUTOSELECT=YES")
-                                    Log.i("SmartSubtitleLog", "[Vixcloud] ENABLED Forced: $trackName")
                                 } else {
-                                    Log.d("SmartSubtitleLog", "[Vixcloud] Disabled: $trackName")
+                                    // Non-forced or wrong language subtitle - disabled
                                 }
                                 finalLines.add(patchedLine)
                             } else {
                                 finalLines.add(patchedLine)
                             }
                         }
-                        Log.d("SmartSubtitleLog", "--- Vixcloud Subtitle Processing END ---")
-                        
                         val base64Manifest = Base64.encodeToString(finalLines.joinToString("\n").toByteArray(), Base64.NO_WRAP)
                         videoSource = "data:application/vnd.apple.mpegurl;base64,$base64Manifest"
                     }
                 }
             } catch (e: Exception) {
-                Log.e("VixcloudDebug", "Error in patching: ${e.message}")
+                // Patching failed, continue with unpatched source
             }
         }
 

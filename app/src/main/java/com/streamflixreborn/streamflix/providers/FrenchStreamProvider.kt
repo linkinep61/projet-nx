@@ -226,7 +226,12 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     id = it.attr("href").substringBeforeLast("/").substringAfterLast("/"),
                     name = it.text(),
                 )
-            } ?: emptyList()
+            }?.toMutableList() ?: mutableListOf()
+
+            // Ajouter K-Drama (recherche par mots-clés via GenreViewModel)
+            if (genres.none { (it as? Genre)?.id == "k-drama" }) {
+                genres.add(Genre(id = "k-drama", name = "K-Drama"))
+            }
 
             return genres
         }

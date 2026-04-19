@@ -1,6 +1,5 @@
 package com.streamflixreborn.streamflix.extractors
 
-import android.util.Log
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
@@ -18,16 +17,12 @@ class VideoSibNetExtractor : Extractor() {
     override val mainUrl = "https://video.sibnet.ru/"
 
     override suspend fun extract(link: String): Video {
-        Log.d("VideoSibNet", "Extracting from: $link")
         val service = Service.build(mainUrl)
 
         val document = service.get(link, mainUrl)
-        Log.d("VideoSibNet", "Page fetched, HTML length: ${document.toString().length}")
 
         val relativeVideoUrl = extractVideoUrl(document)
             ?: throw Exception("Could not find video source in the webpage")
-
-        Log.d("VideoSibNet", "Found video path: $relativeVideoUrl")
 
         val absoluteVideoUrl = when {
             relativeVideoUrl.startsWith("http") -> relativeVideoUrl
@@ -54,7 +49,6 @@ class VideoSibNetExtractor : Extractor() {
         // Priority 1: <video src="..."> element (modern Sibnet uses this)
         document.selectFirst("video[src]")?.attr("src")?.let {
             if (it.isNotEmpty() && (it.contains(".mp4") || it.contains(".flv") || it.contains("/v/"))) {
-                Log.d("VideoSibNet", "Found video element src: $it")
                 return it
             }
         }
@@ -62,7 +56,6 @@ class VideoSibNetExtractor : Extractor() {
         // Priority 2: <video><source src="..."></video>
         document.selectFirst("video source[src]")?.attr("src")?.let {
             if (it.isNotEmpty()) {
-                Log.d("VideoSibNet", "Found video source element: $it")
                 return it
             }
         }

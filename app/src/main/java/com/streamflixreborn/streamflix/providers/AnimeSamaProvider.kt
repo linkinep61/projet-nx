@@ -194,7 +194,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             it.name.lowercase().contains("derniers contenus")
         }
         if (derniersContenus != null) {
-            val featured = derniersContenus.list.take(6).map { item ->
+            val featured = derniersContenus.list.take(15).map { item ->
                 when (item) {
                     is Movie -> Movie(
                         id = item.id,

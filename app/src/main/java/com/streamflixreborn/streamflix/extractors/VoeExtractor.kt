@@ -17,11 +17,19 @@ class VoeExtractor : Extractor() {
 
     override val name = "VOE"
     override val mainUrl = "https://voe.sx/"
-    override val aliasUrls = listOf("https://jilliandescribecompany.com", "https://mikaylaarealike.com","https://christopheruntilpoint.com","https://walterprettytheir.com","https://crystaltreatmenteast.com","https://lauradaydo.com","https://lancewhosedifficult.com", "https://dianaavoidthey.com", "https://jefferycontrolmodel.com")
+    override val aliasUrls = listOf("https://jilliandescribecompany.com", "https://mikaylaarealike.com","https://christopheruntilpoint.com","https://walterprettytheir.com","https://crystaltreatmenteast.com","https://lauradaydo.com","https://lancewhosedifficult.com", "https://dianaavoidthey.com", "https://jefferycontrolmodel.com", "https://sandratableother.com", "https://marissasharecareer.com", "https://ralphysuccessfull.org")
+
+    // Voe uses rotating random-word domains (e.g. sandratableother.com, marissasharecareer.com)
+    // Pattern: 3+ concatenated English words (12+ lowercase chars) + /e/ path
+    override val rotatingDomain: List<Regex> = listOf(
+        Regex("""^[a-zA-Z0-9-]{12,60}\.(com|net|org|to|sx)/e/[a-zA-Z0-9]+""")
+    )
 
 
     override suspend fun extract(link: String): Video {
-        val service = VoeExtractorService.build(mainUrl, link)
+        // Use the link's own domain as base, not mainUrl (fixes rotating domains getting 404)
+        val linkBaseUrl = URL(link).let { "${it.protocol}://${it.host}" }
+        val service = VoeExtractorService.build(linkBaseUrl, link)
         
         // Extract path from original link (handles both mainUrl and alias URLs)
         val parsedUrl = URL(link)
@@ -37,7 +45,8 @@ class VoeExtractor : Extractor() {
             DecryptHelper.decrypt(encodedStringInScriptTag)
         }
 
-        val m3u8 = decryptedContent.get("source")?.asString.orEmpty()
+        val m3u8 = decryptedContent.get("source")?.asString
+            ?: throw Exception("VOE: decryption failed or 'source' key missing")
 
         val baseSubtitleScript = source.selectFirst("script")?.data()?:""
         var baseSubtitle = ""

@@ -77,7 +77,10 @@ import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import androidx.core.net.toUri
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cronet.CronetDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import org.chromium.net.CronetEngine
 import com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsView
 import java.util.Base64 
 import java.io.File
@@ -95,7 +98,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
-import okhttp3.internal.userAgent
+// Removed: import okhttp3.internal.userAgent — it resolves to "okhttp/4.12.0"
 import java.util.Locale
 
 class PlayerMobileFragment : Fragment() {
@@ -896,7 +899,7 @@ class PlayerMobileFragment : Fragment() {
 
         httpDataSource.setDefaultRequestProperties(
             mapOf(
-                "User-Agent" to userAgent,
+                "User-Agent" to NetworkClient.USER_AGENT,
             ) + (video.headers ?: emptyMap())
         )
 
@@ -1292,8 +1295,24 @@ class PlayerMobileFragment : Fragment() {
         currentExtraBuffering = extraBuffering
         currentSoftwareDecoder = softwareDecoder
 
-        val okHttpClient = NetworkClient.default
-        httpDataSource = OkHttpDataSource.Factory(okHttpClient)
+        // Use CronetDataSource — Chromium's actual network stack.
+        // OkHttp and HttpURLConnection are both blocked by u14.vidzy.live
+        // (TLS fingerprint detection → SocketException: Socket closed).
+        httpDataSource = try {
+            val cronetEngine = CronetEngine.Builder(requireContext()).build()
+            android.util.Log.d("PlayerNetwork", "Using CronetDataSource (Chrome network stack)")
+            CronetDataSource.Factory(cronetEngine, java.util.concurrent.Executors.newCachedThreadPool())
+                .setUserAgent(NetworkClient.USER_AGENT)
+                .setConnectionTimeoutMs(30_000)
+                .setReadTimeoutMs(30_000)
+        } catch (e: Exception) {
+            android.util.Log.w("PlayerNetwork", "Cronet unavailable: ${e.message}")
+            DefaultHttpDataSource.Factory()
+                .setUserAgent(NetworkClient.USER_AGENT)
+                .setConnectTimeoutMs(30_000)
+                .setReadTimeoutMs(30_000)
+                .setAllowCrossProtocolRedirects(true)
+        }
 
         dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
 

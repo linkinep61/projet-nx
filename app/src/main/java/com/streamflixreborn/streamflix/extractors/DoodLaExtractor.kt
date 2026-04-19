@@ -23,7 +23,9 @@ open class DoodLaExtractor : Extractor() {
         "https://myvidplay.com",
         "https://playmogo.com",
         "https://do7go.com",
-        "https://d000d.com"
+        "https://d000d.com",
+        "https://dood.work",
+        "https://doply.net"
     )
 
     private val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
@@ -82,11 +84,19 @@ open class DoodLaExtractor : Extractor() {
     private interface Service {
 
         companion object {
+            private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
             fun build(baseUrl: String): Service {
                 val client = OkHttpClient.Builder()
                     .dns(DnsResolver.doh)
                     .followRedirects(true)
                     .followSslRedirects(true)
+                    .addInterceptor { chain ->
+                        val request = chain.request().newBuilder()
+                            .header("User-Agent", USER_AGENT)
+                            .build()
+                        chain.proceed(request)
+                    }
                     .build()
 
                 val retrofit = Retrofit.Builder()

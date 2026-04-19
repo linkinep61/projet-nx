@@ -23,6 +23,7 @@ class VidHideExtractor: Extractor() {
         "https://dingtezuni.com",
         "https://dintezuvio.com",
         "https://minochinos.com",
+        "https://minochinoos.com",
         "https://moflix-stream.click",
         "https://filelions.to"
     )

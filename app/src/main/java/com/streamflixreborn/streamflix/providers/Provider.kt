@@ -52,25 +52,29 @@ interface Provider {
     suspend fun getVideo(server: Video.Server): Video
 
     companion object {
+        enum class ProviderGroup {
+            ANIME,
+            FILMS_SERIES
+        }
+
         data class ProviderSupport(
             val movies: Boolean,
-            val tvShows: Boolean
+            val tvShows: Boolean,
+            val group: ProviderGroup = ProviderGroup.FILMS_SERIES
         )
 
         val providers: Map<Provider, ProviderSupport> = mapOf(
             // French providers only
             WiflixProvider to ProviderSupport(movies = true, tvShows = true),
             FrenchStreamProvider to ProviderSupport(movies = true, tvShows = true),
-            FrenchAnimeProvider to ProviderSupport(movies = true, tvShows = true),
-            FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true),
+            FrenchAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
+            FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME),
             FrembedProvider to ProviderSupport(movies = true, tvShows = true),
-
             KidrazProvider to ProviderSupport(movies = true, tvShows = false),
             UnJourUnFilmProvider to ProviderSupport(movies = true, tvShows = true),
-            // UnJourUnFilm2Provider désactivé — miroir de UnJourUnFilm, tombe en panne en même temps
-            // UnJourUnFilm2Provider to ProviderSupport(movies = true, tvShows = true),
             aploufProvider to ProviderSupport(movies = true, tvShows = false),
-            AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true),
+            AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
+            MovixProvider to ProviderSupport(movies = true, tvShows = true),
         )
 
         // Helper functions to check support
@@ -86,6 +90,14 @@ interface Provider {
 
         fun findByName(name: String): Provider? {
             return providers.keys.find { it.name == name }
+        }
+
+        fun getGroup(provider: Provider): ProviderGroup {
+            return providers[provider]?.group ?: ProviderGroup.FILMS_SERIES
+        }
+
+        fun getProvidersByGroup(group: ProviderGroup): List<Provider> {
+            return providers.filter { it.value.group == group }.keys.toList()
         }
     }
 }

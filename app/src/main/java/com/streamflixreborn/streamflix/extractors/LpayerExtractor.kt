@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.util.Log
 import android.view.MotionEvent
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -31,12 +30,8 @@ class LpayerExtractor : Extractor() {
     val context = StreamFlixApp.instance.applicationContext
 
     override suspend fun extract(link: String): Video {
-        Log.e("Lpayer", "Extracting from: $link")
-
         val videoUrl = interceptVideoFromWebView(link)
             ?: throw Exception("Could not find video source in Lpayer (timeout or no media URL)")
-
-        Log.e("Lpayer", "Found video URL: ${videoUrl.take(120)}")
 
         // Include cookies from the WebView session — may be needed for m3u8 auth
         val cookies = try {
@@ -50,7 +45,6 @@ class LpayerExtractor : Extractor() {
         )
         if (cookies.isNotEmpty()) {
             headers["Cookie"] = cookies
-            Log.e("Lpayer", "Including cookies: ${cookies.take(120)}")
         }
 
         return Video(
@@ -97,7 +91,6 @@ class LpayerExtractor : Extractor() {
                     webView.addJavascriptInterface(object {
                         @JavascriptInterface
                         fun onSourceFound(sourceUrl: String) {
-                            Log.e("Lpayer", "Lpayer JS bridge found source: ${sourceUrl.take(120)}")
                             if (sourceUrl.startsWith("http")
                                 && (sourceUrl.contains(".m3u8") || sourceUrl.contains(".mp4"))
                                 && !sourceUrl.contains("preload.m3u8")
@@ -124,9 +117,7 @@ class LpayerExtractor : Extractor() {
                             favicon: android.graphics.Bitmap?
                         ) {
                             super.onPageStarted(view, url, favicon)
-                            Log.e("Lpayer", "onPageStarted: resolved=$resolved view=${view != null}")
                             if (view == null || resolved) return
-                            Log.e("Lpayer", "onPageStarted: injecting hooks")
                             view.evaluateJavascript(FETCH_HOOK_JS, null)
                         }
 
@@ -138,19 +129,15 @@ class LpayerExtractor : Extractor() {
                             val urlPath = request.url?.path ?: ""
                             val host = request.url?.host ?: ""
 
-                            Log.e("Lpayer", "req: ${reqUrl.take(120)}")
-
                             // === STRATEGY 1: Intercept real m3u8 requests ===
                             // Skip preload.m3u8 (placeholder before decryption)
                             if (reqUrl.contains(".m3u8") && !reqUrl.contains("preload.m3u8")) {
-                                Log.e("Lpayer", "INTERCEPTED m3u8: $reqUrl")
                                 view?.post { resolve(reqUrl) }
                                 return null
                             }
 
                             // === STRATEGY 2: Intercept mp4 requests (path only) ===
                             if (urlPath.endsWith(".mp4")) {
-                                Log.e("Lpayer", "INTERCEPTED mp4: $reqUrl")
                                 view?.post { resolve(reqUrl) }
                                 return null
                             }
@@ -158,7 +145,6 @@ class LpayerExtractor : Extractor() {
                             // === STRATEGY 3: Intercept .ts segment → derive m3u8 ===
                             if (urlPath.matches(Regex(".*\\.ts$")) && host.contains("embed4me")) {
                                 val m3u8Url = reqUrl.substringBeforeLast("/") + "/master.m3u8"
-                                Log.e("Lpayer", "INTERCEPTED TS → m3u8: $m3u8Url")
                                 view?.post { resolve(m3u8Url) }
                                 return null
                             }
@@ -172,11 +158,9 @@ class LpayerExtractor : Extractor() {
                         }
 
                         override fun onPageFinished(view: WebView?, finishedUrl: String?) {
-                            Log.e("Lpayer", "onPageFinished: resolved=$resolved view=${view != null}")
                             if (view == null || resolved) return
 
                             view.evaluateJavascript(FETCH_HOOK_JS, null)
-                            Log.e("Lpayer", "Injecting poll+play JS")
                             view.evaluateJavascript(POLL_AND_PLAY_JS, null)
 
                             // Schedule real touch events to trigger Vidstack's
@@ -186,7 +170,6 @@ class LpayerExtractor : Extractor() {
                             for (delay in longArrayOf(2000, 4000, 6000, 8000, 10000)) {
                                 handler.postDelayed({
                                     if (!resolved) {
-                                        Log.e("Lpayer", "Simulating real click (delay=${delay}ms)")
                                         simulateClick(view)
                                     }
                                 }, delay)
@@ -198,13 +181,10 @@ class LpayerExtractor : Extractor() {
                             request: WebResourceRequest?,
                             error: android.webkit.WebResourceError?
                         ) {
-                            if (request?.isForMainFrame == true) {
-                                Log.e("Lpayer", "Main frame error: ${error?.description} (${error?.errorCode})")
-                            }
+                            // Main frame errors handled silently
                         }
                     }
 
-                    Log.e("Lpayer", "Lpayer Loading page: $url")
                     webView.loadUrl(url)
 
                     cont.invokeOnCancellation {
@@ -235,9 +215,7 @@ class LpayerExtractor : Extractor() {
             view.dispatchTouchEvent(up)
             down.recycle()
             up.recycle()
-            Log.e("Lpayer", "Real touch dispatched at ($x, $y)")
-        } catch (e: Exception) {
-            Log.e("Lpayer", "simulateClick error: ${e.message}")
+        } catch (_: Exception) {
         }
     }
 

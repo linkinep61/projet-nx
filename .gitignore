@@ -10,3 +10,38 @@
 local.properties
 *.salive
 *.log
+
+# Scripts locaux (tous les .bat sauf gradlew.bat)
+push_to_github.bat
+push_test_update.bat
+push_cleanup.bat
+push_fix.bat
+fix_and_push*.bat
+create_tag_and_release.bat
+remove_old_credential.bat
+build_and_deploy.bat
+build_and_test.bat
+build-release.bat
+dump_logcat.bat
+logcat_streamflix.bat
+kill_gradle.bat
+agent_bridge.ps1
+NOTES_SESSION.md
+
+# Release APK (généré par le build)
+app/release/
+
+# Fichiers temporaires / debug
+logcat*.txt
+logcat_done*.txt
+build_output.txt
+install_output.txt
+adb_devices.txt
+agent_status.txt
+trigger.txt
+
+# Keystore (ne pas exposer)
+streamflix-release.jks
+
+# Claude
+.claude/

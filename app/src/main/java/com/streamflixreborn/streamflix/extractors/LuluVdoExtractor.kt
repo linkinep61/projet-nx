@@ -1,8 +1,8 @@
 package com.streamflixreborn.streamflix.extractors
 
-import android.util.Log
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
+import com.streamflixreborn.streamflix.utils.DnsResolver
 import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import retrofit2.Retrofit
@@ -15,7 +15,7 @@ class LuluVdoExtractor : Extractor() {
 
     override val name = "LuluVdo"
     override val mainUrl = "https://luluvdo.com/"
-    override val aliasUrls = listOf("https://luluvdoo.com", "https://luluvid.com")
+    override val aliasUrls = listOf("https://luluvdoo.com", "https://luluvid.com", "https://lulustream.com")
     override suspend fun extract(link: String): Video {
         val service = Service.build(mainUrl)
 
@@ -37,7 +37,6 @@ class LuluVdoExtractor : Extractor() {
         if (source == null) {
             unpacked = unpackJs(html)
             if (unpacked.isNotEmpty()) {
-                Log.d("LuluVdo", "Unpacked JS: ${unpacked.take(500)}")
                 source = listOf(
                     Regex("""sources:\s*\[\s*\{\s*file\s*:\s*"(.*?)""""),
                     Regex("""file\s*:\s*"(https?://[^"]+\.m3u8[^"]*)""""),
@@ -106,6 +105,9 @@ class LuluVdoExtractor : Extractor() {
         companion object {
             fun build(baseUrl: String): Service {
                 val client = OkHttpClient.Builder()
+                    .dns(DnsResolver.doh)
+                    .followRedirects(true)
+                    .followSslRedirects(true)
                     .build()
 
                 val retrofit = Retrofit.Builder()

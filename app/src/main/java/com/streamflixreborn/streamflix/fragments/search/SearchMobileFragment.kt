@@ -26,6 +26,7 @@ import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.ui.SpacingItemDecoration
 import com.streamflixreborn.streamflix.utils.CacheUtils
 import com.streamflixreborn.streamflix.utils.LoggingUtils
+import com.streamflixreborn.streamflix.providers.Provider
 import com.streamflixreborn.streamflix.utils.UserPreferences // <-- IMPORT AÑADIDO
 import com.streamflixreborn.streamflix.utils.VoiceRecognitionHelper
 import com.streamflixreborn.streamflix.utils.dp
@@ -130,6 +131,11 @@ class SearchMobileFragment : Fragment() {
     }
 
     private fun initializeSearch() {
+        // Sync global search toggle with UserPreferences
+        binding.swGlobalSearch.setOnCheckedChangeListener { _, isChecked ->
+            UserPreferences.isGlobalSearchEnabled = isChecked
+        }
+
         binding.etSearch.apply {
             // ========= LÓGICA DE BÚSQUEDA MODIFICADA =========
             setOnEditorActionListener { _, actionId, _ ->
@@ -138,8 +144,14 @@ class SearchMobileFragment : Fragment() {
                     hideKeyboard()
 
                     if (binding.swGlobalSearch.isChecked) {
-                        val currentLanguage = UserPreferences.currentProvider?.language ?: "es"
-                        viewModel.searchGlobal(query, currentLanguage)
+                        val currentLanguage = UserPreferences.currentProvider?.language ?: "fr"
+                        val currentProvider = UserPreferences.currentProvider
+                        val group = if (currentProvider != null) {
+                            Provider.getGroup(currentProvider)
+                        } else {
+                            Provider.Companion.ProviderGroup.FILMS_SERIES
+                        }
+                        viewModel.searchGlobal(query, currentLanguage, group)
                     } else {
                         viewModel.search(query)
                     }

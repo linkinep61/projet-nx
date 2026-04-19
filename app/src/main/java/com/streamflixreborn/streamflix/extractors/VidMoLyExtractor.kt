@@ -2,7 +2,6 @@ package com.streamflixreborn.streamflix.extractors
 
 import android.annotation.SuppressLint
 import android.net.Uri
-import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -30,15 +29,11 @@ open class VidMoLyExtractor : Extractor() {
     private val context = StreamFlixApp.instance.applicationContext
 
     override suspend fun extract(link: String): Video {
-        Log.e("VidMoLy", "=== VidMoLy Starting extraction from: $link ===")
-
         // vidmoly.to is heavily rate-limited (429) — use .biz which works
         val normalizedLink = link.replace(Regex("vidmoly\\.(to|me|net)"), "vidmoly.biz")
-        Log.e("VidMoLy", "VidMoLy Normalized link: $normalizedLink")
 
         val hlsUrl = extractByIntercepting(normalizedLink)
         if (hlsUrl != null) {
-            Log.e("VidMoLy", "VidMoLy WebView found HLS: ${hlsUrl.take(100)}")
             return buildVideo(hlsUrl, normalizedLink)
         }
 
@@ -106,7 +101,6 @@ open class VidMoLyExtractor : Extractor() {
                             // Allow main vidmoly domains, block ww1/ww2/etc ad redirects
                             val isMainVidmoly = host.matches(Regex("vidmoly\\.(to|biz|me|net)"))
                             if (isMainVidmoly) return false
-                            Log.e("VidMoLy", "VidMoLy Blocked navigation to: $reqUrl")
                             return true
                         }
 
@@ -117,12 +111,9 @@ open class VidMoLyExtractor : Extractor() {
                             val reqUrl = request?.url?.toString() ?: return null
 
                             if (reqUrl.contains(".m3u8")) {
-                                Log.e("VidMoLy", "VidMoLy INTERCEPTED m3u8: ${reqUrl.take(100)}")
                                 view?.post { resolve(reqUrl) }
                                 return WebResourceResponse("text/plain", "utf-8", null)
                             }
-
-                            Log.e("VidMoLy", "VidMoLy req: ${reqUrl.take(80)}")
 
                             val host = request.url?.host ?: ""
                             if (BLOCKED_HOSTS.any { host.contains(it) }) {
@@ -133,15 +124,7 @@ open class VidMoLyExtractor : Extractor() {
                         }
 
                         override fun onPageFinished(view: WebView?, finishedUrl: String?) {
-                            Log.e("VidMoLy", "VidMoLy Page finished: $finishedUrl")
                             if (view == null || resolved) return
-
-                            // Dump HTML for debugging
-                            view.evaluateJavascript(
-                                "(function(){ var h = document.documentElement.outerHTML; return 'LEN=' + h.length + '|M3U8=' + (h.indexOf('m3u8') > -1) + '|JWPLAYER=' + (h.indexOf('jwplayer') > -1) + '|SOURCES=' + (h.indexOf('sources') > -1) + '|FIRST500=' + h.substring(0, 500); })()"
-                            ) { result ->
-                                Log.e("VidMoLy", "VidMoLy HTML dump: ${result?.take(600)}")
-                            }
 
                             // Check if this is a JS challenge page (small HTML with window.location.replace)
                             // If so, extract the redirect URL and manually navigate to it
@@ -152,14 +135,12 @@ open class VidMoLyExtractor : Extractor() {
                                     ?.removeSurrounding("\"")
                                     ?.takeIf { it != "null" && it.startsWith("http") }
                                 if (redirectUrl != null) {
-                                    Log.e("VidMoLy", "VidMoLy Challenge page detected! Navigating to JWT URL: ${redirectUrl.take(120)}")
                                     view.loadUrl(redirectUrl, mapOf("Referer" to referer))
                                     return@evaluateJavascript
                                 }
 
                                 // Not a challenge page — check for m3u8
                                 if (resolved) return@evaluateJavascript
-                                Log.e("VidMoLy", "VidMoLy Real page loaded, running m3u8 extraction...")
 
                                 // Try immediate extraction
                                 view.evaluateJavascript(EXTRACT_M3U8_JS) { m3u8Result ->
@@ -167,23 +148,17 @@ open class VidMoLyExtractor : Extractor() {
                                         ?.removeSurrounding("\"")
                                         ?.takeIf { it != "null" && it.contains(".m3u8") }
                                     if (extracted != null) {
-                                        Log.e("VidMoLy", "VidMoLy JS found m3u8 immediately: ${extracted.take(100)}")
                                         resolve(extracted)
                                     } else {
-                                        Log.e("VidMoLy", "VidMoLy No m3u8 yet, will retry in 3s...")
                                         // Retry after delay (JWPlayer may need time to init)
                                         view.postDelayed({
                                             if (resolved) return@postDelayed
-                                            Log.e("VidMoLy", "VidMoLy Retry m3u8 extraction...")
                                             view.evaluateJavascript(EXTRACT_M3U8_JS) { retryResult ->
                                                 val retryExtracted = retryResult?.trim()
                                                     ?.removeSurrounding("\"")
                                                     ?.takeIf { it != "null" && it.contains(".m3u8") }
                                                 if (retryExtracted != null) {
-                                                    Log.e("VidMoLy", "VidMoLy JS found m3u8 on retry: ${retryExtracted.take(100)}")
                                                     resolve(retryExtracted)
-                                                } else {
-                                                    Log.e("VidMoLy", "VidMoLy JS still no m3u8 (result=$retryResult)")
                                                 }
                                             }
                                         }, 3000)
@@ -194,7 +169,6 @@ open class VidMoLyExtractor : Extractor() {
                             // Final timeout — resolve null after 12s
                             view.postDelayed({
                                 if (!resolved) {
-                                    Log.e("VidMoLy", "VidMoLy timeout: no m3u8 after 12s")
                                     resolve(null)
                                 }
                             }, 12000)
@@ -205,13 +179,10 @@ open class VidMoLyExtractor : Extractor() {
                             request: WebResourceRequest?,
                             error: android.webkit.WebResourceError?
                         ) {
-                            if (request?.isForMainFrame == true) {
-                                Log.e("VidMoLy", "VidMoLy Main frame error: ${error?.description} (${error?.errorCode})")
-                            }
+                            // Main frame errors handled silently
                         }
                     }
 
-                    Log.e("VidMoLy", "VidMoLy Loading embed page: $url")
                     webView.loadUrl(url, mapOf("Referer" to referer))
 
                     cont.invokeOnCancellation {

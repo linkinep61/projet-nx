@@ -47,6 +47,8 @@
 
     <string name="search_input_hint">Search movies, TV shows</string>
     <string name="global_search">Global search</string>
+    <string name="global_search_films">Global search movies &amp; TV shows</string>
+    <string name="global_search_anime">Global search anime</string>
     <string name="searching">Searching...</string>
     <string name="search_error">Error</string>
     <string name="result">Result</string>

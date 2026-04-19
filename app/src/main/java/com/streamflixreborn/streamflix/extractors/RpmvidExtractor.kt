@@ -23,7 +23,9 @@ class RpmvidExtractor : Extractor() {
     override val name = "Rpmvid"
     override val mainUrl = "https://rpmvid.com"
     override val aliasUrls = listOf("https://cubeembed.rpmvid.com", "https://bummi.upns.xyz", "https://loadm.cam", "https://anibum.playerp2p.online", "https://pelisplus.upns.pro", "https://pelisplus.rpmstream.live", "https://pelisplus.strp2p.com", "https://flemmix.upns.pro", "https://moflix.rpmplay.xyz", "https://moflix.upns.xyz", "https://flix2day.xyz", "https://primevid.click",
-        "https://totocoutouno.rpmlive.online", "https://dismoiceline.uns.bio", "https://doremifasol.ezplayer.me", "https://marcus.p2pstream.vip","https://animeav1.uns.bio")
+        "https://totocoutouno.rpmlive.online", "https://dismoiceline.uns.bio", "https://doremifasol.ezplayer.me", "https://marcus.p2pstream.vip","https://animeav1.uns.bio",
+        "https://serix.upns.live",
+        "https://coflix.upn.one")
 
     companion object {
         private const val DEFAULT_USER_AGENT =
@@ -69,7 +71,8 @@ class RpmvidExtractor : Extractor() {
 
     override suspend fun extract(link: String): Video {
         val id = extractId(link) ?: throw Exception("Invalid link: missing id after #")
-        val mainLink = URL(link).protocol + "://" + URL(link).host
+        val url = URL(link)
+        val mainLink = "${url.protocol}://${url.host}"
         val service = Service.build(mainLink, client)
         val apiUrl = "$mainLink/api/v1/video"
 
@@ -81,7 +84,7 @@ class RpmvidExtractor : Extractor() {
             h = "1080",
         )
 
-        val decryptedJson = decryptHexPayload(hexResponse)
+        val decryptedJson = decryptHexPayloadSafe(hexResponse)
         val json = JsonParser.parseString(decryptedJson).asJsonObject
         val hlsPath = json.get("hls")?.asString?.takeIf { it.isNotEmpty() }
         val hlsTiktok = json.get("hlsVideoTiktok")?.asString?.takeIf { it.isNotEmpty() }
@@ -90,93 +93,31 @@ class RpmvidExtractor : Extractor() {
 
         val (finalUrl, headers) = when {
             !hlsPath.isNullOrEmpty() -> {
-                "$mainLink$hlsPath" to mapOf("Referer" to mainLink)
+                toAbsoluteUrl(mainLink, hlsPath) to mapOf("Referer" to mainLink)
             }
             !hlsTiktok.isNullOrEmpty() -> {
-                var v = ""
-                try {
-                    val configStr = json.get("streamingConfig")?.asString
-                    if (!configStr.isNullOrEmpty()) {
-                        val config = JsonParser.parseString(configStr).asJsonObject
-                        v = config.getAsJsonObject("adjust")
-                            ?.getAsJsonObject("Tiktok")
-                            ?.getAsJsonObject("params")
-                            ?.get("v")?.asString ?: ""
-                    }
-                } catch (e: Exception) { }
-                val query = if (v.isNotEmpty()) "?v=$v" else ""
-                "$mainLink$hlsTiktok$query" to mapOf("Referer" to mainLink)
+                val v = extractTiktokV(json)
+                val query = if (!v.isNullOrEmpty()) "?v=$v" else ""
+                toAbsoluteUrl(mainLink, "$hlsTiktok$query") to mapOf("Referer" to mainLink)
             }
             !cfPath.isNullOrEmpty() -> {
-
-                var t: String? = null
-                var e: String? = null
-                val configStr = json.get("streamingConfig")?.asString
-
-                try {
-                    if (configStr != null) {
-                        val streamingConfig = JsonParser.parseString(configStr).asJsonObject
-
-                        val cloudflare = streamingConfig
-                            .getAsJsonObject("adjust")
-                            ?.getAsJsonObject("Cloudflare")
-
-                        val disabled = cloudflare
-                            ?.get("disabled")
-                            ?.takeIf { !it.isJsonNull }
-                            ?.asBoolean ?: true
-
-                        if (!disabled) {
-                            val params = cloudflare.getAsJsonObject("params")
-
-                            t = params
-                                ?.get("t")
-                                ?.takeIf { !it.isJsonNull }
-                                ?.asString
-
-                            e = params
-                                ?.get("e")
-                                ?.takeIf { !it.isJsonNull }
-                                ?.asString
-                        }
-                    }
-                } catch (e: Exception) { }
-
-                if (!e.isNullOrEmpty() && !t.isNullOrEmpty()) {
-                    cfPath = "$cfPath?t=${t}&e=${e}"
-                } else {
-                    if (!cfExpire.isNullOrEmpty()) {
-                        val parts = cfExpire.split("::")
-                        if (parts.size >= 2) {
-                            cfPath = "$cfPath?t=${parts[0]}&e=${parts[1]}"
-                        }
-                    }
-                }
-                cfPath!! to mapOf("Referer" to mainLink)
+                cfPath = buildCloudFlareUrl(cfPath, cfExpire, json)
+                toAbsoluteUrl(mainLink, cfPath!!) to mapOf("Referer" to mainLink)
             }
             else -> throw Exception("Missing hls, hlsVideoTiktok or cf in response")
         }
 
         val defaultSub = json.getAsJsonObject("defaultSubtitle")
-                                ?.get("defaultSubtitle")?.asString?:""
-        var alreadySelect = false
+                                ?.get("defaultSubtitle")?.asString.orEmpty()
         val subtitles = json.getAsJsonObject("subtitle")
             ?.entrySet()
-            ?.map { (label, file ) ->
+            ?.map { (label, file) ->
                 Video.Subtitle(
                     label = label,
-                    file = file.asString?:"",
-                    default = if (alreadySelect == false && defaultSub.isNotEmpty() && label.contains(
-                            defaultSub
-                        )
-                    ) {
-                        alreadySelect = true
-                        true
-                    } else {
-                        false
-                    }
+                    file = file.asString.orEmpty(),
+                    default = defaultSub.isNotEmpty() && label.equals(defaultSub, ignoreCase = true)
                 )
-            } ?: emptyList()
+            }.orEmpty()
 
         return Video(
             source = finalUrl,
@@ -192,16 +133,23 @@ class RpmvidExtractor : Extractor() {
         return link.substring(idx + 1).substringBefore("&")
     }
 
-    private fun decryptHexPayload(hex: String): String {
-        val bytes = hexToBytes(hex)
-        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(KEY, "AES"), IvParameterSpec(IV))
-        val decrypted = cipher.doFinal(bytes)
-        return decrypted.toString(Charsets.UTF_8)
+    private fun decryptHexPayloadSafe(hex: String): String {
+        val cleaned = hex.trim()
+        if (cleaned.isEmpty()) throw Exception("Empty encrypted payload")
+        return try {
+            val bytes = hexToBytes(cleaned)
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(KEY, "AES"), IvParameterSpec(IV))
+            val decrypted = cipher.doFinal(bytes)
+            decrypted.toString(Charsets.UTF_8)
+        } catch (e: Exception) {
+            throw Exception("Failed to decrypt payload: ${e.message}")
+        }
     }
 
     private fun hexToBytes(input: String): ByteArray {
         val cleaned = input.lowercase(Locale.US).replace(Regex("[^0-9a-f]"), "")
+        require(cleaned.length >= 2) { "Invalid hex payload" }
         val even = if (cleaned.length % 2 == 0) cleaned else "0$cleaned"
         val out = ByteArray(even.length / 2)
         var i = 0
@@ -211,5 +159,56 @@ class RpmvidExtractor : Extractor() {
             i += 2
         }
         return out
+    }
+
+    private fun toAbsoluteUrl(origin: String, path: String): String {
+        return if (path.startsWith("http://") || path.startsWith("https://")) {
+            path
+        } else {
+            if (path.startsWith("/")) "$origin$path" else "$origin/$path"
+        }
+    }
+
+    private fun extractTiktokV(json: com.google.gson.JsonObject): String? = try {
+        val configStr = json.get("streamingConfig")?.asString ?: return null
+        val config = JsonParser.parseString(configStr).asJsonObject
+        config.getAsJsonObject("adjust")
+            ?.getAsJsonObject("Tiktok")
+            ?.getAsJsonObject("params")
+            ?.get("v")?.asString
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun buildCloudFlareUrl(cfPath: String, cfExpire: String?, json: com.google.gson.JsonObject): String {
+        var t: String? = null
+        var e: String? = null
+        try {
+            val configStr = json.get("streamingConfig")?.asString
+            if (configStr != null) {
+                val streamingConfig = JsonParser.parseString(configStr).asJsonObject
+                val cloudflare = streamingConfig
+                    .getAsJsonObject("adjust")
+                    ?.getAsJsonObject("Cloudflare")
+                val disabled = cloudflare
+                    ?.get("disabled")
+                    ?.takeIf { !it.isJsonNull }
+                    ?.asBoolean ?: true
+                if (!disabled) {
+                    val params = cloudflare.getAsJsonObject("params")
+                    t = params?.get("t")?.takeIf { !it.isJsonNull }?.asString
+                    e = params?.get("e")?.takeIf { !it.isJsonNull }?.asString
+                }
+            }
+        } catch (_: Exception) { }
+
+        return when {
+            !e.isNullOrEmpty() && !t.isNullOrEmpty() -> "$cfPath?t=$t&e=$e"
+            !cfExpire.isNullOrEmpty() -> {
+                val parts = cfExpire.split("::")
+                if (parts.size >= 2) "$cfPath?t=${parts[0]}&e=${parts[1]}" else cfPath
+            }
+            else -> cfPath
+        }
     }
 }

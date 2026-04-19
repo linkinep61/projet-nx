@@ -46,8 +46,12 @@ import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.datasource.cronet.CronetDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import com.google.android.gms.net.CronetProviderInstaller
+import org.chromium.net.CronetEngine
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -88,7 +92,7 @@ import com.streamflixreborn.streamflix.utils.toSubtitleMimeType
 import com.streamflixreborn.streamflix.utils.viewModelsFactory
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
-import okhttp3.internal.userAgent
+// Removed: import okhttp3.internal.userAgent — it resolves to "okhttp/4.12.0"
 import java.util.Calendar
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
@@ -1004,7 +1008,7 @@ class PlayerTvFragment : Fragment() {
 
             httpDataSource.setDefaultRequestProperties(
                 mapOf(
-                    "User-Agent" to userAgent,
+                    "User-Agent" to NetworkClient.USER_AGENT,
                 ) + (video.headers ?: emptyMap())
             )
             player.setMediaItem(
@@ -1446,10 +1450,26 @@ class PlayerTvFragment : Fragment() {
             currentExtraBuffering = extraBuffering
             currentSoftwareDecoder = softwareDecoder
 
-            val okHttpClient = OkHttpClient.Builder()
-                .dns(DnsResolver.doh)
-                .build()
-            httpDataSource = OkHttpDataSource.Factory(okHttpClient)
+            // Use CronetDataSource — Chromium's actual network stack.
+            // OkHttp and HttpURLConnection are both blocked by u14.vidzy.live
+            // (TLS fingerprint / JA3 detection → SocketException: Socket closed).
+            // Cronet IS Chrome's network code, so CDNs cannot distinguish it
+            // from a real Chrome browser.
+            httpDataSource = try {
+                val cronetEngine = CronetEngine.Builder(requireContext()).build()
+                Log.d("PlayerNetwork", "Using CronetDataSource (Chrome network stack)")
+                CronetDataSource.Factory(cronetEngine, java.util.concurrent.Executors.newCachedThreadPool())
+                    .setUserAgent(NetworkClient.USER_AGENT)
+                    .setConnectionTimeoutMs(30_000)
+                    .setReadTimeoutMs(30_000)
+            } catch (e: Exception) {
+                Log.w("PlayerNetwork", "Cronet unavailable, falling back to DefaultHttpDataSource: ${e.message}")
+                DefaultHttpDataSource.Factory()
+                    .setUserAgent(NetworkClient.USER_AGENT)
+                    .setConnectTimeoutMs(30_000)
+                    .setReadTimeoutMs(30_000)
+                    .setAllowCrossProtocolRedirects(true)
+            }
 
             dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
 
@@ -1652,8 +1672,20 @@ class PlayerTvFragment : Fragment() {
         val extraBuffering = PlayerSettingsView.Settings.ExtraBuffering.isEnabled
         currentExtraBuffering = extraBuffering
 
-        val okHttpClient = NetworkClient.default
-        httpDataSource = OkHttpDataSource.Factory(okHttpClient)
+        // Same CronetDataSource as initializePlayer (Chrome network stack)
+        httpDataSource = try {
+            val cronetEngine = CronetEngine.Builder(requireContext()).build()
+            CronetDataSource.Factory(cronetEngine, java.util.concurrent.Executors.newCachedThreadPool())
+                .setUserAgent(NetworkClient.USER_AGENT)
+                .setConnectionTimeoutMs(30_000)
+                .setReadTimeoutMs(30_000)
+        } catch (e: Exception) {
+            DefaultHttpDataSource.Factory()
+                .setUserAgent(NetworkClient.USER_AGENT)
+                .setConnectTimeoutMs(30_000)
+                .setReadTimeoutMs(30_000)
+                .setAllowCrossProtocolRedirects(true)
+        }
 
         dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
 

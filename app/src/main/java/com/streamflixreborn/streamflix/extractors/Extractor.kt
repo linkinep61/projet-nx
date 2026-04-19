@@ -110,7 +110,12 @@ abstract class Extractor {
             VidsonicExtractor(),
             HxfileExtractor(),
             ZillaExtractor(),
-            PDrainExtractor()
+            PDrainExtractor(),
+            KakaflixExtractor(),
+            NetuExtractor(),
+            SeekPlaysExtractor(),
+            XshotcokExtractor(),
+            DarkiboxExtractor()
         )
 
         suspend fun extract(link: String, server: Video.Server? = null): Video {

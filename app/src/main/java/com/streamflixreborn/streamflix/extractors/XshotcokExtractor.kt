@@ -10,30 +10,22 @@ import retrofit2.http.GET
 import retrofit2.http.Url
 import java.net.URL
 
-class VidsonicExtractor : Extractor() {
-    override val name = "Vidsonic"
-    override val mainUrl = "https://vidsonic.net"
+class XshotcokExtractor : Extractor() {
+    override val name = "Xshotcok"
+    override val mainUrl = "https://xshotcok.com"
 
     companion object {
-        private const val DEFAULT_USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        private const val USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     }
 
     override suspend fun extract(link: String): Video {
-        // Use link's own domain as base (domain may have changed from mainUrl)
-        val linkUrl = URL(link)
-        val linkBaseUrl = "${linkUrl.protocol}://${linkUrl.host}"
-        val service = Service.build(linkBaseUrl)
-
-        val source = service.getSource(
-            url = link,
-            userAgent = DEFAULT_USER_AGENT,
-            referer = "$linkBaseUrl/"
-        )
-
+        val baseUrl = URL(link).let { "${it.protocol}://${it.host}" }
+        val service = Service.build(baseUrl)
+        val source = service.getSource(url = link)
         val html = source.toString()
 
-        // Try multiple patterns for encoded hex string
+        // Try multiple patterns for encoded hex string (like Vidsonic)
         val encodedRegexes = listOf(
             Regex("""(?:const|var|let)\s+\w+\s*=\s*'([a-fA-F0-9|]{50,})'\s*;"""),
             Regex("""(?:const|var|let)\s+\w+\s*=\s*"([a-fA-F0-9|]{50,})"\s*;"""),
@@ -54,34 +46,36 @@ class VidsonicExtractor : Extractor() {
             val sourceUrl = asciiBuilder.toString().reversed()
             return Video(
                 source = sourceUrl,
-                headers = mapOf("Referer" to "$linkBaseUrl/", "Origin" to linkBaseUrl)
+                headers = mapOf("Referer" to baseUrl, "Origin" to baseUrl)
             )
         }
 
-        // Fallback: try direct URL extraction
+        // Fallback: try direct URL extraction (common patterns)
         val directPatterns = listOf(
             Regex("""sources\s*:\s*\[\s*\{\s*(?:src|file)\s*:\s*['"]([^'"]+)['"]"""),
             Regex("""file\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]"""),
+            Regex("""source\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]"""),
+            Regex("""src\s*:\s*['"]([^'"]+\.m3u8[^'"]*)['"]"""),
             Regex("""(https?://[^"'\s]+\.m3u8[^"'\s]*)"""),
-            Regex("""(https?://[^"'\s]+\.mp4[^"'\s]*)""")
+            Regex("""(https?://[^"'\s]+\.mp4[^"'\s]*)"""),
+            Regex("""player\.src\(\s*\{[^}]*src\s*:\s*['"]([^'"]+)['"]"""),
+            Regex("""video_link\s*=\s*['"]([^'"]+)['"]""")
         )
 
         val directUrl = directPatterns.firstNotNullOfOrNull { regex ->
             regex.find(html)?.groupValues?.get(1)
-        } ?: throw Exception("Could not find video source in Vidsonic HTML")
+        } ?: throw Exception("Could not find video source in Xshotcok HTML")
 
         return Video(
             source = directUrl,
-            headers = mapOf("Referer" to "$linkBaseUrl/", "Origin" to linkBaseUrl)
+            headers = mapOf("Referer" to baseUrl, "Origin" to baseUrl)
         )
     }
 
     private interface Service {
         @GET
         suspend fun getSource(
-            @Url url: String,
-            @retrofit2.http.Header("User-Agent") userAgent: String = DEFAULT_USER_AGENT,
-            @retrofit2.http.Header("Referer") referer: String = ""
+            @Url url: String
         ): Document
 
         companion object {
@@ -90,6 +84,12 @@ class VidsonicExtractor : Extractor() {
                     .dns(DnsResolver.doh)
                     .followRedirects(true)
                     .followSslRedirects(true)
+                    .addInterceptor { chain ->
+                        val request = chain.request().newBuilder()
+                            .header("User-Agent", USER_AGENT)
+                            .build()
+                        chain.proceed(request)
+                    }
                     .build()
 
                 val retrofit = Retrofit.Builder()
