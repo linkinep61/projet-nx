@@ -232,7 +232,23 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             )
         )
 
-        return categories
+        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films
+        return categories.sortedWith(compareBy { cat ->
+            val n = cat.name.lowercase()
+            val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
+            val isSeries = n.contains("séri") || n.contains("seri") || n.contains("saison") || n.contains("tv")
+            val isFilm = n.contains("film") || n.contains("movie") || n.contains("cinéma")
+            when {
+                cat.name == Category.FEATURED -> 0
+                n.contains("épisode") || n.contains("episode") -> 1
+                isRecent && isSeries -> 2
+                isRecent && isFilm -> 3
+                isSeries -> 4
+                isFilm -> 5
+                isRecent -> 1
+                else -> 6
+            }
+        })
     }
 
     suspend fun ignoreSource(source: String): Boolean {
@@ -393,10 +409,14 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             title = document.selectFirst("header.full-title h1")
                 ?.text()
                 ?: "",
-            overview = document.selectFirst("div.screenshots-full")
-                ?.ownText()
-                ?.substringAfter("en Streaming Complet:")
-                ?.trim(),
+            overview = (document.selectFirst("div.screenshots-full")?.text()
+                ?.let { text ->
+                    if (text.contains("en Streaming Complet:")) text.substringAfter("en Streaming Complet:").trim()
+                    else text.trim()
+                }?.takeIf { it.isNotBlank() }
+                ?: document.select("ul.mov-list li")
+                    .find { it.selectFirst("div.mov-label")?.text()?.contains("Synopsis") == true }
+                    ?.selectFirst("div.mov-desc")?.text()?.trim()),
             released = document.select("ul.mov-list li")
                 .find {
                     it.selectFirst("div.mov-label")?.text()?.contains("Date de sortie") == true
@@ -507,8 +527,10 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 .find { it.selectFirst("div.mov-label")?.text()?.contains("Synopsis") == true }
                 ?.selectFirst("div.mov-desc")
                 ?.text()
-                ?.substringAfter("en Streaming Complet:")
-                ?.trim(),
+                ?.let { text ->
+                    if (text.contains("en Streaming Complet:")) text.substringAfter("en Streaming Complet:").trim()
+                    else text.trim()
+                },
             released = document.select("ul.mov-list li")
                 .find {
                     it.selectFirst("div.mov-label")?.text()?.contains("Date de sortie") == true
@@ -765,7 +787,25 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
         }
 
-        return servers
+        // Sort: VF/FR first, then by service reliability, VOSTFR last
+        return servers.sortedWith(compareBy<Video.Server> { server ->
+            val name = server.name.uppercase()
+            when {
+                name.contains("VFF") || name.contains("TRUEFRENCH") -> 0
+                name.contains("VF") && !name.contains("VOSTFR") -> 1
+                name.contains("FR") && !name.contains("VOSTFR") -> 2
+                name.contains("VOSTFR") || name.contains("VOST") -> 5
+                name.contains("VO") -> 6
+                else -> 3
+            }
+        }.thenBy { server ->
+            val serviceName = Extractor.identifyServiceName(server.src)
+            when (serviceName) {
+                "Vidara" -> 1; "Vidsonic" -> 2; "Rpmvid" -> 3
+                "Filemoon" -> 10
+                else -> 5
+            }
+        })
     }
 
     override suspend fun getVideo(server: Video.Server): Video {

@@ -175,7 +175,19 @@ class AfterDarkExtractor(var newUrl: String = "") : Extractor() {
                 )
             }
         }
-        return allServers
+
+        // Sort: VF/French first, VOSTFR/VO last
+        return allServers.sortedBy { server ->
+            val name = server.name.uppercase()
+            when {
+                name.contains("VFF") -> 0
+                name.contains("VF") && !name.contains("VOSTFR") -> 1
+                name.contains("FRENCH") && !name.contains("VOSTFR") -> 2
+                name.contains("VOSTFR") || name.contains("VOST") -> 5
+                name.contains("VO") -> 6
+                else -> 3
+            }
+        }
     }
 
     /**

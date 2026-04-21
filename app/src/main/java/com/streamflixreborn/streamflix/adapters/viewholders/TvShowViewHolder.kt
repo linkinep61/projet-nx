@@ -485,6 +485,7 @@ class TvShowViewHolder(
     }
 
     private fun displayTvShowMobile(binding: ContentTvShowMobileBinding) {
+        // MOBILE TV SHOW DETAIL
         binding.ivTvShowPoster.run {
             loadTvShowPoster(tvShow) {
                 fallback(R.drawable.glide_fallback_cover)
@@ -527,7 +528,11 @@ class TvShowViewHolder(
             isVisible = tvShow.genres.isNotEmpty()
         }
 
-        binding.tvTvShowOverview.text = tvShow.overview
+        binding.tvTvShowOverview.apply {
+            text = tvShow.overview
+            isVisible = !tvShow.overview.isNullOrBlank()
+        }
+        binding.tvTvShowOverviewLabel.isVisible = !tvShow.overview.isNullOrBlank()
         val episodeToWatch = tvShow.episodeToWatch
         val episodeSeason = resolveEpisodeSeason(episodeToWatch)
         binding.btnTvShowWatchNow.apply {
@@ -661,7 +666,11 @@ class TvShowViewHolder(
             isVisible = tvShow.genres.isNotEmpty()
         }
 
-        binding.tvTvShowOverview.text = tvShow.overview
+        binding.tvTvShowOverview.apply {
+            text = tvShow.overview
+            isVisible = !tvShow.overview.isNullOrBlank()
+        }
+        binding.tvTvShowOverviewLabel.isVisible = !tvShow.overview.isNullOrBlank()
         val episodeToWatch = tvShow.episodeToWatch
         val episodeSeason = resolveEpisodeSeason(episodeToWatch)
         binding.btnTvShowWatchNow.apply {

@@ -11,9 +11,9 @@ import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 
 class VidzeeExtractor : Extractor() {
     override val name = "Vidzee"
@@ -64,9 +64,9 @@ class VidzeeExtractor : Extractor() {
         return servers(videoType).first()
     }
 
-    override suspend fun extract(link: String): Video = coroutineScope {
+    override suspend fun extract(link: String): Video = withContext(Dispatchers.IO) {
         val masterKey = getMasterKey() ?: throw Exception("Failed to get Vidzee master key")
-        
+
         try {
             val request = Request.Builder()
                 .url(link)
@@ -76,7 +76,7 @@ class VidzeeExtractor : Extractor() {
                 .build()
 
             val response = client.newCall(request).execute()
-            if (!response.isSuccessful) throw Exception("Network error")
+            if (!response.isSuccessful) throw Exception("Network error (${response.code})")
 
             val body = response.body?.string() ?: throw Exception("Empty body")
             val json = JSONObject(body)
@@ -108,7 +108,7 @@ class VidzeeExtractor : Extractor() {
             val isDukeServer = link.contains("sr=1")
             val mimeType = if (isDukeServer) MimeTypes.VIDEO_MP4 else MimeTypes.APPLICATION_M3U8
 
-            return@coroutineScope Video(
+            return@withContext Video(
                 source = decryptedUrl,
                 subtitles = subtitles,
                 headers = mapOf(

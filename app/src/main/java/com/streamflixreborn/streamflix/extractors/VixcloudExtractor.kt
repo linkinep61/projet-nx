@@ -25,6 +25,7 @@ class VixcloudExtractor(
 
     override val name = "vixcloud"
     override val mainUrl = "https://vixcloud.co/"
+    override val aliasUrls = listOf("https://vixcloud.org", "https://www.vixcloud.org")
 
     companion object {
         private val client = NetworkClient.default.newBuilder()

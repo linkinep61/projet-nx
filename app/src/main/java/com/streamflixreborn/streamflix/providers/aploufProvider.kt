@@ -173,7 +173,23 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
         }
 
-        categories
+        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films
+        categories.sortedWith(compareBy { cat ->
+            val n = cat.name.lowercase()
+            val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
+            val isSeries = n.contains("séri") || n.contains("seri") || n.contains("saison") || n.contains("tv")
+            val isFilm = n.contains("film") || n.contains("movie") || n.contains("cinéma")
+            when {
+                cat.name == Category.FEATURED -> 0
+                n.contains("épisode") || n.contains("episode") -> 1
+                isRecent && isSeries -> 2
+                isRecent && isFilm -> 3
+                isSeries -> 4
+                isFilm -> 5
+                isRecent -> 1
+                else -> 6
+            }
+        })
     }
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> = coroutineScope {
         initializeService()
@@ -343,10 +359,12 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         val url = document.selectFirst("iframe")?.attr("src")
         if (url == null) throw Exception("Video unavailable")
         val urlobj = url.toHttpUrl()
+        val serviceName = Extractor.identifyServiceName(url)
+        val displayName = serviceName ?: urlobj.host.replace(".com", "")
 
         return listOf(Video.Server(
             id = urlobj.host,
-            name = urlobj.host.replace(".com", ""),
+            name = displayName,
             src = url))
     }
 

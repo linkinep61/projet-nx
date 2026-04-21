@@ -34,7 +34,8 @@ class USTRExtractor: Extractor() {
 
 
         return Video(
-            source = sources.firstOrNull() ?: "",
+            source = sources.firstOrNull()
+                ?: throw Exception("USTR: No stream URL found in sources"),
         )
     }
 

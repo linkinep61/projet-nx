@@ -216,18 +216,24 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             }
         }
 
-        // Reorder: put FEATURED first, then "Derniers épisodes ajoutés" and "Derniers contenus sortis"
-        val priority = listOf("derniers épisodes", "derniers contenus")
-        val sorted = categories.sortedWith(compareByDescending { cat ->
-            val lower = cat.name.lowercase()
+        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films
+        return categories.sortedWith(compareBy { cat ->
+            val n = cat.name.lowercase()
+            val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
+            val isSeries = n.contains("séri") || n.contains("seri") || n.contains("saison") || n.contains("tv") || n.contains("anim")
+            val isFilm = n.contains("film") || n.contains("movie") || n.contains("cinéma")
             when {
-                cat.name == Category.FEATURED -> 100
-                priority.any { lower.contains(it) } -> priority.indexOfFirst { lower.contains(it) }.let { 10 - it }
-                else -> 0
+                cat.name == Category.FEATURED -> 0
+                n.contains("épisode") || n.contains("episode") -> 1
+                n.contains("derniers contenus") -> 2
+                isRecent && isSeries -> 2
+                isRecent && isFilm -> 3
+                isSeries -> 4
+                isFilm -> 5
+                isRecent -> 1
+                else -> 6
             }
         })
-
-        return sorted
     }
 
     // ========== SEARCH ==========

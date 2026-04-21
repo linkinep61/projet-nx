@@ -55,7 +55,8 @@ class VidsrcRuExtractor : Extractor() {
                 webView.webViewClient = object : WebViewClient() {
                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): android.webkit.WebResourceResponse? {
                         val url = request?.url?.toString() ?: ""
-                        if (url.contains("/file2/") && url.endsWith(".m3u8")) {
+                        // Match .m3u8 URLs with or without query params (e.g. .m3u8?token=...)
+                        if (url.contains("/file2/") && url.contains(".m3u8")) {
                             timeoutHandler.removeCallbacks(timeoutRunnable)
                             if (continuation.isActive) {
                                 val video = Video(

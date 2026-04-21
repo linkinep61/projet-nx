@@ -12,8 +12,12 @@ import java.net.URL
 
 class UqloadExtractor : Extractor() {
     override val name = "Uqload"
-    override val mainUrl = "https://uqload.cx"
-    override val aliasUrls = listOf("https://uqload.is")
+    override val mainUrl = "https://uqload.is"
+    override val aliasUrls = listOf(
+        "https://uqload.cx",
+        "https://uqload.co",
+        "https://uqload.to"
+    )
 
 
     override suspend fun extract(link: String): Video {
@@ -30,9 +34,9 @@ class UqloadExtractor : Extractor() {
 
         // Try multiple regex patterns for different Uqload page versions
         val regexPatterns = listOf(
-            Regex("""sources:\s*\["([^"]+)"]"""),
-            Regex("""sources:\s*\[\{[^}]*file\s*:\s*"([^"]+)"[^}]*}\]"""),
-            Regex("""sources:\s*\[\{[^}]*src\s*:\s*"([^"]+)"[^}]*}\]"""),
+            Regex("""sources:\s*\["([^"]+)"\]"""),
+            Regex("""sources:\s*\[\{[^}]*file\s*:\s*"([^"]+)"[^}]*\}\]"""),
+            Regex("""sources:\s*\[\{[^}]*src\s*:\s*"([^"]+)"[^}]*\}\]"""),
             Regex("""file\s*:\s*"(https?://[^"]+\.mp4[^"]*)""""),
             Regex("""src\s*:\s*"(https?://[^"]+\.mp4[^"]*)""""),
             Regex("""player\.src\(\s*\{[^}]*src\s*:\s*"([^"]+)"[^}]*\}"""),
@@ -87,6 +91,7 @@ class UqloadExtractor : Extractor() {
                     .addInterceptor { chain ->
                         val request = chain.request().newBuilder()
                             .header("User-Agent", USER_AGENT)
+                            .header("Referer", baseUrl)
                             .build()
                         chain.proceed(request)
                     }

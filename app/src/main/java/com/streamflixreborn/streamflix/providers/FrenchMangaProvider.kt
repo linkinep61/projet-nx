@@ -100,7 +100,22 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
         }
 
-        return categories
+        // Reorder: 1.Épisodes/récents 2.Séries récentes 3.Films récents 4.Séries 5.Films
+        return categories.sortedWith(compareBy { cat ->
+            val n = cat.name.lowercase()
+            val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
+            val isSeries = n.contains("séri") || n.contains("seri") || n.contains("saison") || n.contains("tv")
+            val isFilm = n.contains("film") || n.contains("movie") || n.contains("cinéma") || n.contains("animation")
+            when {
+                n.contains("épisode") || n.contains("episode") -> 0
+                isRecent && isSeries -> 1
+                isRecent && isFilm -> 2
+                isSeries -> 3
+                isFilm -> 4
+                isRecent -> 0
+                else -> 5
+            }
+        })
     }
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
@@ -116,7 +131,7 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         val results = document.select("div.search-item")
             .mapNotNull {
                 val id = it
-                    .attr("onclick").substringAfter("newsid=").substringBefore("'")
+                    .attr("onclick").substringAfter("/").substringBefore("'")
                 if (id.isEmpty()) return@mapNotNull null
                 val title = it.selectFirst("div.search-title")
                     ?.text()?.replace("\\'","'")
@@ -125,7 +140,7 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     ?.attr("src")
                     ?: ""
 
-                if (title.contains(" - Saison "))
+                if (title.contains(" - Saison ") || title.contains(" - Intégrale "))
                     TvShow(
                         id = id,
                         title = title,
@@ -371,6 +386,17 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         return People(id = id, name = id)
     }
 
+    // Reliability ranking: lower = better
+    private val reliabilityOrder = mapOf(
+        "Vidara" to 1,
+        "Vidsonic" to 2,
+        "Rpmvid" to 3,
+        "StreamWish" to 4,
+        "Streamix" to 4,
+        "Filemoon" to 10,
+    )
+    private val defaultReliability = 5
+
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         initializeService()
 
@@ -385,23 +411,29 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 val tvShowServers = mutableListOf<Video.Server>()
 
                 episodesData?.vf?.get(tvShowNumber)?.forEach { (provider, url) ->
+                    val serviceName = Extractor.identifyServiceName(url)
+                    val displayName = serviceName ?: provider.replaceFirstChar { it.uppercase() }
                     tvShowServers.add(Video.Server(
                         id = "vf$provider",
-                        name = provider.replaceFirstChar { it.uppercase() }+" (VF)",
+                        name = "$displayName (VF)",
                         src = url
                     ))
                 }
                 episodesData?.vostfr?.get(tvShowNumber)?.forEach { (provider, url) ->
+                    val serviceName = Extractor.identifyServiceName(url)
+                    val displayName = serviceName ?: provider.replaceFirstChar { it.uppercase() }
                     tvShowServers.add(Video.Server(
                         id = "vostfr$provider",
-                        name = provider.replaceFirstChar { it.uppercase() }+" (VOSTFR)",
+                        name = "$displayName (VOSTFR)",
                         src = url
                     ))
                 }
                 episodesData?.vo?.get(tvShowNumber)?.forEach { (provider, url) ->
+                    val serviceName = Extractor.identifyServiceName(url)
+                    val displayName = serviceName ?: provider.replaceFirstChar { it.uppercase() }
                     tvShowServers.add(Video.Server(
                         id = "vo$provider",
-                        name = provider.replaceFirstChar { it.uppercase() }+" (VO)",
+                        name = "$displayName (VO)",
                         src = url
                     ))
                 }
@@ -424,10 +456,12 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                             val count = counts.getOrDefault(key, 0) + 1
                             counts[key] = count
                             val suffix = if (count > 1) " $count" else ""
-                            
+                            val serviceName = Extractor.identifyServiceName(url)
+                            val displayName = serviceName ?: provider.replaceFirstChar { it.uppercase() }
+
                             movieServers.add(Video.Server(
                                 id = "${lang.lowercase()}${provider}$count",
-                                name = provider.replaceFirstChar { it.uppercase() }+" ($lang)$suffix",
+                                name = "$displayName ($lang)$suffix",
                                 src = url
                             ))
                         }
@@ -437,12 +471,24 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 addServers(episodesData?.vf, "VF")
                 addServers(episodesData?.vostfr, "VOSTFR")
                 addServers(episodesData?.vo, "VO")
-                
+
                 movieServers
             }
         }
 
-        return servers
+        // Compound sort: language priority (VF > VOSTFR > VO), then reliability
+        return servers.sortedWith(compareBy<Video.Server> { server ->
+            val name = server.name.uppercase()
+            when {
+                name.contains("VF") && !name.contains("VOSTFR") -> 0
+                name.contains("VOSTFR") || name.contains("VOST") -> 2
+                name.contains("VO") -> 3
+                else -> 1
+            }
+        }.thenBy { server ->
+            val serviceName = Extractor.identifyServiceName(server.src)
+            reliabilityOrder[serviceName] ?: defaultReliability
+        })
     }
 
     override suspend fun getVideo(server: Video.Server): Video {

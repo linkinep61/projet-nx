@@ -18,7 +18,6 @@ import com.streamflixreborn.streamflix.databinding.ContentCategorySwiperMobileBi
 import com.streamflixreborn.streamflix.databinding.ContentCategorySwiperTvBinding
 import com.streamflixreborn.streamflix.databinding.ItemCategoryMobileBinding
 import com.streamflixreborn.streamflix.databinding.ItemCategoryTvBinding
-import com.streamflixreborn.streamflix.fragments.home.HomeMobileFragment
 import com.streamflixreborn.streamflix.fragments.home.HomeTvFragment
 import com.streamflixreborn.streamflix.fragments.home.HomeTvFragmentDirections
 import com.streamflixreborn.streamflix.models.Category
@@ -32,7 +31,6 @@ import com.streamflixreborn.streamflix.utils.toActivity
 import java.util.Locale
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.providers.Provider
-import com.streamflixreborn.streamflix.database.AppDatabase
 
 class CategoryViewHolder(
     private val _binding: ViewBinding
@@ -202,20 +200,20 @@ class CategoryViewHolder(
             }
             action()
         }
-        
+
         // Aggiornamento dello sfondo forzato per TV all'inizio o al cambio indice
         val poster = when (selected) {
             is Movie -> selected.banner
             is TvShow -> selected.banner
             else -> null
         }
-        
+
         when (val fragment = context.toActivity()?.getCurrentFragment()) {
             is HomeTvFragment -> {
                 if (poster != null) {
                     fragment.updateBackground(poster, false) // Imposta lo sfondo senza marcare come focalizzato
                 }
-                
+
                 // Se l'elemento è stato appena selezionato (indice cambiato), assicura che l'aggiornamento sia visibile
                 if (category.selectedIndex == category.list.indexOf(selected)) {
                     fragment.resetSwiperSchedule() // Riavvia lo scheduler per assicurarsi che continui

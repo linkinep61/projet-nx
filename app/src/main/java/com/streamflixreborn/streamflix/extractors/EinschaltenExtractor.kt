@@ -44,15 +44,15 @@ class EinschaltenExtractor : Extractor() {
 
     private val service = Service.build(mainUrl)
 
-    fun server(videoType: Video.Type): Video.Server {
-        return Video.Server(
-            id = name,
-            name = name,
-            src = when (videoType) {
-                is Video.Type.Movie -> "$mainUrl/api/movies/${videoType.id}/watch"
-                is Video.Type.Episode -> ""
-            },
-        )
+    fun server(videoType: Video.Type): Video.Server? {
+        return when (videoType) {
+            is Video.Type.Movie -> Video.Server(
+                id = name,
+                name = name,
+                src = "$mainUrl/api/movies/${videoType.id}/watch"
+            )
+            is Video.Type.Episode -> null // Einschalten does not support episodes
+        }
     }
 
     override suspend fun extract(link: String): Video {

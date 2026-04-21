@@ -17,20 +17,41 @@ class ApiVoirFilmExtractor : Extractor() {
 
     private val service = Service.build(mainUrl)
 
+    // Reliability ranking: lower = better
+    private val reliabilityOrder = mapOf(
+        "Vidara" to 1,
+        "Vidsonic" to 2,
+        "Rpmvid" to 3,
+        "StreamWish" to 4,
+        "Streamix" to 4,
+        "Filemoon" to 10,
+    )
+    private val defaultReliability = 5
+
     suspend fun expand(link: String, referer: String = mainUrl, suffix: String = ""): List<Video.Server> {
         val doc = service.get(link, referer)
 
         val links = doc.select("div.top ul.content > li").mapIndexedNotNull { idx, item ->
             val url = item.attr("data-url")
             if (url.isEmpty()) return@mapIndexedNotNull null
-            val title = suffix+(item.text()?:"Server$idx")
+            val originalTitle = item.text() ?: "Server$idx"
+            val serviceName = Extractor.identifyServiceName(url)
+            val title = if (serviceName != null) {
+                "$suffix$serviceName"
+            } else {
+                "$suffix$originalTitle"
+            }
             Video.Server( "${name}_${idx}",
                 name = title,
                 src = url
             )
         }
 
-        return links
+        // Sort by reliability
+        return links.sortedBy { server ->
+            val serviceName = Extractor.identifyServiceName(server.src)
+            reliabilityOrder[serviceName] ?: defaultReliability
+        }
     }
 
     override suspend fun extract(link: String): Video {

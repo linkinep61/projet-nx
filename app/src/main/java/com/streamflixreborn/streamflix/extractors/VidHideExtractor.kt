@@ -2,14 +2,17 @@ package com.streamflixreborn.streamflix.extractors
 
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
+import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.JsUnpacker
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.Url
 import java.net.URL
+import java.util.concurrent.TimeUnit
 
 class VidHideExtractor: Extractor() {
     override val name = "VidHide"
@@ -58,13 +61,17 @@ class VidHideExtractor: Extractor() {
             ?: throw Exception("Unpacked is null")
 
         val links = mutableMapOf<String, String>()
-        Regex("""["'](hls\d+)["']\s*:\s*["'](.*?)["']""")
+        // Match both numbered hls keys (hls4, hls2) and generic keys (hls, file, src, source)
+        Regex("""["'](hls\d*|file|src|source)["']\s*:\s*["']([^"']+)["']""")
             .findAll(unPacked)
             .forEach {
                 links[it.groupValues[1]] = it.groupValues[2]
             }
 
-        val finalUrl = links["hls4"] ?: links["hls2"] ?: throw Exception("No HLS link found")
+        // Prefer highest quality HLS, then generic keys
+        val finalUrl = links["hls4"] ?: links["hls2"] ?: links["hls"]
+            ?: links["file"] ?: links["src"] ?: links["source"]
+            ?: throw Exception("No HLS link found")
         
         // Add domain if the URL starts with "/"
         val completeUrl = if (finalUrl.startsWith("/")) {
@@ -88,8 +95,16 @@ class VidHideExtractor: Extractor() {
 
         companion object {
             fun build(baseUrl: String): Service {
+                val client = OkHttpClient.Builder()
+                    .dns(DnsResolver.doh)
+                    .connectTimeout(15, TimeUnit.SECONDS)
+                    .readTimeout(15, TimeUnit.SECONDS)
+                    .followRedirects(true)
+                    .followSslRedirects(true)
+                    .build()
                 val retrofit = Retrofit.Builder()
                     .baseUrl(baseUrl)
+                    .client(client)
                     .addConverterFactory(JsoupConverterFactory.create())
                     .build()
                 return retrofit.create(Service::class.java)

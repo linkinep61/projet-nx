@@ -17,7 +17,7 @@ class VoeExtractor : Extractor() {
 
     override val name = "VOE"
     override val mainUrl = "https://voe.sx/"
-    override val aliasUrls = listOf("https://jilliandescribecompany.com", "https://mikaylaarealike.com","https://christopheruntilpoint.com","https://walterprettytheir.com","https://crystaltreatmenteast.com","https://lauradaydo.com","https://lancewhosedifficult.com", "https://dianaavoidthey.com", "https://jefferycontrolmodel.com", "https://sandratableother.com", "https://marissasharecareer.com", "https://ralphysuccessfull.org")
+    override val aliasUrls = listOf("https://jilliandescribecompany.com", "https://mikaylaarealike.com","https://christopheruntilpoint.com","https://walterprettytheir.com","https://crystaltreatmenteast.com","https://lauradaydo.com","https://lancewhosedifficult.com", "https://dianaavoidthey.com", "https://jefferycontrolmodel.com", "https://sandratableother.com", "https://marissasharecareer.com", "https://ralphysuccessfull.org", "https://charlestoughrace.com")
 
     // Voe uses rotating random-word domains (e.g. sandratableother.com, marissasharecareer.com)
     // Pattern: 3+ concatenated English words (12+ lowercase chars) + /e/ path
@@ -30,20 +30,23 @@ class VoeExtractor : Extractor() {
         // Use the link's own domain as base, not mainUrl (fixes rotating domains getting 404)
         val linkBaseUrl = URL(link).let { "${it.protocol}://${it.host}" }
         val service = VoeExtractorService.build(linkBaseUrl, link)
-        
-        // Extract path from original link (handles both mainUrl and alias URLs)
-        val parsedUrl = URL(link)
-        val originalPath = parsedUrl.path + if (parsedUrl.query != null) "?${parsedUrl.query}" else ""
 
-        val source = service.getSource(originalPath)
+        val source = service.getSource(link)
         val scriptTag = source.selectFirst("script[type=application/json]")
         val encodedStringInScriptTag = scriptTag?.data()?.trim().orEmpty()
         val encodedString = DecryptHelper.findEncodedRegex(source.html())
-        val decryptedContent = if (encodedString != null) {
-            DecryptHelper.decrypt(encodedString)
-        } else {
-            DecryptHelper.decrypt(encodedStringInScriptTag)
+
+        // VOE now wraps the encoded data in a JSON array like ["encodedString"]
+        // We need to unwrap it before decrypting
+        val rawEncoded = encodedString ?: encodedStringInScriptTag
+        val unwrappedEncoded = try {
+            val jsonArray = com.google.gson.JsonParser.parseString(rawEncoded).asJsonArray
+            jsonArray.get(0).asString
+        } catch (_: Exception) {
+            rawEncoded // Fallback: use as-is if not a JSON array
         }
+
+        val decryptedContent = DecryptHelper.decrypt(unwrappedEncoded)
 
         val m3u8 = decryptedContent.get("source")?.asString
             ?: throw Exception("VOE: decryption failed or 'source' key missing")
@@ -78,7 +81,7 @@ class VoeExtractor : Extractor() {
     private interface VoeExtractorService {
 
         companion object {
-            suspend fun build(baseUrl: String, originalLink: String): VoeExtractorService {
+            fun build(baseUrl: String, originalLink: String): VoeExtractorService {
                 val client = OkHttpClient.Builder()
                     .dns(DnsResolver.doh)
                     .followRedirects(true)
@@ -91,38 +94,16 @@ class VoeExtractor : Extractor() {
                     }
                     .build()
 
-                val retrofitVOE = Retrofit.Builder()
+                // Single Retrofit instance — OkHttp follows HTTP redirects automatically,
+                // so we don't need to detect the redirect domain from the page HTML.
+                // The old approach broke because the first URL in the page (CDN url)
+                // was incorrectly used as the redirect base.
+                val retrofit = Retrofit.Builder()
                     .baseUrl(baseUrl)
                     .client(client)
                     .addConverterFactory(JsoupConverterFactory.create())
-
                     .build()
-                val retrofitVOEBuiled = retrofitVOE.create(VoeExtractorService::class.java)
-
-                // Extract path from original link (handles both mainUrl and alias URLs)
-                val relativePath = if (originalLink.startsWith(baseUrl)) {
-                    originalLink.replace(baseUrl, "")
-                } else {
-                    // If link doesn't start with baseUrl, extract path directly (alias URL)
-                    val parsedUrl = URL(originalLink)
-                    parsedUrl.path + if (parsedUrl.query != null) "?${parsedUrl.query}" else ""
-                }
-
-                val retrofitVOEhtml = retrofitVOEBuiled.getSource(relativePath).html()
-
-                val regex = Regex("""https://([a-zA-Z0-9.-]+)(?:/[^'"]*)?""")
-                val match = regex.find(retrofitVOEhtml)
-                val redirectBaseUrl = if (match != null) {
-                    "https://${match.groupValues[1]}/"
-                } else {
-                    throw Exception("Base url not found for VOE")
-                }
-
-                val retrofitRedirected = Retrofit.Builder()
-                    .baseUrl(redirectBaseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                return retrofitRedirected.create(VoeExtractorService::class.java)
+                return retrofit.create(VoeExtractorService::class.java)
             }
         }
 
@@ -130,8 +111,7 @@ class VoeExtractor : Extractor() {
         @Headers(
             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Accept-Language: it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-            "X-Requested-With: XMLHttpRequest"
+            "Accept-Language: it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
         )
         suspend fun getSource(@Url url: String): Document
     }

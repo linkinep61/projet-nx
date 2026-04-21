@@ -60,8 +60,13 @@ class SupervideoExtractor : Extractor() {
         val unpacked = JsUnpacker(scriptData).unpack() ?: throw Exception("Unpack failed")
 
         val fileRegex = Regex("""file\s*:\s*[\"']([^\"']+)[\"']""")
-        val streamUrl = fileRegex.find(unpacked)?.groupValues?.get(1)
-            ?: throw Exception("Stream URL not found in file field")
+        // Collect all file: matches; prefer video URLs (.m3u8/.mp4) over subtitles (.vtt/.srt/.ass)
+        val allFileMatches = fileRegex.findAll(unpacked).map { it.groupValues[1] }.toList()
+        val streamUrl = allFileMatches.firstOrNull {
+            it.contains(".m3u8") || it.contains(".mp4") || it.contains(".mpd")
+        } ?: allFileMatches.firstOrNull {
+            !it.contains(".vtt") && !it.contains(".srt") && !it.contains(".ass")
+        } ?: throw Exception("Stream URL not found in file field")
 
         val tracksBlock = Regex("""tracks\s*:\s*\[(.*?)\]""", RegexOption.DOT_MATCHES_ALL)
             .find(unpacked)
@@ -79,7 +84,7 @@ class SupervideoExtractor : Extractor() {
         return Video(
             source = streamUrl,
             subtitles = subtitles,
-            headers = mapOf("Referer" to "mainUrl"),
+            headers = mapOf("Referer" to mainUrl),
             extraBuffering = true
         )
     }

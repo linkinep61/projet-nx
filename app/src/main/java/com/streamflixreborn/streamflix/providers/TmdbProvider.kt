@@ -732,7 +732,7 @@ class TmdbProvider(override val language: String) : Provider {
                 // Solo server tedeschi
                 servers.addAll(0, MoflixExtractor().servers(videoType))
                 if (videoType is Video.Type.Movie) {
-                    servers.add(EinschaltenExtractor().server(videoType))
+                    EinschaltenExtractor().server(videoType)?.let { servers.add(it) }
                 }
                 VideasyExtractor().server(videoType, language)?.let { servers.add(it) }
             }

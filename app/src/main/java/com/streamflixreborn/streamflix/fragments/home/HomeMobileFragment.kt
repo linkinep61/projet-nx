@@ -148,7 +148,7 @@ class HomeMobileFragment : Fragment() {
             }
         }
         
-        // Ensure background image is hidden on mobile to show theme color
+        // Hide background ImageView on mobile — wallpaper is at activity level
         binding.ivHomeBackground.visibility = View.GONE
     }
 

@@ -228,5 +228,33 @@ abstract class Extractor {
 
             throw Exception("No extractors found for URL: $finalLink")
         }
+
+        /**
+         * Identify the extractor/service name for a given URL.
+         * Returns the extractor name (e.g. "Filemoon", "Vidara", "Rpmvid") or null if unknown.
+         */
+        fun identifyServiceName(url: String): String? {
+            val urlRegex = Regex("^(https?://)?(www\\.)?")
+            val compareUrl = url.lowercase().replace(urlRegex, "")
+
+            for (extractor in extractors) {
+                if (compareUrl.startsWith(extractor.mainUrl.replace(urlRegex, ""))) {
+                    return extractor.name
+                }
+                for (aliasUrl in extractor.aliasUrls) {
+                    if (compareUrl.startsWith(aliasUrl.lowercase().replace(urlRegex, ""))) {
+                        return extractor.name
+                    }
+                }
+            }
+            // Fallback: match base domain name without TLD
+            for (extractor in extractors) {
+                val baseName = extractor.mainUrl.replace(Regex("^(https?://)?(www\\.)?(.*?)(\\.[a-z]+)"), "$3")
+                if (compareUrl.startsWith(baseName)) {
+                    return extractor.name
+                }
+            }
+            return null
+        }
     }
 }

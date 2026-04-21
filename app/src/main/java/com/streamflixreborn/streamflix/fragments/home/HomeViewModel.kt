@@ -380,7 +380,95 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         loadUserDataCache(provider)
 
         try {
-            val categories = provider.getHome()
+            val categories = provider.getHome().toMutableList()
+
+            // Enrich carousels: load extra pages to fill carousels with maximum items
+            try {
+                val allMovies = mutableListOf<Movie>()
+                val allTvShows = mutableListOf<TvShow>()
+
+                // Track FEATURED items by identity so we never share references
+                // with enriched categories (sharing causes itemType overwrites in displayHome)
+                val featuredItems = categories.firstOrNull()?.list?.toSet() ?: emptySet()
+
+                // Collect items from NON-featured categories first
+                for (cat in categories) {
+                    for (item in cat.list) {
+                        if (item in featuredItems) continue
+                        when (item) {
+                            is Movie -> allMovies.add(item)
+                            is TvShow -> allTvShows.add(item)
+                        }
+                    }
+                }
+
+                // Load up to 10 pages of movies + TV shows in parallel
+                coroutineScope {
+                    val moviePages = (1..10).map { page ->
+                        async {
+                            try {
+                                provider.getMovies(page)
+                            } catch (e: Exception) {
+                                emptyList()
+                            }
+                        }
+                    }
+                    val tvShowPages = (1..10).map { page ->
+                        async {
+                            try {
+                                provider.getTvShows(page)
+                            } catch (e: Exception) {
+                                emptyList()
+                            }
+                        }
+                    }
+                    for (deferred in moviePages) {
+                        allMovies.addAll(deferred.await())
+                    }
+                    for (deferred in tvShowPages) {
+                        allTvShows.addAll(deferred.await())
+                    }
+                }
+
+                // Deduplicate — keep items even with blank id (use title as fallback key)
+                // Also exclude any FEATURED item references to avoid shared-object itemType conflicts
+                val featuredMovieKeys = featuredItems.filterIsInstance<Movie>().map { it.id.ifBlank { it.title } }.toSet()
+                val featuredTvShowKeys = featuredItems.filterIsInstance<TvShow>().map { it.id.ifBlank { it.title } }.toSet()
+                val uniqueMovies = allMovies.distinctBy { it.id.ifBlank { it.title } }
+                    .filter { (it.id.ifBlank { it.title }) !in featuredMovieKeys }
+                val uniqueTvShows = allTvShows.distinctBy { it.id.ifBlank { it.title } }
+                    .filter { (it.id.ifBlank { it.title }) !in featuredTvShowKeys }
+
+                // Rebuild: keep featured banner, replace everything else
+                // Order: FEATURED → Séries Récentes → Films Récents → Séries Populaires → Films Populaires
+                if (uniqueMovies.size > 5 || uniqueTvShows.size > 5) {
+                    val featured = categories.firstOrNull()
+                    categories.clear()
+                    if (featured != null) categories.add(featured)
+
+                    val seriesNames = listOf("Séries Récentes", "Séries Populaires", "Encore plus de Séries", "Séries à Découvrir")
+                    val filmNames = listOf("Films Récents", "Films Populaires", "Encore plus de Films", "Films à Découvrir")
+                    val tvChunks = uniqueTvShows.chunked(40)
+                    val movieChunks = uniqueMovies.chunked(40)
+                    val maxChunks = maxOf(tvChunks.size, movieChunks.size)
+
+                    // Interleave: recent series, recent films, popular series, popular films, etc.
+                    for (i in 0 until maxChunks) {
+                        if (i < tvChunks.size) {
+                            val name = seriesNames.getOrElse(i) { "Séries #${i + 1}" }
+                            categories.add(Category(name = name, list = tvChunks[i]))
+                        }
+                        if (i < movieChunks.size) {
+                            val name = filmNames.getOrElse(i) { "Films #${i + 1}" }
+                            categories.add(Category(name = name, list = movieChunks[i]))
+                        }
+                    }
+
+                }
+            } catch (e: Exception) {
+                Log.e("HomeViewModel", "Enrich failed for ${provider.name}: ${e.message}")
+            }
+
             HomeCacheStore.write(appContext, provider, categories)
             _state.emit(State.SuccessLoading(categories))
         } catch (e: Exception) {

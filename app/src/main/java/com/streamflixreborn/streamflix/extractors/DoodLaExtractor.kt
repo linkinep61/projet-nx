@@ -19,13 +19,13 @@ open class DoodLaExtractor : Extractor() {
     override val mainUrl = "https://dood.la"
     override val aliasUrls = listOf(
         "https://dsvplay.com",
-        "https://mikaylaarealike.com",
         "https://myvidplay.com",
         "https://playmogo.com",
         "https://do7go.com",
         "https://d000d.com",
         "https://dood.work",
-        "https://doply.net"
+        "https://doply.net",
+        "https://doodstream.me"
     )
 
     private val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
@@ -42,16 +42,18 @@ open class DoodLaExtractor : Extractor() {
         val finalUrl = response.raw().request.url.toString()
         val finalBaseUrl = getBaseUrl(finalUrl)
 
-        val md5Path = Regex("/pass_md5/[^']*").find(document.toString())?.value
+        val md5Path = Regex("""/pass_md5/[^"'\s]+""").find(document.toString())?.value
             ?: throw Exception("Could not find md5 path")
-        
+
         val md5Url = finalBaseUrl + md5Path
 
-        val videoPrefix = service.getString(md5Url, finalUrl)
-        
+        val videoPrefix = service.getString(md5Url, finalUrl).trim()
+
+        val token = md5Url.substringAfterLast("/")
+        val sep = if ('?' in videoPrefix) '&' else '?'
         val url = videoPrefix +
                 createHashTable() +
-                "?token=${md5Url.substringAfterLast("/")}"
+                "${sep}token=${token}&expiry=${System.currentTimeMillis()}"
 
         return Video(
             source = url,

@@ -17,6 +17,7 @@ import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
@@ -27,13 +28,13 @@ import java.util.concurrent.TimeUnit
 object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
 
     override val name = "Movix"
-    override val defaultBaseUrl: String = "https://api.movix.llc/"
+    override val defaultBaseUrl: String = "https://api.movix.cash/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
             return cacheURL.ifEmpty { field }
         }
-    override val defaultPortalUrl: String = "https://movix.llc/"
+    override val defaultPortalUrl: String = "https://movix.cash/"
     override val portalUrl: String = defaultPortalUrl
         get() {
             val cachePortalURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_PORTAL_URL)
@@ -42,10 +43,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
     override val logo: String
         get() {
             val cacheLogo = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_LOGO)
-            return cacheLogo.ifEmpty { "https://movix.llc/movix.png" }
+            return cacheLogo.ifEmpty { "${portalUrl}movix.png" }
         }
     override val language = "fr"
     override val changeUrlMutex = Mutex()
+
+    private const val AUTO_UPDATE_URL = "https://movix.health/"
 
     private lateinit var movixServiceInstance: MovixService
     private var serviceInitialized = false
@@ -349,10 +352,82 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
 
     override suspend fun onChangeUrl(forceRefresh: Boolean): String {
         changeUrlMutex.withLock {
+            if (forceRefresh || UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
+                try {
+                    val activeDomain = fetchActiveDomain()
+                    if (!activeDomain.isNullOrEmpty()) {
+                        val portalBase = if (activeDomain.endsWith("/")) activeDomain else "$activeDomain/"
+                        val apiBase = portalBase.replace("://", "://api.")
+
+                        UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_URL, apiBase)
+                        UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_PORTAL_URL, portalBase)
+                        UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_LOGO, "${portalBase}movix.png")
+                        Log.d("MovixProvider", "Auto-update: active domain -> $portalBase (API: $apiBase)")
+                    }
+                } catch (e: Exception) {
+                    Log.e("MovixProvider", "Auto-update failed: ${e.message}")
+                }
+            }
             movixServiceInstance = buildMovixService()
             serviceInitialized = true
         }
         return baseUrl
+    }
+
+    /**
+     * Fetches the active Movix domain from movix.health.
+     *
+     * movix.health is a React SPA that embeds domain data in its JS bundle.
+     * The domains are stored as an array of objects with properties:
+     *   id, label, url, blocked (boolean), blockedReason (optional)
+     *
+     * Strategy:
+     * 1. Fetch the HTML page to find the JS bundle filename
+     * 2. Fetch the JS bundle
+     * 3. Regex for the first domain entry with blocked:!1 (= not blocked)
+     */
+    private fun fetchActiveDomain(): String? {
+        val client = OkHttpClient.Builder()
+            .readTimeout(15, TimeUnit.SECONDS)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .dns(DnsResolver.doh)
+            .build()
+
+        // Step 1: Fetch the HTML to find the JS bundle path
+        val htmlRequest = Request.Builder()
+            .url(AUTO_UPDATE_URL)
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .build()
+
+        val html = client.newCall(htmlRequest).execute().use { response ->
+            if (!response.isSuccessful) return null
+            response.body?.string() ?: return null
+        }
+
+        // Extract JS bundle path: <script ... src="/assets/index-XXXX.js">
+        val jsPath = Regex("""src="(/assets/index-[^"]+\.js)"""")
+            .find(html)?.groupValues?.get(1)
+            ?: return null
+
+        val jsUrl = AUTO_UPDATE_URL.trimEnd('/') + jsPath
+
+        // Step 2: Fetch the JS bundle
+        val jsRequest = Request.Builder()
+            .url(jsUrl)
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .build()
+
+        val jsContent = client.newCall(jsRequest).execute().use { response ->
+            if (!response.isSuccessful) return null
+            response.body?.string() ?: return null
+        }
+
+        // Step 3: Find the first domain with blocked:!1 (not blocked)
+        // Format: url:'https://movix.XXXX',blocked:!1
+        val activeDomainUrl = Regex("""url:'(https://movix\.[a-z]+)',blocked:!1""")
+            .find(jsContent)?.groupValues?.get(1)
+
+        return activeDomainUrl
     }
 
     private suspend fun initializeService() {
@@ -398,23 +473,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                 categories.add(Category(name = Category.FEATURED, list = featuredItems))
             }
 
-            // Popular movies
-            val popularMovies = tmdbService.getPopularMovies(apiKey = TMDB_API_KEY)
-            val movieItems = popularMovies.results?.map { item ->
-                Movie(
-                    id = item.id.toString(),
-                    title = item.title ?: "",
-                    poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
-                    banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
-                    rating = item.vote_average,
-                    released = item.release_date
-                )
-            } ?: emptyList()
-            if (movieItems.isNotEmpty()) {
-                categories.add(Category(name = "Films populaires", list = movieItems))
-            }
-
-            // Popular TV shows
+            // Séries récentes en premier
             val popularTv = tmdbService.getPopularTvShows(apiKey = TMDB_API_KEY)
             val tvItems = popularTv.results?.map { item ->
                 TvShow(
@@ -428,22 +487,6 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             } ?: emptyList()
             if (tvItems.isNotEmpty()) {
                 categories.add(Category(name = "Séries populaires", list = tvItems))
-            }
-
-            // Top rated movies
-            val topMovies = tmdbService.getTopRatedMovies(apiKey = TMDB_API_KEY)
-            val topMovieItems = topMovies.results?.map { item ->
-                Movie(
-                    id = item.id.toString(),
-                    title = item.title ?: "",
-                    poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
-                    banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
-                    rating = item.vote_average,
-                    released = item.release_date
-                )
-            } ?: emptyList()
-            if (topMovieItems.isNotEmpty()) {
-                categories.add(Category(name = "Films les mieux notés", list = topMovieItems))
             }
 
             // Top rated TV
@@ -462,11 +505,59 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                 categories.add(Category(name = "Séries les mieux notées", list = topTvItems))
             }
 
+            // Puis les films
+            val popularMovies = tmdbService.getPopularMovies(apiKey = TMDB_API_KEY)
+            val movieItems = popularMovies.results?.map { item ->
+                Movie(
+                    id = item.id.toString(),
+                    title = item.title ?: "",
+                    poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
+                    banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
+                    rating = item.vote_average,
+                    released = item.release_date
+                )
+            } ?: emptyList()
+            if (movieItems.isNotEmpty()) {
+                categories.add(Category(name = "Films populaires", list = movieItems))
+            }
+
+            // Top rated movies
+            val topMovies = tmdbService.getTopRatedMovies(apiKey = TMDB_API_KEY)
+            val topMovieItems = topMovies.results?.map { item ->
+                Movie(
+                    id = item.id.toString(),
+                    title = item.title ?: "",
+                    poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
+                    banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
+                    rating = item.vote_average,
+                    released = item.release_date
+                )
+            } ?: emptyList()
+            if (topMovieItems.isNotEmpty()) {
+                categories.add(Category(name = "Films les mieux notés", list = topMovieItems))
+            }
+
         } catch (e: Exception) {
             Log.e("MovixProvider", "Error loading home: ${e.message}")
         }
 
-        return categories
+        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films
+        return categories.sortedWith(compareBy { cat ->
+            val n = cat.name.lowercase()
+            val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
+            val isSeries = n.contains("séri") || n.contains("seri") || n.contains("saison") || n.contains("tv")
+            val isFilm = n.contains("film") || n.contains("movie") || n.contains("cinéma")
+            when {
+                cat.name == Category.FEATURED -> 0
+                n.contains("épisode") || n.contains("episode") -> 1
+                isRecent && isSeries -> 2
+                isRecent && isFilm -> 3
+                isSeries -> 4
+                isFilm -> 5
+                isRecent -> 1
+                else -> 6
+            }
+        })
     }
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
@@ -1110,6 +1201,9 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
      *     "https://streamtape.com/e/xyz" -> "Streamtape"
      */
     private fun guessPlayerName(url: String): String {
+        // Try the accurate extractor-based detection first
+        Extractor.identifyServiceName(url)?.let { return it }
+        // Fallback: derive from domain name
         return try {
             val host = url.substringAfter("://").substringBefore("/").substringBefore(":")
             val domain = host.removePrefix("www.")

@@ -100,10 +100,20 @@ class PlayerViewModel(
         lastId = id
         _state.emit(State.LoadingServers)
         try {
-            val servers = UserPreferences.currentProvider!!.getServers(id, videoType)
-            if (servers.isEmpty()) throw Exception("No servers found")
-            
-            // LOG POTENZIATO: Mostra tutti i server disponibili per il player
+            val rawServers = UserPreferences.currentProvider!!.getServers(id, videoType)
+            if (rawServers.isEmpty()) throw Exception("No servers found")
+
+            // Deprioritize Netu (cfglobalcdn blocked by French ISPs) — put it last
+            val netuPatterns = listOf("netu", "waaw", "hqq", "hqcloud", "younetu")
+            val servers = rawServers.sortedBy { server ->
+                val id = server.id.lowercase()
+                val name = server.name.lowercase()
+                when {
+                    netuPatterns.any { p -> name.contains(p) || id.contains(p) } -> 1
+                    else -> 0
+                }
+            }
+
             Log.i("StreamFlixES", "[SERVERS LIST] -> Provider: ${UserPreferences.currentProvider!!.name}")
             Log.i("StreamFlixES", "[SERVERS LIST] -> Found ${servers.size} servers: ${servers.joinToString { it.name }}")
 
