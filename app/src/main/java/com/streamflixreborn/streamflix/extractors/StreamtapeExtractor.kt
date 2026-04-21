@@ -24,29 +24,42 @@ class StreamtapeExtractor : Extractor() {
         val service = StreamtapeExtractorService.build(mainUrl)
         val source = service.getSource(linkJustParameter)
 
-        // Estrae i parametri dal codice JavaScript
-        val scriptRegex = Regex("document\\.getElementById\\('botlink'\\)\\.innerHTML\\s*=\\s*'([^']+)'\\s*\\+\\s*\\('([^']+)'\\)\\.substring\\(([0-9]+)\\)")
-        val scriptMatch = scriptRegex.find(source.html()) 
-            ?: throw Exception("botlink JavaScript not found")
-        
+        // Streamtape uses rotating element IDs: 'botlink', 'norobotlink', 'ideoooolink', etc.
+        // Try multiple regex patterns for different Streamtape page versions
+        val html = source.html()
+
+        val scriptRegexPatterns = listOf(
+            // New format: document.getElementById('norobotlink').innerHTML = '...' + ('...').substring(N)
+            Regex("""document\.getElementById\('norobotlink'\)\.innerHTML\s*=\s*'([^']+)'\s*\+\s*\('([^']+)'\)\.substring\(([0-9]+)\)"""),
+            // Old format: document.getElementById('botlink').innerHTML = '...' + ('...').substring(N)
+            Regex("""document\.getElementById\('botlink'\)\.innerHTML\s*=\s*'([^']+)'\s*\+\s*\('([^']+)'\)\.substring\(([0-9]+)\)"""),
+            // Generic: any getElementById with innerHTML assignment
+            Regex("""document\.getElementById\('[^']*link'\)\.innerHTML\s*=\s*'([^']+)'\s*\+\s*\('([^']+)'\)\.substring\(([0-9]+)\)"""),
+        )
+
+        val scriptMatch = scriptRegexPatterns.firstNotNullOfOrNull { it.find(html) }
+            ?: throw Exception("Streamtape link JavaScript not found (tried botlink/norobotlink)")
+
         val baseUrl = scriptMatch.groupValues[1]
         val paramString = scriptMatch.groupValues[2]
-        val substringIndex = scriptMatch.groupValues[3].toInt() // 4
-        
+        val substringIndex = scriptMatch.groupValues[3].toInt()
+
         // Applica substring per ottenere i parametri corretti
         val cleanParams = paramString.substring(substringIndex)
-        
-        // Estrae id, expires, ip e token dai parametri
+
+        // Build the video URL from baseUrl + cleanParams
+        val tokenRegex = Regex("token=([^&']+)")
+        val token = tokenRegex.find(cleanParams)?.groupValues?.get(1) ?: throw Exception("token not found")
+
+        // Reconstruct the full get_video URL
         val idRegex = Regex("id=([^&]+)")
         val expiresRegex = Regex("expires=([^&]+)")
         val ipRegex = Regex("ip=([^&]+)")
-        val tokenRegex = Regex("token=([^&]+)")
-        
+
         val videoId = idRegex.find(cleanParams)?.groupValues?.get(1) ?: throw Exception("video id not found")
         val expires = expiresRegex.find(cleanParams)?.groupValues?.get(1) ?: throw Exception("expires not found")
         val ip = ipRegex.find(cleanParams)?.groupValues?.get(1) ?: throw Exception("ip not found")
-        val token = tokenRegex.find(cleanParams)?.groupValues?.get(1) ?: throw Exception("token not found")
-        
+
         val finalVideoUrl = "$mainUrl/get_video?id=$videoId&expires=$expires&ip=$ip&token=$token&stream=1"
 
         val response = service.getVideo(finalVideoUrl)

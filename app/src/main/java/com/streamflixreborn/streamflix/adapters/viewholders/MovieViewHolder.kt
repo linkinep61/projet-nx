@@ -683,7 +683,11 @@ class MovieViewHolder(
             }
         }
 
-        binding.tvMovieOverview.text = movie.overview
+        binding.tvMovieOverview.apply {
+            text = movie.overview
+            visibility = if (movie.overview.isNullOrBlank()) View.GONE else View.VISIBLE
+        }
+        binding.tvMovieOverviewLabel.visibility = if (movie.overview.isNullOrBlank()) View.GONE else View.VISIBLE
 
         binding.btnMovieWatchNow.apply {
             setOnClickListener {
@@ -814,7 +818,11 @@ class MovieViewHolder(
             }
         }
 
-        binding.tvMovieOverview.text = movie.overview
+        binding.tvMovieOverview.apply {
+            text = movie.overview
+            visibility = if (movie.overview.isNullOrBlank()) View.GONE else View.VISIBLE
+        }
+        binding.tvMovieOverviewLabel.visibility = if (movie.overview.isNullOrBlank()) View.GONE else View.VISIBLE
 
         binding.btnMovieWatchNow.apply {
             setOnClickListener {

@@ -32,9 +32,10 @@ class ProvidersViewModel : ViewModel() {
         _state.emit(State.Loading)
 
         try {
+            val providerOrder = Provider.providers.keys.toList()
             val providers = Provider.providers.keys
                 .filter { language == null || it.language == language }
-                .sortedBy { it.name }
+                .sortedBy { providerOrder.indexOf(it) }
                 .toMutableList()
 
             if (language == null) {
@@ -61,10 +62,7 @@ class ProvidersViewModel : ViewModel() {
                     language = it.language,
                     provider = it,
                 )
-            }.sortedWith(
-                compareBy<ModelProvider> { it.provider is TmdbProvider }
-                    .thenBy { it.name.lowercase(Locale.ROOT) }
-            )
+            }
 
             _state.emit(State.SuccessLoading(modelProviders))
         } catch (e: Exception) {

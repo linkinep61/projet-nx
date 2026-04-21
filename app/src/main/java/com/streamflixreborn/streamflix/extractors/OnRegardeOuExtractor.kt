@@ -17,6 +17,17 @@ class OnRegardeOuExtractor : Extractor() {
 
     private val service = Service.build(mainUrl)
 
+    // Reliability ranking: lower = better. Servers with lower scores appear first.
+    private val reliabilityOrder = mapOf(
+        "Vidara" to 1,
+        "Vidsonic" to 2,
+        "Rpmvid" to 3,
+        "StreamWish" to 4,
+        "Streamix" to 4,
+        "Filemoon" to 10,  // CDN files expire often → last
+    )
+    private val defaultReliability = 5
+
     suspend fun expand(link: String, referer: String = mainUrl, suffix: String = ""): List<Video.Server> {
         val doc = service.get(link, referer)
 
@@ -39,21 +50,33 @@ class OnRegardeOuExtractor : Extractor() {
         for (i in 0 until servers.length()) {
             val server = servers.getJSONObject(i) ?: continue
 
-            val name = suffix+server.optString("name", "Server$i")
-            val url = server.optString("url")
+            val originalName = server.optString("name", "Server$i")
+            val url = server.optString("url").replace("\\/", "/")
 
             if (url.isEmpty()) continue
+
+            // Detect hosting service from URL
+            val serviceName = Extractor.identifyServiceName(url)
+            val displayName = if (serviceName != null) {
+                "$suffix$serviceName"
+            } else {
+                "$suffix$originalName"
+            }
 
             list.add(
                 Video.Server(
                     "${this.name}_$i",
-                    name = name,
-                    src = url.replace("\\/", "/") // nettoie les URLs
+                    name = displayName,
+                    src = url
                 )
             )
         }
 
-        return list
+        // Sort by reliability: best services first
+        return list.sortedBy { server ->
+            val serviceName = Extractor.identifyServiceName(server.src)
+            reliabilityOrder[serviceName] ?: defaultReliability
+        }
     }
 
     override suspend fun extract(link: String): Video {

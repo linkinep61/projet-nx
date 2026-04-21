@@ -21,6 +21,7 @@ class VidsrcToExtractor : Extractor() {
 
     override val name = "Vidsrc.to"
     override val mainUrl = "https://vidsrc.to"
+    override val aliasUrls = listOf<String>()
     val key = "https://raw.githubusercontent.com/Ciarands/vidsrc-keys/main/keys.json"
 
     fun server(videoType: Video.Type): Video.Server {
@@ -36,13 +37,24 @@ class VidsrcToExtractor : Extractor() {
 
     override suspend fun extract(link: String): Video {
         val service = Service.build(mainUrl)
+        val doc = service.get(link)
 
-        val mediaId = service.get(link)
-            .selectFirst("ul.episodes li a")
-            ?.attr("data-id")
-            ?: throw Exception("Can't retrieve media ID")
+        // New flow: vidsrc.to now embeds content via iframe to vsembed.ru/cloudnestra
+        val iframeSrc = doc.selectFirst("iframe")?.attr("src")
+            ?.let { if (it.startsWith("//")) "https:$it" else it }
 
-        val keys = service.getKeys(key)
+        if (iframeSrc != null) {
+            // Delegate to the appropriate extractor (VidsrcNetExtractor handles vsembed.ru)
+            return Extractor.extract(iframeSrc)
+        }
+
+        // Legacy fallback: old API-based flow (ul.episodes with data-id)
+        val mediaId = doc.selectFirst("a[data-id]")?.attr("data-id")
+            ?: doc.selectFirst("ul.episodes li a")?.attr("data-id")
+            ?: throw Exception("Can't retrieve media ID or iframe src")
+
+        val keysList = service.getKeys(key)
+        val keys = Keys.fromList(keysList)
 
         val sources = service.getSources(
             mediaId,
@@ -152,7 +164,7 @@ class VidsrcToExtractor : Extractor() {
         suspend fun get(@Url url: String): Document
 
         @GET
-        suspend fun getKeys(@Url url: String): Keys
+        suspend fun getKeys(@Url url: String): List<String>
 
         @GET("ajax/embed/episode/{mediaId}/sources")
         suspend fun getSources(
@@ -199,5 +211,15 @@ class VidsrcToExtractor : Extractor() {
     data class Keys(
         val encrypt: List<String>,
         val decrypt: List<String>,
-    )
+    ) {
+        companion object {
+            fun fromList(list: List<String>): Keys {
+                val half = list.size / 2
+                return Keys(
+                    encrypt = list.subList(0, half),
+                    decrypt = list.subList(half, list.size)
+                )
+            }
+        }
+    }
 }

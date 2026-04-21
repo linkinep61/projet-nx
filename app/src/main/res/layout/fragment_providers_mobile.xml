@@ -7,11 +7,23 @@
     tools:context=".fragments.providers.ProvidersMobileFragment">
 
     <ImageView
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:scaleType="centerCrop"
+        android:src="@drawable/bg_wallpaper_mobile"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:ignore="ContentDescription" />
+
+    <ImageView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginEnd="4dp"
         android:src="@drawable/ic_providers_language"
         android:tint="#FFFFFF"
+        android:visibility="gone"
         app:layout_constraintBottom_toBottomOf="@id/s_providers_language"
         app:layout_constraintEnd_toStartOf="@id/s_providers_language"
         app:layout_constraintTop_toTopOf="@id/s_providers_language"
@@ -23,6 +35,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="32dp"
         android:layout_marginEnd="16dp"
+        android:visibility="gone"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 

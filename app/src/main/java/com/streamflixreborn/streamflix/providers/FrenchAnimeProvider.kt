@@ -126,7 +126,23 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
             }
         }
 
-        return categories
+        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films
+        return categories.sortedWith(compareBy { cat ->
+            val n = cat.name.lowercase()
+            val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
+            val isSeries = n.contains("séri") || n.contains("seri") || n.contains("saison") || n.contains("tv")
+            val isFilm = n.contains("film") || n.contains("movie") || n.contains("cinéma")
+            when {
+                cat.name == Category.FEATURED -> 0
+                n.contains("épisode") || n.contains("episode") -> 1
+                isRecent && isSeries -> 2
+                isRecent && isFilm -> 3
+                isSeries -> 4
+                isFilm -> 5
+                isRecent -> 1
+                else -> 6
+            }
+        })
     }
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
@@ -428,7 +444,15 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
             }
         } ?: emptyList()
 
-        return servers
+        // Sort by service reliability
+        return servers.sortedBy { server ->
+            val serviceName = Extractor.identifyServiceName(server.src)
+            when (serviceName) {
+                "Vidara" -> 1; "Vidsonic" -> 2; "Rpmvid" -> 3
+                "Filemoon" -> 10
+                else -> 5
+            }
+        }
     }
 
     override suspend fun getVideo(server: Video.Server): Video {

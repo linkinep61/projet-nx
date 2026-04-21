@@ -88,6 +88,8 @@ import java.io.FileOutputStream
 import android.webkit.CookieManager
 import androidx.core.content.FileProvider
 import androidx.navigation.NavOptions
+import com.bumptech.glide.Glide
+import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
 import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.NetworkClient
 import com.streamflixreborn.streamflix.utils.EpisodeManager
@@ -95,6 +97,7 @@ import com.streamflixreborn.streamflix.utils.PlayerGestureHelper
 import com.streamflixreborn.streamflix.utils.UserDataCache.toEpisode
 import com.streamflixreborn.streamflix.utils.UserDataCache.toMovie
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -102,6 +105,10 @@ import okhttp3.OkHttpClient
 import java.util.Locale
 
 class PlayerMobileFragment : Fragment() {
+    companion object {
+        private const val NEXT_EPISODE_PREFETCH_THRESHOLD_MS = 60_000L
+        private const val NEXT_EPISODE_OVERLAY_MIN_THRESHOLD_MS = 30_000L
+    }
 
     private var _binding: FragmentPlayerMobileBinding? = null
     private val binding get() = _binding!!
@@ -127,9 +134,14 @@ class PlayerMobileFragment : Fragment() {
 
     private var currentVideo: Video? = null
     private var currentServer: Video.Server? = null
+    private var usingCronet = false
+    private var usingDoH = false
     private var isIgnoringPip = false
     private var waitingForBypass = false
     private var bypassDone = false
+    private var nextEpisodePrefetchTargetId: String? = null
+    private var nextEpisodePrefetchJob: Job? = null
+    private var nextEpisodeOverlayDismissed = false
 
     private val bypassWebViewLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -492,6 +504,7 @@ class PlayerMobileFragment : Fragment() {
                             subtitle = "S${nextEpisode.season.number} E${nextEpisode.number}  •  ${nextEpisode.title}"
                         )
 
+                    hideNextEpisodeOverlay()
                     findNavController().navigate(
                         action,
                         NavOptions.Builder()
@@ -528,6 +541,7 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        nextEpisodePrefetchJob?.cancel()
         val window = requireActivity().window
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
@@ -571,6 +585,8 @@ class PlayerMobileFragment : Fragment() {
         requireActivity().requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         when (val type = args.videoType) {
             is Video.Type.Episode -> {
+                nextEpisodeOverlayDismissed = false
+                nextEpisodePrefetchTargetId = null
                 if (EpisodeManager.listIsEmpty(type)) {
                     EpisodeManager.clearEpisodes()
                     lifecycleScope.launch(Dispatchers.IO) {
@@ -588,7 +604,12 @@ class PlayerMobileFragment : Fragment() {
                     refreshEpisodeNavigation(type)
                 }
             }
-            is Video.Type.Movie -> {EpisodeManager.clearEpisodes()}
+            is Video.Type.Movie -> {
+                nextEpisodeOverlayDismissed = false
+                nextEpisodePrefetchTargetId = null
+                EpisodeManager.clearEpisodes()
+                hideNextEpisodeOverlay()
+            }
         }
 
 
@@ -707,6 +728,15 @@ class PlayerMobileFragment : Fragment() {
         binding.pvPlayer.controller.binding.btnSkipIntro.setOnClickListener {
             player.seekTo(player.currentPosition + 85000)
             it.isGone = true
+        }
+
+        binding.btnNextEpisodeAction.setOnClickListener {
+            hideNextEpisodeOverlay()
+            playNextEpisodeAcrossSeasons()
+        }
+        binding.btnNextEpisodeDismiss.setOnClickListener {
+            nextEpisodeOverlayDismissed = true
+            hideNextEpisodeOverlay()
         }
 
         binding.settings.onManualZoomClicked = {
@@ -878,12 +908,23 @@ class PlayerMobileFragment : Fragment() {
         updatePlayerHeader()
 
         val extraBuffering = PlayerSettingsView.Settings.ExtraBuffering.isEnabled
-
         val softwareDecoder = PlayerSettingsView.Settings.SoftwareDecoder.isEnabled
+
+        // Switch DataSource if the video URL needs a different engine
+        val urlNeedsCronet = needsCronet(video.source)
+        val urlNeedsDoH = needsDoH(video.source)
+        val dataSourceMismatch = (urlNeedsCronet && !usingCronet) || (!urlNeedsCronet && usingCronet)
+            || (urlNeedsDoH && !usingDoH) || (!urlNeedsDoH && usingDoH)
         val needsReinit =
-            extraBuffering != currentExtraBuffering || softwareDecoder != currentSoftwareDecoder
+            extraBuffering != currentExtraBuffering || softwareDecoder != currentSoftwareDecoder || dataSourceMismatch
+
+        if (dataSourceMismatch) {
+            Log.d("PlayerNetwork", "DataSource mismatch: needsCronet=$urlNeedsCronet(was=$usingCronet), needsDoH=$urlNeedsDoH(was=$usingDoH) → switching")
+            httpDataSource = createHttpDataSourceFactory(video.source)
+        }
+
         if (needsReinit) {
-            initializePlayer(extraBuffering, softwareDecoder)
+            initializePlayer(extraBuffering, softwareDecoder, video.source)
             player.playlistMetadata = MediaMetadata.Builder()
                 .setTitle(resolvePlayerTitle())
                 .setMediaServers(servers.map {
@@ -1088,6 +1129,49 @@ class PlayerMobileFragment : Fragment() {
             override fun onPlayerError(error: PlaybackException) {
                 super.onPlayerError(error)
                 Log.e("PlayerMobileFragment", "onPlayerError: ", error)
+
+                val cause = error.cause?.cause
+                val causeMsg = cause?.message ?: ""
+
+                // Fallback 1: if Cronet hit a network error, retry with DefaultHttp
+                val isCronetNetworkError = causeMsg.contains("ERR_CONNECTION_TIMED_OUT")
+                        || causeMsg.contains("ERR_CONNECTION_REFUSED")
+                        || causeMsg.contains("ERR_CONNECTION_RESET")
+                        || causeMsg.contains("ERR_NAME_NOT_RESOLVED")
+                        || causeMsg.contains("ERR_SSL")
+                        || causeMsg.contains("ERR_NETWORK")
+                        || cause is CronetDataSource.OpenException
+                if (usingCronet && isCronetNetworkError) {
+                    Log.w("PlayerNetwork", "Cronet network error ($causeMsg), retrying with DefaultHttp fallback")
+                    val video = currentVideo ?: return
+                    val server = currentServer ?: return
+                    httpDataSource = createDefaultHttpDataSourceFactory()
+                    dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
+                    initializePlayer(currentExtraBuffering, currentSoftwareDecoder, video.source)
+                    displayVideo(video, server)
+                    return
+                }
+
+                // Fallback 2: if connection timed out or ISP-blocked,
+                // automatically try the next server
+                val isConnectionTimeout = causeMsg.contains("SocketTimeoutException")
+                        || causeMsg.contains("failed to connect")
+                        || causeMsg.contains("Connection timed out")
+                        || causeMsg.contains("ERR_CONNECTION_TIMED_OUT")
+                        || causeMsg.contains("ISP blocked")
+                        || causeMsg.contains("cfglobalcdn IP")
+                        || cause is java.net.SocketTimeoutException
+                        || error.cause is java.net.SocketTimeoutException
+                if (isConnectionTimeout) {
+                    val server = currentServer ?: return
+                    val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
+                    if (nextServer != null) {
+                        Log.w("PlayerNetwork", "Connection timeout on ${server.name}, auto-switching to ${nextServer.name}")
+                        viewModel.getVideo(nextServer)
+                    } else {
+                        Log.e("PlayerNetwork", "Connection timeout on ${server.name}, no more servers to try")
+                    }
+                }
             }
         })
 
@@ -1225,6 +1309,7 @@ class PlayerMobileFragment : Fragment() {
             if (player.isPlaying) {
                 val show = player.currentPosition in 3000..120000
                 showSkipIntroButton(show)
+                updateNextEpisodeOverlay()
             }
             progressHandler.postDelayed(progressRunnable, 1000)
         }
@@ -1234,6 +1319,100 @@ class PlayerMobileFragment : Fragment() {
     private fun stopProgressHandler() {
         if (::progressHandler.isInitialized) {
             progressHandler.removeCallbacks(progressRunnable)
+        }
+    }
+
+    private fun updateNextEpisodeOverlay() {
+        val currentEpisode = currentVideoTypeForUi() as? Video.Type.Episode ?: run {
+            hideNextEpisodeOverlay()
+            return
+        }
+        val duration = player.duration.takeIf { it > 0 } ?: run {
+            hideNextEpisodeOverlay()
+            return
+        }
+        val remainingMs = (duration - player.currentPosition).coerceAtLeast(0L)
+
+        if (nextEpisodeOverlayDismissed) {
+            hideNextEpisodeOverlay()
+            return
+        }
+
+        if (remainingMs <= NEXT_EPISODE_PREFETCH_THRESHOLD_MS) {
+            ensureNextEpisodePrepared(currentEpisode)
+        }
+
+        val nextEpisode = EpisodeManager.peekNextEpisode()
+        val overlayThresholdMs = maxOf(
+            NEXT_EPISODE_OVERLAY_MIN_THRESHOLD_MS,
+            UserPreferences.autoplayBuffer * 1000L
+        )
+        if (nextEpisode == null || remainingMs == 0L || remainingMs > overlayThresholdMs) {
+            hideNextEpisodeOverlay()
+            return
+        }
+
+        showNextEpisodeOverlay(nextEpisode, remainingMs)
+    }
+
+    private fun ensureNextEpisodePrepared(currentEpisode: Video.Type.Episode) {
+        if (EpisodeManager.peekNextEpisode() != null) return
+        if (nextEpisodePrefetchTargetId == currentEpisode.id && nextEpisodePrefetchJob?.isActive == true) {
+            return
+        }
+
+        nextEpisodePrefetchTargetId = currentEpisode.id
+        nextEpisodePrefetchJob?.cancel()
+        nextEpisodePrefetchJob = lifecycleScope.launch(Dispatchers.IO) {
+            val loaded = EpisodeManager.ensureNextEpisodeAvailable(currentEpisode, database)
+            withContext(Dispatchers.Main) {
+                if (!isAdded || _binding == null) return@withContext
+                setupEpisodeNavigationButtons()
+                if (loaded && player.isPlaying) {
+                    updateNextEpisodeOverlay()
+                }
+            }
+        }
+    }
+
+    private fun showNextEpisodeOverlay(nextEpisode: Video.Type.Episode, remainingMs: Long) {
+        binding.tvNextEpisodeMeta.text = getString(
+            R.string.tv_show_item_season_number_episode_number,
+            nextEpisode.season.number,
+            nextEpisode.number
+        )
+        binding.tvNextEpisodeTitle.text = nextEpisode.title
+            ?: getString(R.string.episode_number, nextEpisode.number)
+        binding.tvNextEpisodeCountdown.text = if (UserPreferences.autoplay) {
+            getString(
+                R.string.player_next_episode_autoplay_in,
+                ((remainingMs + 999L) / 1000L).toInt()
+            )
+        } else {
+            getString(R.string.player_next_episode_ready)
+        }
+
+        Glide.with(this)
+            .load(nextEpisode.poster ?: nextEpisode.tvShow.poster)
+            .error(R.drawable.glide_fallback_cover)
+            .fallback(R.drawable.glide_fallback_cover)
+            .centerCrop()
+            .transition(DrawableTransitionOptions.withCrossFade())
+            .into(binding.ivNextEpisodePoster)
+
+        if (binding.layoutNextEpisodeOverlay.isGone) {
+            val fadeIn = android.view.animation.AnimationUtils.loadAnimation(requireContext(), R.anim.fade_in)
+            binding.layoutNextEpisodeOverlay.startAnimation(fadeIn)
+            binding.layoutNextEpisodeOverlay.isVisible = true
+        }
+    }
+
+    private fun hideNextEpisodeOverlay() {
+        if (_binding == null) return
+        if (binding.layoutNextEpisodeOverlay.isVisible) {
+            val fadeOut = android.view.animation.AnimationUtils.loadAnimation(requireContext(), R.anim.fade_out)
+            binding.layoutNextEpisodeOverlay.startAnimation(fadeOut)
+            binding.layoutNextEpisodeOverlay.isGone = true
         }
     }
 
@@ -1255,6 +1434,7 @@ class PlayerMobileFragment : Fragment() {
     override fun onPause() {
         super.onPause()
         stopProgressHandler()
+        hideNextEpisodeOverlay()
     }
 
     private var currentExtraBuffering = false
@@ -1290,29 +1470,147 @@ class PlayerMobileFragment : Fragment() {
             .build()
     }
 
-    private fun initializePlayer(extraBuffering: Boolean, softwareDecoder: Boolean = currentSoftwareDecoder) {
-        releasePlayer()
-        currentExtraBuffering = extraBuffering
-        currentSoftwareDecoder = softwareDecoder
+    private fun needsCronet(url: String): Boolean {
+        return url.contains("vidzy.live", ignoreCase = true)
+    }
 
-        // Use CronetDataSource — Chromium's actual network stack.
-        // OkHttp and HttpURLConnection are both blocked by u14.vidzy.live
-        // (TLS fingerprint detection → SocketException: Socket closed).
-        httpDataSource = try {
+    private fun needsDoH(url: String): Boolean {
+        return url.contains("cfglobalcdn.com", ignoreCase = true)
+    }
+
+    /**
+     * Creates the right DataSource factory for [videoUrl].
+     * - vidzy.live → Cronet (Chrome network stack, needed for JA3 bypass)
+     * - cfglobalcdn.com → OkHttp + DoH (ISP DNS blocks, need CNAME chain resolution)
+     * - everything else → DefaultHttpDataSource (system DNS, most compatible)
+     */
+    private fun createHttpDataSourceFactory(videoUrl: String = ""): HttpDataSource.Factory {
+        if (!needsCronet(videoUrl)) {
+            if (needsDoH(videoUrl)) {
+                Log.d("PlayerNetwork", "URL needs DoH for CNAME resolution ($videoUrl)")
+                return createDoHOkHttpDataSourceFactory()
+            }
+            Log.d("PlayerNetwork", "URL does not need Cronet ($videoUrl), using DefaultHttp")
+            return createDefaultHttpDataSourceFactory()
+        }
+        return try {
             val cronetEngine = CronetEngine.Builder(requireContext()).build()
-            android.util.Log.d("PlayerNetwork", "Using CronetDataSource (Chrome network stack)")
+            Log.d("PlayerNetwork", "Using CronetDataSource for vidzy.live (Chrome network stack)")
+            usingCronet = true
+            usingDoH = false
             CronetDataSource.Factory(cronetEngine, java.util.concurrent.Executors.newCachedThreadPool())
                 .setUserAgent(NetworkClient.USER_AGENT)
                 .setConnectionTimeoutMs(30_000)
                 .setReadTimeoutMs(30_000)
         } catch (e: Exception) {
-            android.util.Log.w("PlayerNetwork", "Cronet unavailable: ${e.message}")
-            DefaultHttpDataSource.Factory()
-                .setUserAgent(NetworkClient.USER_AGENT)
-                .setConnectTimeoutMs(30_000)
-                .setReadTimeoutMs(30_000)
-                .setAllowCrossProtocolRedirects(true)
+            Log.w("PlayerNetwork", "Cronet unavailable, using fallback: ${e.message}")
+            createDefaultHttpDataSourceFactory()
         }
+    }
+
+    /**
+     * OkHttp DataSource with a custom DNS resolver that uses Cloudflare's JSON
+     * DoH API to follow CNAME chains + TCP pre-check to detect ISP-blocked IPs fast.
+     */
+    private fun createDoHOkHttpDataSourceFactory(): HttpDataSource.Factory {
+        usingCronet = false
+        usingDoH = true
+
+        val jsonDohDns = object : okhttp3.Dns {
+            private val fallback = DnsResolver.doh
+            private val dnsClient = OkHttpClient.Builder()
+                .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
+
+            override fun lookup(hostname: String): List<java.net.InetAddress> {
+                if (!hostname.contains("cfglobalcdn.com", ignoreCase = true)) {
+                    return fallback.lookup(hostname)
+                }
+                Log.d("PlayerNetwork", "JSON DoH lookup for: $hostname")
+                try {
+                    val request = okhttp3.Request.Builder()
+                        .url("https://cloudflare-dns.com/dns-query?name=$hostname&type=A")
+                        .header("Accept", "application/dns-json")
+                        .build()
+                    val response = dnsClient.newCall(request).execute().use { it.body?.string() }
+                        ?: throw Exception("Empty DoH response")
+
+                    val json = org.json.JSONObject(response)
+                    val answers = json.optJSONArray("Answer")
+                        ?: throw Exception("No Answer in DoH response")
+
+                    val ips = mutableListOf<java.net.InetAddress>()
+                    for (i in 0 until answers.length()) {
+                        val answer = answers.getJSONObject(i)
+                        if (answer.optInt("type") == 1) {
+                            val ip = answer.optString("data")
+                            Log.d("PlayerNetwork", "JSON DoH resolved $hostname → $ip")
+                            ips.add(java.net.InetAddress.getByName(ip))
+                        }
+                    }
+                    if (ips.isEmpty()) throw Exception("No A records in DoH response")
+
+                    // TCP pre-check: try ALL resolved IPs, keep reachable ones first
+                    val reachable = mutableListOf<java.net.InetAddress>()
+                    val unreachable = mutableListOf<java.net.InetAddress>()
+                    for (ip in ips) {
+                        try {
+                            val socket = java.net.Socket()
+                            socket.connect(java.net.InetSocketAddress(ip, 443), 5000)
+                            socket.close()
+                            Log.d("PlayerNetwork", "TCP pre-check OK: $hostname → ${ip.hostAddress}:443")
+                            reachable.add(ip)
+                            break // one reachable IP is enough
+                        } catch (e: Exception) {
+                            Log.w("PlayerNetwork", "TCP pre-check FAILED: $hostname → ${ip.hostAddress}:443 (${e.message})")
+                            unreachable.add(ip)
+                        }
+                    }
+
+                    // Return reachable IPs first, then unreachable as fallback
+                    // (never throw — let OkHttp/player handle the actual connection)
+                    val ordered = reachable + unreachable
+                    if (reachable.isEmpty()) {
+                        Log.w("PlayerNetwork", "All ${ips.size} IPs for $hostname failed pre-check, returning anyway for OkHttp to try")
+                    }
+                    return ordered
+                } catch (e: Exception) {
+                    Log.w("PlayerNetwork", "JSON DoH failed for $hostname: ${e.message}, trying wire DoH")
+                    return fallback.lookup(hostname)
+                }
+            }
+        }
+
+        val dohClient = OkHttpClient.Builder()
+            .dns(jsonDohDns)
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+        Log.d("PlayerNetwork", "Using OkHttpDataSource with JSON DoH (cfglobalcdn CNAME resolution)")
+        return OkHttpDataSource.Factory(dohClient)
+            .setUserAgent(NetworkClient.USER_AGENT)
+    }
+
+    private fun createDefaultHttpDataSourceFactory(): HttpDataSource.Factory {
+        usingCronet = false
+        usingDoH = false
+        Log.d("PlayerNetwork", "Using DefaultHttpDataSource (Java HttpURLConnection, system DNS)")
+        return DefaultHttpDataSource.Factory()
+            .setUserAgent(NetworkClient.USER_AGENT)
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(30_000)
+            .setAllowCrossProtocolRedirects(true)
+    }
+
+    private fun initializePlayer(extraBuffering: Boolean, softwareDecoder: Boolean = currentSoftwareDecoder, videoUrl: String = "") {
+        releasePlayer()
+        currentExtraBuffering = extraBuffering
+        currentSoftwareDecoder = softwareDecoder
+
+        httpDataSource = createHttpDataSourceFactory(videoUrl)
 
         dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
 

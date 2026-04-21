@@ -13,7 +13,7 @@ class VidGuardExtractor : Extractor() {
     override val name = "VidGuard"
     override val mainUrl = "https://vidguard.to"
     override val aliasUrls = listOf(
-        "vembed.net", "bembed.cc", "vgfplay.com", "listeamed.net", "vidguard.to"
+        "https://vembed.net", "https://bembed.cc", "https://vgfplay.com", "https://listeamed.net", "https://vidguard.to"
     )
 
     private val client = OkHttpClient()
@@ -62,7 +62,8 @@ class VidGuardExtractor : Extractor() {
     }
 
     private fun sigDecode(url: String): String {
-        val sig = url.split("sig=")[1].split("&")[0]
+        val sig = android.net.Uri.parse(url).getQueryParameter("sig")
+            ?: throw Exception("VidGuard: 'sig' parameter not found in URL")
         val decodedSig = sig.chunked(2)
             .joinToString("") { (Integer.parseInt(it, 16) xor 2).toChar().toString() }
             .let {

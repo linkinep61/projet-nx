@@ -3,14 +3,13 @@ package com.streamflixreborn.streamflix.extractors
 import com.google.gson.JsonParser
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody
 import retrofit2.Retrofit
-import retrofit2.http.Field
-import retrofit2.http.FormUrlEncoded
-import retrofit2.http.GET
+import retrofit2.http.Body
 import retrofit2.http.POST
-import retrofit2.http.Query
 import java.net.URL
 
 class VidaraExtractor : Extractor() {
@@ -27,7 +26,10 @@ class VidaraExtractor : Extractor() {
         val baseUrl = "${url.protocol}://${url.host}"
         val service = Service.build(baseUrl)
 
-        val responseBody = service.getStream(fileCode = fileCode)
+        // API expects JSON body with filecode and device fields
+        val jsonBody = """{"filecode":"$fileCode","device":"web"}"""
+        val requestBody = jsonBody.toRequestBody("application/json".toMediaType())
+        val responseBody = service.getStream(requestBody)
         val jsonString = responseBody.use { it.string() }
         if (jsonString.isBlank()) throw Exception("Empty API response")
 
@@ -41,7 +43,8 @@ class VidaraExtractor : Extractor() {
             ?: throw Exception("Streaming URL not found in API response")
 
         val defaultSub = json.get("default_sub_lang")?.asString.orEmpty()
-        val subtitles = json.get("subtitles")?.asJsonArray?.map { elem ->
+        val subtitlesArray = json.get("subtitles")?.takeIf { it.isJsonArray }?.asJsonArray
+        val subtitles = subtitlesArray?.map { elem ->
             val obj = elem.asJsonObject
             val lang = obj.get("language")?.asString.orEmpty()
             Video.Subtitle(
@@ -88,10 +91,9 @@ class VidaraExtractor : Extractor() {
             }
         }
 
-        @FormUrlEncoded
         @POST("api/stream")
         suspend fun getStream(
-            @Field("filecode") fileCode: String
+            @Body body: okhttp3.RequestBody
         ): ResponseBody
     }
 }

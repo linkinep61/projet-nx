@@ -33,7 +33,8 @@ class StreamhubExtractor : Extractor() {
             .map { it.groupValues[1] }.toList()
 
         val video = Video(
-            source = sources.firstOrNull() ?: "",
+            source = sources.firstOrNull()
+                ?: throw Exception("No stream URL found in sources"),
             subtitles = source.select("video > track")
                 .map {
                     Video.Subtitle(

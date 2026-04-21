@@ -63,18 +63,18 @@ interface Provider {
             val group: ProviderGroup = ProviderGroup.FILMS_SERIES
         )
 
-        val providers: Map<Provider, ProviderSupport> = mapOf(
-            // French providers only
-            WiflixProvider to ProviderSupport(movies = true, tvShows = true),
+        val providers: Map<Provider, ProviderSupport> = linkedMapOf(
+            // French providers — custom display order
             FrenchStreamProvider to ProviderSupport(movies = true, tvShows = true),
-            FrenchAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
-            FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME),
-            FrembedProvider to ProviderSupport(movies = true, tvShows = true),
-            KidrazProvider to ProviderSupport(movies = true, tvShows = false),
-            UnJourUnFilmProvider to ProviderSupport(movies = true, tvShows = true),
-            aploufProvider to ProviderSupport(movies = true, tvShows = false),
-            AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             MovixProvider to ProviderSupport(movies = true, tvShows = true),
+            UnJourUnFilmProvider to ProviderSupport(movies = true, tvShows = true),
+            AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
+            FrembedProvider to ProviderSupport(movies = true, tvShows = true),
+            aploufProvider to ProviderSupport(movies = true, tvShows = false),
+            FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME),
+            FrenchAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
+            KidrazProvider to ProviderSupport(movies = true, tvShows = false),
+            WiflixProvider to ProviderSupport(movies = true, tvShows = true),
         )
 
         // Helper functions to check support

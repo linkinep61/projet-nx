@@ -1,6 +1,5 @@
 package com.streamflixreborn.streamflix.providers
 
-import android.util.Log
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.Extractor
@@ -134,8 +133,10 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         val imdb: String?,
         val tmdb: Int?,
         val overview: String?,
+        val overview_fr: String?,
         val rating: Double?,
         val title: String?,
+        val title_fr: String?,
         val trailer: String?,
         val year: String?,
         val poster: String?,
@@ -148,6 +149,7 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         val id: Int?,
         val imdb: String?,
         val title: String?,
+        val title_fr: String?,
         val name: String?,
         val director: String,
         val cast: List<FrembedCastItem>,
@@ -160,6 +162,7 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         val rating: Double?,
         var sa: Int?,
         var overview: String?,
+        var overview_fr: String?,
         var trailer: String?,
         var media_type: String?,
     )
@@ -175,7 +178,7 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             TvShow(
                 id = (tmdb?:id).toString(),
                 title = buildString {
-                    append(title?:name?:"TvShow")
+                    append(title_fr?:title?:name?:"TvShow")
                     if (sa != null) {
                         append(" - S${sa}")
                     } },
@@ -186,7 +189,7 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         else {
             Movie(
                 id = (tmdb?:id).toString(),
-                title = title?:name?:"Movie",
+                title = title_fr?:title?:name?:"Movie",
                 poster = (poster?.w500)?:poster_path,
                 banner = poster?.original,
                 rating = rating
@@ -241,20 +244,38 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         try {
             val ranking = service.getApiPublic("ranking")
             categories.add(ranking.toCategorie(Category.FEATURED))
+            // Séries récentes en premier
+            val latestAdded = service.getApiView("latest-added-seasons")
+            categories.add(latestAdded.toCategorie("Nouvelles séries"))
+            val mostViewedSeasons = service.getApiView("most-viewed-seasons")
+            categories.add(mostViewedSeasons.toCategorie("Meilleures séries"))
+            // Puis les films
             val latest = service.getApiPublic("latest")
             categories.add(latest.toCategorie("Nouveaux films"))
             val updated = service.getApiPublic("updated")
             categories.add(updated.toCategorie("Films mis à jour"))
             val mostViewed = service.getApiView("most-viewed")
             categories.add(mostViewed.toCategorie("Meilleurs films"))
-            val latestAdded = service.getApiView("latest-added-seasons")
-            categories.add(latestAdded.toCategorie("Nouvelles séries"))
-            val mostViewedSeasons = service.getApiView("most-viewed-seasons")
-            categories.add(mostViewedSeasons.toCategorie("Meilleures séries"))
 
-        } catch (e: Exception) { Log.e("ERROR", "ERROR => "+e) }
+        } catch (e: Exception) { }
 
-        return categories
+        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films
+        return categories.sortedWith(compareBy { cat ->
+            val n = cat.name.lowercase()
+            val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
+            val isSeries = n.contains("séri") || n.contains("seri") || n.contains("saison") || n.contains("tv")
+            val isFilm = n.contains("film") || n.contains("movie") || n.contains("cinéma")
+            when {
+                cat.name == Category.FEATURED -> 0
+                n.contains("épisode") || n.contains("episode") -> 1
+                isRecent && isSeries -> 2
+                isRecent && isFilm -> 3
+                isSeries -> 4
+                isFilm -> 5
+                isRecent -> 1
+                else -> 6
+            }
+        })
     }
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
@@ -297,8 +318,8 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         return service.getMovie(id).let { movie ->
             Movie(
                 id = movie.tmdb.toString(),
-                title = movie.title?:"Movie",
-                overview = movie.overview,
+                title = movie.title_fr?:movie.title?:"Movie",
+                overview = movie.overview_fr?:movie.overview,
                 released = movie.year,
                 trailer = movie.trailer?.let { "https://www.youtube.com/watch?v=${movie.trailer}" },
                 rating = movie.rating,
@@ -348,8 +369,8 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         return tvshowp.let { tvshow ->
                 TvShow(
                     id = tvshow.tmdb.toString(),
-                    title = tvshow.title ?: "TvShow",
-                    overview = tvshow.overview,
+                    title = tvshow.title_fr ?: tvshow.title ?: "TvShow",
+                    overview = tvshow.overview_fr ?: tvshow.overview,
                     released = tvshow.year,
                     trailer = tvshow.trailer?.let { "https://www.youtube.com/watch?v=${tvshow.trailer}" },
                     rating = tvshow.rating,

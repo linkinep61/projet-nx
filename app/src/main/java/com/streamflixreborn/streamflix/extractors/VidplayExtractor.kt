@@ -24,6 +24,7 @@ open class VidplayExtractor : Extractor() {
 
     override val name = "Vidplay"
     override val mainUrl = "https://vidplay.site"
+    override val aliasUrls = listOf("https://vidplay-org.lol", "https://vidplay.lol")
     open val key = "https://raw.githubusercontent.com/Ciarands/vidsrc-keys/main/keys.json"
 
     override suspend fun extract(link: String): Video {
@@ -31,7 +32,8 @@ open class VidplayExtractor : Extractor() {
 
         val id = link.substringBefore("?").substringAfterLast("/")
 
-        val keys = service.getKeys(key)
+        val keysList = service.getKeys(key)
+        val keys = Keys.fromList(keysList)
 
         val encId = encode(keys.encrypt[1], id)
         val h = encode(keys.encrypt[2], id)
@@ -152,7 +154,7 @@ open class VidplayExtractor : Extractor() {
         ): SourcesResponse
 
         @GET
-        suspend fun getKeys(@Url url: String): Keys
+        suspend fun getKeys(@Url url: String): List<String>
     }
 
 
@@ -254,5 +256,15 @@ open class VidplayExtractor : Extractor() {
     data class Keys(
         val encrypt: List<String>,
         val decrypt: List<String>,
-    )
+    ) {
+        companion object {
+            fun fromList(list: List<String>): Keys {
+                val half = list.size / 2
+                return Keys(
+                    encrypt = list.subList(0, half),
+                    decrypt = list.subList(half, list.size)
+                )
+            }
+        }
+    }
 }

@@ -122,17 +122,36 @@
         tools:text="Genres" />
 
     <TextView
+        android:id="@+id/tv_movie_overview_label"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="40dp"
+        android:layout_marginTop="20dp"
+        android:layout_marginEnd="70dp"
+        android:text="@string/movie_synopsis_label"
+        android:textColor="#FFFFFF"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toEndOf="@id/iv_movie_poster"
+        app:layout_constraintTop_toBottomOf="@id/tv_movie_genres"
+        app:layout_goneMarginStart="70dp" />
+
+    <TextView
         android:id="@+id/tv_movie_overview"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginStart="40dp"
-        android:layout_marginTop="30dp"
+        android:layout_marginTop="8dp"
         android:layout_marginEnd="70dp"
         android:ellipsize="end"
         android:maxLines="10"
+        android:textColor="#C0C0C0"
+        android:textSize="16sp"
+        android:lineSpacingExtra="4dp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toEndOf="@id/iv_movie_poster"
-        app:layout_constraintTop_toBottomOf="@id/tv_movie_genres"
+        app:layout_constraintTop_toBottomOf="@id/tv_movie_overview_label"
         app:layout_goneMarginStart="70dp"
         tools:text="Overview" />
 

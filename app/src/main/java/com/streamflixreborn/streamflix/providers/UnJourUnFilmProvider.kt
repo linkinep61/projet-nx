@@ -1,6 +1,7 @@
 package com.streamflixreborn.streamflix.providers
 
 import android.text.Html
+import android.util.Log
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.ApiVoirFilmExtractor
@@ -224,7 +225,26 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 }
         }
 
-        return categories
+        // Log category names for debugging
+        categories.forEach { cat -> Log.d("UnJourUnFilm", "Category: '${cat.name}' (${cat.list.size} items)") }
+
+        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films
+        return categories.sortedWith(compareBy { cat ->
+            val n = cat.name.lowercase()
+            val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
+            val isSeries = n.contains("séri") || n.contains("seri") || n.contains("saison") || n.contains("tv")
+            val isFilm = n.contains("film") || n.contains("movie") || n.contains("cinéma")
+            when {
+                cat.name == Category.FEATURED -> 0
+                n.contains("épisode") || n.contains("episode") -> 1
+                isRecent && isSeries -> 2
+                isRecent && isFilm -> 3
+                isSeries -> 4
+                isFilm -> 5
+                isRecent -> 1
+                else -> 6
+            }
+        })
     }
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
@@ -576,7 +596,21 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         val title = decodeHtml(jsonLd.optString("name", "")).ifBlank {
             document.selectFirst("h1.entry-title, h1, .data h1")?.text() ?: ""
         }
-        val overview = decodeHtml(jsonLd.optString("description", "")).substringAfter(": ").substringBeforeLast(" Voir ")
+        // Extract overview: JSON-LD description first, fallback to page content
+        var overview = decodeHtml(jsonLd.optString("description", "")).let { desc ->
+            if (desc.isBlank()) ""
+            else {
+                val cleaned = if (desc.contains(": ")) desc.substringAfter(": ") else desc
+                if (cleaned.contains(" Voir ")) cleaned.substringBeforeLast(" Voir ").trim() else cleaned.trim()
+            }
+        }
+        // Fallback: try wp-content div if JSON-LD was empty
+        if (overview.isBlank()) {
+            overview = decodeHtml(document.selectFirst("div.wp-content")?.text() ?: "").let { text ->
+                if (text.startsWith("Regarder ") && text.contains(": ")) text.substringAfter(": ").trim()
+                else text.trim()
+            }
+        }
         val released = id.substringAfterLast("-")
         val strTrailerURL = jsonLd.optString("embedUrl", "").ifBlank {
             scriptdoc.substringAfter("\"embedUrl\":").substringBefore(",").replace("\"","")
@@ -1133,17 +1167,23 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                                     val flags = srv.optString("flags", "")
 
                                     if (url.isNotEmpty() && !ignoreSource("", url)) {
-                                        val displayName = if (flags.isNotEmpty()) "$flags $label" else label
+                                        val flagPrefix = if (flags.isNotEmpty()) "$flags " else ""
 
                                         if (url.startsWith(apivoirfilm.mainUrl)) {
                                             apiUrl = url
                                         } else if (url.startsWith(onregadeou.mainUrl)) {
                                             onregardeUrl = url
                                         } else {
+                                            val serviceName = Extractor.identifyServiceName(url)
+                                            val displayName = if (serviceName != null) {
+                                                if (label.isNotBlank()) "$flagPrefix$label ($serviceName)" else "$flagPrefix$serviceName"
+                                            } else {
+                                                "$flagPrefix${label.ifBlank { "Server ${i + 1}" }}"
+                                            }
                                             servers.add(
                                                 Video.Server(
                                                     id = "srv$i",
-                                                    name = displayName.ifBlank { "Server ${i + 1}" },
+                                                    name = displayName,
                                                     src = url
                                                 )
                                             )
@@ -1197,10 +1237,16 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                         } else if (url.startsWith(onregadeou.mainUrl)) {
                             onregardeUrl = url
                         } else {
+                            val serviceName = Extractor.identifyServiceName(url)
+                            val displayName = if (serviceName != null) {
+                                if (label.isNotBlank()) "$label ($serviceName)" else serviceName
+                            } else {
+                                label.ifBlank { "Server ${servers.size + 1}" }
+                            }
                             servers.add(
                                 Video.Server(
                                     id = "srv${servers.size}",
-                                    name = label.ifBlank { "Server ${servers.size + 1}" },
+                                    name = displayName,
                                     src = url
                                 )
                             )
@@ -1208,7 +1254,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     }
                 }
             } catch (e: Exception) {
-                // JSON parsing failed, try fallback method
+                // J1F_SRV parsing failed, will fallback to DooPlay AJAX
             }
         }
 
@@ -1239,10 +1285,11 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                             continue
                         }
 
+                        val serviceName = Extractor.identifyServiceName(link.embed_url)
                         servers.add(
                             Video.Server(
                                 id = "srv$nume",
-                                name = "Serveur $nume",
+                                name = serviceName ?: "Serveur $nume",
                                 src = link.embed_url
                             )
                         )
@@ -1274,10 +1321,14 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     }
 
                     val title = it.selectFirst("span.title")?.text() ?: "Server $idx"
+                    val serviceName = Extractor.identifyServiceName(link.embed_url)
+                    val displayName = if (serviceName != null) {
+                        if (title != "Server $idx") "$title ($serviceName)" else serviceName
+                    } else title
 
                     Video.Server(
                         id = "srv$idx",
-                        name = title,
+                        name = displayName,
                         src = link.embed_url
                     )
                 } ?: emptyList()
@@ -1295,21 +1346,36 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     }
 
     /**
-     * Sort servers so that FR/VF sources appear first and VOSTFR sources appear last.
-     * Priority: VFF > VF > FR > (no tag) > VOSTFR > VO
+     * Sort servers: first by language (FR first, VOSTFR last),
+     * then by hosting service reliability within each language group.
+     * Language priority: VFF > VF > FR > (no tag) > VOSTFR > VO
+     * Reliability: Vidara > Vidsonic > Rpmvid > (unknown) > Filemoon
      */
+    private val reliabilityOrder = mapOf(
+        "Vidara" to 1,
+        "Vidsonic" to 2,
+        "Rpmvid" to 3,
+        "StreamWish" to 4,
+        "Streamix" to 4,
+        "Filemoon" to 10,
+    )
+    private val defaultReliability = 5
+
     private fun sortServersByLanguage(servers: List<Video.Server>): List<Video.Server> {
-        return servers.sortedWith(compareBy { server ->
+        return servers.sortedWith(compareBy<Video.Server> { server ->
             val name = server.name.uppercase()
             when {
                 name.contains("VFF") -> 0
                 name.contains("VF") && !name.contains("VOSTFR") -> 1
                 name.contains("FR") && !name.contains("VOSTFR") -> 2
-                name.contains("VF") && name.contains("VOSTFR") -> 3  // "VF + VOSTFR" → dernier des FR
+                name.contains("VF") && name.contains("VOSTFR") -> 3
                 name.contains("VOSTFR") || name.contains("VOST") -> 5
                 name.contains("VO") -> 6
                 else -> 4
             }
+        }.thenBy { server ->
+            val serviceName = Extractor.identifyServiceName(server.src)
+            reliabilityOrder[serviceName] ?: defaultReliability
         })
     }
 

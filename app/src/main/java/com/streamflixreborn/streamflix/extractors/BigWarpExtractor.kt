@@ -33,8 +33,12 @@ class BigWarpExtractor: Extractor() {
             }
         }
 
+        if (m3u8 == null) {
+            throw Exception("Stream URL not found in script tags")
+        }
+
         return Video(
-            source = m3u8.toString(),
+            source = m3u8,
             subtitles = listOf(),
             type = MimeTypes.APPLICATION_MP4,
             headers =                     mapOf(

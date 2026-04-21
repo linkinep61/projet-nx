@@ -48,7 +48,7 @@ class GuploadExtractor : Extractor() {
         val pContent = pRegex.find(html)?.groupValues?.get(1)
             ?: throw Exception("XOR key list _p not found in HTML")
         
-        val key = Regex("""['"]([^'"]+)['Mult'"]""").findAll(pContent)
+        val key = Regex("""['"]([^'"]+)['"]""").findAll(pContent)
             .map { it.groupValues[1] }
             .joinToString("")
 

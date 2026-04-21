@@ -25,7 +25,8 @@ class YourUploadExtractor : Extractor() {
         // Look for .m3u8 first, then fallback to .mp4
         val regex = Regex("""file:\s*'([^']+\.(?:m3u8|mp4))'""")
         val match = regex.find(scriptContent)
-        val videoUrl = match?.groupValues?.get(1) ?: ""
+        val videoUrl = match?.groupValues?.get(1)
+            ?: throw Exception("Stream URL not found in JWPlayer config")
 
         return Video(
             source = videoUrl,
