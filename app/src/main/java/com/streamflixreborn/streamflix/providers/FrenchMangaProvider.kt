@@ -77,6 +77,44 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         val document = service.getHome()
         val categories = mutableListOf<Category>()
 
+        // Carousel "Coups de cœur" — scrape le slider/owl-carousel du site
+        val featuredSelectors = listOf(
+            ".owl-carousel .item",      // owl-carousel classique
+            ".swiper-wrapper .swiper-slide", // swiper
+            ".anime-featured .item",    // featured anime
+            ".slider .slide"            // slider générique
+        )
+        for (selector in featuredSelectors) {
+            val featuredItems = document.select(selector).mapNotNull { item ->
+                val a = item.selectFirst("a") ?: return@mapNotNull null
+                val link = a.attr("href")
+                val id = link.substringAfterLast("=").takeIf { it.isNotBlank() }
+                    ?: link.substringAfterLast("/").substringBefore(".html").takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
+                val title = (item.selectFirst(".title1")?.text()
+                    ?: item.selectFirst("div.short-title")?.text()
+                    ?: a.attr("title").takeIf { it.isNotBlank() }
+                    ?: a.text().takeIf { it.isNotBlank() }
+                    ?: "")
+                val banner = (item.selectFirst("img")?.attr("data-src")
+                    ?: item.selectFirst("img")?.attr("src"))
+
+                TvShow(
+                    id = id,
+                    title = title,
+                    banner = banner,
+                    poster = banner ?: ""
+                )
+            }
+            if (featuredItems.isNotEmpty()) {
+                categories.add(Category(name = Category.FEATURED, list = featuredItems))
+                break
+            }
+        }
+
+        // Si pas de carousel trouvé, utiliser les "Coups de cœur" du div.sect
+        // ou à défaut les premiers éléments de la première catégorie
+        val hasFeatured = categories.any { it.name == Category.FEATURED }
 
         document.select("div.sect").mapNotNull { cat_item ->
             val title = cat_item.selectFirst("div.st-left > a")
@@ -96,12 +134,54 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
 
             if (movies.isNotEmpty()) {
-                categories.add(Category(name = title.text(), list = movies))
+                val catName = title.text()
+                // Si c'est "Coups de cœur" et pas encore de featured, en faire le carousel
+                if (!hasFeatured && catName.lowercase().let {
+                        it.contains("coup") || it.contains("cœur") || it.contains("coeur")
+                        || it.contains("featured") || it.contains("populaire")
+                    }) {
+                    val featuredItems = movies.map { show ->
+                        when (show) {
+                            is Movie -> Movie(
+                                id = show.id, title = show.title,
+                                banner = show.poster, poster = show.poster ?: ""
+                            )
+                            is TvShow -> TvShow(
+                                id = show.id, title = show.title,
+                                banner = show.poster, poster = show.poster ?: ""
+                            )
+                            else -> show
+                        }
+                    }
+                    categories.add(Category(name = Category.FEATURED, list = featuredItems))
+                } else {
+                    categories.add(Category(name = catName, list = movies))
+                }
             }
         }
 
-        // Reorder: 1.Épisodes/récents 2.Séries récentes 3.Films récents 4.Séries 5.Films
+        // Si toujours pas de featured, prendre les premiers items de la 1ère catégorie
+        if (categories.none { it.name == Category.FEATURED } && categories.isNotEmpty()) {
+            val firstCat = categories.first()
+            val featuredItems = firstCat.list.take(15).map { show ->
+                when (show) {
+                    is Movie -> Movie(
+                        id = show.id, title = show.title,
+                        banner = show.poster, poster = show.poster ?: ""
+                    )
+                    is TvShow -> TvShow(
+                        id = show.id, title = show.title,
+                        banner = show.poster, poster = show.poster ?: ""
+                    )
+                    else -> show
+                }
+            }
+            categories.add(0, Category(name = Category.FEATURED, list = featuredItems))
+        }
+
+        // Reorder: Featured first, then 1.Épisodes/récents 2.Séries récentes 3.Films récents 4.Séries 5.Films
         return categories.sortedWith(compareBy { cat ->
+            if (cat.name == Category.FEATURED) return@compareBy -1
             val n = cat.name.lowercase()
             val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
             val isSeries = n.contains("séri") || n.contains("seri") || n.contains("saison") || n.contains("tv")
@@ -512,108 +592,3 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
         }.thenBy { server ->
             val serviceName = Extractor.identifyServiceName(server.src)
-            reliabilityOrder[serviceName] ?: defaultReliability
-        })
-    }
-
-    override suspend fun getVideo(server: Video.Server): Video {
-        val video = Extractor.extract(server.src)
-        if (video.subtitles.isNotEmpty()) {
-            if (!server.name.contains("VOSTFR")) {
-                // Disable subtitles when not watching in VOSTFR
-                return video.copy(
-                    subtitles = emptyList()
-                )
-            } else {
-                // otherwise select the initial subtitle
-                video.subtitles.forEach {
-                    if (it.initialDefault) {
-                        it.default = true
-                    }
-                }
-            }
-        }
-
-        return video
-    }
-
-    override suspend fun onChangeUrl(forceRefresh: Boolean): String {
-        FrenchStreamProvider.changeUrlMutex.withLock {
-            if (forceRefresh || UserPreferences.getProviderCache(this,UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
-                val addressService = FrenchMangaService.buildAddressFetcher()
-                try {
-                    val document = addressService.getHome()
-
-                    val fsUrl = document.select("div.container > div.url-card")
-                        .selectFirst("a")
-                        ?.attr("href")
-                        ?.trim()
-                    if (!fsUrl.isNullOrEmpty()) {
-                        val fsdoc = addressService.loadPage(fsUrl)
-                        var newUrl = fsdoc
-                            .selectFirst("li.submenu:has(a:contains(ANIMES)) a")
-                            ?.attr("href")
-                        if (newUrl.isNullOrEmpty()) throw Exception()
-                        val finalUrl = addressService.followPage(newUrl)
-                        newUrl = finalUrl.raw().request.url.toString()
-                        newUrl = if (newUrl.endsWith("/")) newUrl else "$newUrl/"
-                        UserPreferences.setProviderCache(this,UserPreferences.PROVIDER_URL, newUrl)
-                        UserPreferences.setProviderCache(
-                            this,
-                            UserPreferences.PROVIDER_LOGO,
-                            newUrl + "favicon-96x96.png"
-                        )
-                    }
-                } catch (e: Exception) {
-                    // In case of failure, we'll use the default URL
-                    // No need to throw as we already have a fallback URL
-                }
-            }
-            service = FrenchMangaService.build(baseUrl)
-            serviceInitialized = true
-        }
-        return baseUrl
-    }
-
-    private suspend fun initializeService() {
-        initializationMutex.withLock {
-            if (serviceInitialized) return
-            onChangeUrl()
-        }
-    }
-
-    private interface FrenchMangaService {
-        companion object {
-            private val client = NetworkClient.default.newBuilder()
-                .build()
-            fun buildAddressFetcher(): FrenchMangaService {
-                val addressRetrofit = Retrofit.Builder()
-                    .baseUrl(FrenchStreamProvider.portalUrl)
-
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .client(client)
-
-                    .build()
-
-                return addressRetrofit.create(FrenchMangaService::class.java)
-            }
-            fun build(baseUrl: String): FrenchMangaService {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .addConverterFactory(GsonConverterFactory.create())
-                    .client(client)
-                    .build()
-
-                return retrofit.create(FrenchMangaService::class.java)
-            }
-        }
-
-        @GET
-        suspend fun loadPage(
-            @Url url: String
-        ): Document
-
-        @GET
-        suspend fun followPage(
-            @Url url:
