@@ -245,8 +245,12 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                 "Action", "Aventure", "Comédie", "Drame", "Fantastique",
                 "Horreur", "Mystère", "Romance", "Science-fiction", "Thriller",
                 "Isekai", "Shônen", "Seinen", "Shôjo", "Ecole",
-                "Magie", "Crime", "Psychologique", "Sport", "Musique"
-            ).map { Genre(id = it, name = it) }
+                "Magie", "Crime", "Psychologique", "Sport", "Musique",
+                "K-Drama"
+            ).map { name ->
+                if (name == "K-Drama") Genre(id = "k-drama", name = name)
+                else Genre(id = name, name = name)
+            }
         }
 
         val html = searchPost(query)
@@ -753,10 +757,4 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                 return Retrofit.Builder()
                     .baseUrl(baseUrl)
                     .client(client)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                    .create(Service::class.java)
-            }
-        }
-    }
-}
+                    .addConverterFactory

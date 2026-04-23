@@ -119,8 +119,19 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     }
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
-        if (query.isEmpty() || page > 1) {
-            return emptyList()
+        if (page > 1) return emptyList()
+        if (query.isEmpty()) {
+            // Genres anime/manga + K-Drama
+            return listOf(
+                "Action", "Aventure", "Comédie", "Drame", "Ecchi",
+                "Fantastique", "Fantasy", "Horreur", "Historique",
+                "Mystère", "Psychologique", "Romance", "School Life",
+                "Science-fiction", "Seinen", "Shônen", "Slice of Life",
+                "Surnaturel", "Thriller", "K-Drama"
+            ).map { name ->
+                if (name == "K-Drama") Genre(id = "k-drama", name = name)
+                else Genre(id = name, name = name)
+            }
         }
 
         initializeService()
@@ -379,7 +390,21 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     }
 
     override suspend fun getGenre(id: String, page: Int): Genre {
-        return Genre("","",emptyList())
+        if (page > 1) return Genre(id, id, emptyList())
+        initializeService()
+        val results = service.search(query = id)
+        val shows = results.select("div.search-item").mapNotNull {
+            val itemId = it.attr("onclick").substringAfter("/").substringBefore("'")
+            if (itemId.isEmpty()) return@mapNotNull null
+            val title = it.selectFirst("div.search-title")?.text()?.replace("\\'", "'") ?: ""
+            val poster = it.selectFirst("img")?.attr("src") ?: ""
+
+            if (title.contains(" - Saison ") || title.contains(" - Intégrale "))
+                TvShow(id = itemId, title = title, poster = poster)
+            else
+                Movie(id = itemId, title = title, poster = poster)
+        }
+        return Genre(id = id, name = id, shows = shows)
     }
 
     override suspend fun getPeople(id: String, page: Int): People {
@@ -591,43 +616,4 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         @GET
         suspend fun followPage(
-            @Url url: String
-        ): Response<ResponseBody>
-
-        @GET(".")
-        suspend fun getHome(
-            @Header("cookie") cookie: String = "dle_skin=MGM"
-        ): Document
-
-        @GET("index.php")
-        suspend fun getCategorie(
-            @Query("cstart") cstart: Int = 1,
-            @Query("do") vdo: String = "cat",
-            @Query("category") categorie: String = "manga-streaming-1",
-            @Header("cookie") cookie: String = "dle_skin=MGM"
-        ): Document
-
-        @FormUrlEncoded
-        @POST("engine/ajax/search.php")
-        suspend fun search(
-            @Field("query") query: String,
-            @Field("page") page: Int = 1
-        ): Document
-
-        @FormUrlEncoded
-        @POST("index.php")
-        suspend fun getItem(
-            @Query("newsid") id: String,
-            @Field("cookie") skin_name: String = "skin_name=MGV3",
-            @Field("cookie") skin_change: String = "action_skin_change=yes",
-            @Header("cookie") dle_skin: String = "dle_skin=MGV1"
-        ): Document
-
-        @GET("engine/ajax/manga_episodes_api.php")
-        suspend fun getEpisodesData(
-            @Query("id") id: String,
-            @Header("Cookie") cookie: String = "dle_skin=MGV1",
-            @Header("X-Requested-With") requestedWith: String = "XMLHttpRequest"
-        ): EpisodesData
-    }
-}
+            @Url url:
