@@ -455,14 +455,13 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
 
     /**
      * Améliore la qualité d'une URL d'image WordPress.
-     * Les thumbnails sont au format "-110x150.jpg" — on les remplace par la version originale
-     * ou par "-193x278" pour les posters de meilleure qualité.
+     * Les thumbnails homepage sont au format "-110x150.jpg" (trop petit).
+     * On les remplace par "-193x278" (taille poster du site, bonne qualité).
+     * NB: la version sans suffixe est bloquée par Cloudflare.
      */
     private fun improveImageUrl(url: String?): String? {
         if (url.isNullOrBlank()) return null
-        // Remplacer -110x150 par -193x278 (taille poster standard du site)
-        // ou retirer complètement le suffixe pour la version originale
-        return url.replace(Regex("""-\d+x\d+\."""), ".")
+        return url.replace(Regex("""-110x150\."""), "-193x278.")
     }
 
     /**
@@ -542,4 +541,9 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
             val poster = improveImageUrl(rawPoster)
 
             TvShow(id = id, title = title, poster = poster) as AppAdapter.Item
-        }.distinctBy { (it as? TvShow)?.id ?: (it as? Movie)?.id
+        }.distinctBy { (it as? TvShow)?.id ?: (it as? Movie)?.id }
+    }
+
+    // ==================== SERVICE ====================
+
+    private inter

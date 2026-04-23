@@ -38,23 +38,16 @@ class GlideCustomModule : AppGlideModule() {
         val trustManager = trustAllCerts[0] as X509TrustManager
 
         // Build a base client (trust-all) to bootstrap DoH
+        // Includes User-Agent, Referer, and shared CookieJar for Cloudflare compatibility
         return Builder()
             .cache(appCache)
             .readTimeout(30, TimeUnit.SECONDS)
             .connectTimeout(30, TimeUnit.SECONDS)
             .addInterceptor(logging)
-            .sslSocketFactory(sslContext.socketFactory, trustManager)
-            .hostnameVerifier { _, _ -> true }
-            .dns(DnsResolver.doh)
-            .build()
-    }
-
-    override fun registerComponents(
-        context: Context, glide: Glide, registry: com.bumptech.glide.Registry
-    ) {
-        val okHttpClient = getOkHttpClient()
-        registry.replace(
-            GlideUrl::class.java, InputStream::class.java, OkHttpUrlLoader.Factory(okHttpClient)
-        )
-    }
-}
+            .addInterceptor { chain ->
+                val request = chain.request()
+                val newRequest = request.newBuilder()
+                    .header("User-Agent", com.streamflixreborn.streamflix.utils.NetworkClient.USER_AGENT)
+                    .header("Referer", "${request.url.scheme}://${request.url.host}/")
+                    .build()
+                chain.proceed(newRe
