@@ -75,6 +75,7 @@ interface Provider {
             FrenchAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             KidrazProvider to ProviderSupport(movies = true, tvShows = false),
             WiflixProvider to ProviderSupport(movies = true, tvShows = true),
+            VoirDramaProvider to ProviderSupport(movies = true, tvShows = true),
         )
 
         // Helper functions to check support
@@ -97,7 +98,4 @@ interface Provider {
         }
 
         fun getProvidersByGroup(group: ProviderGroup): List<Provider> {
-            return providers.filter { it.value.group == group }.keys.toList()
-        }
-    }
-}
+            ret
