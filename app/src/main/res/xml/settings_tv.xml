@@ -2,6 +2,92 @@
 <androidx.preference.PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
 
     <PreferenceScreen
+        android:key="screen_provider"
+        android:title="@string/settings_category_provider_title"
+        android:summary="@string/settings_screen_provider_summary"
+        android:widgetLayout="@layout/preference_widget_chevron">
+
+        <PreferenceCategory
+            android:key="pc_provider_settings"
+            android:title="@string/settings_category_provider_title">
+
+            <EditTextPreference
+                android:key="provider_url"
+                android:title="@string/settings_category_provider_url"
+                android:inputType="textUri" />
+
+            <EditTextPreference
+                android:key="provider_portal_url"
+                android:title="@string/settings_category_provider_update_url"
+                android:inputType="textUri" />
+
+            <SwitchPreference
+                android:key="provider_autoupdate"
+                android:title="@string/settings_autoupdate"
+                android:defaultValue="true"
+                android:summaryOn="@string/settings_autoupdate_on"
+                android:summaryOff="@string/settings_autoupdate_off" />
+
+            <Preference
+                android:icon="@drawable/ic_refresh"
+                android:key="provider_autoupdate_now"
+                android:title="@string/settings_autoupdate_now" />
+
+            <SwitchPreference
+                android:key="pc_frenchstream_new_interface"
+                android:title="@string/settings_frenchstream_use_new_interface"
+                android:defaultValue="true"
+                android:summaryOn="@string/settings_frenchstream_use_new_interface_on"
+                android:summaryOff="@string/settings_frenchstream_use_new_interface_off" />
+        </PreferenceCategory>
+
+        <PreferenceCategory
+            android:key="pc_streamingcommunity_settings"
+            android:title="@string/settings_category_streamingcommunity">
+
+            <EditTextPreference
+                android:key="provider_streamingcommunity_domain"
+                android:title="@string/settings_category_streamingcommunity_domain"
+                android:inputType="text" />
+
+            <Preference
+                android:key="provider_streamingcommunity_domain_reset"
+                android:title="@string/settings_streamingcommunity_domain_reset"
+                android:summary="@string/settings_streamingcommunity_domain_reset_summary" />
+        </PreferenceCategory>
+
+        <PreferenceCategory
+            android:key="pc_cuevana_settings"
+            android:title="@string/settings_category_cuevana">
+
+            <EditTextPreference
+                android:key="provider_cuevana_domain"
+                android:title="@string/settings_category_cuevana_domain"
+                android:inputType="text" />
+        </PreferenceCategory>
+
+        <PreferenceCategory
+            android:key="pc_poseidon_settings"
+            android:title="@string/settings_category_poseidon">
+
+            <EditTextPreference
+                android:key="provider_poseidon_domain"
+                android:title="@string/settings_category_poseidon_domain"
+                android:inputType="text" />
+        </PreferenceCategory>
+
+        <PreferenceCategory
+            android:key="pc_provider_empty_state"
+            android:title="@string/settings_provider_connection_title">
+
+            <Preference
+                android:key="provider_no_options"
+                android:title="@string/settings_provider_no_options_title"
+                android:summary="@string/settings_provider_no_options_summary" />
+        </PreferenceCategory>
+    </PreferenceScreen>
+
+    <PreferenceScreen
         android:key="screen_content"
         android:title="@string/settings_section_content_title"
         android:summary="@string/settings_screen_content_summary"
@@ -202,92 +288,6 @@
     </PreferenceScreen>
 
     <PreferenceScreen
-        android:key="screen_provider"
-        android:title="@string/settings_category_provider_title"
-        android:summary="@string/settings_screen_provider_summary"
-        android:widgetLayout="@layout/preference_widget_chevron">
-
-        <PreferenceCategory
-            android:key="pc_provider_settings"
-            android:title="@string/settings_category_provider_title">
-
-            <EditTextPreference
-                android:key="provider_url"
-                android:title="@string/settings_category_provider_url"
-                android:inputType="textUri" />
-
-            <EditTextPreference
-                android:key="provider_portal_url"
-                android:title="@string/settings_category_provider_update_url"
-                android:inputType="textUri" />
-
-            <SwitchPreference
-                android:key="provider_autoupdate"
-                android:title="@string/settings_autoupdate"
-                android:defaultValue="true"
-                android:summaryOn="@string/settings_autoupdate_on"
-                android:summaryOff="@string/settings_autoupdate_off" />
-
-            <Preference
-                android:icon="@drawable/ic_refresh"
-                android:key="provider_autoupdate_now"
-                android:title="@string/settings_autoupdate_now" />
-
-            <SwitchPreference
-                android:key="pc_frenchstream_new_interface"
-                android:title="@string/settings_frenchstream_use_new_interface"
-                android:defaultValue="true"
-                android:summaryOn="@string/settings_frenchstream_use_new_interface_on"
-                android:summaryOff="@string/settings_frenchstream_use_new_interface_off" />
-        </PreferenceCategory>
-
-        <PreferenceCategory
-            android:key="pc_streamingcommunity_settings"
-            android:title="@string/settings_category_streamingcommunity">
-
-            <EditTextPreference
-                android:key="provider_streamingcommunity_domain"
-                android:title="@string/settings_category_streamingcommunity_domain"
-                android:inputType="text" />
-
-            <Preference
-                android:key="provider_streamingcommunity_domain_reset"
-                android:title="@string/settings_streamingcommunity_domain_reset"
-                android:summary="@string/settings_streamingcommunity_domain_reset_summary" />
-        </PreferenceCategory>
-
-        <PreferenceCategory
-            android:key="pc_cuevana_settings"
-            android:title="@string/settings_category_cuevana">
-
-            <EditTextPreference
-                android:key="provider_cuevana_domain"
-                android:title="@string/settings_category_cuevana_domain"
-                android:inputType="text" />
-        </PreferenceCategory>
-
-        <PreferenceCategory
-            android:key="pc_poseidon_settings"
-            android:title="@string/settings_category_poseidon">
-
-            <EditTextPreference
-                android:key="provider_poseidon_domain"
-                android:title="@string/settings_category_poseidon_domain"
-                android:inputType="text" />
-        </PreferenceCategory>
-
-        <PreferenceCategory
-            android:key="pc_provider_empty_state"
-            android:title="@string/settings_provider_connection_title">
-
-            <Preference
-                android:key="provider_no_options"
-                android:title="@string/settings_provider_no_options_title"
-                android:summary="@string/settings_provider_no_options_summary" />
-        </PreferenceCategory>
-    </PreferenceScreen>
-
-    <PreferenceScreen
         android:key="screen_backup"
         android:title="@string/backup_category_title"
         android:summary="@string/settings_screen_backup_summary"
@@ -325,6 +325,11 @@
 
     <PreferenceCategory
         android:title="@string/miscelaneous_title">
+
+        <Preference
+            android:icon="@drawable/ic_telegram"
+            android:key="p_settings_telegram"
+            android:title="@string/settings_telegram" />
 
         <SwitchPreference
             android:key="UPDATE_CHECK_ENABLED"

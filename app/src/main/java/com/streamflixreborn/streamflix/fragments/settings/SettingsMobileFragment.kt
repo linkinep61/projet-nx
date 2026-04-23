@@ -372,7 +372,10 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             setOnPreferenceClickListener(null)
         }
 
-        // Telegram and Help buttons removed
+        findPreference<Preference>("p_settings_telegram")?.setOnPreferenceClickListener {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/+Jxyj7znoNQsyMjg0")))
+            true
+        }
 
         findPreference<Preference>("p_scan_resolver_qr")?.setOnPreferenceClickListener {
             scanResolverQrLauncher.launch(Intent(requireContext(), QrScannerActivity::class.java))

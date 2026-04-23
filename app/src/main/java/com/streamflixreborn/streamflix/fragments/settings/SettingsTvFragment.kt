@@ -407,7 +407,10 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             setOnPreferenceClickListener(null)
         }
 
-        // Telegram and Help buttons removed
+        findPreference<Preference>("p_settings_telegram")?.setOnPreferenceClickListener {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/+Jxyj7znoNQsyMjg0")))
+            true
+        }
 
         findPreference<SwitchPreference>("AUTOPLAY")?.isChecked = UserPreferences.autoplay
         findPreference<SwitchPreference>("AUTOPLAY")?.setOnPreferenceChangeListener { _, newValue ->
