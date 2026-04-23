@@ -312,7 +312,12 @@ class StreamingCommunityProvider(private val _language: String? = null) : Provid
                 Gson().fromJson(json.toString(), StreamingCommunityService.HomeRes::class.java)
             }
             if (version != res.version) version = res.version ?: ""
-            return res.props?.genres?.map { Genre(id = it.id, name = it.name) }?.sortedBy { it.name } ?: listOf()
+            val genres = res.props?.genres?.map { Genre(id = it.id, name = it.name) }?.sortedBy { it.name }?.toMutableList() ?: mutableListOf()
+            // Ajouter K-Drama (recherche par mots-clés via GenreViewModel)
+            if (genres.none { it.id.contains("k-drama", ignoreCase = true) || it.name.contains("K-Drama", ignoreCase = true) }) {
+                genres.add(Genre(id = "k-drama", name = "K-Drama"))
+            }
+            return genres
         }
         val res = withSslFallback { it.search(query, page, LANG) }
         if (res.currentPage == null || (res.lastPage != null && res.currentPage > res.lastPage)) return listOf()
@@ -713,9 +718,4 @@ class StreamingCommunityProvider(private val _language: String? = null) : Provid
         data class SeasonPropsDetails(val episodes: List<SeasonPropsEpisodes>)
         data class SeasonProps(val loadedSeason: SeasonPropsDetails)
         data class SeasonRes(val version: String?, val props: SeasonProps?)
-        data class ArchivePage(val data: List<Show>?, @SerializedName("current_page") val currentPage: Int?, @SerializedName("last_page") val lastPage: Int?)
-        data class ArchiveProps(val archive: ArchivePage?, val titles: ArchivePage?, val movies: ArchivePage?, val tv: ArchivePage?, @SerializedName("tv_shows") val tvShows: ArchivePage?)
-        data class ArchiveRes(val version: String, val props: ArchiveProps?)
-        data class ApiArchiveRes(val titles: List<Show>)
-    }
-}
+        data class ArchivePage(val data: List<Show>?, @SerializedName("current_page") val currentPage: Int?, @SerializedName("last_page") val l

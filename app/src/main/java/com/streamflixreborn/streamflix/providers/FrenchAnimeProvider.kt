@@ -154,6 +154,11 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
                     id = it.attr("href").substringBeforeLast("/").substringAfterLast("/"),
                     name = it.text()
                 )
+            }.toMutableList()
+
+            // Ajouter K-Drama (recherche par mots-clés via GenreViewModel)
+            if (genres.none { it.id.contains("k-drama", ignoreCase = true) }) {
+                genres.add(Genre(id = "k-drama", name = "K-Drama"))
             }
 
             return genres
@@ -622,11 +627,4 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
         @FormUrlEncoded
         suspend fun getPeople(
             @Field("do") doAction: String = "search",
-            @Field("subaction") subAction: String = "search",
-            @Field("story") query: String,
-            @Field("search_start") searchStart: Int = -1,
-            @Field("result_from") resultFrom: Int = -1,
-            @Field("full_search") fullSearch: Int = 0
-        ): Document
-    }
-}
+            @Field("subaction") subAction: St
