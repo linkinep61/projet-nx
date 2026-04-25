@@ -484,13 +484,16 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
 
     /**
      * Améliore la qualité d'une URL d'image WordPress.
-     * Les thumbnails homepage sont au format "-110x150.jpg" (trop petit).
+     * Les thumbnails homepage sont au format "-110x150.jpg", "-175x238.jpg" etc (trop petit).
      * On les remplace par "-193x278" (taille poster du site, bonne qualité).
-     * NB: la version sans suffixe est bloquée par Cloudflare.
+     * Si l'URL contient un redimensionnement de taille, on essaie le format -193x278
+     * avant de retomber sur l'URL originale.
+     * NB: la version sans suffixe peut être bloquée par Cloudflare.
      */
     private fun improveImageUrl(url: String?): String? {
         if (url.isNullOrBlank()) return null
-        return url.replace(Regex("""-110x150\."""), "-193x278.")
+        // Remplacer le suffixe de redimensionnement WordPress par -193x278 (meilleure qualité dispo)
+        return url.replace(Regex("""-\d+x\d+\."""), "-193x278.")
     }
 
     /**

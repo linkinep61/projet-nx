@@ -193,11 +193,21 @@ class MainTvActivity : FragmentActivity() {
     
     private fun updateNavigationVisibility() {
         UserPreferences.currentProvider?.let { provider ->
-            binding.navMain.menu.findItem(R.id.movies)?.isVisible = Provider.supportsMovies(provider)
-            val tvShowsItem = binding.navMain.menu.findItem(R.id.tv_shows)
-            tvShowsItem?.isVisible = Provider.supportsTvShows(provider)
-            tvShowsItem?.title = if (provider.name == "CableVisionHD" || provider.name == "TvporinternetHD") 
-                getString(R.string.main_menu_all_channels) else getString(R.string.main_menu_tv_shows)
+            binding.navMain.menu.findItem(R.id.movies)?.apply {
+                isVisible = Provider.supportsMovies(provider)
+                title = when (provider.name) {
+                    "VoirDrama", "VoirAnime" -> getString(R.string.main_menu_series_fr)
+                    else -> getString(R.string.main_menu_movies)
+                }
+            }
+            binding.navMain.menu.findItem(R.id.tv_shows)?.apply {
+                isVisible = Provider.supportsTvShows(provider)
+                title = when (provider.name) {
+                    "CableVisionHD", "TvporinternetHD" -> getString(R.string.main_menu_all_channels)
+                    "VoirDrama", "VoirAnime" -> getString(R.string.main_menu_series)
+                    else -> getString(R.string.main_menu_tv_shows)
+                }
+            }
         }
     }
 
