@@ -1,5 +1,6 @@
 package com.streamflixreborn.streamflix.extractors
 
+import android.util.Log
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
 import okhttp3.OkHttpClient
@@ -86,10 +87,39 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
     private interface Service {
         companion object {
             private const val USER_AGENT =
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
+            /** Client for API calls — follows redirects, sends Origin header */
             fun build(baseUrl: String): Service {
-                val clientBuilder = OkHttpClient.Builder()
+                val apiClient = OkHttpClient.Builder()
+                    .readTimeout(30, TimeUnit.SECONDS)
+                    .connectTimeout(30, TimeUnit.SECONDS)
+                    .followRedirects(true)
+                    .followSslRedirects(true)
+                    .addNetworkInterceptor { chain ->
+                        val request = chain.request()
+                        val url = request.url
+                        val origin = "${url.scheme}://${url.host}"
+                        val newRequest = request.newBuilder()
+                            .header("Referer", "$origin/")
+                            .header("Origin", origin)
+                            .build()
+                        chain.proceed(newRequest)
+                    }
+                    .dns(DnsResolver.doh)
+                    .build()
+
+                return Retrofit.Builder()
+                    .baseUrl(baseUrl)
+                    .addConverterFactory(GsonConverterFactory.create())
+                    .client(apiClient)
+                    .build()
+                    .create(Service::class.java)
+            }
+
+            /** Client for stream link resolution — no redirects, captures Location header */
+            fun buildStreamResolver(baseUrl: String): Service {
+                val resolverClient = OkHttpClient.Builder()
                     .readTimeout(30, TimeUnit.SECONDS)
                     .connectTimeout(30, TimeUnit.SECONDS)
                     .followRedirects(false)
@@ -103,11 +133,13 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
                             .build()
                         chain.proceed(newRequest)
                     }
+                    .dns(DnsResolver.doh)
+                    .build()
 
                 return Retrofit.Builder()
                     .baseUrl(baseUrl)
-                    .addConverterFactory( GsonConverterFactory.create())
-                    .client(clientBuilder.dns(DnsResolver.doh).build())
+                    .addConverterFactory(GsonConverterFactory.create())
+                    .client(resolverClient)
                     .build()
                     .create(Service::class.java)
             }
@@ -139,6 +171,7 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
     }
 
     private val service = Service.build(mainUrl)
+    private val streamResolver = Service.buildStreamResolver(mainUrl)
 
     override suspend fun extract(link: String): Video {
         throw Exception("None")
@@ -159,16 +192,19 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
     private val defaultReliability = 7
 
     suspend fun servers(videoType: Video.Type): List<Video.Server> {
+        Log.d("FrembedExtractor", "servers() called, mainUrl=$mainUrl, videoType=$videoType")
         return try {
             val ret = when(videoType) { is Video.Type.Movie -> service.getMovieLinks( videoType.id)
                                         is Video.Type.Episode -> service.getTvShowLinks(videoType.tvShow.id, videoType.season.number, videoType.number) }
+            Log.d("FrembedExtractor", "API response: link1=${ret.link1?.take(60)}, link2=${ret.link2?.take(60)}, link3=${ret.link3?.take(60)}")
             val initialServers = ret.toServers()
+            Log.d("FrembedExtractor", "Initial servers: ${initialServers.size} found")
 
             val resolvedServers = coroutineScope {
                 initialServers.map { server ->
                     async(Dispatchers.IO) {
                         try {
-                            val response = service.getStreamLinks(server.src)
+                            val response = streamResolver.getStreamLinks(server.src)
                             val redirect = response.headers()["Location"]
                             if (!redirect.isNullOrEmpty()) {
                                 val fullRedirect = if (redirect.startsWith("//")) "https:$redirect" else redirect
@@ -201,6 +237,7 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
                 reliabilityOrder[serviceName] ?: defaultReliability
             })
         } catch (e: Exception) {
+            Log.e("FrembedExtractor", "servers() FAILED: ${e.javaClass.simpleName}: ${e.message}", e)
             emptyList()
         }
     }

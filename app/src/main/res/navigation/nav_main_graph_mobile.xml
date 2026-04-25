@@ -64,6 +64,9 @@
         <action
             android:id="@+id/action_movies_to_movie"
             app:destination="@id/movie" />
+        <action
+            android:id="@+id/action_movies_to_tv_show"
+            app:destination="@id/tv_show" />
     </fragment>
     <fragment
         android:id="@+id/tv_shows"
@@ -105,10 +108,12 @@
             app:argType="string" />
         <argument
             android:name="poster"
+            android:defaultValue="@null"
             app:argType="string"
             app:nullable="true" />
         <argument
             android:name="banner"
+            android:defaultValue="@null"
             app:argType="string"
             app:nullable="true" />
         <action

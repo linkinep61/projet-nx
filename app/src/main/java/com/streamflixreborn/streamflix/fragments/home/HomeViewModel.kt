@@ -383,7 +383,9 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
             val categories = provider.getHome().toMutableList()
 
             // Enrich carousels: load extra pages to fill carousels with maximum items
-            try {
+            val providerSupport = Provider.Companion.providers[provider]
+            val shouldEnrich = providerSupport?.enrichHome ?: true
+            if (shouldEnrich) try {
                 val allMovies = mutableListOf<Movie>()
                 val allTvShows = mutableListOf<TvShow>()
 

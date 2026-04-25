@@ -30,6 +30,8 @@
     <string name="main_menu_movies">Films</string>
     <string name="main_menu_tv_shows">Séries TV</string>
     <string name="main_menu_all_channels">Toutes les chaînes</string>
+    <string name="main_menu_series">VOSTFR</string>
+    <string name="main_menu_series_fr">FR</string>
     <string name="main_menu_settings">Paramètres</string>
     <string name="main_menu_theme_change">Changer de thème</string>
     <string name="theme_default">Par défaut</string>

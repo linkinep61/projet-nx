@@ -1,6 +1,7 @@
 package com.streamflixreborn.streamflix.utils
 
 import android.util.Base64
+import android.util.Log
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 
@@ -27,7 +28,7 @@ object DecryptHelper {
 
             JsonParser.parseString(vAtob).asJsonObject
         } catch (e: Exception) {
-            println("Decryption error: ${e.message}")
+            Log.e("DecryptHelper", "Decryption error: ${e.message}")
             JsonObject()
         }
     }

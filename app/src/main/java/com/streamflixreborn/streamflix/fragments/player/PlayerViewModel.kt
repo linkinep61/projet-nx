@@ -103,12 +103,13 @@ class PlayerViewModel(
             val rawServers = UserPreferences.currentProvider!!.getServers(id, videoType)
             if (rawServers.isEmpty()) throw Exception("No servers found")
 
-            // Deprioritize Netu (cfglobalcdn blocked by French ISPs) — put it last
+            // Deprioritize problematic servers — put them last
             val netuPatterns = listOf("netu", "waaw", "hqq", "hqcloud", "younetu")
             val servers = rawServers.sortedBy { server ->
                 val id = server.id.lowercase()
                 val name = server.name.lowercase()
                 when {
+                    // Netu last — blocked by French ISPs
                     netuPatterns.any { p -> name.contains(p) || id.contains(p) } -> 1
                     else -> 0
                 }

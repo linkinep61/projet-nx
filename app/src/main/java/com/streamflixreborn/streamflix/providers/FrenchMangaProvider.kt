@@ -592,3 +592,147 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
         }.thenBy { server ->
             val serviceName = Extractor.identifyServiceName(server.src)
+            reliabilityOrder[serviceName] ?: defaultReliability
+        })
+    }
+
+    override suspend fun getVideo(server: Video.Server): Video {
+        val video = Extractor.extract(server.src)
+        if (video.subtitles.isNotEmpty()) {
+            if (!server.name.contains("VOSTFR")) {
+                // Disable subtitles when not watching in VOSTFR
+                return video.copy(
+                    subtitles = emptyList()
+                )
+            } else {
+                // otherwise select the initial subtitle
+                video.subtitles.forEach {
+                    if (it.initialDefault) {
+                        it.default = true
+                    }
+                }
+            }
+        }
+
+        return video
+    }
+
+    override suspend fun onChangeUrl(forceRefresh: Boolean): String {
+        FrenchStreamProvider.changeUrlMutex.withLock {
+            if (forceRefresh || UserPreferences.getProviderCache(this,UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
+                val addressService = FrenchMangaService.buildAddressFetcher()
+                try {
+                    val document = addressService.getHome()
+
+                    val fsUrl = document.select("div.container > div.url-card")
+                        .selectFirst("a")
+                        ?.attr("href")
+                        ?.trim()
+                    if (!fsUrl.isNullOrEmpty()) {
+                        val fsdoc = addressService.loadPage(fsUrl)
+                        var newUrl = fsdoc
+                            .selectFirst("li.submenu:has(a:contains(ANIMES)) a")
+                            ?.attr("href")
+                        if (newUrl.isNullOrEmpty()) throw Exception()
+                        val finalUrl = addressService.followPage(newUrl)
+                        newUrl = finalUrl.raw().request.url.toString()
+                        newUrl = if (newUrl.endsWith("/")) newUrl else "$newUrl/"
+                        UserPreferences.setProviderCache(this,UserPreferences.PROVIDER_URL, newUrl)
+                        UserPreferences.setProviderCache(
+                            this,
+                            UserPreferences.PROVIDER_LOGO,
+                            newUrl + "favicon-96x96.png"
+                        )
+                    }
+                } catch (e: Exception) {
+                    // In case of failure, we'll use the default URL
+                    // No need to throw as we already have a fallback URL
+                }
+            }
+            service = FrenchMangaService.build(baseUrl)
+            serviceInitialized = true
+        }
+        return baseUrl
+    }
+
+    private suspend fun initializeService() {
+        initializationMutex.withLock {
+            if (serviceInitialized) return
+            onChangeUrl()
+        }
+    }
+
+    private interface FrenchMangaService {
+        companion object {
+            private val client = NetworkClient.default.newBuilder()
+                .build()
+            fun buildAddressFetcher(): FrenchMangaService {
+                val addressRetrofit = Retrofit.Builder()
+                    .baseUrl(FrenchStreamProvider.portalUrl)
+
+                    .addConverterFactory(JsoupConverterFactory.create())
+                    .client(client)
+
+                    .build()
+
+                return addressRetrofit.create(FrenchMangaService::class.java)
+            }
+            fun build(baseUrl: String): FrenchMangaService {
+                val retrofit = Retrofit.Builder()
+                    .baseUrl(baseUrl)
+                    .addConverterFactory(JsoupConverterFactory.create())
+                    .addConverterFactory(GsonConverterFactory.create())
+                    .client(client)
+                    .build()
+
+                return retrofit.create(FrenchMangaService::class.java)
+            }
+        }
+
+        @GET
+        suspend fun loadPage(
+            @Url url: String
+        ): Document
+
+        @GET
+        suspend fun followPage(
+            @Url url: String
+        ): Response<ResponseBody>
+
+        @GET(".")
+        suspend fun getHome(
+            @Header("cookie") cookie: String = "dle_skin=MGM"
+        ): Document
+
+        @GET("index.php")
+        suspend fun getCategorie(
+            @Query("cstart") cstart: Int = 1,
+            @Query("do") vdo: String = "cat",
+            @Query("category") categorie: String = "manga-streaming-1",
+            @Header("cookie") cookie: String = "dle_skin=MGM"
+        ): Document
+
+        @FormUrlEncoded
+        @POST("engine/ajax/search.php")
+        suspend fun search(
+            @Field("query") query: String,
+            @Field("page") page: Int = 1
+        ): Document
+
+        @FormUrlEncoded
+        @POST("index.php")
+        suspend fun getItem(
+            @Query("newsid") id: String,
+            @Field("cookie") skin_name: String = "skin_name=MGV3",
+            @Field("cookie") skin_change: String = "action_skin_change=yes",
+            @Header("cookie") dle_skin: String = "dle_skin=MGV1"
+        ): Document
+
+        @GET("engine/ajax/manga_episodes_api.php")
+        suspend fun getEpisodesData(
+            @Query("id") id: String,
+            @Header("Cookie") cookie: String = "dle_skin=MGV1",
+            @Header("X-Requested-With") requestedWith: String = "XMLHttpRequest"
+        ): EpisodesData
+    }
+}

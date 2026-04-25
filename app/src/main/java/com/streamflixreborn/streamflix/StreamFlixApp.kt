@@ -7,8 +7,11 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import java.security.Security
 import org.conscrypt.Conscrypt
+import android.util.Log
 import com.streamflixreborn.streamflix.database.AppDatabase
 import com.streamflixreborn.streamflix.providers.AniWorldProvider
+import com.streamflixreborn.streamflix.providers.Provider
+import com.streamflixreborn.streamflix.providers.ProviderConfigUrl
 import com.streamflixreborn.streamflix.providers.SerienStreamProvider
 import com.streamflixreborn.streamflix.utils.AppLanguageManager
 import com.streamflixreborn.streamflix.utils.ArtworkRepairScheduler
@@ -73,7 +76,37 @@ class StreamFlixApp : Application() {
             AniWorldProvider.initialize(appContext)
             ArtworkRepairScheduler.schedule(appContext, UserPreferences.currentProvider)
             CacheUtils.autoClearIfNeeded(appContext, thresholdMb = threshold)
+
+            // Auto-refresh URLs for all providers that have auto-update enabled
+            refreshProviderUrls()
         }
+    }
+
+    /**
+     * Refresh URLs for all providers that implement ProviderConfigUrl
+     * and have auto-update enabled. Runs in background on app startup.
+     */
+    private suspend fun refreshProviderUrls() {
+        val configProviders = Provider.providers.keys.filterIsInstance<ProviderConfigUrl>()
+        Log.d("StreamFlixApp", "Refreshing URLs for ${configProviders.size} providers...")
+
+        for (provider in configProviders) {
+            try {
+                val autoUpdate = UserPreferences.getProviderCache(
+                    provider as Provider,
+                    UserPreferences.PROVIDER_AUTOUPDATE
+                )
+                if (autoUpdate == "false") {
+                    Log.d("StreamFlixApp", "  ${(provider as Provider).name}: auto-update disabled, skipping")
+                    continue
+                }
+                provider.onChangeUrl()
+                Log.d("StreamFlixApp", "  ${(provider as Provider).name}: URL refreshed → ${(provider as Provider).baseUrl}")
+            } catch (e: Exception) {
+                Log.w("StreamFlixApp", "  ${(provider as Provider).name}: URL refresh failed: ${e.message}")
+            }
+        }
+        Log.d("StreamFlixApp", "Provider URL refresh complete")
     }
 
     override fun onTrimMemory(level: Int) {

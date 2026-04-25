@@ -282,6 +282,32 @@ object UserPreferences {
             Key.BYPASS_WS_ADVERTISED_HOST.setString(value.trim())
         }
 
+    var hlsProxyUrl: String
+        get() = Key.HLS_PROXY_URL.getString() ?: "https://hls-proxy.nanico61250.workers.dev"
+        set(value) {
+            Key.HLS_PROXY_URL.setString(value.trim().trimEnd('/'))
+        }
+
+    /**
+     * Liste de proxys HLS avec fallback automatique.
+     * Si le proxy principal atteint la limite de 100k requêtes/jour (HTTP 429),
+     * on bascule sur le suivant dans la liste.
+     * Le proxy configuré par l'utilisateur est toujours en premier.
+     */
+    val hlsProxyUrls: List<String>
+        get() {
+            val userProxy = hlsProxyUrl
+            val defaults = listOf(
+                "https://hls-proxy.nanico61250.workers.dev",
+                "https://hls-proxy-2.moctis.workers.dev"
+            )
+            return if (userProxy.isNotEmpty() && userProxy !in defaults) {
+                listOf(userProxy) + defaults
+            } else {
+                defaults
+            }
+        }
+
     enum class PlayerResize(
         val stringRes: Int,
         val resizeMode: Int,
@@ -478,7 +504,8 @@ object UserPreferences {
         SELECTED_THEME,
         BYPASS_WS_ADVERTISED_HOST,
         UPDATE_CHECK_ENABLED,
-        PROVIDER_LANGUAGE;
+        PROVIDER_LANGUAGE,
+        HLS_PROXY_URL;
 
         fun getBoolean(): Boolean? = when {
             prefs.contains(name) -> prefs.getBoolean(name, false)

@@ -115,12 +115,14 @@ abstract class Extractor {
             NetuExtractor(),
             SeekPlaysExtractor(),
             XshotcokExtractor(),
-            DarkiboxExtractor()
+            DarkiboxExtractor(),
+            Up4StreamExtractor()
         )
 
         suspend fun extract(link: String, server: Video.Server? = null): Video {
+            Log.d("Extractor", "extract() called with link=$link server=${server?.name}")
             var finalLink = link
-            
+
             // 1. RISOLUZIONE BRIDGE UNIVERSALE (StreamHG/Sync/Cuevana)
             // Facciamo questo PRIMA di cercare l'estrattore perché il link bridge (es. mysync.mov)
             // non appartiene a nessun estrattore specifico, ma il link risolto sì (es. filemoon).
@@ -226,6 +228,7 @@ abstract class Extractor {
                 return video
             }
 
+            Log.e("Extractor", "No extractors found for URL: $finalLink (original: $link)")
             throw Exception("No extractors found for URL: $finalLink")
         }
 

@@ -718,4 +718,9 @@ class StreamingCommunityProvider(private val _language: String? = null) : Provid
         data class SeasonPropsDetails(val episodes: List<SeasonPropsEpisodes>)
         data class SeasonProps(val loadedSeason: SeasonPropsDetails)
         data class SeasonRes(val version: String?, val props: SeasonProps?)
-        data class ArchivePage(val data: List<Show>?, @SerializedName("current_page") val currentPage: Int?, @SerializedName("last_page") val l
+        data class ArchivePage(val data: List<Show>?, @SerializedName("current_page") val currentPage: Int?, @SerializedName("last_page") val lastPage: Int?)
+        data class ArchiveProps(val archive: ArchivePage?, val titles: ArchivePage?, val movies: ArchivePage?, val tv: ArchivePage?, @SerializedName("tv_shows") val tvShows: ArchivePage?)
+        data class ArchiveRes(val version: String, val props: ArchiveProps?)
+        data class ApiArchiveRes(val titles: List<Show>)
+    }
+}

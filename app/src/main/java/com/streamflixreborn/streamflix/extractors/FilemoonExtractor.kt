@@ -71,13 +71,14 @@ open class FilemoonExtractor : Extractor() {
 
         Log.i("StreamFlixES", "[Filemoon] -> Source found: $sourceUrl")
 
+        val videoHeaders = mutableMapOf(
+            "Referer" to embedFrameUrl,
+            "User-Agent" to Service.DEFAULT_USER_AGENT,
+            "Origin" to playbackDomain
+        )
         return Video(
             source = sourceUrl,
-            headers = mapOf(
-                "Referer" to "$playbackDomain/",
-                "User-Agent" to Service.DEFAULT_USER_AGENT,
-                "Origin" to playbackDomain
-            )
+            headers = videoHeaders
         )
     }
 
@@ -117,7 +118,8 @@ open class FilemoonExtractor : Extractor() {
 
             fun build(baseUrl: String): Service {
                 val client = OkHttpClient.Builder()
-                    .dns(DnsResolver.doh).build()
+                    .dns(DnsResolver.doh)
+                    .build()
                 return Retrofit.Builder()
                     .baseUrl(baseUrl)
                     .client(client)
@@ -135,4 +137,5 @@ open class FilemoonExtractor : Extractor() {
         val payload: String,
         val key_parts: List<String>
     )
+
 }

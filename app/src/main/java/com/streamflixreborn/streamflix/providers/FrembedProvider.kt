@@ -14,9 +14,13 @@ import com.streamflixreborn.streamflix.models.Show
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import android.util.Log
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.jsoup.nodes.Document
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
@@ -472,16 +476,23 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 try {
                     val document = addressService.getPortalHome()
 
-                    val newUrl = document.selectFirst("a")
+                    var newUrl = document.selectFirst("a")
                         ?.attr("href")
                         ?.trim()
                     if (!newUrl.isNullOrEmpty()) {
-                        val newUrl = if (newUrl.endsWith("/")) newUrl else "$newUrl/"
+                        // Follow redirects to find the real domain
+                        // (e.g. frembed.cyou → frembed.one)
+                        try {
+                            val resolvedUrl = resolveRedirects(newUrl)
+                            if (resolvedUrl.isNotEmpty()) newUrl = resolvedUrl
+                        } catch (_: Exception) {}
+
+                        newUrl = if (newUrl!!.endsWith("/")) newUrl else "$newUrl/"
                         UserPreferences.setProviderCache(this,UserPreferences.PROVIDER_URL, newUrl)
                         UserPreferences.setProviderCache(
                             this,
                             UserPreferences.PROVIDER_LOGO,
-                            newUrl + "/favicon-32x32.png"
+                            newUrl + "favicon-32x32.png"
                         )
                     }
                 } catch (e: Exception) {
@@ -494,6 +505,45 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             serviceInitialized = true
         }
         return baseUrl
+    }
+
+    /**
+     * Follow HTTP redirects to find the final URL.
+     * e.g. frembed.cyou → frembed.one
+     */
+    private suspend fun resolveRedirects(url: String): String {
+        return withContext(Dispatchers.IO) {
+            val client = OkHttpClient.Builder()
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(10, TimeUnit.SECONDS)
+                .dns(DnsResolver.doh)
+                .build()
+
+            var currentUrl = if (url.endsWith("/")) url.dropLast(1) else url
+            var maxRedirects = 5
+
+            while (maxRedirects-- > 0) {
+                val request = Request.Builder().url(currentUrl).head().build()
+                val response = client.newCall(request).execute()
+                val code = response.code
+                response.close()
+
+                if (code in 301..308) {
+                    val location = response.header("Location") ?: break
+                    currentUrl = if (location.startsWith("http")) location
+                                 else "${currentUrl.substringBefore("://") }://${java.net.URL(currentUrl).host}$location"
+                    Log.d("FrembedProvider", "Redirect: $code → $currentUrl")
+                } else {
+                    break
+                }
+            }
+
+            // Return the scheme + host (base URL)
+            val parsed = java.net.URL(currentUrl)
+            "${parsed.protocol}://${parsed.host}"
+        }
     }
 
     private suspend fun initializeService() {

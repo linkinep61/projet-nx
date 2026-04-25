@@ -81,11 +81,21 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cronet.CronetDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import org.chromium.net.CronetEngine
+import com.google.android.gms.net.CronetProviderInstaller
 import com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsView
 import java.util.Base64 
 import java.io.File
 import java.io.FileOutputStream
+import android.graphics.Color
+import android.view.Gravity
 import android.webkit.CookieManager
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
+import android.widget.TextView
 import androidx.core.content.FileProvider
 import androidx.navigation.NavOptions
 import com.bumptech.glide.Glide
@@ -136,6 +146,18 @@ class PlayerMobileFragment : Fragment() {
     private var currentServer: Video.Server? = null
     private var usingCronet = false
     private var usingDoH = false
+    private var usingBrowserOkHttp = false
+    private var usingWebView = false
+
+    // ── WebView overlay (Netu anti-bot bypass — touch-friendly for mobile) ──
+    private var webViewOverlay: FrameLayout? = null
+    private var overlayWebView: WebView? = null
+    private var pendingWebViewVideo: Video? = null
+    private var pendingWebViewServer: Video.Server? = null
+    @Volatile private var m3u8Intercepted = false
+
+    /** Cached CronetEngine using Play Services' Chrome TLS stack */
+    private var cronetEngine: CronetEngine? = null
     private var isIgnoringPip = false
     private var waitingForBypass = false
     private var bypassDone = false
@@ -271,6 +293,9 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        // Pre-install Play Services Cronet provider asynchronously so it's ready
+        // by the time a LuluVdo/vidzy video needs Chrome's TLS stack
+        initCronetEngine()
         initializePlayer(false)
         initializeVideo()
         gestureHelper = PlayerGestureHelper(
@@ -355,16 +380,10 @@ class PlayerMobileFragment : Fragment() {
                     }
 
                     is PlayerViewModel.State.LoadingVideo -> {
-                        player.setMediaItem(
-                            MediaItem.Builder()
-                                .setUri("".toUri())
-                                .setMediaMetadata(
-                                    MediaMetadata.Builder()
-                                        .setMediaServerId(state.server.id)
-                                        .build()
-                                )
-                                .build()
-                        )
+                        // Don't set a MediaItem with empty URI — it causes
+                        // FileNotFoundException and puts the player in ERROR state
+                        // before extraction finishes. displayVideo() will set the
+                        // real MediaItem when SuccessLoadingVideo arrives.
                     }
 
                     is PlayerViewModel.State.SuccessLoadingVideo -> {
@@ -541,6 +560,7 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        hideWebViewOverlay()
         nextEpisodePrefetchJob?.cancel()
         val window = requireActivity().window
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -563,6 +583,10 @@ class PlayerMobileFragment : Fragment() {
     }
 
     fun onBackPressed(): Boolean = when {
+        webViewOverlay != null -> {
+            hideWebViewOverlay()
+            true
+        }
         binding.pvPlayer.isManualZoomEnabled -> {
             binding.pvPlayer.exitManualZoomMode()
             true
@@ -902,10 +926,110 @@ class PlayerMobileFragment : Fragment() {
     }
 
 
+    /**
+     * Returns true if this video source is a LuluVdo/LuluStream CDN URL
+     * that will always 403 with any non-WebView HTTP client (including Cronet).
+     */
+    private fun isLuluVdoCdn(video: Video): Boolean {
+        if (video.webViewUrl.isNullOrBlank()) return false
+        val src = video.source.lowercase()
+        val wvUrl = video.webViewUrl!!.lowercase()
+        return src.contains("tnmr.org") || src.contains("luluvdo") || src.contains("lulustream")
+                || src.contains("luluvid") || src.contains("luluvdoo") || src.contains("lulucdn")
+                || wvUrl.contains("luluvdo") || wvUrl.contains("lulustream")
+                || wvUrl.contains("luluvid") || wvUrl.contains("luluvdoo")
+    }
+
+    /** Netu cfglobalcdn — ISP blocks the IP, WebView bypasses it */
+    private fun isNetuCfglobalcdn(video: Video): Boolean {
+        return video.webViewUrl != null &&
+               com.streamflixreborn.streamflix.extractors.NetuExtractor.sharedWebView != null &&
+               (video.source.startsWith("data:") || video.source.contains("cfglobalcdn.com"))
+    }
+
+    /**
+     * Sync cookies from Android's WebView CookieManager to Java's default CookieHandler.
+     * This allows DefaultHttpDataSource (which uses HttpURLConnection) to send WebView cookies.
+     */
+    private fun syncWebViewCookies(sourceUrl: String) {
+        try {
+            val uri = java.net.URI(sourceUrl)
+            val host = uri.host ?: return
+
+            // Ensure Java's CookieHandler is set up
+            if (java.net.CookieHandler.getDefault() == null) {
+                java.net.CookieHandler.setDefault(java.net.CookieManager())
+            }
+            val cookieHandler = java.net.CookieHandler.getDefault() as? java.net.CookieManager ?: return
+
+            // Get cookies from WebView's CookieManager for this domain
+            val webViewCookies = android.webkit.CookieManager.getInstance().getCookie("https://$host")
+            if (webViewCookies.isNullOrBlank()) {
+                Log.d("PlayerNetwork", "No WebView cookies for $host")
+                return
+            }
+
+            // Parse and add each cookie to Java's CookieManager
+            webViewCookies.split(";").forEach { cookie ->
+                val trimmed = cookie.trim()
+                if (trimmed.isNotBlank()) {
+                    try {
+                        val httpCookie = java.net.HttpCookie.parse("Set-Cookie: $trimmed")
+                        httpCookie.forEach { c ->
+                            c.domain = host
+                            c.path = "/"
+                            cookieHandler.cookieStore.add(uri, c)
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+            Log.d("PlayerNetwork", "Synced WebView cookies to CookieHandler for $host: ${webViewCookies.take(100)}")
+        } catch (e: Exception) {
+            Log.w("PlayerNetwork", "Cookie sync failed: ${e.message}")
+        }
+    }
+
     private fun displayVideo(video: Video, server: Video.Server) {
         currentVideo = video
         currentServer = server
         updatePlayerHeader()
+
+        // Clean up any existing WebView overlay (e.g. switching servers)
+        if (webViewOverlay != null && !(video.needsWebViewClick && !video.webViewUrl.isNullOrBlank())) {
+            hideWebViewOverlay()
+        }
+
+        Log.d("PlayerDebug", "displayVideo: server=${server.name}, source=${video.source.take(100)}, type=${video.type}, headers=${video.headers}")
+
+        // ── Netu anti-bot: show WebView overlay so user can tap the play button ──
+        if (video.needsWebViewClick && !video.webViewUrl.isNullOrBlank()) {
+            // Ignore duplicate extraction results when overlay is already shown
+            if (webViewOverlay != null) {
+                Log.d("PlayerMobile", "needsWebViewClick but overlay already showing → ignoring duplicate")
+                return
+            }
+            Log.d("PlayerMobile", "needsWebViewClick → showing WebView overlay for: ${video.webViewUrl}")
+            // Stop current playback before showing overlay
+            if (::player.isInitialized) {
+                player.stop()
+                player.clearMediaItems()
+            }
+            pendingWebViewVideo = video
+            pendingWebViewServer = server
+            showWebViewOverlay(video.webViewUrl!!)
+            return
+        }
+
+        // WebView bypass: LuluVdo (TLS fingerprint) or Netu (ISP IP block)
+        // If we have a shared WebView from extraction, use WebViewDataSource
+        // to route ExoPlayer's HTTP requests through the WebView's network stack.
+        val needsWebViewDs = (isLuluVdoCdn(video)
+            && video.source.startsWith("data:")
+            && com.streamflixreborn.streamflix.extractors.LuluVdoExtractor.sharedWebView != null)
+            || isNetuCfglobalcdn(video)
+        if (isLuluVdoCdn(video) || isNetuCfglobalcdn(video)) {
+            Log.d("PlayerNetwork", "WebView bypass: source is ${if (video.source.startsWith("data:")) "data URI" else "CDN URL"}, webViewDs=$needsWebViewDs, lulu=${isLuluVdoCdn(video)}, netu=${isNetuCfglobalcdn(video)}")
+        }
 
         val extraBuffering = PlayerSettingsView.Settings.ExtraBuffering.isEnabled
         val softwareDecoder = PlayerSettingsView.Settings.SoftwareDecoder.isEnabled
@@ -913,18 +1037,22 @@ class PlayerMobileFragment : Fragment() {
         // Switch DataSource if the video URL needs a different engine
         val urlNeedsCronet = needsCronet(video.source)
         val urlNeedsDoH = needsDoH(video.source)
+        val urlNeedsBrowserOkHttp = needsBrowserOkHttp(video.source)
         val dataSourceMismatch = (urlNeedsCronet && !usingCronet) || (!urlNeedsCronet && usingCronet)
             || (urlNeedsDoH && !usingDoH) || (!urlNeedsDoH && usingDoH)
+            || (urlNeedsBrowserOkHttp && !usingBrowserOkHttp) || (!urlNeedsBrowserOkHttp && usingBrowserOkHttp)
         val needsReinit =
             extraBuffering != currentExtraBuffering || softwareDecoder != currentSoftwareDecoder || dataSourceMismatch
 
         if (dataSourceMismatch) {
-            Log.d("PlayerNetwork", "DataSource mismatch: needsCronet=$urlNeedsCronet(was=$usingCronet), needsDoH=$urlNeedsDoH(was=$usingDoH) → switching")
+            Log.d("PlayerNetwork", "DataSource mismatch: needsCronet=$urlNeedsCronet(was=$usingCronet), needsDoH=$urlNeedsDoH(was=$usingDoH), needsBrowserOkHttp=$urlNeedsBrowserOkHttp(was=$usingBrowserOkHttp) → switching")
             httpDataSource = createHttpDataSourceFactory(video.source)
+            Log.d("PlayerNetwork", "After factory creation: httpDataSource=${httpDataSource.javaClass.simpleName}, usingCronet=$usingCronet, usingDoH=$usingDoH, usingBrowserOkHttp=$usingBrowserOkHttp")
         }
 
         if (needsReinit) {
             initializePlayer(extraBuffering, softwareDecoder, video.source)
+            Log.d("PlayerNetwork", "After initializePlayer: httpDataSource=${httpDataSource.javaClass.simpleName}, usingCronet=$usingCronet")
             player.playlistMetadata = MediaMetadata.Builder()
                 .setTitle(resolvePlayerTitle())
                 .setMediaServers(servers.map {
@@ -938,30 +1066,49 @@ class PlayerMobileFragment : Fragment() {
 
         val currentPosition = player.currentPosition
 
-        httpDataSource.setDefaultRequestProperties(
-            mapOf(
-                "User-Agent" to NetworkClient.USER_AGENT,
-            ) + (video.headers ?: emptyMap())
-        )
+        if (!needsWebViewDs) {
+            httpDataSource.setDefaultRequestProperties(
+                mapOf(
+                    "User-Agent" to NetworkClient.USER_AGENT,
+                ) + (video.headers ?: emptyMap())
+            )
+        }
 
-        player.setMediaItem(
-            MediaItem.Builder()
-                .setUri(video.source.toUri())
-                .setMimeType(video.type)
-                .setSubtitleConfigurations(video.subtitles.map { subtitle ->
-                    MediaItem.SubtitleConfiguration.Builder(subtitle.file.toUri())
-                        .setMimeType(subtitle.file.toSubtitleMimeType())
-                        .setLabel(subtitle.label)
-                        .setSelectionFlags(if (subtitle.default) C.SELECTION_FLAG_DEFAULT else 0)
-                        .build()
-                })
-                .setMediaMetadata(
-                    MediaMetadata.Builder()
-                        .setMediaServerId(server.id)
-                        .build()
-                )
-                .build()
-        )
+        val mediaItem = MediaItem.Builder()
+            .setUri(video.source.toUri())
+            .setMimeType(video.type)
+            .setSubtitleConfigurations(video.subtitles.map { subtitle ->
+                MediaItem.SubtitleConfiguration.Builder(subtitle.file.toUri())
+                    .setMimeType(subtitle.file.toSubtitleMimeType())
+                    .setLabel(subtitle.label)
+                    .setSelectionFlags(if (subtitle.default) C.SELECTION_FLAG_DEFAULT else 0)
+                    .build()
+            })
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setMediaServerId(server.id)
+                    .build()
+            )
+            .build()
+
+        if (needsWebViewDs) {
+            // Route .ts segment requests through WebView's network stack
+            val wv = com.streamflixreborn.streamflix.extractors.LuluVdoExtractor.sharedWebView
+                ?: com.streamflixreborn.streamflix.extractors.NetuExtractor.sharedWebView
+                ?: error("needsWebViewDs but no sharedWebView available")
+            val webViewDsFactory = DefaultDataSource.Factory(
+                requireContext(),
+                com.streamflixreborn.streamflix.utils.WebViewDataSource.Factory(wv)
+            )
+            val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(webViewDsFactory)
+                .createMediaSource(mediaItem)
+            player.setMediaSource(hlsSource)
+            usingWebView = true
+            Log.d("PlayerNetwork", "WebView bypass: using WebViewDataSource for HLS playback (${if (isLuluVdoCdn(video)) "LuluVdo" else "Netu"})")
+        } else {
+            player.setMediaItem(mediaItem)
+            usingWebView = false
+        }
 
         binding.pvPlayer.controller.binding.btnExoExternalPlayer.setOnClickListener {
             isIgnoringPip = true
@@ -1041,6 +1188,18 @@ class PlayerMobileFragment : Fragment() {
             }
         }
         player.addListener(object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                super.onPlaybackStateChanged(playbackState)
+                val stateName = when (playbackState) {
+                    Player.STATE_IDLE -> "IDLE"
+                    Player.STATE_BUFFERING -> "BUFFERING"
+                    Player.STATE_READY -> "READY"
+                    Player.STATE_ENDED -> "ENDED"
+                    else -> "UNKNOWN($playbackState)"
+                }
+                Log.d("PlayerDebug", "onPlaybackStateChanged: $stateName, uri=${player.currentMediaItem?.localConfiguration?.uri?.toString()?.take(80)}")
+            }
+
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 super.onIsPlayingChanged(isPlaying)
                 binding.pvPlayer.keepScreenOn = isPlaying || UserPreferences.keepScreenOnWhenPaused
@@ -1128,20 +1287,25 @@ class PlayerMobileFragment : Fragment() {
 
             override fun onPlayerError(error: PlaybackException) {
                 super.onPlayerError(error)
+                Log.e("PlayerDebug", "onPlayerError: code=${error.errorCode}, msg=${error.message}")
+                Log.e("PlayerDebug", "  cause: ${error.cause}")
+                Log.e("PlayerDebug", "  cause.cause: ${error.cause?.cause}")
+                Log.e("PlayerDebug", "  uri: ${player.currentMediaItem?.localConfiguration?.uri?.toString()?.take(100)}")
                 Log.e("PlayerMobileFragment", "onPlayerError: ", error)
 
                 val cause = error.cause?.cause
                 val causeMsg = cause?.message ?: ""
+                val errorCauseMsg = error.cause?.message ?: ""
 
-                // Fallback 1: if Cronet hit a network error, retry with DefaultHttp
+                // Fallback 0: Cronet network errors (NOT 403) → retry with DefaultHttp
+                val is403 = errorCauseMsg.contains("403") || causeMsg.contains("403")
                 val isCronetNetworkError = causeMsg.contains("ERR_CONNECTION_TIMED_OUT")
                         || causeMsg.contains("ERR_CONNECTION_REFUSED")
                         || causeMsg.contains("ERR_CONNECTION_RESET")
                         || causeMsg.contains("ERR_NAME_NOT_RESOLVED")
                         || causeMsg.contains("ERR_SSL")
                         || causeMsg.contains("ERR_NETWORK")
-                        || cause is CronetDataSource.OpenException
-                if (usingCronet && isCronetNetworkError) {
+                if (usingCronet && isCronetNetworkError && !is403) {
                     Log.w("PlayerNetwork", "Cronet network error ($causeMsg), retrying with DefaultHttp fallback")
                     val video = currentVideo ?: return
                     val server = currentServer ?: return
@@ -1149,6 +1313,20 @@ class PlayerMobileFragment : Fragment() {
                     dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
                     initializePlayer(currentExtraBuffering, currentSoftwareDecoder, video.source)
                     displayVideo(video, server)
+                    return
+                }
+
+                // Fallback 1: if 403, try next server
+                if (is403) {
+                    Log.e("PlayerNetwork", "403 error! usingCronet=$usingCronet, source=${player.currentMediaItem?.localConfiguration?.uri?.toString()?.take(80)}")
+                    val server = currentServer ?: return
+                    val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
+                    if (nextServer != null) {
+                        Log.d("PlayerNetwork", "403 → trying next server: ${nextServer.name}")
+                        viewModel.getVideo(nextServer)
+                    } else {
+                        Log.e("PlayerNetwork", "No more servers to try after 403")
+                    }
                     return
                 }
 
@@ -1470,18 +1648,52 @@ class PlayerMobileFragment : Fragment() {
             .build()
     }
 
+    /**
+     * Pre-install Cronet from Play Services so CronetEngine.Builder uses
+     * Chrome's real BoringSSL stack (identical JA3 fingerprint to Chrome).
+     * Called once in onViewCreated — by the time a video loads, it's ready.
+     */
+    private fun initCronetEngine() {
+        CronetProviderInstaller.installProvider(requireContext())
+            .addOnSuccessListener {
+                try {
+                    cronetEngine = CronetEngine.Builder(requireContext())
+                        .enableQuic(true)
+                        .enableHttp2(true)
+                        .build()
+                    Log.d("PlayerNetwork", "Cronet engine pre-initialized: ${cronetEngine?.javaClass?.name}")
+                } catch (e: Exception) {
+                    Log.e("PlayerNetwork", "Cronet engine build failed after provider install: ${e.message}")
+                }
+            }
+            .addOnFailureListener { e ->
+                Log.w("PlayerNetwork", "CronetProviderInstaller failed: ${e.message} — will try native Cronet on demand")
+            }
+    }
+
     private fun needsCronet(url: String): Boolean {
+        // Cronet uses Chrome's TLS stack (JA3 fingerprint matches real browsers)
+        // These CDNs reject non-Chromium TLS fingerprints (OkHttp → 404)
         return url.contains("vidzy.live", ignoreCase = true)
+            || url.contains("cfglobalcdn.com", ignoreCase = true)
     }
 
     private fun needsDoH(url: String): Boolean {
-        return url.contains("cfglobalcdn.com", ignoreCase = true)
+        // sprintcdn/r66nv9ed.com: Filemoon CDN — system DNS resolves to wrong edge,
+        // token is edge-bound so we need DoH to hit the correct server
+        return url.contains("sprintcdn", ignoreCase = true)
+            || url.contains("r66nv9ed.com", ignoreCase = true)
+    }
+
+    private fun needsBrowserOkHttp(url: String): Boolean {
+        return false // luluvdo/tnmr.org now handled by Cronet
     }
 
     /**
      * Creates the right DataSource factory for [videoUrl].
      * - vidzy.live → Cronet (Chrome network stack, needed for JA3 bypass)
      * - cfglobalcdn.com → OkHttp + DoH (ISP DNS blocks, need CNAME chain resolution)
+     * - tnmr.org/luluvdo → OkHttp with full browser headers (CDN requires browser-like requests)
      * - everything else → DefaultHttpDataSource (system DNS, most compatible)
      */
     private fun createHttpDataSourceFactory(videoUrl: String = ""): HttpDataSource.Factory {
@@ -1490,22 +1702,38 @@ class PlayerMobileFragment : Fragment() {
                 Log.d("PlayerNetwork", "URL needs DoH for CNAME resolution ($videoUrl)")
                 return createDoHOkHttpDataSourceFactory()
             }
+            if (needsBrowserOkHttp(videoUrl)) {
+                Log.d("PlayerNetwork", "URL needs browser OkHttp ($videoUrl)")
+                return createBrowserOkHttpDataSourceFactory()
+            }
             Log.d("PlayerNetwork", "URL does not need Cronet ($videoUrl), using DefaultHttp")
             return createDefaultHttpDataSourceFactory()
         }
-        return try {
-            val cronetEngine = CronetEngine.Builder(requireContext()).build()
-            Log.d("PlayerNetwork", "Using CronetDataSource for vidzy.live (Chrome network stack)")
-            usingCronet = true
-            usingDoH = false
-            CronetDataSource.Factory(cronetEngine, java.util.concurrent.Executors.newCachedThreadPool())
-                .setUserAgent(NetworkClient.USER_AGENT)
-                .setConnectionTimeoutMs(30_000)
-                .setReadTimeoutMs(30_000)
+        // Use pre-initialized engine from Play Services, or build one on-demand
+        val engine = cronetEngine ?: try {
+            Log.d("PlayerNetwork", "Cronet engine not pre-initialized, building on demand...")
+            CronetEngine.Builder(requireContext())
+                .enableQuic(true)
+                .enableHttp2(true)
+                .build()
         } catch (e: Exception) {
-            Log.w("PlayerNetwork", "Cronet unavailable, using fallback: ${e.message}")
-            createDefaultHttpDataSourceFactory()
+            Log.e("PlayerNetwork", "Cronet completely unavailable: ${e.message}", e)
+            null
         }
+
+        if (engine == null) {
+            Log.w("PlayerNetwork", "No Cronet engine available, falling back to OkHttp")
+            return createDefaultHttpDataSourceFactory()
+        }
+
+        Log.d("PlayerNetwork", "Using CronetDataSource (${engine.javaClass.simpleName}) for: ${videoUrl.take(80)}")
+        usingCronet = true
+        usingDoH = false
+        usingBrowserOkHttp = false
+        return CronetDataSource.Factory(engine, java.util.concurrent.Executors.newCachedThreadPool())
+            .setUserAgent(NetworkClient.USER_AGENT)
+            .setConnectionTimeoutMs(30_000)
+            .setReadTimeoutMs(30_000)
     }
 
     /**
@@ -1515,6 +1743,7 @@ class PlayerMobileFragment : Fragment() {
     private fun createDoHOkHttpDataSourceFactory(): HttpDataSource.Factory {
         usingCronet = false
         usingDoH = true
+        usingBrowserOkHttp = false
 
         val jsonDohDns = object : okhttp3.Dns {
             private val fallback = DnsResolver.doh
@@ -1523,60 +1752,104 @@ class PlayerMobileFragment : Fragment() {
                 .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
 
+            /** Multiple DoH providers — different providers may return different IPs */
+            private val dohProviders = listOf(
+                "https://cloudflare-dns.com/dns-query",
+                "https://dns.google/resolve",
+                "https://dns.quad9.net:5053/dns-query"
+            )
+
+            /** Query a DoH provider and return all A record IPs + any CNAME targets found */
+            private fun queryDoH(provider: String, name: String): Pair<List<String>, List<String>> {
+                val request = okhttp3.Request.Builder()
+                    .url("$provider?name=$name&type=A")
+                    .header("Accept", "application/dns-json")
+                    .build()
+                val body = dnsClient.newCall(request).execute().use { it.body?.string() }
+                    ?: return Pair(emptyList(), emptyList())
+
+                val json = org.json.JSONObject(body)
+                val answers = json.optJSONArray("Answer")
+                    ?: return Pair(emptyList(), emptyList())
+
+                val ips = mutableListOf<String>()
+                val cnames = mutableListOf<String>()
+                for (i in 0 until answers.length()) {
+                    val answer = answers.getJSONObject(i)
+                    when (answer.optInt("type")) {
+                        1 -> ips.add(answer.optString("data"))   // A record
+                        5 -> cnames.add(answer.optString("data").trimEnd('.')) // CNAME
+                    }
+                }
+                return Pair(ips, cnames)
+            }
+
             override fun lookup(hostname: String): List<java.net.InetAddress> {
                 if (!hostname.contains("cfglobalcdn.com", ignoreCase = true)) {
                     return fallback.lookup(hostname)
                 }
-                Log.d("PlayerNetwork", "JSON DoH lookup for: $hostname")
+                Log.d("PlayerNetwork", "Multi-DoH lookup for: $hostname")
                 try {
-                    val request = okhttp3.Request.Builder()
-                        .url("https://cloudflare-dns.com/dns-query?name=$hostname&type=A")
-                        .header("Accept", "application/dns-json")
-                        .build()
-                    val response = dnsClient.newCall(request).execute().use { it.body?.string() }
-                        ?: throw Exception("Empty DoH response")
+                    val allIps = linkedSetOf<String>() // preserve order, no duplicates
+                    var cnameTarget: String? = null
 
-                    val json = org.json.JSONObject(response)
-                    val answers = json.optJSONArray("Answer")
-                        ?: throw Exception("No Answer in DoH response")
-
-                    val ips = mutableListOf<java.net.InetAddress>()
-                    for (i in 0 until answers.length()) {
-                        val answer = answers.getJSONObject(i)
-                        if (answer.optInt("type") == 1) {
-                            val ip = answer.optString("data")
-                            Log.d("PlayerNetwork", "JSON DoH resolved $hostname → $ip")
-                            ips.add(java.net.InetAddress.getByName(ip))
+                    // Phase 1: query all DoH providers for the cfglobalcdn hostname
+                    for (provider in dohProviders) {
+                        try {
+                            val (ips, cnames) = queryDoH(provider, hostname)
+                            Log.d("PlayerNetwork", "DoH ($provider): IPs=$ips, CNAMEs=$cnames")
+                            allIps.addAll(ips)
+                            if (cnames.isNotEmpty() && cnameTarget == null) {
+                                cnameTarget = cnames.first()
+                            }
+                        } catch (e: Exception) {
+                            Log.w("PlayerNetwork", "DoH provider $provider failed: ${e.message}")
                         }
                     }
-                    if (ips.isEmpty()) throw Exception("No A records in DoH response")
 
-                    // TCP pre-check: try ALL resolved IPs, keep reachable ones first
+                    // Phase 2: if CNAME found, also resolve CNAME target directly
+                    // (might give different IPs than the flattened chain)
+                    if (cnameTarget != null) {
+                        Log.d("PlayerNetwork", "CNAME chain: $hostname → $cnameTarget, resolving target...")
+                        for (provider in dohProviders) {
+                            try {
+                                val (ips, _) = queryDoH(provider, cnameTarget!!)
+                                if (ips.isNotEmpty()) {
+                                    Log.d("PlayerNetwork", "CNAME target $cnameTarget via $provider: $ips")
+                                    allIps.addAll(ips)
+                                }
+                            } catch (_: Exception) {}
+                        }
+                    }
+
+                    if (allIps.isEmpty()) throw Exception("No IPs from any DoH provider")
+                    Log.d("PlayerNetwork", "All candidate IPs for $hostname: $allIps")
+
+                    // Phase 3: TCP pre-check all unique IPs
                     val reachable = mutableListOf<java.net.InetAddress>()
                     val unreachable = mutableListOf<java.net.InetAddress>()
-                    for (ip in ips) {
+                    for (ipStr in allIps) {
+                        val ip = java.net.InetAddress.getByName(ipStr)
                         try {
                             val socket = java.net.Socket()
-                            socket.connect(java.net.InetSocketAddress(ip, 443), 5000)
+                            socket.connect(java.net.InetSocketAddress(ip, 443), 3000)
                             socket.close()
-                            Log.d("PlayerNetwork", "TCP pre-check OK: $hostname → ${ip.hostAddress}:443")
+                            Log.d("PlayerNetwork", "TCP OK: $hostname → ${ip.hostAddress}:443")
                             reachable.add(ip)
-                            break // one reachable IP is enough
+                            break // one reachable is enough
                         } catch (e: Exception) {
-                            Log.w("PlayerNetwork", "TCP pre-check FAILED: $hostname → ${ip.hostAddress}:443 (${e.message})")
+                            Log.w("PlayerNetwork", "TCP FAIL: $hostname → ${ip.hostAddress}:443")
                             unreachable.add(ip)
                         }
                     }
 
-                    // Return reachable IPs first, then unreachable as fallback
-                    // (never throw — let OkHttp/player handle the actual connection)
                     val ordered = reachable + unreachable
                     if (reachable.isEmpty()) {
-                        Log.w("PlayerNetwork", "All ${ips.size} IPs for $hostname failed pre-check, returning anyway for OkHttp to try")
+                        Log.w("PlayerNetwork", "ALL ${allIps.size} IPs blocked for $hostname")
                     }
                     return ordered
                 } catch (e: Exception) {
-                    Log.w("PlayerNetwork", "JSON DoH failed for $hostname: ${e.message}, trying wire DoH")
+                    Log.w("PlayerNetwork", "Multi-DoH failed for $hostname: ${e.message}, trying wire DoH")
                     return fallback.lookup(hostname)
                 }
             }
@@ -1589,14 +1862,38 @@ class PlayerMobileFragment : Fragment() {
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
-        Log.d("PlayerNetwork", "Using OkHttpDataSource with JSON DoH (cfglobalcdn CNAME resolution)")
+        Log.d("PlayerNetwork", "Using OkHttpDataSource with Multi-DoH (cfglobalcdn resolution)")
         return OkHttpDataSource.Factory(dohClient)
+            .setUserAgent(NetworkClient.USER_AGENT)
+    }
+
+    /**
+     * Clean OkHttp DataSource for CDNs like tnmr.org that reject inconsistent headers.
+     * Uses DoH DNS + cookie jar from NetworkClient, but NO browser-navigation interceptor
+     * (which would add Upgrade-Insecure-Requests and Sec-Fetch-Dest:document that conflict
+     * with the media-fetch headers the player sets via setDefaultRequestProperties).
+     */
+    private fun createBrowserOkHttpDataSourceFactory(): HttpDataSource.Factory {
+        usingCronet = false
+        usingDoH = false
+        usingBrowserOkHttp = true
+        val cleanClient = OkHttpClient.Builder()
+            .dns(DnsResolver.doh)
+            .cookieJar(NetworkClient.cookieJar)
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+        Log.d("PlayerNetwork", "Using clean OkHttpDataSource (DoH + cookies, no interceptor)")
+        return OkHttpDataSource.Factory(cleanClient)
             .setUserAgent(NetworkClient.USER_AGENT)
     }
 
     private fun createDefaultHttpDataSourceFactory(): HttpDataSource.Factory {
         usingCronet = false
         usingDoH = false
+        usingBrowserOkHttp = false
         Log.d("PlayerNetwork", "Using DefaultHttpDataSource (Java HttpURLConnection, system DNS)")
         return DefaultHttpDataSource.Factory()
             .setUserAgent(NetworkClient.USER_AGENT)
@@ -1642,6 +1939,219 @@ class PlayerMobileFragment : Fragment() {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // WebView overlay — Netu anti-bot bypass (touch-friendly for mobile)
+    // ═══════════════════════════════════════════════════════════════════
+
+    @android.annotation.SuppressLint("SetJavaScriptEnabled")
+    private fun showWebViewOverlay(embedUrl: String) {
+        if (webViewOverlay != null) return
+        val ctx = requireContext()
+        val rootView = binding.root as ViewGroup
+        m3u8Intercepted = false
+
+        // ── Overlay container ──
+        val overlay = FrameLayout(ctx).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(Color.BLACK)
+            elevation = 30f
+        }
+
+        // ── WebView (user can touch/tap directly) ──
+        val wv = WebView(ctx).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(Color.BLACK)
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                userAgentString = NetworkClient.USER_AGENT
+                mediaPlaybackRequiresUserGesture = false
+                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                loadWithOverviewMode = true
+                useWideViewPort = true
+            }
+        }
+
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
+
+        wv.webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(
+                view: WebView?, request: WebResourceRequest?
+            ): WebResourceResponse? {
+                val url = request?.url?.toString() ?: return null
+
+                if (url.contains("cfglobalcdn.com")) {
+                    // Once M3U8 is captured, block ALL cfglobalcdn requests to
+                    // prevent HLS.js from consuming the single-use token.
+                    if (m3u8Intercepted) {
+                        Log.d("PlayerMobile", "Blocking cfglobalcdn request: ${url.takeLast(60)}")
+                        return WebResourceResponse(
+                            "text/plain", "UTF-8",
+                            java.io.ByteArrayInputStream("".toByteArray())
+                        ).apply {
+                            responseHeaders = mapOf(
+                                "Access-Control-Allow-Origin" to "*"
+                            )
+                        }
+                    }
+                    // Capture the first HLS URL (contains silverlight/hls-vod path).
+                    // Non-HLS resources (thumbnails, posters) go through normally.
+                    if (url.contains("silverlight") || url.contains("hls-vod")
+                        || url.contains(".m3u8")
+                    ) {
+                        Log.d("PlayerMobile", "M3U8 intercepted from WebView: ${url.take(120)}")
+                        m3u8Intercepted = true
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            onM3u8Intercepted(url)
+                        }
+                        // Return a fake empty M3U8 with CORS headers so HLS.js
+                        // doesn't retry (CORS error triggers manifestLoadError retries)
+                        return WebResourceResponse(
+                            "application/vnd.apple.mpegurl", "UTF-8",
+                            java.io.ByteArrayInputStream(
+                                "#EXTM3U\n#EXT-X-ENDLIST\n".toByteArray()
+                            )
+                        ).apply {
+                            responseHeaders = mapOf(
+                                "Access-Control-Allow-Origin" to "*"
+                            )
+                        }
+                    }
+                }
+
+                return null // let WebView handle all other requests natively
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                Log.d("PlayerMobile", "Overlay WebView loaded: ${url?.take(80)}")
+            }
+        }
+
+        wv.webChromeClient = object : android.webkit.WebChromeClient() {
+            override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
+                Log.d("PlayerMobile", "JS console [${consoleMessage?.messageLevel()}]: ${consoleMessage?.message()?.take(200)}")
+                return true
+            }
+        }
+
+        // ── Hint text ──
+        val hint = TextView(ctx).apply {
+            text = "Appuyez sur le bouton play pour lancer la vidéo"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setShadowLayer(4f, 0f, 0f, Color.BLACK)
+            setBackgroundColor(Color.parseColor("#99000000"))
+            setPadding(24, 12, 24, 12)
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            ).apply { bottomMargin = 48 }
+        }
+
+        overlay.addView(wv)
+        overlay.addView(hint)
+        rootView.addView(overlay)
+
+        webViewOverlay = overlay
+        overlayWebView = wv
+
+        // Load the embed page inside an iframe wrapper.
+        // The netu page expects to be in an iframe (checks window.parent !== window).
+        // shouldInterceptRequest proxies all requests to frembed/netu via OkHttp+DoH.
+        val iframeWrapper = """
+            <!DOCTYPE html>
+            <html><head>
+            <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+            <style>*{margin:0;padding:0}html,body{width:100%;height:100%;overflow:hidden;background:#000}
+            iframe{width:100%;height:100%;border:none}</style>
+            </head><body>
+            <iframe src="$embedUrl" allow="autoplay;fullscreen;encrypted-media" allowfullscreen
+                    referrerpolicy="origin"></iframe>
+            </body></html>
+        """.trimIndent()
+        Log.d("PlayerMobile", "Loading iframe wrapper for: ${embedUrl.take(100)}")
+        wv.loadDataWithBaseURL("https://frembed.cyou/", iframeWrapper, "text/html", "UTF-8", null)
+
+        // Auto-fade hint after 5 seconds
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            hint.animate().alpha(0f).setDuration(600).start()
+        }, 5000)
+    }
+
+    private fun hideWebViewOverlay() {
+        val overlay = webViewOverlay ?: return
+        val wv = overlayWebView
+        webViewOverlay = null
+        overlayWebView = null
+        pendingWebViewVideo = null
+        pendingWebViewServer = null
+
+        wv?.let {
+            try { it.stopLoading(); it.destroy() } catch (_: Exception) {}
+        }
+        (binding.root as? ViewGroup)?.removeView(overlay)
+        Log.d("PlayerMobile", "WebView overlay hidden")
+    }
+
+    /**
+     * Called when shouldInterceptRequest detects a cfglobalcdn M3U8 URL.
+     * Navigate the WebView to the M3U8 URL to extract content, then play via ExoPlayer.
+     */
+    private fun onM3u8Intercepted(m3u8Url: String) {
+        val video = pendingWebViewVideo ?: return
+        val server = pendingWebViewServer ?: return
+
+        Log.d("PlayerMobile", "onM3u8Intercepted: ${m3u8Url.take(100)}")
+
+        // The netu embed URL is the correct Referer for cfglobalcdn
+        // (not frembed.cyou — cfglobalcdn validates Referer against the netu origin)
+        val netuEmbedUrl = video.webViewUrl ?: "https://netu.frembed.bond/"
+        val netuOrigin = try {
+            val u = java.net.URL(netuEmbedUrl); "${u.protocol}://${u.host}"
+        } catch (_: Exception) { "https://netu.frembed.bond" }
+
+        // Extract cookies from the WebView session BEFORE destroying it.
+        // The anti-bot click sets session cookies that cfglobalcdn validates.
+        val cookieManager = CookieManager.getInstance()
+        val cfgCookies = cookieManager.getCookie(m3u8Url) ?: ""
+        val netuCookies = cookieManager.getCookie(netuEmbedUrl) ?: ""
+        Log.d("PlayerMobile", "Cookies for cfglobalcdn: ${cfgCookies.take(80)}")
+        Log.d("PlayerMobile", "Cookies for netu: ${netuCookies.take(80)}")
+
+        // Destroy the overlay WebView — CronetDataSource handles TLS
+        hideWebViewOverlay()
+        com.streamflixreborn.streamflix.extractors.NetuExtractor.sharedWebView = null
+
+        Log.d("PlayerMobile", "Using CronetDataSource for Netu/cfglobalcdn (referer=$netuEmbedUrl)")
+
+        // Build headers with correct Referer, Origin, and cookies
+        val headers = mutableMapOf(
+            "Referer" to netuEmbedUrl,
+            "Origin" to netuOrigin,
+        )
+        if (cfgCookies.isNotBlank()) {
+            headers["Cookie"] = cfgCookies
+        }
+
+        val newVideo = Video(
+            source = m3u8Url,
+            type = MimeTypes.APPLICATION_M3U8,
+            headers = headers,
+            webViewUrl = null,
+            subtitles = video.subtitles
+        )
+        displayVideo(newVideo, server)
+    }
+
     private fun releasePlayer() {
         stopProgressHandler()
         binding.pvPlayer.player = null
@@ -1652,6 +2162,12 @@ class PlayerMobileFragment : Fragment() {
         }
         if (::mediaSession.isInitialized) {
             mediaSession.release()
+        }
+        // Release shared WebView used by WebViewDataSource
+        if (usingWebView) {
+            com.streamflixreborn.streamflix.extractors.LuluVdoExtractor.releaseSharedWebView()
+            com.streamflixreborn.streamflix.extractors.NetuExtractor.releaseSharedWebView()
+            usingWebView = false
         }
     }
 

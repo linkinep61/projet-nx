@@ -30,14 +30,16 @@ open class VidMoLyExtractor : Extractor() {
 
     override suspend fun extract(link: String): Video {
         // vidmoly.to is heavily rate-limited (429) — use .biz which works
-        val normalizedLink = link.replace(Regex("vidmoly\\.(to|me|net)"), "vidmoly.biz")
+        val normalizedLink = if (link.contains("vidmoly"))
+            link.replace(Regex("vidmoly\\.(to|me|net)"), "vidmoly.biz")
+        else link
 
         val hlsUrl = extractByIntercepting(normalizedLink)
         if (hlsUrl != null) {
             return buildVideo(hlsUrl, normalizedLink)
         }
 
-        throw Exception("VidMoLy: Could not find HLS source in VidMoly page")
+        throw Exception("VidMoLy: Could not find HLS source in page: $link")
     }
 
     private fun buildVideo(hlsUrl: String, pageUrl: String): Video {
