@@ -333,6 +333,13 @@
                 android:entryValues="@array/doh_provider_urls"
                 android:defaultValue="https://cloudflare-dns.com/dns-query"
                 app:iconSpaceReserved="false" />
+
+            <EditTextPreference
+                android:key="HLS_PROXY_URL"
+                android:title="HLS Proxy URL"
+                android:summary="Cloudflare Worker URL pour contourner le blocage FAI (cfglobalcdn)"
+                android:inputType="textUri"
+                app:iconSpaceReserved="false" />
         </PreferenceCategory>
 
         <PreferenceCategory

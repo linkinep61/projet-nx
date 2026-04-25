@@ -1258,30 +1258,42 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
         val name = server.name.lowercase()
         val src = server.src.lowercase()
         return when {
-            // Tier 1 : Darkibox = P1 (HLS direct, très fiable, comme sur Movix)
+            // === Tier 1 : Les meilleurs (fiables, rapides) ===
             src.contains("darkibox") || name.contains("darkibox") || name.contains("darki") -> 0
-            // Tier 1.5 : Autres extracteurs rapides
             src.contains("vixsrc") -> 1
-            src.contains("xshotcok") || name.contains("xshotcok") -> 2
-            src.contains("flemmix") || name.contains("flemmix") -> 3
-            src.contains("minochinos") || name.contains("minochinos") -> 4
-            // Tier 2 : Vidzy (Cloudflare, contenu différent sans cookies)
-            name.contains("vidzy") || src.contains("vidzy") -> 6
-            // Tier 2 : Extracteurs fonctionnels mais plus lents
-            src.contains("waaw") || name.contains("waaw") -> 10
-            src.contains("hgcloud") || name.contains("hgcloud") -> 11
-            src.contains("playmogo") || name.contains("playmogo") -> 12
-            src.contains("uqload") || name.contains("uqload") -> 13
-            src.contains("filemoon") || name.contains("filemoon") -> 14
-            src.contains("streamwish") || name.contains("streamwish") -> 14
-            src.contains("vidguard") || name.contains("vidguard") -> 14
-            // Tier 3 : Extracteurs instables / souvent HS
+            src.contains("flemmix") || name.contains("flemmix") -> 2
+            // Netu/Waaw : CronetDataSource + TLS Chromium, très fiable
+            src.contains("netu") || name.contains("netu")
+                || src.contains("frembed") || name.contains("frembed")
+                || src.contains("waaw") || name.contains("waaw") -> 3
+            // VidHide/Minochinos : fonctionne bien (hls2 CDN)
+            src.contains("minochinos") || name.contains("minochinos")
+                || src.contains("vidhide") || name.contains("vidhide")
+                || src.contains("filelions") || name.contains("filelions") -> 4
+
+            // === Tier 2 : Fonctionnels ===
+            name.contains("vidzy") || src.contains("vidzy") -> 5
+            src.contains("uqload") || name.contains("uqload") -> 22
+            src.contains("filemoon") || name.contains("filemoon") -> 7
+            src.contains("streamwish") || name.contains("streamwish") -> 8
+            src.contains("savefiles") || name.contains("savefiles") -> 9
+            src.contains("playmogo") || name.contains("playmogo") -> 10
+            src.contains("vidguard") || name.contains("vidguard") -> 11
+
+            // === Tier 3 : Lents ou instables ===
+            src.contains("dood") || name.contains("dood") -> 15
             src.contains("vidsonic") || name.contains("vidsonic") -> 20
             src.contains("vidara") || name.contains("vidara") -> 21
-            src.contains("voe.sx") || name.contains("voe") -> 22
+            src.contains("voe.sx") || name.contains("voe") -> 6
             src.contains("luluvdo") || name.contains("luluvdo") -> 23
+
+            // === Tier 4 : Cassés ou mauvaise qualité ===
+            src.contains("hgcloud") || name.contains("hgcloud") -> 25
+            // xshotcok : HS - embeds désactivés (hxfile.co/embed_disabled)
+            src.contains("xshotcok") || name.contains("xshotcok") -> 99
+
             // Défaut
-            else -> 15
+            else -> 12
         }
     }
 

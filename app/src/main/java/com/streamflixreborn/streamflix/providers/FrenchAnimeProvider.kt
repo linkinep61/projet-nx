@@ -449,6 +449,9 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
             }
         } ?: emptyList()
 
+        android.util.Log.d("FrenchAnime", "getServers: found ${servers.size} servers")
+        servers.forEach { android.util.Log.d("FrenchAnime", "  server: name=${it.name}, src=${it.src}") }
+
         // Sort by service reliability
         return servers.sortedBy { server ->
             val serviceName = Extractor.identifyServiceName(server.src)
@@ -461,8 +464,14 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
-        val video = Extractor.extract(server.src)
-
+        android.util.Log.d("FrenchAnime", "getVideo: server=${server.name}, src=${server.src}")
+        val video = try {
+            Extractor.extract(server.src)
+        } catch (e: Exception) {
+            android.util.Log.e("FrenchAnime", "getVideo FAILED for ${server.name}: ${e.message}")
+            throw e
+        }
+        android.util.Log.d("FrenchAnime", "getVideo result: ${video.source}")
         return video
     }
 
@@ -627,4 +636,11 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
         @FormUrlEncoded
         suspend fun getPeople(
             @Field("do") doAction: String = "search",
-            @Field("subaction") subAction: St
+            @Field("subaction") subAction: String = "search",
+            @Field("story") query: String,
+            @Field("search_start") searchStart: Int = -1,
+            @Field("result_from") resultFrom: Int = -1,
+            @Field("full_search") fullSearch: Int = 0
+        ): Document
+    }
+}

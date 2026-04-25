@@ -119,7 +119,44 @@ class ShowOptionsMobileDialog(
             }
         }
 
-        binding.btnOptionShowFavorite.visibility = View.GONE
+        binding.btnOptionShowFavorite.apply {
+            val tvShow = episode.tvShow
+            if (tvShow != null) {
+                val freshTvShow = database.tvShowDao().getById(tvShow.id) ?: tvShow
+
+                setOnClickListener {
+                    checkProviderAndRun(episode) {
+                        val provider = UserPreferences.currentProvider ?: return@checkProviderAndRun
+                        context.toActivity()?.lifecycleScope?.launch(Dispatchers.IO) {
+                            val dao = database.tvShowDao()
+                            val current = dao.getById(tvShow.id)?.isFavorite ?: false
+                            val newValue = !current
+                            val resolvedTvShow = ArtworkRepair.resolveTvShowForFavorite(context, tvShow, newValue)
+
+                            dao.upsertFavorite(resolvedTvShow, newValue)
+                            if (newValue) {
+                                UserDataCache.syncTvShowToCache(
+                                    context,
+                                    provider,
+                                    resolvedTvShow.copy().apply { isFavorite = true })
+                            } else {
+                                UserDataCache.removeTvShowFromFavorites(context, provider, freshTvShow.id)
+                            }
+                        }
+                    }
+                    hide()
+                }
+
+                text = if (freshTvShow.isFavorite) {
+                    context.getString(R.string.option_show_unfavorite)
+                } else {
+                    context.getString(R.string.option_show_favorite)
+                }
+                visibility = View.VISIBLE
+            } else {
+                visibility = View.GONE
+            }
+        }
 
         binding.btnOptionShowWatched.apply {
             setOnClickListener {

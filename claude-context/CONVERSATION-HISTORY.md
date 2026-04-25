@@ -79,3 +79,76 @@ Changed `local.properties` APP_LAYOUT from `tv` to `mobile` for emulator testing
 - "LES CODE POUR LES LOGE" = log filter keywords
 - Sends logcat screenshots and raw log pastes
 - Expects direct action, minimal explanation
+
+---
+
+## Session 3 (2026-04-23) — Multi-provider UI fixes + Wiflix + LuluVdo
+
+### Série FR / VOSTFR Navigation Fix
+- Movie objects in Série FR/VOSTFR tabs redirectaient vers MovieDetail au lieu de TvShowDetail
+- Ajouté `action_movies_to_tv_show` dans nav_main_graph_mobile.xml
+- Modifié MovieViewHolder: `isDramaOrAnimeProvider()` helper (VoirDrama/VoirAnime seulement, PAS AnimeSama)
+- Navigation redirect dans displayMobileItem(), displayGridMobileItem(), displaySwiperMobileItem()
+- Ajouté `android:defaultValue="@null"` pour les args nullable (poster, banner) du tv_show fragment
+
+### Film Detection
+- TvShowViewHolder: "Regarder maintenant" au lieu de "Regarder S1 E1" quand seasons≤1 && episodes≤1
+- TvShowMobileFragment: hide section Saisons pour les films (1 season avec ≤1 episode)
+
+### Episode Thumbnails
+- VoirDramaProvider + VoirAnimeProvider: extraction du poster de la série via `.summary_image img`
+- Passé comme `poster = showPoster` dans le constructeur Episode → plus de placeholders gris
+
+### Empty Content Filter
+- VoirDrama/VoirAnime: `parseHomeItem()` retourne null si `.list-chapter` existe mais `.chapter-item` est vide
+- AnimeSama: supprimé le "ultimate fallback" qui créait une fake Season 1
+- AnimeSama: filtre badge "Scan" dans getHome()
+- AnimeSama: probe episodes.js pour items featured (20 candidats → garde 15 avec contenu)
+
+### Tab Renaming
+- strings.xml: "Série FR" → "FR", "Série VOSTFR" → "VOSTFR"
+- MainMobileActivity: customisation tabs pour VoirDrama/VoirAnime (AnimeSama revert après erreur)
+
+### Wiflix Provider Improvements
+- Added FEATURED category from TOP Séries (banner = poster)
+- Parsing "Derniers Episodes" via div.base/div.base-hd/ul.last
+- getServers(): `mapIndexed` → `mapIndexedNotNull`, filtre src vide
+- Vrais noms de serveurs via `Extractor.identifyServiceName(src)` → "Rpmvid — Lecteur 1" au lieu de "Lecteur 1"
+- `deduplicateServers()` pour éliminer doublons même service sur domaines différents
+- Serveurs triés: VF first → service reliability → VOSTFR last
+
+### RpmvidExtractor Updates
+- Nouveaux alias: flemmix.farm, flemmix.rpmlive.online, flemmix.upns.xyz, etc.
+- `rotatingDomain` patterns: `flemmix\.[a-z]+(?:\.[a-z]+)?/embed` et `/e/`
+- `extractId()` amélioré: supporte 3 formats (#ID, /e/ID, ?id=ID)
+
+### LuluVdo Extractor Fix (principal)
+**Problème**: LuluVdo fonctionnait sur le site web mais pas dans l'app
+**Diagnostic**:
+1. Premier problème: OkHttpClient custom sans cookies/headers → Cloudflare bloquait (timeout 45s)
+2. Solution: utiliser `NetworkClient.default` (cookies partagés WebView, headers navigateur, TLS configuré)
+3. Requête passe (200 OK en ~470ms) mais vidéo ne jouait toujours pas
+4. Deuxième problème: `JsoupConverterFactory` modifiait le HTML JavaScript lors du parsing
+5. Solution: changé pour `ScalarsConverterFactory` (HTML brut en String)
+6. Ajouté logs debug à chaque étape (tag: LuluVdoExtractor)
+**Résultat**: Extraction réussie — page 53KB, unpack JS 3922 chars, source HLS trouvée
+
+### Domaines vérifiés sur Wiflix (flemmix.wales)
+- luluvdo.com → LuluVdoExtractor ✓
+- charlestoughrace.com → VoeExtractor ✓ (alias)
+- playmogo.com → DoodLaExtractor ✓ (alias)
+- flemmix.upns.pro → RpmvidExtractor ✓ (alias)
+- vidara.to → VidaraExtractor ✓
+- vidsonic.net → VidsonicExtractor ✓
+
+### Erreurs et corrections
+- AnimeSama ajouté par erreur à isDramaOrAnimeProvider() et MainMobileActivity → revert
+- LuluVdo "ignoreServerUrl()" créé pour filtrer → supprimé car LuluVdo fonctionne, remplacé par deduplicateServers()
+- LuluVdo User-Agent Chrome/124 → Chrome/131
+- Referer double slash "$mainUrl/" → mainUrl (sans double //)
+
+### User Communication Notes
+- "Holà holà j'ai pas parlé de animsama" = ne touche pas à ce que j'ai pas demandé
+- "Et tu peux réparer ça Allez Go tout seul Tu peux te débrouiller" = autonomie attendue
+- "Prends la main et va sur le site principal" = utilise Chrome MCP pour tester
+- Envoie screenshots du site + logs Logcat

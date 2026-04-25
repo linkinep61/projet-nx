@@ -381,6 +381,10 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                         }
 
                         is Settings.Server -> {
+                            // Update selection immediately so the UI reflects
+                            // the new server before the video finishes loading
+                            Settings.Server.list.forEach { it.isSelected = false }
+                            item.isSelected = true
                             settingsView.onServerSelected?.invoke(item)
                             settingsView.displaySettings(Setting.MAIN)
                         }

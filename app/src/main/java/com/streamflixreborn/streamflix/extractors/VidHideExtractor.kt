@@ -1,5 +1,6 @@
 package com.streamflixreborn.streamflix.extractors
 
+import android.util.Log
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
@@ -32,11 +33,13 @@ class VidHideExtractor: Extractor() {
     )
 
     companion object {
+        private const val TAG = "VidHideExtractor"
         private const val DEFAULT_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
     }
 
     override suspend fun extract(link: String): Video {
+        Log.d(TAG, "extract() link=$link")
         val mainLink = URL(link).protocol + "://" + URL(link).host
         val service = Service.build(mainLink)
         val fallback = URL(link).protocol + "://" + URL(link).host
@@ -46,40 +49,56 @@ class VidHideExtractor: Extractor() {
             fallback
         }
         val origin = referer
-        
+        Log.d(TAG, "referer=$referer origin=$origin")
+
         val source = service.getSource(
             url = link,
             referer = referer,
             origin = origin,
             userAgent = DEFAULT_USER_AGENT
         )
+        Log.d(TAG, "HTML length=${source.toString().length}")
+
         val packedJS = Regex("(eval\\(function\\(p,a,c,k,e,d\\)(.|\\n)*?)</script>")
             .find(source.toString())?.let { it.groupValues[1] }
-            ?: throw Exception("Packed JS not found")
+
+        if (packedJS == null) {
+            Log.e(TAG, "Packed JS not found! HTML preview: ${source.toString().take(500)}")
+            throw Exception("Packed JS not found")
+        }
+        Log.d(TAG, "Packed JS found, length=${packedJS.length}")
 
         val unPacked = JsUnpacker(packedJS).unpack()
-            ?: throw Exception("Unpacked is null")
+        if (unPacked == null) {
+            Log.e(TAG, "Unpacked is null")
+            throw Exception("Unpacked is null")
+        }
+        Log.d(TAG, "Unpacked JS: ${unPacked.take(300)}")
 
         val links = mutableMapOf<String, String>()
-        // Match both numbered hls keys (hls4, hls2) and generic keys (hls, file, src, source)
         Regex("""["'](hls\d*|file|src|source)["']\s*:\s*["']([^"']+)["']""")
             .findAll(unPacked)
             .forEach {
                 links[it.groupValues[1]] = it.groupValues[2]
             }
+        Log.d(TAG, "Found links: $links")
 
-        // Prefer highest quality HLS, then generic keys
-        val finalUrl = links["hls4"] ?: links["hls2"] ?: links["hls"]
+        // Prefer hls2 (full CDN URL) over hls4 (relative path on embed domain)
+        val finalUrl = links["hls2"] ?: links["hls4"] ?: links["hls3"] ?: links["hls"]
             ?: links["file"] ?: links["src"] ?: links["source"]
-            ?: throw Exception("No HLS link found")
-        
-        // Add domain if the URL starts with "/"
+
+        if (finalUrl == null) {
+            Log.e(TAG, "No HLS link found in unpacked JS")
+            throw Exception("No HLS link found")
+        }
+
         val completeUrl = if (finalUrl.startsWith("/")) {
             val baseUrl = URL(link).protocol + "://" + URL(link).host
             baseUrl + finalUrl
         } else {
             finalUrl
         }
+        Log.d(TAG, "Final URL: $completeUrl")
 
         return Video(source = completeUrl)
     }

@@ -50,4 +50,21 @@ class GlideCustomModule : AppGlideModule() {
                     .header("User-Agent", com.streamflixreborn.streamflix.utils.NetworkClient.USER_AGENT)
                     .header("Referer", "${request.url.scheme}://${request.url.host}/")
                     .build()
-                chain.proceed(newRe
+                chain.proceed(newRequest)
+            }
+            .cookieJar(com.streamflixreborn.streamflix.utils.NetworkClient.cookieJar)
+            .sslSocketFactory(sslContext.socketFactory, trustManager)
+            .hostnameVerifier { _, _ -> true }
+            .dns(DnsResolver.doh)
+            .build()
+    }
+
+    override fun registerComponents(
+        context: Context, glide: Glide, registry: com.bumptech.glide.Registry
+    ) {
+        val okHttpClient = getOkHttpClient()
+        registry.replace(
+            GlideUrl::class.java, InputStream::class.java, OkHttpUrlLoader.Factory(okHttpClient)
+        )
+    }
+}

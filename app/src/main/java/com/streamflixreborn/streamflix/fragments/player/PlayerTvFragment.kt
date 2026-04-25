@@ -8,18 +8,28 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.widget.FrameLayout
 import android.webkit.CookieManager
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -122,6 +132,8 @@ class PlayerTvFragment : Fragment() {
         private const val NEXT_EPISODE_OVERLAY_MIN_THRESHOLD_MS = 30_000L
         private const val NEXT_EPISODE_OVERLAY_ALPHA_UNFOCUSED = 0.72f
         private const val NEXT_EPISODE_OVERLAY_ALPHA_FOCUSED = 0.96f
+        private const val CURSOR_STEP = 18f    // base pixels per D-pad press
+        private const val CURSOR_SIZE_DP = 28
     }
 
     private data class BypassSession(
@@ -156,6 +168,18 @@ class PlayerTvFragment : Fragment() {
     private var currentServer: Video.Server? = null
     private var usingCronet = false
     private var usingDoH = false
+    private var usingWebView = false
+
+    // ── WebView overlay with virtual cursor (Netu anti-bot bypass on TV) ──
+    private var webViewOverlay: FrameLayout? = null
+    private var overlayWebView: WebView? = null
+    private var virtualCursorView: View? = null
+    private var cursorX = 0f
+    private var cursorY = 0f
+    private var pendingWebViewVideo: Video? = null
+    private var pendingWebViewServer: Video.Server? = null
+    @Volatile private var m3u8Intercepted = false
+
     private var waitingForBypass = false
     private var bypassDone = false
     private var activeBypassSession: BypassSession? = null
@@ -386,16 +410,10 @@ class PlayerTvFragment : Fragment() {
                         }
 
                         is PlayerViewModel.State.LoadingVideo -> {
-                            player.setMediaItem(
-                                MediaItem.Builder()
-                                    .setUri("".toUri())
-                                    .setMediaMetadata(
-                                        MediaMetadata.Builder()
-                                            .setMediaServerId(state.server.id)
-                                            .build()
-                                    )
-                                    .build()
-                            )
+                            // Don't set a MediaItem with empty URI — it causes
+                            // FileNotFoundException and puts the player in ERROR state
+                            // before extraction finishes. displayVideo() will set the
+                            // real MediaItem when SuccessLoadingVideo arrives.
                         }
 
                         is PlayerViewModel.State.SuccessLoadingVideo -> {
@@ -611,6 +629,7 @@ class PlayerTvFragment : Fragment() {
 
         override fun onDestroyView() {
             super.onDestroyView()
+            hideWebViewOverlay()
             nextEpisodePrefetchJob?.cancel()
             clearBypassSession(dismissDialog = true)
             releasePlayer()
@@ -624,6 +643,10 @@ class PlayerTvFragment : Fragment() {
 
     fun onBackPressed(): Boolean = when {
 
+        webViewOverlay != null -> {
+            hideWebViewOverlay()
+            true
+        }
 
         (binding.pvPlayer as? PlayerTvView)?.isManualZoomEnabled == true -> {
             (binding.pvPlayer as? PlayerTvView)?.exitManualZoomMode()
@@ -1014,6 +1037,55 @@ class PlayerTvFragment : Fragment() {
             }
         }
 
+        /**
+         * Returns true if this video source is a LuluVdo/LuluStream CDN URL
+         * that will always 403 with any non-WebView HTTP client.
+         */
+        private fun isLuluVdoCdn(video: Video): Boolean {
+            if (video.webViewUrl.isNullOrBlank()) return false
+            val src = video.source.lowercase()
+            val wvUrl = video.webViewUrl!!.lowercase()
+            return src.contains("tnmr.org") || src.contains("luluvdo") || src.contains("lulustream")
+                    || src.contains("luluvid") || src.contains("luluvdoo") || src.contains("lulucdn")
+                    || wvUrl.contains("luluvdo") || wvUrl.contains("lulustream")
+                    || wvUrl.contains("luluvid") || wvUrl.contains("luluvdoo")
+        }
+
+        private fun isNetuCfglobalcdn(video: Video): Boolean {
+            return video.webViewUrl != null &&
+                   com.streamflixreborn.streamflix.extractors.NetuExtractor.sharedWebView != null &&
+                   (video.source.startsWith("data:") || video.source.contains("cfglobalcdn.com"))
+        }
+
+        private fun syncWebViewCookies(sourceUrl: String) {
+            try {
+                val uri = java.net.URI(sourceUrl)
+                val host = uri.host ?: return
+                if (java.net.CookieHandler.getDefault() == null) {
+                    java.net.CookieHandler.setDefault(java.net.CookieManager())
+                }
+                val cookieHandler = java.net.CookieHandler.getDefault() as? java.net.CookieManager ?: return
+                val webViewCookies = android.webkit.CookieManager.getInstance().getCookie("https://$host")
+                if (webViewCookies.isNullOrBlank()) return
+                webViewCookies.split(";").forEach { cookie ->
+                    val trimmed = cookie.trim()
+                    if (trimmed.isNotBlank()) {
+                        try {
+                            val httpCookie = java.net.HttpCookie.parse("Set-Cookie: $trimmed")
+                            httpCookie.forEach { c ->
+                                c.domain = host
+                                c.path = "/"
+                                cookieHandler.cookieStore.add(uri, c)
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+                Log.d("PlayerNetwork", "Synced WebView cookies for $host")
+            } catch (e: Exception) {
+                Log.w("PlayerNetwork", "Cookie sync failed: ${e.message}")
+            }
+        }
+
         private fun displayVideo(
             video: Video,
             server: Video.Server,
@@ -1023,6 +1095,39 @@ class PlayerTvFragment : Fragment() {
             currentVideo = video
             currentServer = server
             updatePlayerHeader()
+
+            // Clean up any existing WebView overlay (e.g. switching servers)
+            if (webViewOverlay != null && !(video.needsWebViewClick && !video.webViewUrl.isNullOrBlank())) {
+                hideWebViewOverlay()
+            }
+
+            // ── Netu anti-bot: show WebView overlay so user can click the play button ──
+            if (video.needsWebViewClick && !video.webViewUrl.isNullOrBlank()) {
+                if (webViewOverlay != null) {
+                    Log.d("PlayerTV", "needsWebViewClick but overlay already showing → ignoring duplicate")
+                    return
+                }
+                Log.d("PlayerTV", "needsWebViewClick → showing WebView overlay for: ${video.webViewUrl}")
+                // Stop current playback before showing overlay
+                if (::player.isInitialized) {
+                    player.stop()
+                    player.clearMediaItems()
+                }
+                pendingWebViewVideo = video
+                pendingWebViewServer = server
+                showWebViewOverlay(video.webViewUrl!!)
+                return
+            }
+
+            // WebView bypass: LuluVdo (TLS fingerprint) or Netu (ISP IP block)
+            val needsWebViewDs = (isLuluVdoCdn(video)
+                && video.source.startsWith("data:")
+                && com.streamflixreborn.streamflix.extractors.LuluVdoExtractor.sharedWebView != null)
+                || isNetuCfglobalcdn(video)
+            if (isLuluVdoCdn(video) || isNetuCfglobalcdn(video)) {
+                Log.d("PlayerNetwork", "WebView bypass: source is ${if (video.source.startsWith("data:")) "data URI" else "CDN URL"}, webViewDs=$needsWebViewDs, lulu=${isLuluVdoCdn(video)}, netu=${isNetuCfglobalcdn(video)}")
+            }
+
             val extraBuffering = PlayerSettingsView.Settings.ExtraBuffering.isEnabled
             val softwareDecoder = PlayerSettingsView.Settings.SoftwareDecoder.isEnabled
 
@@ -1055,29 +1160,48 @@ class PlayerTvFragment : Fragment() {
 
             val currentPosition = startPositionMs ?: player.currentPosition
 
-            httpDataSource.setDefaultRequestProperties(
-                mapOf(
-                    "User-Agent" to NetworkClient.USER_AGENT,
-                ) + (video.headers ?: emptyMap())
-            )
-            player.setMediaItem(
-                MediaItem.Builder()
-                    .setUri(video.source.toUri())
-                    .setMimeType(video.type)
-                    .setSubtitleConfigurations(video.subtitles.map { subtitle ->
-                        MediaItem.SubtitleConfiguration.Builder(subtitle.file.toUri())
-                            .setMimeType(subtitle.file.toSubtitleMimeType())
-                            .setLabel(subtitle.label)
-                            .setSelectionFlags(if (subtitle.default) C.SELECTION_FLAG_DEFAULT else 0)
-                            .build()
-                    })
-                    .setMediaMetadata(
-                        MediaMetadata.Builder()
-                            .setMediaServerId(server.id)
-                            .build()
-                    )
-                    .build()
-            )
+            val mediaItem = MediaItem.Builder()
+                .setUri(video.source.toUri())
+                .setMimeType(video.type)
+                .setSubtitleConfigurations(video.subtitles.map { subtitle ->
+                    MediaItem.SubtitleConfiguration.Builder(subtitle.file.toUri())
+                        .setMimeType(subtitle.file.toSubtitleMimeType())
+                        .setLabel(subtitle.label)
+                        .setSelectionFlags(if (subtitle.default) C.SELECTION_FLAG_DEFAULT else 0)
+                        .build()
+                })
+                .setMediaMetadata(
+                    MediaMetadata.Builder()
+                        .setMediaServerId(server.id)
+                        .build()
+                )
+                .build()
+
+            if (!needsWebViewDs) {
+                httpDataSource.setDefaultRequestProperties(
+                    mapOf(
+                        "User-Agent" to NetworkClient.USER_AGENT,
+                    ) + (video.headers ?: emptyMap())
+                )
+            }
+
+            if (needsWebViewDs) {
+                val wv = com.streamflixreborn.streamflix.extractors.LuluVdoExtractor.sharedWebView
+                    ?: com.streamflixreborn.streamflix.extractors.NetuExtractor.sharedWebView
+                    ?: error("needsWebViewDs but no sharedWebView available")
+                val webViewDsFactory = DefaultDataSource.Factory(
+                    requireContext(),
+                    com.streamflixreborn.streamflix.utils.WebViewDataSource.Factory(wv)
+                )
+                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(webViewDsFactory)
+                    .createMediaSource(mediaItem)
+                player.setMediaSource(hlsSource)
+                usingWebView = true
+                Log.d("PlayerNetwork", "WebView bypass: using WebViewDataSource for HLS playback")
+            } else {
+                player.setMediaItem(mediaItem)
+                usingWebView = false
+            }
 
             binding.pvPlayer.controller.binding.btnExoExternalPlayer.setOnClickListener {
                 val videoTitle = when (val type = args.videoType) {
@@ -1739,16 +1863,17 @@ class PlayerTvFragment : Fragment() {
 
         /** Only vidzy.live requires Cronet (JA3 fingerprint bypass). */
         private fun needsCronet(url: String): Boolean {
+            // Cronet uses Chrome's TLS stack (JA3 fingerprint matches real browsers)
+            // These CDNs reject non-Chromium TLS fingerprints (OkHttp → 404)
             return url.contains("vidzy.live", ignoreCase = true)
+                || url.contains("cfglobalcdn.com", ignoreCase = true)
         }
 
-        /**
-         * cfglobalcdn.com subdomains (e.g. d65f47.cfglobalcdn.com) use CNAME chains
-         * (→ c28.netu.tv → real IP) that ISP DNS often fails to resolve.
-         * OkHttp + DNS-over-HTTPS resolves them correctly.
-         */
         private fun needsDoH(url: String): Boolean {
-            return url.contains("cfglobalcdn.com", ignoreCase = true)
+            // sprintcdn/r66nv9ed.com: Filemoon CDN — system DNS resolves to wrong edge,
+            // token is edge-bound so we need DoH to hit the correct server
+            return url.contains("sprintcdn", ignoreCase = true)
+                || url.contains("r66nv9ed.com", ignoreCase = true)
         }
 
         /**
@@ -1804,60 +1929,94 @@ class PlayerTvFragment : Fragment() {
                     .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
                     .build()
 
+                private val dohProviders = listOf(
+                    "https://cloudflare-dns.com/dns-query",
+                    "https://dns.google/resolve",
+                    "https://dns.quad9.net:5053/dns-query"
+                )
+
+                private fun queryDoH(provider: String, name: String): Pair<List<String>, List<String>> {
+                    val request = okhttp3.Request.Builder()
+                        .url("$provider?name=$name&type=A")
+                        .header("Accept", "application/dns-json")
+                        .build()
+                    val body = dnsClient.newCall(request).execute().use { it.body?.string() }
+                        ?: return Pair(emptyList(), emptyList())
+                    val json = org.json.JSONObject(body)
+                    val answers = json.optJSONArray("Answer")
+                        ?: return Pair(emptyList(), emptyList())
+                    val ips = mutableListOf<String>()
+                    val cnames = mutableListOf<String>()
+                    for (i in 0 until answers.length()) {
+                        val answer = answers.getJSONObject(i)
+                        when (answer.optInt("type")) {
+                            1 -> ips.add(answer.optString("data"))
+                            5 -> cnames.add(answer.optString("data").trimEnd('.'))
+                        }
+                    }
+                    return Pair(ips, cnames)
+                }
+
                 override fun lookup(hostname: String): List<java.net.InetAddress> {
                     if (!hostname.contains("cfglobalcdn.com", ignoreCase = true)) {
                         return fallback.lookup(hostname)
                     }
-                    Log.d("PlayerNetwork", "JSON DoH lookup for: $hostname")
+                    Log.d("PlayerNetwork", "Multi-DoH lookup for: $hostname")
                     try {
-                        val request = okhttp3.Request.Builder()
-                            .url("https://cloudflare-dns.com/dns-query?name=$hostname&type=A")
-                            .header("Accept", "application/dns-json")
-                            .build()
-                        val response = dnsClient.newCall(request).execute().use { it.body?.string() }
-                            ?: throw Exception("Empty DoH response")
+                        val allIps = linkedSetOf<String>()
+                        var cnameTarget: String? = null
 
-                        val json = org.json.JSONObject(response)
-                        val answers = json.optJSONArray("Answer")
-                            ?: throw Exception("No Answer in DoH response")
-
-                        val ips = mutableListOf<java.net.InetAddress>()
-                        for (i in 0 until answers.length()) {
-                            val answer = answers.getJSONObject(i)
-                            if (answer.optInt("type") == 1) {
-                                val ip = answer.optString("data")
-                                Log.d("PlayerNetwork", "JSON DoH resolved $hostname → $ip")
-                                ips.add(java.net.InetAddress.getByName(ip))
+                        for (provider in dohProviders) {
+                            try {
+                                val (ips, cnames) = queryDoH(provider, hostname)
+                                Log.d("PlayerNetwork", "DoH ($provider): IPs=$ips, CNAMEs=$cnames")
+                                allIps.addAll(ips)
+                                if (cnames.isNotEmpty() && cnameTarget == null) cnameTarget = cnames.first()
+                            } catch (e: Exception) {
+                                Log.w("PlayerNetwork", "DoH provider $provider failed: ${e.message}")
                             }
                         }
-                        if (ips.isEmpty()) throw Exception("No A records in DoH response")
 
-                        // TCP pre-check: try ALL resolved IPs, keep reachable ones first
+                        if (cnameTarget != null) {
+                            Log.d("PlayerNetwork", "CNAME chain: $hostname → $cnameTarget, resolving target...")
+                            for (provider in dohProviders) {
+                                try {
+                                    val (ips, _) = queryDoH(provider, cnameTarget!!)
+                                    if (ips.isNotEmpty()) {
+                                        Log.d("PlayerNetwork", "CNAME target $cnameTarget via $provider: $ips")
+                                        allIps.addAll(ips)
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                        }
+
+                        if (allIps.isEmpty()) throw Exception("No IPs from any DoH provider")
+                        Log.d("PlayerNetwork", "All candidate IPs for $hostname: $allIps")
+
                         val reachable = mutableListOf<java.net.InetAddress>()
                         val unreachable = mutableListOf<java.net.InetAddress>()
-                        for (ip in ips) {
+                        for (ipStr in allIps) {
+                            val ip = java.net.InetAddress.getByName(ipStr)
                             try {
                                 val socket = java.net.Socket()
-                                socket.connect(java.net.InetSocketAddress(ip, 443), 5000)
+                                socket.connect(java.net.InetSocketAddress(ip, 443), 3000)
                                 socket.close()
-                                Log.d("PlayerNetwork", "TCP pre-check OK: $hostname → ${ip.hostAddress}:443")
+                                Log.d("PlayerNetwork", "TCP OK: $hostname → ${ip.hostAddress}:443")
                                 reachable.add(ip)
-                                break // one reachable IP is enough
+                                break
                             } catch (e: Exception) {
-                                Log.w("PlayerNetwork", "TCP pre-check FAILED: $hostname → ${ip.hostAddress}:443 (${e.message})")
+                                Log.w("PlayerNetwork", "TCP FAIL: $hostname → ${ip.hostAddress}:443")
                                 unreachable.add(ip)
                             }
                         }
 
-                        // Return reachable IPs first, then unreachable as fallback
-                        // (never throw — let OkHttp/player handle the actual connection)
                         val ordered = reachable + unreachable
                         if (reachable.isEmpty()) {
-                            Log.w("PlayerNetwork", "All ${ips.size} IPs for $hostname failed pre-check, returning anyway for OkHttp to try")
+                            Log.w("PlayerNetwork", "ALL ${allIps.size} IPs blocked for $hostname")
                         }
                         return ordered
                     } catch (e: Exception) {
-                        Log.w("PlayerNetwork", "JSON DoH failed for $hostname: ${e.message}, trying wire DoH")
+                        Log.w("PlayerNetwork", "Multi-DoH failed for $hostname: ${e.message}, trying wire DoH")
                         return fallback.lookup(hostname)
                     }
                 }
@@ -1870,7 +2029,7 @@ class PlayerTvFragment : Fragment() {
                 .followRedirects(true)
                 .followSslRedirects(true)
                 .build()
-            Log.d("PlayerNetwork", "Using OkHttpDataSource with JSON DoH (cfglobalcdn CNAME resolution)")
+            Log.d("PlayerNetwork", "Using OkHttpDataSource with Multi-DoH (cfglobalcdn resolution)")
             return OkHttpDataSource.Factory(dohClient)
                 .setUserAgent(NetworkClient.USER_AGENT)
         }
@@ -1930,8 +2089,319 @@ class PlayerTvFragment : Fragment() {
             }
         }
 
+        // ═══════════════════════════════════════════════════════════════════
+        // WebView overlay with virtual cursor — Netu anti-bot bypass on TV
+        // ═══════════════════════════════════════════════════════════════════
+
+        @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
+        private fun showWebViewOverlay(embedUrl: String) {
+            if (webViewOverlay != null) return // already showing
+            val ctx = requireContext()
+            val rootView = binding.root as ViewGroup
+            m3u8Intercepted = false
+
+            // ── Overlay container ──
+            val overlay = FrameLayout(ctx).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                setBackgroundColor(Color.BLACK)
+                elevation = 30f
+                isFocusable = true
+                isFocusableInTouchMode = true
+            }
+
+            // ── WebView ──
+            val wv = WebView(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+                setBackgroundColor(Color.BLACK)
+                settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    userAgentString = NetworkClient.USER_AGENT
+                    mediaPlaybackRequiresUserGesture = false
+                    mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                    loadWithOverviewMode = true
+                    useWideViewPort = true
+                }
+            }
+
+            CookieManager.getInstance().setAcceptCookie(true)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
+
+            wv.webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView?, request: WebResourceRequest?
+                ): WebResourceResponse? {
+                    val url = request?.url?.toString() ?: return null
+
+                    if (url.contains("cfglobalcdn.com")) {
+                        // Once M3U8 is captured, block ALL cfglobalcdn requests to
+                        // prevent HLS.js from consuming the single-use token.
+                        if (m3u8Intercepted) {
+                            Log.d("PlayerTV", "Blocking cfglobalcdn request: ${url.takeLast(60)}")
+                            return WebResourceResponse(
+                                "text/plain", "UTF-8",
+                                java.io.ByteArrayInputStream("".toByteArray())
+                            ).apply {
+                                responseHeaders = mapOf(
+                                    "Access-Control-Allow-Origin" to "*"
+                                )
+                            }
+                        }
+                        // Capture the first HLS URL (contains silverlight/hls-vod path).
+                        // Non-HLS resources (thumbnails, posters) go through normally.
+                        if (url.contains("silverlight") || url.contains("hls-vod")
+                            || url.contains(".m3u8")
+                        ) {
+                            Log.d("PlayerTV", "M3U8 intercepted from WebView: ${url.take(120)}")
+                            m3u8Intercepted = true
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                onM3u8Intercepted(url)
+                            }
+                            // Return a fake empty M3U8 with CORS headers so HLS.js
+                            // doesn't retry (CORS error triggers manifestLoadError retries)
+                            return WebResourceResponse(
+                                "application/vnd.apple.mpegurl", "UTF-8",
+                                java.io.ByteArrayInputStream(
+                                    "#EXTM3U\n#EXT-X-ENDLIST\n".toByteArray()
+                                )
+                            ).apply {
+                                responseHeaders = mapOf(
+                                    "Access-Control-Allow-Origin" to "*"
+                                )
+                            }
+                        }
+                    }
+
+                    return null // let WebView handle all other requests natively
+                }
+
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    Log.d("PlayerTV", "Overlay WebView loaded: ${url?.take(80)}")
+                }
+            }
+
+            // ── Virtual cursor ──
+            val cursorSizePx = (CURSOR_SIZE_DP * ctx.resources.displayMetrics.density).toInt()
+            val cursor = View(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(cursorSizePx, cursorSizePx)
+                background = createCursorDrawable(ctx)
+                elevation = 35f
+            }
+
+            // ── Hint text ──
+            val hint = TextView(ctx).apply {
+                text = "Utilisez les flèches pour déplacer, OK pour cliquer"
+                setTextColor(Color.WHITE)
+                textSize = 14f
+                setShadowLayer(4f, 0f, 0f, Color.BLACK)
+                setBackgroundColor(Color.parseColor("#99000000"))
+                setPadding(24, 12, 24, 12)
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                ).apply { bottomMargin = 32 }
+            }
+
+            overlay.addView(wv)
+            overlay.addView(cursor)
+            overlay.addView(hint)
+            rootView.addView(overlay)
+
+            // Center cursor initially
+            overlay.post {
+                cursorX = overlay.width / 2f
+                cursorY = overlay.height / 2f
+                updateCursorPosition(cursor)
+            }
+
+            // D-pad key handling
+            overlay.setOnKeyListener { _, keyCode, event ->
+                if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                // Acceleration when holding the key
+                val speed = when {
+                    event.repeatCount > 30 -> CURSOR_STEP * 5f
+                    event.repeatCount > 15 -> CURSOR_STEP * 3f
+                    event.repeatCount > 5 -> CURSOR_STEP * 2f
+                    else -> CURSOR_STEP
+                }
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        cursorY = (cursorY - speed).coerceAtLeast(0f)
+                        updateCursorPosition(cursor); true
+                    }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        cursorY = (cursorY + speed).coerceAtMost((overlay.height).toFloat())
+                        updateCursorPosition(cursor); true
+                    }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        cursorX = (cursorX - speed).coerceAtLeast(0f)
+                        updateCursorPosition(cursor); true
+                    }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        cursorX = (cursorX + speed).coerceAtMost((overlay.width).toFloat())
+                        updateCursorPosition(cursor); true
+                    }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                        dispatchClickToWebView(wv, cursorX, cursorY)
+                        true
+                    }
+                    KeyEvent.KEYCODE_BACK -> {
+                        hideWebViewOverlay()
+                        true
+                    }
+                    else -> false
+                }
+            }
+
+            overlay.requestFocus()
+            webViewOverlay = overlay
+            overlayWebView = wv
+            virtualCursorView = cursor
+
+            // Load the embed page inside an iframe wrapper.
+            // The netu page expects to be in an iframe (checks window.parent !== window).
+            // shouldInterceptRequest proxies all requests to frembed/netu via OkHttp+DoH.
+            val iframeWrapper = """
+                <!DOCTYPE html>
+                <html><head>
+                <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+                <style>*{margin:0;padding:0}html,body{width:100%;height:100%;overflow:hidden;background:#000}
+                iframe{width:100%;height:100%;border:none}</style>
+                </head><body>
+                <iframe src="$embedUrl" allow="autoplay;fullscreen;encrypted-media" allowfullscreen
+                        referrerpolicy="origin"></iframe>
+                </body></html>
+            """.trimIndent()
+            Log.d("PlayerTV", "Loading iframe wrapper for: ${embedUrl.take(100)}")
+            wv.loadDataWithBaseURL("https://frembed.cyou/", iframeWrapper, "text/html", "UTF-8", null)
+
+            // Auto-fade hint after 6 seconds
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                hint.animate().alpha(0f).setDuration(600).start()
+            }, 6000)
+        }
+
+        private fun hideWebViewOverlay() {
+            val overlay = webViewOverlay ?: return
+            val wv = overlayWebView
+            webViewOverlay = null
+            overlayWebView = null
+            virtualCursorView = null
+            pendingWebViewVideo = null
+            pendingWebViewServer = null
+
+            wv?.let {
+                try { it.stopLoading(); it.destroy() } catch (_: Exception) {}
+            }
+            (binding.root as? ViewGroup)?.removeView(overlay)
+            Log.d("PlayerTV", "WebView overlay hidden")
+        }
+
+        private fun updateCursorPosition(cursor: View) {
+            cursor.translationX = cursorX - cursor.width / 2f
+            cursor.translationY = cursorY - cursor.height / 2f
+        }
+
+        private fun dispatchClickToWebView(wv: WebView, x: Float, y: Float) {
+            val downTime = SystemClock.uptimeMillis()
+            val downEvent = MotionEvent.obtain(
+                downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0
+            )
+            val upEvent = MotionEvent.obtain(
+                downTime, downTime + 80, MotionEvent.ACTION_UP, x, y, 0
+            )
+            wv.dispatchTouchEvent(downEvent)
+            wv.dispatchTouchEvent(upEvent)
+            downEvent.recycle()
+            upEvent.recycle()
+            Log.d("PlayerTV", "Virtual click dispatched at ($x, $y)")
+        }
+
+        private fun createCursorDrawable(ctx: android.content.Context): android.graphics.drawable.Drawable {
+            // Outer ring (white with semi-transparent fill)
+            val outerRing = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#30FFFFFF"))
+                setStroke(
+                    (2 * ctx.resources.displayMetrics.density).toInt(),
+                    Color.WHITE
+                )
+            }
+            // Inner dot (red)
+            val innerDot = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#FFFF4444"))
+            }
+            val sizePx = (CURSOR_SIZE_DP * ctx.resources.displayMetrics.density).toInt()
+            val dotSize = (6 * ctx.resources.displayMetrics.density).toInt()
+            val inset = (sizePx - dotSize) / 2
+            return LayerDrawable(arrayOf(outerRing, innerDot)).apply {
+                setLayerInset(0, 0, 0, 0, 0)
+                setLayerInset(1, inset, inset, inset, inset)
+            }
+        }
+
+        /**
+         * Called when shouldInterceptRequest detects a cfglobalcdn M3U8 URL.
+         * We keep the overlay WebView alive, navigate it to the M3U8 URL
+         * (so it ends up on cfglobalcdn origin for same-origin segment XHR),
+         * extract the M3U8 content, then play via ExoPlayer + WebViewDataSource.
+         */
+        private fun onM3u8Intercepted(m3u8Url: String) {
+            val video = pendingWebViewVideo ?: return
+            val server = pendingWebViewServer ?: return
+
+            Log.d("PlayerTV", "onM3u8Intercepted: ${m3u8Url.take(100)}")
+
+            // The netu embed URL is the correct Referer for cfglobalcdn
+            val netuEmbedUrl = video.webViewUrl ?: "https://netu.frembed.bond/"
+            val netuOrigin = try {
+                val u = java.net.URL(netuEmbedUrl); "${u.protocol}://${u.host}"
+            } catch (_: Exception) { "https://netu.frembed.bond" }
+
+            // Extract cookies from the WebView session BEFORE destroying it
+            val cookieManager = CookieManager.getInstance()
+            val cfgCookies = cookieManager.getCookie(m3u8Url) ?: ""
+            Log.d("PlayerTV", "Cookies for cfglobalcdn: ${cfgCookies.take(80)}")
+
+            hideWebViewOverlay()
+            com.streamflixreborn.streamflix.extractors.NetuExtractor.sharedWebView = null
+
+            Log.d("PlayerTV", "Using CronetDataSource for Netu/cfglobalcdn (referer=$netuEmbedUrl)")
+
+            val headers = mutableMapOf(
+                "Referer" to netuEmbedUrl,
+                "Origin" to netuOrigin,
+            )
+            if (cfgCookies.isNotBlank()) {
+                headers["Cookie"] = cfgCookies
+            }
+
+            val newVideo = Video(
+                source = m3u8Url,
+                type = MimeTypes.APPLICATION_M3U8,
+                headers = headers,
+                webViewUrl = null,
+                subtitles = video.subtitles
+            )
+            displayVideo(newVideo, server)
+        }
+
         private fun releasePlayer() {
             stopProgressHandler()
+            if (usingWebView) {
+                com.streamflixreborn.streamflix.extractors.LuluVdoExtractor.releaseSharedWebView()
+                com.streamflixreborn.streamflix.extractors.NetuExtractor.releaseSharedWebView()
+                usingWebView = false
+            }
             binding.pvPlayer.player = null
             binding.settings.player = null
             binding.settings.subtitleView = null

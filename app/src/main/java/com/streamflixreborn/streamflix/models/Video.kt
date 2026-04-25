@@ -10,7 +10,11 @@ data class Video(
     val headers: Map<String, String>? = null,
     val type: String? = null,
     val extraBuffering: Boolean = false,
-    val useServerSubtitleSetting: Boolean = false
+    val useServerSubtitleSetting: Boolean = false,
+    val webViewUrl: String? = null,
+    /** When true, the TV player must show a WebView overlay so the user can
+     *  click the anti-bot play button before the M3U8 becomes accessible. */
+    val needsWebViewClick: Boolean = false
 ) : Serializable {
 
     sealed class Type : Parcelable, Serializable {

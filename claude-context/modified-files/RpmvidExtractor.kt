@@ -206,28 +206,4 @@ class RpmvidExtractor : Extractor() {
             val configStr = json.get("streamingConfig")?.asString
             if (configStr != null) {
                 val streamingConfig = JsonParser.parseString(configStr).asJsonObject
-                val cloudflare = streamingConfig
-                    .getAsJsonObject("adjust")
-                    ?.getAsJsonObject("Cloudflare")
-                val disabled = cloudflare
-                    ?.get("disabled")
-                    ?.takeIf { !it.isJsonNull }
-                    ?.asBoolean ?: true
-                if (!disabled) {
-                    val params = cloudflare.getAsJsonObject("params")
-                    t = params?.get("t")?.takeIf { !it.isJsonNull }?.asString
-                    e = params?.get("e")?.takeIf { !it.isJsonNull }?.asString
-                }
-            }
-        } catch (_: Exception) { }
-
-        return when {
-            !e.isNullOrEmpty() && !t.isNullOrEmpty() -> "$cfPath?t=$t&e=$e"
-            !cfExpire.isNullOrEmpty() -> {
-                val parts = cfExpire.split("::")
-                if (parts.size >= 2) "$cfPath?t=${parts[0]}&e=${parts[1]}" else cfPath
-            }
-            else -> cfPath
-        }
-    }
-}
+          

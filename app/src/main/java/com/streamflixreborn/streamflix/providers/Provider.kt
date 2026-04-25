@@ -60,7 +60,8 @@ interface Provider {
         data class ProviderSupport(
             val movies: Boolean,
             val tvShows: Boolean,
-            val group: ProviderGroup = ProviderGroup.FILMS_SERIES
+            val group: ProviderGroup = ProviderGroup.FILMS_SERIES,
+            val enrichHome: Boolean = true
         )
 
         val providers: Map<Provider, ProviderSupport> = linkedMapOf(
@@ -75,7 +76,8 @@ interface Provider {
             FrenchAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             KidrazProvider to ProviderSupport(movies = true, tvShows = false),
             WiflixProvider to ProviderSupport(movies = true, tvShows = true),
-            VoirDramaProvider to ProviderSupport(movies = true, tvShows = true),
+            VoirDramaProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
+            VoirAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
         )
 
         // Helper functions to check support
@@ -98,4 +100,7 @@ interface Provider {
         }
 
         fun getProvidersByGroup(group: ProviderGroup): List<Provider> {
-            ret
+            return providers.filter { it.value.group == group }.keys.toList()
+        }
+    }
+}

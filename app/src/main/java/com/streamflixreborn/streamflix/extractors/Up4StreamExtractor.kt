@@ -28,14 +28,15 @@ import java.net.URL
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
-class SaveFilesExtractor : Extractor() {
-
-    override val name = "Savefiles"
-    override val mainUrl = "https://savefiles.com/"
-    override val aliasUrls = listOf("https://streamhls.to")
+class Up4StreamExtractor : Extractor() {
+    override val name = "Up4Stream"
+    override val mainUrl = "https://up4fun.top"
+    override val aliasUrls = listOf(
+        "https://up4stream.com"
+    )
 
     companion object {
-        private const val TAG = "SaveFilesExtractor"
+        private const val TAG = "Up4StreamExtractor"
         private const val USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
@@ -43,6 +44,7 @@ class SaveFilesExtractor : Extractor() {
             "googlesyndication", "doubleclick", "adservice",
             "popads", "popunder", "popcash", "propellerads",
             "juicyads", "exoclick", "trafficjunky",
+            "bvtpk.com", "clksite.com", "clkurl.com",
             "searchresultsworld"
         )
     }
@@ -51,12 +53,13 @@ class SaveFilesExtractor : Extractor() {
 
     override suspend fun extract(link: String): Video {
         Log.d(TAG, "extract() link=$link")
-        val baseUrl = URL(link).protocol + "://" + URL(link).host
-        val referer = "$baseUrl/"
+        val host = Uri.parse(link).host ?: "up4fun.top"
+        val referer = "https://$host/"
 
         // Strategy 1: Quick OkHttp fetch + parse (10s max)
         val okHttpResult = withTimeoutOrNull(10_000) {
             try {
+                val baseUrl = URL(link).protocol + "://" + URL(link).host
                 val service = Service.build(baseUrl)
                 val document = service.getSource(
                     url = link,
@@ -66,14 +69,7 @@ class SaveFilesExtractor : Extractor() {
                 val html = document.toString()
                 Log.d(TAG, "HTML fetched, length=${html.length}")
 
-                // 1a: Direct m3u8 in page (JWPlayer setup, sources array, etc.)
-                val m3u8Direct = findM3u8InHtml(html)
-                if (m3u8Direct != null) {
-                    Log.d(TAG, "M3U8 found directly in HTML: $m3u8Direct")
-                    return@withTimeoutOrNull m3u8Direct
-                }
-
-                // 1b: Packed JS (eval(function(p,a,c,k,e,d)...))
+                // 1a: Look for packed JS (eval(function(p,a,c,k,e,d)...))
                 val packedJS = Regex("(eval\\(function\\(p,a,c,k,e,d\\)(.|\\n)*?)</script>")
                     .find(html)?.groupValues?.get(1)
                 if (packedJS != null) {
@@ -81,38 +77,34 @@ class SaveFilesExtractor : Extractor() {
                     val unpacked = JsUnpacker(packedJS).unpack()
                     if (unpacked != null) {
                         Log.d(TAG, "Unpacked JS: ${unpacked.take(300)}")
-                        val m3u8 = findM3u8InHtml(unpacked)
+                        val m3u8 = findM3u8InText(unpacked)
                         if (m3u8 != null) {
                             Log.d(TAG, "M3U8 from packed JS: $m3u8")
                             return@withTimeoutOrNull m3u8
                         }
-                    }
-                }
-
-                // 1c: Try the old /dl API as fallback
-                try {
-                    val pathParts = URL(link).path.split("/").filter { it.isNotEmpty() }
-                    val fileCode = pathParts.last().split("?")[0].trim()
-                    if (fileCode.isNotEmpty()) {
-                        val dlService = DlService.build(baseUrl)
-                        val dlDoc = dlService.getDl(
-                            op = "embed",
-                            fileCode = fileCode,
-                            auto = "0",
-                            referer = ""
-                        )
-                        val dlHtml = dlDoc.toString()
-                        val m3u8 = findM3u8InHtml(dlHtml)
-                        if (m3u8 != null) {
-                            Log.d(TAG, "M3U8 from /dl API: $m3u8")
-                            return@withTimeoutOrNull m3u8
+                        val mp4 = findMp4InText(unpacked)
+                        if (mp4 != null) {
+                            Log.d(TAG, "MP4 from packed JS: $mp4")
+                            return@withTimeoutOrNull mp4
                         }
                     }
-                } catch (e: Exception) {
-                    Log.d(TAG, "/dl API fallback failed: ${e.message}")
                 }
 
-                Log.d(TAG, "No stream found via OkHttp")
+                // 1b: Direct m3u8 in page HTML
+                val m3u8Direct = findM3u8InText(html)
+                if (m3u8Direct != null) {
+                    Log.d(TAG, "M3U8 found directly in HTML: $m3u8Direct")
+                    return@withTimeoutOrNull m3u8Direct
+                }
+
+                // 1c: Direct MP4 in page HTML
+                val mp4Direct = findMp4InText(html)
+                if (mp4Direct != null) {
+                    Log.d(TAG, "MP4 found directly in HTML: $mp4Direct")
+                    return@withTimeoutOrNull mp4Direct
+                }
+
+                Log.d(TAG, "No stream found via OkHttp, HTML preview: ${html.take(500)}")
                 null
             } catch (e: Exception) {
                 Log.e(TAG, "OkHttp fetch failed: ${e.message}")
@@ -126,29 +118,29 @@ class SaveFilesExtractor : Extractor() {
 
         // Strategy 2: WebView interception (handles JS-rendered content)
         Log.d(TAG, "OkHttp timed out or failed, trying WebView...")
-        val hlsUrl = interceptM3u8WithWebView(link)
+        val hlsUrl = interceptWithWebView(link)
         if (hlsUrl != null) {
-            Log.d(TAG, "M3U8 from WebView: $hlsUrl")
-            return buildVideo(hlsUrl, "https://${URL(link).host}/")
+            Log.d(TAG, "Stream from WebView: $hlsUrl")
+            return buildVideo(hlsUrl, referer)
         }
 
-        throw Exception("SaveFiles: Could not find stream URL in page: $link")
+        throw Exception("Up4Stream: Could not find HLS source in page: $link")
     }
 
-    private fun findM3u8InHtml(text: String): String? {
-        // Try JWPlayer sources format
+    private fun findM3u8InText(text: String): String? {
+        // JWPlayer sources format
         Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""")
             .find(text)?.let { return it.groupValues[1] }
 
-        // Try file: "url" format
+        // file: "url" format
         Regex("""file\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""")
             .find(text)?.let { return it.groupValues[1] }
 
-        // Try source/src: "url" format
+        // source/src: "url" format
         Regex("""(?:source|src)\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]""")
             .find(text)?.let { return it.groupValues[1] }
 
-        // Try hls variants (hls, hls2, hls4, etc.)
+        // hls variants
         Regex("""["']?hls\d*["']?\s*[:=]\s*["']([^"']*\.m3u8[^"']*)["']""")
             .find(text)?.let { return it.groupValues[1] }
 
@@ -159,9 +151,21 @@ class SaveFilesExtractor : Extractor() {
         return null
     }
 
-    private fun buildVideo(hlsUrl: String, referer: String): Video {
+    private fun findMp4InText(text: String): String? {
+        // file: "url.mp4" format (common in video hosts)
+        Regex("""file\s*:\s*['"]([^'"]*\.mp4[^'"]*)['"]""")
+            .find(text)?.let { return it.groupValues[1] }
+
+        // source/src with mp4
+        Regex("""(?:source|src)\s*:\s*['"]([^'"]*\.mp4[^'"]*)['"]""")
+            .find(text)?.let { return it.groupValues[1] }
+
+        return null
+    }
+
+    private fun buildVideo(sourceUrl: String, referer: String): Video {
         return Video(
-            source = hlsUrl,
+            source = sourceUrl,
             headers = mapOf(
                 "Referer" to referer,
                 "Origin" to referer.trimEnd('/'),
@@ -171,9 +175,9 @@ class SaveFilesExtractor : Extractor() {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun interceptM3u8WithWebView(url: String): String? =
+    private suspend fun interceptWithWebView(url: String): String? =
         withContext(Dispatchers.Main) {
-            val host = Uri.parse(url).host ?: "savefiles.com"
+            val host = Uri.parse(url).host ?: "up4fun.top"
             val referer = "https://$host/"
 
             withTimeoutOrNull(20_000) {
@@ -204,18 +208,21 @@ class SaveFilesExtractor : Extractor() {
                     }
 
                     webView.webViewClient = object : WebViewClient() {
+
                         override fun shouldInterceptRequest(
                             view: WebView?,
                             request: WebResourceRequest?
                         ): WebResourceResponse? {
                             val reqUrl = request?.url?.toString() ?: return null
 
-                            if (reqUrl.contains(".m3u8")) {
-                                Log.d(TAG, "M3U8 intercepted from WebView: $reqUrl")
+                            // Intercept m3u8 or mp4 stream requests
+                            if (reqUrl.contains(".m3u8") || (reqUrl.contains(".mp4") && !reqUrl.contains(".mp4?"))) {
+                                Log.d(TAG, "Stream intercepted from WebView: $reqUrl")
                                 view?.post { resolve(reqUrl) }
                                 return WebResourceResponse("text/plain", "utf-8", null)
                             }
 
+                            // Block ad domains
                             val reqHost = request.url?.host ?: ""
                             if (AD_HOSTS.any { reqHost.contains(it) }) {
                                 return WebResourceResponse("text/plain", "utf-8", null)
@@ -228,6 +235,7 @@ class SaveFilesExtractor : Extractor() {
                             if (view == null || resolved) return
                             Log.d(TAG, "WebView page finished: $finishedUrl")
 
+                            // JS extraction backup after page loads
                             view.postDelayed({
                                 if (resolved) return@postDelayed
                                 view.evaluateJavascript("""
@@ -236,8 +244,10 @@ class SaveFilesExtractor : Extractor() {
                                             var scripts = document.querySelectorAll('script');
                                             for (var i = 0; i < scripts.length; i++) {
                                                 var text = scripts[i].textContent;
-                                                if (text && text.indexOf('m3u8') > -1) {
+                                                if (text && (text.indexOf('m3u8') > -1 || text.indexOf('.mp4') > -1)) {
                                                     var match = text.match(/['"]([^'"]*\.m3u8[^'"]*)['"]/);
+                                                    if (match) return match[1];
+                                                    match = text.match(/file\s*:\s*['"]([^'"]*\.mp4[^'"]*)['"]/);
                                                     if (match) return match[1];
                                                 }
                                             }
@@ -245,25 +255,27 @@ class SaveFilesExtractor : Extractor() {
                                         return null;
                                     })();
                                 """.trimIndent()) { result ->
-                                    val m3u8 = result?.trim()
+                                    val stream = result?.trim()
                                         ?.removeSurrounding("\"")
-                                        ?.takeIf { it != "null" && it.contains(".m3u8") }
-                                    if (m3u8 != null) {
-                                        Log.d(TAG, "M3U8 from WebView JS: $m3u8")
-                                        resolve(m3u8)
+                                        ?.takeIf { it != "null" && (it.contains(".m3u8") || it.contains(".mp4")) }
+                                    if (stream != null) {
+                                        Log.d(TAG, "Stream from WebView JS: $stream")
+                                        resolve(stream)
                                     }
                                 }
                             }, 3000)
 
+                            // Final timeout
                             view.postDelayed({
                                 if (!resolved) {
-                                    Log.d(TAG, "WebView timeout - no M3U8 found")
+                                    Log.d(TAG, "WebView timeout - no stream found")
                                     resolve(null)
                                 }
                             }, 15000)
                         }
                     }
 
+                    Log.d(TAG, "Loading URL in WebView: $url")
                     webView.loadUrl(url, mapOf("Referer" to referer))
 
                     cont.invokeOnCancellation {
@@ -299,32 +311,6 @@ class SaveFilesExtractor : Extractor() {
             @Url url: String,
             @Header("Referer") referer: String = "",
             @Header("User-Agent") userAgent: String = USER_AGENT
-        ): Document
-    }
-
-    private interface DlService {
-        companion object {
-            fun build(baseUrl: String): DlService {
-                val client = OkHttpClient.Builder()
-                    .dns(DnsResolver.doh)
-                    .connectTimeout(15, TimeUnit.SECONDS)
-                    .readTimeout(15, TimeUnit.SECONDS)
-                    .build()
-                val retrofit = Retrofit.Builder()
-                    .baseUrl("$baseUrl/")
-                    .client(client)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                return retrofit.create(DlService::class.java)
-            }
-        }
-
-        @GET("dl")
-        suspend fun getDl(
-            @retrofit2.http.Query("op") op: String,
-            @retrofit2.http.Query("file_code") fileCode: String,
-            @retrofit2.http.Query("auto") auto: String,
-            @retrofit2.http.Query("referer") referer: String
         ): Document
     }
 }
