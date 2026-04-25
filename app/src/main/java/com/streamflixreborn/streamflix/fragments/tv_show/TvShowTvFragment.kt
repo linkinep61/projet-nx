@@ -126,7 +126,10 @@ class TvShowTvFragment : Fragment() {
         appAdapter.submitList(listOfNotNull(
             tvShow.apply { itemType = AppAdapter.Type.TV_SHOW_TV },
 
-            tvShow.takeIf { it.seasons.isNotEmpty() }
+            tvShow.takeIf {
+                    it.seasons.isNotEmpty() &&
+                    !(it.seasons.size == 1 && (it.seasons.first().episodes.size <= 1))
+                }
                 ?.copy()
                 ?.apply { itemType = AppAdapter.Type.TV_SHOW_SEASONS_TV },
 

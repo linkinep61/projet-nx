@@ -154,11 +154,11 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
     // ==================== MOVIES / TV SHOWS ====================
 
     override suspend fun getMovies(page: Int): List<Movie> {
-        // Onglet "Série FR" — contenu VF via liste-animes/?filter=dubbed
+        // Onglet "Série FR" — contenu VF via liste-danimes/?filter=dubbed
         initializeService()
         return try {
-            val url = if (page > 1) "${baseUrl}liste-animes/page/$page/?filter=dubbed"
-                      else "${baseUrl}liste-animes/?filter=dubbed"
+            val url = if (page > 1) "${baseUrl}liste-danimes/page/$page/?filter=dubbed"
+                      else "${baseUrl}liste-danimes/?filter=dubbed"
             val document = service.getPage(url)
             document.select(".page-item-detail").mapNotNull { item ->
                 val show = parseHomeItem(item) ?: return@mapNotNull null
@@ -175,11 +175,11 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
     }
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
-        // Onglet "Série VOSTFR" — via liste-animes/?filter=subbed
+        // Onglet "Série VOSTFR" — via liste-danimes/?filter=subbed
         initializeService()
         return try {
-            val url = if (page > 1) "${baseUrl}liste-animes/page/$page/?filter=subbed"
-                      else "${baseUrl}liste-animes/?filter=subbed"
+            val url = if (page > 1) "${baseUrl}liste-danimes/page/$page/?filter=subbed"
+                      else "${baseUrl}liste-danimes/?filter=subbed"
             val document = service.getPage(url)
             document.select(".page-item-detail").mapNotNull { item ->
                 val show = parseHomeItem(item) ?: return@mapNotNull null
@@ -432,7 +432,8 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
 
     private fun improveImageUrl(url: String?): String? {
         if (url.isNullOrBlank()) return null
-        return url.replace(Regex("""-110x150\."""), "-193x278.")
+        // Remplacer le suffixe de redimensionnement WordPress par -193x278 (meilleure qualité dispo)
+        return url.replace(Regex("""-\d+x\d+\."""), "-193x278.")
     }
 
     private fun getInfoValue(document: Document, label: String): String? {

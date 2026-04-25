@@ -45,3 +45,4 @@ streamflix-release.jks
 
 # Claude
 .claude/
+claude-context/

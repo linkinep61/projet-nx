@@ -372,37 +372,49 @@ class MovieViewHolder(
             isFocusable = true
             setOnClickListener {
                 checkProviderAndRun {
-                    when (context.toActivity()?.getCurrentFragment()) {
-                        is HomeTvFragment -> {
-                            if (movie.itemType == AppAdapter.Type.MOVIE_CONTINUE_WATCHING_TV_ITEM) {
-                                findNavController().navigate(
-                                    R.id.action_global_player,
-                                    Bundle().apply {
-                                        putString("id", movie.id)
-                                        putString("title", movie.title)
-                                        putString("subtitle", movie.released?.format("yyyy") ?: "")
-                                        putSerializable(
-                                            "videoType",
-                                            Video.Type.Movie(
-                                                id = movie.id,
-                                                title = movie.title,
-                                                releaseDate = movie.released?.format("yyyy-MM-dd") ?: "",
-                                                poster = movie.poster ?: movie.banner ?: "",
-                                                imdbId = movie.imdbId,
-                                            )
-                                        )
-                                    }
-                                )
-                            } else {
-                                findNavController().navigate(HomeTvFragmentDirections.actionHomeToMovie(id = movie.id))
-                            }
+                    if (isDramaOrAnimeProvider()) {
+                        when (context.toActivity()?.getCurrentFragment()) {
+                            is HomeTvFragment -> findNavController().navigate(HomeTvFragmentDirections.actionHomeToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
+                            is MoviesTvFragment -> findNavController().navigate(MoviesTvFragmentDirections.actionMoviesToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
+                            is GenreTvFragment -> findNavController().navigate(GenreTvFragmentDirections.actionGenreToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
+                            is SearchTvFragment -> findNavController().navigate(SearchTvFragmentDirections.actionSearchToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
+                            is MovieTvFragment -> findNavController().navigate(MovieTvFragmentDirections.actionMovieToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
+                            is TvShowTvFragment -> findNavController().navigate(TvShowTvFragmentDirections.actionTvShowToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
+                            is PeopleTvFragment -> findNavController().navigate(PeopleTvFragmentDirections.actionPeopleToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
                         }
-                        is MoviesTvFragment -> findNavController().navigate(MoviesTvFragmentDirections.actionMoviesToMovie(id = movie.id))
-                        is GenreTvFragment -> findNavController().navigate(GenreTvFragmentDirections.actionGenreToMovie(id = movie.id))
-                        is SearchTvFragment -> findNavController().navigate(SearchTvFragmentDirections.actionSearchToMovie(id = movie.id))
-                        is MovieTvFragment -> findNavController().navigate(MovieTvFragmentDirections.actionMovieToMovie(id = movie.id))
-                        is TvShowTvFragment -> findNavController().navigate(TvShowTvFragmentDirections.actionTvShowToMovie(id = movie.id))
-                        is PeopleTvFragment -> findNavController().navigate(PeopleTvFragmentDirections.actionPeopleToMovie(id = movie.id))
+                    } else {
+                        when (context.toActivity()?.getCurrentFragment()) {
+                            is HomeTvFragment -> {
+                                if (movie.itemType == AppAdapter.Type.MOVIE_CONTINUE_WATCHING_TV_ITEM) {
+                                    findNavController().navigate(
+                                        R.id.action_global_player,
+                                        Bundle().apply {
+                                            putString("id", movie.id)
+                                            putString("title", movie.title)
+                                            putString("subtitle", movie.released?.format("yyyy") ?: "")
+                                            putSerializable(
+                                                "videoType",
+                                                Video.Type.Movie(
+                                                    id = movie.id,
+                                                    title = movie.title,
+                                                    releaseDate = movie.released?.format("yyyy-MM-dd") ?: "",
+                                                    poster = movie.poster ?: movie.banner ?: "",
+                                                    imdbId = movie.imdbId,
+                                                )
+                                            )
+                                        }
+                                    )
+                                } else {
+                                    findNavController().navigate(HomeTvFragmentDirections.actionHomeToMovie(id = movie.id))
+                                }
+                            }
+                            is MoviesTvFragment -> findNavController().navigate(MoviesTvFragmentDirections.actionMoviesToMovie(id = movie.id))
+                            is GenreTvFragment -> findNavController().navigate(GenreTvFragmentDirections.actionGenreToMovie(id = movie.id))
+                            is SearchTvFragment -> findNavController().navigate(SearchTvFragmentDirections.actionSearchToMovie(id = movie.id))
+                            is MovieTvFragment -> findNavController().navigate(MovieTvFragmentDirections.actionMovieToMovie(id = movie.id))
+                            is TvShowTvFragment -> findNavController().navigate(TvShowTvFragmentDirections.actionTvShowToMovie(id = movie.id))
+                            is PeopleTvFragment -> findNavController().navigate(PeopleTvFragmentDirections.actionPeopleToMovie(id = movie.id))
+                        }
                     }
                 }
             }
@@ -524,12 +536,22 @@ class MovieViewHolder(
             isFocusable = true
             setOnClickListener {
                 checkProviderAndRun {
-                    when (context.toActivity()?.getCurrentFragment()) {
-                        is HomeTvFragment -> findNavController().navigate(HomeTvFragmentDirections.actionHomeToMovie(id = movie.id))
-                        is MoviesTvFragment -> findNavController().navigate(MoviesTvFragmentDirections.actionMoviesToMovie(id = movie.id))
-                        is GenreTvFragment -> findNavController().navigate(GenreTvFragmentDirections.actionGenreToMovie(id = movie.id))
-                        is SearchTvFragment -> findNavController().navigate(SearchTvFragmentDirections.actionSearchToMovie(id = movie.id))
-                        is PeopleTvFragment -> findNavController().navigate(PeopleTvFragmentDirections.actionPeopleToMovie(id = movie.id))
+                    if (isDramaOrAnimeProvider()) {
+                        when (context.toActivity()?.getCurrentFragment()) {
+                            is HomeTvFragment -> findNavController().navigate(HomeTvFragmentDirections.actionHomeToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
+                            is MoviesTvFragment -> findNavController().navigate(MoviesTvFragmentDirections.actionMoviesToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
+                            is GenreTvFragment -> findNavController().navigate(GenreTvFragmentDirections.actionGenreToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
+                            is SearchTvFragment -> findNavController().navigate(SearchTvFragmentDirections.actionSearchToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
+                            is PeopleTvFragment -> findNavController().navigate(PeopleTvFragmentDirections.actionPeopleToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
+                        }
+                    } else {
+                        when (context.toActivity()?.getCurrentFragment()) {
+                            is HomeTvFragment -> findNavController().navigate(HomeTvFragmentDirections.actionHomeToMovie(id = movie.id))
+                            is MoviesTvFragment -> findNavController().navigate(MoviesTvFragmentDirections.actionMoviesToMovie(id = movie.id))
+                            is GenreTvFragment -> findNavController().navigate(GenreTvFragmentDirections.actionGenreToMovie(id = movie.id))
+                            is SearchTvFragment -> findNavController().navigate(SearchTvFragmentDirections.actionSearchToMovie(id = movie.id))
+                            is PeopleTvFragment -> findNavController().navigate(PeopleTvFragmentDirections.actionPeopleToMovie(id = movie.id))
+                        }
                     }
                 }
             }

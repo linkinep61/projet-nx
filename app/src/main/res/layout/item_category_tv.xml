@@ -30,6 +30,7 @@
         android:clipToPadding="false"
         android:paddingStart="70dp"
         android:paddingEnd="70dp"
+        android:scrollbars="none"
         app:focusOutEnd="true"
         app:focusOutFront="true"
         app:layout_constraintEnd_toEndOf="parent"
