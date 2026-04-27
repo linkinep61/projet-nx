@@ -35,6 +35,8 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
     defStyleAttr: Int = 0
 ) : ConstraintLayout(context, attrs, defStyleAttr) {
 
+    protected open fun onServerListUpdated() {}
+
     var player: ExoPlayer? = null
         set(value) {
             if (field === value) return
@@ -51,6 +53,7 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                 override fun onEvents(player: Player, events: Player.Events) {
                     if (events.contains(Player.EVENT_PLAYLIST_METADATA_CHANGED)) {
                         Settings.Server.init(value)
+                        onServerListUpdated()
                     }
                     if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
                         Settings.Server.refresh(value)
@@ -100,6 +103,7 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
         OPEN_SUBTITLES,
         SUBDL,
         SPEED,
+        CHANNEL_VARIANT,
         EXTRA_BUFFERING,
         SOFTWARE_DECODER,
         SERVERS,
@@ -379,6 +383,11 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
         this.onServerSelected = onServerSelected
     }
 
+    protected var onChannelVariantSelected: ((Settings.ChannelVariant) -> Unit)? = null
+    fun setOnChannelVariantSelectedListener(listener: (variant: Settings.ChannelVariant) -> Unit) {
+        this.onChannelVariantSelected = listener
+    }
+
 
     interface Item
 
@@ -390,6 +399,7 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                 Audio,
                 Subtitle,
                 Speed,
+                ChannelVariant,
                 Server,
                 ExtraBuffering,
                 SoftwareDecoder,
@@ -402,6 +412,7 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                 Audio,
                 Subtitle,
                 Speed,
+                ChannelVariant,
                 Server,
                 ExtraBuffering,
                 SoftwareDecoder,
@@ -1221,6 +1232,27 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                         it.isSelected = true
                     }
                 }
+            }
+        }
+
+        /** OLA TV channel variant (e.g. M6, M6 4K, M6 HEVC).
+         *  Populated by the provider when getServers returns OLA TV results.
+         *  Selecting a variant switches to that specific OLA TV stream. */
+        class ChannelVariant(
+            val id: String,    // "m3u8::<url>"
+            val name: String,  // "M6 4K", "M6 HEVC FR", etc.
+        ) : Item {
+            var isSelected: Boolean = false
+
+            companion object : Settings() {
+                val list = mutableListOf<ChannelVariant>()
+
+                val selected: ChannelVariant?
+                    get() = list.find { it.isSelected }
+
+                /** True when there are variants to show (hide button if empty). */
+                val hasVariants: Boolean
+                    get() = list.size > 1
             }
         }
 

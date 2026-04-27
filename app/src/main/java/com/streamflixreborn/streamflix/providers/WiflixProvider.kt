@@ -924,6 +924,22 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             private val client = NetworkClient.default.newBuilder()
                 .readTimeout(30, TimeUnit.SECONDS)
                 .connectTimeout(30, TimeUnit.SECONDS)
+                // Preserve POST method & body on redirects (site may change domain)
+                .followRedirects(false)
+                .addInterceptor { chain ->
+                    var request = chain.request()
+                    var response = chain.proceed(request)
+                    var redirects = 0
+                    while (response.isRedirect && redirects < 5) {
+                        val location = response.header("Location") ?: break
+                        val newUrl = request.url.resolve(location) ?: break
+                        response.close()
+                        request = request.newBuilder().url(newUrl).build()
+                        response = chain.proceed(request)
+                        redirects++
+                    }
+                    response
+                }
                 .build()
 
             fun buildAddressFetcher(): Service {

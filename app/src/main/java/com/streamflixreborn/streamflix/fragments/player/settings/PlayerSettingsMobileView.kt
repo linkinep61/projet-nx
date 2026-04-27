@@ -46,6 +46,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
     private val softwareDecoderAdapter = SettingsAdapter(this, Settings.SoftwareDecoder.list)
     private val gesturesAdapter = SettingsAdapter(this, Settings.Gestures.list)
     private val keepScreenOnAdapter = SettingsAdapter(this, Settings.KeepScreenOn.list)
+    private val channelVariantAdapter = SettingsAdapter(this, Settings.ChannelVariant.list)
     private val serversAdapter = SettingsAdapter(this, Settings.Server.list)
     private val marginAdapter = SettingsAdapter(this, Settings.Subtitle.Style.Margin.list)
 
@@ -68,6 +69,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
             Setting.AUDIO,
             Setting.SUBTITLES,
             Setting.SPEED,
+            Setting.CHANNEL_VARIANT,
             Setting.SERVERS,
             Setting.GESTURES,
             Setting.KEEP_SCREEN_ON,
@@ -121,6 +123,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                 Setting.OPEN_SUBTITLES -> context.getString(R.string.player_settings_open_subtitles_title)
                 Setting.SUBDL -> context.getString(R.string.player_settings_subdl_title)
                 Setting.SPEED -> context.getString(R.string.player_settings_speed_title)
+                Setting.CHANNEL_VARIANT -> context.getString(R.string.player_settings_channel_variant_title)
                 Setting.EXTRA_BUFFERING -> context.getString(R.string.player_settings_extra_buffer_title)
                 Setting.SOFTWARE_DECODER -> context.getString(R.string.player_settings_software_decoder_title)
                 Setting.SERVERS -> context.getString(R.string.player_settings_servers_title)
@@ -150,6 +153,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
             Setting.OPEN_SUBTITLES -> openSubtitlesAdapter
             Setting.SUBDL -> subDLAdapter
             Setting.SPEED -> speedAdapter
+            Setting.CHANNEL_VARIANT -> channelVariantAdapter
             Setting.EXTRA_BUFFERING -> extraBufferingAdapter
             Setting.SOFTWARE_DECODER -> softwareDecoderAdapter
             Setting.SERVERS -> serversAdapter
@@ -158,6 +162,21 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
             Setting.KEEP_SCREEN_ON -> keepScreenOnAdapter
             Setting.MANUAL_ZOOM -> settingsAdapter
         }
+    }
+
+    override fun onServerListUpdated() {
+        refreshServerList()
+    }
+
+    fun refreshServerList() {
+        serversAdapter.notifyDataSetChanged()
+        // Also refresh main list so server count updates
+        settingsAdapter.notifyDataSetChanged()
+    }
+
+    fun refreshChannelVariantList() {
+        channelVariantAdapter.notifyDataSetChanged()
+        settingsAdapter.notifyDataSetChanged()
     }
 
     fun hide() {
@@ -208,6 +227,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                                 Settings.Audio -> settingsView.displaySettings(Setting.AUDIO)
                                 Settings.Subtitle -> settingsView.displaySettings(Setting.SUBTITLES)
                                 Settings.Speed -> settingsView.displaySettings(Setting.SPEED)
+                                Settings.ChannelVariant -> settingsView.displaySettings(Setting.CHANNEL_VARIANT)
                                 Settings.ExtraBuffering -> settingsView.displaySettings(Setting.EXTRA_BUFFERING)
                                 Settings.SoftwareDecoder -> settingsView.displaySettings(Setting.SOFTWARE_DECODER)
                                 Settings.Server -> settingsView.displaySettings(Setting.SERVERS)
@@ -380,6 +400,13 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                             settingsView.displaySettings(Setting.MAIN)
                         }
 
+                        is Settings.ChannelVariant -> {
+                            Settings.ChannelVariant.list.forEach { it.isSelected = false }
+                            item.isSelected = true
+                            settingsView.onChannelVariantSelected?.invoke(item)
+                            settingsView.displaySettings(Setting.MAIN)
+                        }
+
                         is Settings.Server -> {
                             // Update selection immediately so the UI reflects
                             // the new server before the video finishes loading
@@ -418,6 +445,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                         Settings.Audio -> R.drawable.ic_player_settings_audio
                         Settings.Subtitle -> if (Settings.Subtitle.selected is Settings.Subtitle.TextTrackInformation) R.drawable.ic_player_settings_subtitle_on else R.drawable.ic_player_settings_subtitle_off
                         Settings.Speed -> R.drawable.ic_player_settings_playback_speed
+                        Settings.ChannelVariant -> R.drawable.ic_player_settings_servers
                         Settings.ExtraBuffering -> R.drawable.ic_player_settings_extra_buffer
                         Settings.SoftwareDecoder -> R.drawable.ic_player_settings_extra_buffer
                         Settings.Server -> R.drawable.ic_player_settings_servers
@@ -435,6 +463,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                         Settings.Audio -> context.getString(R.string.player_settings_audio_label)
                         Settings.Subtitle -> context.getString(R.string.player_settings_subtitles_label)
                         Settings.Speed -> context.getString(R.string.player_settings_speed_label)
+                        Settings.ChannelVariant -> context.getString(R.string.player_settings_channel_variant_label)
                         Settings.ExtraBuffering -> context.getString(R.string.player_settings_extra_buffer_server_label)
                         Settings.SoftwareDecoder -> context.getString(R.string.player_settings_software_decoder_label)
                         Settings.Server -> context.getString(R.string.player_settings_servers_label)
@@ -518,6 +547,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
 
                     is Settings.KeepScreenOn -> context.getString(item.stringId)
 
+                    is Settings.ChannelVariant -> item.name
                     is Settings.Server -> item.name
                     else -> ""
                 }
@@ -549,6 +579,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                         Settings.SoftwareDecoder -> context.getString(Settings.SoftwareDecoder.selected.stringId)
                         Settings.Gestures -> context.getString(Settings.Gestures.selected.stringId)
                         Settings.KeepScreenOn -> context.getString(Settings.KeepScreenOn.selected.stringId)
+                        Settings.ChannelVariant -> Settings.ChannelVariant.selected?.name ?: ""
                         Settings.Server -> Settings.Server.selected?.name ?: ""
                         Settings.ManualZoom -> ""
                         else -> ""
@@ -679,6 +710,11 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                         else -> View.GONE
                     }
 
+                    is Settings.ChannelVariant -> when {
+                        item.isSelected -> View.VISIBLE
+                        else -> View.GONE
+                    }
+
                     is Settings.Server -> when {
                         item.isSelected -> View.VISIBLE
                         else -> View.GONE
@@ -696,6 +732,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                             Settings.Audio,
                             Settings.Subtitle,
                             Settings.Speed,
+                            Settings.ChannelVariant,
                             Settings.ExtraBuffering,
                             Settings.SoftwareDecoder,
                             Settings.Gestures,

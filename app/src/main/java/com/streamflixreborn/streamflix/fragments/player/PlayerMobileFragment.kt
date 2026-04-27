@@ -58,7 +58,6 @@ import com.streamflixreborn.streamflix.models.Season
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.models.WatchItem
-import com.streamflixreborn.streamflix.providers.SerienStreamProvider
 import com.streamflixreborn.streamflix.ui.PlayerMobileView
 import com.streamflixreborn.streamflix.utils.MediaServer
 import com.streamflixreborn.streamflix.utils.UserPreferences
@@ -70,6 +69,7 @@ import com.streamflixreborn.streamflix.utils.plus
 import com.streamflixreborn.streamflix.utils.setMediaServerId
 import com.streamflixreborn.streamflix.utils.setMediaServers
 import com.streamflixreborn.streamflix.utils.toSubtitleMimeType
+import com.streamflixreborn.streamflix.providers.WiTvProvider
 import com.streamflixreborn.streamflix.utils.viewModelsFactory
 import kotlinx.coroutines.launch
 import java.util.Calendar
@@ -118,6 +118,79 @@ class PlayerMobileFragment : Fragment() {
     companion object {
         private const val NEXT_EPISODE_PREFETCH_THRESHOLD_MS = 60_000L
         private const val NEXT_EPISODE_OVERLAY_MIN_THRESHOLD_MS = 30_000L
+
+        /** Ad / tracking / popup domains blocked in DaddyLive WebView embeds */
+        private val AD_BLOCK_PATTERNS = listOf(
+            "doubleclick", "googlesyndication", "googleadservices",
+            "adservice.google", "pagead2.googlesyndication",
+            "trafficjunky", "exoclick", "juicyads", "clickadu",
+            "popads", "popcash", "propellerads", "adsterra",
+            "hilltopads", "richads", "pushground", "a-ads",
+            "ad-maven", "admaven", "revcontent", "mgid",
+            "taboola", "outbrain", "criteo", "amazon-adsystem",
+            "bidswitch", "openx", "pubmatic", "rubiconproject",
+            "spotxchange", "smartadserver",
+            "betrad", "bluekai", "bongacams", "chaturbate",
+            "livejasmin", "stripchat", "cam4",
+            "pushwoosh", "onesignal", "pushengage",
+            "notify", "notix", "gravitec",
+            "acdn.adnxs", "adnxs.com", "adsrvr.org",
+            "serving-sys.com", "zedo.com", "yieldmanager",
+            "disqusads", "revdeepak", "pushance",
+        )
+
+        /** JS injected into DaddyLive embeds to kill popup ads and overlays */
+        private const val DADDYLIVE_AD_KILL_JS = """
+            (function(){
+                // 1. Kill window.open (popup ads)
+                window.open = function(){ return null; };
+
+                // 2. Kill alert/confirm/prompt (annoying dialogs)
+                window.alert = function(){};
+                window.confirm = function(){ return false; };
+                window.prompt = function(){ return null; };
+
+                // 3. Periodic DOM cleanup — remove popup/overlay elements
+                function killAds() {
+                    // Remove elements with high z-index that overlay the video
+                    document.querySelectorAll('div,iframe,section,aside').forEach(function(el){
+                        var s = getComputedStyle(el);
+                        var z = parseInt(s.zIndex) || 0;
+                        var pos = s.position;
+                        // Skip the video container / player
+                        if (el.querySelector('video') || el.closest('video')) return;
+                        if (el.id && (el.id.includes('player') || el.id.includes('video'))) return;
+                        if (el.className && typeof el.className === 'string'
+                            && (el.className.includes('player') || el.className.includes('video')
+                                || el.className.includes('hls'))) return;
+                        // Kill fixed/absolute overlays with high z-index
+                        if ((pos === 'fixed' || pos === 'absolute') && z > 100) {
+                            el.remove();
+                        }
+                    });
+                    // Remove iframes that are NOT the player
+                    document.querySelectorAll('iframe').forEach(function(f){
+                        var src = f.src || '';
+                        if (!src.includes('bolaloca') && !src.includes('player')
+                            && !src.includes('embed') && src.length > 0) {
+                            f.remove();
+                        }
+                    });
+                }
+                killAds();
+                setInterval(killAds, 2000);
+
+                // 4. Inject CSS to hide common ad patterns
+                var css = document.createElement('style');
+                css.textContent = [
+                    '[id*="ad-"],[id*="ad_"],[class*="ad-overlay"]',
+                    ',[class*="popup"],[class*="modal"],[class*="interstitial"]',
+                    ',[id*="popup"],[id*="modal"]',
+                    '{ display:none !important; }'
+                ].join('');
+                document.head.appendChild(css);
+            })();
+        """
     }
 
     private var _binding: FragmentPlayerMobileBinding? = null
@@ -155,6 +228,11 @@ class PlayerMobileFragment : Fragment() {
     private var pendingWebViewVideo: Video? = null
     private var pendingWebViewServer: Video.Server? = null
     @Volatile private var m3u8Intercepted = false
+    /** CDN iframe page URL captured from shouldInterceptRequest — needed to establish the CDN session */
+    @Volatile private var daddyLiveCdnPageUrl: String? = null
+
+    /** Hidden WebView on file:/// for DaddyLive WebViewDataSource (Chrome TLS + no CORS) */
+    private var daddyLiveProxyWebView: WebView? = null
 
     /** Cached CronetEngine using Play Services' Chrome TLS stack */
     private var cronetEngine: CronetEngine? = null
@@ -338,6 +416,13 @@ class PlayerMobileFragment : Fragment() {
                             val isTmdb = providerName.contains("TMDb", ignoreCase = true)
 
                             if (servers.isEmpty()) {
+                                // For WiTV provider, don't exit — OLA CID servers may arrive progressively
+                                if (providerName == "WiTV") {
+                                    Log.d("PlayerMobileFragment", "No initial servers, waiting for OLA CID servers...")
+                                    PlayerSettingsView.Settings.ChannelVariant.list.clear()
+                                    binding.settings.refreshChannelVariantList()
+                                    return@collect
+                                }
                                 val message = if (isTmdb) {
                                     val langCode = providerName.substringAfter("(").substringBefore(")")
                                     val locale = Locale.forLanguageTag(langCode)
@@ -365,6 +450,11 @@ class PlayerMobileFragment : Fragment() {
                             binding.settings.setOnServerSelectedListener { server ->
                                 viewModel.getVideo(state.servers.find { server.id == it.id }!!)
                             }
+
+                            // Chaîne starts empty — clear old entries from previous channel
+                            PlayerSettingsView.Settings.ChannelVariant.list.clear()
+                            binding.settings.refreshChannelVariantList()
+
                             viewModel.getVideo(state.servers.first())
                         }
 
@@ -387,6 +477,8 @@ class PlayerMobileFragment : Fragment() {
                     }
 
                     is PlayerViewModel.State.SuccessLoadingVideo -> {
+                        // Channel works — unmark as failed if it was
+                        UserPreferences.unmarkChannelFailed(args.id)
                         PlayerSettingsView.Settings.ExtraBuffering.init(state.video.extraBuffering)
                         PlayerSettingsView.Settings.SoftwareDecoder.init(false)
                         displayVideo(state.video, state.server)
@@ -396,8 +488,16 @@ class PlayerMobileFragment : Fragment() {
                         val nextServer = servers.getOrNull(servers.indexOf(state.server) + 1)
                         if (nextServer != null) {
                             viewModel.getVideo(nextServer)
+                        } else if (tryNextChannelVariant(state.server)) {
+                            // OLA channel variant fallback succeeded — playing next variant
                         } else {
-                            val providerName = UserPreferences.currentProvider?.name ?: ""
+                            // Mark channel as failed for WiTV so it's hidden next time
+                            val provider = UserPreferences.currentProvider
+                            if (provider is com.streamflixreborn.streamflix.providers.WiTvProvider) {
+                                UserPreferences.markChannelFailed(args.id)
+                            }
+
+                            val providerName = provider?.name ?: ""
                             val isTmdb = providerName.contains("TMDb", ignoreCase = true)
 
                             val message = if (isTmdb) {
@@ -409,7 +509,7 @@ class PlayerMobileFragment : Fragment() {
                             } else {
                                 "All servers failed to load the video."
                             }
-                            
+
                             Toast.makeText(
                                 requireContext(),
                                 message,
@@ -418,6 +518,74 @@ class PlayerMobileFragment : Fragment() {
                             findNavController().navigateUp()
                         }
                     }
+                }
+            }
+        }
+
+        // Progressive additional servers (OLA TV streams go to Chaîne, others to Serveurs)
+        // Extract channel key from args.id (e.g. "ch::france2" → "france2")
+        val currentChannelKey = args.id.removePrefix("ch::").removePrefix("sport::")
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewModel.additionalServer.collect { server ->
+                servers = servers + server
+
+                if (server.name.startsWith("OLA[")) {
+                    // Parse "OLA[key] label" format
+                    val closeBracket = server.name.indexOf(']')
+                    if (closeBracket < 0) return@collect
+                    val olaKey = server.name.substring(4, closeBracket)
+                    val label = server.name.substring(closeBracket + 2) // skip "] "
+
+                    // Filter: ignore streams from a different channel (stale emissions)
+                    if (olaKey != currentChannelKey) {
+                        Log.d("PlayerMobileFragment", "Ignoring stale OLA stream: ${server.name} (expected key=$currentChannelKey)")
+                        return@collect
+                    }
+
+                    // OLA TV stream → add to Chaîne page (max 3 per same name)
+                    val sameNameCount = PlayerSettingsView.Settings.ChannelVariant.list.count { it.name == label }
+                    if (sameNameCount < 3) {
+                        PlayerSettingsView.Settings.ChannelVariant.list.add(
+                            PlayerSettingsView.Settings.ChannelVariant(id = server.id, name = label)
+                        )
+                        if (PlayerSettingsView.Settings.ChannelVariant.list.size == 1) {
+                            PlayerSettingsView.Settings.ChannelVariant.list.first().isSelected = true
+                        }
+                        binding.settings.refreshChannelVariantList()
+                    }
+
+                    // Set up variant click handler
+                    binding.settings.setOnChannelVariantSelectedListener { variant ->
+                        viewModel.getVideo(Video.Server(variant.id, variant.name))
+                    }
+
+                    // Auto-play first OLA stream if nothing else is playing
+                    val hasNonOla = servers.any { !it.name.startsWith("OLA[") }
+                    if (!hasNonOla && PlayerSettingsView.Settings.ChannelVariant.list.size == 1) {
+                        Log.d("PlayerMobileFragment", "No non-OLA servers — auto-playing first OLA stream")
+                        viewModel.getVideo(server)
+                    }
+
+                    Log.d("PlayerMobileFragment", "OLA stream added to Chaîne: $label")
+                } else {
+                    // Regular server → add to Serveurs page
+                    player.playlistMetadata = MediaMetadata.Builder()
+                        .setTitle(player.playlistMetadata?.title?.toString() ?: "")
+                        .setMediaServers(servers.filter { !it.name.startsWith("OLA[") }.map {
+                            MediaServer(id = it.id, name = it.name)
+                        })
+                        .build()
+                    PlayerSettingsView.Settings.Server.list.add(
+                        PlayerSettingsView.Settings.Server(id = server.id, name = server.name)
+                    )
+                    binding.settings.refreshServerList()
+                    Log.d("PlayerMobileFragment", "Additional server added: ${server.name}")
+                }
+
+                // Update server selection listener (regular servers only)
+                binding.settings.setOnServerSelectedListener { sel ->
+                    servers.find { sel.id == it.id }?.let { viewModel.getVideo(it) }
                 }
             }
         }
@@ -801,6 +969,13 @@ class PlayerMobileFragment : Fragment() {
         val btnPrevious = binding.pvPlayer.controller.binding.btnCustomPrev
         val btnNext = binding.pvPlayer.controller.binding.btnCustomNext
 
+        // IPTV channel navigation: prev/next channel buttons
+        val isIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::")
+        if (isIptvChannel) {
+            setupChannelNavigationButtons(btnPrevious, btnNext)
+            return
+        }
+
         fun handleNavigationButton(
             button: ImageView,
             hasEpisode: () -> Boolean,
@@ -869,6 +1044,89 @@ class PlayerMobileFragment : Fragment() {
             viewModel::playPreviousEpisode
         )
         handleNavigationButton(btnNext, EpisodeManager::hasNextEpisode, ::playNextEpisodeAcrossSeasons)
+    }
+
+    private fun setupChannelNavigationButtons(btnPrevious: ImageView, btnNext: ImageView) {
+        val provider = UserPreferences.currentProvider
+        if (provider !is WiTvProvider) {
+            btnPrevious.isGone = true
+            btnNext.isGone = true
+            return
+        }
+
+        val prevId = provider.getPreviousChannelId(args.id)
+        val nextId = provider.getNextChannelId(args.id)
+
+        btnPrevious.isGone = prevId == null
+        btnNext.isGone = nextId == null
+
+        fun navigateToChannel(channelId: String) {
+            val channelName = provider.getChannelDisplayName(channelId) ?: channelId
+            val channelPoster = provider.getChannelPoster(channelId)
+
+            val videoType = Video.Type.Episode(
+                id = channelId,
+                number = 1,
+                title = channelName,
+                poster = channelPoster,
+                overview = null,
+                tvShow = Video.Type.Episode.TvShow(
+                    id = channelId,
+                    title = channelName,
+                    poster = channelPoster,
+                    banner = null,
+                    releaseDate = null,
+                    imdbId = null,
+                ),
+                season = Video.Type.Episode.Season(
+                    number = 1,
+                    title = "Live",
+                ),
+            )
+            val navArgs = android.os.Bundle().apply {
+                putString("id", channelId)
+                putString("title", channelName)
+                putString("subtitle", channelName)
+                putSerializable("videoType", videoType)
+            }
+            findNavController().navigate(
+                R.id.player,
+                navArgs,
+                androidx.navigation.NavOptions.Builder()
+                    .setPopUpTo(R.id.player, true)
+                    .build()
+            )
+        }
+
+        if (prevId != null) {
+            btnPrevious.setOnClickListener { navigateToChannel(prevId) }
+        }
+        if (nextId != null) {
+            btnNext.setOnClickListener { navigateToChannel(nextId) }
+        }
+    }
+
+    /** Try the next untried OLA channel variant. Returns true if a variant was found and is being tried. */
+    private var triedChannelVariantIds = mutableSetOf<String>()
+
+    private fun tryNextChannelVariant(failedServer: Video.Server?): Boolean {
+        val variants = PlayerSettingsView.Settings.ChannelVariant.list
+        if (variants.isEmpty()) return false
+
+        // Mark the failed server's variant as tried
+        if (failedServer != null) triedChannelVariantIds.add(failedServer.id)
+
+        // Find the first untried variant
+        val nextVariant = variants.firstOrNull { it.id !in triedChannelVariantIds }
+        if (nextVariant != null) {
+            triedChannelVariantIds.add(nextVariant.id)
+            Log.d("PlayerMobileFragment", "Fallback → trying channel variant: ${nextVariant.name}")
+            viewModel.getVideo(Video.Server(nextVariant.id, nextVariant.name))
+            return true
+        }
+
+        Log.d("PlayerMobileFragment", "No more channel variants to try (tried ${triedChannelVariantIds.size})")
+        return false
     }
 
     private fun refreshEpisodeNavigation(type: Video.Type.Episode) {
@@ -1003,11 +1261,18 @@ class PlayerMobileFragment : Fragment() {
 
         // ── Netu anti-bot: show WebView overlay so user can tap the play button ──
         if (video.needsWebViewClick && !video.webViewUrl.isNullOrBlank()) {
-            // Ignore duplicate extraction results when overlay is already shown
+            // Clean up any existing overlay first (prevents second player stacking)
             if (webViewOverlay != null) {
-                Log.d("PlayerMobile", "needsWebViewClick but overlay already showing → ignoring duplicate")
-                return
+                Log.d("PlayerMobile", "Cleaning previous overlay before new one: ${video.webViewUrl?.take(60)}")
+                hideWebViewOverlay()
             }
+            // Clean up DaddyLive proxy if any
+            daddyLiveProxyWebView?.let { old ->
+                try { old.stopLoading(); old.destroy() } catch (_: Exception) {}
+                (binding.root as? ViewGroup)?.removeView(old)
+            }
+            daddyLiveProxyWebView = null
+
             Log.d("PlayerMobile", "needsWebViewClick → showing WebView overlay for: ${video.webViewUrl}")
             // Stop current playback before showing overlay
             if (::player.isInitialized) {
@@ -1316,7 +1581,7 @@ class PlayerMobileFragment : Fragment() {
                     return
                 }
 
-                // Fallback 1: if 403, try next server
+                // Fallback 1: if 403, try next server or channel variant
                 if (is403) {
                     Log.e("PlayerNetwork", "403 error! usingCronet=$usingCronet, source=${player.currentMediaItem?.localConfiguration?.uri?.toString()?.take(80)}")
                     val server = currentServer ?: return
@@ -1324,14 +1589,14 @@ class PlayerMobileFragment : Fragment() {
                     if (nextServer != null) {
                         Log.d("PlayerNetwork", "403 → trying next server: ${nextServer.name}")
                         viewModel.getVideo(nextServer)
-                    } else {
-                        Log.e("PlayerNetwork", "No more servers to try after 403")
+                    } else if (!tryNextChannelVariant(server)) {
+                        Log.e("PlayerNetwork", "No more servers or channel variants to try after 403")
                     }
                     return
                 }
 
-                // Fallback 2: if connection timed out or ISP-blocked,
-                // automatically try the next server
+                // Fallback 2: if connection timed out, ISP-blocked, or WebView fetch failed,
+                // automatically try the next server or channel variant
                 val isConnectionTimeout = causeMsg.contains("SocketTimeoutException")
                         || causeMsg.contains("failed to connect")
                         || causeMsg.contains("Connection timed out")
@@ -1340,14 +1605,16 @@ class PlayerMobileFragment : Fragment() {
                         || causeMsg.contains("cfglobalcdn IP")
                         || cause is java.net.SocketTimeoutException
                         || error.cause is java.net.SocketTimeoutException
+                        || errorCauseMsg.contains("WebView fetch failed")
+                        || errorCauseMsg.contains("WebView fetch timed out")
                 if (isConnectionTimeout) {
                     val server = currentServer ?: return
                     val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
                     if (nextServer != null) {
                         Log.w("PlayerNetwork", "Connection timeout on ${server.name}, auto-switching to ${nextServer.name}")
                         viewModel.getVideo(nextServer)
-                    } else {
-                        Log.e("PlayerNetwork", "Connection timeout on ${server.name}, no more servers to try")
+                    } else if (!tryNextChannelVariant(server)) {
+                        Log.e("PlayerNetwork", "Connection timeout on ${server.name}, no more servers or variants to try")
                     }
                 }
             }
@@ -1928,6 +2195,7 @@ class PlayerMobileFragment : Fragment() {
                 }
 
                 mediaSession = MediaSession.Builder(requireContext(), player)
+                    .setId("player_mobile_${System.nanoTime()}")
                     .build()
             }
 
@@ -1949,6 +2217,7 @@ class PlayerMobileFragment : Fragment() {
         val ctx = requireContext()
         val rootView = binding.root as ViewGroup
         m3u8Intercepted = false
+        daddyLiveCdnPageUrl = null
 
         // ── Overlay container ──
         val overlay = FrameLayout(ctx).apply {
@@ -1981,15 +2250,82 @@ class PlayerMobileFragment : Fragment() {
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
 
+        // Detect if this is a DaddyLive/bolaloca embed
+        val isDaddyLiveEmbed = embedUrl.contains("bolaloca")
+
         wv.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(
                 view: WebView?, request: WebResourceRequest?
             ): WebResourceResponse? {
                 val url = request?.url?.toString() ?: return null
 
+                // ── DaddyLive: block ads + popups ──
+                if (isDaddyLiveEmbed) {
+                    val host = request?.url?.host ?: ""
+                    // Block known ad / tracking / popup domains
+                    val isAd = AD_BLOCK_PATTERNS.any { host.contains(it, ignoreCase = true) }
+                        || url.contains("/ads/") || url.contains("/ad.")
+                        || url.contains("popunder") || url.contains("pop.js")
+                        || url.contains("trafficjunky") || url.contains("exoclick")
+                        || url.contains("juicyads") || url.contains("clickadu")
+                        || url.contains("/prebid") || url.contains("adserver")
+                        || url.contains("syndication") || url.contains("banner")
+                        || url.contains("/vast") || url.contains("vpaid")
+                    if (isAd) {
+                        Log.d("PlayerMobile", "DaddyLive AD BLOCKED: ${host}/${url.takeLast(60)}")
+                        return WebResourceResponse(
+                            "text/plain", "UTF-8",
+                            java.io.ByteArrayInputStream("".toByteArray())
+                        )
+                    }
+                }
+
+                // ── DaddyLive: LOG ALL non-ad requests for CDN iframe detection ──
+                if (isDaddyLiveEmbed && !m3u8Intercepted) {
+                    val reqHost = request?.url?.host ?: ""
+                    val isBolaloca = reqHost.contains("bolaloca") || reqHost.contains("daddylive")
+                    if (!isBolaloca) {
+                        val accept = request?.requestHeaders?.get("Accept") ?: ""
+                        Log.d("PlayerMobile", "DaddyLive REQ [${request?.method}] host=$reqHost accept=${accept.take(40)} url=${url.take(160)}")
+                    }
+
+                    // Capture the CDN iframe page URL (the HTML page, not assets)
+                    if (daddyLiveCdnPageUrl == null) {
+                        val isCdnDomain = reqHost.contains("58103793") || reqHost.contains("lulustream")
+                            || reqHost.contains("luluvdo") || reqHost.contains("lulucdn")
+                            || reqHost.contains("cdn-tnmr") || reqHost.contains("hlsbot")
+                        val isStaticAsset = url.contains(".m3u8") || url.contains(".ts")
+                            || url.contains(".js") || url.contains(".css")
+                            || url.contains(".png") || url.contains(".jpg")
+                            || url.contains(".svg") || url.contains(".ico")
+                            || url.contains(".woff") || url.contains(".gif")
+                            || url.contains(".woff2") || url.contains(".ttf")
+                        val accept = request?.requestHeaders?.get("Accept") ?: ""
+                        val looksLikeHtml = accept.contains("text/html") || (!isStaticAsset && request?.method == "GET")
+                        if (isCdnDomain && looksLikeHtml && !isStaticAsset) {
+                            daddyLiveCdnPageUrl = url
+                            Log.d("PlayerMobile", "DaddyLive CDN iframe URL captured: ${url.take(160)}")
+                        }
+                    }
+                }
+
+                // ── DaddyLive: intercept m3u8, play via ExoPlayer + WebViewDataSource ──
+                if (isDaddyLiveEmbed && url.contains(".m3u8")) {
+                    if (!m3u8Intercepted) {
+                        Log.d("PlayerMobile", "DaddyLive M3U8 intercepted: ${url.take(140)}")
+                        m3u8Intercepted = true
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            onDaddyLiveM3u8Intercepted(m3u8Url = url, embedUrl = embedUrl)
+                        }
+                    }
+                    return WebResourceResponse(
+                        "application/vnd.apple.mpegurl", "UTF-8",
+                        java.io.ByteArrayInputStream("#EXTM3U\n#EXT-X-ENDLIST\n".toByteArray())
+                    ).apply { responseHeaders = mapOf("Access-Control-Allow-Origin" to "*") }
+                }
+
+                // ── Netu/cfglobalcdn interception (existing logic) ──
                 if (url.contains("cfglobalcdn.com")) {
-                    // Once M3U8 is captured, block ALL cfglobalcdn requests to
-                    // prevent HLS.js from consuming the single-use token.
                     if (m3u8Intercepted) {
                         Log.d("PlayerMobile", "Blocking cfglobalcdn request: ${url.takeLast(60)}")
                         return WebResourceResponse(
@@ -2001,8 +2337,6 @@ class PlayerMobileFragment : Fragment() {
                             )
                         }
                     }
-                    // Capture the first HLS URL (contains silverlight/hls-vod path).
-                    // Non-HLS resources (thumbnails, posters) go through normally.
                     if (url.contains("silverlight") || url.contains("hls-vod")
                         || url.contains(".m3u8")
                     ) {
@@ -2011,8 +2345,6 @@ class PlayerMobileFragment : Fragment() {
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
                             onM3u8Intercepted(url)
                         }
-                        // Return a fake empty M3U8 with CORS headers so HLS.js
-                        // doesn't retry (CORS error triggers manifestLoadError retries)
                         return WebResourceResponse(
                             "application/vnd.apple.mpegurl", "UTF-8",
                             java.io.ByteArrayInputStream(
@@ -2032,6 +2364,11 @@ class PlayerMobileFragment : Fragment() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 Log.d("PlayerMobile", "Overlay WebView loaded: ${url?.take(80)}")
+
+                // ── DaddyLive: inject anti-popup/ad JS ──
+                if (isDaddyLiveEmbed) {
+                    view?.evaluateJavascript(DADDYLIVE_AD_KILL_JS, null)
+                }
             }
         }
 
@@ -2040,11 +2377,19 @@ class PlayerMobileFragment : Fragment() {
                 Log.d("PlayerMobile", "JS console [${consoleMessage?.messageLevel()}]: ${consoleMessage?.message()?.take(200)}")
                 return true
             }
+            // Block ALL popup windows (window.open)
+            override fun onCreateWindow(
+                view: WebView?, isDialog: Boolean,
+                isUserGesture: Boolean, resultMsg: android.os.Message?
+            ): Boolean {
+                Log.d("PlayerMobile", "BLOCKED popup window (isDaddyLive=$isDaddyLiveEmbed)")
+                return false
+            }
         }
 
         // ── Hint text ──
         val hint = TextView(ctx).apply {
-            text = "Appuyez sur le bouton play pour lancer la vidéo"
+            text = if (isDaddyLiveEmbed) "Chargement du flux DaddyLive..." else "Appuyez sur le bouton play pour lancer la vidéo"
             setTextColor(Color.WHITE)
             textSize = 14f
             setShadowLayer(4f, 0f, 0f, Color.BLACK)
@@ -2064,22 +2409,28 @@ class PlayerMobileFragment : Fragment() {
         webViewOverlay = overlay
         overlayWebView = wv
 
-        // Load the embed page inside an iframe wrapper.
-        // The netu page expects to be in an iframe (checks window.parent !== window).
-        // shouldInterceptRequest proxies all requests to frembed/netu via OkHttp+DoH.
-        val iframeWrapper = """
-            <!DOCTYPE html>
-            <html><head>
-            <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-            <style>*{margin:0;padding:0}html,body{width:100%;height:100%;overflow:hidden;background:#000}
-            iframe{width:100%;height:100%;border:none}</style>
-            </head><body>
-            <iframe src="$embedUrl" allow="autoplay;fullscreen;encrypted-media" allowfullscreen
-                    referrerpolicy="origin"></iframe>
-            </body></html>
-        """.trimIndent()
-        Log.d("PlayerMobile", "Loading iframe wrapper for: ${embedUrl.take(100)}")
-        wv.loadDataWithBaseURL("https://frembed.cyou/", iframeWrapper, "text/html", "UTF-8", null)
+        if (isDaddyLiveEmbed) {
+            // DaddyLive: load embed URL DIRECTLY (no iframe wrapper) so our
+            // ad-kill JS runs in the same context as the popup-creating scripts.
+            Log.d("PlayerMobile", "Loading DaddyLive embed directly: ${embedUrl.take(100)}")
+            wv.loadUrl(embedUrl)
+        } else {
+            // Other embeds: use iframe wrapper (page expects to be in an iframe)
+            val baseHost = "https://frembed.cyou/"
+            val iframeWrapper = """
+                <!DOCTYPE html>
+                <html><head>
+                <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+                <style>*{margin:0;padding:0}html,body{width:100%;height:100%;overflow:hidden;background:#000}
+                iframe{width:100%;height:100%;border:none}</style>
+                </head><body>
+                <iframe src="$embedUrl" allow="autoplay;fullscreen;encrypted-media" allowfullscreen
+                        referrerpolicy="origin"></iframe>
+                </body></html>
+            """.trimIndent()
+            Log.d("PlayerMobile", "Loading iframe wrapper for: ${embedUrl.take(100)} (base=$baseHost)")
+            wv.loadDataWithBaseURL(baseHost, iframeWrapper, "text/html", "UTF-8", null)
+        }
 
         // Auto-fade hint after 5 seconds
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
@@ -2152,6 +2503,141 @@ class PlayerMobileFragment : Fragment() {
         displayVideo(newVideo, server)
     }
 
+    /**
+     * Called when a DaddyLive/bolaloca WebView intercepts an m3u8 URL.
+     * Creates a hidden proxy WebView that navigates to the CDN's REAL URL
+     * (not loadDataWithBaseURL — that creates a synthetic origin the CDN
+     * rejects). By doing loadUrl("cdnOrigin/"), the WebView gets a genuine
+     * same-origin context: XHR has correct Origin/Referer headers, Chrome
+     * TLS fingerprint, and shared cookies via CookieManager.
+     */
+    @android.annotation.SuppressLint("SetJavaScriptEnabled")
+    private fun onDaddyLiveM3u8Intercepted(m3u8Url: String, embedUrl: String) {
+        val video = pendingWebViewVideo ?: return
+        val server = pendingWebViewServer ?: return
+
+        // Extract CDN origin from the m3u8 URL INCLUDING port (e.g. https://xxx.58103793.net:8443)
+        val cdnOrigin = try {
+            val u = java.net.URL(m3u8Url)
+            val port = if (u.port != -1 && u.port != u.defaultPort) ":${u.port}" else ""
+            "${u.protocol}://${u.host}$port"
+        } catch (_: Exception) { "" }
+
+        Log.d("PlayerMobile", "DaddyLive M3U8 → ExoPlayer via WebViewDataSource (CDN origin=$cdnOrigin): ${m3u8Url.take(120)}")
+
+        // ── 0. Clean up any previous DaddyLive proxy (prevents second player) ──
+        daddyLiveProxyWebView?.let { old ->
+            Log.d("PlayerMobile", "Cleaning up previous DaddyLive proxy WebView")
+            try { old.stopLoading(); old.destroy() } catch (_: Exception) {}
+            (binding.root as? ViewGroup)?.removeView(old)
+        }
+        daddyLiveProxyWebView = null
+
+        // ── 1. Create a hidden proxy WebView ──
+        val ctx = requireContext()
+        val proxyWv = WebView(ctx).apply {
+            layoutParams = FrameLayout.LayoutParams(1, 1) // invisible
+            setBackgroundColor(Color.TRANSPARENT)
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                userAgentString = NetworkClient.USER_AGENT
+                mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                // Allow XHR from loadDataWithBaseURL context
+                @Suppress("DEPRECATION")
+                allowUniversalAccessFromFileURLs = true
+                @Suppress("DEPRECATION")
+                allowFileAccessFromFileURLs = true
+            }
+        }
+
+        // Ensure cookies are shared
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(proxyWv, true)
+
+        // Add to view tree (required for WebView to work) but invisible
+        (binding.root as ViewGroup).addView(proxyWv)
+        daddyLiveProxyWebView = proxyWv
+
+        val cdnPageUrl = daddyLiveCdnPageUrl
+        Log.d("PlayerMobile", "DaddyLive proxy: cdnPageUrl=$cdnPageUrl, cdnOrigin=$cdnOrigin")
+
+        proxyWv.webViewClient = object : WebViewClient() {
+            private var started = false
+
+            override fun shouldInterceptRequest(
+                view: WebView?, request: WebResourceRequest?
+            ): WebResourceResponse? {
+                val reqUrl = request?.url?.toString() ?: return null
+                // BEFORE page loaded: block scripts so hls.js doesn't start its own playback
+                // AFTER page loaded (started=true): let EVERYTHING through for WebViewDataSource fetch()
+                if (!started && (reqUrl.endsWith(".js") || reqUrl.contains("hls.min")
+                            || reqUrl.contains("hls.js") || reqUrl.contains("/js/"))) {
+                    Log.d("PlayerMobile", "DaddyLive proxy: blocking script: ${reqUrl.takeLast(60)}")
+                    return WebResourceResponse(
+                        "text/plain", "UTF-8",
+                        java.io.ByteArrayInputStream("".toByteArray())
+                    )
+                }
+                return null
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                if (started) return
+                started = true
+                Log.d("PlayerMobile", "DaddyLive proxy WebView loaded CDN page, url=$url")
+
+                // ── 3. Hide the overlay WebView (stop its playback) ──
+                hideWebViewOverlay()
+
+                // ── 4. Build HLS source with WebViewDataSource ──
+                val webViewDsFactory = DefaultDataSource.Factory(
+                    ctx,
+                    com.streamflixreborn.streamflix.utils.WebViewDataSource.Factory(proxyWv)
+                )
+
+                val mediaItem = MediaItem.Builder()
+                    .setUri(m3u8Url.toUri())
+                    .setMimeType(MimeTypes.APPLICATION_M3U8)
+                    .setMediaMetadata(
+                        MediaMetadata.Builder()
+                            .setMediaServerId(server.id)
+                            .build()
+                    )
+                    .build()
+
+                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(webViewDsFactory)
+                    .createMediaSource(mediaItem)
+
+                // ── 5. Play in ExoPlayer ──
+                if (!::player.isInitialized) return
+                player.setMediaSource(hlsSource)
+                player.prepare()
+                player.playWhenReady = true
+                usingWebView = true
+
+                Log.d("PlayerMobile", "DaddyLive → ExoPlayer playing via WebViewDataSource (cdnPage=$url)")
+            }
+        }
+
+        // ── 2. Load the CDN iframe page to establish the player session ──
+        // The CDN validates .ts segment requests against an active session
+        // created when its iframe page loads. Without this, .ts gets 403.
+        if (cdnPageUrl != null) {
+            Log.d("PlayerMobile", "DaddyLive proxy: loading CDN iframe page: ${cdnPageUrl.take(120)}")
+            proxyWv.loadUrl(cdnPageUrl)
+        } else {
+            // Fallback: use loadDataWithBaseURL (m3u8 will work but .ts may 403)
+            Log.w("PlayerMobile", "DaddyLive proxy: no CDN page URL captured, using loadDataWithBaseURL origin=$cdnOrigin")
+            proxyWv.loadDataWithBaseURL(
+                "$cdnOrigin/",
+                "<html><head></head><body></body></html>",
+                "text/html", "UTF-8", null
+            )
+        }
+    }
+
     private fun releasePlayer() {
         stopProgressHandler()
         binding.pvPlayer.player = null
@@ -2169,6 +2655,12 @@ class PlayerMobileFragment : Fragment() {
             com.streamflixreborn.streamflix.extractors.NetuExtractor.releaseSharedWebView()
             usingWebView = false
         }
+        // Release DaddyLive proxy WebView
+        daddyLiveProxyWebView?.let {
+            try { it.stopLoading(); it.destroy() } catch (_: Exception) {}
+            (binding.root as? ViewGroup)?.removeView(it)
+        }
+        daddyLiveProxyWebView = null
     }
 
     private fun isSerienStreamBypassUrl(url: String): Boolean {
@@ -2178,15 +2670,7 @@ class PlayerMobileFragment : Fragment() {
     }
 
     private fun buildSerienStreamBypassUrl(): String? {
-        val provider = UserPreferences.currentProvider ?: return null
-        if (provider != SerienStreamProvider) return null
-
-        val episodeId = when (val type = args.videoType) {
-            is Video.Type.Episode -> type.id
-            is Video.Type.Movie -> return null
-        }
-
-        return "${SerienStreamProvider.baseUrl}serie/$episodeId"
+        return null
     }
 
     private fun applyBypassCookies(url: String, cookieHeader: String) {

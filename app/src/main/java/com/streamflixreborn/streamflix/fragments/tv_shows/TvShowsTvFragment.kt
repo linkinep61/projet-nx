@@ -1,21 +1,30 @@
 package com.streamflixreborn.streamflix.fragments.tv_shows
 
+import android.annotation.SuppressLint
 import android.os.Bundle
+import android.util.Log
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
+import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.flowWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.navigation.fragment.findNavController
 import androidx.recyclerview.widget.RecyclerView
+import com.bumptech.glide.Glide
 import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.database.AppDatabase
 import com.streamflixreborn.streamflix.databinding.FragmentTvShowsTvBinding
 import com.streamflixreborn.streamflix.models.TvShow
+import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.providers.Provider
+import com.streamflixreborn.streamflix.providers.WiTvProvider
+import com.streamflixreborn.streamflix.utils.MiniPlayerController
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.CacheUtils
 import com.streamflixreborn.streamflix.utils.viewModelsFactory
@@ -33,6 +42,8 @@ class TvShowsTvFragment : Fragment() {
 
     private val appAdapter = AppAdapter()
 
+    private var currentHasMore: Boolean = false
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -45,7 +56,9 @@ class TvShowsTvFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        initializeLanguageTabs()
         initializeTvShows()
+        initializeMiniPlayer()
 
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
@@ -100,9 +113,124 @@ class TvShowsTvFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        // Don't clear onIptvChannelClick — race condition with new fragment's onViewCreated
         _binding = null
     }
 
+    override fun onPause() {
+        super.onPause()
+        if (MiniPlayerController.transitioningToFullscreen) {
+            Log.d("TvShowsTv", "onPause: skipping cleanup (transitioning to fullscreen)")
+            return
+        }
+        if (_binding != null) {
+            binding.miniPlayerView.player = null
+        }
+        MiniPlayerController.releaseDetachedPlayer()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (_binding == null) return
+        val channelId = MiniPlayerController.currentChannelId ?: return
+
+        if (MiniPlayerController.getPlayer() == null) {
+            Log.d("TvShowsTv", "onResume: player was released, re-initializing for $channelId")
+            MiniPlayerController.initPlayer(requireContext())
+            binding.miniPlayerView.player = MiniPlayerController.getPlayer()
+            MiniPlayerController.playChannel(
+                channelId,
+                MiniPlayerController.currentChannelName ?: channelId,
+                MiniPlayerController.currentChannelPoster
+            )
+        } else {
+            binding.miniPlayerView.player = MiniPlayerController.getPlayer()
+        }
+
+        binding.miniPlayerContainer.visibility = View.VISIBLE
+        binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
+        MiniPlayerController.currentChannelPoster?.let { poster ->
+            Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
+        }
+        updatePauseButton()
+
+        if (MiniPlayerController.onIptvChannelClick == null) {
+            MiniPlayerController.onIptvChannelClick = { tvShow ->
+                if (tvShow.id == MiniPlayerController.currentChannelId) {
+                    Log.d("TvShowsTv", "Same channel, flagging for transfer (onResume): ${tvShow.title}")
+                    MiniPlayerController.transitioningToFullscreen = true
+                    if (_binding != null) { binding.miniPlayerView.player = null }
+                    false
+                } else {
+                    Log.d("TvShowsTv", "Mini player intercept (onResume): ${tvShow.title}")
+                    MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
+                    true
+                }
+            }
+        }
+    }
+
+
+    private fun initializeLanguageTabs() {
+        val providerName = UserPreferences.currentProvider?.name ?: return
+
+        if (viewModel.isTypeFilterable) {
+            // Providers like AnimeSama: "Série" / "Film" tabs — reload from server on each tab
+            binding.tabLanguage.visibility = View.VISIBLE
+            binding.tabFr.text = "Série"
+            binding.tabVostfr.text = "Film"
+            selectTab(binding.tabFr, binding.tabVostfr)
+            setupTabFocus(binding.tabFr, binding.tabVostfr)
+            binding.tabFr.setOnClickListener {
+                selectTab(binding.tabFr, binding.tabVostfr)
+                viewModel.setLanguageFilter("serie")
+            }
+            binding.tabVostfr.setOnClickListener {
+                selectTab(binding.tabVostfr, binding.tabFr)
+                viewModel.setLanguageFilter("film")
+            }
+        } else if (viewModel.isFilterable) {
+            // Language-filterable providers: "FR" / "VOSTFR" tabs
+            binding.tabLanguage.visibility = View.VISIBLE
+            binding.tabFr.text = "FR"
+            binding.tabVostfr.text = "VOSTFR"
+            selectTab(binding.tabFr, binding.tabVostfr)
+            setupTabFocus(binding.tabFr, binding.tabVostfr)
+            binding.tabFr.setOnClickListener {
+                selectTab(binding.tabFr, binding.tabVostfr)
+                viewModel.setLanguageFilter("vf")
+            }
+            binding.tabVostfr.setOnClickListener {
+                selectTab(binding.tabVostfr, binding.tabFr)
+                viewModel.setLanguageFilter("vostfr")
+            }
+        }
+    }
+
+    private fun setupTabFocus(tab1: android.widget.TextView, tab2: android.widget.TextView) {
+        val focusListener = View.OnFocusChangeListener { v, hasFocus ->
+            val tv = v as android.widget.TextView
+            if (hasFocus) {
+                tv.setBackgroundColor(0x66E50914.toInt()) // brighter highlight when focused
+                tv.setTextColor(0xFFFFFFFF.toInt())
+            } else {
+                // Restore proper background based on whether this tab is selected
+                // (selectTab will be called on click, so just dim slightly)
+                tv.setBackgroundColor(if (tv.typeface?.isBold == true) 0x33E50914.toInt() else android.graphics.Color.TRANSPARENT)
+            }
+        }
+        tab1.onFocusChangeListener = focusListener
+        tab2.onFocusChangeListener = focusListener
+    }
+
+    private fun selectTab(selected: android.widget.TextView, other: android.widget.TextView) {
+        selected.setTextColor(0xFFFFFFFF.toInt())
+        selected.setTypeface(null, android.graphics.Typeface.BOLD)
+        selected.setBackgroundColor(0x33E50914)
+        other.setTextColor(0x80FFFFFF.toInt())
+        other.setTypeface(null, android.graphics.Typeface.NORMAL)
+        other.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+    }
 
     private fun initializeTvShows() {
         binding.vgvTvShows.apply {
@@ -116,7 +244,202 @@ class TvShowsTvFragment : Fragment() {
         binding.root.requestFocus()
     }
 
+    private fun initializeMiniPlayer() {
+        val isWiTv = UserPreferences.currentProvider is WiTvProvider
+        if (!isWiTv || !UserPreferences.miniPlayerEnabled) {
+            binding.miniPlayerContainer.visibility = View.GONE
+            MiniPlayerController.onIptvChannelClick = null
+            return
+        }
+
+        MiniPlayerController.initPlayer(requireContext())
+        binding.miniPlayerView.player = MiniPlayerController.getPlayer()
+
+        if (MiniPlayerController.currentChannelId != null) {
+            binding.miniPlayerContainer.visibility = View.VISIBLE
+            binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
+            MiniPlayerController.currentChannelPoster?.let { poster ->
+                Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
+            }
+            updateGridForMiniPlayer(true)
+        }
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            MiniPlayerController.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
+                when (state) {
+                    is MiniPlayerController.State.Idle -> {
+                        binding.miniPlayerContainer.visibility = View.GONE
+                        updateGridForMiniPlayer(false)
+                    }
+                    is MiniPlayerController.State.Loading -> {
+                        binding.miniPlayerContainer.visibility = View.VISIBLE
+                        binding.miniPlayerChannelName.text = state.channelName
+                        binding.miniPlayerLoading.visibility = View.VISIBLE
+                        updateGridForMiniPlayer(true)
+                    }
+                    is MiniPlayerController.State.Playing -> {
+                        binding.miniPlayerContainer.visibility = View.VISIBLE
+                        binding.miniPlayerChannelName.text = state.channelName
+                        binding.miniPlayerLoading.visibility = View.GONE
+                        updatePauseButton()
+                        updateGridForMiniPlayer(true)
+                        state.channelPoster?.let { poster ->
+                            Glide.with(this@TvShowsTvFragment).load(poster).into(binding.miniPlayerChannelLogo)
+                        }
+                    }
+                    is MiniPlayerController.State.Error -> {
+                        binding.miniPlayerLoading.visibility = View.GONE
+                        Log.e("TvShowsTv", "Mini player error: ${state.message}")
+                    }
+                }
+            }
+        }
+
+        binding.miniPlayerClose.setOnClickListener { MiniPlayerController.stop() }
+        binding.miniPlayerPause.setOnClickListener {
+            MiniPlayerController.togglePause()
+            updatePauseButton()
+        }
+        binding.miniPlayerFullscreen.setOnClickListener { navigateToFullPlayer() }
+        binding.miniPlayerView.setOnClickListener { navigateToFullPlayer() }
+
+        MiniPlayerController.onIptvChannelClick = { tvShow ->
+            if (tvShow.id == MiniPlayerController.currentChannelId) {
+                Log.d("TvShowsTv", "Same channel, flagging for transfer: ${tvShow.title}")
+                MiniPlayerController.transitioningToFullscreen = true
+                if (_binding != null) { binding.miniPlayerView.player = null }
+                false
+            } else {
+                Log.d("TvShowsTv", "Mini player intercept: ${tvShow.title} (${tvShow.id})")
+                MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
+                true
+            }
+        }
+
+        setupMiniPlayerDragAndResize()
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupMiniPlayerDragAndResize() {
+        val container = binding.miniPlayerContainer
+        val parent = container.parent as? View ?: return
+
+        var dragStartX = 0f
+        var dragStartY = 0f
+        var origMarginEnd = 0
+        var origMarginTop = 0
+        var isDragging = false
+
+        // Drag via the overlay bar (bottom bar with channel name)
+        binding.miniPlayerOverlay.setOnTouchListener { _, event ->
+            val lp = container.layoutParams as ConstraintLayout.LayoutParams
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    dragStartX = event.rawX
+                    dragStartY = event.rawY
+                    origMarginEnd = lp.marginEnd
+                    origMarginTop = lp.topMargin
+                    isDragging = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - dragStartX
+                    val dy = event.rawY - dragStartY
+                    if (!isDragging && (dx * dx + dy * dy) > 100) isDragging = true
+                    if (isDragging) {
+                        lp.marginEnd = (origMarginEnd - dx.toInt()).coerceIn(0, parent.width - container.width)
+                        lp.topMargin = (origMarginTop + dy.toInt()).coerceIn(0, parent.height - container.height)
+                        container.layoutParams = lp
+                    }
+                    isDragging
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    val wasDragging = isDragging
+                    isDragging = false
+                    wasDragging
+                }
+                else -> false
+            }
+        }
+
+        // Resize via scroll-wheel on the container
+        container.setOnGenericMotionListener { _, event ->
+            if (event.action == MotionEvent.ACTION_SCROLL) {
+                val scrollY = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+                val lp = container.layoutParams as ConstraintLayout.LayoutParams
+                val currentPercent = lp.matchConstraintPercentWidth
+                val newPercent = (currentPercent + scrollY * 0.03f).coerceIn(0.2f, 0.7f)
+                lp.matchConstraintPercentWidth = newPercent
+                container.layoutParams = lp
+                true
+            } else false
+        }
+    }
+
+    private fun updatePauseButton() {
+        if (_binding == null) return
+        val icon = if (MiniPlayerController.isPaused()) {
+            R.drawable.ic_mini_player_play
+        } else {
+            R.drawable.ic_mini_player_pause
+        }
+        binding.miniPlayerPause.setImageResource(icon)
+    }
+
+    private fun navigateToFullPlayer() {
+        if (!isAdded || _binding == null) return
+        val channelId = MiniPlayerController.currentChannelId ?: return
+        val channelName = MiniPlayerController.currentChannelName ?: channelId
+        val channelPoster = MiniPlayerController.currentChannelPoster
+
+        // Flag for transfer — PlayerTvFragment.onViewCreated will steal the player
+        MiniPlayerController.transitioningToFullscreen = true
+        if (_binding != null) { binding.miniPlayerView.player = null }
+
+        val videoType = Video.Type.Episode(
+            id = channelId, number = 1, title = channelName, poster = channelPoster,
+            overview = null,
+            tvShow = Video.Type.Episode.TvShow(id = channelId, title = channelName, poster = channelPoster, banner = null, releaseDate = null, imdbId = null),
+            season = Video.Type.Episode.Season(number = 1, title = "Live"),
+        )
+
+        val args = Bundle().apply {
+            putString("id", channelId)
+            putString("title", channelName)
+            putString("subtitle", channelName)
+            putSerializable("videoType", videoType)
+        }
+        try {
+            findNavController().navigate(R.id.action_global_player, args)
+        } catch (e: Exception) {
+            Log.e("TvShowsTv", "navigateToFullPlayer failed: ${e.message}", e)
+        }
+    }
+
+    private var miniPlayerLayoutApplied = false
+
+    private fun updateGridForMiniPlayer(miniPlayerVisible: Boolean) {
+        if (_binding == null) return
+        if (miniPlayerVisible == miniPlayerLayoutApplied) return
+        miniPlayerLayoutApplied = miniPlayerVisible
+        val grid = binding.vgvTvShows
+        val params = grid.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
+        if (miniPlayerVisible) {
+            // Constrain grid width to end at the mini player (45% + 16dp margin)
+            // so items keep their original 6-column size and don't go behind it.
+            params.matchConstraintPercentWidth = 0.52f
+            params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
+            params.horizontalBias = 0f
+        } else {
+            params.matchConstraintPercentWidth = 1f
+            params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+        }
+        grid.layoutParams = params
+    }
+
     private fun displayTvShows(tvShows: List<TvShow>, hasMore: Boolean) {
+        currentHasMore = hasMore
+
         appAdapter.submitList(tvShows.onEach {
             it.itemType = AppAdapter.Type.TV_SHOW_GRID_TV_ITEM
         })

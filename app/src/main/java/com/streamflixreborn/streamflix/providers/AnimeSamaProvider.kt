@@ -10,11 +10,17 @@ import com.streamflixreborn.streamflix.models.Genre
 import com.streamflixreborn.streamflix.models.Movie
 import com.streamflixreborn.streamflix.models.People
 import com.streamflixreborn.streamflix.models.Season
+import com.streamflixreborn.streamflix.models.Show
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
+import com.streamflixreborn.streamflix.utils.TMDb3
+import com.streamflixreborn.streamflix.utils.TMDb3.original
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -29,7 +35,7 @@ import retrofit2.http.Path
 import retrofit2.http.Url
 import java.util.concurrent.TimeUnit
 
-object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
+object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, FilterableProvider {
 
     override val name = "AnimeSama"
     override val defaultBaseUrl: String = "https://anime-sama.to/"
@@ -53,11 +59,60 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
     private const val IMG_BASE = "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/"
     private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
+    // Cache of all Film slugs from AnimeSama catalogue — used to exclude films from the Série tab
+    @Volatile private var cachedFilmSlugs: Set<String>? = null
+
+    /**
+     * Fetches all Film slugs from the AnimeSama catalogue (all pages, up to 20).
+     * Cached after first call so subsequent pages/tabs are instant.
+     */
+    private suspend fun getFilmSlugs(): Set<String> {
+        cachedFilmSlugs?.let { return it }
+        val slugs = mutableSetOf<String>()
+        try {
+            var page = 1
+            while (page <= 5) { // reduced from 20 — enough for exclusion filter
+                val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
+                val cards = fetchDocument(filmUrl).select(".catalog-card")
+                if (cards.isEmpty()) break
+                cards.forEach { card ->
+                    card.selectFirst("a[href*=/catalogue/]")?.attr("href")
+                        ?.substringAfter("/catalogue/")?.removeSuffix("/")
+                        ?.split("/")?.firstOrNull()?.let { slugs.add(it) }
+                }
+                page++
+            }
+        } catch (_: Exception) { }
+        cachedFilmSlugs = slugs
+        return slugs
+    }
+
     private val client = OkHttpClient.Builder()
         .dns(DnsResolver.doh)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
-        .followRedirects(true)
+        // Preserve POST method & body on redirects (site may change domain)
+        .followRedirects(false)
+        .addInterceptor { chain ->
+            var request = chain.request()
+            var response = chain.proceed(request)
+            var redirects = 0
+            while (response.isRedirect && redirects < 5) {
+                val location = response.header("Location") ?: break
+                val newUrl = request.url.resolve(location) ?: break
+                response.close()
+                request = request.newBuilder().url(newUrl).build()
+                response = chain.proceed(request)
+                redirects++
+            }
+            response
+        }
+        .build()
+
+    // Faster client for season probing (shorter timeouts to avoid long waits on 404s)
+    private val probeClient = client.newBuilder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
         .build()
 
     private var serviceInitialized = false
@@ -75,13 +130,17 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
         Jsoup.parse(html).apply { setBaseUri(baseUrl) }
     }
 
-    private suspend fun fetchText(url: String): String = withContext(Dispatchers.IO) {
+    private suspend fun fetchText(url: String): String = fetchTextWith(url, client)
+
+    private suspend fun probeText(url: String): String = fetchTextWith(url, probeClient)
+
+    private suspend fun fetchTextWith(url: String, httpClient: OkHttpClient): String = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", USER_AGENT)
             .header("Referer", baseUrl)
             .build()
-        val response = client.newCall(request).execute()
+        val response = httpClient.newCall(request).execute()
         if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
         val text = response.body?.string() ?: ""
         // Detect 404 pages disguised as 200
@@ -144,6 +203,8 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             if (sectionTitle.contains("Scans", ignoreCase = true)) continue
             // Skip "Reprenez votre visionnage" — requires user cookies (not available server-side)
             if (sectionTitle.contains("Reprenez", ignoreCase = true)) continue
+            // Skip unreliable film sections — AnimeSama mixes series into "Films Populaires"/"Films Récents"
+            if (sectionTitle.lowercase().contains("film")) continue
 
             val cards = container.select("a[href*=/catalogue/]")
             if (cards.isEmpty()) continue
@@ -169,10 +230,13 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                         ?: el.attr("data-src")?.takeIf { it.isNotBlank() }
                 } ?: "${IMG_BASE}${slug}.jpg"
 
-                // Type badge: "Film" → Movie, "Scan" → skip (pas de vidéo), else TvShow
+                // Skip scans (no video content)
                 val badgeText = card.selectFirst(".badge-text")?.text()?.trim() ?: ""
                 if (badgeText.equals("Scan", ignoreCase = true)) return@mapNotNull null
-                if (badgeText.equals("Film", ignoreCase = true)) {
+                // Use SECTION title to classify (more reliable than per-item badge)
+                val sectionLower = sectionTitle.lowercase()
+                val isFilmSection = sectionLower.contains("film")
+                if (isFilmSection) {
                     Movie(id = slug, title = title, poster = img)
                 } else {
                     TvShow(id = slug, title = title, poster = img)
@@ -191,30 +255,12 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
         }
 
         // FEATURED: Build hero slider from "Derniers contenus sortis"
-        // Vérifier que chaque item a du contenu (probe episodes.js)
+        // No per-item probing — trust the homepage cards (saves 60-120 HTTP requests)
         val derniersContenus = categories.firstOrNull {
             it.name.lowercase().contains("derniers contenus")
         }
         if (derniersContenus != null) {
-            val featured = derniersContenus.list.take(20).mapNotNull { item ->
-                val slug = when (item) {
-                    is Movie -> item.id
-                    is TvShow -> item.id
-                    else -> return@mapNotNull null
-                }
-                // Vérifier rapidement si l'item a du contenu
-                val hasContent = listOf("vostfr", "vf").any { lang ->
-                    listOf("saison1/", "").any { prefix ->
-                        try {
-                            val probeUrl = "${baseUrl}catalogue/$slug/${prefix}$lang/episodes.js"
-                            val text = fetchText(probeUrl)
-                            val eps1Content = Regex("""var\s+eps1\s*=\s*\[([^\]]*)\]""").find(text)?.groupValues?.get(1) ?: ""
-                            val urlCount = Regex("""['"]https?://[^'"]+['"]""").findAll(eps1Content).count()
-                            urlCount >= 2
-                        } catch (_: Exception) { false }
-                    }
-                }
-                if (!hasContent) return@mapNotNull null
+            val featured = derniersContenus.list.take(10).map { item ->
                 when (item) {
                     is Movie -> Movie(
                         id = item.id,
@@ -230,8 +276,44 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                     )
                     else -> item
                 }
-            }.take(15)
+            }
             if (featured.isNotEmpty()) {
+                // Enhance banners with TMDB HD backdrops — parallel
+                if (UserPreferences.enableTmdb) {
+                    val animeLanguages = setOf("ja", "ko", "zh")
+                    coroutineScope {
+                        featured.map { item ->
+                            async(Dispatchers.IO) {
+                                try {
+                                    val title = when (item) {
+                                        is Movie -> item.title
+                                        is TvShow -> item.title
+                                        else -> return@async
+                                    }
+                                    val results = TMDb3.Search.multi(title)
+                                    val match = results.results.firstOrNull { result ->
+                                        when (result) {
+                                            is TMDb3.Movie -> result.originalLanguage in animeLanguages && result.backdropPath != null
+                                            is TMDb3.Tv -> result.originalLanguage in animeLanguages && result.backdropPath != null
+                                            else -> false
+                                        }
+                                    }
+                                    val tmdbBanner = when (match) {
+                                        is TMDb3.Movie -> match.backdropPath?.original
+                                        is TMDb3.Tv -> match.backdropPath?.original
+                                        else -> null
+                                    }
+                                    if (tmdbBanner != null) {
+                                        when (item) {
+                                            is Movie -> item.banner = tmdbBanner
+                                            is TvShow -> item.banner = tmdbBanner
+                                        }
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                        }.awaitAll()
+                    }
+                }
                 categories.add(0, Category(name = Category.FEATURED, list = featured))
             }
         }
@@ -276,56 +358,215 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
         val html = searchPost(query)
         val doc = Jsoup.parse(html)
 
-        return doc.select("a.asn-search-result").mapNotNull { result ->
+        val rawResults = doc.select("a.asn-search-result").mapNotNull { result ->
             val href = result.attr("href")
             val slug = href.substringAfter("/catalogue/")
                 .removeSuffix("/")
                 .split("/").firstOrNull() ?: return@mapNotNull null
             val title = result.selectFirst("h3.asn-search-result-title")?.text()?.trim() ?: return@mapNotNull null
             val img = result.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+            Triple(slug, title, img)
+        }
 
-            TvShow(
-                id = slug,
-                title = title,
-                poster = img,
-            )
+        // Determine type by checking panneauAnime entries on each result's catalogue page.
+        // Show everything: series, individual films, and OAVs as separate results.
+        return coroutineScope {
+            rawResults.map { (slug, title, img) ->
+                async(Dispatchers.IO) {
+                    try {
+                        val pageHtml = probeText("${baseUrl}catalogue/$slug/")
+                        val cleanHtml = pageHtml.replace(Regex("""/\*[\s\S]*?\*/"""), "")
+                        val panneauRegex = Regex("""panneauAnime\s*\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)""")
+                        val entriesWithPath = panneauRegex.findAll(cleanHtml).mapNotNull { match ->
+                            val label = match.groupValues[1].trim()
+                            val path = match.groupValues[2].trim()
+                            if (label == "nom" && path == "url") null else (label to path)
+                        }.toList()
+
+                        val hasFilm = entriesWithPath.any { it.first.equals("Film", ignoreCase = true) }
+                        val hasOav = entriesWithPath.any { it.first.equals("OAV", ignoreCase = true) }
+                        val hasSeason = entriesWithPath.any {
+                            !it.first.equals("Film", ignoreCase = true) && !it.first.equals("OAV", ignoreCase = true)
+                        }
+
+                        val items = mutableListOf<AppAdapter.Item>()
+
+                        // Add TvShow if there are seasons
+                        if (hasSeason) {
+                            items.add(TvShow(id = slug, title = title, poster = img))
+                        }
+
+                        // Helper: count episodes in a folder by probing episodes.js
+                        suspend fun countEpisodes(folder: String): Int {
+                            for (lang in listOf("vostfr", "vf")) {
+                                try {
+                                    val epsJs = probeText("${baseUrl}catalogue/$slug/$folder/$lang/episodes.js")
+                                    val eps1 = Regex("""var\s+eps1\s*=\s*\[([\s\S]*?)\]""").find(epsJs)?.groupValues?.get(1) ?: ""
+                                    val count = Regex("""['"]https?://[^'"]+['"]""").findAll(eps1).count()
+                                    if (count > 0) return count
+                                } catch (_: Exception) {}
+                            }
+                            return 1
+                        }
+
+                        // Add individual films
+                        if (hasFilm) {
+                            val filmCount = countEpisodes("film")
+                            if (filmCount <= 1) {
+                                items.add(Movie(id = "$slug@film0", title = if (hasSeason || hasOav) "$title (Film)" else title, poster = img))
+                            } else {
+                                for (i in 0 until filmCount) {
+                                    items.add(Movie(id = "$slug@film$i", title = "$title - Film ${i + 1}", poster = img))
+                                }
+                            }
+                        }
+
+                        // Add individual OAVs
+                        if (hasOav) {
+                            val oavCount = countEpisodes("oav")
+                            if (oavCount <= 1) {
+                                items.add(Movie(id = "$slug@oav0", title = "$title (OAV)", poster = img))
+                            } else {
+                                for (i in 0 until oavCount) {
+                                    items.add(Movie(id = "$slug@oav$i", title = "$title - OAV ${i + 1}", poster = img))
+                                }
+                            }
+                        }
+
+                        // Fallback if nothing found
+                        if (items.isEmpty()) {
+                            items.add(TvShow(id = slug, title = title, poster = img))
+                        }
+
+                        items.map { it as AppAdapter.Item }
+                    } catch (_: Exception) {
+                        listOf(TvShow(id = slug, title = title, poster = img) as AppAdapter.Item)
+                    }
+                }
+            }.awaitAll().flatten()
         }
     }
 
     // ========== MOVIES ==========
 
     override suspend fun getMovies(page: Int): List<Movie> {
-        val url = "${baseUrl}catalogue/?type[]=Film&page=$page"
-        val document = fetchDocument(url)
-        return document.select(".catalog-card").mapNotNull { card ->
-            val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
-            val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
-                .split("/").firstOrNull() ?: return@mapNotNull null
-            val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
-            val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
-            Movie(id = slug, title = title, poster = img)
-        }
+        // FR tab: returns BOTH series (isSeries=true) and films (isSeries=false)
+        // No per-item probing — classify by catalogue type (2 requests total instead of N+1)
+        val movies = mutableListOf<Movie>()
+
+        // 1. Anime series with VF → Movie with isSeries=true
+        try {
+            val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=vf&page=$page"
+            fetchDocument(animeUrl).select(".catalog-card").mapNotNull { card ->
+                val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
+                val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
+                    .split("/").firstOrNull() ?: return@mapNotNull null
+                val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+                Movie(id = "$slug@vf", title = title, poster = img).also { it.isSeries = true }
+            }.let { movies.addAll(it) }
+        } catch (_: Exception) {}
+
+        // 2. Standalone films from catalogue type=Film → Movie with isSeries=false
+        try {
+            val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
+            fetchDocument(filmUrl).select(".catalog-card").mapNotNull { card ->
+                val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
+                val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
+                    .split("/").firstOrNull() ?: return@mapNotNull null
+                val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+                Movie(id = "$slug@film0", title = title, poster = img)
+            }.let { movies.addAll(it) }
+        } catch (_: Exception) {}
+
+        return movies
     }
 
     // ========== TV SHOWS ==========
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
-        val url = "${baseUrl}catalogue/?type[]=Anime&page=$page"
-        val document = fetchDocument(url)
-        return document.select(".catalog-card").mapNotNull { card ->
-            val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
-            val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
-                .split("/").firstOrNull() ?: return@mapNotNull null
-            val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
-            val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
-            TvShow(id = slug, title = title, poster = img)
+        // Default: load only anime series (fast — single request)
+        return getFilteredTvShows("serie", page)
+    }
+
+    override suspend fun getFilteredTvShows(language: String, page: Int): List<TvShow> {
+        // "language" is reused as type filter: "serie" or "film"
+        return when (language) {
+            "film" -> {
+                // Films only — from catalogue type=Film
+                try {
+                    val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
+                    fetchDocument(filmUrl).select(".catalog-card").mapNotNull { card ->
+                        val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
+                        val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
+                            .split("/").firstOrNull() ?: return@mapNotNull null
+                        val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                        val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+                        TvShow(id = "$slug@vostfr-film0", title = title, poster = img).also { it.isMovie = true }
+                    }
+                } catch (_: Exception) { emptyList() }
+            }
+            else -> {
+                // Series only — fetch Anime VOSTFR, exclude anything in the Film catalogue
+                try {
+                    val filmSlugs = getFilmSlugs()
+                    val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=vostfr&page=$page"
+                    fetchDocument(animeUrl).select(".catalog-card").mapNotNull { card ->
+                        val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
+                        val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
+                            .split("/").firstOrNull() ?: return@mapNotNull null
+                        if (slug in filmSlugs) return@mapNotNull null // exclude films
+                        val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                        val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+                        TvShow(id = "$slug@vostfr", title = title, poster = img)
+                    }
+                } catch (_: Exception) { emptyList() }
+            }
+        }
+    }
+
+    override suspend fun getFilteredMovies(language: String, page: Int): List<Movie> {
+        // Fast path: single catalogue request per tab (no per-item probing)
+        return when (language) {
+            "film" -> {
+                // Films only — from catalogue type=Film
+                try {
+                    val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
+                    fetchDocument(filmUrl).select(".catalog-card").mapNotNull { card ->
+                        val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
+                        val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
+                            .split("/").firstOrNull() ?: return@mapNotNull null
+                        val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                        val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+                        Movie(id = "$slug@film0", title = title, poster = img)
+                    }
+                } catch (_: Exception) { emptyList() }
+            }
+            else -> {
+                // Series (Anime VF) — exclude anything in the Film catalogue
+                try {
+                    val filmSlugs = getFilmSlugs()
+                    val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=vf&page=$page"
+                    fetchDocument(animeUrl).select(".catalog-card").mapNotNull { card ->
+                        val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
+                        val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
+                            .split("/").firstOrNull() ?: return@mapNotNull null
+                        if (slug in filmSlugs) return@mapNotNull null // exclude films
+                        val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                        val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+                        Movie(id = "$slug@vf", title = title, poster = img).also { it.isSeries = true }
+                    }
+                } catch (_: Exception) { emptyList() }
+            }
         }
     }
 
     // ========== MOVIE DETAIL ==========
 
     override suspend fun getMovie(id: String): Movie {
-        val document = fetchDocument("${baseUrl}catalogue/$id/")
+        val slug = id.substringBefore("@")
+        val document = fetchDocument("${baseUrl}catalogue/$slug/")
         val html = document.html()
 
         val title = document.title().substringBefore(" |").trim()
@@ -334,19 +575,52 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
         val genresMatch = Regex("GENRES[\\s\\S]*?<p[^>]*>([\\s\\S]*?)</p>", RegexOption.IGNORE_CASE).find(html)
         val genresText = genresMatch?.groupValues?.get(1)?.let { Jsoup.parse(it).text() } ?: ""
 
+        // ── Search for related content from the same franchise ──
+        val relatedFilms = mutableListOf<Show>()
+        try {
+            val searchHtml = searchPost(title)
+            val searchDoc = Jsoup.parse(searchHtml)
+            searchDoc.select("a.asn-search-result").mapNotNull { result ->
+                val href = result.attr("href")
+                val resultSlug = href.substringAfter("/catalogue/")
+                    .removeSuffix("/").split("/").firstOrNull() ?: return@mapNotNull null
+                if (resultSlug == slug) return@mapNotNull null // Skip self
+                val resultTitle = result.selectFirst("h3.asn-search-result-title")?.text()?.trim()
+                    ?: return@mapNotNull null
+                val resultImg = result.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${resultSlug}.jpg"
+                // Show as a TvShow (clickable → will open detail with seasons/films)
+                TvShow(id = resultSlug, title = resultTitle, poster = resultImg)
+            }.let { relatedFilms.addAll(it) }
+        } catch (_: Exception) {}
+
         return Movie(
             id = id,
             title = title,
             overview = synopsis,
-            poster = "${IMG_BASE}${id}.jpg",
-            genres = genresText.split(",").map { Genre(id = it.trim().lowercase(), name = it.trim()) }
+            poster = "${IMG_BASE}${slug}.jpg",
+            genres = genresText.split(",").map { Genre(id = it.trim().lowercase(), name = it.trim()) },
+            recommendations = relatedFilms,
         )
     }
 
     // ========== TV SHOW DETAIL ==========
 
     override suspend fun getTvShow(id: String): TvShow {
-        val document = fetchDocument("${baseUrl}catalogue/$id/")
+        val slug = id.substringBefore("@")
+        val afterAt = id.substringAfter("@", "")
+        // Parse forced language: supports "vostfr", "vf", "vostfr-film0", "vf-film2", etc.
+        val forcedLang = when {
+            afterAt.startsWith("vostfr") -> "vostfr"
+            afterAt.startsWith("vf") -> "vf"
+            else -> null
+        }
+        // Detect film/OAV entries: "vostfr-film0", "film0", "vf-oav2", etc.
+        val filmEntryMatch = Regex("""(film|oav)(\d+)""").find(afterAt)
+        val isFilmEntry = filmEntryMatch != null
+        val filmFolder = filmEntryMatch?.groupValues?.get(1) ?: "film"
+        val filmIndex = filmEntryMatch?.groupValues?.get(2)?.toIntOrNull() ?: 0
+
+        val document = fetchDocument("${baseUrl}catalogue/$slug/")
         val html = document.html()
 
         val title = document.title().substringBefore(" |").trim()
@@ -355,64 +629,210 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
         val genresMatch = Regex("GENRES[\\s\\S]*?<p[^>]*>([\\s\\S]*?)</p>", RegexOption.IGNORE_CASE).find(html)
         val genresText = genresMatch?.groupValues?.get(1)?.let { Jsoup.parse(it).text() } ?: ""
 
-        // Season links are generated by JavaScript (document.write) so they
-        // don't appear in the server-side HTML.  Instead, we probe for seasons
-        // by trying to fetch episodes.js for each potential season number.
-        // If both VF and VOSTFR exist, show language folders first.
-        // If only one language, show seasons directly.
         val seasons = mutableListOf<Season>()
-        val languages = listOf("vostfr", "vf")
+        val animePoster = "${IMG_BASE}${slug}.jpg"
+
+        // ── Film/OAV entry shortcut ──
+        // When the user clicked a specific film from a tab (FR or VOSTFR),
+        // go directly to that film's content — no season probing, no language choice.
+        if (isFilmEntry) {
+            val lang = forcedLang ?: "vostfr"
+            val seasonId = "$slug/@filmentry-$filmFolder-$lang-$filmIndex"
+            seasons.add(Season(
+                id = seasonId,
+                number = 1,
+                title = title,
+                poster = animePoster,
+            ))
+
+            // ── Search for related content from the same franchise ──
+            val relatedContent = mutableListOf<Show>()
+            try {
+                val searchHtml = searchPost(title)
+                val searchDoc = Jsoup.parse(searchHtml)
+                searchDoc.select("a.asn-search-result").mapNotNull { result ->
+                    val href = result.attr("href")
+                    val resultSlug = href.substringAfter("/catalogue/")
+                        .removeSuffix("/").split("/").firstOrNull() ?: return@mapNotNull null
+                    if (resultSlug == slug) return@mapNotNull null // Skip self
+                    val resultTitle = result.selectFirst("h3.asn-search-result-title")?.text()?.trim()
+                        ?: return@mapNotNull null
+                    val resultImg = result.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${resultSlug}.jpg"
+                    TvShow(id = resultSlug, title = resultTitle, poster = resultImg)
+                }.let { relatedContent.addAll(it) }
+            } catch (_: Exception) {}
+
+            return TvShow(
+                id = id,
+                title = title,
+                overview = synopsis,
+                poster = animePoster,
+                genres = genresText.split(",").filter { it.isNotBlank() }.map { Genre(id = it.trim().lowercase(), name = it.trim()) },
+                seasons = seasons,
+                recommendations = relatedContent,
+            )
+        }
+
+        val languages = if (forcedLang != null) listOf(forcedLang) else listOf("vostfr", "vf")
         val langLabels = mapOf("vostfr" to "VOSTFR", "vf" to "VF")
 
-        // Discover which (season_num, lang) combos exist
-        val langSeasons = mutableMapOf<String, MutableList<Int>>() // lang -> season numbers
+        // ── Step 1: parse panneauAnime() calls from page JavaScript ──
+        // AnimeSama uses document.write via JS: panneauAnime("Label", "folder/lang");
+        // These are NOT rendered as <a> tags in the raw HTML, so we parse the JS calls.
+        // IMPORTANT: strip JS block comments (/* ... */) first — AnimeSama often comments out
+        // future/placeholder seasons, and our regex would otherwise pick them up.
+        val htmlNoComments = html.replace(Regex("""/\*[\s\S]*?\*/"""), "")
+        val excludedPrefixes = listOf("kai", "scans", "manga")
+        val panneauRegex = Regex("""panneauAnime\s*\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)""")
+        val scrapedFolders = panneauRegex.findAll(htmlNoComments).mapNotNull { match ->
+            val label = match.groupValues[1].trim()
+            val rawPath = match.groupValues[2].trim() // e.g. "saison2-2/vostfr"
+            // Extract the folder part (before the language suffix)
+            val folder = rawPath.split("/").firstOrNull()?.trim() ?: return@mapNotNull null
+            if (folder.isBlank()) return@mapNotNull null
+            // Skip the template/header entry: panneauAnime("nom", "url")
+            if (label == "nom" && rawPath == "url") return@mapNotNull null
+            // Skip Kai versions, Scans, Manga (match by label prefix or folder prefix)
+            val labelLower = label.lowercase()
+            if (excludedPrefixes.any { labelLower.startsWith(it) || folder.startsWith(it) }) return@mapNotNull null
+            // Skip "Sans fillers" variants (duplicate of the full version)
+            if (labelLower.contains("sans filler")) return@mapNotNull null
+            // Clean up "Avec fillers" label → just show as season name
+            val cleanLabel = if (label.lowercase().contains("avec filler")) {
+                // Try to extract a meaningful name from the folder (e.g. "saison1" → "Saison 1")
+                val num = Regex("""saison(\d+)""").find(folder)?.groupValues?.get(1)
+                if (num != null) "Saison $num" else label
+            } else label
+            folder to cleanLabel
+        }.toList().distinctBy { it.first }
 
-        for (num in 1..20) {
+        Log.d(TAG, "[Seasons] Parsed ${scrapedFolders.size} panneauAnime entries: ${scrapedFolders.map { "${it.second} -> ${it.first}" }}")
+
+        // ── Step 2: build the list of folder paths to probe ──
+        // Use scraped folders if found, otherwise fall back to sequential saison1..20
+        data class SeasonFolder(val path: String, val label: String)
+
+        val foldersToProbe = if (scrapedFolders.isNotEmpty()) {
+            scrapedFolders.map { (folder, label) -> SeasonFolder(folder, label) }
+        } else {
+            // Fallback: probe saison1..20 sequentially
+            (1..20).map { SeasonFolder("saison$it", "Saison $it") }
+        }
+
+        // ── Step 3: probe each folder for each language ──
+        // langSeasonFolders maps lang -> list of SeasonFolder that have valid episodes
+        val langSeasonFolders = mutableMapOf<String, MutableList<SeasonFolder>>()
+        var consecutiveMisses = 0
+        // Track eps1 content per lang to deduplicate seasons with identical episodes
+        val seenEps1PerLang = mutableMapOf<String, MutableSet<String>>()
+
+        for (folder in foldersToProbe) {
             var anyFound = false
             for (lang in languages) {
                 try {
-                    val probeUrl = "${baseUrl}catalogue/$id/saison$num/$lang/episodes.js"
-                    val text = fetchText(probeUrl)
+                    val probeUrl = "${baseUrl}catalogue/$slug/${folder.path}/$lang/episodes.js"
+                    val text = probeText(probeUrl)
                     if (text.contains("var eps1") && text.contains("http")) {
-                        // Count actual episode URLs to filter out generic fallback templates
-                        // (the site returns HTTP 200 with a 1-URL template for non-existent seasons)
-                        val eps1Content = Regex("""var\s+eps1\s*=\s*\[([^\]]*)\]""").find(text)?.groupValues?.get(1) ?: ""
+                        val eps1Content = Regex("""var\s+eps1\s*=\s*\[([\s\S]*?)\]""").find(text)?.groupValues?.get(1) ?: ""
                         val urlCount = Regex("""['"]https?://[^'"]+['"]""").findAll(eps1Content).count()
-                        if (urlCount >= 2) {
-                            langSeasons.getOrPut(lang) { mutableListOf() }.add(num)
+                        if (urlCount >= 1) {
+                            // Deduplicate: skip if another season already has identical eps1 URLs
+                            val eps1Urls = Regex("""['"]https?://[^'"]+['"]""").findAll(eps1Content)
+                                .map { it.value }.sorted().joinToString("|")
+                            val seen = seenEps1PerLang.getOrPut(lang) { mutableSetOf() }
+                            if (seen.contains(eps1Urls)) {
+                                Log.d(TAG, "[Seasons] Skipping duplicate $slug/${folder.path}/$lang (same eps1 as earlier season)")
+                                continue
+                            }
+                            seen.add(eps1Urls)
+                            langSeasonFolders.getOrPut(lang) { mutableListOf() }.add(folder)
                             anyFound = true
                         } else {
-                            Log.d(TAG, "[Seasons] Skipping $id/saison$num/$lang: only $urlCount URL(s) — likely fallback template")
+                            Log.d(TAG, "[Seasons] Skipping $slug/${folder.path}/$lang: only $urlCount URL(s)")
                         }
                     }
                 } catch (_: Exception) {}
             }
-            if (!anyFound && langSeasons.isNotEmpty()) break
+            if (anyFound) {
+                consecutiveMisses = 0
+            } else {
+                consecutiveMisses++
+                // For sequential probing (no scraped folders), stop after 3 consecutive misses
+                if (scrapedFolders.isEmpty() && consecutiveMisses >= 3 && langSeasonFolders.isNotEmpty()) break
+                if (scrapedFolders.isEmpty() && consecutiveMisses >= 4) break
+            }
         }
 
-        // Fallback: try without "saison" prefix (single-season anime)
-        if (langSeasons.isEmpty()) {
+        // Fallback: try without subfolder (single-season anime: slug/vf/episodes.js)
+        if (langSeasonFolders.isEmpty()) {
             for (lang in languages) {
                 try {
-                    val probeUrl = "${baseUrl}catalogue/$id/$lang/episodes.js"
-                    val text = fetchText(probeUrl)
+                    val probeUrl = "${baseUrl}catalogue/$slug/$lang/episodes.js"
+                    val text = probeText(probeUrl)
                     if (text.contains("var eps1") && text.contains("http")) {
-                        langSeasons.getOrPut(lang) { mutableListOf() }.add(0) // 0 = no season prefix
+                        langSeasonFolders.getOrPut(lang) { mutableListOf() }.add(SeasonFolder("", "Épisodes"))
                     }
                 } catch (_: Exception) {}
             }
         }
 
-        val animePoster = "${IMG_BASE}${id}.jpg"
+        // If forced language found nothing, try the other language as fallback
+        if (langSeasonFolders.isEmpty() && forcedLang != null) {
+            val fallbackLang = if (forcedLang == "vf") "vostfr" else "vf"
+            val fallbackFolders = if (scrapedFolders.isNotEmpty()) {
+                scrapedFolders.map { (folder, label) -> SeasonFolder(folder, label) }
+            } else {
+                (1..3).map { SeasonFolder("saison$it", "Saison $it") }
+            }
+            for (folder in fallbackFolders) {
+                try {
+                    val probeUrl = "${baseUrl}catalogue/$slug/${folder.path}/$fallbackLang/episodes.js"
+                    val text = probeText(probeUrl)
+                    if (text.contains("var eps1") && text.contains("http")) {
+                        val eps1Content = Regex("""var\s+eps1\s*=\s*\[([\s\S]*?)\]""").find(text)?.groupValues?.get(1) ?: ""
+                        val urlCount = Regex("""['"]https?://[^'"]+['"]""").findAll(eps1Content).count()
+                        if (urlCount >= 1) {
+                            langSeasonFolders.getOrPut(fallbackLang) { mutableListOf() }.add(folder)
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+            // Also try without subfolder
+            if (langSeasonFolders.isEmpty()) {
+                try {
+                    val probeUrl = "${baseUrl}catalogue/$slug/$fallbackLang/episodes.js"
+                    val text = probeText(probeUrl)
+                    if (text.contains("var eps1") && text.contains("http")) {
+                        langSeasonFolders.getOrPut(fallbackLang) { mutableListOf() }.add(SeasonFolder("", "Épisodes"))
+                    }
+                } catch (_: Exception) {}
+            }
+        }
 
-        if (langSeasons.size > 1) {
-            // Multiple languages: show language folders (VOSTFR / VF)
+        if (forcedLang != null || langSeasonFolders.size == 1) {
+            // Language already chosen (from VF/VOSTFR tab) or only one exists: show seasons directly
+            val entry = langSeasonFolders.entries.firstOrNull()
+            val lang = entry?.key ?: "vostfr"
+            val folders = entry?.value ?: mutableListOf()
+            for ((idx, folder) in folders.withIndex()) {
+                val seasonId = if (folder.path.isEmpty()) "$slug/$lang" else "$slug/${folder.path}/$lang"
+                seasons.add(Season(
+                    id = seasonId,
+                    number = idx + 1,
+                    title = folder.label,
+                    poster = animePoster,
+                ))
+            }
+        } else {
+            // No forced language and multiple languages: show language folders (VOSTFR / VF)
             var idx = 0
             for (lang in languages) {
-                val nums = langSeasons[lang] ?: continue
+                val folders = langSeasonFolders[lang] ?: continue
                 val label = langLabels[lang] ?: lang.uppercase()
                 idx++
-                val folderId = "$id/@$lang/${nums.joinToString(",")}"
+                val folderPaths = folders.joinToString(",") { it.path.ifEmpty { "0" } }
+                val folderLabels = folders.joinToString("|") { it.label }
+                val folderId = "$slug/@$lang/$folderPaths/$folderLabels"
                 seasons.add(Season(
                     id = folderId,
                     number = idx,
@@ -420,28 +840,13 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                     poster = animePoster,
                 ))
             }
-        } else if (langSeasons.size == 1) {
-            // Single language: show seasons directly
-            val (lang, nums) = langSeasons.entries.first()
-            for ((idx, num) in nums.withIndex()) {
-                val seasonId = if (num == 0) "$id/$lang" else "$id/saison$num/$lang"
-                seasons.add(Season(
-                    id = seasonId,
-                    number = idx + 1,
-                    title = if (num == 0) "Épisodes" else "Saison $num",
-                    poster = animePoster,
-                ))
-            }
         }
-
-        // Pas de fallback — si aucune saison n'a de contenu, on laisse la liste vide
-        // pour ne pas afficher de saison fantôme sans épisodes
 
         return TvShow(
             id = id,
             title = title,
             overview = synopsis,
-            poster = "${IMG_BASE}${id}.jpg",
+            poster = "${IMG_BASE}${slug}.jpg",
             genres = genresText.split(",").filter { it.isNotBlank() }.map { Genre(id = it.trim().lowercase(), name = it.trim()) },
             seasons = seasons,
         )
@@ -450,33 +855,53 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
     // ========== EPISODES ==========
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
-        // Two formats:
-        // 1. Language folder: "slug/@vostfr/1,2,3" → fetch episodes from multiple real seasons
-        // 2. Direct season:   "slug/saison1/vostfr" or "slug/vostfr" → single season
-        val langFolderRegex = Regex("""(.+)/@(\w+)/(.+)""")
+        // Three formats:
+        // 1. Film entry:      "slug/@filmentry-film-vostfr-0" → single film episode
+        // 2. Language folder:  "slug/@vostfr/path1,path2/Label1|Label2" → sub-seasons
+        // 3. Direct season:    "slug/saison1/vostfr" or "slug/vostfr" → single season
+
+        // ── Film entry shortcut ──
+        val filmEntryRegex = Regex("""(.+)/@filmentry-(film|oav)-(\w+)-(\d+)""")
+        val filmEntryMatch = filmEntryRegex.find(seasonId)
+        if (filmEntryMatch != null) {
+            val feSlug = filmEntryMatch.groupValues[1]
+            val feFolder = filmEntryMatch.groupValues[2]
+            val feLang = filmEntryMatch.groupValues[3]
+            val feIndex = filmEntryMatch.groupValues[4].toIntOrNull() ?: 0
+            val episodePoster = "${IMG_BASE}${feSlug}.jpg"
+            // Return a single episode that points to the specific film
+            return listOf(Episode(
+                id = "$feSlug/$feFolder/$feLang/${feIndex + 1}",
+                number = 1,
+                title = "Film${if (feIndex > 0) " ${feIndex + 1}" else ""}",
+                poster = episodePoster,
+            ))
+        }
+
+        val langFolderRegex = Regex("""(.+)/@(\w+)/([^/]+)/(.+)""")
         val langMatch = langFolderRegex.find(seasonId)
 
         // Extract anime slug for episode poster (use the anime's cover image)
         val animeSlug = langMatch?.groupValues?.get(1)
-            ?: seasonId.substringBefore("/saison").substringBefore("/vostfr").substringBefore("/vf")
+            ?: seasonId.split("/").firstOrNull() ?: seasonId
         val episodePoster = "${IMG_BASE}${animeSlug}.jpg"
 
         if (langMatch != null) {
             // Language folder mode: return sub-seasons as fake episodes
             val slug = langMatch.groupValues[1]
             val lang = langMatch.groupValues[2]
-            val seasonNums = langMatch.groupValues[3].split(",").mapNotNull { it.toIntOrNull() }
-            Log.d(TAG, "[Episodes] Language folder: lang=$lang, seasons=$seasonNums")
+            val folderPaths = langMatch.groupValues[3].split(",")
+            val folderLabels = langMatch.groupValues[4].split("|")
+            Log.d(TAG, "[Episodes] Language folder: lang=$lang, folders=$folderPaths, labels=$folderLabels")
 
             val episodes = mutableListOf<Episode>()
-            for ((idx, num) in seasonNums.withIndex()) {
-                val seasonId = if (num == 0) "$slug/$lang" else "$slug/saison$num/$lang"
-                val title = if (seasonNums.size == 1 && num == 0) "Épisodes"
-                    else "Saison $num"
+            for ((idx, path) in folderPaths.withIndex()) {
+                val subSeasonId = if (path == "0") "$slug/$lang" else "$slug/$path/$lang"
+                val label = folderLabels.getOrElse(idx) { path }
                 episodes.add(Episode(
-                    id = "@subfolder:$seasonId",
+                    id = "@subfolder:$subSeasonId",
                     number = idx + 1,
-                    title = title,
+                    title = label,
                     poster = episodePoster,
                     overview = "@subfolder",
                 ))
@@ -502,7 +927,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             return emptyList()
         }
 
-        val eps1Regex = Regex("""var\s+eps1\s*=\s*\[([^\]]*)\]""")
+        val eps1Regex = Regex("""var\s+eps1\s*=\s*\[([\s\S]*?)\]""")
         val eps1Content = eps1Regex.find(episodesJs)?.groupValues?.get(1) ?: ""
         val urlRegex = Regex("""['"]((https?://[^'"]+))['"]""")
         val urls = urlRegex.findAll(eps1Content).map { it.groupValues[1] }.toList()
@@ -524,16 +949,21 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         val servers = mutableListOf<Video.Server>()
         val urlRegex = Regex("""['"]((https?://[^'"]+))['"]""")
-        val epsRegex = Regex("""var\s+(eps\w+)\s*=\s*\[([^\]]*)\]""")
+        val epsRegex = Regex("""var\s+(eps\w+)\s*=\s*\[([\s\S]*?)\]""")
 
         if (videoType is Video.Type.Movie) {
-            // Movies: probe film/vostfr and film/vf, episode index is always 0
-            Log.d(TAG, "[Movie Servers] Starting for id=$id videoType=$videoType")
+            // Movies/OAV: ID format is "slug@filmN" or "slug@oavN" where N is the index (0-based)
+            // or legacy "slug@vf"/"slug@vostfr"/"slug" (defaults to film index 0)
+            val movieSlug = id.substringBefore("@")
+            val filmMatch = Regex("""@(film|oav)(\d+)""").find(id)
+            val folder = filmMatch?.groupValues?.get(1) ?: "film"
+            val filmIndex = filmMatch?.groupValues?.get(2)?.toIntOrNull() ?: 0
+            Log.d(TAG, "[Movie Servers] Starting for id=$id slug=$movieSlug folder=$folder filmIndex=$filmIndex")
             val languages = listOf("vf", "vostfr")
             val langLabels = mapOf("vostfr" to "VOSTFR", "vf" to "VF")
 
             for (lang in languages) {
-                val fetchUrl = "${baseUrl}catalogue/$id/film/$lang/episodes.js"
+                val fetchUrl = "${baseUrl}catalogue/$movieSlug/$folder/$lang/episodes.js"
                 Log.d(TAG, "[Movie Servers] Fetching: $fetchUrl")
                 val episodesJs = try {
                     fetchText(fetchUrl)
@@ -544,20 +974,17 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                 Log.d(TAG, "[Movie Servers] $lang response: length=${episodesJs.length}, hasEps1=${episodesJs.contains("var eps1")}")
                 if (episodesJs.isBlank() || !episodesJs.contains("var eps1")) continue
 
-                val matchCount = epsRegex.findAll(episodesJs).count()
-                Log.d(TAG, "[Movie Servers] $lang epsRegex matches: $matchCount")
-
                 for (match in epsRegex.findAll(episodesJs)) {
                     val varName = match.groupValues[1]
                     val urls = urlRegex.findAll(match.groupValues[2])
                         .map { it.groupValues[1] }.toList()
-                    Log.d(TAG, "[Movie Servers] $lang $varName: ${urls.size} urls")
-                    if (urls.isNotEmpty()) {
-                        val url = urls[0]
+                    Log.d(TAG, "[Movie Servers] $lang $varName: ${urls.size} urls, using index $filmIndex")
+                    if (filmIndex < urls.size) {
+                        val url = urls[filmIndex]
                         val serverName = getServerName(varName, url)
                         val langSuffix = if (languages.size > 1) " (${langLabels[lang]})" else ""
                         servers.add(Video.Server(
-                            id = "${varName}_$lang",
+                            id = "${varName}_${lang}_$filmIndex",
                             name = "$serverName$langSuffix",
                             src = url,
                         ))

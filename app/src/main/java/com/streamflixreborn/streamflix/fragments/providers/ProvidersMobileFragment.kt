@@ -1,5 +1,6 @@
 package com.streamflixreborn.streamflix.fragments.providers
 
+import android.content.res.Configuration
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
@@ -8,6 +9,7 @@ import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.fragment.app.Fragment
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.flowWithLifecycle
@@ -76,6 +78,12 @@ class ProvidersMobileFragment : Fragment() {
                 }
             }
         }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val spanCount = if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) 4 else 2
+        (binding.rvProviders.layoutManager as? GridLayoutManager)?.spanCount = spanCount
     }
 
     override fun onDestroyView() {
@@ -149,6 +157,8 @@ class ProvidersMobileFragment : Fragment() {
             adapter = appAdapter.apply {
                 stateRestorationPolicy = RecyclerView.Adapter.StateRestorationPolicy.PREVENT_WHEN_EMPTY
             }
+            val spanCount = if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) 4 else 2
+            (layoutManager as? GridLayoutManager)?.spanCount = spanCount
             addItemDecoration(
                 SpacingItemDecoration(32.dp(requireContext()))
             )

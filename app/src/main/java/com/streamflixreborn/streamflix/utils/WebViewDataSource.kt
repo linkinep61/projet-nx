@@ -66,36 +66,53 @@ class WebViewDataSource(
             try {
                 val escapedUrl = url.replace("\\", "\\\\").replace("'", "\\'")
 
-                // Inject XHR that stores base64 result in window variable
-                // (same proven pattern as LuluVdoExtractor's M3U8 fetch)
+                // Log the WebView's actual URL/origin for debugging
+                webView.evaluateJavascript("location.href") { href ->
+                    Log.d(TAG, "[$fetchId] WebView origin: ${href?.take(120)}")
+                }
+
+                // Use fetch() API with explicit referrer (CDN blocks .ts
+                // segments when Referer is about:blank from loadDataWithBaseURL)
                 webView.evaluateJavascript("""
                     (function() {
                         window.__${fetchId} = null;
                         window.__${fetchId}_err = null;
                         try {
-                            var xhr = new XMLHttpRequest();
-                            xhr.open('GET', '$escapedUrl', true);
-                            xhr.responseType = 'arraybuffer';
-                            xhr.withCredentials = true;
-                            xhr.setRequestHeader('Accept', '*/*');
-                            xhr.timeout = ${FETCH_TIMEOUT_MS};
-                            xhr.onload = function() {
-                                if (xhr.status >= 200 && xhr.status < 400) {
-                                    var bytes = new Uint8Array(xhr.response);
-                                    var binary = '';
-                                    var chunk = 8192;
-                                    for (var i = 0; i < bytes.length; i += chunk) {
-                                        binary += String.fromCharCode.apply(null,
-                                            bytes.subarray(i, Math.min(i + chunk, bytes.length)));
-                                    }
-                                    window.__${fetchId} = btoa(binary);
-                                } else {
-                                    window.__${fetchId}_err = 'HTTP ' + xhr.status;
+                            var ctrl = new AbortController();
+                            var tid = setTimeout(function() { ctrl.abort(); }, ${FETCH_TIMEOUT_MS});
+                            fetch('$escapedUrl', {
+                                method: 'GET',
+                                credentials: 'include',
+                                referrer: location.origin + '/',
+                                referrerPolicy: 'no-referrer-when-downgrade',
+                                signal: ctrl.signal
+                            })
+                            .then(function(resp) {
+                                clearTimeout(tid);
+                                if (!resp.ok) {
+                                    window.__${fetchId}_err = 'HTTP ' + resp.status;
+                                    throw new Error('HTTP ' + resp.status);
                                 }
-                            };
-                            xhr.onerror = function() { window.__${fetchId}_err = 'XHR error'; };
-                            xhr.ontimeout = function() { window.__${fetchId}_err = 'XHR timeout'; };
-                            xhr.send();
+                                return resp.arrayBuffer();
+                            })
+                            .then(function(buf) {
+                                var bytes = new Uint8Array(buf);
+                                var binary = '';
+                                var chunk = 8192;
+                                for (var i = 0; i < bytes.length; i += chunk) {
+                                    binary += String.fromCharCode.apply(null,
+                                        bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+                                }
+                                window.__${fetchId} = btoa(binary);
+                            })
+                            .catch(function(e) {
+                                clearTimeout(tid);
+                                if (!window.__${fetchId}_err) {
+                                    window.__${fetchId}_err = 'Fetch: ' + e.message
+                                        + ' origin=' + location.origin
+                                        + ' url=' + '$escapedUrl'.substring(0, 80);
+                                }
+                            });
                         } catch(e) {
                             window.__${fetchId}_err = 'JS: ' + e.message;
                         }

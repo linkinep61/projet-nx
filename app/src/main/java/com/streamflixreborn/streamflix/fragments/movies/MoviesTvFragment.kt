@@ -33,6 +33,8 @@ class MoviesTvFragment : Fragment() {
 
     private val appAdapter = AppAdapter()
 
+    private var currentHasMore: Boolean = false
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -45,6 +47,7 @@ class MoviesTvFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        initializeLanguageTabs()
         initializeMovies()
 
         viewLifecycleOwner.lifecycleScope.launch {
@@ -104,6 +107,65 @@ class MoviesTvFragment : Fragment() {
     }
 
 
+    private fun initializeLanguageTabs() {
+        val providerName = UserPreferences.currentProvider?.name ?: return
+
+        if (viewModel.isTypeFilterable) {
+            // Providers like AnimeSama: "Série" / "Film" tabs — reload from server on each tab
+            binding.tabLanguage.visibility = View.VISIBLE
+            binding.tabFr.text = "Série"
+            binding.tabVostfr.text = "Film"
+            selectTab(binding.tabFr, binding.tabVostfr)
+            setupTabFocus(binding.tabFr, binding.tabVostfr)
+            binding.tabFr.setOnClickListener {
+                selectTab(binding.tabFr, binding.tabVostfr)
+                viewModel.setLanguageFilter("serie")
+            }
+            binding.tabVostfr.setOnClickListener {
+                selectTab(binding.tabVostfr, binding.tabFr)
+                viewModel.setLanguageFilter("film")
+            }
+        } else if (viewModel.isFilterable) {
+            binding.tabLanguage.visibility = View.VISIBLE
+            binding.tabFr.text = "FR"
+            binding.tabVostfr.text = "VOSTFR"
+            selectTab(binding.tabFr, binding.tabVostfr)
+            setupTabFocus(binding.tabFr, binding.tabVostfr)
+            binding.tabFr.setOnClickListener {
+                selectTab(binding.tabFr, binding.tabVostfr)
+                viewModel.setLanguageFilter("vf")
+            }
+            binding.tabVostfr.setOnClickListener {
+                selectTab(binding.tabVostfr, binding.tabFr)
+                viewModel.setLanguageFilter("vostfr")
+            }
+        }
+    }
+
+    private fun setupTabFocus(tab1: android.widget.TextView, tab2: android.widget.TextView) {
+        val focusListener = View.OnFocusChangeListener { v, hasFocus ->
+            val tv = v as android.widget.TextView
+            if (hasFocus) {
+                tv.setBackgroundColor(0x66E50914.toInt()) // brighter highlight when focused
+                tv.setTextColor(0xFFFFFFFF.toInt())
+            } else {
+                // Restore proper background based on whether this tab is selected
+                tv.setBackgroundColor(if (tv.typeface?.isBold == true) 0x33E50914.toInt() else android.graphics.Color.TRANSPARENT)
+            }
+        }
+        tab1.onFocusChangeListener = focusListener
+        tab2.onFocusChangeListener = focusListener
+    }
+
+    private fun selectTab(selected: android.widget.TextView, other: android.widget.TextView) {
+        selected.setTextColor(0xFFFFFFFF.toInt())
+        selected.setTypeface(null, android.graphics.Typeface.BOLD)
+        selected.setBackgroundColor(0x33E50914)
+        other.setTextColor(0x80FFFFFF.toInt())
+        other.setTypeface(null, android.graphics.Typeface.NORMAL)
+        other.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+    }
+
     private fun initializeMovies() {
         binding.vgvMovies.apply {
             adapter = appAdapter.apply {
@@ -116,6 +178,8 @@ class MoviesTvFragment : Fragment() {
     }
 
     private fun displayMovies(movies: List<Movie>, hasMore: Boolean) {
+        currentHasMore = hasMore
+
         appAdapter.submitList(movies.onEach {
             it.itemType = AppAdapter.Type.MOVIE_GRID_TV_ITEM
         })

@@ -9,6 +9,7 @@ import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.databinding.ItemProviderMobileBinding
 import com.streamflixreborn.streamflix.databinding.ItemProviderTvBinding
 import com.streamflixreborn.streamflix.models.Provider
+import com.streamflixreborn.streamflix.utils.MiniPlayerController
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.toActivity
 import java.util.Locale
@@ -35,6 +36,8 @@ class ProviderViewHolder(
     private fun displayMobileItem(binding: ItemProviderMobileBinding) {
         binding.root.apply {
             setOnClickListener {
+                // Stop & release mini player before switching provider
+                MiniPlayerController.stop()
                 UserPreferences.currentProvider = provider.provider
                 context.toActivity()?.apply {
                     startActivity(
@@ -65,6 +68,8 @@ class ProviderViewHolder(
     private fun displayTvItem(binding: ItemProviderTvBinding) {
         binding.root.apply {
             setOnClickListener {
+                // Stop & release mini player before switching provider
+                MiniPlayerController.stop()
                 UserPreferences.currentProvider = provider.provider
                 context.toActivity()?.apply {
                     startActivity(

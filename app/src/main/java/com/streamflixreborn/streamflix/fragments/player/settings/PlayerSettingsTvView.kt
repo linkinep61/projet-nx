@@ -46,6 +46,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
     private val speedAdapter = SettingsAdapter(this, Settings.Speed.list)
     private val extraBufferingAdapter = SettingsAdapter(this, Settings.ExtraBuffering.list)
     private val softwareDecoderAdapter = SettingsAdapter(this, Settings.SoftwareDecoder.list)
+    private val channelVariantAdapter = SettingsAdapter(this, Settings.ChannelVariant.list)
     private val serversAdapter = SettingsAdapter(this, Settings.Server.list)
     private val marginAdapter = SettingsAdapter(this, Settings.Subtitle.Style.Margin.list)
 
@@ -63,6 +64,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             Setting.AUDIO,
             Setting.SUBTITLES,
             Setting.SPEED,
+            Setting.CHANNEL_VARIANT,
             Setting.EXTRA_BUFFERING,
             Setting.SOFTWARE_DECODER,
             Setting.SERVERS,
@@ -124,6 +126,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                 Setting.OPEN_SUBTITLES -> context.getString(R.string.player_settings_open_subtitles_title)
                 Setting.SUBDL -> context.getString(R.string.player_settings_subdl_title)
                 Setting.SPEED -> context.getString(R.string.player_settings_speed_title)
+                Setting.CHANNEL_VARIANT -> context.getString(R.string.player_settings_channel_variant_title)
                 Setting.EXTRA_BUFFERING -> context.getString(R.string.player_settings_extra_buffer_title)
                 Setting.SOFTWARE_DECODER -> context.getString(R.string.player_settings_software_decoder_title)
                 Setting.SERVERS -> context.getString(R.string.player_settings_servers_title)
@@ -151,6 +154,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             Setting.OPEN_SUBTITLES -> openSubtitlesAdapter
             Setting.SUBDL -> subDLAdapter
             Setting.SPEED -> speedAdapter
+            Setting.CHANNEL_VARIANT -> channelVariantAdapter
             Setting.EXTRA_BUFFERING -> extraBufferingAdapter
             Setting.SOFTWARE_DECODER -> softwareDecoderAdapter
             Setting.SERVERS -> serversAdapter
@@ -158,6 +162,20 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             else -> settingsAdapter
         }
         binding.rvSettings.requestFocus()
+    }
+
+    override fun onServerListUpdated() {
+        refreshServerList()
+    }
+
+    fun refreshServerList() {
+        serversAdapter.notifyDataSetChanged()
+        settingsAdapter.notifyDataSetChanged()
+    }
+
+    fun refreshChannelVariantList() {
+        channelVariantAdapter.notifyDataSetChanged()
+        settingsAdapter.notifyDataSetChanged()
     }
 
     fun hide() {
@@ -211,6 +229,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                                 Settings.ExtraBuffering -> settingsView.displaySettings(Setting.EXTRA_BUFFERING)
                                 Settings.SoftwareDecoder -> settingsView.displaySettings(Setting.SOFTWARE_DECODER)
                                 Settings.Server -> settingsView.displaySettings(Setting.SERVERS)
+                                Settings.ChannelVariant -> settingsView.displaySettings(Setting.CHANNEL_VARIANT)
                                 Settings.ManualZoom -> {
                                     settingsView.onManualZoomClicked?.invoke()
                                     settingsView.hide()
@@ -365,6 +384,13 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                             settingsView.hide()
                         }
 
+                        is Settings.ChannelVariant -> {
+                            Settings.ChannelVariant.list.forEach { it.isSelected = false }
+                            item.isSelected = true
+                            settingsView.onChannelVariantSelected?.invoke(item)
+                            settingsView.hide()
+                        }
+
                         is Settings.Server -> {
                             // Update selection immediately so the UI reflects
                             // the new server before the video finishes loading
@@ -403,6 +429,13 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                                     R.drawable.ic_player_settings_playback_speed
                                 )
                                 )
+
+                            Settings.ChannelVariant -> setImageDrawable(
+                                ContextCompat.getDrawable(
+                                    context,
+                                    R.drawable.ic_player_settings_servers
+                                )
+                            )
 
                             Settings.ExtraBuffering -> setImageDrawable(
                                 ContextCompat.getDrawable(
@@ -471,6 +504,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                         Settings.Audio -> context.getString(R.string.player_settings_audio_label)
                         Settings.Subtitle -> context.getString(R.string.player_settings_subtitles_label)
                         Settings.Speed -> context.getString(R.string.player_settings_speed_label)
+                        Settings.ChannelVariant -> context.getString(R.string.player_settings_channel_variant_label)
                         Settings.ExtraBuffering -> context.getString(R.string.player_settings_extra_buffer_server_label)
                         Settings.SoftwareDecoder -> context.getString(R.string.player_settings_software_decoder_label)
                         Settings.Server -> context.getString(R.string.player_settings_servers_label)
@@ -549,6 +583,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
 
                     is Settings.SoftwareDecoder -> context.getString(item.stringId)
 
+                    is Settings.ChannelVariant -> item.name
                     is Settings.Server -> item.name
 
                     else -> ""
@@ -578,6 +613,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                         }
                         Settings.Speed -> context.getString(Settings.Speed.selected.stringId)
                         Settings.ExtraBuffering -> context.getString(Settings.ExtraBuffering.selected.stringId)
+                        Settings.ChannelVariant -> Settings.ChannelVariant.selected?.name ?: ""
                         Settings.Server -> Settings.Server.selected?.name ?: ""
                         Settings.ManualZoom -> ""
                         else -> ""

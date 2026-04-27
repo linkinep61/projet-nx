@@ -9,8 +9,10 @@ import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.flowWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.navigation.fragment.findNavController
 import androidx.navigation.fragment.navArgs
 import androidx.recyclerview.widget.RecyclerView
+import com.streamflixreborn.streamflix.models.Video
 import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.database.AppDatabase
@@ -27,6 +29,7 @@ import kotlinx.coroutines.launch
 class TvShowMobileFragment : Fragment() {
 
     private var hasAutoCleared409: Boolean = false
+    private var hasAutoPlayed: Boolean = false
 
     private var _binding: FragmentTvShowMobileBinding? = null
     private val binding get() = _binding!!
@@ -69,6 +72,12 @@ class TvShowMobileFragment : Fragment() {
                     is TvShowViewModel.State.SuccessLoading -> {
                         displayTvShow(state.tvShow)
                         binding.isLoading.root.visibility = View.GONE
+
+                        // IPTV channels: auto-play and pop this detail page
+                        if (!hasAutoPlayed && isIptvChannel(state.tvShow)) {
+                            hasAutoPlayed = true
+                            autoPlayChannel(state.tvShow)
+                        }
                     }
                     is TvShowViewModel.State.FailedLoading -> {
                         val code = (state.error as? retrofit2.HttpException)?.code()
@@ -120,6 +129,47 @@ class TvShowMobileFragment : Fragment() {
                 SpacingItemDecoration(20.dp(requireContext()))
             )
         }
+    }
+
+    private fun isIptvChannel(tvShow: TvShow): Boolean {
+        return tvShow.providerName == "WiTV"
+            || tvShow.id.startsWith("ch::")
+            || tvShow.id.startsWith("sport::")
+    }
+
+    private fun autoPlayChannel(tvShow: TvShow) {
+        val videoType = Video.Type.Episode(
+            id = tvShow.id,
+            number = 1,
+            title = tvShow.title,
+            poster = tvShow.poster,
+            overview = tvShow.overview,
+            tvShow = Video.Type.Episode.TvShow(
+                id = tvShow.id,
+                title = tvShow.title,
+                poster = tvShow.poster,
+                banner = tvShow.banner,
+                releaseDate = null,
+                imdbId = tvShow.imdbId,
+            ),
+            season = Video.Type.Episode.Season(
+                number = 1,
+                title = "Live",
+            ),
+        )
+        val args = Bundle().apply {
+            putString("id", tvShow.id)
+            putString("title", tvShow.title)
+            putString("subtitle", tvShow.title)
+            putSerializable("videoType", videoType)
+        }
+        findNavController().navigate(
+            com.streamflixreborn.streamflix.R.id.player,
+            args,
+            androidx.navigation.NavOptions.Builder()
+                .setPopUpTo(com.streamflixreborn.streamflix.R.id.tv_show, true)
+                .build()
+        )
     }
 
     private fun displayTvShow(tvShow: TvShow) {

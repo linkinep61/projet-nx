@@ -70,6 +70,9 @@ class Movie(
 
 
     @Ignore
+    var isSeries: Boolean = false
+
+    @Ignore
     override lateinit var itemType: AppAdapter.Type
 
 
@@ -108,7 +111,7 @@ class Movie(
         cast,
         recommendations,
         isFavorite,
-    )
+    ).also { it.isSeries = this.isSeries }
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

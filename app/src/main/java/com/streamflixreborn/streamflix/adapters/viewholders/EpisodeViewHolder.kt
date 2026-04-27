@@ -29,6 +29,7 @@ import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.format
 import com.streamflixreborn.streamflix.utils.getCurrentFragment
 import com.streamflixreborn.streamflix.utils.loadTvShowCardArtwork
+import com.streamflixreborn.streamflix.utils.loadTvShowPoster
 import com.streamflixreborn.streamflix.utils.toActivity
 
 class EpisodeViewHolder(
@@ -147,15 +148,18 @@ class EpisodeViewHolder(
             }
         }
 
-        binding.tvEpisodeInfo.text = context.getString(
-            R.string.episode_number,
-            episode.number
-        )
+        val isSubfolder = episode.overview == "@subfolder"
+        binding.tvEpisodeInfo.text = if (isSubfolder) {
+            "Saison ${episode.number}"
+        } else {
+            context.getString(R.string.episode_number, episode.number)
+        }
 
-        binding.tvEpisodeTitle.text = episode.title ?: context.getString(
-            R.string.episode_number,
-            episode.number
-        )
+        binding.tvEpisodeTitle.text = episode.title ?: if (isSubfolder) {
+            "Saison ${episode.number}"
+        } else {
+            context.getString(R.string.episode_number, episode.number)
+        }
 
         binding.tvEpisodeReleased.apply {
             text = episode.released?.let { " • ${it.format("yyyy-MM-dd")}" }
@@ -164,7 +168,7 @@ class EpisodeViewHolder(
                 else -> View.VISIBLE
             }
         }
-        binding.tvEpisodeOverview.text = episode.overview ?: ""
+        binding.tvEpisodeOverview.text = if (isSubfolder) "" else (episode.overview ?: "")
     }
 
     private fun displayTvItem(binding: ItemEpisodeTvBinding) {
@@ -352,44 +356,78 @@ class EpisodeViewHolder(
             }
         }
 
+        val isIptv = episode.tvShow?.id?.startsWith("ch::") == true
+                || episode.tvShow?.id?.startsWith("sport::") == true
+
         binding.ivEpisodeTvShowPoster.apply {
             clipToOutline = true
-            loadContinueWatchingArtwork()
+            if (isIptv && episode.tvShow != null) {
+                // IPTV: use same poster style as regular category items (FIT_CENTER + dark bg)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                setBackgroundColor(0xFF1a1a2e.toInt())
+                setPadding(16, 16, 16, 16)
+                loadTvShowPoster(episode.tvShow!!) {
+                    fallback(com.streamflixreborn.streamflix.R.drawable.glide_fallback_cover)
+                    transition(DrawableTransitionOptions.withCrossFade())
+                }
+            } else {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setBackgroundColor(0x00000000)
+                setPadding(0, 0, 0, 0)
+                loadContinueWatchingArtwork()
+            }
         }
 
         binding.pbEpisodeProgress.apply {
-            val watchHistory = episode.watchHistory
-
-            progress = when {
-                watchHistory != null -> (watchHistory.lastPlaybackPositionMillis * 100 / watchHistory.durationMillis.toDouble()).toInt()
-                else -> 0
-            }
-            visibility = when {
-                watchHistory != null -> View.VISIBLE
-                else -> View.GONE
+            if (isIptv) {
+                visibility = View.GONE
+            } else {
+                val watchHistory = episode.watchHistory
+                progress = when {
+                    watchHistory != null -> (watchHistory.lastPlaybackPositionMillis * 100 / watchHistory.durationMillis.toDouble()).toInt()
+                    else -> 0
+                }
+                visibility = when {
+                    watchHistory != null -> View.VISIBLE
+                    else -> View.GONE
+                }
             }
         }
 
-        binding.tvEpisodeTvShowTitle.text = episode.tvShow?.title ?: ""
+        binding.tvEpisodeTvShowTitle.apply {
+            text = episode.tvShow?.title ?: ""
+            if (isIptv) {
+                // IPTV: center the title like regular category items
+                gravity = android.view.Gravity.CENTER_HORIZONTAL
+            }
+        }
 
-        binding.tvEpisodeInfo.text = episode.season?.takeIf { it.number != 0 }?.let { season ->
-            context.getString(
-                R.string.episode_item_info,
-                season.number,
-                episode.number,
-                episode.title ?: context.getString(
-                    R.string.episode_number,
-                    episode.number
+        binding.tvEpisodeInfo.apply {
+            if (isIptv) {
+                // IPTV: hide "S1 E1 · Signal en Direct" subtitle
+                visibility = View.GONE
+            } else {
+                visibility = View.VISIBLE
+                text = episode.season?.takeIf { it.number != 0 }?.let { season ->
+                    context.getString(
+                        R.string.episode_item_info,
+                        season.number,
+                        episode.number,
+                        episode.title ?: context.getString(
+                            R.string.episode_number,
+                            episode.number
+                        )
+                    )
+                } ?: context.getString(
+                    R.string.episode_item_info_episode_only,
+                    episode.number,
+                    episode.title ?: context.getString(
+                        R.string.episode_number,
+                        episode.number
+                    )
                 )
-            )
-        } ?: context.getString(
-            R.string.episode_item_info_episode_only,
-            episode.number,
-            episode.title ?: context.getString(
-                R.string.episode_number,
-                episode.number
-            )
-        )
+            }
+        }
     }
 
     private fun displayContinueWatchingTvItem(binding: ItemEpisodeContinueWatchingTvBinding) {
@@ -471,46 +509,77 @@ class EpisodeViewHolder(
             }
         }
 
+        val isIptvTv = episode.tvShow?.id?.startsWith("ch::") == true
+                || episode.tvShow?.id?.startsWith("sport::") == true
+
         binding.ivEpisodeTvShowPoster.apply {
             clipToOutline = true
-            loadContinueWatchingArtwork(withFallback = true)
+            if (isIptvTv && episode.tvShow != null) {
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                setBackgroundColor(0xFF1a1a2e.toInt())
+                setPadding(16, 16, 16, 16)
+                loadTvShowPoster(episode.tvShow!!) {
+                    fallback(com.streamflixreborn.streamflix.R.drawable.glide_fallback_cover)
+                    transition(DrawableTransitionOptions.withCrossFade())
+                }
+            } else {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setBackgroundColor(0x00000000)
+                setPadding(0, 0, 0, 0)
+                loadContinueWatchingArtwork(withFallback = true)
+            }
         }
 
         binding.pbEpisodeProgress.apply {
-            val watchHistory = episode.watchHistory
-
-            progress = when {
-                watchHistory != null -> (watchHistory.lastPlaybackPositionMillis * 100 / watchHistory.durationMillis.toDouble()).toInt()
-                episode.isWatched -> 100
-                else -> 0
-            }
-            visibility = when {
-                watchHistory != null -> View.VISIBLE
-                episode.isWatched -> View.VISIBLE
-                else -> View.GONE
+            if (isIptvTv) {
+                visibility = View.GONE
+            } else {
+                val watchHistory = episode.watchHistory
+                progress = when {
+                    watchHistory != null -> (watchHistory.lastPlaybackPositionMillis * 100 / watchHistory.durationMillis.toDouble()).toInt()
+                    episode.isWatched -> 100
+                    else -> 0
+                }
+                visibility = when {
+                    watchHistory != null -> View.VISIBLE
+                    episode.isWatched -> View.VISIBLE
+                    else -> View.GONE
+                }
             }
         }
 
-        binding.tvEpisodeTvShowTitle.text = episode.tvShow?.title ?: ""
+        binding.tvEpisodeTvShowTitle.apply {
+            text = episode.tvShow?.title ?: ""
+            if (isIptvTv) {
+                gravity = android.view.Gravity.CENTER_HORIZONTAL
+            }
+        }
 
-        binding.tvEpisodeInfo.text = episode.season?.takeIf { it.number != 0 }?.let { season ->
-            context.getString(
-                R.string.episode_item_info,
-                season.number,
-                episode.number,
-                episode.title ?: context.getString(
-                    R.string.episode_number,
-                    episode.number
+        binding.tvEpisodeInfo.apply {
+            if (isIptvTv) {
+                visibility = View.GONE
+            } else {
+                visibility = View.VISIBLE
+                text = episode.season?.takeIf { it.number != 0 }?.let { season ->
+                    context.getString(
+                        R.string.episode_item_info,
+                        season.number,
+                        episode.number,
+                        episode.title ?: context.getString(
+                            R.string.episode_number,
+                            episode.number
+                        )
+                    )
+                } ?: context.getString(
+                    R.string.episode_item_info_episode_only,
+                    episode.number,
+                    episode.title ?: context.getString(
+                        R.string.episode_number,
+                        episode.number
+                    )
                 )
-            )
-        } ?: context.getString(
-            R.string.episode_item_info_episode_only,
-            episode.number,
-            episode.title ?: context.getString(
-                R.string.episode_number,
-                episode.number
-            )
-        )
+            }
+        }
     }
 
     private fun ImageView.loadContinueWatchingArtwork(withFallback: Boolean = false) {

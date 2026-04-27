@@ -831,8 +831,8 @@ class TmdbProvider(override val language: String) : Provider {
                         val n = srv.name.lowercase()
                         n.contains("vostfr") || n.contains("vost") || (n.contains("vo") && !n.contains("vof"))
                     }
-                    val reliableServers = listOf("vidzy", "uqload", "filemoon", "filmoon", "voe", "netu", "sharecloudy", "playmogo")
-                    val unreliableServers = listOf("premium", "fsvid", "dood")
+                    val reliableServers = listOf("vidzy", "dood", "voe", "filemoon", "filmoon", "netu", "sharecloudy", "playmogo")
+                    val unreliableServers = listOf("premium", "fsvid", "uqload")
                     val serverPriority: (Video.Server) -> Int = { srv ->
                         val n = srv.name.lowercase()
                         when {
@@ -863,86 +863,15 @@ class TmdbProvider(override val language: String) : Provider {
                 }
             }
             "es" -> {
-                // TMDB Spagnolo: Utilizza ESCLUSIVAMENTE server certificati con audio spagnolo ([LAT] o [CAST])
-                
-                val targetTitle = when (videoType) {
-                    is Video.Type.Movie -> videoType.title
-                    is Video.Type.Episode -> videoType.tvShow.title
-                }
-                
-                Log.i("StreamFlixES", "[SEARCH START] -> Target: $targetTitle (${if (videoType is Video.Type.Movie) "Movie" else "TV Show"})")
-
-                // Funzione di matching rigorosa per i titoli e tipo
-                fun isMatch(item: AppAdapter.Item, target: String): Boolean {
-                    val isCorrectType = if (videoType is Video.Type.Movie) item is Movie else item is TvShow
-                    if (!isCorrectType) return false
-
-                    val itemTitle = if (item is Movie) item.title else (item as TvShow).title
-                    val nItem = itemTitle.lowercase().replace(Regex("[^a-z0-9]"), "")
-                    val nTarget = target.lowercase().replace(Regex("[^a-z0-9]"), "")
-                    
-                    // Match esatto (normalizzato) ha la priorità
-                    if (nItem == nTarget) return true
-                    
-                    // Match parziale se contenuto e differenza lunghezza minima
-                    if (nItem.contains(nTarget) || nTarget.contains(nItem)) {
-                        val diff = Math.abs(nItem.length - nTarget.length)
-                        if (diff <= 5) return true
-                    }
-                    
-                    // Match per parole (almeno una deve corrispondere esattamente se il target è corto, o tutte se lungo)
-                    val cleanWords: (String) -> Set<String> = { s ->
-                        s.lowercase()
-                            .replace(Regex("[^a-z0-9 ]"), " ")
-                            .split(Regex("\\s+"))
-                            .filter { it.length > 2 }
-                            .toSet()
-                    }
-                    val nItemWords = cleanWords(itemTitle)
-                    val nTargetWords = cleanWords(target)
-                    
-                    if (nItemWords.isEmpty() || nTargetWords.isEmpty()) return false
-                    
-                    // Se il target ha solo una parola importante, deve esserci
-                    if (nTargetWords.size == 1) return nItemWords.contains(nTargetWords.first())
-                    
-                    // Altrimenti tutte le parole del target devono essere presenti nell'item
-                    return nItemWords.containsAll(nTargetWords) || nTargetWords.containsAll(nItemWords)
-                }
-
-                coroutineScope {
-                    val providers = listOf(CuevanaEuProvider, PelisplustoProvider, SoloLatinoProvider, CineCalidadProvider, PoseidonHD2Provider)
-                    val deferred = providers.map { provider ->
-                        async {
-                            try {
-                                val searchResults = provider.search(targetTitle, 1)
-                                val bestMatch = searchResults.firstOrNull { isMatch(it, targetTitle) }
-                                val id = if (bestMatch is Movie) bestMatch.id else (bestMatch as? TvShow)?.id
-                                
-                                if (id != null) {
-                                    val matchTitle = if (bestMatch is Movie) bestMatch.title else (bestMatch as? TvShow)?.title
-                                    Log.i("StreamFlixES", "[MATCH FOUND] -> Provider: ${provider.name}, Matched: '$matchTitle', ID: $id")
-                                    
-                                    val allServers = provider.getServers(id, videoType)
-                                    val filtered = allServers.filter { s ->
-                                        val n = s.name.uppercase()
-                                        n.contains("[LAT]") || n.contains("[CAST]") || n.contains("[CAS]") || n.contains("[ES]") ||
-                                        n.contains("(LAT)") || n.contains("(ESP)") || n.contains("LATINO") || n.contains("CASTELLANO")
-                                    }
-                                    Log.i("StreamFlixES", "[SERVERS OK] -> ${provider.name}: ${filtered.size}/${allServers.size} servers kept")
-                                    filtered
-                                } else {
-                                    Log.d("StreamFlixES", "[NO MATCH] -> ${provider.name} did not find a valid match for '$targetTitle'")
-                                    emptyList()
-                                }
-                            } catch (e: Exception) { 
-                                Log.e("StreamFlixES", "[PROVIDER ERROR] -> ${provider.name}: ${e.message}")
-                                emptyList() 
-                            }
-                        }
-                    }
-                    servers.addAll(deferred.awaitAll().flatten())
-                }
+                // Providers espagnols archivés — fallback sur extracteurs globaux
+                servers.addAll(listOf(
+                    VixSrcExtractor().server(videoType),
+                    VidsrcNetExtractor().server(videoType),
+                    VidLinkExtractor().server(videoType),
+                    VidsrcRuExtractor().server(videoType),
+                    TwoEmbedExtractor().server(videoType),
+                ))
+                VideasyExtractor().server(videoType, language)?.let { servers.add(it) }
             }
             else -> {
                 // Per inglese (en) o altre lingue non specifiche, usiamo i server globali

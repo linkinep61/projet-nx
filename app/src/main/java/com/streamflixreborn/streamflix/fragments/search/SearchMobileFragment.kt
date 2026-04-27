@@ -1,5 +1,6 @@
 package com.streamflixreborn.streamflix.fragments.search
 
+import android.content.res.Configuration
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
@@ -14,6 +15,7 @@ import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.flowWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.adapters.AppAdapter
@@ -124,6 +126,12 @@ class SearchMobileFragment : Fragment() {
         }
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val spanCount = if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) 6 else 3
+        (binding.rvSearch.layoutManager as? GridLayoutManager)?.spanCount = spanCount
+    }
+
     override fun onDestroyView() {
         super.onDestroyView()
         voiceHelper.stopRecognition()
@@ -215,6 +223,8 @@ class SearchMobileFragment : Fragment() {
         }
 
         binding.rvSearch.apply {
+            val spanCount = if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) 6 else 3
+            (layoutManager as? GridLayoutManager)?.spanCount = spanCount
             adapter = appAdapter.apply {
                 stateRestorationPolicy = RecyclerView.Adapter.StateRestorationPolicy.PREVENT_WHEN_EMPTY
             }
@@ -225,6 +235,14 @@ class SearchMobileFragment : Fragment() {
     }
 
     private fun displaySearch(list: List<AppAdapter.Item>, hasMore: Boolean) {
+        if (list.isEmpty() && viewModel.query.isNotEmpty()) {
+            // Search returned no results — show a toast instead of clearing the screen
+            Toast.makeText(requireContext(), getString(R.string.search_no_results), Toast.LENGTH_SHORT).show()
+            // Reload genres so the screen isn't blank
+            viewModel.search("")
+            return
+        }
+
         appAdapter.submitList(list.onEach {
             when (it) {
                 is Genre -> it.itemType = AppAdapter.Type.GENRE_GRID_MOBILE_ITEM

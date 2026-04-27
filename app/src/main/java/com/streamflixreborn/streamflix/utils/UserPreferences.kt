@@ -115,6 +115,36 @@ object UserPreferences {
         get() = Key.PROVIDER_LANGUAGE.getString()
         set(value) = Key.PROVIDER_LANGUAGE.setString(value)
 
+    // ── Failed channels (hidden until a working server is found) ──
+
+    private fun getFailedChannels(): MutableSet<String> {
+        val raw = Key.FAILED_CHANNELS.getString() ?: return mutableSetOf()
+        return raw.split("||").filter { it.isNotBlank() }.toMutableSet()
+    }
+
+    private fun saveFailedChannels(set: Set<String>) {
+        Key.FAILED_CHANNELS.setString(set.joinToString("||"))
+    }
+
+    fun markChannelFailed(channelId: String) {
+        val set = getFailedChannels()
+        set.add(channelId)
+        saveFailedChannels(set)
+    }
+
+    fun unmarkChannelFailed(channelId: String) {
+        val set = getFailedChannels()
+        if (set.remove(channelId)) saveFailedChannels(set)
+    }
+
+    fun isChannelFailed(channelId: String): Boolean {
+        return getFailedChannels().contains(channelId)
+    }
+
+    fun clearFailedChannels() {
+        Key.FAILED_CHANNELS.remove()
+    }
+
     var captionTextSize: Float
         get() = Key.CAPTION_TEXT_SIZE.getFloat()
             ?: PlayerSettingsView.Settings.Subtitle.Style.TextSize.DEFAULT.value
@@ -463,6 +493,12 @@ object UserPreferences {
         get() = Key.SCREEN_PADDING_Y.getInt() ?: 0
         set(value) = Key.SCREEN_PADDING_Y.setInt(value)
 
+    var miniPlayerEnabled: Boolean
+        get() = Key.MINI_PLAYER_ENABLED.getBoolean() ?: true
+        set(value) {
+            Key.MINI_PLAYER_ENABLED.setBoolean(value)
+        }
+
     private enum class Key {
         APP_LAYOUT,
         CURRENT_LANGUAGE,
@@ -505,7 +541,9 @@ object UserPreferences {
         BYPASS_WS_ADVERTISED_HOST,
         UPDATE_CHECK_ENABLED,
         PROVIDER_LANGUAGE,
-        HLS_PROXY_URL;
+        HLS_PROXY_URL,
+        MINI_PLAYER_ENABLED,
+        FAILED_CHANNELS;
 
         fun getBoolean(): Boolean? = when {
             prefs.contains(name) -> prefs.getBoolean(name, false)

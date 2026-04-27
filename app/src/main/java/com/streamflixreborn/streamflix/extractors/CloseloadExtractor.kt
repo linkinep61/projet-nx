@@ -4,7 +4,6 @@ import android.util.Base64
 import androidx.media3.common.MimeTypes
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
-import com.streamflixreborn.streamflix.providers.RidomoviesProvider
 import com.streamflixreborn.streamflix.utils.JsUnpacker
 import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
@@ -22,7 +21,7 @@ class CloseloadExtractor : Extractor() {
 
     override suspend fun extract(link: String): Video {
         val service = Service.build(mainUrl)
-        val document = service.get(link, RidomoviesProvider.URL)
+        val document = service.get(link, "https://ridomovies.tv/")
         val html = document.toString()
         
         val unpacker = JsUnpacker(html)

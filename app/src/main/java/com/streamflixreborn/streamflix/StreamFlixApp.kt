@@ -9,10 +9,8 @@ import java.security.Security
 import org.conscrypt.Conscrypt
 import android.util.Log
 import com.streamflixreborn.streamflix.database.AppDatabase
-import com.streamflixreborn.streamflix.providers.AniWorldProvider
 import com.streamflixreborn.streamflix.providers.Provider
 import com.streamflixreborn.streamflix.providers.ProviderConfigUrl
-import com.streamflixreborn.streamflix.providers.SerienStreamProvider
 import com.streamflixreborn.streamflix.utils.AppLanguageManager
 import com.streamflixreborn.streamflix.utils.ArtworkRepairScheduler
 import com.streamflixreborn.streamflix.utils.CacheUtils
@@ -32,6 +30,36 @@ class StreamFlixApp : Application() {
         @Volatile
         var currentActivity: Activity? = null
             private set
+
+        /**
+         * Pre-initialized Cronet engine (lazy, thread-safe).
+         * CronetEngine.Builder().build() takes 300-800ms on ARM/Chromecast.
+         * By initializing once at app level, the player avoids this cost.
+         *
+         * Stored as Any? to avoid forcing the classloader to resolve
+         * org.chromium.net.CronetEngine when StreamFlixApp is loaded.
+         * If Cronet isn't on the device, the app still starts normally.
+         */
+        @Volatile
+        private var _cronetEngine: Any? = null
+
+        fun getCronetEngine(context: Context): Any? {
+            return _cronetEngine ?: synchronized(this) {
+                _cronetEngine ?: try {
+                    val clz = Class.forName("org.chromium.net.CronetEngine\$Builder")
+                    val ctor = clz.getConstructor(Context::class.java)
+                    val builder = ctor.newInstance(context.applicationContext)
+                    val buildMethod = clz.getMethod("build")
+                    buildMethod.invoke(builder).also {
+                        _cronetEngine = it
+                        Log.d("StreamFlixApp", "CronetEngine initialized")
+                    }
+                } catch (e: Exception) {
+                    Log.w("StreamFlixApp", "CronetEngine init failed (Cronet may not be available): ${e.message}")
+                    null
+                }
+            }
+        }
     }
 
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -71,42 +99,63 @@ class StreamFlixApp : Application() {
         val threshold = if (isTv) 10L else 50L
 
         applicationScope.launch(Dispatchers.IO) {
+            // Pre-init Cronet in background — saves 300-800ms when player opens
+            try { getCronetEngine(appContext) } catch (_: Exception) {}
+
             AppDatabase.setup(appContext)
-            SerienStreamProvider.initialize(appContext)
-            AniWorldProvider.initialize(appContext)
-            ArtworkRepairScheduler.schedule(appContext, UserPreferences.currentProvider)
+            // Skip ArtworkRepair on TV — too expensive for Chromecast's limited resources
+            if (!isTv) {
+                ArtworkRepairScheduler.schedule(appContext, UserPreferences.currentProvider)
+            }
             CacheUtils.autoClearIfNeeded(appContext, thresholdMb = threshold)
 
-            // Auto-refresh URLs for all providers that have auto-update enabled
-            refreshProviderUrls()
+            // Refresh URLs only for the ACTIVE provider at startup.
+            // Other providers refresh lazily when the user switches to them.
+            refreshActiveProviderUrl()
+        }
+
+        // Pre-warm ExoPlayer class loading + codec enumeration on a background thread.
+        // On Chromecast, the first ExoPlayer.Builder.build() triggers MediaCodecList
+        // enumeration which takes 5-10 seconds. Pre-warming caches these results
+        // so the player fragment's build() is near-instant (~100ms).
+        applicationScope.launch(Dispatchers.Default) {
+            try {
+                val start = android.os.SystemClock.elapsedRealtime()
+                // Force MediaCodecList enumeration (cached per-process)
+                android.media.MediaCodecList(android.media.MediaCodecList.ALL_CODECS).codecInfos
+                val elapsed = android.os.SystemClock.elapsedRealtime() - start
+                Log.d("StreamFlixApp", "Codec enumeration pre-warmed in ${elapsed}ms")
+            } catch (e: Exception) {
+                Log.w("StreamFlixApp", "Codec warmup failed: ${e.message}")
+            }
         }
     }
 
     /**
-     * Refresh URLs for all providers that implement ProviderConfigUrl
-     * and have auto-update enabled. Runs in background on app startup.
+     * Refresh URL only for the currently active provider at startup.
+     * Other providers refresh lazily when the user switches to them.
+     * This saves 10+ seconds of sequential HTTP requests on startup.
      */
-    private suspend fun refreshProviderUrls() {
-        val configProviders = Provider.providers.keys.filterIsInstance<ProviderConfigUrl>()
-        Log.d("StreamFlixApp", "Refreshing URLs for ${configProviders.size} providers...")
-
-        for (provider in configProviders) {
-            try {
-                val autoUpdate = UserPreferences.getProviderCache(
-                    provider as Provider,
-                    UserPreferences.PROVIDER_AUTOUPDATE
-                )
-                if (autoUpdate == "false") {
-                    Log.d("StreamFlixApp", "  ${(provider as Provider).name}: auto-update disabled, skipping")
-                    continue
-                }
-                provider.onChangeUrl()
-                Log.d("StreamFlixApp", "  ${(provider as Provider).name}: URL refreshed → ${(provider as Provider).baseUrl}")
-            } catch (e: Exception) {
-                Log.w("StreamFlixApp", "  ${(provider as Provider).name}: URL refresh failed: ${e.message}")
-            }
+    private suspend fun refreshActiveProviderUrl() {
+        val current = UserPreferences.currentProvider
+        if (current == null || current !is ProviderConfigUrl) {
+            Log.d("StreamFlixApp", "Active provider doesn't need URL refresh")
+            return
         }
-        Log.d("StreamFlixApp", "Provider URL refresh complete")
+        try {
+            val autoUpdate = UserPreferences.getProviderCache(
+                current,
+                UserPreferences.PROVIDER_AUTOUPDATE
+            )
+            if (autoUpdate == "false") {
+                Log.d("StreamFlixApp", "  ${current.name}: auto-update disabled, skipping")
+                return
+            }
+            (current as ProviderConfigUrl).onChangeUrl()
+            Log.d("StreamFlixApp", "  ${current.name}: URL refreshed → ${current.baseUrl}")
+        } catch (e: Exception) {
+            Log.w("StreamFlixApp", "  ${current.name}: URL refresh failed: ${e.message}")
+        }
     }
 
     override fun onTrimMemory(level: Int) {

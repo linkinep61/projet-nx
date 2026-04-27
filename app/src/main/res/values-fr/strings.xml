@@ -38,6 +38,7 @@
     <string name="theme_nero_amoled_oled">Noir Amoled/Oled</string>
 
     <string name="search_input_hint">Rechercher des films, séries TV</string>
+    <string name="search_no_results">Aucun résultat trouvé</string>
     <string name="global_search">Recherche globale</string>
     <string name="global_search_films">Recherche globale films et séries</string>
     <string name="global_search_anime">Recherche globale anime</string>
@@ -219,6 +220,8 @@
     <string name="player_settings_speed_1_5">× 1.5</string>
     <string name="player_settings_speed_1_75">× 1.75</string>
     <string name="player_settings_speed_2">× 2</string>
+    <string name="player_settings_channel_variant_title">Chaîne</string>
+    <string name="player_settings_channel_variant_label">Chaîne</string>
     <string name="player_settings_servers_title">Serveurs</string>
     <string name="player_settings_servers_label">Serveurs</string>
 
