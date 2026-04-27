@@ -41,7 +41,7 @@ class UpdateAppMobileDialog(
         }.joinToString("\n")
 
         binding.btnUpdateCancel.setOnClickListener {
-            hide()
+            dismiss()
         }
 
 
@@ -54,5 +54,12 @@ class UpdateAppMobileDialog(
 
     fun setOnUpdateClickListener(listener: (view: View) -> Unit) {
         binding.btnUpdate.setOnClickListener(listener)
+    }
+
+    fun setOnCancelClickListener(listener: () -> Unit) {
+        binding.btnUpdateCancel.setOnClickListener {
+            listener()
+            dismiss()
+        }
     }
 }

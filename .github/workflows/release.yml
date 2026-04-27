@@ -33,6 +33,17 @@ jobs:
       - name: Decode Keystore
         run: echo "${{ secrets.KEYSTORE }}" | base64 -d > streamflix-release.jks
 
+      - name: Inject version from Git tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "Injecting version $TAG from tag"
+          # Calculate versionCode from tag parts: major*10000 + minor*100 + patch
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$TAG"
+          VERSION_CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+          sed -i "s/versionCode [0-9]*/versionCode $VERSION_CODE/" app/build.gradle
+          sed -i "s/versionName \"[^\"]*\"/versionName \"$TAG\"/" app/build.gradle
+          echo "Set versionName=$TAG versionCode=$VERSION_CODE"
+
       - name: Make Gradle executable
         run: chmod +x ./gradlew
 

@@ -41,7 +41,7 @@ class UpdateAppTvDialog(
         }.joinToString("\n")
 
         binding.btnUpdateCancel.setOnClickListener {
-            hide()
+            dismiss()
         }
 
         binding.btnUpdate.requestFocus()
@@ -56,5 +56,12 @@ class UpdateAppTvDialog(
 
     fun setOnUpdateClickListener(listener: (view: View) -> Unit) {
         binding.btnUpdate.setOnClickListener(listener)
+    }
+
+    fun setOnCancelClickListener(listener: () -> Unit) {
+        binding.btnUpdateCancel.setOnClickListener {
+            listener()
+            dismiss()
+        }
     }
 }

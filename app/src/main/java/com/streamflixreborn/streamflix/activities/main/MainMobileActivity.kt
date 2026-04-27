@@ -190,7 +190,7 @@ class MainMobileActivity : FragmentActivity() {
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
                 when (state) {
                     is MainViewModel.State.SuccessCheckingUpdate -> {
-                        showUpdateDialog(state)
+                        if (!viewModel.updateDismissed) showUpdateDialog(state)
                     }
 
                     MainViewModel.State.DownloadingUpdate -> updateAppDialog?.isLoading = true
@@ -274,6 +274,9 @@ class MainMobileActivity : FragmentActivity() {
                 if (!dialog.isLoading) {
                     viewModel.downloadUpdate(this@MainMobileActivity, state.asset)
                 }
+            }
+            dialog.setOnCancelClickListener {
+                viewModel.updateDismissed = true
             }
             dialog.show()
         }
