@@ -84,6 +84,7 @@ interface Provider {
             VoirDramaProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             VoirAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
             WiTvProvider to ProviderSupport(movies = false, tvShows = true, enrichHome = false),
+            VavooProvider to ProviderSupport(movies = false, tvShows = true, enrichHome = false),
         )
 
         // Helper functions to check support
