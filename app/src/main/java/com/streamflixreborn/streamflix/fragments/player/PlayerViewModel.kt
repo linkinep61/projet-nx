@@ -9,9 +9,11 @@ import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.CustomTabHelper
 import com.streamflixreborn.streamflix.utils.EpisodeManager
 import com.streamflixreborn.streamflix.utils.OpenSubtitles
+import com.streamflixreborn.streamflix.providers.WiTvProvider
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.format
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,6 +34,12 @@ class PlayerViewModel(
 
     private val _playPreviousOrNextEpisode = MutableSharedFlow<Video.Type.Episode>()
     val playPreviousOrNextEpisode: SharedFlow<Video.Type.Episode> = _playPreviousOrNextEpisode
+
+    // Progressive additional servers (e.g. OLA TV emitting as discovered)
+    private val _additionalServer = MutableSharedFlow<Video.Server>(extraBufferCapacity = 100)
+    val additionalServer: SharedFlow<Video.Server> = _additionalServer
+    private var additionalServerJob: Job? = null
+
     init {
         getServers(videoType, id)
         getSubtitles(videoType)
@@ -120,6 +128,18 @@ class PlayerViewModel(
 
             Log.d("PlayerViewModel", "Ricerca server completata: ${servers.size} server trovati")
             _state.emit(State.SuccessLoadingServers(servers))
+
+            // Start collecting progressive OLA TV servers if provider is WiTV
+            val provider = UserPreferences.currentProvider
+            if (provider is WiTvProvider) {
+                additionalServerJob?.cancel()
+                additionalServerJob = viewModelScope.launch(Dispatchers.IO) {
+                    provider.additionalServersFlow.collect { server ->
+                        Log.d("PlayerViewModel", "Additional server arrived: ${server.name}")
+                        _additionalServer.emit(server)
+                    }
+                }
+            }
         } catch (e: Exception) {
             Log.e("PlayerViewModel", "Errore ricerca server: ", e)
             _state.emit(State.FailedLoadingServers(e))

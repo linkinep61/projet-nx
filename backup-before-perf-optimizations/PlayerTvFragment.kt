@@ -87,7 +87,6 @@ import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.models.WatchItem
 import com.streamflixreborn.streamflix.ui.PlayerTvView
 import com.streamflixreborn.streamflix.utils.DnsResolver
-import com.streamflixreborn.streamflix.utils.EnrichmentTrigger
 import com.streamflixreborn.streamflix.utils.NetworkClient
 import com.streamflixreborn.streamflix.utils.EpisodeManager
 import com.streamflixreborn.streamflix.utils.MediaServer
@@ -225,7 +224,6 @@ class PlayerTvFragment : Fragment() {
     private lateinit var progressRunnable: Runnable
     private lateinit var gestureHelper: PlayerGestureHelper
 
-
     private var servers = listOf<Video.Server>()
     private var zoomToast: Toast? = null
 
@@ -354,15 +352,11 @@ class PlayerTvFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
 
         // Defer ExoPlayer creation to allow the layout to inflate and render first.
-        // Codec enumeration is pre-warmed in StreamFlixApp so build() is fast (~100ms).
+        // On Chromecast (ARM), buildPlayer() + codec enumeration can block for seconds,
+        // causing ANR if done synchronously in onViewCreated.
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             if (isAdded && _binding != null) {
-                val transferred = MiniPlayerController.transferPlayer()
-                if (transferred != null) {
-                    attachTransferredPlayer(transferred)
-                } else {
-                    initializePlayer(false)
-                }
+                initializePlayer(false)
             }
         }
         initializeVideo()
@@ -1394,18 +1388,15 @@ class PlayerTvFragment : Fragment() {
             val urlNeedsDoH = needsDoH(video.source)
             val dataSourceMismatch = (urlNeedsCronet && !usingCronet) || (!urlNeedsCronet && usingCronet)
                 || (urlNeedsDoH && !usingDoH) || (!urlNeedsDoH && usingDoH)
-            // Only rebuild the player for buffering/decoder changes.
-            // DataSource mismatches are handled via explicit MediaSource — no costly release().
-            val needsPlayerRebuild =
-                extraBuffering != currentExtraBuffering || softwareDecoder != currentSoftwareDecoder
+            val needsReinit =
+                extraBuffering != currentExtraBuffering || softwareDecoder != currentSoftwareDecoder || dataSourceMismatch
 
             if (dataSourceMismatch) {
-                Log.d("PlayerNetwork", "DataSource mismatch: needsCronet=$urlNeedsCronet(was=$usingCronet), needsDoH=$urlNeedsDoH(was=$usingDoH) → hot-swap (no player rebuild)")
+                Log.d("PlayerNetwork", "DataSource mismatch: needsCronet=$urlNeedsCronet(was=$usingCronet), needsDoH=$urlNeedsDoH(was=$usingDoH) → switching")
                 httpDataSource = createHttpDataSourceFactory(video.source)
-                dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
             }
 
-            if (needsPlayerRebuild) {
+            if (needsReinit) {
                 initializePlayer(extraBuffering, softwareDecoder, video.source)
                 player.playlistMetadata = MediaMetadata.Builder()
                     .setTitle(resolvePlayerTitle())
@@ -1458,13 +1449,6 @@ class PlayerTvFragment : Fragment() {
                 player.setMediaSource(hlsSource)
                 usingWebView = true
                 Log.d("PlayerNetwork", "WebView bypass: using WebViewDataSource for HLS playback")
-            } else if (dataSourceMismatch && !needsPlayerRebuild) {
-                // DataSource changed — create MediaSource with the updated factory
-                // instead of rebuilding the entire player (avoids 5-14s release() ANR).
-                val source = DefaultMediaSourceFactory(dataSourceFactory).createMediaSource(mediaItem)
-                player.setMediaSource(source)
-                usingWebView = false
-                Log.d("PlayerNetwork", "DataSource hot-swap: explicit MediaSource (no player rebuild)")
             } else {
                 player.setMediaItem(mediaItem)
                 usingWebView = false
@@ -1777,9 +1761,6 @@ class PlayerTvFragment : Fragment() {
 
             player.prepare()
             player.playWhenReady = shouldPlay
-
-            // Signal HomeViewModel that the player is loading — safe to start enrichment now
-            EnrichmentTrigger.notifyPlayerReady()
         }
 
 
@@ -2170,12 +2151,11 @@ class PlayerTvFragment : Fragment() {
                 return if (needsDoH(videoUrl)) createDoHOkHttpDataSourceFactory() else createDefaultHttpDataSourceFactory()
             }
             return try {
-                val cronetEngine = com.streamflixreborn.streamflix.StreamFlixApp.getCronetEngine(requireContext())
-                    ?: throw IllegalStateException("CronetEngine not available")
+                val cronetEngine = CronetEngine.Builder(requireContext()).build()
                 Log.d("PlayerNetwork", "Using CronetDataSource for vidzy.live (Chrome network stack)")
                 usingCronet = true
                 usingDoH = false
-                CronetDataSource.Factory(cronetEngine as CronetEngine, java.util.concurrent.Executors.newCachedThreadPool())
+                CronetDataSource.Factory(cronetEngine, java.util.concurrent.Executors.newCachedThreadPool())
                     .setUserAgent(NetworkClient.USER_AGENT)
                     .setConnectionTimeoutMs(30_000)
                     .setReadTimeoutMs(30_000)
@@ -2317,35 +2297,6 @@ class PlayerTvFragment : Fragment() {
                 .setConnectTimeoutMs(15_000)
                 .setReadTimeoutMs(30_000)
                 .setAllowCrossProtocolRedirects(true)
-        }
-
-        /**
-         * Attach a transferred ExoPlayer from the mini player — zero codec re-init.
-         */
-        private fun attachTransferredPlayer(transferred: ExoPlayer) {
-            Log.d("PlayerTvFragment", "Attaching transferred ExoPlayer from mini player")
-            player = transferred
-            if (!::httpDataSource.isInitialized) {
-                httpDataSource = createDefaultHttpDataSourceFactory()
-            }
-            dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
-            player.setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(C.USAGE_MEDIA)
-                    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                    .build(), true)
-            val lang = UserPreferences.currentProvider?.language?.substringBefore("-")
-            if (lang == "es") {
-                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                    .setPreferredAudioLanguage("spa").build()
-            }
-            mediaSession = MediaSession.Builder(requireContext(), player).build()
-            binding.pvPlayer.player = player
-            binding.settings.player = player
-            binding.settings.subtitleView = binding.pvPlayer.subtitleView
-            binding.settings.onSubtitlesClicked = { viewModel.getSubtitles(args.videoType) }
-            MiniPlayerController.clearTransitionFlag()
-            Log.d("PlayerTvFragment", "Transferred player attached — no codec re-init needed")
         }
 
         private fun initializePlayer(extraBuffering: Boolean, softwareDecoder: Boolean = currentSoftwareDecoder, videoUrl: String = "") {
@@ -2931,10 +2882,6 @@ class PlayerTvFragment : Fragment() {
             binding.settings.player = null
             binding.settings.subtitleView = null
             if (::player.isInitialized) {
-                // Detach then release — release() can block 5-14s on Chromecast
-                // waiting for hardware codec slots to free. Since the player runs
-                // on its own playback thread, release() is asynchronous and won't
-                // block the main thread.
                 player.release()
             }
             if (::mediaSession.isInitialized) {

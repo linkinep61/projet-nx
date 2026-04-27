@@ -24,9 +24,9 @@ import com.streamflixreborn.streamflix.databinding.ContentHeaderMenuMainTvBindin
 import com.streamflixreborn.streamflix.fragments.player.PlayerTvFragment
 import com.streamflixreborn.streamflix.ui.UpdateAppTvDialog
 import com.streamflixreborn.streamflix.providers.Provider
-import com.streamflixreborn.streamflix.providers.Cine24hProvider
 import com.streamflixreborn.streamflix.providers.WiflixProvider
 import com.streamflixreborn.streamflix.utils.AppLanguageManager
+import com.streamflixreborn.streamflix.utils.CacheUtils
 import com.streamflixreborn.streamflix.utils.ThemeManager
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.getCurrentFragment
@@ -52,7 +52,6 @@ class MainTvActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
         
         // Inizializza il provider con il context dell'attività per gestire eventuali bypass visibili
-        Cine24hProvider.init(this)
         WiflixProvider.init(this)
 
         _binding = ActivityMainTvBinding.inflate(layoutInflater)
@@ -83,6 +82,13 @@ class MainTvActivity : FragmentActivity() {
             UserPreferences.currentProvider?.let {
                 navController.navigate(R.id.home)
             }
+        } else {
+            // On activity recreation (e.g. Chromecast process kill), ensure we're not
+            // stuck on the providers screen if a provider is already selected.
+            val currentDest = navController.currentDestination?.id
+            if (currentDest == R.id.providers && UserPreferences.currentProvider != null) {
+                navController.navigate(R.id.home)
+            }
         }
 
         binding.navMain.setupWithNavController(navController)
@@ -92,7 +98,14 @@ class MainTvActivity : FragmentActivity() {
             binding.navMainFragment.isFocusedByDefault = true
         }
 
+        var previousDestinationId: Int? = null
         navController.addOnDestinationChangedListener { _, destination, _ ->
+            // Clear Glide memory cache when switching between main tabs to free memory
+            if (previousDestinationId != null && previousDestinationId != destination.id) {
+                CacheUtils.clearMemoryCache(this)
+            }
+            previousDestinationId = destination.id
+
             binding.navMain.headerView?.apply {
                 val header = ContentHeaderMenuMainTvBinding.bind(this)
 
@@ -196,15 +209,18 @@ class MainTvActivity : FragmentActivity() {
             binding.navMain.menu.findItem(R.id.movies)?.apply {
                 isVisible = Provider.supportsMovies(provider)
                 title = when (provider.name) {
-                    "VoirDrama", "VoirAnime" -> getString(R.string.main_menu_series_fr)
+                    "VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga" -> getString(R.string.main_menu_series_fr)
                     else -> getString(R.string.main_menu_movies)
+                }
+                if (provider.name in listOf("VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga")) {
+                    setIcon(R.drawable.ic_menu_tv)
                 }
             }
             binding.navMain.menu.findItem(R.id.tv_shows)?.apply {
                 isVisible = Provider.supportsTvShows(provider)
                 title = when (provider.name) {
                     "CableVisionHD", "TvporinternetHD" -> getString(R.string.main_menu_all_channels)
-                    "VoirDrama", "VoirAnime" -> getString(R.string.main_menu_series)
+                    "VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga" -> getString(R.string.main_menu_series)
                     else -> getString(R.string.main_menu_tv_shows)
                 }
             }

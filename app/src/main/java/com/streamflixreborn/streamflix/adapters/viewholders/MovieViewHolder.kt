@@ -147,7 +147,11 @@ class MovieViewHolder(
 
     private fun isDramaOrAnimeProvider(): Boolean {
         val name = movie.providerName ?: UserPreferences.currentProvider?.name ?: ""
-        return name == "VoirDrama" || name == "VoirAnime"
+        return when (name) {
+            "VoirDrama", "VoirAnime" -> true
+            "FrenchAnime", "AnimeSama", "FrenchManga" -> movie.isSeries
+            else -> false
+        }
     }
 
     private fun checkProviderAndRun(action: () -> Unit) {
@@ -330,7 +334,11 @@ class MovieViewHolder(
                 }
             }
             setOnLongClickListener {
-                ShowOptionsMobileDialog(context, movie).show()
+                if (isDramaOrAnimeProvider()) {
+                    ShowOptionsMobileDialog(context, TvShow(id = movie.id, title = movie.title, poster = movie.poster, banner = movie.banner)).show()
+                } else {
+                    ShowOptionsMobileDialog(context, movie).show()
+                }
                 true
             }
         }
@@ -349,7 +357,7 @@ class MovieViewHolder(
         }
 
         binding.tvMovieReleasedYear.text = movie.released?.format("yyyy")
-            ?: context.getString(R.string.movie_item_type)
+            ?: context.getString(if (movie.isSeries) R.string.tv_show_item_type else R.string.movie_item_type)
 
         binding.pbMovieProgress.apply {
             val watchHistory = movie.watchHistory
@@ -421,7 +429,11 @@ class MovieViewHolder(
 
 
             setOnLongClickListener {
-                ShowOptionsTvDialog(context, movie).show()
+                if (isDramaOrAnimeProvider()) {
+                    ShowOptionsTvDialog(context, TvShow(id = movie.id, title = movie.title, poster = movie.poster, banner = movie.banner)).show()
+                } else {
+                    ShowOptionsTvDialog(context, movie).show()
+                }
                 true
             }
             setOnFocusChangeListener { _, hasFocus ->
@@ -468,7 +480,7 @@ class MovieViewHolder(
             }
         }
         binding.tvMovieReleasedYear.text = movie.released?.format("yyyy")
-            ?: context.getString(R.string.movie_item_type)
+            ?: context.getString(if (movie.isSeries) R.string.tv_show_item_type else R.string.movie_item_type)
         binding.tvMovieTitle.text = movie.title
     }
 
@@ -494,7 +506,11 @@ class MovieViewHolder(
                 }
             }
             setOnLongClickListener {
-                ShowOptionsMobileDialog(context, movie).show()
+                if (isDramaOrAnimeProvider()) {
+                    ShowOptionsMobileDialog(context, TvShow(id = movie.id, title = movie.title, poster = movie.poster, banner = movie.banner)).show()
+                } else {
+                    ShowOptionsMobileDialog(context, movie).show()
+                }
                 true
             }
         }
@@ -513,7 +529,7 @@ class MovieViewHolder(
         }
 
         binding.tvMovieReleasedYear.text = movie.released?.format("yyyy")
-            ?: context.getString(R.string.movie_item_type)
+            ?: context.getString(if (movie.isSeries) R.string.tv_show_item_type else R.string.movie_item_type)
 
         binding.pbMovieProgress.apply {
             val watchHistory = movie.watchHistory
@@ -557,7 +573,11 @@ class MovieViewHolder(
             }
 
             setOnLongClickListener {
-                ShowOptionsTvDialog(context, movie).show()
+                if (isDramaOrAnimeProvider()) {
+                    ShowOptionsTvDialog(context, TvShow(id = movie.id, title = movie.title, poster = movie.poster, banner = movie.banner)).show()
+                } else {
+                    ShowOptionsTvDialog(context, movie).show()
+                }
                 true
             }
             setOnFocusChangeListener { _, hasFocus ->
@@ -593,7 +613,7 @@ class MovieViewHolder(
             }
         }
         binding.tvMovieReleasedYear.text = movie.released?.format("yyyy")
-            ?: context.getString(R.string.movie_item_type)
+            ?: context.getString(if (movie.isSeries) R.string.tv_show_item_type else R.string.movie_item_type)
         binding.tvMovieTitle.text = movie.title
     }
 
@@ -605,7 +625,7 @@ class MovieViewHolder(
 
         binding.tvSwiperTitle.text = movie.title
 
-        binding.tvSwiperTvShowLastEpisode.text = context.getString(R.string.movie_item_type)
+        binding.tvSwiperTvShowLastEpisode.text = context.getString(if (movie.isSeries) R.string.tv_show_item_type else R.string.movie_item_type)
 
         binding.tvSwiperQuality.apply {
             text = movie.quality

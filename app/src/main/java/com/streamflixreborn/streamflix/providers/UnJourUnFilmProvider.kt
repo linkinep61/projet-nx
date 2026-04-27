@@ -16,17 +16,15 @@ import com.streamflixreborn.streamflix.models.People
 import com.streamflixreborn.streamflix.models.Season
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import retrofit2.HttpException
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Path
-import com.streamflixreborn.streamflix.utils.DnsResolver
+import com.streamflixreborn.streamflix.utils.NetworkClient
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import org.json.JSONObject
 import org.json.JSONArray
@@ -45,7 +43,7 @@ import android.util.Base64
 object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     override val name = "1Jour1Film"
 
-    const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    const val USER_AGENT = NetworkClient.USER_AGENT
     override val defaultPortalUrl: String = "https://1jour1film-officiel.site/"
 
     override val portalUrl: String = defaultPortalUrl
@@ -54,7 +52,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             return cachePortalURL.ifEmpty { field }
         }
 
-    override val defaultBaseUrl: String = "https://1jour1film0426c.site/"
+    override val defaultBaseUrl: String = "https://1jour1film0526.site/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
@@ -170,59 +168,6 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     )
                 )
             }
-        }
-
-        // Fallback to old structure if no sections found
-        if (categories.size <= 1) {
-            document.select("header")
-                .filter { it.children().firstOrNull()?.tagName() == "h2" }
-                .mapNotNull { part ->
-                    var sibling: Element? = part.nextElementSibling()
-
-                    while (sibling != null) {
-                        if (sibling.tagName() == "header" && sibling.selectFirst("h2") != null) {
-                            break
-                        }
-
-                        val items = sibling.select("article.item")
-                            .mapNotNull { item ->
-                                val link = item.selectFirst("a") ?: return@mapNotNull null
-                                val img = item.selectFirst("img")
-
-                                if (item.hasClass("movies"))
-                                    Movie(
-                                        id = link.attr("href").substringBeforeLast("/").substringAfterLast("/"),
-                                        title = img?.attr("alt") ?: "",
-                                        poster = img?.let { img ->
-                                            img.attr("src").ifBlank { img.attr("data-src") }
-                                        } ?: ""
-                                    )
-                                else {
-                                    var id = link.attr("href").substringBeforeLast("/")
-                                        .substringAfterLast("/")
-                                    id = regex_episode.find(id)?.groupValues?.get(1)
-                                            ?: regex_saison.find(id)?.groupValues?.get(1)
-                                                    ?: id
-                                    TvShow(
-                                        id = id,
-                                        title = img?.attr("alt") ?: "",
-                                        poster = img?.let { img ->
-                                            img.attr("src").ifBlank { img.attr("data-src") }
-                                        } ?: "",
-                                    )
-                                }
-                            }
-                        if (items.isNotEmpty()) {
-                            categories.add(
-                                Category(
-                                    name = part.selectFirst("h2")?.text() ?: "",
-                                    list = items
-                                )
-                            )
-                        }
-                        sibling = sibling.nextElementSibling()
-                    }
-                }
         }
 
         // Log category names for debugging
@@ -370,185 +315,46 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         val document = service.getMovies(page)
 
-        var movies: List<Movie> = emptyList()
-        if (page == 1) {
-            movies = document.select("div#slider-movies").getOrNull(0)?.select("article.item")
-                ?.map {
-                    Movie(
-                        id = it.selectFirst("a")
-                            ?.attr("href")?.substringBeforeLast("/")?.substringAfterLast("/")
-                            ?: "",
-                        title = it.selectFirst("h3.title")
-                            ?.text()
-                            ?: "",
-                        poster = it.selectFirst("img")?.let { img ->
-                            img.attr("src").ifBlank { img.attr("data-src") }
-                        } ?: "",
-                    )
-                } ?: emptyList();
-
-            val items = document.selectFirst("div.items.featured")
-                ?.select("article.item")
-                            ?.mapNotNull { item ->
-                                val link = item.selectFirst("a") ?: return@mapNotNull null
-                                val img = item.selectFirst("img")
-
-                                    Movie(
-                                        id = link.attr("href"),
-                                        title = img?.attr("alt") ?: "",
-                                        poster = img?.let { img ->
-                                            img.attr("src").ifBlank { img.attr("data-src") }
-                                        } ?: ""
-                                    )
-                            }
-                ?: emptyList()
-
-            if (items.isNotEmpty()) {
-                movies = movies + items
-            }
-        }
-
-        var itemsRec = document.selectFirst("div.items.full")
-            ?.select("article.item")
-            ?.mapNotNull { item ->
-                val link = item.selectFirst("a") ?: return@mapNotNull null
-                val img = item.selectFirst("img")
-
+        // Primary: new j1f-card structure
+        val movies = document.select("a.j1f-card")
+            .mapNotNull { card ->
+                val href = card.attr("href")
+                if (!href.contains("/films/")) return@mapNotNull null
+                val title = card.selectFirst(".j1f-card__title")?.text() ?: ""
+                val posterImg = card.selectFirst(".j1f-card__poster img")
+                val poster = posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
                 Movie(
-                    id = link.attr("href"),
-                    title = img?.attr("alt") ?: "",
-                    poster = img?.let { img ->
-                        img.attr("src").ifBlank { img.attr("data-src") }
-                    } ?: ""
+                    id = href.substringBeforeLast("/").substringAfterLast("/"),
+                    title = title,
+                    poster = poster
                 )
             }
-            ?: emptyList()
 
-        // Fallback to new card structure if old selectors returned nothing
-        if (itemsRec.isEmpty()) {
-            itemsRec = document.select("a.j1f-card")
-                .mapNotNull { card ->
-                    val href = card.attr("href")
-
-                    if (!href.contains("/films/")) return@mapNotNull null
-
-                    // Try both old and new card inner selectors
-                    val title = (card.selectFirst(".j1f-card__title") ?: card.selectFirst(".card-title"))?.text() ?: ""
-                    val posterImg = card.selectFirst(".j1f-card__poster img") ?: card.selectFirst(".card-poster img")
-                    val poster = posterImg?.attr("src")?.ifBlank { posterImg?.attr("data-src") } ?: ""
-                    val id = href.substringBeforeLast("/").substringAfterLast("/")
-
-                    Movie(
-                        id = id,
-                        title = title,
-                        poster = poster
-                    )
-                }
-        }
-
-        if (itemsRec.isNotEmpty()) {
-            movies = movies + itemsRec
-        }
-
-        // REST API fallback: catalogue pages are now JS-rendered, Jsoup sees nothing
-        if (movies.isEmpty()) {
-            movies = getMoviesFromApi(page)
-        }
-
-        return movies
+        // REST API fallback if Jsoup sees nothing (JS-rendered pages)
+        return movies.ifEmpty { getMoviesFromApi(page) }
     }
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
         initializeService()
         val document = service.getTvShows(page)
 
-        var tvshows: List<TvShow> = emptyList()
-
-        if (page == 1) {
-            tvshows = document.select("div#slider-tvshows").getOrNull(0)?.select("article.item")
-                ?.map {
-                    TvShow(
-                        id = it.selectFirst("a")
-                            ?.attr("href")?.substringBeforeLast("/")?.substringAfterLast("/")
-                            ?: "",
-                        title = it.selectFirst("h3.title")
-                            ?.text()
-                            ?: "",
-                        poster = it.selectFirst("img")?.let { img ->
-                            img.attr("src").ifBlank { img.attr("data-src") }
-                        } ?: "",
-                    )
-                } ?: emptyList();
-
-            val items = document.selectFirst("div.items.featured")
-                ?.select("article.item")
-                ?.mapNotNull { item ->
-                    val link = item.selectFirst("a") ?: return@mapNotNull null
-                    val img = item.selectFirst("img")
-
-                    TvShow(
-                        id = link.attr("href"),
-                        title = img?.attr("alt") ?: "",
-                        poster = img?.let { img ->
-                            img.attr("src").ifBlank { img.attr("data-src") }
-                        } ?: ""
-                    )
-                }
-                ?: emptyList()
-
-            if (items.isNotEmpty()) {
-                tvshows = tvshows + items
-            }
-        }
-
-        var itemsRec = document.selectFirst("div.items.full")
-            ?.select("article.item")
-            ?.mapNotNull { item ->
-                val link = item.selectFirst("a") ?: return@mapNotNull null
-                val img = item.selectFirst("img")
-
+        // Primary: new j1f-card structure
+        val tvshows = document.select("a.j1f-card")
+            .mapNotNull { card ->
+                val href = card.attr("href")
+                if (!href.contains("/tvshows/")) return@mapNotNull null
+                val title = card.selectFirst(".j1f-card__title")?.text() ?: ""
+                val posterImg = card.selectFirst(".j1f-card__poster img")
+                val poster = posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
                 TvShow(
-                    id = link.attr("href"),
-                    title = img?.attr("alt") ?: "",
-                    poster = img?.let { img ->
-                        img.attr("src").ifBlank { img.attr("data-src") }
-                    } ?: ""
+                    id = href.substringBeforeLast("/").substringAfterLast("/"),
+                    title = title,
+                    poster = poster
                 )
             }
-            ?: emptyList()
 
-        // Fallback to new card structure if old selectors returned nothing
-        if (itemsRec.isEmpty()) {
-            itemsRec = document.select("a.j1f-card")
-                .mapNotNull { card ->
-                    val href = card.attr("href")
-
-                    if (!href.contains("/tvshows/")) return@mapNotNull null
-
-                    // Try both old and new card inner selectors
-                    val title = (card.selectFirst(".j1f-card__title") ?: card.selectFirst(".card-title"))?.text() ?: ""
-                    val posterImg = card.selectFirst(".j1f-card__poster img") ?: card.selectFirst(".card-poster img")
-                    val poster = posterImg?.attr("src")?.ifBlank { posterImg?.attr("data-src") } ?: ""
-                    val id = href.substringBeforeLast("/").substringAfterLast("/")
-
-                    TvShow(
-                        id = id,
-                        title = title,
-                        poster = poster
-                    )
-                }
-        }
-
-        if (itemsRec.isNotEmpty()) {
-            tvshows = tvshows + itemsRec
-        }
-
-        // REST API fallback: catalogue pages are now JS-rendered, Jsoup sees nothing
-        if (tvshows.isEmpty()) {
-            tvshows = getTvShowsFromApi(page)
-        }
-
-        return tvshows
+        // REST API fallback if Jsoup sees nothing (JS-rendered pages)
+        return tvshows.ifEmpty { getTvShowsFromApi(page) }
     }
 
     suspend fun getRating(votes: Element): Double {
@@ -1258,14 +1064,14 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
         }
 
-        // Fallback: extract post ID from body class and probe DooPlay AJAX
+        // Legacy DooPlay AJAX fallback (post-ID probe, max 10 requests)
         if (servers.isEmpty() && apiUrl.isEmpty() && onregardeUrl.isEmpty()) {
             val postIdMatch = Regex("""postid-(\d+)""").find(rawHtml)
             val postId = postIdMatch?.groupValues?.get(1) ?: ""
             val isEpisode = videoType is Video.Type.Episode
 
             if (postId.isNotEmpty()) {
-                for (nume in 1..30) {
+                for (nume in 1..10) {
                     try {
                         val link = service.getServers(
                             num = nume.toString(),
@@ -1273,66 +1079,23 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                             type = if (isEpisode) "tv" else "movie"
                         )
                         if (link.embed_url.isNullOrEmpty()) break
-
                         if (ignoreSource("", link.embed_url)) continue
 
                         if (link.embed_url.startsWith(apivoirfilm.mainUrl)) {
                             apiUrl = link.embed_url
-                            continue
-                        }
-                        if (link.embed_url.startsWith(onregadeou.mainUrl)) {
+                        } else if (link.embed_url.startsWith(onregadeou.mainUrl)) {
                             onregardeUrl = link.embed_url
-                            continue
-                        }
-
-                        val serviceName = Extractor.identifyServiceName(link.embed_url)
-                        servers.add(
-                            Video.Server(
+                        } else {
+                            val serviceName = Extractor.identifyServiceName(link.embed_url)
+                            servers.add(Video.Server(
                                 id = "srv$nume",
                                 name = serviceName ?: "Serveur $nume",
                                 src = link.embed_url
-                            )
-                        )
+                            ))
+                        }
                     } catch (_: Exception) { break }
                 }
             }
-        }
-
-        // Legacy fallback: old DooPlay player options (pre-redesign)
-        if (servers.isEmpty() && apiUrl.isEmpty() && onregardeUrl.isEmpty()) {
-            val oldServers = document.selectFirst("ul#playeroptionsul")?.select("li.dooplay_player_option")
-                ?.mapIndexedNotNull { idx, it ->
-                    val nume = it.attr("data-nume")
-                    val post = it.attr("data-post")
-                    val isEpisode = videoType is Video.Type.Episode
-                    val link = service.getServers(num=nume, post=post, type=if (isEpisode) "tv" else "movie")
-
-                    if (link.embed_url.isNullOrEmpty() ||
-                        ignoreSource("", link.embed_url))
-                        return@mapIndexedNotNull null
-
-                    if (link.embed_url.startsWith(apivoirfilm.mainUrl)) {
-                        apiUrl = link.embed_url
-                        return@mapIndexedNotNull null
-                    }
-                    if (link.embed_url.startsWith(onregadeou.mainUrl)) {
-                        onregardeUrl = link.embed_url
-                        return@mapIndexedNotNull null
-                    }
-
-                    val title = it.selectFirst("span.title")?.text() ?: "Server $idx"
-                    val serviceName = Extractor.identifyServiceName(link.embed_url)
-                    val displayName = if (serviceName != null) {
-                        if (title != "Server $idx") "$title ($serviceName)" else serviceName
-                    } else title
-
-                    Video.Server(
-                        id = "srv$idx",
-                        name = displayName,
-                        src = link.embed_url
-                    )
-                } ?: emptyList()
-            servers.addAll(oldServers)
         }
 
         val other = if (apiUrl.isNotEmpty())
@@ -1392,7 +1155,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
                     val newUrl = document.html().substringAfter("window.location.href = \"").substringBefore("\"")
                         .trim()
-                    if (!newUrl.isNullOrEmpty()) {
+                    if (!newUrl.isNullOrEmpty() && newUrl.startsWith("http")) {
                         val newIcon = document.selectFirst("link[rel=apple-touch-icon]")
                             ?.attr("href")
                             ?: "$defaultPortalUrl/wp-content/uploads/2025/07/1J1F-150x150.jpg"
@@ -1469,11 +1232,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private interface Service {
 
         companion object {
-            private val client = OkHttpClient.Builder()
-                .readTimeout(30, TimeUnit.SECONDS)
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .dns(DnsResolver.doh)
-                .build()
+            private val client = NetworkClient.default
 
             fun buildAddressFetcher(): Service {
                 val addressRetrofit = Retrofit.Builder()

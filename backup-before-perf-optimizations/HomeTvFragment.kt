@@ -207,9 +207,8 @@ class HomeTvFragment : Fragment() {
         if (MiniPlayerController.onIptvChannelClick == null) {
             MiniPlayerController.onIptvChannelClick = { tvShow ->
                 if (tvShow.id == MiniPlayerController.currentChannelId) {
-                    Log.d("HomeTv", "Same channel clicked, flagging for transfer (onResume): ${tvShow.title}")
-                    MiniPlayerController.transitioningToFullscreen = true
-                    if (_binding != null) { binding.miniPlayerView.player = null }
+                    Log.d("HomeTv", "Same channel clicked, stopping mini player for fullscreen (onResume): ${tvShow.title}")
+                    MiniPlayerController.stopAsync()
                     false
                 } else {
                     Log.d("HomeTv", "Mini player intercept (onResume): ${tvShow.title}")
@@ -245,17 +244,14 @@ class HomeTvFragment : Fragment() {
                 when (state) {
                     is MiniPlayerController.State.Idle -> {
                         binding.miniPlayerContainer.visibility = View.GONE
-                        updateHomeGridForMiniPlayer(false)
                     }
                     is MiniPlayerController.State.Loading -> {
                         binding.miniPlayerContainer.visibility = View.VISIBLE
-                        updateHomeGridForMiniPlayer(true)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.VISIBLE
                     }
                     is MiniPlayerController.State.Playing -> {
                         binding.miniPlayerContainer.visibility = View.VISIBLE
-                        updateHomeGridForMiniPlayer(true)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.GONE
                         updatePauseButton()
@@ -281,10 +277,9 @@ class HomeTvFragment : Fragment() {
 
         MiniPlayerController.onIptvChannelClick = { tvShow ->
             if (tvShow.id == MiniPlayerController.currentChannelId) {
-                // Same channel clicked again → flag for transfer, let fullscreen player steal it
-                Log.d("HomeTv", "Same channel clicked, flagging for transfer: ${tvShow.title}")
-                MiniPlayerController.transitioningToFullscreen = true
-                if (_binding != null) { binding.miniPlayerView.player = null }
+                // Same channel clicked again → stop mini player, let normal player handle it
+                Log.d("HomeTv", "Same channel clicked, stopping mini player for fullscreen: ${tvShow.title}")
+                MiniPlayerController.stopAsync()
                 false // not handled → TvShowViewHolder will navigate to full player
             } else {
                 Log.d("HomeTv", "Mini player intercept: ${tvShow.title} (${tvShow.id})")
@@ -373,13 +368,7 @@ class HomeTvFragment : Fragment() {
         val channelName = MiniPlayerController.currentChannelName ?: channelId
         val channelPoster = MiniPlayerController.currentChannelPoster
 
-        // Set transition flag BEFORE navigate so onPause skips cleanup.
-        // The actual ExoPlayer transfer happens in PlayerTvFragment.onViewCreated().
-        MiniPlayerController.transitioningToFullscreen = true
-        // Detach surface to avoid blocking, but keep the player alive for transfer
-        if (_binding != null) {
-            binding.miniPlayerView.player = null
-        }
+        MiniPlayerController.releasePlayerKeepState()
 
         val videoType = Video.Type.Episode(
             id = channelId, number = 1, title = channelName, poster = channelPoster,
@@ -429,31 +418,6 @@ class HomeTvFragment : Fragment() {
         if (!isBackgroundPinned) return
         isBackgroundPinned = false
         syncFeaturedBackground()
-    }
-
-    private var homeGridConstrained = false
-
-    /**
-     * Constrain the home grid width so horizontal swipers stop
-     * at the left edge of the mini player instead of scrolling behind it.
-     */
-    private fun updateHomeGridForMiniPlayer(miniPlayerVisible: Boolean) {
-        if (_binding == null) return
-        if (miniPlayerVisible == homeGridConstrained) return
-        homeGridConstrained = miniPlayerVisible
-        val grid = binding.vgvHome
-        val params = grid.layoutParams as ConstraintLayout.LayoutParams
-        if (miniPlayerVisible) {
-            // Mini player is 45% width + 16dp margin from end.
-            // Constrain grid to ~53% so rows don't go behind it.
-            params.matchConstraintPercentWidth = 0.53f
-            params.endToEnd = ConstraintLayout.LayoutParams.UNSET
-            params.horizontalBias = 0f
-        } else {
-            params.matchConstraintPercentWidth = 1f
-            params.endToEnd = ConstraintLayout.LayoutParams.PARENT_ID
-        }
-        grid.layoutParams = params
     }
 
     private fun initializeHome() {

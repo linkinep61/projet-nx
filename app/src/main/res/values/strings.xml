@@ -33,7 +33,9 @@
     <string name="main_menu_tv_shows">TV Shows</string>
     <string name="main_menu_all_channels">All Channels</string>
     <string name="main_menu_series">VOSTFR</string>
-    <string name="main_menu_series_fr">FR</string>
+    <string name="main_menu_series_fr">VF</string>
+    <string name="main_menu_films">Film</string>
+    <string name="main_menu_series_tab">Série</string>
     <string name="main_menu_settings">Settings</string>
     <string name="main_menu_theme_change">Change Theme</string>
     <string name="theme_default">Default</string>
@@ -48,6 +50,7 @@
     <string name="theme_retro_neon">Retro Neon</string>
 
     <string name="search_input_hint">Search movies, TV shows</string>
+    <string name="search_no_results">Aucun résultat trouvé</string>
     <string name="global_search">Global search</string>
     <string name="global_search_films">Global search movies &amp; TV shows</string>
     <string name="global_search_anime">Global search anime</string>
@@ -229,6 +232,8 @@
     <string name="player_settings_speed_1_5">× 1.5</string>
     <string name="player_settings_speed_1_75">× 1.75</string>
     <string name="player_settings_speed_2">× 2</string>
+    <string name="player_settings_channel_variant_title">Channel</string>
+    <string name="player_settings_channel_variant_label">Channel</string>
     <string name="player_settings_servers_title">Servers</string>
     <string name="player_settings_servers_label">Servers</string>
 

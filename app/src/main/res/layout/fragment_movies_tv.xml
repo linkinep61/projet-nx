@@ -6,6 +6,51 @@
     android:layout_height="match_parent"
     tools:context=".fragments.movies.MoviesTvFragment">
 
+    <LinearLayout
+        android:id="@+id/tab_language"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:visibility="gone"
+        android:background="#1A1A2E"
+        android:baselineAligned="false"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <TextView
+            android:id="@+id/tab_fr"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:text="FR"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusDown="@id/vgv_movies"
+            android:nextFocusRight="@id/tab_vostfr"
+            android:background="#33E50914" />
+
+        <TextView
+            android:id="@+id/tab_vostfr"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:text="VOSTFR"
+            android:textColor="#80FFFFFF"
+            android:textSize="14sp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusDown="@id/vgv_movies"
+            android:nextFocusLeft="@id/tab_fr"
+            android:background="@android:color/transparent" />
+
+    </LinearLayout>
+
     <androidx.leanback.widget.VerticalGridView
         android:id="@+id/vgv_movies"
         android:layout_width="0dp"
@@ -13,12 +58,13 @@
         android:clipChildren="false"
         android:clipToPadding="false"
         android:padding="@dimen/movies_spacing"
+        android:nextFocusUp="@id/tab_fr"
         app:focusOutEnd="true"
         app:focusOutFront="true"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/tab_language"
         app:numberOfColumns="6"
         tools:listitem="@layout/item_movie_grid_tv" />
 
@@ -30,6 +76,6 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent" />
+        app:layout_constraintTop_toBottomOf="@id/tab_language" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

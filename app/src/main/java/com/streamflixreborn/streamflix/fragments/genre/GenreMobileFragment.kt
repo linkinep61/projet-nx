@@ -1,5 +1,6 @@
 package com.streamflixreborn.streamflix.fragments.genre
 
+import android.content.res.Configuration
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
@@ -101,6 +102,12 @@ class GenreMobileFragment : Fragment() {
         }
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val spanCount = if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) 6 else 3
+        (binding.rvGenre.layoutManager as? GridLayoutManager)?.spanCount = spanCount
+    }
+
     override fun onDestroyView() {
         super.onDestroyView()
         _binding = null
@@ -109,7 +116,8 @@ class GenreMobileFragment : Fragment() {
 
     private fun initializeGenre() {
         binding.rvGenre.apply {
-            layoutManager = GridLayoutManager(context, 3).also {
+            val cols = if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) 6 else 3
+            layoutManager = GridLayoutManager(context, cols).also {
                 it.spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
                     override fun getSpanSize(position: Int): Int {
                         val viewType = appAdapter.getItemViewType(position)

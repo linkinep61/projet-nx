@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.streamflixreborn.streamflix.database.AppDatabase
 import com.streamflixreborn.streamflix.models.TvShow
+import com.streamflixreborn.streamflix.providers.FilterableProvider
 import com.streamflixreborn.streamflix.utils.ParentalControlUtils
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
@@ -26,6 +27,11 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
         // Listen for provider changes and reload data
         viewModelScope.launch {
             ProviderChangeNotifier.providerChangeFlow.collect {
+                languageFilter = when {
+                    UserPreferences.currentProvider?.name in typeFilterProviders -> "serie"
+                    UserPreferences.currentProvider is FilterableProvider -> "vf"
+                    else -> "all"
+                }
                 getTvShows()
             }
         }
@@ -64,7 +70,27 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
         }
     }.flowOn(Dispatchers.IO)
 
+    private val typeFilterProviders = listOf("VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga")
+
     private var page = 1
+    private var languageFilter: String = when {
+        UserPreferences.currentProvider?.name in typeFilterProviders -> "serie"
+        UserPreferences.currentProvider is FilterableProvider -> "vf"
+        else -> "all"
+    }
+
+    val isFilterable: Boolean
+        get() = UserPreferences.currentProvider is FilterableProvider
+
+    val isTypeFilterable: Boolean
+        get() = UserPreferences.currentProvider?.name in typeFilterProviders
+
+    fun setLanguageFilter(language: String) {
+        if (languageFilter != language) {
+            languageFilter = language
+            getTvShows()
+        }
+    }
 
     sealed class State {
         data object Loading : State()
@@ -82,10 +108,31 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
         _state.emit(State.Loading)
 
         try {
-            val tvShows = ParentalControlUtils.filterItems(
-                UserPreferences.currentProvider!!.getTvShows()
-            ).filterIsInstance<TvShow>()
+            val provider = UserPreferences.currentProvider!!
+            Log.d("TvShowsViewModel", "getTvShows: provider=${provider.name}, isFilterable=${provider is FilterableProvider}, languageFilter=$languageFilter")
+            var tvShows = if (provider is FilterableProvider && languageFilter != "all") {
+                Log.d("TvShowsViewModel", "getTvShows: using FILTERED with language=$languageFilter")
+                ParentalControlUtils.filterItems(
+                    provider.getFilteredTvShows(languageFilter)
+                ).filterIsInstance<TvShow>()
+            } else {
+                Log.d("TvShowsViewModel", "getTvShows: using STANDARD (no filter)")
+                ParentalControlUtils.filterItems(
+                    provider.getTvShows()
+                ).filterIsInstance<TvShow>()
+            }
 
+            // For type-filterable providers that don't implement FilterableProvider,
+            // apply local serie/film filtering after fetch
+            if (provider.name in typeFilterProviders && provider !is FilterableProvider) {
+                tvShows = when (languageFilter) {
+                    "serie" -> tvShows.filter { !it.isMovie }
+                    "film" -> tvShows.filter { it.isMovie }
+                    else -> tvShows
+                }
+            }
+
+            Log.d("TvShowsViewModel", "getTvShows: got ${tvShows.size} tvShows")
             page = 1
 
             _state.emit(State.SuccessLoading(tvShows, true))
@@ -101,9 +148,25 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
             _state.emit(State.LoadingMore)
 
             try {
-                val tvShows = ParentalControlUtils.filterItems(
-                    UserPreferences.currentProvider!!.getTvShows(page + 1)
-                ).filterIsInstance<TvShow>()
+                val provider = UserPreferences.currentProvider!!
+                var tvShows = if (provider is FilterableProvider && languageFilter != "all") {
+                    ParentalControlUtils.filterItems(
+                        provider.getFilteredTvShows(languageFilter, page + 1)
+                    ).filterIsInstance<TvShow>()
+                } else {
+                    ParentalControlUtils.filterItems(
+                        provider.getTvShows(page + 1)
+                    ).filterIsInstance<TvShow>()
+                }
+
+                // Local type filter for non-FilterableProvider providers
+                if (provider.name in typeFilterProviders && provider !is FilterableProvider) {
+                    tvShows = when (languageFilter) {
+                        "serie" -> tvShows.filter { !it.isMovie }
+                        "film" -> tvShows.filter { it.isMovie }
+                        else -> tvShows
+                    }
+                }
 
                 page += 1
 

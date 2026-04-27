@@ -12,6 +12,7 @@ import com.streamflixreborn.streamflix.models.Movie
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.providers.Provider
 import com.streamflixreborn.streamflix.ui.UserDataNotifier
+import com.streamflixreborn.streamflix.utils.EnrichmentTrigger
 import com.streamflixreborn.streamflix.utils.HomeCacheStore
 import com.streamflixreborn.streamflix.utils.ParentalControlUtils
 import com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
@@ -20,6 +21,7 @@ import com.streamflixreborn.streamflix.utils.UserDataCache.toCached
 import com.streamflixreborn.streamflix.utils.UserDataCache.toEpisode
 import com.streamflixreborn.streamflix.utils.UserDataCache.toMovie
 import com.streamflixreborn.streamflix.utils.UserDataCache.toTvShow
+import com.streamflixreborn.streamflix.utils.TmdbUtils
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.combine
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +37,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 
 class HomeViewModel(database: AppDatabase) : ViewModel() {
@@ -57,6 +60,10 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
     private val continueWatchingSeasonEpisodesCache = ConcurrentHashMap<String, List<Episode>>()
     private val _userDataCache = MutableStateFlow<UserDataCache.UserData?>(null)
     private var currentProvider: Provider? = null
+
+    /** True once getHome() has been called at least once (prevents re-load on view recreation). */
+    var hasLoaded: Boolean = false
+        private set
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val state: Flow<State> = combine(
@@ -364,6 +371,7 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
     }
 
     fun getHome() = viewModelScope.launch(Dispatchers.IO) {
+        hasLoaded = true
         val provider = UserPreferences.currentProvider ?: run {
             _state.emit(State.FailedLoading(IllegalStateException("No provider selected")))
             return@launch
@@ -382,10 +390,26 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         try {
             val categories = provider.getHome().toMutableList()
 
-            // Enrich carousels: load extra pages to fill carousels with maximum items
+            // Emit base categories immediately so the UI appears fast.
+            // Enrichment (20 extra requests) runs AFTER this first display.
+            HomeCacheStore.write(appContext, provider, categories)
+            _state.emit(State.SuccessLoading(categories))
+
+            // Enrich carousels in the background — deferred so it doesn't
+            // compete with player init or channel loading.
             val providerSupport = Provider.Companion.providers[provider]
             val shouldEnrich = providerSupport?.enrichHome ?: true
             if (shouldEnrich) try {
+                // Wait until the player has opened and started loading the first
+                // channel before firing 20 enrichment requests.  This avoids
+                // competing for CPU/network with ExoPlayer init on Chromecast.
+                // Safety timeout: if the user never opens the player, enrich
+                // after 30 seconds anyway so the home screen isn't left bare.
+                withTimeoutOrNull(30_000) {
+                    EnrichmentTrigger.playerReadyFlow.first()
+                }
+                Log.d("HomeViewModel", "Enrichment triggered for ${provider.name}")
+
                 val allMovies = mutableListOf<Movie>()
                 val allTvShows = mutableListOf<TvShow>()
 
@@ -404,32 +428,21 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                     }
                 }
 
-                // Load up to 10 pages of movies + TV shows in parallel
-                coroutineScope {
-                    val moviePages = (1..10).map { page ->
-                        async {
-                            try {
-                                provider.getMovies(page)
-                            } catch (e: Exception) {
-                                emptyList()
-                            }
+                // Load pages of movies + TV shows sequentially in pairs
+                // to limit memory pressure on low-RAM devices (Chromecast 64MB heap).
+                for (page in 1..5) {
+                    coroutineScope {
+                        val movieDeferred = async {
+                            try { provider.getMovies(page) } catch (_: Exception) { emptyList() }
                         }
-                    }
-                    val tvShowPages = (1..10).map { page ->
-                        async {
-                            try {
-                                provider.getTvShows(page)
-                            } catch (e: Exception) {
-                                emptyList()
-                            }
+                        val tvShowDeferred = async {
+                            try { provider.getTvShows(page) } catch (_: Exception) { emptyList() }
                         }
+                        allMovies.addAll(movieDeferred.await())
+                        allTvShows.addAll(tvShowDeferred.await())
                     }
-                    for (deferred in moviePages) {
-                        allMovies.addAll(deferred.await())
-                    }
-                    for (deferred in tvShowPages) {
-                        allTvShows.addAll(deferred.await())
-                    }
+                    // Yield to let GC and UI thread breathe between pages
+                    kotlinx.coroutines.delay(100)
                 }
 
                 // Deduplicate — keep items even with blank id (use title as fallback key)
@@ -438,41 +451,43 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                 val featuredTvShowKeys = featuredItems.filterIsInstance<TvShow>().map { it.id.ifBlank { it.title } }.toSet()
                 val uniqueMovies = allMovies.distinctBy { it.id.ifBlank { it.title } }
                     .filter { (it.id.ifBlank { it.title }) !in featuredMovieKeys }
+                    .filter { !it.isSeries } // Exclude series marked as Movie — they belong in "Séries" not "Films"
                 val uniqueTvShows = allTvShows.distinctBy { it.id.ifBlank { it.title } }
                     .filter { (it.id.ifBlank { it.title }) !in featuredTvShowKeys }
+                    .filter { !it.isMovie } // Exclude films marked as TvShow — they belong in "Films" not "Séries"
 
                 // Rebuild: keep featured banner, replace everything else
                 // Order: FEATURED → Séries Récentes → Films Récents → Séries Populaires → Films Populaires
                 if (uniqueMovies.size > 5 || uniqueTvShows.size > 5) {
+                    val enrichedCategories = mutableListOf<Category>()
                     val featured = categories.firstOrNull()
-                    categories.clear()
-                    if (featured != null) categories.add(featured)
+                    if (featured != null) enrichedCategories.add(featured)
 
                     val seriesNames = listOf("Séries Récentes", "Séries Populaires", "Encore plus de Séries", "Séries à Découvrir")
                     val filmNames = listOf("Films Récents", "Films Populaires", "Encore plus de Films", "Films à Découvrir")
-                    val tvChunks = uniqueTvShows.chunked(40)
-                    val movieChunks = uniqueMovies.chunked(40)
+                    val tvChunks = uniqueTvShows.chunked(20)
+                    val movieChunks = uniqueMovies.chunked(20)
                     val maxChunks = maxOf(tvChunks.size, movieChunks.size)
 
                     // Interleave: recent series, recent films, popular series, popular films, etc.
                     for (i in 0 until maxChunks) {
                         if (i < tvChunks.size) {
                             val name = seriesNames.getOrElse(i) { "Séries #${i + 1}" }
-                            categories.add(Category(name = name, list = tvChunks[i]))
+                            enrichedCategories.add(Category(name = name, list = tvChunks[i]))
                         }
                         if (i < movieChunks.size) {
                             val name = filmNames.getOrElse(i) { "Films #${i + 1}" }
-                            categories.add(Category(name = name, list = movieChunks[i]))
+                            enrichedCategories.add(Category(name = name, list = movieChunks[i]))
                         }
                     }
 
+                    // Update UI with enriched content
+                    HomeCacheStore.write(appContext, provider, enrichedCategories)
+                    _state.emit(State.SuccessLoading(enrichedCategories))
                 }
             } catch (e: Exception) {
                 Log.e("HomeViewModel", "Enrich failed for ${provider.name}: ${e.message}")
             }
-
-            HomeCacheStore.write(appContext, provider, categories)
-            _state.emit(State.SuccessLoading(categories))
         } catch (e: Exception) {
             Log.e("HomeViewModel", "getHome: ", e)
             if (cachedCategories.isNullOrEmpty()) {

@@ -145,12 +145,6 @@ class TvShowViewHolder(
         }
         // Interceptor returned false or not set → navigate to full player
 
-        // If mini player is active, flag transition so onPause doesn't release it.
-        // PlayerTvFragment.onViewCreated will call transferPlayer() to reuse it.
-        if (MiniPlayerController.isPlaying()) {
-            MiniPlayerController.transitioningToFullscreen = true
-        }
-
         val videoType = Video.Type.Episode(
             id = tvShow.id,
             number = 1,

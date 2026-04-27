@@ -14,8 +14,11 @@ import com.streamflixreborn.streamflix.models.Show
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.NetworkClient
+import com.streamflixreborn.streamflix.utils.TMDb3
+import com.streamflixreborn.streamflix.utils.TMDb3.original
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -63,6 +66,12 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
                 val popularDeferred = async {
                     try { service.getPage("${baseUrl}drama/?m_orderby=views") } catch (_: Exception) { null }
                 }
+                val popularFilmsDeferred = async {
+                    try { service.getPage("${baseUrl}liste-dramas/?filter=dubbed&m_orderby=views") } catch (_: Exception) { null }
+                }
+                val topRatedDeferred = async {
+                    try { service.getPage("${baseUrl}drama/?m_orderby=rating") } catch (_: Exception) { null }
+                }
 
                 val document = homeDeferred.await()
                 val categories = mutableListOf<Category>()
@@ -72,28 +81,52 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
                     parseHomeItem(item)
                 }
 
-                // Featured carousel : les premiers items de la page d'accueil
                 if (allItems.isNotEmpty()) {
-                    val bannerItems = allItems.take(10).map { show ->
-                        when (show) {
-                            is Movie -> Movie(
-                                id = show.id, title = show.title,
-                                banner = show.poster, poster = show.poster ?: ""
-                            )
-                            is TvShow -> TvShow(
-                                id = show.id, title = show.title,
-                                banner = show.poster, poster = show.poster ?: ""
-                            )
-                            else -> show
+                    // FEATURED carousel with deep copies to avoid shared itemType conflicts
+                    val featuredItems = allItems.take(10).map { item ->
+                        when (item) {
+                            is Movie -> item.copy(banner = item.banner ?: item.poster)
+                            is TvShow -> item.copy(banner = item.banner ?: item.poster)
+                            else -> item
                         }
                     }
-                    categories.add(Category(name = Category.FEATURED, list = bannerItems))
-
-                    // "En cours" = tous les items de la page d'accueil
+                    // Enhance banners with TMDB HD backdrops (filter Asian content only)
+                    val asianLanguages = setOf("ko", "ja", "zh", "th", "tl")
+                    if (UserPreferences.enableTmdb) {
+                        for (item in featuredItems) {
+                            try {
+                                val title = when (item) {
+                                    is Movie -> item.title
+                                    is TvShow -> item.title
+                                    else -> null
+                                } ?: continue
+                                val results = TMDb3.Search.multi(title)
+                                val match = results.results.firstOrNull { result ->
+                                    when (result) {
+                                        is TMDb3.Movie -> result.originalLanguage in asianLanguages && result.backdropPath != null
+                                        is TMDb3.Tv -> result.originalLanguage in asianLanguages && result.backdropPath != null
+                                        else -> false
+                                    }
+                                }
+                                val banner = when (match) {
+                                    is TMDb3.Movie -> match.backdropPath?.original
+                                    is TMDb3.Tv -> match.backdropPath?.original
+                                    else -> null
+                                }
+                                if (banner != null) {
+                                    when (item) {
+                                        is Movie -> item.banner = banner
+                                        is TvShow -> item.banner = banner
+                                    }
+                                }
+                            } catch (_: Exception) {}
+                        }
+                    }
+                    categories.add(Category(name = Category.FEATURED, list = featuredItems))
                     categories.add(Category(name = "En cours", list = allItems))
                 }
 
-                // Nouveaux ajouts
+                // 2. Nouveaux ajouts
                 val recentDoc = recentDeferred.await()
                 if (recentDoc != null) {
                     val recentShows = recentDoc.select(".page-item-detail").mapNotNull { item ->
@@ -104,7 +137,7 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
                     }
                 }
 
-                // Séries populaires (par vues)
+                // 3. Séries populaires (par vues)
                 val popularDoc = popularDeferred.await()
                 if (popularDoc != null) {
                     val popularShows = popularDoc.select(".page-item-detail").mapNotNull { item ->
@@ -112,6 +145,33 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
                     }
                     if (popularShows.isNotEmpty()) {
                         categories.add(Category(name = "Séries Populaires", list = popularShows))
+                    }
+                }
+
+                // 4. Films populaires (VF, triés par vues)
+                val popularFilmsDoc = popularFilmsDeferred.await()
+                if (popularFilmsDoc != null) {
+                    val popularFilms = popularFilmsDoc.select(".page-item-detail").mapNotNull { item ->
+                        val show = parseHomeItem(item) ?: return@mapNotNull null
+                        when (show) {
+                            is TvShow -> Movie(id = show.id, title = show.title, poster = show.poster).apply { isSeries = true }
+                            is Movie -> show
+                            else -> null
+                        }
+                    }
+                    if (popularFilms.isNotEmpty()) {
+                        categories.add(Category(name = "Films Populaires", list = popularFilms))
+                    }
+                }
+
+                // 5. Mieux notés (par note)
+                val topRatedDoc = topRatedDeferred.await()
+                if (topRatedDoc != null) {
+                    val topRated = topRatedDoc.select(".page-item-detail").mapNotNull { item ->
+                        parseHomeItem(item)
+                    }
+                    if (topRated.isNotEmpty()) {
+                        categories.add(Category(name = "Mieux Notés", list = topRated))
                     }
                 }
 
@@ -166,20 +226,33 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
 
     // ==================== MOVIES / TV SHOWS ====================
 
-    override suspend fun getMovies(page: Int): List<Movie> {
-        // Onglet "Série FR" — contenu VF via liste-dramas/?filter=dubbed
+    override suspend fun getMovies(page: Int): List<Movie> = coroutineScope {
+        // Onglet "FR" — contenu VF via liste-dramas/?filter=dubbed
         initializeService()
-        return try {
+        try {
             val url = if (page > 1) "${baseUrl}liste-dramas/page/$page/?filter=dubbed"
                       else "${baseUrl}liste-dramas/?filter=dubbed"
             val document = service.getPage(url)
-            document.select(".page-item-detail").mapNotNull { item ->
+            val items = document.select(".page-item-detail").mapNotNull { item ->
                 val show = parseHomeItem(item) ?: return@mapNotNull null
-                when (show) {
-                    is TvShow -> Movie(id = show.id, title = show.title, poster = show.poster)
-                    is Movie -> show
-                    else -> null
-                }
+                val id = when (show) { is Movie -> show.id; is TvShow -> show.id; else -> return@mapNotNull null }
+                val title = when (show) { is Movie -> show.title; is TvShow -> show.title; else -> return@mapNotNull null }
+                val poster = when (show) { is Movie -> show.poster; is TvShow -> show.poster; else -> return@mapNotNull null }
+                Triple(id, title, poster)
+            }
+
+            // Vérifier chaque page détail en parallèle (batches de 5)
+            // >1 épisode = série, ≤1 épisode = film
+            items.chunked(5).flatMap { batch ->
+                batch.map { (id, title, poster) ->
+                    async {
+                        val hasMultipleEpisodes = try {
+                            val detailDoc = service.getPage("${baseUrl}drama/$id/")
+                            detailDoc.select("li.wp-manga-chapter").size > 1
+                        } catch (e: Exception) { false }
+                        Movie(id = id, title = title, poster = poster).apply { isSeries = hasMultipleEpisodes }
+                    }
+                }.awaitAll()
             }
         } catch (e: Exception) {
             Log.e("VoirDramaProvider", "getMovies error: ", e)
@@ -187,26 +260,40 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
         }
     }
 
-    override suspend fun getTvShows(page: Int): List<TvShow> {
-        // Onglet "Série VOSTFR" — via liste-dramas/?filter=subbed
+    override suspend fun getTvShows(page: Int): List<TvShow> = coroutineScope {
+        // Onglet "VOSTFR" — via liste-dramas/?filter=subbed
         initializeService()
-        return try {
+        try {
             val url = if (page > 1) "${baseUrl}liste-dramas/page/$page/?filter=subbed"
                       else "${baseUrl}liste-dramas/?filter=subbed"
             val document = service.getPage(url)
-            document.select(".page-item-detail").mapNotNull { item ->
+            val items = document.select(".page-item-detail").mapNotNull { item ->
                 val show = parseHomeItem(item) ?: return@mapNotNull null
-                when (show) {
-                    is TvShow -> show
-                    is Movie -> TvShow(id = show.id, title = show.title, poster = show.poster)
-                    else -> null
-                }
+                val id = when (show) { is Movie -> show.id; is TvShow -> show.id; else -> return@mapNotNull null }
+                val title = when (show) { is Movie -> show.title; is TvShow -> show.title; else -> return@mapNotNull null }
+                val poster = when (show) { is Movie -> show.poster; is TvShow -> show.poster; else -> return@mapNotNull null }
+                Triple(id, title, poster)
+            }
+
+            // Vérifier chaque page détail en parallèle (batches de 5)
+            items.chunked(5).flatMap { batch ->
+                batch.map { (id, title, poster) ->
+                    async {
+                        val hasMultipleEpisodes = try {
+                            val detailDoc = service.getPage("${baseUrl}drama/$id/")
+                            detailDoc.select("li.wp-manga-chapter").size > 1
+                        } catch (e: Exception) { true }
+                        TvShow(id = id, title = title, poster = poster).apply { isMovie = !hasMultipleEpisodes }
+                    }
+                }.awaitAll()
             }
         } catch (e: Exception) {
             Log.e("VoirDramaProvider", "getTvShows error: ", e)
             emptyList()
         }
     }
+
+
 
     // ==================== DETAIL ====================
 
@@ -512,6 +599,12 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
      *             .item-summary > h3 > a (titre + lien)
      *             .score (note)
      *             .chapter-item > a (épisodes récents)
+     *
+     * Détection film vs série :
+     *   1) Badge Madara type (.manga-type-badge, .type-label, span[class*=type]) : "MOVIE","TV","OVA"…
+     *   2) Genres dans l'item (.mg_genres a, .genres a, .post-on span) : contient "Movie"/"Film"
+     *   3) Nombre de chapitres listés : 0-1 = Movie, >1 = TvShow
+     *   4) Titre contient "(Film)" ou "(Movie)"
      */
     private fun parseHomeItem(element: Element): Show? {
         val thumb = element.selectFirst(".item-thumb")
@@ -547,8 +640,52 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
         }?.takeIf { it.isNotBlank() && it.startsWith("http") }
         val poster = improveImageUrl(rawPoster)
 
-        // Sur VoirDrama, tout est série (drama) sauf indication contraire
-        return TvShow(id = id, title = title, poster = poster)
+        // --- Détection film vs série ---
+
+        // 1) Badge de type Madara (span contenant MOVIE, TV, OVA, ONA, SPECIAL, TV SHORT…)
+        val typeBadge = element.selectFirst(".manga-type-badge, .type-label, span[class*=type]")
+            ?.text()?.trim()?.uppercase()
+
+        // 2) Texte de tous les genres / labels dans l'item
+        val genreTexts = element.select(".mg_genres a, .genres a, .post-on span, .item-summary .font-meta")
+            .joinToString(" ") { it.text() }.lowercase()
+
+        // 3) Nombre de chapitres — essayer plusieurs sélecteurs Madara
+        val chapterItems = listChapter?.select(".chapter-item")
+            ?.ifEmpty { element.select(".listing-chapters_wrap .wp-manga-chapter") }
+            ?.ifEmpty { element.select("li.wp-manga-chapter") }
+            ?: emptyList()
+        val chapterCount = chapterItems.size
+
+        // 4) Texte d'épisode — récupérer le texte du 1er chapitre listé
+        val firstChapterText = (chapterItems.firstOrNull()?.selectFirst("a")?.text()
+            ?: chapterItems.firstOrNull()?.text())?.trim()?.lowercase() ?: ""
+
+        val isMovie = when {
+            // Badge de type explicite
+            typeBadge == "MOVIE" || typeBadge == "FILM" -> true
+            typeBadge == "TV" || typeBadge == "TV SHORT" || typeBadge == "OVA" || typeBadge == "ONA" || typeBadge == "SPECIAL" -> false
+            // Genres contiennent "movie" ou "film"
+            genreTexts.contains("movie") || genreTexts.contains("film") -> true
+            // Titre contient "(Film)" ou "(Movie)"
+            title.contains("(Film)", ignoreCase = true) || title.contains("(Movie)", ignoreCase = true) -> true
+            // Texte de chapitre contient "film" ou "movie"
+            firstChapterText.contains("film") || firstChapterText.contains("movie") -> true
+            // Texte de chapitre contient "episode" ou "épisode" → série
+            firstChapterText.contains("episode") || firstChapterText.contains("épisode") || firstChapterText.contains("saison") -> false
+            // Fallback : nombre de chapitres
+            chapterCount > 1 -> false   // Plusieurs épisodes = série
+            chapterCount == 1 -> true   // 1 seul chapitre = probablement un film
+            else -> false               // Pas d'info chapitres = série par défaut
+        }
+
+        Log.d("VoirDrama_Parse", "id=$id title=$title type=${if (isMovie) "MOVIE" else "TVSHOW"} badge=$typeBadge genres='$genreTexts' chapters=$chapterCount firstCh='$firstChapterText' listChapter=${listChapter != null}")
+
+        return if (isMovie) {
+            Movie(id = id, title = title, poster = poster)
+        } else {
+            TvShow(id = id, title = title, poster = poster)
+        }
     }
 
     /**
@@ -569,7 +706,14 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
 
         val img = element.selectFirst("img")
         val rawPoster = img?.let {
-            it.attr("data-src").ifEmpty { it.attr("src") }
+            // Madara lazy-loading : data-lazy-src > data-src > srcset > src
+            it.attr("data-lazy-src").ifEmpty {
+                it.attr("data-src").ifEmpty {
+                    it.attr("srcset").split(",").firstOrNull()?.trim()?.split(" ")?.firstOrNull().orEmpty().ifEmpty {
+                        it.attr("src")
+                    }
+                }
+            }
         }?.takeIf { it.isNotBlank() && it.startsWith("http") }
         val poster = improveImageUrl(rawPoster)
 
@@ -609,6 +753,16 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
             @Query("s") query: String,
             @Query("page") page: Int = 1,
             @Query("post_type") postType: String = "wp-manga"
+        ): Document
+
+        @GET(".")
+        suspend fun searchFiltered(
+            @Query("s") query: String = "",
+            @Query("post_type") postType: String = "wp-manga",
+            @Query("type") type: String,
+            @Query("language") language: String,
+            @Query("m_orderby") orderBy: String = "views",
+            @Query("paged") page: Int = 1
         ): Document
     }
 }

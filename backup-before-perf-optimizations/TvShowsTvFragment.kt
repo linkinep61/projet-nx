@@ -1,41 +1,40 @@
 package com.streamflixreborn.streamflix.fragments.tv_shows
 
-import android.content.res.Configuration
+import android.annotation.SuppressLint
 import android.os.Bundle
 import android.util.Log
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
+import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.fragment.app.Fragment
-import androidx.navigation.fragment.findNavController
-import androidx.recyclerview.widget.GridLayoutManager
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.flowWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.navigation.fragment.findNavController
 import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
 import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.database.AppDatabase
-import com.streamflixreborn.streamflix.databinding.FragmentTvShowsMobileBinding
+import com.streamflixreborn.streamflix.databinding.FragmentTvShowsTvBinding
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.providers.Provider
 import com.streamflixreborn.streamflix.providers.WiTvProvider
-import com.streamflixreborn.streamflix.ui.SpacingItemDecoration
 import com.streamflixreborn.streamflix.utils.MiniPlayerController
 import com.streamflixreborn.streamflix.utils.UserPreferences
-import com.streamflixreborn.streamflix.utils.dp
-import com.streamflixreborn.streamflix.utils.viewModelsFactory
 import com.streamflixreborn.streamflix.utils.CacheUtils
+import com.streamflixreborn.streamflix.utils.viewModelsFactory
 import kotlinx.coroutines.launch
 
-class TvShowsMobileFragment : Fragment() {
+class TvShowsTvFragment : Fragment() {
 
     private var hasAutoCleared409: Boolean = false
 
-    private var _binding: FragmentTvShowsMobileBinding? = null
+    private var _binding: FragmentTvShowsTvBinding? = null
     private val binding get() = _binding!!
 
     private val database by lazy { AppDatabase.getInstance(requireContext()) }
@@ -44,25 +43,19 @@ class TvShowsMobileFragment : Fragment() {
     private val appAdapter = AppAdapter()
 
     private var currentHasMore: Boolean = false
-    private var shouldScrollToTop: Boolean = true
 
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        _binding = FragmentTvShowsMobileBinding.inflate(inflater, container, false)
+        _binding = FragmentTvShowsTvBinding.inflate(inflater, container, false)
         return binding.root
-    }
-
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        shouldScrollToTop = true
         initializeLanguageTabs()
         initializeTvShows()
         initializeMiniPlayer()
@@ -79,6 +72,7 @@ class TvShowsMobileFragment : Fragment() {
                     is TvShowsViewModel.State.SuccessLoading -> {
                         displayTvShows(state.tvShows, state.hasMore)
                         appAdapter.isLoading = false
+                        binding.vgvTvShows.visibility = View.VISIBLE
                         binding.isLoading.root.visibility = View.GONE
                     }
                     is TvShowsViewModel.State.FailedLoading -> {
@@ -87,6 +81,7 @@ class TvShowsMobileFragment : Fragment() {
                             hasAutoCleared409 = true
                             CacheUtils.clearAppCache(requireContext())
                             android.widget.Toast.makeText(requireContext(), getString(com.streamflixreborn.streamflix.R.string.clear_cache_done_409), android.widget.Toast.LENGTH_SHORT).show()
+                            if (appAdapter.isLoading) appAdapter.isLoading = false
                             viewModel.getTvShows()
                             return@collect
                         }
@@ -101,25 +96,19 @@ class TvShowsMobileFragment : Fragment() {
                             binding.isLoading.apply {
                                 pbIsLoading.visibility = View.GONE
                                 gIsLoadingRetry.visibility = View.VISIBLE
-                                val doRetry = { viewModel.getTvShows() }
-                                btnIsLoadingRetry.setOnClickListener { doRetry() }
+                                btnIsLoadingRetry.setOnClickListener { viewModel.getTvShows() }
                                 btnIsLoadingClearCache.setOnClickListener {
                                     CacheUtils.clearAppCache(requireContext())
                                     android.widget.Toast.makeText(requireContext(), getString(com.streamflixreborn.streamflix.R.string.clear_cache_done), android.widget.Toast.LENGTH_SHORT).show()
-                                    doRetry()
+                                    viewModel.getTvShows()
                                 }
+                                binding.vgvTvShows.visibility = View.GONE
                             }
                         }
                     }
                 }
             }
         }
-    }
-
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        val spanCount = if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) 6 else 3
-        (binding.rvTvShows.layoutManager as? GridLayoutManager)?.spanCount = spanCount
     }
 
     override fun onDestroyView() {
@@ -130,6 +119,10 @@ class TvShowsMobileFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
+        if (MiniPlayerController.transitioningToFullscreen) {
+            Log.d("TvShowsTv", "onPause: skipping cleanup (transitioning to fullscreen)")
+            return
+        }
         if (_binding != null) {
             binding.miniPlayerView.player = null
         }
@@ -142,7 +135,7 @@ class TvShowsMobileFragment : Fragment() {
         val channelId = MiniPlayerController.currentChannelId ?: return
 
         if (MiniPlayerController.getPlayer() == null) {
-            Log.d("TvShowsMobile", "onResume: player was released, re-initializing for $channelId")
+            Log.d("TvShowsTv", "onResume: player was released, re-initializing for $channelId")
             MiniPlayerController.initPlayer(requireContext())
             binding.miniPlayerView.player = MiniPlayerController.getPlayer()
             MiniPlayerController.playChannel(
@@ -164,11 +157,11 @@ class TvShowsMobileFragment : Fragment() {
         if (MiniPlayerController.onIptvChannelClick == null) {
             MiniPlayerController.onIptvChannelClick = { tvShow ->
                 if (tvShow.id == MiniPlayerController.currentChannelId) {
-                    Log.d("TvShowsMobile", "Same channel, stopping mini player for fullscreen (onResume): ${tvShow.title}")
+                    Log.d("TvShowsTv", "Same channel, stopping mini player for fullscreen (onResume): ${tvShow.title}")
                     MiniPlayerController.stopAsync()
                     false
                 } else {
-                    Log.d("TvShowsMobile", "Mini player intercept (onResume): ${tvShow.title}")
+                    Log.d("TvShowsTv", "Mini player intercept (onResume): ${tvShow.title}")
                     MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
                     true
                 }
@@ -186,6 +179,7 @@ class TvShowsMobileFragment : Fragment() {
             binding.tabFr.text = "Série"
             binding.tabVostfr.text = "Film"
             selectTab(binding.tabFr, binding.tabVostfr)
+            setupTabFocus(binding.tabFr, binding.tabVostfr)
             binding.tabFr.setOnClickListener {
                 selectTab(binding.tabFr, binding.tabVostfr)
                 viewModel.setLanguageFilter("serie")
@@ -200,6 +194,7 @@ class TvShowsMobileFragment : Fragment() {
             binding.tabFr.text = "FR"
             binding.tabVostfr.text = "VOSTFR"
             selectTab(binding.tabFr, binding.tabVostfr)
+            setupTabFocus(binding.tabFr, binding.tabVostfr)
             binding.tabFr.setOnClickListener {
                 selectTab(binding.tabFr, binding.tabVostfr)
                 viewModel.setLanguageFilter("vf")
@@ -209,6 +204,22 @@ class TvShowsMobileFragment : Fragment() {
                 viewModel.setLanguageFilter("vostfr")
             }
         }
+    }
+
+    private fun setupTabFocus(tab1: android.widget.TextView, tab2: android.widget.TextView) {
+        val focusListener = View.OnFocusChangeListener { v, hasFocus ->
+            val tv = v as android.widget.TextView
+            if (hasFocus) {
+                tv.setBackgroundColor(0x66E50914.toInt()) // brighter highlight when focused
+                tv.setTextColor(0xFFFFFFFF.toInt())
+            } else {
+                // Restore proper background based on whether this tab is selected
+                // (selectTab will be called on click, so just dim slightly)
+                tv.setBackgroundColor(if (tv.typeface?.isBold == true) 0x33E50914.toInt() else android.graphics.Color.TRANSPARENT)
+            }
+        }
+        tab1.onFocusChangeListener = focusListener
+        tab2.onFocusChangeListener = focusListener
     }
 
     private fun selectTab(selected: android.widget.TextView, other: android.widget.TextView) {
@@ -221,17 +232,15 @@ class TvShowsMobileFragment : Fragment() {
     }
 
     private fun initializeTvShows() {
-        binding.rvTvShows.apply {
+        binding.vgvTvShows.apply {
+            val spacing = requireContext().resources.getDimension(R.dimen.tv_shows_spacing).toInt()
+            setItemSpacing(spacing)
             adapter = appAdapter.apply {
                 stateRestorationPolicy = RecyclerView.Adapter.StateRestorationPolicy.PREVENT_WHEN_EMPTY
             }
-            // Adapt grid columns: 6 in landscape, 3 in portrait
-            val spanCount = if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) 6 else 3
-            (layoutManager as? GridLayoutManager)?.spanCount = spanCount
-            addItemDecoration(
-                SpacingItemDecoration(10.dp(requireContext()))
-            )
         }
+
+        binding.root.requestFocus()
     }
 
     private fun initializeMiniPlayer() {
@@ -251,6 +260,7 @@ class TvShowsMobileFragment : Fragment() {
             MiniPlayerController.currentChannelPoster?.let { poster ->
                 Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
             }
+            updateGridPadding(true)
         }
 
         viewLifecycleOwner.lifecycleScope.launch {
@@ -258,24 +268,27 @@ class TvShowsMobileFragment : Fragment() {
                 when (state) {
                     is MiniPlayerController.State.Idle -> {
                         binding.miniPlayerContainer.visibility = View.GONE
+                        updateGridPadding(false)
                     }
                     is MiniPlayerController.State.Loading -> {
                         binding.miniPlayerContainer.visibility = View.VISIBLE
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.VISIBLE
+                        updateGridPadding(true)
                     }
                     is MiniPlayerController.State.Playing -> {
                         binding.miniPlayerContainer.visibility = View.VISIBLE
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.GONE
                         updatePauseButton()
+                        updateGridPadding(true)
                         state.channelPoster?.let { poster ->
-                            Glide.with(this@TvShowsMobileFragment).load(poster).into(binding.miniPlayerChannelLogo)
+                            Glide.with(this@TvShowsTvFragment).load(poster).into(binding.miniPlayerChannelLogo)
                         }
                     }
                     is MiniPlayerController.State.Error -> {
                         binding.miniPlayerLoading.visibility = View.GONE
-                        Log.e("TvShowsMobile", "Mini player error: ${state.message}")
+                        Log.e("TvShowsTv", "Mini player error: ${state.message}")
                     }
                 }
             }
@@ -291,14 +304,73 @@ class TvShowsMobileFragment : Fragment() {
 
         MiniPlayerController.onIptvChannelClick = { tvShow ->
             if (tvShow.id == MiniPlayerController.currentChannelId) {
-                Log.d("TvShowsMobile", "Same channel, stopping mini player for fullscreen: ${tvShow.title}")
+                Log.d("TvShowsTv", "Same channel, stopping mini player for fullscreen: ${tvShow.title}")
                 MiniPlayerController.stopAsync()
                 false
             } else {
-                Log.d("TvShowsMobile", "Mini player intercept: ${tvShow.title} (${tvShow.id})")
+                Log.d("TvShowsTv", "Mini player intercept: ${tvShow.title} (${tvShow.id})")
                 MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
                 true
             }
+        }
+
+        setupMiniPlayerDragAndResize()
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupMiniPlayerDragAndResize() {
+        val container = binding.miniPlayerContainer
+        val parent = container.parent as? View ?: return
+
+        var dragStartX = 0f
+        var dragStartY = 0f
+        var origMarginEnd = 0
+        var origMarginTop = 0
+        var isDragging = false
+
+        // Drag via the overlay bar (bottom bar with channel name)
+        binding.miniPlayerOverlay.setOnTouchListener { _, event ->
+            val lp = container.layoutParams as ConstraintLayout.LayoutParams
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    dragStartX = event.rawX
+                    dragStartY = event.rawY
+                    origMarginEnd = lp.marginEnd
+                    origMarginTop = lp.topMargin
+                    isDragging = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - dragStartX
+                    val dy = event.rawY - dragStartY
+                    if (!isDragging && (dx * dx + dy * dy) > 100) isDragging = true
+                    if (isDragging) {
+                        lp.marginEnd = (origMarginEnd - dx.toInt()).coerceIn(0, parent.width - container.width)
+                        lp.topMargin = (origMarginTop + dy.toInt()).coerceIn(0, parent.height - container.height)
+                        container.layoutParams = lp
+                    }
+                    isDragging
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    val wasDragging = isDragging
+                    isDragging = false
+                    wasDragging
+                }
+                else -> false
+            }
+        }
+
+        // Resize via scroll-wheel on the container
+        container.setOnGenericMotionListener { _, event ->
+            if (event.action == MotionEvent.ACTION_SCROLL) {
+                val scrollY = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+                val lp = container.layoutParams as ConstraintLayout.LayoutParams
+                val currentPercent = lp.matchConstraintPercentWidth
+                val newPercent = (currentPercent + scrollY * 0.03f).coerceIn(0.2f, 0.7f)
+                lp.matchConstraintPercentWidth = newPercent
+                container.layoutParams = lp
+                true
+            } else false
         }
     }
 
@@ -313,6 +385,7 @@ class TvShowsMobileFragment : Fragment() {
     }
 
     private fun navigateToFullPlayer() {
+        if (!isAdded || _binding == null) return
         val channelId = MiniPlayerController.currentChannelId ?: return
         val channelName = MiniPlayerController.currentChannelName ?: channelId
         val channelPoster = MiniPlayerController.currentChannelPoster
@@ -335,7 +408,24 @@ class TvShowsMobileFragment : Fragment() {
         try {
             findNavController().navigate(R.id.action_global_player, args)
         } catch (e: Exception) {
-            android.util.Log.e("TvShowsMobile", "navigateToFullPlayer failed: ${e.message}", e)
+            Log.e("TvShowsTv", "navigateToFullPlayer failed: ${e.message}", e)
+        }
+    }
+
+    private var miniPlayerPaddingApplied = false
+
+    private fun updateGridPadding(miniPlayerVisible: Boolean) {
+        if (_binding == null) return
+        if (miniPlayerVisible == miniPlayerPaddingApplied) return
+        miniPlayerPaddingApplied = miniPlayerVisible
+        val grid = binding.vgvTvShows
+        if (miniPlayerVisible) {
+            // Add right padding = ~48% of screen width so items don't go behind the mini player
+            val screenWidth = resources.displayMetrics.widthPixels
+            val padRight = (screenWidth * 0.48f).toInt()
+            grid.setPadding(grid.paddingLeft, grid.paddingTop, padRight, grid.paddingBottom)
+        } else {
+            grid.setPadding(grid.paddingLeft, grid.paddingTop, 0, grid.paddingBottom)
         }
     }
 
@@ -343,13 +433,8 @@ class TvShowsMobileFragment : Fragment() {
         currentHasMore = hasMore
 
         appAdapter.submitList(tvShows.onEach {
-            it.itemType = AppAdapter.Type.TV_SHOW_GRID_MOBILE_ITEM
+            it.itemType = AppAdapter.Type.TV_SHOW_GRID_TV_ITEM
         })
-
-        if (shouldScrollToTop) {
-            shouldScrollToTop = false
-            binding.rvTvShows.post { binding.rvTvShows.scrollToPosition(0) }
-        }
 
         if (hasMore) {
             appAdapter.setOnLoadMoreListener { viewModel.loadMoreTvShows() }

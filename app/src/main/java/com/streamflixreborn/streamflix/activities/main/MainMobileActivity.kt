@@ -29,11 +29,11 @@ import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.activities.tools.BypassWebViewActivity
 import com.streamflixreborn.streamflix.databinding.ActivityMainMobileBinding
 import com.streamflixreborn.streamflix.fragments.player.PlayerMobileFragment
-import com.streamflixreborn.streamflix.providers.Cine24hProvider
 import com.streamflixreborn.streamflix.providers.WiflixProvider
 import com.streamflixreborn.streamflix.providers.Provider
 import com.streamflixreborn.streamflix.ui.UpdateAppMobileDialog
 import com.streamflixreborn.streamflix.utils.AppLanguageManager
+import com.streamflixreborn.streamflix.utils.CacheUtils
 import com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
 import com.streamflixreborn.streamflix.utils.ThemeManager
 import com.streamflixreborn.streamflix.utils.UserPreferences
@@ -100,7 +100,6 @@ class MainMobileActivity : FragmentActivity() {
 
         super.onCreate(savedInstanceState)
 
-        Cine24hProvider.init(this)
         WiflixProvider.init(this)
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -164,7 +163,16 @@ class MainMobileActivity : FragmentActivity() {
         updateNavigationVisibility()
         updateBottomNavigationVisibility(navController.currentDestination?.id)
 
+        var previousDestinationId: Int? = null
         navController.addOnDestinationChangedListener { _, destination, _ ->
+            // Clear Glide memory cache when switching between main tabs to free memory
+            if (previousDestinationId != null && previousDestinationId != destination.id
+                && isTopLevelProviderDestination(previousDestinationId)
+                && isTopLevelProviderDestination(destination.id)) {
+                CacheUtils.clearMemoryCache(this)
+            }
+            previousDestinationId = destination.id
+
             updateNavigationVisibility(destination.id)
             updateBottomNavigationVisibility(destination.id)
             binding.mainContent.post { binding.mainContent.requestApplyInsets() }
@@ -290,20 +298,18 @@ class MainMobileActivity : FragmentActivity() {
         binding.bnvMain.menu.findItem(R.id.movies)?.apply {
             isVisible = supportsMovies
             title = when (provider.name) {
-                "VoirDrama", "VoirAnime" -> getString(R.string.main_menu_series_fr)
+                "VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga" -> getString(R.string.main_menu_series_fr)
                 else -> getString(R.string.main_menu_movies)
             }
-            if (provider.name == "VoirDrama" || provider.name == "VoirAnime") {
+            if (provider.name in listOf("VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga")) {
                 setIcon(R.drawable.ic_menu_tv)
-            } else {
-                setIcon(R.drawable.ic_menu_movie)
             }
         }
         binding.bnvMain.menu.findItem(R.id.tv_shows)?.apply {
             isVisible = supportsTvShows
             title = when (provider.name) {
-                "CableVisionHD", "TvporinternetHD" -> getString(R.string.main_menu_all_channels)
-                "VoirDrama", "VoirAnime" -> getString(R.string.main_menu_series)
+                "CableVisionHD", "TvporinternetHD", "WiTV" -> getString(R.string.main_menu_all_channels)
+                "VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga" -> getString(R.string.main_menu_series)
                 else -> getString(R.string.main_menu_tv_shows)
             }
         }

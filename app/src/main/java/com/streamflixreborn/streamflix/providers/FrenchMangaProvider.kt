@@ -13,6 +13,8 @@ import com.streamflixreborn.streamflix.models.Season
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.NetworkClient
+import com.streamflixreborn.streamflix.utils.TMDb3
+import com.streamflixreborn.streamflix.utils.TMDb3.original
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -179,6 +181,39 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             categories.add(0, Category(name = Category.FEATURED, list = featuredItems))
         }
 
+        // TMDB HD backdrop enhancement for FEATURED carousel
+        val animeLanguages = setOf("ja", "ko", "zh")
+        if (UserPreferences.enableTmdb) {
+            categories.find { it.name == Category.FEATURED }?.list?.forEach { item ->
+                try {
+                    val title = when (item) {
+                        is Movie -> item.title
+                        is TvShow -> item.title
+                        else -> null
+                    } ?: return@forEach
+                    val results = TMDb3.Search.multi(title)
+                    val match = results.results.firstOrNull { result ->
+                        when (result) {
+                            is TMDb3.Movie -> result.originalLanguage in animeLanguages && result.backdropPath != null
+                            is TMDb3.Tv -> result.originalLanguage in animeLanguages && result.backdropPath != null
+                            else -> false
+                        }
+                    }
+                    val banner = when (match) {
+                        is TMDb3.Movie -> match.backdropPath?.original
+                        is TMDb3.Tv -> match.backdropPath?.original
+                        else -> null
+                    }
+                    if (banner != null) {
+                        when (item) {
+                            is Movie -> item.banner = banner
+                            is TvShow -> item.banner = banner
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+
         // Reorder: Featured first, then 1.Épisodes/récents 2.Séries récentes 3.Films récents 4.Séries 5.Films
         return categories.sortedWith(compareBy { cat ->
             if (cat.name == Category.FEATURED) return@compareBy -1
@@ -251,7 +286,7 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     override suspend fun getMovies(page: Int): List<Movie> {
         initializeService()
         val document = try {
-            service.getCategorie( page)
+            service.getCategorie(page)
         } catch (e: HttpException) {
             when (e.code()) {
                 404 -> return emptyList()
@@ -259,20 +294,14 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
         }
 
-        val movies = document.select("div.short > div.short-in").mapNotNull { movie ->
-            val mtype = movie.selectFirst("span.mli-type a")?.text()
-            if (mtype == null) return@mapNotNull null
+        return document.select("div.short > div.short-in").mapNotNull { movie ->
+            val mtype = movie.selectFirst("span.mli-type a")?.text() ?: return@mapNotNull null
             val title = movie.selectFirst("div.short-title")?.text() ?: "Item"
             val href = movie.selectFirst("a.short-poster")
             val poster = href?.selectFirst("> img")?.attr("src")
-            val id = href?.attr("href")?.substringAfterLast("=")?.takeIf{ it.isNotBlank() }
-            if (id == null) return@mapNotNull null
-
-            if (mtype != "Film") return@mapNotNull null
-            Movie(title = title, poster = poster, id = id)
+            val id = href?.attr("href")?.substringAfterLast("=")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            Movie(title = title, poster = poster, id = id).apply { isSeries = mtype != "Film" }
         }
-
-        return movies
     }
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
@@ -283,20 +312,15 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             if (e.code() == 404) return emptyList()
             else throw e
         }
-        val tvshows = document.select("div.short > div.short-in").mapNotNull { movie ->
-            val mtype = movie.selectFirst("span.mli-type a")?.text()
 
-            if (mtype == null) return@mapNotNull null
+        return document.select("div.short > div.short-in").mapNotNull { movie ->
+            val mtype = movie.selectFirst("span.mli-type a")?.text() ?: return@mapNotNull null
             val title = movie.selectFirst("div.short-title")?.text() ?: "Item"
             val href = movie.selectFirst("a.short-poster")
             val poster = href?.selectFirst("> img")?.attr("src")
-            val id = href?.attr("href")?.substringAfterLast("=")?.takeIf{ it.isNotBlank() }
-            if (id == null) return@mapNotNull null
-            if (mtype == "Film") return@mapNotNull null
-            TvShow(title = title, poster = poster, id = id)
+            val id = href?.attr("href")?.substringAfterLast("=")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            TvShow(title = title, poster = poster, id = id).apply { isMovie = mtype == "Film" }
         }
-
-        return tvshows
     }
 
     override suspend fun getMovie(id: String): Movie {
@@ -665,6 +689,22 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private interface FrenchMangaService {
         companion object {
             private val client = NetworkClient.default.newBuilder()
+                // Preserve POST method & body on redirects (site may change domain)
+                .followRedirects(false)
+                .addInterceptor { chain ->
+                    var request = chain.request()
+                    var response = chain.proceed(request)
+                    var redirects = 0
+                    while (response.isRedirect && redirects < 5) {
+                        val location = response.header("Location") ?: break
+                        val newUrl = request.url.resolve(location) ?: break
+                        response.close()
+                        request = request.newBuilder().url(newUrl).build()
+                        response = chain.proceed(request)
+                        redirects++
+                    }
+                    response
+                }
                 .build()
             fun buildAddressFetcher(): FrenchMangaService {
                 val addressRetrofit = Retrofit.Builder()

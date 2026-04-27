@@ -11,6 +11,9 @@ local.properties
 *.salive
 *.log
 
+# Providers archivés (non-français, gardés en local uniquement)
+app/archived_providers/
+
 # Scripts locaux (tous les .bat sauf gradlew.bat)
 push_to_github.bat
 push_test_update.bat

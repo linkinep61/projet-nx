@@ -208,6 +208,19 @@
         </PreferenceCategory>
 
         <PreferenceCategory
+            android:title="Mini Player IPTV"
+            app:iconSpaceReserved="false">
+
+            <SwitchPreference
+                android:key="MINI_PLAYER_ENABLED"
+                android:title="Mini Player"
+                android:defaultValue="true"
+                android:summaryOn="Les chaînes IPTV s'ouvrent dans le mini player"
+                android:summaryOff="Les chaînes IPTV s'ouvrent en plein écran"
+                app:iconSpaceReserved="false" />
+        </PreferenceCategory>
+
+        <PreferenceCategory
             android:key="pc_extra_buffering_settings"
             android:title="@string/player_settings_extra_buffer_title"
             app:iconSpaceReserved="false">

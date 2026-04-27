@@ -67,6 +67,22 @@ object CacheUtils {
         return size
     }
 
+    /**
+     * Lightweight memory cleanup: clears Glide memory cache and triggers GC.
+     * Called when switching between bottom nav tabs to free image memory fast
+     * without the heavy cost of clearing disk cache or WebView cache.
+     */
+    fun clearMemoryCache(context: Context) {
+        try {
+            Glide.get(context).clearMemory()
+            Log.d(TAG, "Glide memory cache cleared (tab switch)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error clearing Glide memory: ${e.message}")
+        }
+        // Suggest GC to reclaim freed image memory
+        System.gc()
+    }
+
     fun autoClearIfNeeded(context: Context, thresholdMb: Long = 50) {
         val currentSize = getCacheSize(context)
         val thresholdBytes = thresholdMb * 1024 * 1024

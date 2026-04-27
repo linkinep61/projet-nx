@@ -22,6 +22,11 @@ interface ProviderConfigUrl {
     val changeUrlMutex: Mutex
 }
 
+interface FilterableProvider {
+    suspend fun getFilteredMovies(language: String, page: Int = 1): List<Movie>
+    suspend fun getFilteredTvShows(language: String, page: Int = 1): List<TvShow>
+}
+
 interface Provider {
 
     val baseUrl: String
@@ -78,6 +83,7 @@ interface Provider {
             WiflixProvider to ProviderSupport(movies = true, tvShows = true),
             VoirDramaProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             VoirAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
+            WiTvProvider to ProviderSupport(movies = false, tvShows = true, enrichHome = false),
         )
 
         // Helper functions to check support

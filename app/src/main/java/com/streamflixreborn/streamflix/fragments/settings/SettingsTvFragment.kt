@@ -41,6 +41,7 @@ import androidx.preference.SeekBarPreference
 import androidx.preference.SwitchPreference
 import androidx.preference.SwitchPreferenceCompat
 import com.streamflixreborn.streamflix.BuildConfig
+import com.streamflixreborn.streamflix.utils.MiniPlayerController
 import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.activities.main.MainTvActivity
 import com.streamflixreborn.streamflix.backup.BackupRestoreManager
@@ -54,7 +55,6 @@ import com.streamflixreborn.streamflix.providers.FrenchStreamProvider
 import com.streamflixreborn.streamflix.providers.Provider
 import com.streamflixreborn.streamflix.providers.ProviderConfigUrl
 import com.streamflixreborn.streamflix.providers.ProviderPortalUrl
-import com.streamflixreborn.streamflix.providers.StreamingCommunityProvider
 import com.streamflixreborn.streamflix.providers.TmdbProvider
 import com.streamflixreborn.streamflix.utils.BypassWebSocketEndpointHelper
 import com.streamflixreborn.streamflix.utils.AppLanguageManager
@@ -251,15 +251,6 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
                     findPreference<EditTextPreference>("provider_streamingcommunity_domain")?.text = null
                     Toast.makeText(requireContext(), getString(R.string.settings_streamingcommunity_domain_blocked), Toast.LENGTH_LONG).show()
                 }
-                if (UserPreferences.currentProvider is StreamingCommunityProvider) {
-                    viewLifecycleOwner.lifecycleScope.launch {
-                        (UserPreferences.currentProvider as StreamingCommunityProvider).rebuildService()
-                        requireActivity().apply {
-                            finish()
-                            startActivity(Intent(this, this::class.java))
-                        }
-                    }
-                }
                 true
             }
         }
@@ -271,15 +262,6 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
                 text = null
             }
             Toast.makeText(requireContext(), getString(R.string.settings_streamingcommunity_domain_reset_done), Toast.LENGTH_SHORT).show()
-            if (UserPreferences.currentProvider is StreamingCommunityProvider) {
-                viewLifecycleOwner.lifecycleScope.launch {
-                    (UserPreferences.currentProvider as StreamingCommunityProvider).rebuildService()
-                    requireActivity().apply {
-                        finish()
-                        startActivity(Intent(this, this::class.java))
-                    }
-                }
-            }
             true
         }
 
@@ -422,6 +404,17 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             isChecked = UserPreferences.forceExtraBuffering
             setOnPreferenceChangeListener { _, newValue ->
                 UserPreferences.forceExtraBuffering = newValue as Boolean
+                true
+            }
+        }
+
+        findPreference<SwitchPreference>("MINI_PLAYER_ENABLED")?.apply {
+            isChecked = UserPreferences.miniPlayerEnabled
+            setOnPreferenceChangeListener { _, newValue ->
+                UserPreferences.miniPlayerEnabled = newValue as Boolean
+                if (!(newValue as Boolean)) {
+                    MiniPlayerController.stop()
+                }
                 true
             }
         }
@@ -581,17 +574,7 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
                         preference.summary = null
                     }
                 }
-                if (UserPreferences.currentProvider is StreamingCommunityProvider) {
-                    viewLifecycleOwner.lifecycleScope.launch {
-                        (UserPreferences.currentProvider as StreamingCommunityProvider).rebuildService()
-                        requireActivity().apply {
-                            finish()
-                            startActivity(Intent(this, this::class.java))
-                        }
-                    }
-                } else {
-                    Toast.makeText(requireContext(), getString(R.string.doh_provider_updated), Toast.LENGTH_LONG).show()
-                }
+                Toast.makeText(requireContext(), getString(R.string.doh_provider_updated), Toast.LENGTH_LONG).show()
                 true
             }
         }
@@ -1375,7 +1358,7 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
     }
 
     private fun updateProviderVisibilityState() {
-        val isStreamingCommunity = UserPreferences.currentProvider is StreamingCommunityProvider
+        val isStreamingCommunity = false
         val isCuevana = UserPreferences.currentProvider?.name == "Cuevana 3"
         val isPoseidon = UserPreferences.currentProvider?.name == "Poseidonhd2"
         val hasConfigProvider = UserPreferences.currentProvider is ProviderConfigUrl

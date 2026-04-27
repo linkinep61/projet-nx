@@ -18,6 +18,96 @@
         app:layout_constraintTop_toTopOf="parent"
         tools:ignore="ContentDescription" />
 
+    <!-- Mini Player container (IPTV only, hidden by default) -->
+    <FrameLayout
+        android:id="@+id/mini_player_container"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:visibility="gone"
+        android:background="#FF000000"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <androidx.media3.ui.PlayerView
+            android:id="@+id/mini_player_view"
+            android:layout_width="match_parent"
+            android:layout_height="200dp"
+            app:use_controller="false"
+            app:show_buffering="when_playing"
+            app:resize_mode="fit" />
+
+        <!-- Channel name overlay -->
+        <LinearLayout
+            android:id="@+id/mini_player_overlay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:background="#80000000"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="8dp">
+
+            <ImageView
+                android:id="@+id/mini_player_channel_logo"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:layout_marginEnd="8dp"
+                android:scaleType="fitCenter"
+                tools:ignore="ContentDescription" />
+
+            <TextView
+                android:id="@+id/mini_player_channel_name"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:maxLines="1"
+                android:ellipsize="end" />
+
+            <ProgressBar
+                android:id="@+id/mini_player_loading"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:layout_marginStart="8dp"
+                android:visibility="gone"
+                android:indeterminateTintMode="src_in"
+                android:indeterminateTint="#FFFFFF" />
+
+            <ImageView
+                android:id="@+id/mini_player_pause"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:layout_marginStart="8dp"
+                android:padding="4dp"
+                android:src="@drawable/ic_mini_player_pause"
+                android:scaleType="fitCenter"
+                android:contentDescription="Pause" />
+
+            <ImageView
+                android:id="@+id/mini_player_fullscreen"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:layout_marginStart="4dp"
+                android:padding="4dp"
+                android:src="@drawable/ic_mini_player_fullscreen"
+                android:scaleType="fitCenter"
+                android:contentDescription="Fullscreen" />
+
+            <ImageView
+                android:id="@+id/mini_player_close"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:layout_marginStart="4dp"
+                android:padding="4dp"
+                android:src="@android:drawable/ic_menu_close_clear_cancel"
+                android:scaleType="fitCenter"
+                android:contentDescription="Close"
+                app:tint="#FFFFFF" />
+        </LinearLayout>
+    </FrameLayout>
+
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rv_home"
         android:layout_width="0dp"
@@ -27,7 +117,7 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/mini_player_container"
         tools:itemCount="1"
         tools:listitem="@layout/content_category_swiper_mobile" />
 
