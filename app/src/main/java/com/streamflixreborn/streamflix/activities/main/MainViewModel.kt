@@ -33,8 +33,13 @@ class MainViewModel : ViewModel() {
     }
 
 
+    private var updateChecked = false
+    var updateDismissed = false
+
     fun checkUpdate() = viewModelScope.launch(Dispatchers.IO) {
         if (!UserPreferences.updateCheckEnabled) return@launch
+        if (updateChecked || updateDismissed) return@launch
+        updateChecked = true
         _state.emit(State.CheckingUpdate)
 
         try {

@@ -49,4 +49,4 @@ streamflix-release.jks
 # Claude
 .claude/
 claude-context/
-build_output*.txt
+build_output*.txt
