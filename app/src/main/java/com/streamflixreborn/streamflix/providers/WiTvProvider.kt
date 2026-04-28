@@ -926,6 +926,9 @@ object WiTvProvider : Provider {
      *  5. Parallelism capped at 5 concurrent probes to avoid API rate limiting */
     private const val MAX_FR_SERVERS = 20
 
+    /** Shared thread pool for OLA TV scanning — reused across calls, avoids re-allocation */
+    private val scanExecutor = java.util.concurrent.Executors.newFixedThreadPool(5)
+
     private fun scanOlaTvFrServers() {
         if (olaTvFrScanDone) return
         val t0 = System.currentTimeMillis()
@@ -936,13 +939,12 @@ object WiTvProvider : Provider {
         val cidsToProbe = olaTvServerMap.keys.filter { it != primaryCid }.toList()
 
         val semaphore = java.util.concurrent.Semaphore(5) // max 5 concurrent
-        val executor = java.util.concurrent.Executors.newFixedThreadPool(5)
         val latch = java.util.concurrent.CountDownLatch(cidsToProbe.size)
         val probedCount = java.util.concurrent.atomic.AtomicInteger(0)
         val earlyStop = java.util.concurrent.atomic.AtomicBoolean(false)
 
         for (cid in cidsToProbe) {
-            executor.submit {
+            scanExecutor.submit {
                 try {
                     if (earlyStop.get()) return@submit // skip remaining work
                     semaphore.acquire()
@@ -973,7 +975,10 @@ object WiTvProvider : Provider {
 
         // Wait for all probes (with overall timeout of 3 minutes, or early stop)
         latch.await(3, TimeUnit.MINUTES)
-        executor.shutdown()
+        if (earlyStop.get()) {
+            // Cancel remaining queued tasks immediately
+            scanExecutor.shutdownNow()
+        }
 
         olaTvFrScanDone = true
         val elapsed = System.currentTimeMillis() - t0

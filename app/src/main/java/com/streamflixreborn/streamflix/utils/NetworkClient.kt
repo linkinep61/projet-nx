@@ -11,6 +11,7 @@ import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.TlsVersion
 import okhttp3.logging.HttpLoggingInterceptor
+import okhttp3.ConnectionPool
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.CertificateFactory
@@ -73,8 +74,16 @@ object NetworkClient {
         }
     }
 
+    /** Shared connection pool — limits idle connections to reduce memory usage */
+    private val sharedConnectionPool = ConnectionPool(
+        maxIdleConnections = 10,
+        keepAliveDuration = 2,
+        timeUnit = TimeUnit.MINUTES
+    )
+
     private fun buildClient(dns: Dns, customizer: ((OkHttpClient.Builder) -> Unit)? = null): OkHttpClient {
         val builder = OkHttpClient.Builder()
+            .connectionPool(sharedConnectionPool)
             .addInterceptor { chain ->
                 val original = chain.request()
                 val requestBuilder = original.newBuilder()
