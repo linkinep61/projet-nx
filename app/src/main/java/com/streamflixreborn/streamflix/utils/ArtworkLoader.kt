@@ -5,8 +5,10 @@ import android.widget.ImageView
 import com.bumptech.glide.Glide
 import com.bumptech.glide.RequestBuilder
 import com.bumptech.glide.load.DataSource
+import com.bumptech.glide.load.DecodeFormat
 import com.bumptech.glide.load.engine.GlideException
 import com.bumptech.glide.request.RequestListener
+import com.bumptech.glide.request.RequestOptions
 import com.bumptech.glide.request.target.Target
 import com.streamflixreborn.streamflix.database.AppDatabase
 import com.streamflixreborn.streamflix.models.Movie
@@ -88,10 +90,21 @@ private object ArtworkRepairCoordinator {
     }
 }
 
+/** Poster in list/grid: 400×600 cap + RGB_565 (2 bytes/px instead of 4) */
+private val POSTER_LIST_OPTIONS = RequestOptions()
+    .override(400, 600)
+    .format(DecodeFormat.PREFER_RGB_565)
+
+/** Banner/backdrop: 800×450 cap + RGB_565 */
+private val BANNER_OPTIONS = RequestOptions()
+    .override(800, 450)
+    .format(DecodeFormat.PREFER_RGB_565)
+
 private fun ImageView.loadRecoverableArtwork(
     initialUrl: String?,
     configure: RequestBuilder<Drawable>.() -> RequestBuilder<Drawable>,
     onRepair: (staleUrl: String, onUpdated: (String) -> Unit) -> Unit,
+    memoryOptions: RequestOptions? = null,
 ) {
     var hasRequestedRepairForBlankUrl = false
 
@@ -105,7 +118,10 @@ private fun ImageView.loadRecoverableArtwork(
             }
         }
 
-        configure(Glide.with(this).load(requestedUrl))
+        val base = Glide.with(this).load(requestedUrl).let { req ->
+            if (memoryOptions != null) req.apply(memoryOptions) else req
+        }
+        configure(base)
             .listener(object : RequestListener<Drawable> {
                 override fun onLoadFailed(
                     e: GlideException?,
@@ -142,68 +158,68 @@ fun ImageView.loadMoviePoster(
     movie: Movie,
     configure: RequestBuilder<Drawable>.() -> RequestBuilder<Drawable> = { this },
 ) {
-    loadRecoverableArtwork(movie.poster, configure) { staleUrl, onUpdated ->
+    loadRecoverableArtwork(movie.poster, configure, memoryOptions = POSTER_LIST_OPTIONS, onRepair = { staleUrl, onUpdated ->
         ArtworkRepairCoordinator.repairMovieArtwork(this, movie, staleUrl) { refreshedMovie ->
             val refreshedUrl = refreshedMovie.poster
             if (!refreshedUrl.isNullOrBlank() && refreshedUrl != staleUrl) {
                 onUpdated(refreshedUrl)
             }
         }
-    }
+    })
 }
 
 fun ImageView.loadMovieBanner(
     movie: Movie,
     configure: RequestBuilder<Drawable>.() -> RequestBuilder<Drawable> = { this },
 ) {
-    loadRecoverableArtwork(movie.banner, configure) { staleUrl, onUpdated ->
+    loadRecoverableArtwork(movie.banner, configure, memoryOptions = BANNER_OPTIONS, onRepair = { staleUrl, onUpdated ->
         ArtworkRepairCoordinator.repairMovieArtwork(this, movie, staleUrl) { refreshedMovie ->
             val refreshedUrl = refreshedMovie.banner
             if (!refreshedUrl.isNullOrBlank() && refreshedUrl != staleUrl) {
                 onUpdated(refreshedUrl)
             }
         }
-    }
+    })
 }
 
 fun ImageView.loadTvShowPoster(
     tvShow: TvShow,
     configure: RequestBuilder<Drawable>.() -> RequestBuilder<Drawable> = { this },
 ) {
-    loadRecoverableArtwork(tvShow.poster, configure) { staleUrl, onUpdated ->
+    loadRecoverableArtwork(tvShow.poster, configure, memoryOptions = POSTER_LIST_OPTIONS, onRepair = { staleUrl, onUpdated ->
         ArtworkRepairCoordinator.repairTvShowArtwork(this, tvShow, staleUrl) { refreshedTvShow ->
             val refreshedUrl = refreshedTvShow.poster
             if (!refreshedUrl.isNullOrBlank() && refreshedUrl != staleUrl) {
                 onUpdated(refreshedUrl)
             }
         }
-    }
+    })
 }
 
 fun ImageView.loadTvShowBanner(
     tvShow: TvShow,
     configure: RequestBuilder<Drawable>.() -> RequestBuilder<Drawable> = { this },
 ) {
-    loadRecoverableArtwork(tvShow.banner, configure) { staleUrl, onUpdated ->
+    loadRecoverableArtwork(tvShow.banner, configure, memoryOptions = BANNER_OPTIONS, onRepair = { staleUrl, onUpdated ->
         ArtworkRepairCoordinator.repairTvShowArtwork(this, tvShow, staleUrl) { refreshedTvShow ->
             val refreshedUrl = refreshedTvShow.banner
             if (!refreshedUrl.isNullOrBlank() && refreshedUrl != staleUrl) {
                 onUpdated(refreshedUrl)
             }
         }
-    }
+    })
 }
 
 fun ImageView.loadTvShowCardArtwork(
     tvShow: TvShow,
     configure: RequestBuilder<Drawable>.() -> RequestBuilder<Drawable> = { this },
 ) {
-    loadRecoverableArtwork(tvShow.poster ?: tvShow.banner, configure) { staleUrl, onUpdated ->
+    loadRecoverableArtwork(tvShow.poster ?: tvShow.banner, configure, memoryOptions = POSTER_LIST_OPTIONS, onRepair = { staleUrl, onUpdated ->
         ArtworkRepairCoordinator.repairTvShowArtwork(this, tvShow, staleUrl) { refreshedTvShow ->
             val refreshedUrl = refreshedTvShow.poster ?: refreshedTvShow.banner
             if (!refreshedUrl.isNullOrBlank() && refreshedUrl != staleUrl) {
                 onUpdated(refreshedUrl)
             }
         }
-    }
+    })
 }

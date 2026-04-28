@@ -2,10 +2,13 @@ package com.streamflixreborn.streamflix.fragments.player
 
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
+import android.app.RemoteAction
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.drawable.Icon
+import android.util.Rational
 import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Build
@@ -118,6 +121,11 @@ class PlayerMobileFragment : Fragment() {
     companion object {
         private const val NEXT_EPISODE_PREFETCH_THRESHOLD_MS = 60_000L
         private const val NEXT_EPISODE_OVERLAY_MIN_THRESHOLD_MS = 30_000L
+
+        private const val PIP_ACTION_PLAY = "com.streamfr.app.PIP_PLAY"
+        private const val PIP_ACTION_PAUSE = "com.streamfr.app.PIP_PAUSE"
+        private const val PIP_ACTION_REWIND = "com.streamfr.app.PIP_REWIND"
+        private const val PIP_ACTION_FORWARD = "com.streamfr.app.PIP_FORWARD"
 
         /** Ad / tracking / popup domains blocked in DaddyLive WebView embeds */
         private val AD_BLOCK_PATTERNS = listOf(
@@ -239,6 +247,22 @@ class PlayerMobileFragment : Fragment() {
     /** Shared bounded executor for Cronet — avoids unbounded newCachedThreadPool */
     private val cronetExecutor = java.util.concurrent.Executors.newFixedThreadPool(4)
     private var isIgnoringPip = false
+
+    private val pipActionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (!::player.isInitialized) return
+            when (intent?.action) {
+                PIP_ACTION_PLAY -> player.play()
+                PIP_ACTION_PAUSE -> player.pause()
+                PIP_ACTION_REWIND -> player.seekTo(maxOf(0, player.currentPosition - 10_000))
+                PIP_ACTION_FORWARD -> player.seekTo(minOf(player.duration, player.currentPosition + 10_000))
+            }
+            // Update PiP actions to reflect new play/pause state
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                updatePipParams()
+            }
+        }
+    }
     private var waitingForBypass = false
     private var bypassDone = false
     private var nextEpisodePrefetchTargetId: String? = null
@@ -712,6 +736,10 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean) {
         binding.pvPlayer.useController = !isInPictureInPictureMode
+        if (!isInPictureInPictureMode) {
+            // Exiting PiP — unregister the broadcast receiver
+            try { requireContext().unregisterReceiver(pipActionReceiver) } catch (_: Exception) {}
+        }
         super.onPictureInPictureModeChanged(isInPictureInPictureMode)
     }
 
@@ -723,7 +751,9 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onStop() {
         super.onStop()
-        if (::player.isInitialized) {
+        val inPip = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                requireActivity().isInPictureInPictureMode
+        if (::player.isInitialized && !inPip) {
             player.pause()
         }
     }
@@ -1670,15 +1700,113 @@ class PlayerMobileFragment : Fragment() {
 
         player.prepare()
         player.play()
+
+        // Enable auto-PiP on Android 12+ once playback starts
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            updatePipParams()
+        }
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
+    private fun buildPipParams(): PictureInPictureParams {
+        val isPlaying = ::player.isInitialized && player.isPlaying
+        val actions = mutableListOf<RemoteAction>()
+
+        // Rewind 10s
+        actions.add(
+            RemoteAction(
+                Icon.createWithResource(requireContext(), R.drawable.exo_styled_controls_rewind),
+                getString(R.string.player_rewind),
+                getString(R.string.player_rewind),
+                PendingIntent.getBroadcast(
+                    requireContext(), 3,
+                    Intent(PIP_ACTION_REWIND),
+                    PendingIntent.FLAG_IMMUTABLE
+                )
+            )
+        )
+
+        // Play or Pause
+        if (isPlaying) {
+            actions.add(
+                RemoteAction(
+                    Icon.createWithResource(requireContext(), R.drawable.exo_styled_controls_pause),
+                    getString(R.string.player_pause),
+                    getString(R.string.player_pause),
+                    PendingIntent.getBroadcast(
+                        requireContext(), 1,
+                        Intent(PIP_ACTION_PAUSE),
+                        PendingIntent.FLAG_IMMUTABLE
+                    )
+                )
+            )
+        } else {
+            actions.add(
+                RemoteAction(
+                    Icon.createWithResource(requireContext(), R.drawable.exo_styled_controls_play),
+                    getString(R.string.player_play),
+                    getString(R.string.player_play),
+                    PendingIntent.getBroadcast(
+                        requireContext(), 2,
+                        Intent(PIP_ACTION_PLAY),
+                        PendingIntent.FLAG_IMMUTABLE
+                    )
+                )
+            )
+        }
+
+        // Forward 10s
+        actions.add(
+            RemoteAction(
+                Icon.createWithResource(requireContext(), R.drawable.exo_styled_controls_fastforward),
+                getString(R.string.player_forward),
+                getString(R.string.player_forward),
+                PendingIntent.getBroadcast(
+                    requireContext(), 4,
+                    Intent(PIP_ACTION_FORWARD),
+                    PendingIntent.FLAG_IMMUTABLE
+                )
+            )
+        )
+
+        val builder = PictureInPictureParams.Builder()
+            .setAspectRatio(Rational(16, 9))
+            .setActions(actions)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setAutoEnterEnabled(true)
+        }
+
+        return builder.build()
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
+    private fun updatePipParams() {
+        try {
+            requireActivity().setPictureInPictureParams(buildPipParams())
+        } catch (_: Exception) {}
     }
 
     private fun enterPIPMode() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             binding.pvPlayer.useController = false
-            requireActivity().enterPictureInPictureMode(
-                PictureInPictureParams.Builder()
-                    .build()
-            )
+
+            // Register PiP action receiver
+            val filter = IntentFilter().apply {
+                addAction(PIP_ACTION_PLAY)
+                addAction(PIP_ACTION_PAUSE)
+                addAction(PIP_ACTION_REWIND)
+                addAction(PIP_ACTION_FORWARD)
+            }
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    requireContext().registerReceiver(pipActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                } else {
+                    requireContext().registerReceiver(pipActionReceiver, filter)
+                }
+            } catch (_: Exception) {}
+
+            requireActivity().enterPictureInPictureMode(buildPipParams())
         }
     }
 

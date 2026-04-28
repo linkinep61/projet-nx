@@ -16,6 +16,9 @@ import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
@@ -898,136 +901,122 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                 val tmdbId = id
                 Log.d("MovixProvider", "getServers Movie tmdbId=$tmdbId")
 
-                // Fstream sources
-                try {
-                    val fstream = movixServiceInstance.getFstreamMovie(tmdbId)
-                    if (fstream.success == true) {
-                        fstream.players?.forEach { (lang, players) ->
-                            players.forEach { player ->
-                                val url = player.url ?: return@forEach
-                                if (url.isBlank()) return@forEach
+                // Parallel fetch all 5 API sources
+                val allResults = coroutineScope {
+                    val fstreamDeferred = async {
+                        try {
+                            val fstream = movixServiceInstance.getFstreamMovie(tmdbId)
+                            val list = mutableListOf<Video.Server>()
+                            if (fstream.success == true) {
+                                fstream.players?.forEach { (lang, players) ->
+                                    players.forEach { player ->
+                                        val url = player.url ?: return@forEach
+                                        if (url.isBlank()) return@forEach
+                                        val displayLang = formatLang(lang)
+                                        val quality = player.quality?.takeIf { it.isNotBlank() } ?: "HD"
+                                        val playerName = player.player?.takeIf { it.isNotBlank() }
+                                            ?: guessPlayerName(url)
+                                        list.add(Video.Server(id = "fstream-$lang-${list.size}", name = "$playerName ($displayLang - $quality)", src = url))
+                                    }
+                                }
+                            }
+                            Log.d("MovixProvider", "Fstream: ${list.size} servers found")
+                            list
+                        } catch (e: Exception) {
+                            Log.e("MovixProvider", "Fstream movie error: ${e.message}")
+                            emptyList()
+                        }
+                    }
+
+                    val linksDeferred = async {
+                        try {
+                            val links = movixServiceInstance.getLinksMovie(tmdbId)
+                            val list = mutableListOf<Video.Server>()
+                            if (links.success == true) {
+                                links.data?.links?.forEachIndexed { index, url ->
+                                    if (url.isNotBlank()) {
+                                        val playerName = guessPlayerName(url)
+                                        list.add(Video.Server(id = "links-$index", name = "$playerName (Link ${index + 1})", src = url))
+                                    }
+                                }
+                            }
+                            Log.d("MovixProvider", "Links: ${list.size} servers found")
+                            list
+                        } catch (e: Exception) {
+                            Log.e("MovixProvider", "Links movie error: ${e.message}")
+                            emptyList()
+                        }
+                    }
+
+                    val wiflixDeferred = async {
+                        try {
+                            val wiflix = movixServiceInstance.getWiflixMovie(tmdbId)
+                            val list = mutableListOf<Video.Server>()
+                            if (wiflix.success == true) {
+                                wiflix.players?.forEach { (lang, sources) ->
+                                    val displayLang = formatLang(lang)
+                                    sources.forEach { source ->
+                                        val url = source.url ?: return@forEach
+                                        if (url.isBlank()) return@forEach
+                                        val playerName = source.name?.takeIf { it.isNotBlank() } ?: guessPlayerName(url)
+                                        list.add(Video.Server(id = "wiflix-$lang-${list.size}", name = "$playerName ($displayLang)", src = url))
+                                    }
+                                }
+                            }
+                            Log.d("MovixProvider", "Wiflix: ${list.size} servers found")
+                            list
+                        } catch (e: Exception) {
+                            Log.e("MovixProvider", "Wiflix movie error: ${e.message}")
+                            emptyList()
+                        }
+                    }
+
+                    val cpasmalDeferred = async {
+                        try {
+                            val cpasmal = movixServiceInstance.getCpasmalMovie(tmdbId)
+                            val list = mutableListOf<Video.Server>()
+                            cpasmal.links?.forEach { (lang, links) ->
                                 val displayLang = formatLang(lang)
-                                val quality = player.quality?.takeIf { it.isNotBlank() } ?: "HD"
-                                val playerName = player.player?.takeIf { it.isNotBlank() }
-                                    ?: guessPlayerName(url)
-                                servers.add(
-                                    Video.Server(
-                                        id = "fstream-$lang-${servers.size}",
-                                        name = "$playerName ($displayLang - $quality)",
-                                        src = url
-                                    )
-                                )
+                                links.forEach { link ->
+                                    val url = link.url ?: return@forEach
+                                    if (url.isBlank()) return@forEach
+                                    val playerName = link.server?.replaceFirstChar { it.uppercase() } ?: guessPlayerName(url)
+                                    list.add(Video.Server(id = "cpasmal-$lang-${list.size}", name = "$playerName ($displayLang)", src = url))
+                                }
                             }
+                            Log.d("MovixProvider", "Cpasmal movie: ${list.size} servers found")
+                            list
+                        } catch (e: Exception) {
+                            Log.e("MovixProvider", "Cpasmal movie error: ${e.message}")
+                            emptyList()
                         }
-                        Log.d("MovixProvider", "Fstream: ${servers.size} servers found")
-                    } else {
-                        Log.w("MovixProvider", "Fstream: ${fstream.error ?: fstream.message ?: "no content"}")
                     }
-                } catch (e: Exception) {
-                    Log.e("MovixProvider", "Fstream movie error: ${e.message}")
-                }
 
-                // Links sources
-                val preLinksCount = servers.size
-                try {
-                    val links = movixServiceInstance.getLinksMovie(tmdbId)
-                    if (links.success == true) {
-                        links.data?.links?.forEachIndexed { index, url ->
-                            if (url.isNotBlank()) {
-                                val playerName = guessPlayerName(url)
-                                servers.add(
-                                    Video.Server(
-                                        id = "links-$index",
-                                        name = "$playerName (Link ${index + 1})",
-                                        src = url
-                                    )
-                                )
-                            }
-                        }
-                        Log.d("MovixProvider", "Links: ${servers.size - preLinksCount} servers found")
-                    } else {
-                        Log.w("MovixProvider", "Links: ${links.error ?: links.message ?: "no content"}")
-                    }
-                } catch (e: Exception) {
-                    Log.e("MovixProvider", "Links movie error: ${e.message}")
-                }
-
-                // Wiflix sources
-                val preWiflixCount = servers.size
-                try {
-                    val wiflix = movixServiceInstance.getWiflixMovie(tmdbId)
-                    if (wiflix.success == true) {
-                        wiflix.players?.forEach { (lang, sources) ->
-                            val displayLang = formatLang(lang)
-                            sources.forEach { source ->
-                                val url = source.url ?: return@forEach
+                    val tmdbMovixDeferred = async {
+                        try {
+                            val tmdbMovix = movixServiceInstance.getTmdbMovixMovie(tmdbId)
+                            val list = mutableListOf<Video.Server>()
+                            tmdbMovix.player_links?.forEach { link ->
+                                val url = link.decoded_url ?: return@forEach
                                 if (url.isBlank()) return@forEach
-                                val playerName = source.name?.takeIf { it.isNotBlank() }
-                                    ?: guessPlayerName(url)
-                                servers.add(
-                                    Video.Server(
-                                        id = "wiflix-$lang-${servers.size}",
-                                        name = "$playerName ($displayLang)",
-                                        src = url
-                                    )
-                                )
+                                val lang = if (link.language?.lowercase()?.contains("french") == true) "VF"
+                                    else link.language ?: ""
+                                val qualityLabel = link.quality?.substringBefore("/")?.trim() ?: "HD"
+                                val playerName = guessPlayerName(url)
+                                list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "$playerName - $qualityLabel ($lang)", src = url))
                             }
-                        }
-                        Log.d("MovixProvider", "Wiflix: ${servers.size - preWiflixCount} servers found")
-                    } else {
-                        Log.w("MovixProvider", "Wiflix: ${wiflix.error ?: wiflix.message ?: "no content"}")
-                    }
-                } catch (e: Exception) {
-                    Log.e("MovixProvider", "Wiflix movie error: ${e.message}")
-                }
-
-                // Cpasmal movie sources
-                try {
-                    val cpasmal = movixServiceInstance.getCpasmalMovie(tmdbId)
-                    cpasmal.links?.forEach { (lang, links) ->
-                        val displayLang = formatLang(lang)
-                        links.forEach { link ->
-                            val url = link.url ?: return@forEach
-                            if (url.isBlank()) return@forEach
-                            val playerName = link.server?.replaceFirstChar { it.uppercase() }
-                                ?: guessPlayerName(url)
-                            servers.add(
-                                Video.Server(
-                                    id = "cpasmal-$lang-${servers.size}",
-                                    name = "$playerName ($displayLang)",
-                                    src = url
-                                )
-                            )
+                            Log.d("MovixProvider", "TmdbMovix movie: ${list.size} servers found")
+                            list
+                        } catch (e: Exception) {
+                            Log.e("MovixProvider", "TmdbMovix movie error: ${e.message}")
+                            emptyList()
                         }
                     }
-                    Log.d("MovixProvider", "Cpasmal movie: ${servers.size} total servers")
-                } catch (e: Exception) {
-                    Log.e("MovixProvider", "Cpasmal movie error: ${e.message}")
+
+                    awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred)
                 }
 
-                // TMDB Movix movie sources
-                try {
-                    val tmdbMovix = movixServiceInstance.getTmdbMovixMovie(tmdbId)
-                    tmdbMovix.player_links?.forEach { link ->
-                        val url = link.decoded_url ?: return@forEach
-                        if (url.isBlank()) return@forEach
-                        val lang = if (link.language?.lowercase()?.contains("french") == true) "VF"
-                            else link.language ?: ""
-                        val qualityLabel = link.quality?.substringBefore("/")?.trim() ?: "HD"
-                        val playerName = guessPlayerName(url)
-                        servers.add(
-                            Video.Server(
-                                id = "tmdbmovix-${servers.size}",
-                                name = "$playerName - $qualityLabel ($lang)",
-                                src = url
-                            )
-                        )
-                    }
-                    Log.d("MovixProvider", "TmdbMovix movie: ${servers.size} total servers")
-                } catch (e: Exception) {
-                    Log.e("MovixProvider", "TmdbMovix movie error: ${e.message}")
-                }
-
+                allResults.forEach { servers.addAll(it) }
                 Log.i("MovixProvider", "Total servers for movie $tmdbId: ${servers.size}")
             }
 
@@ -1036,153 +1025,139 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                 val seasonNum = videoType.season.number
                 val episodeNum = videoType.number
 
-                // Fstream TV sources
-                try {
-                    val fstream = movixServiceInstance.getFstreamTv(tmdbId, seasonNum)
-                    val episode = fstream.episodes?.get(episodeNum.toString())
-                    episode?.languages?.forEach { (lang, players) ->
-                        val displayLang = formatLang(lang)
-                        players.forEach { player ->
-                            val url = player.url ?: return@forEach
-                            if (url.isBlank()) return@forEach
-                            val quality = player.quality?.takeIf { it.isNotBlank() } ?: "HD"
-                            val playerName = player.player?.takeIf { it.isNotBlank() }
-                                ?: guessPlayerName(url)
-                            servers.add(
-                                Video.Server(
-                                    id = "fstream-$lang-${servers.size}",
-                                    name = "$playerName ($displayLang - $quality)",
-                                    src = url
-                                )
-                            )
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e("MovixProvider", "Fstream tv error: ${e.message}")
-                }
-
-                // Links TV sources
-                try {
-                    val links = movixServiceInstance.getLinksTv(tmdbId, seasonNum, episodeNum)
-                    links.data?.forEach { item ->
-                        item.links?.forEachIndexed { index, url ->
-                            if (url.isNotBlank()) {
-                                val playerName = guessPlayerName(url)
-                                servers.add(
-                                    Video.Server(
-                                        id = "links-tv-$index",
-                                        name = "$playerName (Link ${index + 1})",
-                                        src = url
-                                    )
-                                )
+                // Parallel fetch all 6 API sources
+                val allResults = coroutineScope {
+                    val fstreamDeferred = async {
+                        try {
+                            val fstream = movixServiceInstance.getFstreamTv(tmdbId, seasonNum)
+                            val list = mutableListOf<Video.Server>()
+                            fstream.episodes?.get(episodeNum.toString())?.languages?.forEach { (lang, players) ->
+                                val displayLang = formatLang(lang)
+                                players.forEach { player ->
+                                    val url = player.url ?: return@forEach
+                                    if (url.isBlank()) return@forEach
+                                    val quality = player.quality?.takeIf { it.isNotBlank() } ?: "HD"
+                                    val playerName = player.player?.takeIf { it.isNotBlank() } ?: guessPlayerName(url)
+                                    list.add(Video.Server(id = "fstream-$lang-${list.size}", name = "$playerName ($displayLang - $quality)", src = url))
+                                }
                             }
+                            list
+                        } catch (e: Exception) {
+                            Log.e("MovixProvider", "Fstream tv error: ${e.message}")
+                            emptyList()
                         }
                     }
-                } catch (e: Exception) {
-                    Log.e("MovixProvider", "Links tv error: ${e.message}")
-                }
 
-                // Wiflix TV sources
-                try {
-                    val wiflix = movixServiceInstance.getWiflixTv(tmdbId, seasonNum)
-                    val epSources = wiflix.episodes?.get(episodeNum.toString())
-                    epSources?.forEach { (lang, sources) ->
-                        val displayLang = formatLang(lang)
-                        sources.forEach { source ->
-                            val url = source.url ?: return@forEach
-                            if (url.isBlank()) return@forEach
-                            val playerName = source.name?.takeIf { it.isNotBlank() }
-                                ?: guessPlayerName(url)
-                            servers.add(
-                                Video.Server(
-                                    id = "wiflix-$lang-${servers.size}",
-                                    name = "$playerName ($displayLang)",
-                                    src = url
-                                )
-                            )
+                    val linksDeferred = async {
+                        try {
+                            val links = movixServiceInstance.getLinksTv(tmdbId, seasonNum, episodeNum)
+                            val list = mutableListOf<Video.Server>()
+                            links.data?.forEach { item ->
+                                item.links?.forEachIndexed { index, url ->
+                                    if (url.isNotBlank()) {
+                                        val playerName = guessPlayerName(url)
+                                        list.add(Video.Server(id = "links-tv-$index", name = "$playerName (Link ${index + 1})", src = url))
+                                    }
+                                }
+                            }
+                            list
+                        } catch (e: Exception) {
+                            Log.e("MovixProvider", "Links tv error: ${e.message}")
+                            emptyList()
                         }
                     }
-                } catch (e: Exception) {
-                    Log.e("MovixProvider", "Wiflix tv error: ${e.message}")
-                }
 
-                // Cpasmal TV sources
-                try {
-                    val cpasmal = movixServiceInstance.getCpasmalTv(tmdbId, seasonNum, episodeNum)
-                    cpasmal.links?.forEach { (lang, links) ->
-                        val displayLang = formatLang(lang)
-                        links.forEach { link ->
-                            val url = link.url ?: return@forEach
-                            if (url.isBlank()) return@forEach
-                            val playerName = link.server?.replaceFirstChar { it.uppercase() }
-                                ?: guessPlayerName(url)
-                            servers.add(
-                                Video.Server(
-                                    id = "cpasmal-$lang-${servers.size}",
-                                    name = "$playerName ($displayLang)",
-                                    src = url
-                                )
-                            )
+                    val wiflixDeferred = async {
+                        try {
+                            val wiflix = movixServiceInstance.getWiflixTv(tmdbId, seasonNum)
+                            val list = mutableListOf<Video.Server>()
+                            wiflix.episodes?.get(episodeNum.toString())?.forEach { (lang, sources) ->
+                                val displayLang = formatLang(lang)
+                                sources.forEach { source ->
+                                    val url = source.url ?: return@forEach
+                                    if (url.isBlank()) return@forEach
+                                    val playerName = source.name?.takeIf { it.isNotBlank() } ?: guessPlayerName(url)
+                                    list.add(Video.Server(id = "wiflix-$lang-${list.size}", name = "$playerName ($displayLang)", src = url))
+                                }
+                            }
+                            list
+                        } catch (e: Exception) {
+                            Log.e("MovixProvider", "Wiflix tv error: ${e.message}")
+                            emptyList()
                         }
                     }
-                    Log.d("MovixProvider", "Cpasmal tv: added servers")
-                } catch (e: Exception) {
-                    Log.e("MovixProvider", "Cpasmal tv error: ${e.message}")
-                }
 
-                // TMDB Movix TV sources
-                try {
-                    val tmdbMovix = movixServiceInstance.getTmdbMovixTv(tmdbId, seasonNum, episodeNum)
-                    tmdbMovix.current_episode?.player_links?.forEach { link ->
-                        val url = link.decoded_url ?: return@forEach
-                        if (url.isBlank()) return@forEach
-                        val lang = if (link.language?.lowercase()?.contains("french") == true) "VF"
-                            else link.language ?: ""
-                        val qualityLabel = link.quality?.substringBefore("/")?.trim() ?: "HD"
-                        val playerName = guessPlayerName(url)
-                        servers.add(
-                            Video.Server(
-                                id = "tmdbmovix-${servers.size}",
-                                name = "$playerName - $qualityLabel ($lang)",
-                                src = url
-                            )
-                        )
-                    }
-                    Log.d("MovixProvider", "TmdbMovix tv: added servers")
-                } catch (e: Exception) {
-                    Log.e("MovixProvider", "TmdbMovix tv error: ${e.message}")
-                }
-
-                // Series Download sources (darkibox m3u8 direct)
-                try {
-                    // Search for internal Movix series ID
-                    val showTitle = videoType.tvShow.title
-                    val searchResults = movixServiceInstance.searchMovix(showTitle)
-                    val movixShow = searchResults.firstOrNull { it.type == "tv" && it.tmdb_id?.toString() == tmdbId }
-                    val movixId = movixShow?.id?.toString()
-                    if (movixId != null) {
-                        val dl = movixServiceInstance.getSeriesDownload(movixId, seasonNum, episodeNum)
-                        dl.sources?.forEach { source ->
-                            val m3u8Url = source.m3u8
-                            val embedUrl = source.src
-                            val url = if (!m3u8Url.isNullOrBlank()) m3u8Url else embedUrl ?: return@forEach
-                            if (url.isBlank()) return@forEach
-                            val displayLang = source.language?.uppercase() ?: "MULTI"
-                            val quality = source.quality ?: "HD"
-                            val playerName = if (!m3u8Url.isNullOrBlank()) "Darkibox HLS" else guessPlayerName(url)
-                            servers.add(
-                                Video.Server(
-                                    id = "seriesdl-${servers.size}",
-                                    name = "$playerName ($displayLang - $quality)",
-                                    src = url
-                                )
-                            )
+                    val cpasmalDeferred = async {
+                        try {
+                            val cpasmal = movixServiceInstance.getCpasmalTv(tmdbId, seasonNum, episodeNum)
+                            val list = mutableListOf<Video.Server>()
+                            cpasmal.links?.forEach { (lang, links) ->
+                                val displayLang = formatLang(lang)
+                                links.forEach { link ->
+                                    val url = link.url ?: return@forEach
+                                    if (url.isBlank()) return@forEach
+                                    val playerName = link.server?.replaceFirstChar { it.uppercase() } ?: guessPlayerName(url)
+                                    list.add(Video.Server(id = "cpasmal-$lang-${list.size}", name = "$playerName ($displayLang)", src = url))
+                                }
+                            }
+                            list
+                        } catch (e: Exception) {
+                            Log.e("MovixProvider", "Cpasmal tv error: ${e.message}")
+                            emptyList()
                         }
-                        Log.d("MovixProvider", "SeriesDownload tv: added servers")
                     }
-                } catch (e: Exception) {
-                    Log.e("MovixProvider", "SeriesDownload tv error: ${e.message}")
+
+                    val tmdbMovixDeferred = async {
+                        try {
+                            val tmdbMovix = movixServiceInstance.getTmdbMovixTv(tmdbId, seasonNum, episodeNum)
+                            val list = mutableListOf<Video.Server>()
+                            tmdbMovix.current_episode?.player_links?.forEach { link ->
+                                val url = link.decoded_url ?: return@forEach
+                                if (url.isBlank()) return@forEach
+                                val lang = if (link.language?.lowercase()?.contains("french") == true) "VF"
+                                    else link.language ?: ""
+                                val qualityLabel = link.quality?.substringBefore("/")?.trim() ?: "HD"
+                                val playerName = guessPlayerName(url)
+                                list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "$playerName - $qualityLabel ($lang)", src = url))
+                            }
+                            list
+                        } catch (e: Exception) {
+                            Log.e("MovixProvider", "TmdbMovix tv error: ${e.message}")
+                            emptyList()
+                        }
+                    }
+
+                    val seriesDlDeferred = async {
+                        try {
+                            val showTitle = videoType.tvShow.title
+                            val searchResults = movixServiceInstance.searchMovix(showTitle)
+                            val movixShow = searchResults.firstOrNull { it.type == "tv" && it.tmdb_id?.toString() == tmdbId }
+                            val movixId = movixShow?.id?.toString()
+                            val list = mutableListOf<Video.Server>()
+                            if (movixId != null) {
+                                val dl = movixServiceInstance.getSeriesDownload(movixId, seasonNum, episodeNum)
+                                dl.sources?.forEach { source ->
+                                    val m3u8Url = source.m3u8
+                                    val embedUrl = source.src
+                                    val url = if (!m3u8Url.isNullOrBlank()) m3u8Url else embedUrl ?: return@forEach
+                                    if (url.isBlank()) return@forEach
+                                    val displayLang = source.language?.uppercase() ?: "MULTI"
+                                    val quality = source.quality ?: "HD"
+                                    val playerName = if (!m3u8Url.isNullOrBlank()) "Darkibox HLS" else guessPlayerName(url)
+                                    list.add(Video.Server(id = "seriesdl-${list.size}", name = "$playerName ($displayLang - $quality)", src = url))
+                                }
+                            }
+                            list
+                        } catch (e: Exception) {
+                            Log.e("MovixProvider", "SeriesDownload tv error: ${e.message}")
+                            emptyList()
+                        }
+                    }
+
+                    awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, seriesDlDeferred)
                 }
+
+                allResults.forEach { servers.addAll(it) }
             }
         }
 
