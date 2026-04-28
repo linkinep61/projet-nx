@@ -163,7 +163,18 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private var hasMore = true
 
     override suspend fun getHome(): List<Category> {
-        initializeService()
+        try {
+            initializeService()
+        } catch (e: Exception) {
+            Log.e(TAG, "[getHome] initializeService failed: ${e.message}, rebuilding")
+            try {
+                serviceInitialized = false
+                initializeService()
+            } catch (e2: Exception) {
+                Log.e(TAG, "[getHome] initializeService retry failed: ${e2.message}")
+            }
+        }
+
         val document = try {
             val doc = service.getHome()
             val html = doc.html()
@@ -173,16 +184,22 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             } else doc
         } catch (e: Exception) {
             Log.d(TAG, "[getHome] Retrofit failed: ${e.message}, using bypass")
-            getDocument(baseUrl)
+            try {
+                getDocument(baseUrl)
+            } catch (e2: Exception) {
+                Log.e(TAG, "[getHome] bypass also failed: ${e2.message}")
+                return emptyList()
+            }
         }
 
         val categories = mutableListOf<Category>()
 
-        val topSeries = document.select("div.block-main").getOrNull(0)?.select("div.mov")?.map {
+        val topSeries = document.select("div.block-main").getOrNull(0)?.select("div.mov")?.mapNotNull {
+            val id = it.selectFirst("a.mov-t")
+                ?.attr("href")?.substringAfterLast("/")
+                ?.takeIf { id -> id.isNotBlank() } ?: return@mapNotNull null
             TvShow(
-                id = it.selectFirst("a.mov-t")
-                    ?.attr("href")?.substringAfterLast("/")
-                    ?: "",
+                id = id,
                 title = listOfNotNull(
                     it.selectFirst("a.mov-t")?.text(),
                     it.selectFirst("span.block-sai")?.text(),
@@ -194,24 +211,18 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             )
         } ?: emptyList()
 
-        // FEATURED: slider avec jaquettes depuis TOP Séries
-        if (topSeries.isNotEmpty()) {
-            categories.add(Category(name = Category.FEATURED, list = topSeries.take(15)))
-        }
-
         categories.add(Category(name = "TOP Séries", list = topSeries))
 
         categories.add(
             Category(
                 name = "TOP Films",
-                list = document.select("div.block-main").getOrNull(1)?.select("div.mov")?.map {
+                list = document.select("div.block-main").getOrNull(1)?.select("div.mov")?.mapNotNull {
+                    val id = it.selectFirst("a.mov-t")
+                        ?.attr("href")?.substringAfterLast("/")
+                        ?.takeIf { id -> id.isNotBlank() } ?: return@mapNotNull null
                     Movie(
-                        id = it.selectFirst("a.mov-t")
-                            ?.attr("href")?.substringAfterLast("/")
-                            ?: "",
-                        title = it.selectFirst("a.mov-t")
-                            ?.text()
-                            ?: "",
+                        id = id,
+                        title = it.selectFirst("a.mov-t")?.text() ?: return@mapNotNull null,
                         poster = it.selectFirst("img")
                             ?.attr("src")?.let { src -> baseUrl + src },
                     )
@@ -221,14 +232,13 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         categories.add(
             Category(
                 name = "Films Anciens",
-                list = document.select("div.block-main").getOrNull(2)?.select("div.mov")?.map {
+                list = document.select("div.block-main").getOrNull(2)?.select("div.mov")?.mapNotNull {
+                    val id = it.selectFirst("a.mov-t")
+                        ?.attr("href")?.substringAfterLast("/")
+                        ?.takeIf { id -> id.isNotBlank() } ?: return@mapNotNull null
                     Movie(
-                        id = it.selectFirst("a.mov-t")
-                            ?.attr("href")?.substringAfterLast("/")
-                            ?: "",
-                        title = it.selectFirst("a.mov-t")
-                            ?.text()
-                            ?: "",
+                        id = id,
+                        title = it.selectFirst("a.mov-t")?.text() ?: return@mapNotNull null,
                         poster = it.selectFirst("img")
                             ?.attr("src")?.let { src -> baseUrl + src },
                     )
