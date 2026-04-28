@@ -2033,10 +2033,10 @@ class PlayerMobileFragment : Fragment() {
     private fun buildPlayer(extraBuffering: Boolean): ExoPlayer {
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
-                if (extraBuffering) 300_000 else DefaultLoadControl.DEFAULT_MAX_BUFFER_MS,
-                DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_MS,
-                DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS
+                30_000,  // minBuffer 30s (default 50s) — less memory usage
+                if (extraBuffering) 300_000 else 120_000,  // maxBuffer 120s (default 50s) — fewer re-buffers
+                1_500,   // bufferForPlayback 1.5s (default 2.5s) — faster start
+                3_000    // bufferAfterRebuffer 3s (default 5s) — faster recovery
             )
             .build()
 

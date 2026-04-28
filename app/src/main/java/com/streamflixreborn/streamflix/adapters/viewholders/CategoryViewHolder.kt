@@ -38,6 +38,14 @@ class CategoryViewHolder(
     _binding.root
 ) {
 
+    companion object {
+        /** Shared ViewHolder pool across all horizontal category RecyclerViews.
+         *  Reduces inflation count when scrolling the vertical list of categories. */
+        val sharedPool = RecyclerView.RecycledViewPool().apply {
+            setMaxRecycledViews(0, 12) // keep up to 12 recycled VHs of type 0
+        }
+    }
+
     private val context = itemView.context
     private lateinit var category: Category
 
@@ -76,6 +84,7 @@ class CategoryViewHolder(
         binding.tvCategoryTitle.text = category.name
 
         binding.rvCategory.apply {
+            setRecycledViewPool(sharedPool)
             val categoryAdapter = (adapter as? AppAdapter) ?: AppAdapter().also { adapter = it }
             categoryAdapter.apply {
                 this.onMovieClickListener = onMovieClick
@@ -95,6 +104,7 @@ class CategoryViewHolder(
     ) {
         binding.tvCategoryTitle.text = category.name
         binding.hgvCategory.apply {
+            setRecycledViewPool(sharedPool)
             setRowHeight(ViewGroup.LayoutParams.WRAP_CONTENT)
 
             val categoryAdapter = (adapter as? AppAdapter) ?: AppAdapter().also { adapter = it }

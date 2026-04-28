@@ -11,7 +11,9 @@ import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.TlsVersion
 import okhttp3.logging.HttpLoggingInterceptor
+import okhttp3.Cache
 import okhttp3.ConnectionPool
+import java.io.File
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.CertificateFactory
@@ -81,8 +83,17 @@ object NetworkClient {
         timeUnit = TimeUnit.MINUTES
     )
 
+    /** HTTP disk cache — honours Cache-Control headers; avoids re-downloading unchanged pages */
+    private val httpCache: Cache by lazy {
+        Cache(
+            directory = File(StreamFlixApp.instance.cacheDir, "okhttp"),
+            maxSize = 50L * 1024 * 1024 // 50 MB
+        )
+    }
+
     private fun buildClient(dns: Dns, customizer: ((OkHttpClient.Builder) -> Unit)? = null): OkHttpClient {
         val builder = OkHttpClient.Builder()
+            .cache(httpCache)
             .connectionPool(sharedConnectionPool)
             .addInterceptor { chain ->
                 val original = chain.request()
