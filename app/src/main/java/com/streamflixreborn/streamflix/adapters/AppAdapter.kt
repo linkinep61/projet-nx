@@ -601,7 +601,10 @@ class AppAdapter(
         super.onViewRecycled(holder)
 
         states[holder.layoutPosition] = when (holder) {
-            is CategoryViewHolder -> holder.childRecyclerView?.layoutManager?.onSaveInstanceState()
+            is CategoryViewHolder -> {
+                holder.cleanup() // cancel pending handlers & unregister swiper callbacks
+                holder.childRecyclerView?.layoutManager?.onSaveInstanceState()
+            }
             is MovieViewHolder -> holder.childRecyclerView?.layoutManager?.onSaveInstanceState()
             is TvShowViewHolder -> holder.childRecyclerView?.layoutManager?.onSaveInstanceState()
             else -> null

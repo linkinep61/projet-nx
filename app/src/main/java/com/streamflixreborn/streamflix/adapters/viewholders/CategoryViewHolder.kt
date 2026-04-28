@@ -49,6 +49,20 @@ class CategoryViewHolder(
     private val context = itemView.context
     private lateinit var category: Category
 
+    // ---- Swiper lifecycle tracking (prevent leaks on recycle) ----
+    private var swiperHandler: Handler? = null
+    private var swiperCallback: ViewPager2.OnPageChangeCallback? = null
+    private var swiperViewPager: ViewPager2? = null
+
+    /** Must be called before each new bind AND from onViewRecycled. */
+    fun cleanup() {
+        swiperHandler?.removeCallbacksAndMessages(null)
+        swiperHandler = null
+        swiperCallback?.let { swiperViewPager?.unregisterOnPageChangeCallback(it) }
+        swiperCallback = null
+        swiperViewPager = null
+    }
+
     val childRecyclerView: RecyclerView?
         get() = when (_binding) {
             is ItemCategoryMobileBinding -> _binding.rvCategory
@@ -66,6 +80,7 @@ class CategoryViewHolder(
         onMovieClick: ((Movie) -> Unit)? = null,
         onTvShowClick: ((TvShow) -> Unit)? = null
     ) {
+        cleanup() // cancel pending handlers & unregister old callbacks
         this.category = category
 
         when (_binding) {
@@ -84,6 +99,7 @@ class CategoryViewHolder(
         binding.tvCategoryTitle.text = category.name
 
         binding.rvCategory.apply {
+            setHasFixedSize(true)
             setRecycledViewPool(sharedPool)
             val categoryAdapter = (adapter as? AppAdapter) ?: AppAdapter().also { adapter = it }
             categoryAdapter.apply {
@@ -104,6 +120,7 @@ class CategoryViewHolder(
     ) {
         binding.tvCategoryTitle.text = category.name
         binding.hgvCategory.apply {
+            setHasFixedSize(true)
             setRecycledViewPool(sharedPool)
             setRowHeight(ViewGroup.LayoutParams.WRAP_CONTENT)
 
@@ -128,6 +145,8 @@ class CategoryViewHolder(
     ) {
         binding.tvCategoryTitle.text = category.name
         val handler = Handler(Looper.getMainLooper())
+        swiperHandler = handler
+        swiperViewPager = binding.vpCategorySwiper
         handler.postDelayed(8_000) {
             binding.vpCategorySwiper.currentItem += 1
         }
@@ -159,7 +178,7 @@ class CategoryViewHolder(
             }
         }
 
-        binding.vpCategorySwiper.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+        val callback = object : ViewPager2.OnPageChangeCallback() {
             override fun onPageSelected(position: Int) {
                 val indicatorPosition = when (position) {
                     0 -> category.list.lastIndex
@@ -190,7 +209,9 @@ class CategoryViewHolder(
                     }
                 }
             }
-        })
+        }
+        swiperCallback = callback
+        binding.vpCategorySwiper.registerOnPageChangeCallback(callback)
     }
 
     private fun displayTvSwiper(binding: ContentCategorySwiperTvBinding) {

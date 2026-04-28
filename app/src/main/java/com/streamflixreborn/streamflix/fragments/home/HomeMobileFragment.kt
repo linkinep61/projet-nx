@@ -396,6 +396,7 @@ class HomeMobileFragment : Fragment() {
 
     private fun initializeHome() {
         binding.rvHome.apply {
+            setHasFixedSize(true)
             adapter = appAdapter.apply {
                 stateRestorationPolicy = RecyclerView.Adapter.StateRestorationPolicy.PREVENT_WHEN_EMPTY
             }

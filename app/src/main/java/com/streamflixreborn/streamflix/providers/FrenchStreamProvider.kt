@@ -37,6 +37,8 @@ import kotlin.collections.map
 import kotlin.collections.mapNotNull
 import kotlin.collections.mapIndexedNotNull
 import kotlin.math.round
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 
 object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     override val name = "FrenchStream"
@@ -340,17 +342,18 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         return rating
     }
 
-    override suspend fun getMovie(id: String): Movie {
+    override suspend fun getMovie(id: String): Movie = coroutineScope {
         initializeService()
-        val document = service.getItem(id)
         val itemId = id.substringBefore("-")
 
-        val actors = extractActors(document)
-        val filmData = try {
-            service.getFilmData(itemId)
-        } catch (e: Exception) {
-            null
+        val documentDeferred = async { service.getItem(id) }
+        val filmDataDeferred = async {
+            try { service.getFilmData(itemId) } catch (_: Exception) { null }
         }
+
+        val document = documentDeferred.await()
+        val filmData = filmDataDeferred.await()
+        val actors = extractActors(document)
         val trailerURL = filmData ?.meta?.trailer
                                   ?.let { "https://www.youtube.com/watch?v=$it" }
         val poster = filmData ?.meta?.affiche
@@ -416,23 +419,24 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         )
 
-        return movie
+        movie
     }
 
-    override suspend fun getTvShow(id: String): TvShow {
+    override suspend fun getTvShow(id: String): TvShow = coroutineScope {
         initializeService()
-        val document = service.getItem(id, "dle_skin=VFV25")
-        val actors = extractActors(document)
         val itemId = id.substringBefore("-")
 
-        val tvShowData = try {
-            service.getFilmData(itemId)
-        } catch (e: Exception) {
-            null
+        val documentDeferred = async { service.getItem(id, "dle_skin=VFV25") }
+        val filmDataDeferred = async {
+            try { service.getFilmData(itemId) } catch (_: Exception) { null }
         }
+
+        val document = documentDeferred.await()
+        val tvShowData = filmDataDeferred.await()
+        val actors = extractActors(document)
         val seasonsData = try {
-            service.getSeasonsData(tvShowData?.meta?.tagz?:"")
-        } catch (e: Exception) {
+            service.getSeasonsData(tvShowData?.meta?.tagz ?: "")
+        } catch (_: Exception) {
             null
         }
 
@@ -528,7 +532,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             rating = rating
         )
 
-        return tvShow
+        tvShow
     }
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {

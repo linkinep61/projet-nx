@@ -222,6 +222,7 @@ class TvShowsMobileFragment : Fragment() {
 
     private fun initializeTvShows() {
         binding.rvTvShows.apply {
+            setHasFixedSize(true)
             adapter = appAdapter.apply {
                 stateRestorationPolicy = RecyclerView.Adapter.StateRestorationPolicy.PREVENT_WHEN_EMPTY
             }

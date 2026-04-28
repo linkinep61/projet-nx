@@ -166,6 +166,7 @@ class MoviesMobileFragment : Fragment() {
 
     private fun initializeMovies() {
         binding.rvMovies.apply {
+            setHasFixedSize(true)
             adapter = appAdapter.apply {
                 stateRestorationPolicy = RecyclerView.Adapter.StateRestorationPolicy.PREVENT_WHEN_EMPTY
             }

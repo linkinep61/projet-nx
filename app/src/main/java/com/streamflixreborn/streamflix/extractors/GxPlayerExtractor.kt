@@ -19,6 +19,10 @@ class GxPlayerExtractor : Extractor() {
     
     companion object {
         private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        private val REGEX_ID = Regex("\"id\":\"([^\"]+)\"")
+        private val REGEX_UID = Regex("\"uid\":\"([^\"]+)\"")
+        private val REGEX_MD5 = Regex("\"md5\":\"([^\"]+)\"")
+        private val REGEX_STATUS = Regex("\"status\":\"([^\"]+)\"")
     }
 
     override suspend fun extract(link: String): Video {
@@ -29,10 +33,10 @@ class GxPlayerExtractor : Extractor() {
             it.html().contains("var video =") 
         }?.html() ?: throw Exception("Video script not found")
 
-        val id = Regex("\"id\":\"([^\"]+)\"").find(scriptContent)?.groupValues?.get(1) ?: ""
-        val uid = Regex("\"uid\":\"([^\"]+)\"").find(scriptContent)?.groupValues?.get(1) ?: ""
-        val md5 = Regex("\"md5\":\"([^\"]+)\"").find(scriptContent)?.groupValues?.get(1) ?: ""
-        val status = Regex("\"status\":\"([^\"]+)\"").find(scriptContent)?.groupValues?.get(1) ?: ""
+        val id = REGEX_ID.find(scriptContent)?.groupValues?.get(1) ?: ""
+        val uid = REGEX_UID.find(scriptContent)?.groupValues?.get(1) ?: ""
+        val md5 = REGEX_MD5.find(scriptContent)?.groupValues?.get(1) ?: ""
+        val status = REGEX_STATUS.find(scriptContent)?.groupValues?.get(1) ?: ""
 
         if (uid.isEmpty() || md5.isEmpty() || id.isEmpty()) {
             throw Exception("Could not extract video parameters")

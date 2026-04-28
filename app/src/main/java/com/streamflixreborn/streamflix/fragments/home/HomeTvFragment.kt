@@ -458,6 +458,7 @@ class HomeTvFragment : Fragment() {
 
     private fun initializeHome() {
         binding.vgvHome.apply {
+            setHasFixedSize(true)
             adapter = appAdapter.apply {
                 stateRestorationPolicy = RecyclerView.Adapter.StateRestorationPolicy.PREVENT_WHEN_EMPTY
             }
