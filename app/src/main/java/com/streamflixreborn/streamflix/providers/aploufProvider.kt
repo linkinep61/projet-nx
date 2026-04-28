@@ -1,6 +1,7 @@
 package com.streamflixreborn.streamflix.providers
 
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
+import com.streamflixreborn.streamflix.BuildConfig
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.Extractor
 import com.streamflixreborn.streamflix.models.Category
@@ -49,10 +50,7 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
 
     override val logo: String
-        get() {
-            var cacheLogo = UserPreferences.getProviderCache(this,UserPreferences.PROVIDER_LOGO)
-            return cacheLogo.ifEmpty { "http://chezlesducs.free.fr/bureau/medias/cinema.gif" }
-        }
+        get() = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_aplouf"
 
     const val user_agent = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0"
 
