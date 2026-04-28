@@ -28,6 +28,8 @@ import org.jsoup.nodes.Document
 import retrofit2.HttpException
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
+import com.streamflixreborn.streamflix.utils.TMDb3
+import com.streamflixreborn.streamflix.utils.TMDb3.original
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import retrofit2.http.Field
 import retrofit2.http.FormUrlEncoded
@@ -209,24 +211,72 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             )
         } ?: emptyList()
 
-        categories.add(Category(name = "TOP Séries", list = topSeries))
-
-        categories.add(
-            Category(
-                name = "TOP Films",
-                list = document.select("div.block-main").getOrNull(1)?.select("div.mov")?.mapNotNull {
-                    val id = it.selectFirst("a.mov-t")
-                        ?.attr("href")?.substringAfterLast("/")
-                        ?.takeIf { id -> id.isNotBlank() } ?: return@mapNotNull null
-                    Movie(
-                        id = id,
-                        title = it.selectFirst("a.mov-t")?.text() ?: return@mapNotNull null,
-                        poster = it.selectFirst("img")
-                            ?.attr("src")?.let { src -> baseUrl + src },
-                    )
-                } ?: emptyList(),
+        val topFilms = document.select("div.block-main").getOrNull(1)?.select("div.mov")?.mapNotNull {
+            val id = it.selectFirst("a.mov-t")
+                ?.attr("href")?.substringAfterLast("/")
+                ?.takeIf { id -> id.isNotBlank() } ?: return@mapNotNull null
+            Movie(
+                id = id,
+                title = it.selectFirst("a.mov-t")?.text() ?: return@mapNotNull null,
+                poster = it.selectFirst("img")
+                    ?.attr("src")?.let { src -> baseUrl + src },
             )
-        )
+        } ?: emptyList()
+
+        // FEATURED carousel: deep copies from topSeries + topFilms with TMDB HD backdrops
+        val featuredItems = mutableListOf<AppAdapter.Item>()
+        topSeries.take(4).forEach { show ->
+            featuredItems.add(TvShow(
+                id = show.id,
+                title = show.title,
+                poster = show.poster,
+                banner = show.banner,
+            ))
+        }
+        topFilms.take(3).forEach { movie ->
+            featuredItems.add(Movie(
+                id = movie.id,
+                title = movie.title,
+                poster = movie.poster,
+                banner = movie.poster,
+            ))
+        }
+        if (featuredItems.isNotEmpty() && UserPreferences.enableTmdb) {
+            for (item in featuredItems) {
+                try {
+                    val title = when (item) {
+                        is TvShow -> item.title.substringBefore(" - ")
+                        is Movie -> item.title
+                        else -> continue
+                    }
+                    val results = TMDb3.Search.multi(title)
+                    val match = results.results.firstOrNull { result ->
+                        when (result) {
+                            is TMDb3.Movie -> result.backdropPath != null
+                            is TMDb3.Tv -> result.backdropPath != null
+                            else -> false
+                        }
+                    }
+                    val tmdbBanner = when (match) {
+                        is TMDb3.Movie -> match.backdropPath?.original
+                        is TMDb3.Tv -> match.backdropPath?.original
+                        else -> null
+                    }
+                    if (tmdbBanner != null) {
+                        when (item) {
+                            is Movie -> item.banner = tmdbBanner
+                            is TvShow -> item.banner = tmdbBanner
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+        if (featuredItems.isNotEmpty()) {
+            categories.add(Category(name = Category.FEATURED, list = featuredItems))
+        }
+
+        categories.add(Category(name = "TOP Séries", list = topSeries))
+        categories.add(Category(name = "TOP Films", list = topFilms))
         categories.add(
             Category(
                 name = "Films Anciens",
