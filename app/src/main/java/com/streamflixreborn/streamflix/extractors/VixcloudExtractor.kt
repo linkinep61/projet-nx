@@ -183,7 +183,7 @@ class VixcloudExtractor(
                 val request = Request.Builder().url(finalUrl).headers(headersBuilder.build()).build()
                 client.newCall(request).execute().use { response ->
                     if (response.isSuccessful && response.body != null) {
-                        var playlistContent = response.body!!.string()
+                        var playlistContent = response.body?.string() ?: ""
                         val langCode = preferredLanguage
                         val altLangCode = if (langCode == "en") "eng" else if (langCode == "it") "ita" else langCode
                         val baseUri = response.request.url

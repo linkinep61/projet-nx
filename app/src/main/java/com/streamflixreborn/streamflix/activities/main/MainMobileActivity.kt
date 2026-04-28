@@ -43,7 +43,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import okhttp3.OkHttpClient
+import com.streamflixreborn.streamflix.utils.NetworkClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -66,7 +66,7 @@ class MainMobileActivity : FragmentActivity() {
     private val binding get() = _binding!!
 
     private val viewModel by viewModels<MainViewModel>()
-    private val resolverWebSocketClient by lazy { OkHttpClient() }
+    private val resolverWebSocketClient by lazy { NetworkClient.default }
     private val bypassWebViewLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val wsUrl = pendingWs
