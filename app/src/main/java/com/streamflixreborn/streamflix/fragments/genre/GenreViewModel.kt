@@ -117,7 +117,7 @@ class GenreViewModel(private val id: String, private val genreName: String = "",
             if (UserPreferences.isGlobalSearchEnabled) {
                 getGenreGlobal(id)
             } else {
-                val provider = UserPreferences.currentProvider!!
+                val provider = UserPreferences.currentProvider ?: return@launch
                 val searchKeyword = genreSearchKeywords[id]
                 if (searchKeyword != null) {
                     // Genre spécial (K-Drama) → recherche textuelle progressive
@@ -309,7 +309,8 @@ class GenreViewModel(private val id: String, private val genreName: String = "",
             _state.emit(State.LoadingMore)
 
             try {
-                val genre = UserPreferences.currentProvider!!.getGenre(id, page + 1).let {
+                val provider = UserPreferences.currentProvider ?: return@launch
+                val genre = provider.getGenre(id, page + 1).let {
                     it.copy(shows = ParentalControlUtils.filterShows(it.shows))
                 }
 

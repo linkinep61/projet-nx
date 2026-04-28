@@ -97,7 +97,8 @@ class PeopleViewModel(private val id: String, database: AppDatabase) : ViewModel
         _state.emit(State.Loading)
 
         try {
-            val people = UserPreferences.currentProvider!!.getPeople(id)
+            val provider = UserPreferences.currentProvider ?: return@launch
+            val people = provider.getPeople(id)
 
             page = 1
 
@@ -114,7 +115,8 @@ class PeopleViewModel(private val id: String, database: AppDatabase) : ViewModel
             _state.emit(State.LoadingMore)
 
             try {
-                val people = UserPreferences.currentProvider!!.getPeople(id, page + 1)
+                val provider = UserPreferences.currentProvider ?: return@launch
+                val people = provider.getPeople(id, page + 1)
 
                 page += 1
 

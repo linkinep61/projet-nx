@@ -582,9 +582,10 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         findPreference<SwitchPreference>("pc_frenchstream_new_interface")?.apply {
             isVisible = UserPreferences.currentProvider is FrenchStreamProvider
             if (isVisible) {
+                val provider = UserPreferences.currentProvider ?: return@apply
                 val useNewInterface = UserPreferences
                     .getProviderCache(
-                        UserPreferences.currentProvider!!, UserPreferences
+                        provider, UserPreferences
                             .PROVIDER_NEW_INTERFACE
                     ) != "false"
                 isChecked = useNewInterface

@@ -107,7 +107,7 @@ class MoviesViewModel(database: AppDatabase) : ViewModel() {
         _state.emit(State.Loading)
 
         try {
-            val provider = UserPreferences.currentProvider!!
+            val provider = UserPreferences.currentProvider ?: return@launch
             Log.d("MoviesViewModel", "getMovies: provider=${provider.name}, isFilterable=${provider is FilterableProvider}, languageFilter=$languageFilter")
             var movies = if (provider is FilterableProvider && languageFilter != "all") {
                 Log.d("MoviesViewModel", "getMovies: using FILTERED with language=$languageFilter")
@@ -147,7 +147,7 @@ class MoviesViewModel(database: AppDatabase) : ViewModel() {
             _state.emit(State.LoadingMore)
 
             try {
-                val provider = UserPreferences.currentProvider!!
+                val provider = UserPreferences.currentProvider ?: return@launch
                 var movies = if (provider is FilterableProvider && languageFilter != "all") {
                     ParentalControlUtils.filterItems(
                         provider.getFilteredMovies(languageFilter, page + 1)

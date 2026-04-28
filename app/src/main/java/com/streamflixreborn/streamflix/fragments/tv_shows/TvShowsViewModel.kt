@@ -108,7 +108,7 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
         _state.emit(State.Loading)
 
         try {
-            val provider = UserPreferences.currentProvider!!
+            val provider = UserPreferences.currentProvider ?: return@launch
             Log.d("TvShowsViewModel", "getTvShows: provider=${provider.name}, isFilterable=${provider is FilterableProvider}, languageFilter=$languageFilter")
             var tvShows = if (provider is FilterableProvider && languageFilter != "all") {
                 Log.d("TvShowsViewModel", "getTvShows: using FILTERED with language=$languageFilter")
@@ -148,7 +148,7 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
             _state.emit(State.LoadingMore)
 
             try {
-                val provider = UserPreferences.currentProvider!!
+                val provider = UserPreferences.currentProvider ?: return@launch
                 var tvShows = if (provider is FilterableProvider && languageFilter != "all") {
                     ParentalControlUtils.filterItems(
                         provider.getFilteredTvShows(languageFilter, page + 1)
