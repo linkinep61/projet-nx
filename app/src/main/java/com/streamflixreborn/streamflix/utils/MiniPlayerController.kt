@@ -45,8 +45,12 @@ object MiniPlayerController {
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state
 
+    private const val RETRY_DELAY_MS = 30_000L  // 30s before retrying full cycle
+    private const val MAX_RETRY_CYCLES = 3       // max full cycles before giving up
+
     private var player: ExoPlayer? = null
     private var loadJob: Job? = null
+    private var retryJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     // Current channel info
@@ -57,19 +61,27 @@ object MiniPlayerController {
     var currentChannelPoster: String? = null
         private set
 
+    // Server fallback tracking
+    private var availableServers: List<Video.Server> = emptyList()
+    private var currentServerIndex: Int = 0
+    private var retryCycle: Int = 0
+
     fun getPlayer(): ExoPlayer? = player
 
     private val playerListener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
-            Log.e(TAG, "Player error: ${error.message}", error)
-            val chId = currentChannelId ?: return
-            _state.value = State.Error(chId, error.message ?: "Playback error")
+            val serverName = availableServers.getOrNull(currentServerIndex)?.name ?: "?"
+            Log.e(TAG, "Player error on server [$currentServerIndex] $serverName: ${error.message}")
+            tryNextServer()
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
             when (playbackState) {
                 Player.STATE_READY -> {
                     val chId = currentChannelId ?: return
+                    val serverName = availableServers.getOrNull(currentServerIndex)?.name ?: ""
+                    Log.d(TAG, "Playback ready on server [$currentServerIndex] $serverName")
+                    retryCycle = 0 // reset cycle counter on success
                     _state.value = State.Playing(chId, currentChannelName ?: "", currentChannelPoster)
                 }
                 Player.STATE_BUFFERING -> {
@@ -124,6 +136,10 @@ object MiniPlayerController {
         currentChannelId = channelId
         currentChannelName = channelName
         currentChannelPoster = channelPoster
+        availableServers = emptyList()
+        currentServerIndex = 0
+        retryCycle = 0
+        retryJob?.cancel()
         _state.value = State.Loading(channelId, channelName)
 
         loadJob?.cancel()
@@ -158,71 +174,161 @@ object MiniPlayerController {
                     provider.getServers(channelId, videoType)
                 }
                 if (servers.isEmpty()) {
-                    _state.value = State.Error(channelId, "No servers found")
+                    Log.w(TAG, "No servers found for $channelName")
+                    scheduleRetryOrFail(channelId, "No servers found")
                     return@launch
                 }
 
-                // Get video from first server
-                val video = withContext(Dispatchers.IO) {
-                    provider.getVideo(servers.first())
-                }
-                if (video.source.isEmpty()) {
-                    _state.value = State.Error(channelId, "No source found")
-                    return@launch
-                }
+                Log.d(TAG, "Got ${servers.size} servers for $channelName: ${servers.map { it.name }}")
+                availableServers = servers
+                currentServerIndex = 0
 
-                // Ensure we're still on the same channel
-                if (currentChannelId != channelId) {
-                    Log.d(TAG, "Channel changed while loading, ignoring result")
-                    return@launch
-                }
-
-                // Play
-                val p = player ?: return@launch
-                val headers = video.headers ?: emptyMap()
-                if (headers.isNotEmpty()) {
-                    // Re-create data source with headers
-                    val httpDs = DefaultHttpDataSource.Factory()
-                        .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                        .setDefaultRequestProperties(
-                            mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36") + headers
-                        )
-                        .setConnectTimeoutMs(15_000)
-                        .setReadTimeoutMs(15_000)
-                        .setAllowCrossProtocolRedirects(true)
-                    // We can't change the data source factory mid-flight on same player,
-                    // so we set default request properties
-                }
-
-                val mediaItem = MediaItem.Builder()
-                    .setUri(video.source.toUri())
-                    .setMimeType(video.type)
-                    .build()
-
-                p.setMediaItem(mediaItem)
-                p.prepare()
-                p.play()
-
-                Log.d(TAG, "Playing: ${video.source.take(80)}")
+                // Try first server
+                playServerAtIndex(channelId, provider, 0)
 
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error loading channel: ${e.message}", e)
                 if (currentChannelId == channelId) {
-                    _state.value = State.Error(channelId, e.message ?: "Unknown error")
+                    scheduleRetryOrFail(channelId, e.message ?: "Unknown error")
                 }
+            }
+        }
+    }
+
+    /**
+     * Try to play the server at [index]. If extraction fails or source is empty,
+     * automatically moves to the next server.
+     */
+    private suspend fun playServerAtIndex(channelId: String, provider: WiTvProvider, index: Int) {
+        if (currentChannelId != channelId) return // channel changed
+        if (index >= availableServers.size) {
+            Log.w(TAG, "All ${availableServers.size} servers exhausted for $channelId")
+            scheduleRetryOrFail(channelId, "All servers failed")
+            return
+        }
+
+        currentServerIndex = index
+        val server = availableServers[index]
+        Log.d(TAG, "Trying server [$index/${availableServers.size}] ${server.name}")
+        _state.value = State.Loading(channelId, currentChannelName ?: "")
+
+        try {
+            val video = withContext(Dispatchers.IO) {
+                provider.getVideo(server)
+            }
+
+            if (currentChannelId != channelId) return
+
+            if (video.source.isEmpty()) {
+                Log.w(TAG, "Server [$index] ${server.name} returned empty source, trying next")
+                playServerAtIndex(channelId, provider, index + 1)
+                return
+            }
+
+            // Play
+            val p = player ?: return
+            val mediaItem = MediaItem.Builder()
+                .setUri(video.source.toUri())
+                .setMimeType(video.type)
+                .apply {
+                    val headers = video.headers
+                    if (!headers.isNullOrEmpty()) {
+                        setRequestMetadata(
+                            MediaItem.RequestMetadata.Builder().build()
+                        )
+                    }
+                }
+                .build()
+
+            // Set headers on the data source factory if needed
+            val headers = video.headers ?: emptyMap()
+            if (headers.isNotEmpty()) {
+                val httpDs = DefaultHttpDataSource.Factory()
+                    .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    .setDefaultRequestProperties(
+                        mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36") + headers
+                    )
+                    .setConnectTimeoutMs(15_000)
+                    .setReadTimeoutMs(15_000)
+                    .setAllowCrossProtocolRedirects(true)
+            }
+
+            p.setMediaItem(mediaItem)
+            p.prepare()
+            p.play()
+
+            Log.d(TAG, "Playing server [$index] ${server.name}: ${video.source.take(80)}")
+
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Server [$index] ${server.name} failed: ${e.message}")
+            if (currentChannelId == channelId) {
+                playServerAtIndex(channelId, provider, index + 1)
+            }
+        }
+    }
+
+    /**
+     * Called when the player reports an error during playback.
+     * Tries the next server in the list.
+     */
+    private fun tryNextServer() {
+        val channelId = currentChannelId ?: return
+        val nextIndex = currentServerIndex + 1
+        Log.d(TAG, "tryNextServer: moving to index $nextIndex/${availableServers.size}")
+
+        loadJob?.cancel()
+        loadJob = scope.launch {
+            val provider = UserPreferences.currentProvider
+            if (provider !is WiTvProvider) {
+                _state.value = State.Error(channelId, "Not a WiTV provider")
+                return@launch
+            }
+            playServerAtIndex(channelId, provider, nextIndex)
+        }
+    }
+
+    /**
+     * Schedule a full retry cycle after [RETRY_DELAY_MS], or emit final error
+     * if max cycles reached.
+     */
+    private fun scheduleRetryOrFail(channelId: String, message: String) {
+        retryCycle++
+        if (retryCycle > MAX_RETRY_CYCLES) {
+            Log.e(TAG, "Max retry cycles ($MAX_RETRY_CYCLES) reached for $channelId")
+            _state.value = State.Error(channelId, message)
+            return
+        }
+
+        Log.d(TAG, "Scheduling retry cycle $retryCycle/$MAX_RETRY_CYCLES in ${RETRY_DELAY_MS / 1000}s")
+        _state.value = State.Loading(channelId, currentChannelName ?: "")
+
+        retryJob?.cancel()
+        retryJob = scope.launch {
+            delay(RETRY_DELAY_MS)
+            if (currentChannelId == channelId) {
+                Log.d(TAG, "Retry cycle $retryCycle: re-fetching servers for $channelId")
+                val savedCycle = retryCycle
+                playChannel(channelId, currentChannelName ?: "", currentChannelPoster)
+                retryCycle = savedCycle // preserve cycle count across playChannel reset
             }
         }
     }
 
     fun stop() {
         loadJob?.cancel()
+        retryJob?.cancel()
         player?.stop()
         player?.clearMediaItems()
         currentChannelId = null
         currentChannelName = null
         currentChannelPoster = null
+        availableServers = emptyList()
+        currentServerIndex = 0
+        retryCycle = 0
         _state.value = State.Idle
     }
 
@@ -260,6 +366,7 @@ object MiniPlayerController {
 
     fun stopAsync() {
         loadJob?.cancel()
+        retryJob?.cancel()
         transitioningToFullscreen = true
         val p = player
         player = null
@@ -301,6 +408,7 @@ object MiniPlayerController {
 
     fun releasePlayerKeepState() {
         loadJob?.cancel()
+        retryJob?.cancel()
         detachedPlayer = player
         player = null
         // Keep currentChannelId / currentChannelName / currentChannelPoster
@@ -333,6 +441,7 @@ object MiniPlayerController {
 
     fun release() {
         loadJob?.cancel()
+        retryJob?.cancel()
         player?.stop()
         player?.release()
         player = null
@@ -342,6 +451,9 @@ object MiniPlayerController {
         currentChannelId = null
         currentChannelName = null
         currentChannelPoster = null
+        availableServers = emptyList()
+        currentServerIndex = 0
+        retryCycle = 0
         _state.value = State.Idle
         onIptvChannelClick = null
         Log.d(TAG, "ExoPlayer released")
