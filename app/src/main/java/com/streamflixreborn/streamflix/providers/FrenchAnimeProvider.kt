@@ -1,6 +1,7 @@
 package com.streamflixreborn.streamflix.providers
 
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
+import com.streamflixreborn.streamflix.BuildConfig
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.Extractor
 import com.streamflixreborn.streamflix.models.Category
@@ -43,7 +44,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
         }
     override val name = "FrenchAnime"
     override val logo: String
-        get() = "$baseUrl/templates/franime/images/favicon3.png"
+        get() = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_frenchanime"
 
     override val language = "fr"
     override val changeUrlMutex = Mutex()

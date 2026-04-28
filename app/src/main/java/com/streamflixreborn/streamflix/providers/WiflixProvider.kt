@@ -3,6 +3,7 @@ package com.streamflixreborn.streamflix.providers
 import android.content.Context
 import android.util.Log
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
+import com.streamflixreborn.streamflix.BuildConfig
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.Extractor
 import com.streamflixreborn.streamflix.models.Category
@@ -53,10 +54,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
 
     override val logo: String
-        get() {
-            var cacheLogo = UserPreferences.getProviderCache(this,UserPreferences.PROVIDER_LOGO)
-            return cacheLogo.ifEmpty { "$baseUrl/favicon.ico" }
-        }
+        get() = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_wiflix"
 
     override val language = "fr"
     override val changeUrlMutex = Mutex()

@@ -1,6 +1,7 @@
 package com.streamflixreborn.streamflix.providers
 
 import android.util.Log
+import com.streamflixreborn.streamflix.BuildConfig
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.Extractor
 import com.streamflixreborn.streamflix.models.Category
@@ -42,10 +43,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             return cachePortalURL.ifEmpty { field }
         }
     override val logo: String
-        get() {
-            val cacheLogo = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_LOGO)
-            return cacheLogo.ifEmpty { "${portalUrl}movix.png" }
-        }
+        get() = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_movix"
     override val language = "fr"
     override val changeUrlMutex = Mutex()
 
