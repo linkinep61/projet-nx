@@ -731,6 +731,21 @@ class PlayerMobileFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
         hideWebViewOverlay()
+
+        // Cleanup Handler leaks
+        if (::progressHandler.isInitialized && ::progressRunnable.isInitialized) {
+            progressHandler.removeCallbacks(progressRunnable)
+        }
+
+        // Cleanup DaddyLive proxy WebView
+        daddyLiveProxyWebView?.let {
+            try { it.stopLoading(); it.destroy() } catch (_: Exception) {}
+        }
+        daddyLiveProxyWebView = null
+
+        // Shutdown Cronet executor
+        cronetExecutor.shutdownNow()
+
         nextEpisodePrefetchJob?.cancel()
         val window = requireActivity().window
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {

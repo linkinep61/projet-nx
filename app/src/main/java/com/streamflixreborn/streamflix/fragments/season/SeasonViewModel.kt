@@ -79,7 +79,8 @@ class SeasonViewModel(
         _state.emit(State.LoadingEpisodes)
 
         try {
-            val episodes = UserPreferences.currentProvider!!
+            val provider = UserPreferences.currentProvider ?: return@launch
+            val episodes = provider
                 .getEpisodesBySeason(seasonId)
                 .sortedBy { it.number }
 
