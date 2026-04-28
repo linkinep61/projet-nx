@@ -2,8 +2,11 @@ package com.streamflixreborn.streamflix.utils
 
 import android.content.Context
 import android.util.Log
-import android.webkit.WebView
+import android.webkit.WebStorage
 import com.bumptech.glide.Glide
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.io.File
 
 object CacheUtils {
@@ -20,23 +23,20 @@ object CacheUtils {
 
         try {
             Glide.get(context).clearMemory()
-            Thread {
+            CoroutineScope(Dispatchers.IO).launch {
                 try {
                     Glide.get(context).clearDiskCache()
                     Log.d(TAG, "Cache Glide eliminata.")
                 } catch (e: Exception) {
                     Log.e(TAG, "Errore eliminazione cache Glide: ${e.message}")
                 }
-            }.start()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Errore Glide: ${e.message}")
         }
 
         try {
-            WebView(context).apply {
-                clearCache(true)
-                destroy()
-            }
+            WebStorage.getInstance().deleteAllData()
             Log.d(TAG, "Cache WebView eliminata.")
         } catch (e: Exception) {
             Log.e(TAG, "Errore WebView: ${e.message}")
@@ -79,8 +79,6 @@ object CacheUtils {
         } catch (e: Exception) {
             Log.e(TAG, "Error clearing Glide memory: ${e.message}")
         }
-        // Suggest GC to reclaim freed image memory
-        System.gc()
     }
 
     fun autoClearIfNeeded(context: Context, thresholdMb: Long = 50) {

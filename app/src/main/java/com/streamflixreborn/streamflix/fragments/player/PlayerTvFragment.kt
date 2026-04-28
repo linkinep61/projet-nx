@@ -232,6 +232,8 @@ class PlayerTvFragment : Fragment() {
     private var currentVideo: Video? = null
     private var currentServer: Video.Server? = null
     private var usingCronet = false
+    /** Shared bounded executor for Cronet — avoids unbounded newCachedThreadPool */
+    private val cronetExecutor = java.util.concurrent.Executors.newFixedThreadPool(4)
     private var usingDoH = false
     private var usingWebView = false
 
@@ -2175,7 +2177,7 @@ class PlayerTvFragment : Fragment() {
                 Log.d("PlayerNetwork", "Using CronetDataSource for vidzy.live (Chrome network stack)")
                 usingCronet = true
                 usingDoH = false
-                CronetDataSource.Factory(cronetEngine as CronetEngine, java.util.concurrent.Executors.newCachedThreadPool())
+                CronetDataSource.Factory(cronetEngine as CronetEngine, cronetExecutor)
                     .setUserAgent(NetworkClient.USER_AGENT)
                     .setConnectionTimeoutMs(30_000)
                     .setReadTimeoutMs(30_000)

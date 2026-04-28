@@ -236,6 +236,8 @@ class PlayerMobileFragment : Fragment() {
 
     /** Cached CronetEngine using Play Services' Chrome TLS stack */
     private var cronetEngine: CronetEngine? = null
+    /** Shared bounded executor for Cronet — avoids unbounded newCachedThreadPool */
+    private val cronetExecutor = java.util.concurrent.Executors.newFixedThreadPool(4)
     private var isIgnoringPip = false
     private var waitingForBypass = false
     private var bypassDone = false
@@ -1997,7 +1999,7 @@ class PlayerMobileFragment : Fragment() {
         usingCronet = true
         usingDoH = false
         usingBrowserOkHttp = false
-        return CronetDataSource.Factory(engine, java.util.concurrent.Executors.newCachedThreadPool())
+        return CronetDataSource.Factory(engine, cronetExecutor)
             .setUserAgent(NetworkClient.USER_AGENT)
             .setConnectionTimeoutMs(30_000)
             .setReadTimeoutMs(30_000)
