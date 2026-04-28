@@ -2,6 +2,7 @@ package com.streamflixreborn.streamflix.providers
 
 import android.util.Base64
 import android.util.Log
+import com.streamflixreborn.streamflix.BuildConfig
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.models.*
 import com.streamflixreborn.streamflix.utils.EnrichmentTrigger
@@ -36,7 +37,7 @@ object WiTvProvider : Provider {
 
     override val name = "WiTV"
     override val baseUrl = "https://witv.team"
-    override val logo = "https://witv.team/templates/witv/images/witv-logo-w2.png"
+    override val logo = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_witv"
     override val language = "fr"
 
     private const val TAG = "WiTvProvider"

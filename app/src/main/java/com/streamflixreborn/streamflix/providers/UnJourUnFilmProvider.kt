@@ -3,6 +3,7 @@ package com.streamflixreborn.streamflix.providers
 import android.text.Html
 import android.util.Log
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
+import com.streamflixreborn.streamflix.BuildConfig
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.ApiVoirFilmExtractor
 import com.streamflixreborn.streamflix.extractors.Extractor
@@ -60,10 +61,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
 
     override val logo: String
-        get() {
-            val cacheLogo = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_LOGO)
-            return cacheLogo.ifEmpty { portalUrl + "wp-content/uploads/2025/07/1J1F-150x150.jpg" }
-        }
+        get() = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_unjourunfilm"
     override val language = "fr"
     override val changeUrlMutex = Mutex()
 

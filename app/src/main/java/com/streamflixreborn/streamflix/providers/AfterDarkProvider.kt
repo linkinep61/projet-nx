@@ -2,6 +2,7 @@ package com.streamflixreborn.streamflix.providers
 
 import android.util.Log
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
+import com.streamflixreborn.streamflix.BuildConfig
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.AfterDarkExtractor
 import com.streamflixreborn.streamflix.models.Category
@@ -53,7 +54,7 @@ object AfterDarkProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             return cacheURL.ifEmpty { field }
         }
 
-    override val logo = "https://images2.imgbox.com/f5/45/6Es7LVQ6_o.png"
+    override val logo = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_afterdark"
     override val language = "fr"
     override val changeUrlMutex = Mutex()
 

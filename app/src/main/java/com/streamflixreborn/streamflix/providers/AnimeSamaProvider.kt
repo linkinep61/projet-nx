@@ -2,6 +2,7 @@ package com.streamflixreborn.streamflix.providers
 
 import android.util.Log
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
+import com.streamflixreborn.streamflix.BuildConfig
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.Extractor
 import com.streamflixreborn.streamflix.models.Category
@@ -51,7 +52,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             return cachePortalURL.ifEmpty { field }
         }
     override val logo: String
-        get() = "${baseUrl}img/icon.png"
+        get() = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_animesama"
     override val language = "fr"
     override val changeUrlMutex = Mutex()
 

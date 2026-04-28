@@ -2,6 +2,7 @@ package com.streamflixreborn.streamflix.providers
 
 import android.util.Log
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
+import com.streamflixreborn.streamflix.BuildConfig
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.Extractor
 import com.streamflixreborn.streamflix.models.Category
@@ -52,7 +53,7 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
 
     override val logo: String
-        get() = "$baseUrl/logo.png"
+        get() = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_frenchmanga"
 
     override val language = "fr"
     override val changeUrlMutex = Mutex()

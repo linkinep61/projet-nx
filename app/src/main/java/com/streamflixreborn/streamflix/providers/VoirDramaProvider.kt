@@ -1,6 +1,7 @@
 package com.streamflixreborn.streamflix.providers
 
 import android.util.Log
+import com.streamflixreborn.streamflix.BuildConfig
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.Extractor
@@ -44,7 +45,7 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
         }
 
     override val logo: String
-        get() = "${baseUrl}wp-content/uploads/2022/07/voirdrama-logo.png"
+        get() = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_voirdrama"
 
     override val language = "fr"
     override val changeUrlMutex = Mutex()

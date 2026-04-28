@@ -1,5 +1,6 @@
 package com.streamflixreborn.streamflix.providers
 
+import com.streamflixreborn.streamflix.BuildConfig
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.Extractor
 import com.streamflixreborn.streamflix.extractors.MoflixExtractor
@@ -47,7 +48,7 @@ class TmdbProvider(override val language: String) : Provider {
 
     override val name = "TMDb ($language)"
     override val logo =
-        "https://upload.wikimedia.org/wikipedia/commons/thumb/8/89/Tmdb.new.logo.svg/1280px-Tmdb.new.logo.svg.png"
+        "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_tmdb"
 
     override suspend fun getHome(): List<Category> = coroutineScope {
         val categories = mutableListOf<Category>()
