@@ -34,6 +34,8 @@ object InAppUpdater {
     }
 
     suspend fun getReleaseUpdate(): GitHub.Release? {
+        if (BuildConfig.DEBUG) return null
+
         val latestRelease = GitHub.Releases.getLatestRelease(GITHUB_OWNER, GITHUB_REPO)
         val currentVersion = BuildConfig.VERSION_NAME
 
@@ -44,6 +46,8 @@ object InAppUpdater {
     }
 
     suspend fun getNewReleases(): List<GitHub.Release> {
+        if (BuildConfig.DEBUG) return emptyList()
+
         val releases = GitHub.Releases.getReleases(GITHUB_OWNER, GITHUB_REPO)
         val currentVersion = BuildConfig.VERSION_NAME
 

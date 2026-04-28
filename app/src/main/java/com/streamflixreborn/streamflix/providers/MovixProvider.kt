@@ -13,6 +13,7 @@ import com.streamflixreborn.streamflix.models.Show
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
+import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -561,9 +562,8 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
     }
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
-        if (page > 1) return emptyList()
-
         if (query.isEmpty()) {
+            if (page > 1) return emptyList()
             return listOf(
                 Genre(id = "28", name = "Action"),
                 Genre(id = "12", name = "Aventure"),
@@ -585,34 +585,31 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             )
         }
 
-        initializeService()
         return try {
-            val results = movixServiceInstance.search(query)
-            results.mapNotNull { item ->
-                when (item.type) {
-                    "movie" -> Movie(
-                        id = (item.tmdb_id ?: item.id ?: return@mapNotNull null).toString(),
-                        title = item.name ?: "",
-                        poster = item.poster,
-                        banner = item.backdrop,
-                        overview = item.description,
-                        released = item.release_date?.substringBefore("T"),
-                        imdbId = item.imdb_id
+            val tmdbResults = TMDb3.Search.multi(query, language = "fr-FR", page = page)
+            tmdbResults.results.mapNotNull { item ->
+                when (item) {
+                    is TMDb3.Movie -> Movie(
+                        id = item.id.toString(),
+                        title = item.title,
+                        poster = item.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" },
+                        banner = item.backdropPath?.let { "https://image.tmdb.org/t/p/w780$it" },
+                        overview = item.overview,
+                        released = item.releaseDate
                     )
-                    "series" -> TvShow(
-                        id = (item.tmdb_id ?: item.id ?: return@mapNotNull null).toString(),
-                        title = item.name ?: "",
-                        poster = item.poster,
-                        banner = item.backdrop,
-                        overview = item.description,
-                        released = item.release_date?.substringBefore("T"),
-                        imdbId = item.imdb_id
+                    is TMDb3.Tv -> TvShow(
+                        id = item.id.toString(),
+                        title = item.name,
+                        poster = item.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" },
+                        banner = item.backdropPath?.let { "https://image.tmdb.org/t/p/w780$it" },
+                        overview = item.overview,
+                        released = item.firstAirDate
                     )
                     else -> null
                 }
             }
         } catch (e: Exception) {
-            Log.e("MovixProvider", "Search error: ${e.message}")
+            Log.e("MovixProvider", "TMDB search error: ${e.message}")
             emptyList()
         }
     }
