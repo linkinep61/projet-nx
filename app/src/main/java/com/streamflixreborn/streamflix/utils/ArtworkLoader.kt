@@ -10,6 +10,7 @@ import com.bumptech.glide.load.engine.GlideException
 import com.bumptech.glide.request.RequestListener
 import com.bumptech.glide.request.RequestOptions
 import com.bumptech.glide.request.target.Target
+import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.database.AppDatabase
 import com.streamflixreborn.streamflix.models.Movie
 import com.streamflixreborn.streamflix.models.TvShow
@@ -94,11 +95,15 @@ private object ArtworkRepairCoordinator {
 private val POSTER_LIST_OPTIONS = RequestOptions()
     .override(400, 600)
     .format(DecodeFormat.PREFER_RGB_565)
+    .placeholder(R.drawable.glide_fallback_cover)
+    .error(R.drawable.glide_fallback_cover)
 
 /** Banner/backdrop: 800×450 cap + RGB_565 */
 private val BANNER_OPTIONS = RequestOptions()
     .override(800, 450)
     .format(DecodeFormat.PREFER_RGB_565)
+    .placeholder(R.drawable.glide_fallback_cover)
+    .error(R.drawable.glide_fallback_cover)
 
 private fun ImageView.loadRecoverableArtwork(
     initialUrl: String?,
