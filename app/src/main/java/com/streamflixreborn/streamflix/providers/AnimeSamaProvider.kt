@@ -963,35 +963,42 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             val languages = listOf("vf", "vostfr")
             val langLabels = mapOf("vostfr" to "VOSTFR", "vf" to "VF")
 
-            for (lang in languages) {
-                val fetchUrl = "${baseUrl}catalogue/$movieSlug/$folder/$lang/episodes.js"
-                Log.d(TAG, "[Movie Servers] Fetching: $fetchUrl")
-                val episodesJs = try {
-                    fetchText(fetchUrl)
-                } catch (e: Exception) {
-                    Log.e(TAG, "[Movie Servers] Fetch failed for $lang: ${e.message}")
-                    continue
-                }
-                Log.d(TAG, "[Movie Servers] $lang response: length=${episodesJs.length}, hasEps1=${episodesJs.contains("var eps1")}")
-                if (episodesJs.isBlank() || !episodesJs.contains("var eps1")) continue
+            val langResults = coroutineScope {
+                languages.map { lang ->
+                    async {
+                        val fetchUrl = "${baseUrl}catalogue/$movieSlug/$folder/$lang/episodes.js"
+                        Log.d(TAG, "[Movie Servers] Fetching: $fetchUrl")
+                        val episodesJs = try {
+                            fetchText(fetchUrl)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "[Movie Servers] Fetch failed for $lang: ${e.message}")
+                            return@async emptyList<Video.Server>()
+                        }
+                        Log.d(TAG, "[Movie Servers] $lang response: length=${episodesJs.length}, hasEps1=${episodesJs.contains("var eps1")}")
+                        if (episodesJs.isBlank() || !episodesJs.contains("var eps1")) return@async emptyList()
 
-                for (match in epsRegex.findAll(episodesJs)) {
-                    val varName = match.groupValues[1]
-                    val urls = urlRegex.findAll(match.groupValues[2])
-                        .map { it.groupValues[1] }.toList()
-                    Log.d(TAG, "[Movie Servers] $lang $varName: ${urls.size} urls, using index $filmIndex")
-                    if (filmIndex < urls.size) {
-                        val url = urls[filmIndex]
-                        val serverName = getServerName(varName, url)
-                        val langSuffix = if (languages.size > 1) " (${langLabels[lang]})" else ""
-                        servers.add(Video.Server(
-                            id = "${varName}_${lang}_$filmIndex",
-                            name = "$serverName$langSuffix",
-                            src = url,
-                        ))
+                        val langServers = mutableListOf<Video.Server>()
+                        for (match in epsRegex.findAll(episodesJs)) {
+                            val varName = match.groupValues[1]
+                            val urls = urlRegex.findAll(match.groupValues[2])
+                                .map { it.groupValues[1] }.toList()
+                            Log.d(TAG, "[Movie Servers] $lang $varName: ${urls.size} urls, using index $filmIndex")
+                            if (filmIndex < urls.size) {
+                                val url = urls[filmIndex]
+                                val serverName = getServerName(varName, url)
+                                val langSuffix = if (languages.size > 1) " (${langLabels[lang]})" else ""
+                                langServers.add(Video.Server(
+                                    id = "${varName}_${lang}_$filmIndex",
+                                    name = "$serverName$langSuffix",
+                                    src = url,
+                                ))
+                            }
+                        }
+                        langServers
                     }
-                }
+                }.awaitAll()
             }
+            langResults.forEach { servers.addAll(it) }
             Log.d(TAG, "[Movie Servers] Total servers found: ${servers.size}")
         } else {
             // TV Episodes: id format "slug/saison1/lang/3" or "slug/lang/3"

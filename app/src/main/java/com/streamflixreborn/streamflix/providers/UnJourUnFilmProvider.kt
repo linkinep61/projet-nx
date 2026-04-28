@@ -17,6 +17,9 @@ import com.streamflixreborn.streamflix.models.People
 import com.streamflixreborn.streamflix.models.Season
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.jsoup.nodes.Document
@@ -1069,29 +1072,39 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             val isEpisode = videoType is Video.Type.Episode
 
             if (postId.isNotEmpty()) {
-                for (nume in 1..10) {
-                    try {
-                        val link = service.getServers(
-                            num = nume.toString(),
-                            post = postId,
-                            type = if (isEpisode) "tv" else "movie"
-                        )
-                        if (link.embed_url.isNullOrEmpty()) break
-                        if (ignoreSource("", link.embed_url)) continue
-
-                        if (link.embed_url.startsWith(apivoirfilm.mainUrl)) {
-                            apiUrl = link.embed_url
-                        } else if (link.embed_url.startsWith(onregadeou.mainUrl)) {
-                            onregardeUrl = link.embed_url
-                        } else {
-                            val serviceName = Extractor.identifyServiceName(link.embed_url)
-                            servers.add(Video.Server(
-                                id = "srv$nume",
-                                name = serviceName ?: "Serveur $nume",
-                                src = link.embed_url
-                            ))
+                val typeStr = if (isEpisode) "tv" else "movie"
+                val results = coroutineScope {
+                    (1..10).map { nume ->
+                        async {
+                            try {
+                                val link = service.getServers(
+                                    num = nume.toString(),
+                                    post = postId,
+                                    type = typeStr
+                                )
+                                if (link.embed_url.isNullOrEmpty()) null
+                                else nume to link.embed_url
+                            } catch (_: Exception) { null }
                         }
-                    } catch (_: Exception) { break }
+                    }.awaitAll()
+                }
+                for (pair in results) {
+                    if (pair == null) continue
+                    val (nume, embedUrl) = pair
+                    if (ignoreSource("", embedUrl)) continue
+
+                    if (embedUrl.startsWith(apivoirfilm.mainUrl)) {
+                        apiUrl = embedUrl
+                    } else if (embedUrl.startsWith(onregadeou.mainUrl)) {
+                        onregardeUrl = embedUrl
+                    } else {
+                        val serviceName = Extractor.identifyServiceName(embedUrl)
+                        servers.add(Video.Server(
+                            id = "srv$nume",
+                            name = serviceName ?: "Serveur $nume",
+                            src = embedUrl
+                        ))
+                    }
                 }
             }
         }
