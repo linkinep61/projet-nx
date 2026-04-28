@@ -15,6 +15,7 @@ import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 class VidzyExtractor : Extractor() {
@@ -123,7 +124,7 @@ class VidzyExtractor : Extractor() {
             } else {
                 // Second request with cookies from first response
                 Log.d(TAG, "Landing page detected, retrying with cookies...")
-                Thread.sleep(1000) // Small delay to mimic browser behavior
+                delay(1000) // Small delay to mimic browser behavior
                 val response2 = client.newCall(request).execute()
                 val body2 = response2.body?.string() ?: throw Exception("Empty response on retry")
                 Log.d(TAG, "Request 2 - code: ${response2.code}, length: ${body2.length}")

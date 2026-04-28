@@ -108,7 +108,7 @@ class RpmvidExtractor : Extractor() {
             }
             !cfPath.isNullOrEmpty() -> {
                 cfPath = buildCloudFlareUrl(cfPath, cfExpire, json)
-                toAbsoluteUrl(mainLink, cfPath!!) to mapOf("Referer" to mainLink)
+                toAbsoluteUrl(mainLink, cfPath ?: "") to mapOf("Referer" to mainLink)
             }
             else -> throw Exception("Missing hls, hlsVideoTiktok or cf in response")
         }

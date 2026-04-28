@@ -3,7 +3,7 @@ package com.streamflixreborn.streamflix.extractors
 import com.streamflixreborn.streamflix.models.Video
 import androidx.media3.common.MimeTypes
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
+import com.streamflixreborn.streamflix.utils.NetworkClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
@@ -100,7 +100,7 @@ class VideasyExtractor : Extractor() {
     }
 
     override suspend fun extract(link: String): Video {
-        val client = OkHttpClient()
+        val client = NetworkClient.default
 
         // 1. Get encrypted data from api.videasy.net
         val request = Request.Builder()
