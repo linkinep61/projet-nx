@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:padding="12dp"
+    android:background="?attr/selectableItemBackground">
+
+    <ImageView
+        android:id="@+id/iv_poster"
+        android:layout_width="80dp"
+        android:layout_height="120dp"
+        android:scaleType="centerCrop"
+        android:background="#1A1A1A"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:ignore="ContentDescription" />
+
+    <TextView
+        android:id="@+id/tv_title"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="8dp"
+        android:textColor="#FFFFFF"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:maxLines="2"
+        android:ellipsize="end"
+        app:layout_constraintEnd_toStartOf="@id/iv_action"
+        app:layout_constraintStart_toEndOf="@id/iv_poster"
+        app:layout_constraintTop_toTopOf="@id/iv_poster"
+        tools:text="Movie Title" />
+
+    <TextView
+        android:id="@+id/tv_subtitle"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginTop="4dp"
+        android:textColor="#99FFFFFF"
+        android:textSize="13sp"
+        android:maxLines="1"
+        app:layout_constraintStart_toEndOf="@id/iv_poster"
+        app:layout_constraintEnd_toStartOf="@id/iv_action"
+        app:layout_constraintTop_toBottomOf="@id/tv_title"
+        tools:text="S1 E3 - Episode Title" />
+
+    <TextView
+        android:id="@+id/tv_status"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginTop="8dp"
+        android:textColor="#66FFFFFF"
+        android:textSize="12sp"
+        app:layout_constraintStart_toEndOf="@id/iv_poster"
+        app:layout_constraintEnd_toStartOf="@id/iv_action"
+        app:layout_constraintTop_toBottomOf="@id/tv_subtitle"
+        tools:text="Downloading... 45%" />
+
+    <ProgressBar
+        android:id="@+id/progress_bar"
+        style="@android:style/Widget.ProgressBar.Horizontal"
+        android:layout_width="0dp"
+        android:layout_height="3dp"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="8dp"
+        android:layout_marginTop="6dp"
+        android:max="100"
+        android:progressTint="#BB86FC"
+        android:progressBackgroundTint="#333333"
+        app:layout_constraintStart_toEndOf="@id/iv_poster"
+        app:layout_constraintEnd_toStartOf="@id/iv_action"
+        app:layout_constraintTop_toBottomOf="@id/tv_status" />
+
+    <ImageView
+        android:id="@+id/iv_cancel"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:padding="6dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:visibility="gone"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toTopOf="@id/iv_action"
+        app:layout_constraintVertical_chainStyle="packed"
+        tools:ignore="ContentDescription"
+        tools:visibility="visible" />
+
+    <ImageView
+        android:id="@+id/iv_action"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:padding="6dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/iv_cancel"
+        app:layout_constraintBottom_toBottomOf="parent"
+        tools:ignore="ContentDescription" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

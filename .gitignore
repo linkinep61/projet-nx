@@ -19,6 +19,7 @@ push_to_github.bat
 push_test_update.bat
 push_cleanup.bat
 push_fix.bat
+push_update.bat
 fix_and_push*.bat
 create_tag_and_release.bat
 remove_old_credential.bat
@@ -27,7 +28,10 @@ build_and_test.bat
 build-release.bat
 dump_logcat.bat
 logcat_streamflix.bat
+check_lulu_logs.bat
 kill_gradle.bat
+git-push.bat
+tag-push.bat
 agent_bridge.ps1
 NOTES_SESSION.md
 
@@ -46,7 +50,15 @@ trigger.txt
 # Keystore (ne pas exposer)
 streamflix-release.jks
 
+# Backup providers (local uniquement)
+providers_backup/
+
+# Documents divers
+Discussion Claude.docx
+
 # Claude
 .claude/
 claude-context/
-build_output*.txt
+build_output*.txtbuild_log.txt
+adb_out.txt
+adb_err.txt

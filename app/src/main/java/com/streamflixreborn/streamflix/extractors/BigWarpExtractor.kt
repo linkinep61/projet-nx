@@ -1,10 +1,8 @@
 package com.streamflixreborn.streamflix.extractors
 
 import androidx.media3.common.MimeTypes
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Url
 class BigWarpExtractor: Extractor() {
@@ -15,7 +13,7 @@ class BigWarpExtractor: Extractor() {
 
 
     override suspend fun extract(link: String): Video {
-        val service = BigWarpExtractorService.build(mainUrl)
+        val service = Extractor.createJsoupService<BigWarpExtractorService>(mainUrl)
         val source = service.getSource(link.replace(mainUrl, ""))
         val scriptTags = source.select("script[type=text/javascript]")
 
@@ -51,19 +49,6 @@ class BigWarpExtractor: Extractor() {
 
 
     private interface BigWarpExtractorService {
-
-        companion object {
-            fun build(baseUrl: String): BigWarpExtractorService {
-                val retrofitRedirected = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                return retrofitRedirected.create(BigWarpExtractorService::class.java)
-            }
-        }
-
-
-
         @GET
         suspend fun getSource(@Url url: String): Document
     }

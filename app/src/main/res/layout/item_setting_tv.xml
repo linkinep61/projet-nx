@@ -2,6 +2,7 @@
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/root_setting"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:layout_marginStart="16dp"
@@ -79,12 +80,30 @@
         tools:text="Subtitle"
         tools:visibility="visible" />
 
+    <ImageView
+        android:id="@+id/iv_setting_download"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:layout_marginEnd="6dp"
+        android:padding="4dp"
+        android:src="@drawable/ic_downloads"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:background="@drawable/bg_tv_button_focus"
+        android:nextFocusLeft="@id/root_setting"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/iv_setting_enter"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:ignore="ContentDescription,UseAppTint"
+        tools:visibility="visible" />
+
     <androidx.constraintlayout.widget.Barrier
         android:id="@+id/barrier2"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         app:barrierDirection="start"
-        app:constraint_referenced_ids="iv_setting_enter,iv_setting_is_selected" />
+        app:constraint_referenced_ids="iv_setting_download,iv_setting_enter,iv_setting_is_selected" />
 
     <ImageView
         android:id="@+id/iv_setting_enter"

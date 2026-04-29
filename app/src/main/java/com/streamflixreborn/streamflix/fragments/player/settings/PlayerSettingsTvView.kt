@@ -52,9 +52,17 @@ class PlayerSettingsTvView @JvmOverloads constructor(
 
     override var onSubtitlesClicked: (() -> Unit)? = null
     var onManualZoomClicked: (() -> Unit)? = null
+    var onDownloadsClicked: (() -> Unit)? = null
 
     init {
         binding.rvSettings.addItemDecoration(SpacingItemDecoration(6.dp(context)))
+        binding.btnSettingsDownloads.setOnClickListener {
+            hide()
+            onDownloadsClicked?.invoke()
+        }
+        // D-pad: allow navigating UP from the list to the downloads button
+        binding.rvSettings.nextFocusUpId = R.id.btn_settings_downloads
+        binding.btnSettingsDownloads.nextFocusDownId = R.id.rv_settings
     }
 
     fun onBackPressed(): Boolean {
@@ -740,6 +748,24 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     }
 
                     else -> View.GONE
+                }
+            }
+
+            binding.ivSettingDownload.apply {
+                if (item is Settings.Server) {
+                    val knownBad = PlayerSettingsMobileView.isKnownWebViewOnlyServer(item.name)
+                    visibility = View.VISIBLE
+                    alpha = if (knownBad) 0.25f else 1.0f
+                    setOnClickListener {
+                        settingsView.onServerDownloadClicked?.invoke(item)
+                    }
+                    // D-pad: LEFT from download button returns to the row
+                    nextFocusLeftId = binding.root.id
+                    // D-pad: RIGHT from the row goes to the download button
+                    binding.root.nextFocusRightId = this.id
+                } else {
+                    visibility = View.GONE
+                    binding.root.nextFocusRightId = View.NO_ID
                 }
             }
 

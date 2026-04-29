@@ -847,10 +847,14 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 else -> 3
             }
         }.thenBy { server ->
-            val serviceName = Extractor.identifyServiceName(server.src)
-            when (serviceName) {
-                "Vidara" -> 1; "Vidsonic" -> 2; "Rpmvid" -> 3
-                "Filemoon" -> 10
+            val serviceName = Extractor.identifyServiceName(server.src)?.lowercase() ?: ""
+            val sn = server.name.lowercase()
+            when {
+                serviceName == "vidara" || sn.contains("vidara") -> 1
+                serviceName == "vidsonic" || sn.contains("vidsonic") -> 2
+                serviceName == "rpmvid" || sn.contains("rpmvid") -> 3
+                serviceName == "filemoon" || sn.contains("filemoon") -> 4
+                serviceName == "uqload" || sn.contains("uqload") -> 15
                 else -> 5
             }
         })

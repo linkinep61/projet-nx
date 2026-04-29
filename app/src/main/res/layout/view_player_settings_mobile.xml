@@ -35,11 +35,26 @@
         android:textSize="18sp"
         android:textStyle="bold"
         app:layout_constraintBottom_toTopOf="@id/barrier1"
-        app:layout_constraintEnd_toStartOf="@id/btn_settings_close"
+        app:layout_constraintEnd_toStartOf="@id/btn_settings_downloads"
         app:layout_constraintStart_toEndOf="@id/btn_settings_back"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_goneMarginStart="16dp"
         tools:text="Settings" />
+
+    <ImageView
+        android:id="@+id/btn_settings_downloads"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:layout_marginEnd="8dp"
+        android:padding="6dp"
+        android:src="@drawable/ic_downloads"
+        android:tint="#FFFFFF"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        app:layout_constraintBottom_toTopOf="@id/barrier1"
+        app:layout_constraintEnd_toStartOf="@id/btn_settings_close"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:ignore="ContentDescription,UseAppTint" />
 
     <ImageView
         android:id="@+id/btn_settings_close"

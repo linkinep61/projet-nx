@@ -3,11 +3,9 @@ package com.streamflixreborn.streamflix.extractors
 import android.util.Base64
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DecryptHelper
 import java.util.regex.Pattern
-import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import retrofit2.Retrofit
 import retrofit2.http.GET
@@ -19,7 +17,7 @@ class MagaSavorExtractor : Extractor() {
     override val mainUrl = "https://magasavor.net"
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val service = Extractor.createJsoupService<Service>(mainUrl)
         val source = service.get(link, mainUrl)
         val scriptTag = source.selectFirst("script[type=application/json]")
         val encodedStringInScriptTag = scriptTag?.data()?.trim().orEmpty()
@@ -40,15 +38,6 @@ class MagaSavorExtractor : Extractor() {
     }
 
     private interface Service {
-        companion object {
-            fun build(baseUrl: String): Service = Retrofit.Builder()
-                .baseUrl(baseUrl)
-                .client(OkHttpClient.Builder().build())
-                .addConverterFactory(JsoupConverterFactory.create())
-                .build()
-                .create(Service::class.java)
-        }
-
         @GET
         suspend fun get(
             @Url url: String,

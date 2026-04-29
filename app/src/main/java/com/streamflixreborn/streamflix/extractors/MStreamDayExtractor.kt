@@ -1,11 +1,9 @@
 package com.streamflixreborn.streamflix.extractors
 
 import android.util.Base64
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.AADecoder
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Url
 
@@ -25,7 +23,7 @@ class MStreamDayExtractor : Extractor() {
     ).toString(Charsets.UTF_8)
 
     override suspend fun extract(link: String): Video {
-        val service = MStreamDayExtractorService.build(mainUrl, link)
+        val service = Extractor.createJsoupService<MStreamDayExtractorService>(mainUrl)
         val source = service.getSource(link.replace(mainUrl, ""))
         val html = source.html()
         var encodedSource = html.split("window.ADBLOCKER = false;\\n")[1].split("\");</script>")[0]
@@ -56,7 +54,13 @@ class MStreamDayExtractor : Extractor() {
                 .split("window.svg={\"stream\":\"")[1]
                 .split("\",\"hash")[0]
             val urlSigDecoded = sigDecode(urlEncoded)
-            return Video(source = urlSigDecoded)
+            return Video(
+                source = urlSigDecoded,
+                headers = mapOf(
+                    "Referer" to "$mainUrl/",
+                    "User-Agent" to DEFAULT_USER_AGENT
+                )
+            )
         }
         throw Exception("Could not extract MStreamDayVideo")
     }
@@ -84,14 +88,6 @@ class MStreamDayExtractor : Extractor() {
     }
 
     private interface MStreamDayExtractorService {
-        companion object {
-            fun build(baseUrl: String, originalLink: String): MStreamDayExtractorService {
-                val retrofit = Retrofit.Builder().baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create()).build()
-                return retrofit.create(MStreamDayExtractorService::class.java)
-            }
-        }
-
         @GET
         suspend fun getSource(@Url url: String): Document
     }

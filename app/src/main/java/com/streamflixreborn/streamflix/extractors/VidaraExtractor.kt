@@ -2,12 +2,9 @@ package com.streamflixreborn.streamflix.extractors
 
 import com.google.gson.JsonParser
 import com.streamflixreborn.streamflix.models.Video
-import com.streamflixreborn.streamflix.utils.DnsResolver
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody
-import retrofit2.Retrofit
 import retrofit2.http.Body
 import retrofit2.http.POST
 import java.net.URL
@@ -24,7 +21,7 @@ class VidaraExtractor : Extractor() {
         require(fileCode.isNotEmpty()) { "File code not found in URL" }
 
         val baseUrl = "${url.protocol}://${url.host}"
-        val service = Service.build(baseUrl)
+        val service = Extractor.createGsonService<Service>(baseUrl)
 
         // API expects JSON body with filecode and device fields
         val jsonBody = """{"filecode":"$fileCode","device":"web"}"""
@@ -61,36 +58,6 @@ class VidaraExtractor : Extractor() {
     }
 
     private interface Service {
-
-        companion object {
-            private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-
-            fun build(baseUrl: String): Service {
-                val client = OkHttpClient.Builder()
-                    .dns(DnsResolver.doh)
-                    .followRedirects(true)
-                    .followSslRedirects(true)
-                    .addInterceptor { chain ->
-                        val request = chain.request().newBuilder()
-                            .header("User-Agent", USER_AGENT)
-                            .header("Referer", "$baseUrl/")
-                            .header("Origin", baseUrl)
-                            .header("X-Requested-With", "XMLHttpRequest")
-                            .header("Accept", "application/json, text/plain, */*")
-                            .build()
-                        chain.proceed(request)
-                    }
-                    .build()
-
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .client(client)
-                    .build()
-
-                return retrofit.create(Service::class.java)
-            }
-        }
-
         @POST("api/stream")
         suspend fun getStream(
             @Body body: okhttp3.RequestBody

@@ -136,7 +136,7 @@ class MainTvActivity : FragmentActivity() {
             }
 
             when (destination.id) {
-                R.id.search, R.id.home, R.id.movies, R.id.tv_shows, R.id.settings -> {
+                R.id.search, R.id.home, R.id.movies, R.id.tv_shows, R.id.downloads, R.id.settings -> {
                     binding.navMain.visibility = View.VISIBLE
                     updateNavigationVisibility()
                 }
@@ -178,7 +178,7 @@ class MainTvActivity : FragmentActivity() {
             override fun handleOnBackPressed() {
                 when (navController.currentDestination?.id) {
                     R.id.home -> if (binding.navMain.hasFocus()) finish() else binding.navMain.requestFocus()
-                    R.id.settings, R.id.search, R.id.movies, R.id.tv_shows -> {
+                    R.id.settings, R.id.search, R.id.movies, R.id.tv_shows, R.id.downloads -> {
                         navigateToProviderHome(navController)
                         binding.navMain.requestFocus()
                     }

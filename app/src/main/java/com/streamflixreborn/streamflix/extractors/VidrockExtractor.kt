@@ -3,9 +3,6 @@ package com.streamflixreborn.streamflix.extractors
 import android.util.Base64
 import androidx.media3.common.MimeTypes
 import com.streamflixreborn.streamflix.models.Video
-import okhttp3.OkHttpClient
-import retrofit2.Retrofit
-import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Url
 import javax.crypto.Cipher
@@ -32,7 +29,7 @@ class VidrockExtractor : Extractor() {
         }
 
         return try {
-            val service = Service.build(mainUrl)
+            val service = Extractor.createGsonService<Service>(mainUrl)
             val response = service.getStreams(apiUrl)
 
             response.mapNotNull { (serverName, data) ->
@@ -58,7 +55,7 @@ class VidrockExtractor : Extractor() {
         val serverName = link.substringAfter("#", "").takeIf { it != link }
         val apiLink = link.substringBefore("#")
 
-        val service = Service.build(mainUrl)
+        val service = Extractor.createGsonService<Service>(mainUrl)
         val response = service.getStreams(apiLink)
 
         val serverEntry = if (!serverName.isNullOrEmpty()) {
@@ -109,18 +106,6 @@ class VidrockExtractor : Extractor() {
     }
 
     private interface Service {
-        companion object {
-            fun build(baseUrl: String): Service {
-                val client = OkHttpClient.Builder().build()
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(GsonConverterFactory.create())
-                    .client(client)
-                    .build()
-                return retrofit.create(Service::class.java)
-            }
-        }
-
         @GET
         suspend fun getStreams(@Url url: String): Map<String, Map<String, String>>
 

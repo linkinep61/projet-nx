@@ -1,13 +1,9 @@
 package com.streamflixreborn.streamflix.extractors
 
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Url
-import com.streamflixreborn.streamflix.utils.DnsResolver
-import okhttp3.OkHttpClient
 
 class UpZurExtractor : Extractor() {
 
@@ -15,14 +11,14 @@ class UpZurExtractor : Extractor() {
     override val mainUrl = "https://upzur.com"
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val service = Extractor.createJsoupService<Service>(mainUrl)
         val document = service.get(link)
         val html = document.html()
 
         val arrayMatch = Regex("""var uHo4sc = \[(.*?)\]""").find(html)
         val arrayData = arrayMatch?.groupValues?.get(1) ?: throw Exception("Array not found")
-        
-        val elements = arrayData.split(",").map { 
+
+        val elements = arrayData.split(",").map {
             it.trim().removeSurrounding("\"").removeSurrounding("'")
         }
 
@@ -55,22 +51,6 @@ class UpZurExtractor : Extractor() {
     }
 
     private interface Service {
-        companion object {
-            val client = OkHttpClient.Builder()
-                .dns(DnsResolver.doh)
-                .build()
-
-            fun build(baseUrl: String): Service {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .client(client)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-
-                return retrofit.create(Service::class.java)
-            }
-        }
-
         @GET
         suspend fun get(@Url url: String): Document
     }

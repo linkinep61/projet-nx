@@ -26,6 +26,9 @@
         android:id="@+id/action_global_tv_show"
         app:destination="@id/tv_show" />
     <action
+        android:id="@+id/action_global_downloads"
+        app:destination="@id/downloads" />
+    <action
         android:id="@+id/action_global_movie"
         app:destination="@id/movie" />
 
@@ -231,6 +234,11 @@
             app:popUpTo="@id/player"
             app:popUpToInclusive="true" />
     </fragment>
+    <fragment
+        android:id="@+id/downloads"
+        android:name="com.streamflixreborn.streamflix.fragments.downloads.DownloadsMobileFragment"
+        android:label="fragment_downloads_mobile"
+        tools:layout="@layout/fragment_downloads_mobile" />
     <fragment
         android:id="@+id/settings"
         android:name="com.streamflixreborn.streamflix.fragments.settings.SettingsMobileFragment"

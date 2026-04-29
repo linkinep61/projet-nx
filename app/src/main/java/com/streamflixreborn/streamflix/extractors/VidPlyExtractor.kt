@@ -2,7 +2,6 @@ package com.streamflixreborn.streamflix.extractors
 
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
-import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import retrofit2.Retrofit
 import retrofit2.converter.scalars.ScalarsConverterFactory
@@ -16,7 +15,13 @@ class VidPlyExtractor : Extractor() {
     override val mainUrl = "https://vidply.com/"
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val retrofit = Retrofit.Builder()
+            .baseUrl(mainUrl)
+            .client(Extractor.sharedClient)
+            .addConverterFactory(JsoupConverterFactory.create())
+            .addConverterFactory(ScalarsConverterFactory.create())
+            .build()
+        val service = retrofit.create(Service::class.java)
 
         val document = service.get(link.replace("/d/", "/e/", ignoreCase = true))
 
@@ -68,16 +73,6 @@ class VidPlyExtractor : Extractor() {
     }
 
     private interface Service {
-        companion object {
-            fun build(baseUrl: String): Service = Retrofit.Builder()
-                .baseUrl(baseUrl)
-                .client(OkHttpClient.Builder().build())
-                .addConverterFactory(JsoupConverterFactory.create())
-                .addConverterFactory(ScalarsConverterFactory.create())
-                .build()
-                .create(Service::class.java)
-        }
-
         @GET
         suspend fun get(
             @Url url: String,

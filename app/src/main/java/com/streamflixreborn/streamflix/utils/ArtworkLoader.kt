@@ -115,6 +115,10 @@ private fun ImageView.loadRecoverableArtwork(
 
     fun submit(url: String?) {
         val requestedUrl = url
+        // Guard against loading into a destroyed activity
+        val activity = (context as? android.app.Activity)
+        if (activity != null && activity.isDestroyed) return
+
         if (requestedUrl.isNullOrBlank() && !hasRequestedRepairForBlankUrl) {
             hasRequestedRepairForBlankUrl = true
             onRepair("") { refreshedUrl ->

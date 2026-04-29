@@ -29,6 +29,7 @@ import com.streamflixreborn.streamflix.providers.Provider
 import java.util.Calendar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class ShowOptionsTvDialog(
     context: Context,
@@ -138,7 +139,18 @@ class ShowOptionsTvDialog(
         binding.btnOptionShowFavorite.apply {
             val tvShow = episode.tvShow
             if (tvShow != null) {
-                val freshTvShow = database.tvShowDao().getById(tvShow.id) ?: tvShow
+                var freshTvShow = tvShow
+
+                context.toActivity()?.lifecycleScope?.launch(Dispatchers.IO) {
+                    freshTvShow = database.tvShowDao().getById(tvShow.id) ?: tvShow
+                    withContext(Dispatchers.Main) {
+                        text = if (freshTvShow.isFavorite) {
+                            context.getString(R.string.option_show_unfavorite)
+                        } else {
+                            context.getString(R.string.option_show_favorite)
+                        }
+                    }
+                }
 
                 setOnClickListener {
                     checkProviderAndRun(episode) {
@@ -163,11 +175,6 @@ class ShowOptionsTvDialog(
                     hide()
                 }
 
-                text = if (freshTvShow.isFavorite) {
-                    context.getString(R.string.option_show_unfavorite)
-                } else {
-                    context.getString(R.string.option_show_favorite)
-                }
                 visibility = View.VISIBLE
             } else {
                 visibility = View.GONE
@@ -328,7 +335,17 @@ class ShowOptionsTvDialog(
 
         binding.btnOptionEpisodeOpenTvShow.visibility = View.GONE
 
-        val freshMovie = database.movieDao().getById(movie.id) ?: movie
+        var freshMovie = movie
+
+        context.toActivity()?.lifecycleScope?.launch(Dispatchers.IO) {
+            freshMovie = database.movieDao().getById(movie.id) ?: movie
+            withContext(Dispatchers.Main) {
+                binding.btnOptionShowFavorite.text = when {
+                    freshMovie.isFavorite -> context.getString(R.string.option_show_unfavorite)
+                    else -> context.getString(R.string.option_show_favorite)
+                }
+            }
+        }
 
         binding.btnOptionShowFavorite.apply {
             setOnClickListener {
@@ -351,10 +368,6 @@ class ShowOptionsTvDialog(
                 hide()
             }
 
-            text = when {
-                freshMovie.isFavorite -> context.getString(R.string.option_show_unfavorite)
-                else -> context.getString(R.string.option_show_favorite)
-            }
             visibility = View.VISIBLE
 
             requestFocus()
@@ -428,7 +441,17 @@ class ShowOptionsTvDialog(
 
         binding.btnOptionEpisodeOpenTvShow.visibility = View.GONE
 
-        val freshTvShow = database.tvShowDao().getById(tvShow.id) ?: tvShow
+        var freshTvShow = tvShow
+
+        context.toActivity()?.lifecycleScope?.launch(Dispatchers.IO) {
+            freshTvShow = database.tvShowDao().getById(tvShow.id) ?: tvShow
+            withContext(Dispatchers.Main) {
+                binding.btnOptionShowFavorite.text = when {
+                    freshTvShow.isFavorite -> context.getString(R.string.option_show_unfavorite)
+                    else -> context.getString(R.string.option_show_favorite)
+                }
+            }
+        }
 
         binding.btnOptionShowFavorite.apply {
             setOnClickListener {
@@ -455,10 +478,6 @@ class ShowOptionsTvDialog(
                 hide()
             }
 
-            text = when {
-                freshTvShow.isFavorite -> context.getString(R.string.option_show_unfavorite)
-                else -> context.getString(R.string.option_show_favorite)
-            }
             visibility = View.VISIBLE
 
             requestFocus()

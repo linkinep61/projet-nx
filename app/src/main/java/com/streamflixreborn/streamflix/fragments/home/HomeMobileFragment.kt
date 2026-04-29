@@ -417,6 +417,10 @@ class HomeMobileFragment : Fragment() {
                 findNavController().navigate(R.id.providers)
             }
         }
+
+        binding.ivDownloads.setOnClickListener {
+            findNavController().navigate(R.id.downloads)
+        }
         
         // Hide background ImageView on mobile — wallpaper is at activity level
         binding.ivHomeBackground.visibility = View.GONE

@@ -9,23 +9,19 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.os.Message
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.models.Video
-import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.JsUnpacker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Header
+import retrofit2.http.Query
 import retrofit2.http.Url
 import java.net.URL
-import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
 class SaveFilesExtractor : Extractor() {
@@ -36,8 +32,6 @@ class SaveFilesExtractor : Extractor() {
 
     companion object {
         private const val TAG = "SaveFilesExtractor"
-        private const val USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
         private val AD_HOSTS = listOf(
             "googlesyndication", "doubleclick", "adservice",
@@ -57,11 +51,11 @@ class SaveFilesExtractor : Extractor() {
         // Strategy 1: Quick OkHttp fetch + parse (10s max)
         val okHttpResult = withTimeoutOrNull(10_000) {
             try {
-                val service = Service.build(baseUrl)
+                val service = Extractor.createJsoupService<Service>(baseUrl, referer)
                 val document = service.getSource(
                     url = link,
                     referer = referer,
-                    userAgent = USER_AGENT
+                    userAgent = Extractor.DEFAULT_USER_AGENT
                 )
                 val html = document.toString()
                 Log.d(TAG, "HTML fetched, length=${html.length}")
@@ -94,7 +88,7 @@ class SaveFilesExtractor : Extractor() {
                     val pathParts = URL(link).path.split("/").filter { it.isNotEmpty() }
                     val fileCode = pathParts.last().split("?")[0].trim()
                     if (fileCode.isNotEmpty()) {
-                        val dlService = DlService.build(baseUrl)
+                        val dlService = Extractor.createJsoupService<DlService>(baseUrl)
                         val dlDoc = dlService.getDl(
                             op = "embed",
                             fileCode = fileCode,
@@ -165,7 +159,7 @@ class SaveFilesExtractor : Extractor() {
             headers = mapOf(
                 "Referer" to referer,
                 "Origin" to referer.trimEnd('/'),
-                "User-Agent" to USER_AGENT
+                "User-Agent" to Extractor.DEFAULT_USER_AGENT
             )
         )
     }
@@ -190,7 +184,7 @@ class SaveFilesExtractor : Extractor() {
                     val webView = WebView(context).apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
-                        settings.userAgentString = USER_AGENT
+                        settings.userAgentString = Extractor.DEFAULT_USER_AGENT
                         settings.mixedContentMode =
                             android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         settings.mediaPlaybackRequiresUserGesture = false
@@ -276,55 +270,21 @@ class SaveFilesExtractor : Extractor() {
         }
 
     private interface Service {
-        companion object {
-            fun build(baseUrl: String): Service {
-                val client = OkHttpClient.Builder()
-                    .dns(DnsResolver.doh)
-                    .connectTimeout(15, TimeUnit.SECONDS)
-                    .readTimeout(15, TimeUnit.SECONDS)
-                    .followRedirects(true)
-                    .followSslRedirects(true)
-                    .build()
-                val retrofit = Retrofit.Builder()
-                    .baseUrl("$baseUrl/")
-                    .client(client)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                return retrofit.create(Service::class.java)
-            }
-        }
-
         @GET
         suspend fun getSource(
             @Url url: String,
             @Header("Referer") referer: String = "",
-            @Header("User-Agent") userAgent: String = USER_AGENT
+            @Header("User-Agent") userAgent: String = Extractor.DEFAULT_USER_AGENT
         ): Document
     }
 
     private interface DlService {
-        companion object {
-            fun build(baseUrl: String): DlService {
-                val client = OkHttpClient.Builder()
-                    .dns(DnsResolver.doh)
-                    .connectTimeout(15, TimeUnit.SECONDS)
-                    .readTimeout(15, TimeUnit.SECONDS)
-                    .build()
-                val retrofit = Retrofit.Builder()
-                    .baseUrl("$baseUrl/")
-                    .client(client)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                return retrofit.create(DlService::class.java)
-            }
-        }
-
         @GET("dl")
         suspend fun getDl(
-            @retrofit2.http.Query("op") op: String,
-            @retrofit2.http.Query("file_code") fileCode: String,
-            @retrofit2.http.Query("auto") auto: String,
-            @retrofit2.http.Query("referer") referer: String
+            @Query("op") op: String,
+            @Query("file_code") fileCode: String,
+            @Query("auto") auto: String,
+            @Query("referer") referer: String
         ): Document
     }
 }

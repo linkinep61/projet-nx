@@ -28,7 +28,7 @@ open class VidplayExtractor : Extractor() {
     open val key = "https://raw.githubusercontent.com/Ciarands/vidsrc-keys/main/keys.json"
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val service = buildService(mainUrl)
 
         val id = link.substringBefore("?").substringAfterLast("/")
 
@@ -51,6 +51,11 @@ open class VidplayExtractor : Extractor() {
         val video = Video(
             source = result.sources?.first()?.file
                 ?: throw Exception("Can't retrieve source"),
+            headers = mapOf(
+                "Referer" to "$mainUrl/",
+                "User-Agent" to DEFAULT_USER_AGENT,
+                "Origin" to mainUrl
+            ),
             subtitles = result.tracks
                 ?.filter { it.kind == "captions" }
                 ?.mapNotNull {
@@ -118,30 +123,28 @@ open class VidplayExtractor : Extractor() {
         override val mainUrl = "https://vidplay.online"
     }
 
+    private fun buildService(baseUrl: String): Service {
+        val retrofit = Retrofit.Builder()
+            .baseUrl(baseUrl)
+            .client(Extractor.sharedClient)
+            .addConverterFactory(JsoupConverterFactory.create())
+            .addConverterFactory(StringConverterFactory.create())
+            .addConverterFactory(
+                GsonConverterFactory.create(
+                    GsonBuilder()
+                        .registerTypeAdapter(
+                            SourcesResponse::class.java,
+                            SourcesResponse.Deserializer(),
+                        )
+                        .create()
+                )
+            )
+            .build()
+
+        return retrofit.create(Service::class.java)
+    }
 
     private interface Service {
-
-        companion object {
-            fun build(baseUrl: String): Service {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .addConverterFactory(StringConverterFactory.create())
-                    .addConverterFactory(
-                        GsonConverterFactory.create(
-                            GsonBuilder()
-                                .registerTypeAdapter(
-                                    SourcesResponse::class.java,
-                                    SourcesResponse.Deserializer(),
-                                )
-                                .create()
-                        )
-                    )
-                    .build()
-
-                return retrofit.create(Service::class.java)
-            }
-        }
 
         @GET
         @Headers(

@@ -1,19 +1,14 @@
 package com.streamflixreborn.streamflix.extractors
 
 import android.util.Log
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
-import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.JsUnpacker
 import com.streamflixreborn.streamflix.utils.UserPreferences
-import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.Url
 import java.net.URL
-import java.util.concurrent.TimeUnit
 
 class VidHideExtractor: Extractor() {
     override val name = "VidHide"
@@ -41,7 +36,6 @@ class VidHideExtractor: Extractor() {
     override suspend fun extract(link: String): Video {
         Log.d(TAG, "extract() link=$link")
         val mainLink = URL(link).protocol + "://" + URL(link).host
-        val service = Service.build(mainLink)
         val fallback = URL(link).protocol + "://" + URL(link).host
         val referer = try {
             UserPreferences.currentProvider?.baseUrl ?: fallback
@@ -51,11 +45,12 @@ class VidHideExtractor: Extractor() {
         val origin = referer
         Log.d(TAG, "referer=$referer origin=$origin")
 
+        val service = Extractor.createJsoupService<Service>(mainLink, referer)
         val source = service.getSource(
             url = link,
             referer = referer,
             origin = origin,
-            userAgent = DEFAULT_USER_AGENT
+            userAgent = Extractor.DEFAULT_USER_AGENT
         )
         Log.d(TAG, "HTML length=${source.toString().length}")
 
@@ -109,25 +104,7 @@ class VidHideExtractor: Extractor() {
             @Url url: String,
             @Header("Referer") referer: String,
             @Header("Origin") origin: String,
-            @Header("User-Agent") userAgent: String = DEFAULT_USER_AGENT
+            @Header("User-Agent") userAgent: String = Extractor.DEFAULT_USER_AGENT
         ): Document
-
-        companion object {
-            fun build(baseUrl: String): Service {
-                val client = OkHttpClient.Builder()
-                    .dns(DnsResolver.doh)
-                    .connectTimeout(15, TimeUnit.SECONDS)
-                    .readTimeout(15, TimeUnit.SECONDS)
-                    .followRedirects(true)
-                    .followSslRedirects(true)
-                    .build()
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .client(client)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                return retrofit.create(Service::class.java)
-            }
-        }
     }
 }

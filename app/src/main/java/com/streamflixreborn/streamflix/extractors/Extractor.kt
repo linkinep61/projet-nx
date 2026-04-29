@@ -2,6 +2,12 @@ package com.streamflixreborn.streamflix.extractors
 
 import android.util.Log
 import com.streamflixreborn.streamflix.models.Video
+import com.streamflixreborn.streamflix.utils.DnsResolver
+import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
+import okhttp3.OkHttpClient
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
+import java.util.concurrent.TimeUnit
 
 abstract class Extractor {
 
@@ -18,7 +24,70 @@ abstract class Extractor {
         return extract(link)
     }
 
+    // ── Shared HTTP infrastructure ──────────────────────────────────────
+    // All extractors should use these instead of creating their own clients.
+    // sharedClient uses newBuilder() derivatives so they share the connection pool.
+
     companion object {
+        const val DEFAULT_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+        /** Base OkHttpClient shared by all extractors. Has DoH, redirects, 30s timeouts, User-Agent. */
+        val sharedClient: OkHttpClient by lazy {
+            OkHttpClient.Builder()
+                .dns(DnsResolver.doh)
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .addInterceptor { chain ->
+                    val request = chain.request().newBuilder()
+                        .header("User-Agent", DEFAULT_USER_AGENT)
+                        .build()
+                    chain.proceed(request)
+                }
+                .build()
+        }
+
+        /** Derive a client with a Referer header (shares connection pool with sharedClient). */
+        fun clientWithReferer(referer: String): OkHttpClient =
+            sharedClient.newBuilder()
+                .addInterceptor { chain ->
+                    val request = chain.request().newBuilder()
+                        .header("Referer", referer)
+                        .build()
+                    chain.proceed(request)
+                }
+                .build()
+
+        /** Build a Retrofit with JsoupConverterFactory. */
+        fun jsoupRetrofit(baseUrl: String, client: OkHttpClient = sharedClient): Retrofit =
+            Retrofit.Builder()
+                .baseUrl(baseUrl)
+                .client(client)
+                .addConverterFactory(JsoupConverterFactory.create())
+                .build()
+
+        /** Build a Retrofit with GsonConverterFactory. */
+        fun gsonRetrofit(baseUrl: String, client: OkHttpClient = sharedClient): Retrofit =
+            Retrofit.Builder()
+                .baseUrl(baseUrl)
+                .client(client)
+                .addConverterFactory(GsonConverterFactory.create())
+                .build()
+
+        /** Inline helper: create a Jsoup-backed Retrofit service in one call. */
+        inline fun <reified T> createJsoupService(baseUrl: String, referer: String? = null): T {
+            val client = if (referer != null) clientWithReferer(referer) else sharedClient
+            return jsoupRetrofit(baseUrl, client).create(T::class.java)
+        }
+
+        /** Inline helper: create a Gson-backed Retrofit service in one call. */
+        inline fun <reified T> createGsonService(baseUrl: String, referer: String? = null): T {
+            val client = if (referer != null) clientWithReferer(referer) else sharedClient
+            return gsonRetrofit(baseUrl, client).create(T::class.java)
+        }
+
         private val extractors = listOf(
             RabbitstreamExtractor(),
             RabbitstreamExtractor.MegacloudExtractor(),

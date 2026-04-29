@@ -1,10 +1,8 @@
 package com.streamflixreborn.streamflix.extractors
 
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.JsUnpacker
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Url
 
@@ -14,7 +12,7 @@ class USTRExtractor: Extractor() {
     override val aliasUrls = listOf("https://up4stream.com", "https://up4fun.top")
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val service = Extractor.createJsoupService<Service>(mainUrl)
         val linkJustParameter = link.replace(mainUrl, "")
 
         val document = service.getSource(linkJustParameter)
@@ -43,17 +41,6 @@ class USTRExtractor: Extractor() {
     private interface Service {
         @GET
         suspend fun getSource(@Url url: String): Document
-
-        companion object {
-            fun build(baseUrl: String): Service {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-
-                return retrofit.create(Service::class.java)
-            }
-        }
     }
 
 }

@@ -5,7 +5,6 @@ import android.util.Log
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
-import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultDataSource
@@ -51,6 +50,7 @@ object MiniPlayerController {
     private var player: ExoPlayer? = null
     private var loadJob: Job? = null
     private var retryJob: Job? = null
+    private var progressiveServerJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     // Current channel info
@@ -62,9 +62,11 @@ object MiniPlayerController {
         private set
 
     // Server fallback tracking
-    private var availableServers: List<Video.Server> = emptyList()
+    private val availableServers: MutableList<Video.Server> = mutableListOf()
+    private val triedServerUrls: MutableSet<String> = mutableSetOf()
     private var currentServerIndex: Int = 0
     private var retryCycle: Int = 0
+    @Volatile private var serversExhausted: Boolean = false
 
     fun getPlayer(): ExoPlayer? = player
 
@@ -136,10 +138,13 @@ object MiniPlayerController {
         currentChannelId = channelId
         currentChannelName = channelName
         currentChannelPoster = channelPoster
-        availableServers = emptyList()
+        availableServers.clear()
+        triedServerUrls.clear()
         currentServerIndex = 0
         retryCycle = 0
+        serversExhausted = false
         retryJob?.cancel()
+        progressiveServerJob?.cancel()
         _state.value = State.Loading(channelId, channelName)
 
         loadJob?.cancel()
@@ -169,18 +174,28 @@ object MiniPlayerController {
                     season = Video.Type.Episode.Season(number = 1, title = "Live"),
                 )
 
-                // Get servers
+                // Get servers (initial batch: OTF, WiTV, Vavoo)
                 val servers = withContext(Dispatchers.IO) {
                     provider.getServers(channelId, videoType)
                 }
+
+                // Start collecting progressive OLA TV servers (variants)
+                startCollectingProgressiveServers(channelId, provider)
+
                 if (servers.isEmpty()) {
-                    Log.w(TAG, "No servers found for $channelName")
-                    scheduleRetryOrFail(channelId, "No servers found")
+                    Log.w(TAG, "No initial servers for $channelName, waiting for progressive servers...")
+                    // Don't fail immediately — OLA TV servers may arrive shortly
+                    serversExhausted = true
+                    // Give progressive servers 5s to arrive before scheduling retry
+                    delay(5000)
+                    if (currentChannelId == channelId && serversExhausted && availableServers.isEmpty()) {
+                        scheduleRetryOrFail(channelId, "No servers found")
+                    }
                     return@launch
                 }
 
-                Log.d(TAG, "Got ${servers.size} servers for $channelName: ${servers.map { it.name }}")
-                availableServers = servers
+                Log.d(TAG, "Got ${servers.size} initial servers for $channelName: ${servers.map { it.name }}")
+                availableServers.addAll(servers)
                 currentServerIndex = 0
 
                 // Try first server
@@ -198,19 +213,70 @@ object MiniPlayerController {
     }
 
     /**
+     * Collects progressive OLA TV servers (channel variants like TF1 HD, TF1 FHD)
+     * from WiTvProvider.additionalServersFlow.
+     * When a new server arrives and we've exhausted current servers, try it immediately.
+     */
+    private fun startCollectingProgressiveServers(channelId: String, provider: WiTvProvider) {
+        progressiveServerJob?.cancel()
+        progressiveServerJob = scope.launch {
+            provider.additionalServersFlow.collect { server ->
+                if (currentChannelId != channelId) {
+                    progressiveServerJob?.cancel()
+                    return@collect
+                }
+
+                // Deduplicate: skip if already in list or already tried
+                val serverUrl = server.id
+                if (serverUrl in triedServerUrls || availableServers.any { it.id == serverUrl }) {
+                    Log.d(TAG, "Progressive server duplicate, skipping: ${server.name}")
+                    return@collect
+                }
+
+                val newIndex = availableServers.size
+                availableServers.add(server)
+                Log.d(TAG, "Progressive server added [$newIndex]: ${server.name}")
+
+                // If we're in "exhausted" state, try this new server immediately
+                if (serversExhausted) {
+                    serversExhausted = false
+                    retryJob?.cancel() // cancel pending retry delay
+                    Log.d(TAG, "Servers were exhausted — trying new progressive server: ${server.name}")
+                    _state.value = State.Loading(channelId, currentChannelName ?: "")
+                    val prov = UserPreferences.currentProvider
+                    if (prov is WiTvProvider) {
+                        loadJob?.cancel()
+                        loadJob = scope.launch {
+                            playServerAtIndex(channelId, prov, newIndex)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Try to play the server at [index]. If extraction fails or source is empty,
      * automatically moves to the next server.
      */
     private suspend fun playServerAtIndex(channelId: String, provider: WiTvProvider, index: Int) {
         if (currentChannelId != channelId) return // channel changed
         if (index >= availableServers.size) {
-            Log.w(TAG, "All ${availableServers.size} servers exhausted for $channelId")
-            scheduleRetryOrFail(channelId, "All servers failed")
+            Log.w(TAG, "All ${availableServers.size} servers exhausted for $channelId (progressive servers may still arrive)")
+            serversExhausted = true
+            // Don't immediately retry — wait a bit for progressive OLA TV servers
+            delay(3000)
+            // Check if a progressive server arrived and already started playing
+            if (currentChannelId == channelId && serversExhausted) {
+                scheduleRetryOrFail(channelId, "All servers failed")
+            }
             return
         }
 
+        serversExhausted = false
         currentServerIndex = index
         val server = availableServers[index]
+        triedServerUrls.add(server.id)
         Log.d(TAG, "Trying server [$index/${availableServers.size}] ${server.name}")
         _state.value = State.Loading(channelId, currentChannelName ?: "")
 
@@ -321,14 +387,17 @@ object MiniPlayerController {
     fun stop() {
         loadJob?.cancel()
         retryJob?.cancel()
+        progressiveServerJob?.cancel()
         player?.stop()
         player?.clearMediaItems()
         currentChannelId = null
         currentChannelName = null
         currentChannelPoster = null
-        availableServers = emptyList()
+        availableServers.clear()
+        triedServerUrls.clear()
         currentServerIndex = 0
         retryCycle = 0
+        serversExhausted = false
         _state.value = State.Idle
     }
 
@@ -344,6 +413,7 @@ object MiniPlayerController {
 
     fun transferPlayer(): ExoPlayer? {
         loadJob?.cancel()
+        progressiveServerJob?.cancel()
         transitioningToFullscreen = true
         val p = player ?: return null.also { transitioningToFullscreen = false }
         // Detach listener so mini player state changes don't fire
@@ -367,6 +437,7 @@ object MiniPlayerController {
     fun stopAsync() {
         loadJob?.cancel()
         retryJob?.cancel()
+        progressiveServerJob?.cancel()
         transitioningToFullscreen = true
         val p = player
         player = null
@@ -409,6 +480,7 @@ object MiniPlayerController {
     fun releasePlayerKeepState() {
         loadJob?.cancel()
         retryJob?.cancel()
+        progressiveServerJob?.cancel()
         detachedPlayer = player
         player = null
         // Keep currentChannelId / currentChannelName / currentChannelPoster
@@ -442,6 +514,7 @@ object MiniPlayerController {
     fun release() {
         loadJob?.cancel()
         retryJob?.cancel()
+        progressiveServerJob?.cancel()
         player?.stop()
         player?.release()
         player = null
@@ -451,9 +524,11 @@ object MiniPlayerController {
         currentChannelId = null
         currentChannelName = null
         currentChannelPoster = null
-        availableServers = emptyList()
+        availableServers.clear()
+        triedServerUrls.clear()
         currentServerIndex = 0
         retryCycle = 0
+        serversExhausted = false
         _state.value = State.Idle
         onIptvChannelClick = null
         Log.d(TAG, "ExoPlayer released")

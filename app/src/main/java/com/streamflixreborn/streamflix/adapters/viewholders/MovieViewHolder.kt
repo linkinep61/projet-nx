@@ -113,6 +113,15 @@ class MovieViewHolder(
         private const val SMARTTUBE_BETA_PACKAGE = "org.smarttube.beta"
         private const val YOUTUBE_PACKAGE = "com.google.android.youtube"
         private const val YOUTUBE_TV_PACKAGE = "com.google.android.tv.youtube"
+
+        // Cached SharedPreferences to avoid repeated disk reads on every click
+        @Volatile
+        private var cachedPrefs: SharedPreferences? = null
+        fun getCachedPrefs(context: Context): SharedPreferences {
+            return cachedPrefs ?: PreferenceManager.getDefaultSharedPreferences(context).also {
+                cachedPrefs = it
+            }
+        }
     }
 
     val childRecyclerView: RecyclerView?
@@ -186,7 +195,7 @@ class MovieViewHolder(
     }
 
     private fun showSmartTubeVersionDialog(packages: List<String>, trailerUrl: String, shouldSavePreference: Boolean) {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+        val prefs = getCachedPrefs(context)
         val editor = prefs.edit()
         
         val items = packages.map { pkg ->
@@ -219,7 +228,7 @@ class MovieViewHolder(
     }
 
     private fun handleSmartTubeSelection(trailerUrl: String, logPrefix: String) {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+        val prefs = getCachedPrefs(context)
         val savedPackage = prefs.getString(KEY_SMARTTUBE_PACKAGE, null)
         val stPackages = getInstalledSmartTubePackages()
 
@@ -255,7 +264,7 @@ class MovieViewHolder(
         Log.d(TAG, "$logPrefix: Clicked. Trailer URL: $trailer")
 
         val youtubeIntent = Intent(Intent.ACTION_VIEW, trailer.toUri())
-        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+        val prefs = getCachedPrefs(context)
         val preferredPlayer = prefs.getString(KEY_PREFERRED_PLAYER, PLAYER_ASK)
         Log.d(TAG, "$logPrefix: Preferred player from settings: $preferredPlayer")
 

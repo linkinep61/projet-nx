@@ -82,7 +82,22 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         app:barrierDirection="start"
-        app:constraint_referenced_ids="iv_setting_enter,iv_setting_is_selected" />
+        app:constraint_referenced_ids="iv_setting_enter,iv_setting_is_selected,iv_setting_download" />
+
+    <ImageView
+        android:id="@+id/iv_setting_download"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:layout_marginEnd="28dp"
+        android:padding="4dp"
+        android:src="@drawable/ic_downloads"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:ignore="ContentDescription"
+        tools:visibility="visible" />
 
     <ImageView
         android:id="@+id/iv_setting_enter"

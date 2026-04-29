@@ -3,17 +3,12 @@ package com.streamflixreborn.streamflix.extractors
 import android.text.Html
 import android.util.Base64
 import androidx.core.net.toUri
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
-import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.UserPreferences
-import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.Url
-import java.util.concurrent.TimeUnit
 
 class VidsrcNetExtractor : Extractor() {
 
@@ -33,7 +28,7 @@ class VidsrcNetExtractor : Extractor() {
     }
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val service = Extractor.createJsoupService<Service>(mainUrl)
 
         val iframedoc = service.get(link)
             .selectFirst("iframe#player_iframe")?.attr("src")
@@ -269,25 +264,6 @@ class VidsrcNetExtractor : Extractor() {
 
 
     private interface Service {
-
-        companion object {
-            private val client = OkHttpClient.Builder()
-                .readTimeout(30, TimeUnit.SECONDS)
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .dns(DnsResolver.doh)
-                .build()
-
-            fun build(baseUrl: String): Service {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .client(client)
-                    .build()
-
-                return retrofit.create(Service::class.java)
-            }
-        }
-
         @GET
         suspend fun get(
             @Url url: String,

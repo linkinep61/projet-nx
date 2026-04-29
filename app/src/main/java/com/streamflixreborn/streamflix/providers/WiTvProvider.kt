@@ -16,6 +16,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.*
+import okhttp3.ConnectionSpec
+import okhttp3.Protocol
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
@@ -98,6 +100,9 @@ object WiTvProvider : Provider {
         .readTimeout(15, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
+        // Force HTTP/1.1 — LiteSpeed server rejects OkHttp's HTTP/2 ALPN on some TLS stacks
+        .protocols(listOf(Protocol.HTTP_1_1))
+        .connectionSpecs(listOf(ConnectionSpec.COMPATIBLE_TLS, ConnectionSpec.CLEARTEXT))
         .cookieJar(object : CookieJar {
             private val store = HashMap<String, List<Cookie>>()
             override fun saveFromResponse(u: HttpUrl, c: List<Cookie>) { store[u.host] = c }

@@ -54,7 +54,13 @@ class MailRuExtractor : Extractor() {
             else -> throw Exception("Invalid stream URL format")
         }
 
-        return Video(source = finalUrl)
+        return Video(
+            source = finalUrl,
+            headers = mapOf(
+                "Referer" to "$mainUrl/",
+                "User-Agent" to DEFAULT_USER_AGENT
+            )
+        )
     }
 
     private fun extractVideoId(link: String): String? {

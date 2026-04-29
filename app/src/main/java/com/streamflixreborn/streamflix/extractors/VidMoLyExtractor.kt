@@ -49,7 +49,7 @@ open class VidMoLyExtractor : Extractor() {
             headers = mapOf(
                 "Referer" to "https://$host/",
                 "Origin" to "https://$host",
-                "User-Agent" to USER_AGENT,
+                "User-Agent" to Extractor.DEFAULT_USER_AGENT,
             )
         )
     }
@@ -79,7 +79,7 @@ open class VidMoLyExtractor : Extractor() {
                     val webView = WebView(context).apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
-                        settings.userAgentString = USER_AGENT
+                        settings.userAgentString = Extractor.DEFAULT_USER_AGENT
                         settings.mixedContentMode =
                             android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         settings.mediaPlaybackRequiresUserGesture = false
@@ -201,9 +201,6 @@ open class VidMoLyExtractor : Extractor() {
     }
 
     companion object {
-        private const val USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-
         private val BLOCKED_HOSTS = listOf(
             "ww1.vidmoly", "ww2.vidmoly", "ww3.vidmoly", "ww4.vidmoly", "ww5.vidmoly",
             "googlesyndication", "doubleclick", "adservice",

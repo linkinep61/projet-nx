@@ -42,7 +42,11 @@ class PlusPomlaExtractor : Extractor() {
         }
         
         return Video(
-            source = sources.first()
+            source = sources.first(),
+            headers = mapOf(
+                "Referer" to "$mainUrl/",
+                "User-Agent" to DEFAULT_USER_AGENT
+            )
         )
     }
 

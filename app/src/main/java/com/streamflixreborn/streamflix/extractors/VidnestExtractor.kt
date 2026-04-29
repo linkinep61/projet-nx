@@ -1,10 +1,8 @@
 package com.streamflixreborn.streamflix.extractors
 
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Url
 
@@ -45,14 +43,14 @@ class VidnestExtractor : Extractor() {
     }
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val service = Extractor.createJsoupService<Service>(mainUrl)
         val doc = service.get(link)
 
         val scriptTags = doc.select("script[type=text/javascript]")
 
         var m3u8: String? = null
 
-        var subtitles : List<Video.Subtitle> = emptyList();
+        var subtitles: List<Video.Subtitle> = emptyList()
 
         for (script in scriptTags) {
             val scriptData = script.data()
@@ -79,16 +77,6 @@ class VidnestExtractor : Extractor() {
     }
 
     private interface Service {
-        companion object {
-            fun build(baseUrl: String): Service {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                return retrofit.create(Service::class.java)
-            }
-        }
-
         @GET
         suspend fun get(@Url url: String): Document
     }

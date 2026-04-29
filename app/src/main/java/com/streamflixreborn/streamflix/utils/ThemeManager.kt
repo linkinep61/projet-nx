@@ -156,7 +156,7 @@ object ThemeManager {
             mobileNavBackground = color("#1E2129"),
             mobileNavActive = color("#C6C6C6"),
             mobileNavInactive = color("#808080"),
-            systemBar = color("#1E2129"),
+            systemBar = color("#000000"),
             tvNavBackground = color("#181818"),
             tvHeaderPrimary = color("#FFFFFF"),
             tvHeaderSecondary = color("#B3FFFFFF"),

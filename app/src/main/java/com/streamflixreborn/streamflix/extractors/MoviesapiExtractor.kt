@@ -1,9 +1,7 @@
 package com.streamflixreborn.streamflix.extractors
 
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.Url
@@ -25,7 +23,7 @@ class MoviesapiExtractor : Extractor() {
     }
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val service = Extractor.createJsoupService<Service>(mainUrl)
 
         val iframe = service.get(link, referer = "https://pressplay.top/")
             .selectFirst("iframe")
@@ -36,18 +34,6 @@ class MoviesapiExtractor : Extractor() {
     }
 
     private interface Service {
-
-        companion object {
-            fun build(baseUrl: String): Service {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-
-                return retrofit.create(Service::class.java)
-            }
-        }
-
         @GET
         suspend fun get(
             @Url url: String,

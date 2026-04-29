@@ -1,9 +1,7 @@
 package com.streamflixreborn.streamflix.extractors
 
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Url
 
@@ -14,7 +12,7 @@ class OneuploadExtractor : Extractor() {
     override val aliasUrls = listOf("https://tipfly.xyz", "https://oneupload.to")
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val service = Extractor.createJsoupService<Service>(mainUrl)
 
         val document = service.get(link)
         val scriptTags = document.select("script[type*=javascript]")
@@ -39,18 +37,6 @@ class OneuploadExtractor : Extractor() {
     }
 
     private interface Service {
-
-        companion object {
-            fun build(baseUrl: String): Service {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-
-                return retrofit.create(Service::class.java)
-            }
-        }
-
         @GET
         suspend fun get(@Url url: String): Document
     }

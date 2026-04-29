@@ -41,7 +41,7 @@ class LpayerExtractor : Extractor() {
         val headers = mutableMapOf(
             "Referer" to "$mainUrl/",
             "Origin" to mainUrl,
-            "User-Agent" to USER_AGENT
+            "User-Agent" to Extractor.DEFAULT_USER_AGENT
         )
         if (cookies.isNotEmpty()) {
             headers["Cookie"] = cookies
@@ -71,7 +71,7 @@ class LpayerExtractor : Extractor() {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         settings.mediaPlaybackRequiresUserGesture = false
-                        settings.userAgentString = USER_AGENT
+                        settings.userAgentString = Extractor.DEFAULT_USER_AGENT
                         settings.databaseEnabled = true
                         settings.allowContentAccess = true
                         settings.mixedContentMode =
@@ -220,9 +220,6 @@ class LpayerExtractor : Extractor() {
     }
 
     companion object {
-        private const val USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-
         private val BLOCKED_HOSTS = listOf(
             "googlesyndication", "google-analytics", "doubleclick",
             "adservice", "mc.yandex.ru", "cloudflareinsights",

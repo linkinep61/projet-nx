@@ -52,6 +52,11 @@
 # ---- Room ----
 -keep class androidx.room.** { *; }
 -keep class com.streamflixreborn.streamflix.database.** { *; }
+-keep class com.streamflixreborn.streamflix.download.DownloadEntity { *; }
+-keep class com.streamflixreborn.streamflix.download.DownloadDao { *; }
+-keep class com.streamflixreborn.streamflix.download.DownloadDao_Impl { *; }
+-keep class com.streamflixreborn.streamflix.download.DownloadDatabase { *; }
+-keep class com.streamflixreborn.streamflix.download.DownloadDatabase_Impl { *; }
 
 # ---- Glide ----
 -keep public class * implements com.bumptech.glide.module.GlideModule
@@ -115,3 +120,4 @@
 -dontwarn javax.annotation.**
 -dontwarn org.codehaus.mojo.animal_sniffer.**
 -dontwarn sun.misc.Unsafe
+-dontwarn org.slf4j.impl.StaticLoggerBinder

@@ -52,6 +52,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
 
     override var onSubtitlesClicked: (() -> Unit)? = null
     var onManualZoomClicked: (() -> Unit)? = null
+    var onDownloadsClicked: (() -> Unit)? = null
 
     init {
         binding.btnSettingsClose.setOnClickListener {
@@ -59,6 +60,10 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
         }
         binding.btnSettingsBack.setOnClickListener {
             onBackPressed()
+        }
+        binding.btnSettingsDownloads.setOnClickListener {
+            hide()
+            onDownloadsClicked?.invoke()
         }
     }
 
@@ -183,6 +188,19 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
         this.visibility = View.GONE
     }
 
+
+    companion object {
+        /** Server names known to require WebView (can't be downloaded via OkHttp). */
+        private val WEBVIEW_ONLY_PATTERNS = listOf(
+            "luluvdo", "lulustream", "luluvid", "luluvdoo", "lulucdn",
+            "netu", "waaw",
+        )
+
+        fun isKnownWebViewOnlyServer(serverName: String): Boolean {
+            val lower = serverName.lowercase()
+            return WEBVIEW_ONLY_PATTERNS.any { lower.contains(it) }
+        }
+    }
 
     private class SettingsAdapter(
         private val settingsView: PlayerSettingsMobileView,
@@ -418,6 +436,18 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                         else -> {}
                     }
                 }
+            }
+
+            // Download button — visible only for server items
+            if (item is Settings.Server) {
+                val knownBad = isKnownWebViewOnlyServer(item.name)
+                binding.ivSettingDownload.visibility = View.VISIBLE
+                binding.ivSettingDownload.alpha = if (knownBad) 0.25f else 1.0f
+                binding.ivSettingDownload.setOnClickListener {
+                    settingsView.onServerDownloadClicked?.invoke(item)
+                }
+            } else {
+                binding.ivSettingDownload.visibility = View.GONE
             }
 
             // CLEAN RESET

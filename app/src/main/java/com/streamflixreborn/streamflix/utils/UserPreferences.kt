@@ -20,6 +20,9 @@ object UserPreferences {
 
     private const val TAG = "UserPrefsDebug"
 
+    /** Lock for read-modify-write operations on providerCache and failedChannels. */
+    private val lock = Any()
+
     private lateinit var prefs: SharedPreferences
 
     // Default DoH Provider URL (Cloudflare)
@@ -92,18 +95,22 @@ object UserPreferences {
     }
 
     fun setProviderCache(provider: Provider?, key: String, value: String) {
-        val providerName = provider?.name ?: currentProvider?.name ?: return
-        val innerJson = providerCache.optJSONObject(providerName)
-            ?: JSONObject().also { providerCache.put(providerName, it) }
-        innerJson.put(key, value)
-        Key.PROVIDER_CACHE.setString(providerCache.toString())
+        synchronized(lock) {
+            val providerName = provider?.name ?: currentProvider?.name ?: return
+            val innerJson = providerCache.optJSONObject(providerName)
+                ?: JSONObject().also { providerCache.put(providerName, it) }
+            innerJson.put(key, value)
+            commitString(Key.PROVIDER_CACHE, providerCache.toString())
+        }
     }
 
     fun clearProviderCache(providerName: String) {
-        if (providerCache.has(providerName)) {
-            debugLog { "CACHE: removing stored data for $providerName" }
-            providerCache.remove(providerName)
-            Key.PROVIDER_CACHE.setString(providerCache.toString())
+        synchronized(lock) {
+            if (providerCache.has(providerName)) {
+                debugLog { "CACHE: removing stored data for $providerName" }
+                providerCache.remove(providerName)
+                commitString(Key.PROVIDER_CACHE, providerCache.toString())
+            }
         }
     }
 
@@ -122,27 +129,42 @@ object UserPreferences {
         return raw.split("||").filter { it.isNotBlank() }.toMutableSet()
     }
 
-    private fun saveFailedChannels(set: Set<String>) {
-        Key.FAILED_CHANNELS.setString(set.joinToString("||"))
+    /**
+     * Synchronous write for critical read-modify-write operations.
+     * Uses commit() instead of apply() to guarantee the write is persisted
+     * before the lock is released, preventing stale reads from other threads.
+     */
+    private fun commitString(key: Key, value: String) {
+        prefs.edit().putString(key.name, value).commit()
     }
 
     fun markChannelFailed(channelId: String) {
-        val set = getFailedChannels()
-        set.add(channelId)
-        saveFailedChannels(set)
+        synchronized(lock) {
+            val set = getFailedChannels()
+            set.add(channelId)
+            commitString(Key.FAILED_CHANNELS, set.joinToString("||"))
+        }
     }
 
     fun unmarkChannelFailed(channelId: String) {
-        val set = getFailedChannels()
-        if (set.remove(channelId)) saveFailedChannels(set)
+        synchronized(lock) {
+            val set = getFailedChannels()
+            if (set.remove(channelId)) {
+                commitString(Key.FAILED_CHANNELS, set.joinToString("||"))
+            }
+        }
     }
 
     fun isChannelFailed(channelId: String): Boolean {
-        return getFailedChannels().contains(channelId)
+        synchronized(lock) {
+            return getFailedChannels().contains(channelId)
+        }
     }
 
     fun clearFailedChannels() {
-        Key.FAILED_CHANNELS.remove()
+        synchronized(lock) {
+            Key.FAILED_CHANNELS.remove()
+        }
     }
 
     var captionTextSize: Float
@@ -195,7 +217,7 @@ object UserPreferences {
         }
 
     var selectedTheme: String
-        get() = Key.SELECTED_THEME.getString() ?: "default"
+        get() = Key.SELECTED_THEME.getString() ?: "nero_amoled_oled"
         set(value) = Key.SELECTED_THEME.setString(value)
 
     var tmdbApiKey: String
@@ -262,28 +284,32 @@ object UserPreferences {
         get() = (parentalControlLockedUntilMillis - System.currentTimeMillis()).coerceAtLeast(0L)
 
     fun registerParentalPinSuccess() {
-        parentalControlFailedAttempts = 0
-        parentalControlLockedUntilMillis = 0L
-        parentalControlHardLocked = false
+        synchronized(lock) {
+            parentalControlFailedAttempts = 0
+            parentalControlLockedUntilMillis = 0L
+            parentalControlHardLocked = false
+        }
     }
 
     fun registerParentalPinFailure(nowMillis: Long = System.currentTimeMillis()) {
-        val attempts = parentalControlFailedAttempts + 1
-        parentalControlFailedAttempts = attempts
+        synchronized(lock) {
+            val attempts = parentalControlFailedAttempts + 1
+            parentalControlFailedAttempts = attempts
 
-        when {
-            attempts >= 7 && parentalControlAdminPin.isNotBlank() -> {
-                parentalControlHardLocked = true
-                parentalControlLockedUntilMillis = 0L
-            }
-            attempts >= 7 -> {
-                parentalControlLockedUntilMillis = nowMillis + 24L * 60L * 60L * 1000L
-            }
-            attempts >= 5 -> {
-                parentalControlLockedUntilMillis = nowMillis + 30L * 60L * 1000L
-            }
-            attempts >= 3 -> {
-                parentalControlLockedUntilMillis = nowMillis + 5L * 60L * 1000L
+            when {
+                attempts >= 7 && parentalControlAdminPin.isNotBlank() -> {
+                    parentalControlHardLocked = true
+                    parentalControlLockedUntilMillis = 0L
+                }
+                attempts >= 7 -> {
+                    parentalControlLockedUntilMillis = nowMillis + 24L * 60L * 60L * 1000L
+                }
+                attempts >= 5 -> {
+                    parentalControlLockedUntilMillis = nowMillis + 30L * 60L * 1000L
+                }
+                attempts >= 3 -> {
+                    parentalControlLockedUntilMillis = nowMillis + 5L * 60L * 1000L
+                }
             }
         }
     }
@@ -295,9 +321,11 @@ object UserPreferences {
         }
 
     fun unlockParentalControls() {
-        parentalControlFailedAttempts = 0
-        parentalControlLockedUntilMillis = 0L
-        parentalControlHardLocked = false
+        synchronized(lock) {
+            parentalControlFailedAttempts = 0
+            parentalControlLockedUntilMillis = 0L
+            parentalControlHardLocked = false
+        }
     }
 
     var subdlApiKey: String
@@ -410,23 +438,25 @@ object UserPreferences {
             }
         }
         set(value) {
-            val oldDomain = if (::prefs.isInitialized) prefs.getString(Key.STREAMINGCOMMUNITY_DOMAIN.name, null) else null
-            if (!::prefs.isInitialized) {
-                Log.e(TAG, "streamingcommunityDomain SET: prefs is not initialized")
-                return
-            }
-
-            if (value != oldDomain && !value.isNullOrEmpty() && !oldDomain.isNullOrEmpty()) {
-                clearProviderCache("StreamingCommunity")
-            }
-
-            with(prefs.edit()) {
-                if (value.isNullOrEmpty()) {
-                    remove(Key.STREAMINGCOMMUNITY_DOMAIN.name)
-                } else {
-                    putString(Key.STREAMINGCOMMUNITY_DOMAIN.name, value)
+            synchronized(lock) {
+                val oldDomain = if (::prefs.isInitialized) prefs.getString(Key.STREAMINGCOMMUNITY_DOMAIN.name, null) else null
+                if (!::prefs.isInitialized) {
+                    Log.e(TAG, "streamingcommunityDomain SET: prefs is not initialized")
+                    return
                 }
-                apply()
+
+                if (value != oldDomain && !value.isNullOrEmpty() && !oldDomain.isNullOrEmpty()) {
+                    clearProviderCache("StreamingCommunity")
+                }
+
+                prefs.edit().apply {
+                    if (value.isNullOrEmpty()) {
+                        remove(Key.STREAMINGCOMMUNITY_DOMAIN.name)
+                    } else {
+                        putString(Key.STREAMINGCOMMUNITY_DOMAIN.name, value)
+                    }
+                    commit()
+                }
             }
         }
 
@@ -437,20 +467,22 @@ object UserPreferences {
             return if (storedValue.isNullOrEmpty()) DEFAULT_CUEVANA_DOMAIN else storedValue
         }
         set(value) {
-            val oldDomain = if (::prefs.isInitialized) prefs.getString(Key.CUEVANA_DOMAIN.name, null) else null
-            if (!::prefs.isInitialized) return
+            synchronized(lock) {
+                val oldDomain = if (::prefs.isInitialized) prefs.getString(Key.CUEVANA_DOMAIN.name, null) else null
+                if (!::prefs.isInitialized) return
 
-            if (value != oldDomain && !value.isNullOrEmpty() && !oldDomain.isNullOrEmpty()) {
-                clearProviderCache("Cuevana 3")
-            }
-
-            with(prefs.edit()) {
-                if (value.isNullOrEmpty()) {
-                    remove(Key.CUEVANA_DOMAIN.name)
-                } else {
-                    putString(Key.CUEVANA_DOMAIN.name, value)
+                if (value != oldDomain && !value.isNullOrEmpty() && !oldDomain.isNullOrEmpty()) {
+                    clearProviderCache("Cuevana 3")
                 }
-                apply()
+
+                prefs.edit().apply {
+                    if (value.isNullOrEmpty()) {
+                        remove(Key.CUEVANA_DOMAIN.name)
+                    } else {
+                        putString(Key.CUEVANA_DOMAIN.name, value)
+                    }
+                    commit()
+                }
             }
         }
 
@@ -461,20 +493,22 @@ object UserPreferences {
             return if (storedValue.isNullOrEmpty()) DEFAULT_POSEIDON_DOMAIN else storedValue
         }
         set(value) {
-            val oldDomain = if (::prefs.isInitialized) prefs.getString(Key.POSEIDON_DOMAIN.name, null) else null
-            if (!::prefs.isInitialized) return
+            synchronized(lock) {
+                val oldDomain = if (::prefs.isInitialized) prefs.getString(Key.POSEIDON_DOMAIN.name, null) else null
+                if (!::prefs.isInitialized) return
 
-            if (value != oldDomain && !value.isNullOrEmpty() && !oldDomain.isNullOrEmpty()) {
-                clearProviderCache("Poseidonhd2")
-            }
-
-            with(prefs.edit()) {
-                if (value.isNullOrEmpty()) {
-                    remove(Key.POSEIDON_DOMAIN.name)
-                } else {
-                    putString(Key.POSEIDON_DOMAIN.name, value)
+                if (value != oldDomain && !value.isNullOrEmpty() && !oldDomain.isNullOrEmpty()) {
+                    clearProviderCache("Poseidonhd2")
                 }
-                apply()
+
+                prefs.edit().apply {
+                    if (value.isNullOrEmpty()) {
+                        remove(Key.POSEIDON_DOMAIN.name)
+                    } else {
+                        putString(Key.POSEIDON_DOMAIN.name, value)
+                    }
+                    commit()
+                }
             }
         }
 

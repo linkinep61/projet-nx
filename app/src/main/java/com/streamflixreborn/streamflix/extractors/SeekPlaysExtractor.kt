@@ -1,14 +1,11 @@
 package com.streamflixreborn.streamflix.extractors
 
 import com.streamflixreborn.streamflix.models.Video
-import com.streamflixreborn.streamflix.utils.DnsResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.net.URI
-import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -21,13 +18,7 @@ class SeekPlaysExtractor : Extractor() {
         Regex("""[a-z]+\.seekplays\.pro""")
     )
 
-    private val client = OkHttpClient.Builder()
-        .dns(DnsResolver.doh)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
+    private val client = Extractor.sharedClient
 
     override suspend fun extract(link: String): Video {
         return withContext(Dispatchers.IO) {
@@ -39,7 +30,7 @@ class SeekPlaysExtractor : Extractor() {
             val infoUrl = "$baseUrl/api/v1/info?id=$videoId"
             val infoRequest = Request.Builder()
                 .url(infoUrl)
-                .header("User-Agent", USER_AGENT)
+                .header("User-Agent", Extractor.DEFAULT_USER_AGENT)
                 .header("Referer", link)
                 .build()
 
@@ -94,7 +85,7 @@ class SeekPlaysExtractor : Extractor() {
         val videoUrl = "$baseUrl/api/v1/video?id=$videoId"
         val request = Request.Builder()
             .url(videoUrl)
-            .header("User-Agent", USER_AGENT)
+            .header("User-Agent", Extractor.DEFAULT_USER_AGENT)
             .header("Referer", referer)
             .build()
 
@@ -160,8 +151,4 @@ class SeekPlaysExtractor : Extractor() {
         return result
     }
 
-    companion object {
-        private const val USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    }
 }

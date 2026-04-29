@@ -16,7 +16,6 @@ import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Headers
 import retrofit2.http.Url
-import java.util.concurrent.TimeUnit
 
 class VixSrcExtractor : Extractor() {
 
@@ -133,11 +132,7 @@ class VixSrcExtractor : Extractor() {
         providerLang: String,
     ): String? {
         return try {
-            val client = OkHttpClient.Builder()
-                .dns(DnsResolver.doh)
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(15, TimeUnit.SECONDS)
-                .build()
+            val client = Extractor.sharedClient
             val headersBuilder = okhttp3.Headers.Builder()
             headers.forEach { (k, v) -> headersBuilder.add(k, v) }
             val request = Request.Builder().url(finalUrl).headers(headersBuilder.build()).build()
@@ -257,26 +252,14 @@ class VixSrcExtractor : Extractor() {
     private interface VixSrcExtractorService {
         companion object {
             fun build(baseUrl: String): VixSrcExtractorService {
-                val client = OkHttpClient.Builder()
-                    .dns(DnsResolver.doh)
-                    .followRedirects(true)
-                    .followSslRedirects(true)
-                    .connectTimeout(15, TimeUnit.SECONDS)
-                    .readTimeout(20, TimeUnit.SECONDS)
-                    .addInterceptor { chain ->
-                        val request = chain.request().newBuilder()
-                            .header("Referer", baseUrl)
-                            .build()
-                        chain.proceed(request)
-                    }
-                    .build()
-                return Retrofit.Builder()
+                val client = Extractor.clientWithReferer(baseUrl)
+                val retrofit = Retrofit.Builder()
                     .baseUrl(baseUrl)
                     .client(client)
                     .addConverterFactory(JsoupConverterFactory.create())
                     .addConverterFactory(GsonConverterFactory.create())
                     .build()
-                    .create(VixSrcExtractorService::class.java)
+                return retrofit.create(VixSrcExtractorService::class.java)
             }
         }
 

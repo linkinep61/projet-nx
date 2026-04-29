@@ -3,7 +3,6 @@ package com.streamflixreborn.streamflix.extractors
 import android.util.Log
 import androidx.media3.common.MimeTypes
 import com.streamflixreborn.streamflix.models.Video
-import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.JsUnpacker
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import okhttp3.Cookie
@@ -13,7 +12,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -31,43 +29,22 @@ class VidzyExtractor : Extractor() {
 
     companion object {
         private const val TAG = "VidzyExtractor"
-        private const val USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
         private val cookieStore = ConcurrentHashMap<String, List<Cookie>>()
 
-        val client: OkHttpClient = OkHttpClient.Builder()
-            .dns(DnsResolver.doh)
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
-            .followRedirects(true)
-            .followSslRedirects(true)
-            .cookieJar(object : CookieJar {
+        val client: OkHttpClient = run {
+            val cookieJar = object : CookieJar {
                 override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
                     cookieStore[url.host] = cookies
                 }
                 override fun loadForRequest(url: HttpUrl): List<Cookie> {
                     return cookieStore[url.host] ?: emptyList()
                 }
-            })
-            .addInterceptor { chain ->
-                val request = chain.request().newBuilder()
-                    .header("User-Agent", USER_AGENT)
-                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-                    .header("Accept-Language", "en-US,en;q=0.5")
-                    // Do NOT set Accept-Encoding — OkHttp handles gzip automatically
-                    // Setting it manually prevents automatic decompression
-                    .header("Sec-Fetch-Dest", "document")
-                    .header("Sec-Fetch-Mode", "navigate")
-                    .header("Sec-Fetch-Site", "none")
-                    .header("Sec-Fetch-User", "?1")
-                    .header("Upgrade-Insecure-Requests", "1")
-                    .header("Connection", "keep-alive")
-                    .build()
-                chain.proceed(request)
             }
-            .build()
+            Extractor.sharedClient.newBuilder()
+                .cookieJar(cookieJar)
+                .build()
+        }
     }
 
     fun extractSubtitles(text: String): List<Video.Subtitle> {

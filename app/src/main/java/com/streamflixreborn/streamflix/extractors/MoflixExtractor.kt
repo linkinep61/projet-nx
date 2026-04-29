@@ -2,8 +2,6 @@ package com.streamflixreborn.streamflix.extractors
 
 import android.util.Base64
 import com.streamflixreborn.streamflix.models.Video
-import retrofit2.Retrofit
-import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.Url
@@ -14,7 +12,7 @@ class MoflixExtractor : Extractor() {
     override val mainUrl = "https://moflix-stream.xyz"
 
     suspend fun servers(videoType: Video.Type): List<Video.Server> {
-        val service = Service.build(mainUrl)
+        val service = Extractor.createGsonService<Service>(mainUrl)
 
         val url = when (videoType) {
             is Video.Type.Episode -> {
@@ -58,20 +56,6 @@ class MoflixExtractor : Extractor() {
 
 
     private interface Service {
-
-        companion object {
-            private const val DEFAULT_USER_AGENT =
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
-            fun build(baseUrl: String): Service {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(GsonConverterFactory.create())
-                    .build()
-
-                return retrofit.create(Service::class.java)
-            }
-        }
-
         @GET
         suspend fun getResponse(
             @Url url: String,
@@ -81,6 +65,11 @@ class MoflixExtractor : Extractor() {
             @Header("Accept-Language") acceptLanguage: String = "en-US,en;q=0.5",
             @Header("Connection") connection: String = "keep-alive"
         ): MoflixResponse
+
+        companion object {
+            private const val DEFAULT_USER_AGENT =
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
+        }
     }
 
 

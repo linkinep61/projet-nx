@@ -2,11 +2,8 @@ package com.streamflixreborn.streamflix.extractors
 
 import android.util.Base64
 import com.streamflixreborn.streamflix.models.Video
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
-import retrofit2.Retrofit
-import retrofit2.converter.scalars.ScalarsConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Url
 
@@ -14,26 +11,7 @@ class GuploadExtractor : Extractor() {
     override val name = "Gupload"
     override val mainUrl = "https://gupload.xyz"
 
-    companion object {
-        private const val DEFAULT_USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    }
-
-    private val client = OkHttpClient.Builder()
-        .addInterceptor { chain ->
-            val request = chain.request().newBuilder()
-                .header("User-Agent", DEFAULT_USER_AGENT)
-                .build()
-            chain.proceed(request)
-        }
-        .build()
-
-    private val service = Retrofit.Builder()
-        .baseUrl(mainUrl)
-        .addConverterFactory(ScalarsConverterFactory.create())
-        .client(client)
-        .build()
-        .create(GuploadService::class.java)
+    private val service = Extractor.createGsonService<GuploadService>(mainUrl)
 
     private interface GuploadService {
         @GET

@@ -1,9 +1,6 @@
 package com.streamflixreborn.streamflix.extractors
 
 import com.streamflixreborn.streamflix.models.Video
-import okhttp3.OkHttpClient
-import retrofit2.Retrofit
-import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Url
 
@@ -19,7 +16,7 @@ class PrimeSrcExtractor : Extractor() {
         }
 
         return try {
-            val service = Service.build(mainUrl)
+            val service = Extractor.createGsonService<Service>(mainUrl)
             val serversResponse = service.getServers(apiUrl)
 
             // Track server name counts to number duplicates
@@ -48,26 +45,12 @@ class PrimeSrcExtractor : Extractor() {
     }
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
-
+        val service = Extractor.createGsonService<Service>(mainUrl)
         val videoLink = service.getLink(link).link
-
         return Extractor.extract(videoLink)
     }
 
     private interface Service {
-        companion object {
-            fun build(baseUrl: String): Service {
-                val client = OkHttpClient.Builder().build()
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .client(client)
-                    .addConverterFactory(GsonConverterFactory.create())
-                    .build()
-                return retrofit.create(Service::class.java)
-            }
-        }
-
         @GET
         suspend fun getServers(@Url url: String): ServersResponse
 

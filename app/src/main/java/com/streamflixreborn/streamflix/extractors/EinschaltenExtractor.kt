@@ -1,17 +1,10 @@
 package com.streamflixreborn.streamflix.extractors
 
 import com.streamflixreborn.streamflix.models.Video
-import com.streamflixreborn.streamflix.utils.DnsResolver
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
-import okhttp3.OkHttpClient
 import okhttp3.ResponseBody
 import org.json.JSONObject
-import retrofit2.Retrofit
 import retrofit2.http.GET
-import retrofit2.http.Headers
-import retrofit2.http.Path
 import retrofit2.http.Url
-import java.util.concurrent.TimeUnit
 
 class EinschaltenExtractor : Extractor() {
 
@@ -19,30 +12,11 @@ class EinschaltenExtractor : Extractor() {
     override val mainUrl = "https://einschalten.in"
 
     private interface Service {
-        companion object {
-            fun build(baseUrl: String): Service {
-                val clientBuilder = OkHttpClient.Builder()
-                    .readTimeout(30, TimeUnit.SECONDS)
-                    .connectTimeout(30, TimeUnit.SECONDS)
-
-                return Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .client(clientBuilder.dns(DnsResolver.doh).build())
-                    .build()
-                    .create(Service::class.java)
-            }
-        }
-
-        @Headers(
-            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Content-Type: application/json"
-        )
         @GET
         suspend fun getWatch(@Url url: String): ResponseBody
     }
 
-    private val service = Service.build(mainUrl)
+    private val service = Extractor.createGsonService<Service>(mainUrl)
 
     fun server(videoType: Video.Type): Video.Server? {
         return when (videoType) {

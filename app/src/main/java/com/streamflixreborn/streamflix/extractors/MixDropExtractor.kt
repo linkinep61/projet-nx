@@ -1,10 +1,8 @@
 package com.streamflixreborn.streamflix.extractors
 
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.JsUnpacker
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Headers
 import retrofit2.http.Url
@@ -33,7 +31,7 @@ class MixDropExtractor : Extractor() {
     }
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val service = Extractor.createJsoupService<Service>(mainUrl)
 
         val document = service.get(
             url = link
@@ -80,28 +78,6 @@ class MixDropExtractor : Extractor() {
         suspend fun get(
             @Url url: String
         ): Document
-
-        companion object {
-            fun build(baseUrl: String): Service {
-                val client = okhttp3.OkHttpClient.Builder()
-                    .followRedirects(true)
-                    .followSslRedirects(true)
-                    .addInterceptor { chain ->
-                        val request = chain.request().newBuilder()
-                            .header("Referer", baseUrl)
-                            .build()
-                        chain.proceed(request)
-                    }
-                    .build()
-
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .client(client)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                return retrofit.create(Service::class.java)
-            }
-        }
     }
 }
 

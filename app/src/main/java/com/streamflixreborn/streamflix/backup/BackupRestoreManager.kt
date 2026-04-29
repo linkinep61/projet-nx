@@ -15,7 +15,9 @@ import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.WatchItem
 import com.streamflixreborn.streamflix.providers.Provider
 import com.streamflixreborn.streamflix.utils.UserDataCache
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
@@ -79,7 +81,7 @@ class BackupRestoreManager(
         }
     }
 
-    fun exportUserData(): String? {
+    suspend fun exportUserData(): String? {
         return try {
             val root = JSONObject()
             root.put("version", 4) // Versione aumentata per includere le stagioni
@@ -88,12 +90,16 @@ class BackupRestoreManager(
             val providersArray = JSONArray()
             for (p in providers) {
                 // Controlla se il database per questo provider ha dati rilevanti
-                val moviesToExport = p.movieDao.getAll()
-                    .filter { it.isWatched || it.watchedDate != null || it.watchHistory != null || it.isFavorite }
-                val tvShowsToExport = p.tvShowDao.getAllForBackup()
-                    .filter { it.isWatching || it.isFavorite }
-                val episodesToExport = p.episodeDao.getAllForBackup()
-                    .filter { it.isWatched || it.watchedDate != null || it.watchHistory != null }
+                val (moviesToExport, tvShowsToExport, episodesToExport) = withContext(Dispatchers.IO) {
+                    Triple(
+                        p.movieDao.getAll()
+                            .filter { it.isWatched || it.watchedDate != null || it.watchHistory != null || it.isFavorite },
+                        p.tvShowDao.getAllForBackup()
+                            .filter { it.isWatching || it.isFavorite },
+                        p.episodeDao.getAllForBackup()
+                            .filter { it.isWatched || it.watchedDate != null || it.watchHistory != null }
+                    )
+                }
                 
                 // Se non ci sono dati, saltiamo il provider per tenere il file pulito.
                 if (moviesToExport.isEmpty() && tvShowsToExport.isEmpty() && episodesToExport.isEmpty()) {
@@ -141,8 +147,8 @@ class BackupRestoreManager(
 
                 // Seasons
                 val seasonsArray = JSONArray()
-                p.seasonDao.getAllForBackup()
-                    .forEach { season ->
+                val seasonsForBackup = withContext(Dispatchers.IO) { p.seasonDao.getAllForBackup() }
+                seasonsForBackup.forEach { season ->
                         val obj = JSONObject().apply {
                             put("id", season.id)
                             put("number", season.number)
@@ -220,7 +226,7 @@ class BackupRestoreManager(
                         seasonsToSave.add(season)
                     }
                     if (seasonsToSave.isNotEmpty()) {
-                        providerCtx.seasonDao.saveAll(seasonsToSave)
+                        withContext(Dispatchers.IO) { providerCtx.seasonDao.saveAll(seasonsToSave) }
                         Log.d(TAG, "IMPORT: Imported ${seasonsToSave.size} seasons for provider $providerName")
                     }
                 }
@@ -243,7 +249,7 @@ class BackupRestoreManager(
                             this.favoritedAtMillis = favoritedAtMillis
                             this.isWatching = isWatching
                         }
-                        providerCtx.tvShowDao.save(tvShow)
+                        withContext(Dispatchers.IO) { providerCtx.tvShowDao.save(tvShow) }
                         Log.d(TAG, "IMPORT: [${providerName}] TV Show: ${tvShow.title}. Favorites: $isFavorite, Watching: $isWatching")
                     }
                 }
@@ -270,7 +276,7 @@ class BackupRestoreManager(
                             this.watchedDate = watchedDate
                             this.watchHistory = watchHistory
                         }
-                        providerCtx.movieDao.save(movie)
+                        withContext(Dispatchers.IO) { providerCtx.movieDao.save(movie) }
                         Log.d(TAG, "IMPORT: [${providerName}] Movie: ${movie.title}. Favorites: $isFavorite, Watched: $isWatched, History: ${watchHistory != null}")
                     }
                 }
@@ -293,7 +299,7 @@ class BackupRestoreManager(
                             this.watchedDate = watchedDate
                             this.watchHistory = watchHistory
                         }
-                        providerCtx.episodeDao.save(ep)
+                        withContext(Dispatchers.IO) { providerCtx.episodeDao.save(ep) }
                         Log.d(TAG, "IMPORT: [${providerName}] Episode: ${ep.title}. Watched: $isWatched, History: ${watchHistory != null}")
                     }
                 }

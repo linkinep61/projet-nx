@@ -5,6 +5,8 @@ import com.streamflixreborn.streamflix.models.Season
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.models.Video.Type.Episode
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 object EpisodeManager {
     private val episodes = mutableListOf<Episode>()
@@ -36,8 +38,12 @@ object EpisodeManager {
     suspend fun addEpisodesFromDb(type: Video.Type.Episode, database: AppDatabase) {
         val tvShowId = type.tvShow.id
         val seasonNumber = type.season.number
-        var episodesFromDb = database.episodeDao().getByTvShowIdAndSeasonNumber(tvShowId, seasonNumber)
-        val tvShowContext = database.tvShowDao().getById(tvShowId)?.let { storedTvShow ->
+        var episodesFromDb = withContext(Dispatchers.IO) {
+            database.episodeDao().getByTvShowIdAndSeasonNumber(tvShowId, seasonNumber)
+        }
+        val tvShowContext = withContext(Dispatchers.IO) {
+            database.tvShowDao().getById(tvShowId)
+        }?.let { storedTvShow ->
             TvShow(
                 id = storedTvShow.id,
                 title = storedTvShow.title,
@@ -68,7 +74,9 @@ object EpisodeManager {
                             episode.tvShow = episode.tvShow ?: tvShow
                             episode.season = episode.season ?: season
                         }
-                        database.episodeDao().insertAll(fetchedEpisodes)
+                        withContext(Dispatchers.IO) {
+                            database.episodeDao().insertAll(fetchedEpisodes)
+                        }
                         episodesFromDb = fetchedEpisodes
                     }
                 }
@@ -102,24 +110,30 @@ object EpisodeManager {
                 .sortedBy { season -> season.number }
                 .firstOrNull()
 
-        var nextSeason = nextSeasonFrom(database.seasonDao().getByTvShowId(tvShowId))
+        var nextSeason = withContext(Dispatchers.IO) {
+            nextSeasonFrom(database.seasonDao().getByTvShowId(tvShowId))
+        }
 
         if (nextSeason == null) {
             runCatching { provider.getTvShow(tvShowId) }
                 .getOrNull()
                 ?.also { tvShow ->
-                    database.tvShowDao().save(tvShow)
-                    tvShow.seasons.forEach { season ->
-                        season.tvShow = tvShow
+                    withContext(Dispatchers.IO) {
+                        database.tvShowDao().save(tvShow)
+                        tvShow.seasons.forEach { season ->
+                            season.tvShow = tvShow
+                        }
+                        database.seasonDao().insertAll(tvShow.seasons)
                     }
-                    database.seasonDao().insertAll(tvShow.seasons)
                     nextSeason = nextSeasonFrom(tvShow.seasons)
                 }
         }
 
         val seasonToLoad = nextSeason ?: return false
-        var nextSeasonEpisodes = database.episodeDao()
-            .getByTvShowIdAndSeasonNumber(tvShowId, seasonToLoad.number)
+        var nextSeasonEpisodes = withContext(Dispatchers.IO) {
+            database.episodeDao()
+                .getByTvShowIdAndSeasonNumber(tvShowId, seasonToLoad.number)
+        }
 
         if (nextSeasonEpisodes.isEmpty() && seasonToLoad.id.isNotBlank()) {
             nextSeasonEpisodes = runCatching {
@@ -130,7 +144,9 @@ object EpisodeManager {
                         episode.tvShow = episode.tvShow ?: seasonToLoad.tvShow
                         episode.season = episode.season ?: seasonToLoad
                     }
-                    database.episodeDao().insertAll(fetchedEpisodes)
+                    withContext(Dispatchers.IO) {
+                        database.episodeDao().insertAll(fetchedEpisodes)
+                    }
                 }
             }
         }
@@ -188,12 +204,21 @@ object EpisodeManager {
         return episodes.isEmpty() || episodes.none { it.id == episode.id }
     }
 
-    fun convertToVideoTypeEpisodes(episodes: List<com.streamflixreborn.streamflix.models.Episode>, database: AppDatabase, seasonNumber: Int): List<Episode> {
+    suspend fun convertToVideoTypeEpisodes(episodes: List<com.streamflixreborn.streamflix.models.Episode>, database: AppDatabase, seasonNumber: Int): List<Episode> {
+        // Pre-load all needed seasons and tvShows in one batch on IO thread
+        val seasonIds = episodes.mapNotNull { it.season?.id }.distinct()
+        val tvShowIds = episodes.mapNotNull { it.tvShow?.id }.distinct()
+        val (seasonsMap, tvShowsMap) = withContext(Dispatchers.IO) {
+            val seasons = seasonIds.mapNotNull { id -> database.seasonDao().getById(id)?.let { id to it } }.toMap()
+            val tvShows = tvShowIds.mapNotNull { id -> database.tvShowDao().getById(id)?.let { id to it } }.toMap()
+            seasons to tvShows
+        }
+
         val videoEpisodes = episodes.map { ep ->
             val seasonId = ep.season?.id ?: ""
             val tvShowId = ep.tvShow?.id ?: ""
-            val seasonFromDb = database.seasonDao().getById(seasonId)
-            val tvShowFromDb = database.tvShowDao().getById(tvShowId)
+            val seasonFromDb = seasonsMap[seasonId]
+            val tvShowFromDb = tvShowsMap[tvShowId]
             val tvShowTitle = tvShowFromDb?.title?.takeUnless { it.isBlank() }
                 ?: ep.tvShow?.title
                 ?: ""

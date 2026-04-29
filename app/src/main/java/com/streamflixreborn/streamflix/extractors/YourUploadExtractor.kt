@@ -1,11 +1,7 @@
 package com.streamflixreborn.streamflix.extractors
 
 import com.streamflixreborn.streamflix.models.Video
-import com.streamflixreborn.streamflix.utils.DnsResolver
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
-import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Url
 
@@ -16,7 +12,7 @@ class YourUploadExtractor : Extractor() {
     override val aliasUrls = listOf("https://www.yucache.net")
 
     override suspend fun extract(link: String): Video {
-        val service = YourUploadExtractorService.build(mainUrl)
+        val service = Extractor.createJsoupService<YourUploadExtractorService>(mainUrl)
         val doc = service.getSource(link.replace(mainUrl, ""))
 
         // Extract JWPlayer config script
@@ -33,31 +29,12 @@ class YourUploadExtractor : Extractor() {
             subtitles = listOf(),
             headers = mapOf(
                 "Referer" to mainUrl,
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-                        "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                        "Chrome/116.0.0.0 Safari/537.36"
+                "User-Agent" to Extractor.DEFAULT_USER_AGENT
             )
         )
     }
 
     private interface YourUploadExtractorService {
-
-        companion object {
-            fun build(baseUrl: String): YourUploadExtractorService {
-                val client = OkHttpClient.Builder()
-                    .dns(DnsResolver.doh)
-                    .build()
-
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .client(client)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-
-                return retrofit.create(YourUploadExtractorService::class.java)
-            }
-        }
-
         @GET
         suspend fun getSource(@Url url: String): Document
     }

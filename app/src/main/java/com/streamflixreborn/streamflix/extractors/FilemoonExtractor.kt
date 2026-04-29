@@ -3,11 +3,7 @@ package com.streamflixreborn.streamflix.extractors
 import android.util.Base64
 import android.util.Log
 import com.streamflixreborn.streamflix.models.Video
-import com.streamflixreborn.streamflix.utils.DnsResolver
-import okhttp3.OkHttpClient
 import org.json.JSONObject
-import retrofit2.Retrofit
-import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.HeaderMap
 import retrofit2.http.Url
@@ -22,7 +18,7 @@ open class FilemoonExtractor : Extractor() {
     override val aliasUrls = listOf("https://bf0skv.org","https://bysejikuar.com","https://moflix-stream.link","https://bysezoxexe.com","https://bysebuho.com","https://filemoon.sx","https://bysekoze.com","https://bysesayeveum.com","https://lukefirst.lol","https://filemoon.site")
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val service = Extractor.createGsonService<Service>(mainUrl)
         // Regex to match /e/ or /d/ and ID
         val matcher = Regex("""/(e|d)/([a-zA-Z0-9]+)""").find(link) 
             ?: throw Exception("Could not extract video ID or type")
@@ -40,7 +36,7 @@ open class FilemoonExtractor : Extractor() {
 
         var playbackDomain = ""
         val headers = mutableMapOf<String, String>()
-        headers["User-Agent"] = Service.DEFAULT_USER_AGENT
+        headers["User-Agent"] = Extractor.DEFAULT_USER_AGENT
         headers["Accept"] = "application/json"
 
         if (linkType == "d") {
@@ -73,7 +69,7 @@ open class FilemoonExtractor : Extractor() {
 
         val videoHeaders = mutableMapOf(
             "Referer" to embedFrameUrl,
-            "User-Agent" to Service.DEFAULT_USER_AGENT,
+            "User-Agent" to Extractor.DEFAULT_USER_AGENT,
             "Origin" to playbackDomain
         )
         return Video(
@@ -112,22 +108,6 @@ open class FilemoonExtractor : Extractor() {
 
         @GET
         suspend fun getPlayback(@Url url: String, @HeaderMap headers: Map<String, String>): PlaybackResponse
-
-        companion object {
-            const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
-
-            fun build(baseUrl: String): Service {
-                val client = OkHttpClient.Builder()
-                    .dns(DnsResolver.doh)
-                    .build()
-                return Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .client(client)
-                    .addConverterFactory(GsonConverterFactory.create())
-                    .build()
-                    .create(Service::class.java)
-            }
-        }
     }
 
     data class DetailsResponse(val embed_frame_url: String?)

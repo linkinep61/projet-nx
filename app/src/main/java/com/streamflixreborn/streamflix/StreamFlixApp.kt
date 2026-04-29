@@ -94,6 +94,9 @@ class StreamFlixApp : Application() {
         UserPreferences.setup(this)
         DnsResolver.setDnsUrl(UserPreferences.dohProviderUrl)
 
+        // 3. Download manager
+        com.streamflixreborn.streamflix.download.DownloadManager.init(this)
+
         val appContext = applicationContext
         val isTv = packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
         val threshold = if (isTv) 10L else 50L

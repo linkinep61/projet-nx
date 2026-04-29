@@ -1,12 +1,8 @@
 package com.streamflixreborn.streamflix.extractors
 
 import com.streamflixreborn.streamflix.models.Video
-import okhttp3.OkHttpClient
-import retrofit2.Retrofit
-import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Header
-import retrofit2.http.Headers
 import retrofit2.http.Url
 
 class VidflixExtractor : Extractor() {
@@ -26,33 +22,21 @@ class VidflixExtractor : Extractor() {
     }
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val service = Extractor.createGsonService<Service>(mainUrl)
         val referer = link.replace("/api/", "/")
 
         val response = service.getVideoData(link, referer = referer)
         val videoUrl = response.video_url
-        
+
         // Delegate to RpmvidExtractor as requested
         return RpmvidExtractor().extract(videoUrl).copy(
-            subtitles = response.subtitles.map { 
+            subtitles = response.subtitles.map {
                 Video.Subtitle(it.label, it.url, it.default)
             }
         )
     }
 
     private interface Service {
-        companion object {
-            fun build(baseUrl: String): Service {
-                val client = OkHttpClient.Builder().build()
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .client(client)
-                    .addConverterFactory(GsonConverterFactory.create())
-                    .build()
-                return retrofit.create(Service::class.java)
-            }
-        }
-
         @GET
         suspend fun getVideoData(
             @Url url: String,

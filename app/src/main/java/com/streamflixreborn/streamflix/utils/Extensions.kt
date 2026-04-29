@@ -89,14 +89,14 @@ fun Context.toActivity(): FragmentActivity? = this as? FragmentActivity
 fun FragmentActivity.getCurrentFragment(): Fragment? = when (this) {
     is MainMobileActivity -> {
         val navHostFragment = this.supportFragmentManager
-            .findFragmentById(R.id.nav_main_fragment) as NavHostFragment
-        navHostFragment.childFragmentManager.fragments.firstOrNull()
+            .findFragmentById(R.id.nav_main_fragment) as? NavHostFragment
+        navHostFragment?.childFragmentManager?.fragments?.firstOrNull()
     }
 
     is MainTvActivity -> {
         val navHostFragment = this.supportFragmentManager
-            .findFragmentById(R.id.nav_main_fragment) as NavHostFragment
-        navHostFragment.childFragmentManager.fragments.firstOrNull()
+            .findFragmentById(R.id.nav_main_fragment) as? NavHostFragment
+        navHostFragment?.childFragmentManager?.fragments?.firstOrNull()
     }
 
     else -> null

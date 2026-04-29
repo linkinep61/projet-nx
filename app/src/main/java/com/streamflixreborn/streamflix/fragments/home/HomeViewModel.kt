@@ -428,9 +428,21 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                     }
                 }
 
-                // Load pages of movies + TV shows sequentially in pairs
-                // to limit memory pressure on low-RAM devices (Chromecast 64MB heap).
-                for (page in 1..5) {
+                // Load page 1 first and emit immediately for fast perceived loading,
+                // then load remaining pages progressively.
+                coroutineScope {
+                    val movieDeferred = async {
+                        try { provider.getMovies(1) } catch (_: Exception) { emptyList() }
+                    }
+                    val tvShowDeferred = async {
+                        try { provider.getTvShows(1) } catch (_: Exception) { emptyList() }
+                    }
+                    allMovies.addAll(movieDeferred.await())
+                    allTvShows.addAll(tvShowDeferred.await())
+                }
+
+                // Load pages 2-5 progressively in background
+                for (page in 2..5) {
                     coroutineScope {
                         val movieDeferred = async {
                             try { provider.getMovies(page) } catch (_: Exception) { emptyList() }
@@ -441,8 +453,7 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                         allMovies.addAll(movieDeferred.await())
                         allTvShows.addAll(tvShowDeferred.await())
                     }
-                    // Yield to let GC and UI thread breathe between pages
-                    kotlinx.coroutines.delay(100)
+                    kotlinx.coroutines.delay(50)
                 }
 
                 // Deduplicate — keep items even with blank id (use title as fallback key)

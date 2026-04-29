@@ -6,7 +6,6 @@ import android.net.Uri
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.JsUnpacker
@@ -14,7 +13,6 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.Url
@@ -124,7 +122,7 @@ open class StreamWishExtractor : Extractor() {
                 referer = "${uri.scheme}://${uri.host}/"
             }
         }
-        val service = Service.build(mainUrl)
+        val service = Extractor.createJsoupService<Service>(mainUrl)
         val redirectedUrl = resolveRedirectWithWebView(context, link, mainUrl)
         val document = service.get(redirectedUrl, referer = referer)
 
@@ -258,18 +256,6 @@ open class StreamWishExtractor : Extractor() {
 
 
     private interface Service {
-
-        companion object {
-            fun build(baseUrl: String): Service {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-
-                return retrofit.create(Service::class.java)
-            }
-        }
-
         @GET
         suspend fun get(
             @Url url: String,

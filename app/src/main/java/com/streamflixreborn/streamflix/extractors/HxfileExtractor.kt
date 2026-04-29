@@ -2,28 +2,21 @@ package com.streamflixreborn.streamflix.extractors
 
 import android.util.Base64
 import com.streamflixreborn.streamflix.models.Video
-import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.JsUnpacker
-import retrofit2.http.GET
-import retrofit2.http.Url
-import retrofit2.Retrofit
 import org.jsoup.nodes.Document
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
+import retrofit2.http.GET
+import retrofit2.http.Header
+import retrofit2.http.Url
 
 class HxfileExtractor : Extractor() {
     override val name = "Hxfile"
     override val mainUrl = "https://hxfile.co"
 
-    companion object {
-        private const val DEFAULT_USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    }
-
     override suspend fun extract(link: String): Video {
         val fileCode = link.substringAfterLast("/").substringBefore(".html")
         val embedUrl = if (link.contains("/embed-")) link else "$mainUrl/embed-$fileCode.html"
 
-        val service = Service.build(mainUrl)
+        val service = Extractor.createJsoupService<Service>(mainUrl)
         val source = service.getSource(
             url = embedUrl,
             referer = link
@@ -61,18 +54,8 @@ class HxfileExtractor : Extractor() {
         @GET
         suspend fun getSource(
             @Url url: String,
-            @retrofit2.http.Header("User-Agent") userAgent: String = DEFAULT_USER_AGENT,
-            @retrofit2.http.Header("Referer") referer: String
+            @Header("User-Agent") userAgent: String = Extractor.DEFAULT_USER_AGENT,
+            @Header("Referer") referer: String
         ): Document
-
-        companion object {
-            fun build(baseUrl: String): Service {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                return retrofit.create(Service::class.java)
-            }
-        }
     }
 }

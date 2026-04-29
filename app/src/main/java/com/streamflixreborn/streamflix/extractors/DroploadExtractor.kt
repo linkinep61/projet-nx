@@ -2,10 +2,7 @@ package com.streamflixreborn.streamflix.extractors
 
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.JsUnpacker
-import okhttp3.OkHttpClient
 import retrofit2.Response
-import retrofit2.Retrofit
-import retrofit2.converter.scalars.ScalarsConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Url
 import java.net.URI
@@ -15,14 +12,7 @@ class DroploadExtractor : Extractor() {
     override val mainUrl = "https://dropload.tv"
     override val aliasUrls = listOf("https://dropload.io", "https://dropload.pro","https://dr0pstream.com")
 
-    private val client = OkHttpClient.Builder().build()
-
-    private val service = Retrofit.Builder()
-        .baseUrl(mainUrl)
-        .addConverterFactory(ScalarsConverterFactory.create())
-        .client(client)
-        .build()
-        .create(DroploadService::class.java)
+    private val service = Extractor.createGsonService<DroploadService>(mainUrl)
 
     private interface DroploadService {
         @GET

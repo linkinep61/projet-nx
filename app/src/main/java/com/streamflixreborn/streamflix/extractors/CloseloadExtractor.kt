@@ -5,14 +5,12 @@ import androidx.media3.common.MimeTypes
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.JsUnpacker
-import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.Url
-import java.nio.charset.Charset
 
 class CloseloadExtractor : Extractor() {
 
@@ -20,7 +18,13 @@ class CloseloadExtractor : Extractor() {
     override val mainUrl = "https://closeload.top/"
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val retrofit = Retrofit.Builder()
+            .baseUrl(mainUrl)
+            .client(Extractor.sharedClient)
+            .addConverterFactory(JsoupConverterFactory.create())
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+        val service = retrofit.create(Service::class.java)
         val document = service.get(link, "https://ridomovies.tv/")
         val html = document.toString()
         
@@ -200,18 +204,6 @@ class CloseloadExtractor : Extractor() {
     }
     
     private interface Service {
-        companion object {
-            fun build(baseUrl: String): Service {
-                val client = OkHttpClient.Builder().build()
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .addConverterFactory(GsonConverterFactory.create())
-                    .client(client)
-                    .build()
-                return retrofit.create(Service::class.java)
-            }
-        }
         @GET
         suspend fun get(@Url url: String, @Header("referer") referer: String): Document
     }

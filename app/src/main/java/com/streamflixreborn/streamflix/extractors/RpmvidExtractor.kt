@@ -2,13 +2,7 @@ package com.streamflixreborn.streamflix.extractors
 
 import com.streamflixreborn.streamflix.models.Video
 import androidx.media3.common.MimeTypes
-import okhttp3.Interceptor
-import okhttp3.OkHttpClient
-import okhttp3.Response
 import com.google.gson.JsonParser
-import com.streamflixreborn.streamflix.utils.DnsResolver
-import retrofit2.Retrofit
-import retrofit2.converter.scalars.ScalarsConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.Query
@@ -34,23 +28,9 @@ class RpmvidExtractor : Extractor() {
     )
 
     companion object {
-        private const val DEFAULT_USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         private val KEY = "kiemtienmua911ca".toByteArray()
         private val IV = "1234567890oiuytr".toByteArray()
     }
-
-    private val client = OkHttpClient.Builder()
-        .dns(DnsResolver.doh)
-        .addInterceptor(object : Interceptor {
-            override fun intercept(chain: Interceptor.Chain): Response {
-                val request = chain.request().newBuilder()
-                    .header("User-Agent", DEFAULT_USER_AGENT)
-                    .build()
-                return chain.proceed(request)
-            }
-        })
-        .build()
 
     private interface Service {
         @GET
@@ -62,24 +42,13 @@ class RpmvidExtractor : Extractor() {
             @Query("h") h: String,
             @Query("r") r: String = "",
         ): String
-
-        companion object {
-            fun build(baseUrl: String, client: OkHttpClient): Service {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(ScalarsConverterFactory.create())
-                    .client(client)
-                    .build()
-                return retrofit.create(Service::class.java)
-            }
-        }
     }
 
     override suspend fun extract(link: String): Video {
         val id = extractId(link) ?: throw Exception("Invalid link: missing id after #")
         val url = URL(link)
         val mainLink = "${url.protocol}://${url.host}"
-        val service = Service.build(mainLink, client)
+        val service = Extractor.createGsonService<Service>(mainLink)
         val apiUrl = "$mainLink/api/v1/video"
 
         val hexResponse = service.get(

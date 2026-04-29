@@ -1,14 +1,10 @@
 package com.streamflixreborn.streamflix.extractors
 
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DecryptHelper
-import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import android.util.Log
-import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Headers
 import retrofit2.http.Url
@@ -78,8 +74,19 @@ class VoeExtractor : Extractor() {
                     default = if (UserPreferences.serverAutoSubtitlesDisabled) false else obj.get("default").asBoolean
                 )
             }
+        // Determine the Referer from the final page URL
+        val referer = source.location() ?: link
+        val refererHost = try {
+            val u = URL(referer); "${u.protocol}://${u.host}/"
+        } catch (_: Exception) { link }
+
         return Video(
             source = m3u8,
+            headers = mapOf(
+                "Referer" to refererHost,
+                "Origin" to refererHost.trimEnd('/'),
+                "User-Agent" to DEFAULT_USER_AGENT
+            ),
             subtitles = subtitles,
             useServerSubtitleSetting = true
         )
@@ -104,39 +111,12 @@ class VoeExtractor : Extractor() {
      */
     private suspend fun fetchPage(url: String): Document {
         val baseUrl = URL(url).let { "${it.protocol}://${it.host}" }
-        val service = VoeExtractorService.build(baseUrl, url)
+        val service = Extractor.createJsoupService<VoeExtractorService>(baseUrl, url)
         return service.getSource(url)
     }
 
 
     private interface VoeExtractorService {
-
-        companion object {
-            fun build(baseUrl: String, originalLink: String): VoeExtractorService {
-                val client = OkHttpClient.Builder()
-                    .dns(DnsResolver.doh)
-                    .followRedirects(true)
-                    .followSslRedirects(true)
-                    .addInterceptor { chain ->
-                        val request = chain.request().newBuilder()
-                            .header("Referer", originalLink)
-                            .build()
-                        chain.proceed(request)
-                    }
-                    .build()
-
-                // Single Retrofit instance — OkHttp follows HTTP redirects automatically,
-                // so we don't need to detect the redirect domain from the page HTML.
-                // The old approach broke because the first URL in the page (CDN url)
-                // was incorrectly used as the redirect base.
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .client(client)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                return retrofit.create(VoeExtractorService::class.java)
-            }
-        }
 
         @GET
         @Headers(

@@ -383,6 +383,11 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
         this.onServerSelected = onServerSelected
     }
 
+    var onServerDownloadClicked: ((Settings.Server) -> Unit)? = null
+    fun setOnServerDownloadClickedListener(listener: (server: Settings.Server) -> Unit) {
+        this.onServerDownloadClicked = listener
+    }
+
     protected var onChannelVariantSelected: ((Settings.ChannelVariant) -> Unit)? = null
     fun setOnChannelVariantSelectedListener(listener: (variant: Settings.ChannelVariant) -> Unit) {
         this.onChannelVariantSelected = listener

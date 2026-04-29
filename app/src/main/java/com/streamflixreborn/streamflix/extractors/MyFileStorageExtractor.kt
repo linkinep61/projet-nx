@@ -34,7 +34,14 @@ class MyFileStorageExtractor : Extractor() {
     }
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        // StringConverterFactory is custom, cannot be migrated via createGsonService/createJsoupService
+        // Build directly with sharedClient
+        val retrofit = Retrofit.Builder()
+            .baseUrl(mainUrl)
+            .client(Extractor.sharedClient)
+            .addConverterFactory(StringConverterFactory.create())
+            .build()
+        val service = retrofit.create(Service::class.java)
 
         suspend fun String.isSuccess(): Boolean {
             return try {
@@ -68,18 +75,6 @@ class MyFileStorageExtractor : Extractor() {
 
 
     private interface Service {
-
-        companion object {
-            fun build(baseUrl: String): Service {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(StringConverterFactory.create())
-                    .build()
-
-                return retrofit.create(Service::class.java)
-            }
-        }
-
         @GET
         @Streaming
         suspend fun get(

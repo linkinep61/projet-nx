@@ -1,11 +1,7 @@
 package com.streamflixreborn.streamflix.extractors
 
 import com.streamflixreborn.streamflix.models.Video
-import com.streamflixreborn.streamflix.utils.DnsResolver
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
-import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Url
 import java.net.URL
@@ -14,14 +10,9 @@ class XshotcokExtractor : Extractor() {
     override val name = "Xshotcok"
     override val mainUrl = "https://xshotcok.com"
 
-    companion object {
-        private const val USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    }
-
     override suspend fun extract(link: String): Video {
         val baseUrl = URL(link).let { "${it.protocol}://${it.host}" }
-        val service = Service.build(baseUrl)
+        val service = Extractor.createJsoupService<Service>(baseUrl)
         val source = service.getSource(url = link)
         val html = source.toString()
 
@@ -77,28 +68,5 @@ class XshotcokExtractor : Extractor() {
         suspend fun getSource(
             @Url url: String
         ): Document
-
-        companion object {
-            fun build(baseUrl: String): Service {
-                val client = OkHttpClient.Builder()
-                    .dns(DnsResolver.doh)
-                    .followRedirects(true)
-                    .followSslRedirects(true)
-                    .addInterceptor { chain ->
-                        val request = chain.request().newBuilder()
-                            .header("User-Agent", USER_AGENT)
-                            .build()
-                        chain.proceed(request)
-                    }
-                    .build()
-
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .client(client)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                return retrofit.create(Service::class.java)
-            }
-        }
     }
 }

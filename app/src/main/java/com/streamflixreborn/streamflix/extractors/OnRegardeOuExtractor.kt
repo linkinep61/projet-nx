@@ -1,21 +1,18 @@
 package com.streamflixreborn.streamflix.extractors
 
 import com.streamflixreborn.streamflix.models.Video
-import okhttp3.OkHttpClient
 import org.json.JSONObject
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.Url
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 
 class OnRegardeOuExtractor : Extractor() {
 
     override val name = "OnRegardeOu"
     override val mainUrl = "https://onregardeou.site"
 
-    private val service = Service.build(mainUrl)
+    private val service = Extractor.createJsoupService<Service>(mainUrl)
 
     // Reliability ranking: lower = better. Servers with lower scores appear first.
     private val reliabilityOrder = mapOf(
@@ -90,18 +87,5 @@ class OnRegardeOuExtractor : Extractor() {
             @Header("Referer") referer: String,
             @Header("User-agent") useragent: String = "Mozilla/5.0"
         ): Document
-
-        companion object {
-            fun build(baseUrl: String): Service {
-                val client = OkHttpClient.Builder().build()
-
-                return Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .client(client)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                    .create(Service::class.java)
-            }
-        }
     }
 }

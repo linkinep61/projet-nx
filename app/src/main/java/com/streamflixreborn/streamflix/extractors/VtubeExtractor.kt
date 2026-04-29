@@ -2,13 +2,9 @@ package com.streamflixreborn.streamflix.extractors
 
 import android.net.Uri
 import com.streamflixreborn.streamflix.models.Video
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
-import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Url
-import java.util.concurrent.TimeUnit
 
 class VtubeExtractor : Extractor() {
 
@@ -17,7 +13,7 @@ class VtubeExtractor : Extractor() {
     override val aliasUrls = listOf("https://vtube.to")
 
     override suspend fun extract(link: String): Video {
-        val service = Service.build(mainUrl)
+        val service = Extractor.createJsoupService<Service>(mainUrl)
         val document = service.getDocument(link)
         val html = document.outerHtml()
 
@@ -47,22 +43,6 @@ class VtubeExtractor : Extractor() {
     private interface Service {
         @GET
         suspend fun getDocument(@Url url: String): Document
-
-        companion object {
-            fun build(baseUrl: String): Service {
-                val client = OkHttpClient.Builder()
-                    .readTimeout(30, TimeUnit.SECONDS)
-                    .connectTimeout(30, TimeUnit.SECONDS)
-                    .build()
-
-                return Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .client(client)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                    .create(Service::class.java)
-            }
-        }
     }
 
     companion object {

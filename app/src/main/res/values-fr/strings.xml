@@ -7,6 +7,10 @@
     <string name="loading_error_clear_cache">Vider le cache</string>
     <string name="loading_error_details">Détails de l\'erreur</string>
 
+    <string name="downloads">Téléchargements</string>
+    <string name="downloads_empty_title">Aucun téléchargement</string>
+    <string name="downloads_empty_subtitle">Vos films et épisodes téléchargés apparaîtront ici</string>
+
     <string name="update_title">Nouvelle mise à jour disponible</string>
     <string name="update_message">Une nouvelle version de l\'application est disponible !</string>
     <string name="update_current_version_label">Version actuelle</string>

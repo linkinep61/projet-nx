@@ -9,6 +9,7 @@ import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.fragment.app.Fragment
+import androidx.navigation.fragment.findNavController
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.Lifecycle
@@ -48,6 +49,10 @@ class ProvidersMobileFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
 
         initializeProviders()
+
+        binding.ivDownloads.setOnClickListener {
+            findNavController().navigate(R.id.downloads)
+        }
 
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->

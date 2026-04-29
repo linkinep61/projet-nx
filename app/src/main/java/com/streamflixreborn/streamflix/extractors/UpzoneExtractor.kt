@@ -9,13 +9,11 @@ import android.webkit.WebViewClient
 import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.JsUnpacker
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.Url
@@ -39,7 +37,7 @@ class UpzoneExtractor : Extractor() {
     override suspend fun extract(link: String): Video {
         val resolvedUrl = resolveRedirectWithWebView(context, link)
         val pageUrl = if (resolvedUrl.contains("upzone")) resolvedUrl else link
-        val service = Service.build(baseUrlOf(pageUrl))
+        val service = Extractor.createJsoupService<Service>(baseUrlOf(pageUrl))
         val referer = buildReferer(link)
 
         val document = service.get(
@@ -210,15 +208,5 @@ class UpzoneExtractor : Extractor() {
             @Header("Referer") referer: String,
             @Header("User-Agent") userAgent: String
         ): Document
-
-        companion object {
-            fun build(baseUrl: String): Service {
-                return Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                    .create(Service::class.java)
-            }
-        }
     }
 }

@@ -1,7 +1,6 @@
 package com.streamflixreborn.streamflix.extractors
 
 import androidx.media3.common.MimeTypes
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.JsUnpacker
 import com.streamflixreborn.streamflix.utils.NetworkClient
@@ -12,7 +11,6 @@ import okhttp3.Response
 import okhttp3.ResponseBody
 import org.json.JSONObject
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.Header
@@ -44,7 +42,7 @@ open class LoadXExtractor: Extractor() {
             ?: throw Exception("fireplayer_player cookie not found")
 
         getResponse.close()
-        val service = Service.build(mainUrl)
+        val service = Extractor.createJsoupService<Service>(mainUrl)
 
         val responseBody = service.postVideoData(
             data = videoId,
@@ -78,7 +76,7 @@ open class LoadXExtractor: Extractor() {
         suspend fun getWithHeaders(
             @Url url: String,
             @Header("Referer") referer: String,
-            @Header("User-Agent") userAgent: String = DEFAULT_USER_AGENT
+            @Header("User-Agent") userAgent: String = Extractor.DEFAULT_USER_AGENT
         ): Document
 
         @POST("player/index.php")
@@ -102,20 +100,6 @@ open class LoadXExtractor: Extractor() {
             @Header("Cookie") cookie: String,
             @Body body: RequestBody = "".toRequestBody() // empty body
         ): ResponseBody
-
-        companion object {
-            private const val DEFAULT_USER_AGENT =
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
-
-            fun build(baseUrl: String): Service {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-
-                return retrofit.create(Service::class.java)
-            }
-        }
     }
 
 }

@@ -1132,6 +1132,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         "StreamWish" to 4,
         "Streamix" to 4,
         "Filemoon" to 10,
+        "Uqload" to 15,
     )
     private val defaultReliability = 5
 

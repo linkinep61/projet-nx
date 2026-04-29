@@ -14,6 +14,8 @@ import com.streamflixreborn.streamflix.database.AppDatabase
 import com.streamflixreborn.streamflix.models.Movie
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.providers.Provider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.FileNotFoundException
 
 object ArtworkRepair {
@@ -59,8 +61,10 @@ object ArtworkRepair {
                     providerLanguage = provider.language,
                 )
             }
-            database.movieDao().getById(movie.id)?.let { refreshedMovie.merge(it) }
-            database.movieDao().insert(refreshedMovie)
+            withContext(Dispatchers.IO) {
+                database.movieDao().getById(movie.id)?.let { refreshedMovie.merge(it) }
+                database.movieDao().insert(refreshedMovie)
+            }
             refreshedMovie
         }.onFailure { error ->
             Log.w(TAG, "Unable to refresh movie artwork for ${movie.id} on ${provider.name}", error)
@@ -82,8 +86,10 @@ object ArtworkRepair {
                     providerLanguage = provider.language,
                 )
             }
-            database.tvShowDao().getById(tvShow.id)?.let { refreshedTvShow.merge(it) }
-            database.tvShowDao().insert(refreshedTvShow)
+            withContext(Dispatchers.IO) {
+                database.tvShowDao().getById(tvShow.id)?.let { refreshedTvShow.merge(it) }
+                database.tvShowDao().insert(refreshedTvShow)
+            }
             refreshedTvShow
         }.onFailure { error ->
             Log.w(TAG, "Unable to refresh tv show artwork for ${tvShow.id} on ${provider.name}", error)
@@ -97,25 +103,27 @@ object ArtworkRepair {
     ) {
         prepareProvider(context, provider)
 
-        database.episodeDao()
-            .getArtworkRepairTvShowIds()
-            .distinct()
-            .forEach { tvShowId ->
-                val existingTvShow = database.tvShowDao().getById(tvShowId)
-                val missingArtwork = existingTvShow == null ||
-                    !isRemoteArtworkUrl(existingTvShow.poster) ||
-                    existingTvShow.banner.isNullOrBlank() ||
-                    !isRemoteArtworkUrl(existingTvShow.banner)
-
-                if (missingArtwork) {
-                    repairTvShow(
-                        context = context,
-                        provider = provider,
-                        database = database,
-                        tvShow = existingTvShow ?: TvShow(id = tvShowId, title = ""),
-                    )
-                }
+        val tvShowIds = withContext(Dispatchers.IO) {
+            database.episodeDao().getArtworkRepairTvShowIds().distinct()
+        }
+        tvShowIds.forEach { tvShowId ->
+            val existingTvShow = withContext(Dispatchers.IO) {
+                database.tvShowDao().getById(tvShowId)
             }
+            val missingArtwork = existingTvShow == null ||
+                !isRemoteArtworkUrl(existingTvShow.poster) ||
+                existingTvShow.banner.isNullOrBlank() ||
+                !isRemoteArtworkUrl(existingTvShow.banner)
+
+            if (missingArtwork) {
+                repairTvShow(
+                    context = context,
+                    provider = provider,
+                    database = database,
+                    tvShow = existingTvShow ?: TvShow(id = tvShowId, title = ""),
+                )
+            }
+        }
 
         database.movieDao()
             .getArtworkRepairCandidates()

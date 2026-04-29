@@ -3,8 +3,6 @@ package com.streamflixreborn.streamflix.extractors
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.StringConverterFactory
-import com.streamflixreborn.streamflix.utils.DnsResolver
-import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import retrofit2.Response
 import retrofit2.Retrofit
@@ -32,7 +30,13 @@ open class DoodLaExtractor : Extractor() {
 
     override suspend fun extract(link: String): Video {
         val linkBaseUrl = getBaseUrl(link)
-        val service = Service.build(linkBaseUrl)
+        val retrofit = Retrofit.Builder()
+            .baseUrl(linkBaseUrl)
+            .client(Extractor.sharedClient)
+            .addConverterFactory(JsoupConverterFactory.create())
+            .addConverterFactory(StringConverterFactory.create())
+            .build()
+        val service = retrofit.create(Service::class.java)
 
         val embedUrl = link.replace("/d/", "/e/")
         val response = service.get(embedUrl, link)
@@ -84,35 +88,6 @@ open class DoodLaExtractor : Extractor() {
 
 
     private interface Service {
-
-        companion object {
-            private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-
-            fun build(baseUrl: String): Service {
-                val client = OkHttpClient.Builder()
-                    .dns(DnsResolver.doh)
-                    .followRedirects(true)
-                    .followSslRedirects(true)
-                    .addInterceptor { chain ->
-                        val request = chain.request().newBuilder()
-                            .header("User-Agent", USER_AGENT)
-                            .build()
-                        chain.proceed(request)
-                    }
-                    .build()
-
-                val retrofit = Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .addConverterFactory(StringConverterFactory.create())
-                    .client(client)
-                    .build()
-
-                return retrofit.create(Service::class.java)
-            }
-        }
-
-
         @GET
         suspend fun get(
             @Url url: String,

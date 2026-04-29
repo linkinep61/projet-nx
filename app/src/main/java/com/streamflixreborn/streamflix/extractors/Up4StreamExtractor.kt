@@ -9,23 +9,18 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.os.Message
-import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.models.Video
-import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.JsUnpacker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
-import retrofit2.Retrofit
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.Url
 import java.net.URL
-import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
 class Up4StreamExtractor : Extractor() {
@@ -60,7 +55,7 @@ class Up4StreamExtractor : Extractor() {
         val okHttpResult = withTimeoutOrNull(10_000) {
             try {
                 val baseUrl = URL(link).protocol + "://" + URL(link).host
-                val service = Service.build(baseUrl)
+                val service = Extractor.createJsoupService<Service>(baseUrl)
                 val document = service.getSource(
                     url = link,
                     referer = referer,
@@ -288,24 +283,6 @@ class Up4StreamExtractor : Extractor() {
         }
 
     private interface Service {
-        companion object {
-            fun build(baseUrl: String): Service {
-                val client = OkHttpClient.Builder()
-                    .dns(DnsResolver.doh)
-                    .connectTimeout(15, TimeUnit.SECONDS)
-                    .readTimeout(15, TimeUnit.SECONDS)
-                    .followRedirects(true)
-                    .followSslRedirects(true)
-                    .build()
-                val retrofit = Retrofit.Builder()
-                    .baseUrl("$baseUrl/")
-                    .client(client)
-                    .addConverterFactory(JsoupConverterFactory.create())
-                    .build()
-                return retrofit.create(Service::class.java)
-            }
-        }
-
         @GET
         suspend fun getSource(
             @Url url: String,
