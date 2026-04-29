@@ -96,6 +96,7 @@ abstract class AppDatabase : RoomDatabase() {
                 klass = AppDatabase::class.java,
                 name = "$sanitizedName.db"
             )
+                .allowMainThreadQueries()
                 .addMigrations(MIGRATION_1_2)
                 .addMigrations(MIGRATION_2_3)
                 .addMigrations(MIGRATION_3_4)
