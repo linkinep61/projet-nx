@@ -1,0 +1,426 @@
+Configuration on demand is an incubating feature.
+Calculating task graph as no cached configuration is available for tasks: assembleRelease
+
+> Configure project :app
+WARNING: The option setting 'android.usesSdkInManifest.disallowed=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.sdk.defaultTargetSdkToCompileSdkIfUnset=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableAppCompileTimeRClass=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.builtInKotlin=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.newDsl=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.r8.optimizedResourceShrinking=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.defaults.buildfeatures.resvalues=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: API 'applicationVariants' is obsolete and has been replaced with 'AndroidComponentsExtension'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+The legacy variant API is disabled by default in AGP 9.0, but can be re-enabled by adding 
+    android.newDsl=false
+to this project's gradle.properties file.
+For more information, see http://developer.android.com/build/r/new-dsl.
+
+To determine what is calling applicationVariants, use -Pandroid.debug.obsoleteApi=true on the command line to display more information.
+WARNING: API 'testVariants' is obsolete and has been replaced with 'AndroidComponentsExtension'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+The legacy variant API is disabled by default in AGP 9.0, but can be re-enabled by adding 
+    android.newDsl=false
+to this project's gradle.properties file.
+For more information, see http://developer.android.com/build/r/new-dsl.
+
+To determine what is calling testVariants, use -Pandroid.debug.obsoleteApi=true on the command line to display more information.
+WARNING: API 'unitTestVariants' is obsolete and has been replaced with 'AndroidComponentsExtension'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+The legacy variant API is disabled by default in AGP 9.0, but can be re-enabled by adding 
+    android.newDsl=false
+to this project's gradle.properties file.
+For more information, see http://developer.android.com/build/r/new-dsl.
+
+To determine what is calling unitTestVariants, use -Pandroid.debug.obsoleteApi=true on the command line to display more information.
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :navigation
+WARNING: API 'libraryVariants' is obsolete and has been replaced with 'AndroidComponentsExtension'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+The legacy variant API is disabled by default in AGP 9.0, but can be re-enabled by adding 
+    android.newDsl=false
+to this project's gradle.properties file.
+For more information, see http://developer.android.com/build/r/new-dsl.
+
+To determine what is calling libraryVariants, use -Pandroid.debug.obsoleteApi=true on the command line to display more information.
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :retrofit-jsoup-converter
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Task :app:generateReleaseAssets UP-TO-DATE
+> Task :retrofit-jsoup-converter:generateReleaseAssets UP-TO-DATE
+> Task :navigation:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :navigation:generateReleaseAssets UP-TO-DATE
+> Task :retrofit-jsoup-converter:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :navigation:preBuild UP-TO-DATE
+> Task :retrofit-jsoup-converter:preBuild UP-TO-DATE
+> Task :app:preBuild UP-TO-DATE
+> Task :retrofit-jsoup-converter:preReleaseBuild UP-TO-DATE
+> Task :retrofit-jsoup-converter:prepareLintJarForPublish UP-TO-DATE
+> Task :navigation:prepareLintJarForPublish UP-TO-DATE
+> Task :app:preReleaseBuild UP-TO-DATE
+> Task :navigation:preReleaseBuild UP-TO-DATE
+> Task :navigation:prepareReleaseArtProfile
+> Task :navigation:generateReleaseResValues FROM-CACHE
+> Task :retrofit-jsoup-converter:processReleaseNavigationResources FROM-CACHE
+> Task :retrofit-jsoup-converter:generateReleaseResValues FROM-CACHE
+> Task :app:generateReleaseResValues FROM-CACHE
+> Task :navigation:processReleaseNavigationResources FROM-CACHE
+> Task :retrofit-jsoup-converter:prepareReleaseArtProfile
+> Task :retrofit-jsoup-converter:javaPreCompileRelease FROM-CACHE
+> Task :navigation:javaPreCompileRelease FROM-CACHE
+> Task :app:dataBindingMergeDependencyArtifactsRelease
+> Task :navigation:extractDeepLinksRelease FROM-CACHE
+> Task :navigation:mergeReleaseJniLibFolders
+> Task :retrofit-jsoup-converter:mergeReleaseAssets
+> Task :retrofit-jsoup-converter:checkReleaseAarMetadata
+> Task :navigation:mergeReleaseNativeLibs NO-SOURCE
+> Task :navigation:generateReleaseResources FROM-CACHE
+> Task :retrofit-jsoup-converter:generateReleaseResources FROM-CACHE
+> Task :app:mergeReleaseJniLibFolders
+> Task :retrofit-jsoup-converter:extractDeepLinksRelease FROM-CACHE
+> Task :navigation:copyReleaseJniLibsProjectOnly
+> Task :app:createReleaseCompatibleScreenManifests
+> Task :retrofit-jsoup-converter:writeReleaseAarMetadata
+> Task :retrofit-jsoup-converter:writeReleaseLintModelMetadata
+> Task :app:extractDeepLinksRelease FROM-CACHE
+> Task :app:mergeReleaseStartupProfile
+> Task :navigation:stripReleaseDebugSymbols NO-SOURCE
+> Task :navigation:mapReleaseSourceSetPaths
+> Task :app:javaPreCompileRelease FROM-CACHE
+> Task :navigation:copyReleaseJniLibsProjectAndLocalJars
+> Task :app:mapReleaseSourceSetPaths
+> Task :retrofit-jsoup-converter:mapReleaseSourceSetPaths
+> Task :app:validateSigningRelease
+> Task :app:extractProguardFiles
+> Task :app:buildKotlinToolingMetadata
+> Task :navigation:writeReleaseLintModelMetadata
+> Task :app:writeReleaseAppMetadata
+> Task :navigation:extractDeepLinksForAarRelease FROM-CACHE
+> Task :app:checkReleaseDuplicateClasses
+> Task :retrofit-jsoup-converter:extractDeepLinksForAarRelease FROM-CACHE
+> Task :retrofit-jsoup-converter:packageReleaseResources FROM-CACHE
+> Task :retrofit-jsoup-converter:processReleaseManifest FROM-CACHE
+> Task :app:writeReleaseSigningConfigVersions
+> Task :navigation:processReleaseManifest FROM-CACHE
+> Task :app:extractReleaseVersionControlInfo
+> Task :retrofit-jsoup-converter:mergeReleaseJniLibFolders
+> Task :retrofit-jsoup-converter:mergeReleaseNativeLibs NO-SOURCE
+> Task :retrofit-jsoup-converter:extractProguardFiles
+> Task :navigation:extractProguardFiles
+> Task :retrofit-jsoup-converter:stripReleaseDebugSymbols NO-SOURCE
+> Task :navigation:writeReleaseAarMetadata
+> Task :retrofit-jsoup-converter:copyReleaseJniLibsProjectOnly
+> Task :navigation:checkReleaseAarMetadata
+> Task :retrofit-jsoup-converter:copyReleaseJniLibsProjectAndLocalJars
+> Task :navigation:mergeReleaseAssets
+> Task :navigation:packageReleaseResources FROM-CACHE
+> Task :app:checkReleaseAarMetadata
+> Task :app:mergeReleaseArtProfile
+> Task :app:mergeReleaseAssets
+> Task :app:mergeReleaseNativeLibs
+
+> Task :app:stripReleaseDebugSymbols
+Unable to strip the following libraries, packaging them as they are: libconscrypt_jni.so. Run with --info option to learn more.
+
+> Task :app:collectReleaseDependencies
+> Task :app:generateSafeArgsRelease FROM-CACHE
+> Task :app:generateReleaseResources
+> Task :app:generateReleaseBuildConfig
+> Task :retrofit-jsoup-converter:parseReleaseLocalResources FROM-CACHE
+> Task :retrofit-jsoup-converter:compileReleaseLibraryResources FROM-CACHE
+> Task :app:processReleaseNavigationResources
+> Task :navigation:parseReleaseLocalResources FROM-CACHE
+> Task :app:extractReleaseNativeSymbolTables FROM-CACHE
+> Task :app:compileReleaseNavigationResources FROM-CACHE
+> Task :app:mergeReleaseNativeDebugMetadata NO-SOURCE
+> Task :retrofit-jsoup-converter:generateReleaseRFile FROM-CACHE
+> Task :app:expandReleaseL8ArtProfileWildcards FROM-CACHE
+> Task :navigation:compileReleaseLibraryResources FROM-CACHE
+> Task :navigation:generateReleaseRFile FROM-CACHE
+> Task :app:sdkReleaseDependencyData
+> Task :retrofit-jsoup-converter:compileReleaseKotlin FROM-CACHE
+> Task :retrofit-jsoup-converter:compileReleaseJavaWithJavac NO-SOURCE
+> Task :retrofit-jsoup-converter:mergeReleaseGeneratedProguardFiles
+> Task :retrofit-jsoup-converter:mergeReleaseConsumerProguardFiles
+> Task :retrofit-jsoup-converter:processReleaseJavaRes
+> Task :retrofit-jsoup-converter:bundleLibRuntimeToJarRelease
+> Task :retrofit-jsoup-converter:bundleLibCompileToJarRelease
+> Task :retrofit-jsoup-converter:exportReleaseConsumerProguardFiles
+> Task :retrofit-jsoup-converter:createFullJarRelease
+> Task :retrofit-jsoup-converter:mergeReleaseJavaResource
+> Task :navigation:compileReleaseKotlin FROM-CACHE
+> Task :navigation:compileReleaseJavaWithJavac NO-SOURCE
+> Task :navigation:mergeReleaseGeneratedProguardFiles
+> Task :navigation:mergeReleaseConsumerProguardFiles
+> Task :navigation:exportReleaseConsumerProguardFiles
+> Task :navigation:bundleLibRuntimeToJarRelease
+> Task :navigation:processReleaseJavaRes
+> Task :navigation:bundleLibCompileToJarRelease
+> Task :app:compressReleaseAssets FROM-CACHE
+> Task :navigation:mergeReleaseJavaResource
+> Task :retrofit-jsoup-converter:generateReleaseLintModel
+> Task :retrofit-jsoup-converter:generateReleaseLintVitalModel
+> Task :navigation:createFullJarRelease
+> Task :navigation:generateReleaseLintVitalModel
+> Task :navigation:generateReleaseLintModel
+> Task :navigation:mergeReleaseResources FROM-CACHE
+> Task :retrofit-jsoup-converter:mergeReleaseResources FROM-CACHE
+> Task :app:processReleaseMainManifest
+> Task :navigation:extractReleaseAnnotations FROM-CACHE
+> Task :retrofit-jsoup-converter:extractReleaseAnnotations FROM-CACHE
+> Task :retrofit-jsoup-converter:lintVitalAnalyzeRelease FROM-CACHE
+> Task :navigation:lintVitalAnalyzeRelease FROM-CACHE
+> Task :app:packageReleaseResources
+> Task :retrofit-jsoup-converter:syncReleaseLibJars FROM-CACHE
+> Task :navigation:syncReleaseLibJars FROM-CACHE
+> Task :retrofit-jsoup-converter:bundleReleaseAar
+> Task :retrofit-jsoup-converter:bundleReleaseLocalLintAar
+> Task :navigation:bundleReleaseAar
+> Task :navigation:bundleReleaseLocalLintAar
+
+> Task :app:mergeReleaseResources
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-ar\strings.xml:57:1: Multiple substitutions specified in non-positional format of string resource string/episode_item_info. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values\strings.xml:82:4: Multiple substitutions specified in non-positional format of string resource string/episode_item_info. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-ar\strings.xml:83:1: Multiple substitutions specified in non-positional format of string resource string/episode_item_info_episode_only. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values\strings.xml:109:4: Multiple substitutions specified in non-positional format of string resource string/episode_item_info_episode_only. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-ar\strings.xml:75:1: Multiple substitutions specified in non-positional format of string resource string/movie_runtime_hours_minutes. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values\strings.xml:100:4: Multiple substitutions specified in non-positional format of string resource string/movie_runtime_hours_minutes. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values\strings.xml:120:4: Multiple substitutions specified in non-positional format of string resource string/player_subtitle_tv_show. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values\strings.xml:400:4: Multiple substitutions specified in non-positional format of string resource string/player_subtitle_tv_show_episode_only. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-ar\strings.xml:94:1: Multiple substitutions specified in non-positional format of string resource string/player_subtitle_tv_show. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-ar\strings.xml:384:4: Multiple substitutions specified in non-positional format of string resource string/player_subtitle_tv_show_episode_only. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values\strings.xml:86:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_item_season_number_episode_number. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values\strings.xml:89:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_runtime_hours_minutes. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values\strings.xml:96:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_watch_season_episode. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-de\strings.xml:62:4: Multiple substitutions specified in non-positional format of string resource string/episode_item_info. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-ar\strings.xml:61:1: Multiple substitutions specified in non-positional format of string resource string/tv_show_item_season_number_episode_number. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-ar\strings.xml:64:1: Multiple substitutions specified in non-positional format of string resource string/tv_show_runtime_hours_minutes. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-de\strings.xml:88:4: Multiple substitutions specified in non-positional format of string resource string/episode_item_info_episode_only. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-ar\strings.xml:71:1: Multiple substitutions specified in non-positional format of string resource string/tv_show_watch_season_episode. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-de\strings.xml:80:4: Multiple substitutions specified in non-positional format of string resource string/movie_runtime_hours_minutes. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-de\strings.xml:99:4: Multiple substitutions specified in non-positional format of string resource string/player_subtitle_tv_show. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-de\strings.xml:396:4: Multiple substitutions specified in non-positional format of string resource string/player_subtitle_tv_show_episode_only. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-de\strings.xml:66:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_item_season_number_episode_number. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-de\strings.xml:69:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_runtime_hours_minutes. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-de\strings.xml:76:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_watch_season_episode. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-pl\strings.xml:53:4: Multiple substitutions specified in non-positional format of string resource string/episode_item_info. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-pl\strings.xml:76:4: Multiple substitutions specified in non-positional format of string resource string/episode_item_info_episode_only. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-fr\strings.xml:70:4: Multiple substitutions specified in non-positional format of string resource string/episode_item_info. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-pl\strings.xml:89:4: Multiple substitutions specified in non-positional format of string resource string/player_subtitle_tv_show. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-fr\strings.xml:97:4: Multiple substitutions specified in non-positional format of string resource string/episode_item_info_episode_only. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\.gradle\caches\9.4.1\transforms\867b2d3d7c2d61edb773c583d71a1911\transformed\preference-1.2.1\res\values-pl\values-pl.xml:5:4: Multiple substitutions specified in non-positional format of string resource string/player_subtitle_tv_show_episode_only. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-pl\strings.xml:57:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_item_season_number_episode_number. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-pl\strings.xml:59:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_runtime_hours_minutes. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-pl\strings.xml:66:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_watch_season_episode. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-fr\strings.xml:88:4: Multiple substitutions specified in non-positional format of string resource string/movie_runtime_hours_minutes. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-fr\strings.xml:108:4: Multiple substitutions specified in non-positional format of string resource string/player_subtitle_tv_show. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-fr\strings.xml:353:4: Multiple substitutions specified in non-positional format of string resource string/player_subtitle_tv_show_episode_only. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-fr\strings.xml:74:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_item_season_number_episode_number. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-fr\strings.xml:77:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_runtime_hours_minutes. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-fr\strings.xml:84:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_watch_season_episode. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-it\strings.xml:63:4: Multiple substitutions specified in non-positional format of string resource string/episode_item_info. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-it\strings.xml:89:4: Multiple substitutions specified in non-positional format of string resource string/episode_item_info_episode_only. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-it\strings.xml:81:4: Multiple substitutions specified in non-positional format of string resource string/movie_runtime_hours_minutes. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-it\strings.xml:100:4: Multiple substitutions specified in non-positional format of string resource string/player_subtitle_tv_show. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-it\strings.xml:340:4: Multiple substitutions specified in non-positional format of string resource string/player_subtitle_tv_show_episode_only. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-it\strings.xml:67:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_item_season_number_episode_number. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-it\strings.xml:70:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_runtime_hours_minutes. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-it\strings.xml:77:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_watch_season_episode. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-es\strings.xml:71:4: Multiple substitutions specified in non-positional format of string resource string/episode_item_info. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-es\strings.xml:97:4: Multiple substitutions specified in non-positional format of string resource string/episode_item_info_episode_only. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-es\strings.xml:89:4: Multiple substitutions specified in non-positional format of string resource string/movie_runtime_hours_minutes. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-es\strings.xml:108:4: Multiple substitutions specified in non-positional format of string resource string/player_subtitle_tv_show. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-es\strings.xml:381:4: Multiple substitutions specified in non-positional format of string resource string/player_subtitle_tv_show_episode_only. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-es\strings.xml:75:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_item_season_number_episode_number. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-es\strings.xml:78:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_runtime_hours_minutes. Did you mean to add the formatted="false" attribute?
+C:\Users\guill\StudioProjects\streamflix\app\src\main\res\values-es\strings.xml:85:4: Multiple substitutions specified in non-positional format of string resource string/tv_show_watch_season_episode. Did you mean to add the formatted="false" attribute?
+
+> Task :retrofit-jsoup-converter:verifyReleaseResources FROM-CACHE
+> Task :retrofit-jsoup-converter:assembleRelease
+> Task :navigation:verifyReleaseResources FROM-CACHE
+> Task :navigation:assembleRelease
+> Task :app:processReleaseManifest
+> Task :app:parseReleaseLocalResources
+> Task :app:processReleaseManifestForPackage
+> Task :app:dataBindingGenBaseClassesRelease FROM-CACHE
+> Task :app:processReleaseResources
+> Task :app:kspReleaseKotlin
+
+> Task :app:compileReleaseKotlin
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/StreamFlixApp.kt:166:22 'static field TRIM_MEMORY_RUNNING_LOW: Int' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/activities/main/MainMobileActivity.kt:107:16 'var statusBarColor: Int' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/activities/main/MainMobileActivity.kt:108:16 'var navigationBarColor: Int' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/activities/main/MainMobileActivity.kt:599:16 'var statusBarColor: Int' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/activities/main/MainMobileActivity.kt:600:16 'var navigationBarColor: Int' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/activities/main/MainTvActivity.kt:201:16 'var statusBarColor: Int' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/activities/main/MainTvActivity.kt:202:16 'var navigationBarColor: Int' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/activities/tools/BypassWebViewActivity.kt:136:13 'var databaseEnabled: Boolean' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/activities/tools/QrScannerActivity.kt:225:16 'fun createCaptureSession(p0: (Mutable)List<Surface!>, p1: CameraCaptureSession.StateCallback, p2: Handler?): Unit' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/activities/tools/QrScannerActivity.kt:310:16 'var statusBarColor: Int' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/activities/tools/QrScannerActivity.kt:311:16 'var navigationBarColor: Int' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/activities/tools/WebViewPlayerActivity.kt:140:18 This declaration overrides a deprecated member but is not marked as deprecated itself. Add the '@Deprecated' annotation or suppress the diagnostic.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/activities/tools/WebViewPlayerActivity.kt:193:13 'var databaseEnabled: Boolean' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/adapters/viewholders/CategoryViewHolder.kt:239:13 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/download/DownloadDatabase.kt:27:19 'fun fallbackToDestructiveMigration(): RoomDatabase.Builder<DownloadDatabase>' is deprecated. Replace by overloaded version with parameter to indicate if all tables should be dropped or not.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/download/DownloadService.kt:209:19 Unchecked cast of 'Map<*, *>!' to 'Map<String, String>'.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/download/DownloadService.kt:266:19 Unchecked cast of 'Map<*, *>!' to 'Map<String, String>'.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/extractors/LpayerExtractor.kt:75:34 'var databaseEnabled: Boolean' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/extractors/LuluVdoExtractor.kt:184:29 'var databaseEnabled: Boolean' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/fragments/home/HomeViewModel.kt:142:25 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/fragments/home/HomeViewModel.kt:263:33 Check for instance is always 'true'.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/fragments/home/HomeViewModel.kt:264:33 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/fragments/home/HomeViewModel.kt:272:33 Check for instance is always 'true'.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/fragments/home/HomeViewModel.kt:273:33 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/fragments/player/PlayerMobileFragment.kt:1201:17 'fun requestPermissions(p0: Array<(out) String!>, p1: Int): Unit' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/fragments/player/PlayerTvFragment.kt:1850:21 'fun requestPermissions(p0: Array<(out) String!>, p1: Int): Unit' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/fragments/player/settings/PlayerSettingsMobileView.kt:615:25 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/fragments/settings/SettingsTvFragment.kt:715:21 'fun overridePendingTransition(p0: Int, p1: Int): Unit' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/fragments/settings/SettingsTvFragment.kt:736:21 'fun overridePendingTransition(p0: Int, p1: Int): Unit' is deprecated. Deprecated in Java.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/AnimeSamaProvider.kt:252:25 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/FrenchAnimeProvider.kt:103:33 Check for instance is always 'false'.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/FrenchMangaProvider.kt:156:29 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirAnimeProvider.kt:87:29 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirAnimeProvider.kt:98:37 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirAnimeProvider.kt:156:29 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirAnimeProvider.kt:231:83 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirAnimeProvider.kt:232:92 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirAnimeProvider.kt:233:95 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirAnimeProvider.kt:265:83 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirAnimeProvider.kt:266:92 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirAnimeProvider.kt:267:95 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirDramaProvider.kt:91:29 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirDramaProvider.kt:102:37 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirDramaProvider.kt:160:29 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirDramaProvider.kt:239:83 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirDramaProvider.kt:240:92 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirDramaProvider.kt:241:95 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirDramaProvider.kt:273:83 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirDramaProvider.kt:274:92 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirDramaProvider.kt:275:95 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirDramaProvider.kt:560:13 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/VoirDramaProvider.kt:565:13 'when' is exhaustive so 'else' is redundant here.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/WiTvProvider.kt:108:43 The corresponding parameter in the supertype 'CookieJar' is named 'url'. This may cause problems when calling this function with named arguments.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/WiTvProvider.kt:108:55 The corresponding parameter in the supertype 'CookieJar' is named 'cookies'. This may cause problems when calling this function with named arguments.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/providers/WiTvProvider.kt:109:41 The corresponding parameter in the supertype 'CookieJar' is named 'url'. This may cause problems when calling this function with named arguments.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/ui/UserDataNotifier.kt:14:10 This declaration is in a preview state and can be changed in a backwards-incompatible manner with a best-effort migration. Its usage should be marked with '@kotlinx.coroutines.FlowPreview' or '@OptIn(kotlinx.coroutines.FlowPreview::class)' if you accept the drawback of relying on preview API
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/JsUnpacker.kt:36:31 Java type mismatch: inferred type is 'String?', but 'CharSequence' was expected.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/JsUnpacker.kt:38:31 Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/JsUnpacker.kt:42:30 Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/JsUnpacker.kt:46:29 Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/JsUnpacker.kt:50:29 Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/JsUnpacker.kt:64:39 Java type mismatch: inferred type is 'String?', but 'String' was expected.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/JsUnpacker.kt:74:57 Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/OpenSubtitles.kt:29:21 Java type mismatch: inferred type is 'String?', but 'String' was expected.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/ThemeManager.kt:22:9 This annotation is currently applied to the value parameter only, but in the future it will also be applied to field.
+- To opt in to applying to both value parameter and field, add '-Xannotation-default-target=param-property' to your compiler arguments.
+- To keep applying to the value parameter only, use the '@param:' annotation target.
+
+See https://youtrack.jetbrains.com/issue/KT-73255 for more details.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/ThemeManager.kt:23:9 This annotation is currently applied to the value parameter only, but in the future it will also be applied to field.
+- To opt in to applying to both value parameter and field, add '-Xannotation-default-target=param-property' to your compiler arguments.
+- To keep applying to the value parameter only, use the '@param:' annotation target.
+
+See https://youtrack.jetbrains.com/issue/KT-73255 for more details.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/ThemeManager.kt:24:9 This annotation is currently applied to the value parameter only, but in the future it will also be applied to field.
+- To opt in to applying to both value parameter and field, add '-Xannotation-default-target=param-property' to your compiler arguments.
+- To keep applying to the value parameter only, use the '@param:' annotation target.
+
+See https://youtrack.jetbrains.com/issue/KT-73255 for more details.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/ThemeManager.kt:25:9 This annotation is currently applied to the value parameter only, but in the future it will also be applied to field.
+- To opt in to applying to both value parameter and field, add '-Xannotation-default-target=param-property' to your compiler arguments.
+- To keep applying to the value parameter only, use the '@param:' annotation target.
+
+See https://youtrack.jetbrains.com/issue/KT-73255 for more details.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/ThemeManager.kt:26:9 This annotation is currently applied to the value parameter only, but in the future it will also be applied to field.
+- To opt in to applying to both value parameter and field, add '-Xannotation-default-target=param-property' to your compiler arguments.
+- To keep applying to the value parameter only, use the '@param:' annotation target.
+
+See https://youtrack.jetbrains.com/issue/KT-73255 for more details.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/ThemeManager.kt:27:9 This annotation is currently applied to the value parameter only, but in the future it will also be applied to field.
+- To opt in to applying to both value parameter and field, add '-Xannotation-default-target=param-property' to your compiler arguments.
+- To keep applying to the value parameter only, use the '@param:' annotation target.
+
+See https://youtrack.jetbrains.com/issue/KT-73255 for more details.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/ThemeManager.kt:28:9 This annotation is currently applied to the value parameter only, but in the future it will also be applied to field.
+- To opt in to applying to both value parameter and field, add '-Xannotation-default-target=param-property' to your compiler arguments.
+- To keep applying to the value parameter only, use the '@param:' annotation target.
+
+See https://youtrack.jetbrains.com/issue/KT-73255 for more details.
+w: file:///C:/Users/guill/StudioProjects/streamflix/app/src/main/java/com/streamflixreborn/streamflix/utils/WebViewResolver.kt:78:17 'var databaseEnabled: Boolean' is deprecated. Deprecated in Java.
+
+> Task :app:processReleaseJavaRes
+
+> Task :app:compileReleaseJavaWithJavac
+Note: C:\Users\guill\StudioProjects\streamflix\app\src\main\java\com\streamflixreborn\streamflix\utils\AADecoder.java uses or overrides a deprecated API.
+Note: Recompile with -Xlint:deprecation for details.
+
+> Task :app:mergeReleaseGeneratedProguardFiles
+> Task :app:generateReleaseLintVitalReportModel
+> Task :app:mergeReleaseJavaResource
+> Task :app:expandReleaseArtProfileWildcards
+
+> Task :app:minifyReleaseWithR8
+WARNING: C:\Users\guill\StudioProjects\streamflix\app\build\intermediates\merged_java_res\release\mergeReleaseJavaResource\base.jar: R8: Unexpected reference to missing service class: META-INF/services/java.net.spi.InetAddressResolverProvider.
+WARNING: C:\Users\guill\StudioProjects\streamflix\app\build\intermediates\merged_java_res\release\mergeReleaseJavaResource\base.jar: R8: Unexpected reference to missing service class: META-INF/services/sun.net.spi.nameservice.NameServiceDescriptor.
+
+> Task :app:lintVitalAnalyzeRelease
+> Task :app:convertShrunkResourcesToBinaryRelease
+> Task :app:lintVitalReportRelease
+> Task :app:lintVitalRelease
+> Task :app:optimizeReleaseResources
+> Task :app:l8DexDesugarLibRelease
+> Task :app:compileReleaseArtProfile
+> Task :app:packageRelease
+> Task :app:assembleRelease
+> Task :app:createReleaseApkListingFileRedirect
+
+[Incubating] Problems report is available at: file:///C:/Users/guill/StudioProjects/streamflix/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.4.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 3m 42s
+136 actionable tasks: 91 executed, 43 from cache, 2 up-to-date
+Configuration cache entry stored.
