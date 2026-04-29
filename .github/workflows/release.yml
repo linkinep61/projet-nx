@@ -14,10 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup JDK environment
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: 17
           distribution: temurin
@@ -59,19 +59,18 @@ jobs:
 
       - name: Sign Default APK
         id: sign_apk
-        uses: r0adkll/sign-android-release@v1
+        uses: ilharp/sign-android-release@v2
         with:
-          releaseDirectory: app/build/outputs/apk/release
-          signingKeyBase64: ${{ secrets.KEYSTORE }}
-          alias: ${{ secrets.SIGNING_KEY_ALIAS }}
-          keyStorePassword: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          releaseDir: app/build/outputs/apk/release
+          signingKey: ${{ secrets.KEYSTORE }}
+          keyAlias: ${{ secrets.SIGNING_KEY_ALIAS }}
+          keystorePassword: ${{ secrets.SIGNING_STORE_PASSWORD }}
           keyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
-        env:
-          BUILD_TOOLS_VERSION: "34.0.0"
+          buildToolsVersion: "34.0.0"
 
       - name: Rename Default APK
         run: |
-          cp "${{ steps.sign_apk.outputs.signedReleaseFile }}" "streamflix-${{ github.ref_name }}.apk"
+          cp "${{ steps.sign_apk.outputs.signedFile }}" "streamflix-${{ github.ref_name }}.apk"
 
       # --- Mobile build ---
       - name: Set Mobile version
@@ -82,19 +81,18 @@ jobs:
 
       - name: Sign Mobile APK
         id: sign_apk_mobile
-        uses: r0adkll/sign-android-release@v1
+        uses: ilharp/sign-android-release@v2
         with:
-          releaseDirectory: app/build/outputs/apk/release
-          signingKeyBase64: ${{ secrets.KEYSTORE }}
-          alias: ${{ secrets.SIGNING_KEY_ALIAS }}
-          keyStorePassword: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          releaseDir: app/build/outputs/apk/release
+          signingKey: ${{ secrets.KEYSTORE }}
+          keyAlias: ${{ secrets.SIGNING_KEY_ALIAS }}
+          keystorePassword: ${{ secrets.SIGNING_STORE_PASSWORD }}
           keyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
-        env:
-          BUILD_TOOLS_VERSION: "34.0.0"
+          buildToolsVersion: "34.0.0"
 
       - name: Rename Mobile APK
         run: |
-          cp "${{ steps.sign_apk_mobile.outputs.signedReleaseFile }}" "streamflix-${{ github.ref_name }}-mobile.apk"
+          cp "${{ steps.sign_apk_mobile.outputs.signedFile }}" "streamflix-${{ github.ref_name }}-mobile.apk"
 
       # --- TV build ---
       - name: Set TV version
@@ -110,19 +108,18 @@ jobs:
 
       - name: Sign TV APK
         id: sign_apk_tv
-        uses: r0adkll/sign-android-release@v1
+        uses: ilharp/sign-android-release@v2
         with:
-          releaseDirectory: app/build/outputs/apk/release
-          signingKeyBase64: ${{ secrets.KEYSTORE }}
-          alias: ${{ secrets.SIGNING_KEY_ALIAS }}
-          keyStorePassword: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          releaseDir: app/build/outputs/apk/release
+          signingKey: ${{ secrets.KEYSTORE }}
+          keyAlias: ${{ secrets.SIGNING_KEY_ALIAS }}
+          keystorePassword: ${{ secrets.SIGNING_STORE_PASSWORD }}
           keyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
-        env:
-          BUILD_TOOLS_VERSION: "34.0.0"
+          buildToolsVersion: "34.0.0"
 
       - name: Rename TV APK
         run: |
-          cp "${{ steps.sign_apk_tv.outputs.signedReleaseFile }}" "streamflix-${{ github.ref_name }}-tv.apk"
+          cp "${{ steps.sign_apk_tv.outputs.signedFile }}" "streamflix-${{ github.ref_name }}-tv.apk"
 
       # --- Upload all APKs to the existing release ---
       - name: Upload APKs to Release
