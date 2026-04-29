@@ -50,6 +50,7 @@ jobs:
       # Increase JVM heap for R8/D8 dexing (prevents OOM on 3rd build)
       - name: Configure Gradle JVM memory
         run: |
+          echo "" >> gradle.properties
           echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError" >> gradle.properties
           echo "org.gradle.daemon=false" >> gradle.properties
 
