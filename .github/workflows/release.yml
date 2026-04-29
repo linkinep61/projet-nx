@@ -47,6 +47,12 @@ jobs:
       - name: Make Gradle executable
         run: chmod +x ./gradlew
 
+      # Increase JVM heap for R8/D8 dexing (prevents OOM on 3rd build)
+      - name: Configure Gradle JVM memory
+        run: |
+          echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError" >> gradle.properties
+          echo "org.gradle.daemon=false" >> gradle.properties
+
       # --- Default build (all layouts) ---
       - name: Build Default APK
         run: ./gradlew assembleRelease --stacktrace
@@ -95,6 +101,9 @@ jobs:
         run: |
           sed -i '/APP_LAYOUT/d' local.properties
           echo APP_LAYOUT=tv >> local.properties
+
+      - name: Clean before TV build
+        run: ./gradlew clean
 
       - name: Build TV APK
         run: ./gradlew assembleRelease --stacktrace

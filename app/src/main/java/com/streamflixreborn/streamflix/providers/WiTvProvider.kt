@@ -247,6 +247,54 @@ object WiTvProvider : Provider {
         return synchronized(registryLock) { channelRegistry[key]?.logo?.ifBlank { null } }
     }
 
+    // ── Server preload cache for adjacent channels (IPTV zapping) ──
+
+    private data class PreloadEntry(
+        val servers: List<Video.Server>,
+        val timestamp: Long,
+    )
+
+    private val preloadCache = java.util.concurrent.ConcurrentHashMap<String, PreloadEntry>()
+    private val PRELOAD_TTL_MS = 5 * 60 * 1000L  // 5 minutes
+
+    /** Get preloaded servers for a channel, or null if not cached / expired. */
+    fun getPreloadedServers(channelId: String): List<Video.Server>? {
+        val entry = preloadCache[channelId] ?: return null
+        if (System.currentTimeMillis() - entry.timestamp > PRELOAD_TTL_MS) {
+            preloadCache.remove(channelId)
+            return null
+        }
+        return entry.servers
+    }
+
+    /** Preload servers for adjacent channels in the background. */
+    suspend fun preloadAdjacentChannels(currentId: String) {
+        val ids = mutableListOf<String>()
+        getPreviousChannelId(currentId)?.let { ids.add(it) }
+        getNextChannelId(currentId)?.let { ids.add(it) }
+
+        for (id in ids) {
+            if (preloadCache[id] != null) continue  // already cached
+            try {
+                val videoType = com.streamflixreborn.streamflix.models.Video.Type.Episode(
+                    id = id, number = 1, title = "",
+                    poster = null, overview = null,
+                    tvShow = com.streamflixreborn.streamflix.models.Video.Type.Episode.TvShow(
+                        id = id, title = "", poster = null, banner = null, releaseDate = null, imdbId = null
+                    ),
+                    season = com.streamflixreborn.streamflix.models.Video.Type.Episode.Season(
+                        number = 1, title = null
+                    ),
+                )
+                val servers = getServers(id, videoType)
+                preloadCache[id] = PreloadEntry(servers, System.currentTimeMillis())
+                Log.d(TAG, "Preloaded ${servers.size} servers for $id")
+            } catch (e: Exception) {
+                Log.w(TAG, "Preload failed for $id: ${e.message}")
+            }
+        }
+    }
+
     // WiTV category pages — Généraliste first, Sport after Musique per user request
     private val witvCategories = listOf(
         "Généraliste" to "/chaines-live/generaliste/",

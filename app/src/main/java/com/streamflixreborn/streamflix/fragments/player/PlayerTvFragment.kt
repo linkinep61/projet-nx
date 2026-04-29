@@ -824,6 +824,10 @@ class PlayerTvFragment : Fragment() {
             // Shutdown Cronet executor
             cronetExecutor.shutdownNow()
 
+            channelZapJob?.cancel()
+            channelOverlayHideJob?.cancel()
+            binding.pvPlayer.onChannelUp = null
+            binding.pvPlayer.onChannelDown = null
             nextEpisodePrefetchJob?.cancel()
             clearBypassSession(dismissDialog = true)
             releasePlayer()
@@ -1223,56 +1227,154 @@ class PlayerTvFragment : Fragment() {
                 return
             }
 
+            // Setup D-pad zapping (UP/DOWN channel switch with overlay)
+            setupChannelZapping()
+
             val prevId = provider.getPreviousChannelId(args.id)
             val nextId = provider.getNextChannelId(args.id)
 
             btnPrevious.visibility = if (prevId != null) View.VISIBLE else View.GONE
             btnNext.visibility = if (nextId != null) View.VISIBLE else View.GONE
 
-            fun navigateToChannel(channelId: String) {
-                val channelName = provider.getChannelDisplayName(channelId) ?: channelId
-                val channelPoster = provider.getChannelPoster(channelId)
-
-                val videoType = Video.Type.Episode(
-                    id = channelId,
-                    number = 1,
-                    title = channelName,
-                    poster = channelPoster,
-                    overview = null,
-                    tvShow = Video.Type.Episode.TvShow(
-                        id = channelId,
-                        title = channelName,
-                        poster = channelPoster,
-                        banner = null,
-                        releaseDate = null,
-                        imdbId = null,
-                    ),
-                    season = Video.Type.Episode.Season(
-                        number = 1,
-                        title = "Live",
-                    ),
-                )
-                val navArgs = android.os.Bundle().apply {
-                    putString("id", channelId)
-                    putString("title", channelName)
-                    putString("subtitle", channelName)
-                    putSerializable("videoType", videoType)
-                }
-                findNavController().navigate(
-                    R.id.player,
-                    navArgs,
-                    androidx.navigation.NavOptions.Builder()
-                        .setPopUpTo(R.id.player, true)
-                        .build()
-                )
-            }
-
             if (prevId != null) {
-                btnPrevious.setOnClickListener { navigateToChannel(prevId) }
+                btnPrevious.setOnClickListener { navigateToChannel(prevId, provider) }
             }
             if (nextId != null) {
-                btnNext.setOnClickListener { navigateToChannel(nextId) }
+                btnNext.setOnClickListener { navigateToChannel(nextId, provider) }
             }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // D-pad channel zapping with overlay
+        // ═══════════════════════════════════════════════════════════════════
+
+        private var channelZapJob: Job? = null
+        private var pendingZapChannelId: String? = null
+        private var channelOverlayHideJob: Job? = null
+        private val CHANNEL_ZAP_DEBOUNCE_MS = 800L
+        private val CHANNEL_OVERLAY_DISPLAY_MS = 3000L
+
+        /**
+         * Set up D-pad UP/DOWN channel zapping for IPTV.
+         * Called from setupChannelNavigationButtons after the provider check.
+         */
+        private fun setupChannelZapping() {
+            val provider = UserPreferences.currentProvider as? WiTvProvider ?: return
+            val isIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
+            if (!isIptv) return
+
+            val orderedIds = provider.getOrderedChannelIds()
+            if (orderedIds.size < 2) return
+
+            binding.pvPlayer.onChannelUp = {
+                val currentId = pendingZapChannelId ?: args.id
+                val idx = orderedIds.indexOf(currentId)
+                val prevIdx = if (idx > 0) idx - 1 else orderedIds.lastIndex
+                val targetId = orderedIds[prevIdx]
+                scheduleChannelZap(targetId, prevIdx + 1, provider)
+            }
+
+            binding.pvPlayer.onChannelDown = {
+                val currentId = pendingZapChannelId ?: args.id
+                val idx = orderedIds.indexOf(currentId)
+                val nextIdx = if (idx < orderedIds.lastIndex) idx + 1 else 0
+                val targetId = orderedIds[nextIdx]
+                scheduleChannelZap(targetId, nextIdx + 1, provider)
+            }
+        }
+
+        private fun scheduleChannelZap(channelId: String, channelNumber: Int, provider: WiTvProvider) {
+            pendingZapChannelId = channelId
+            showChannelOverlay(channelId, channelNumber, provider)
+
+            // Cancel previous debounce and schedule new one
+            channelZapJob?.cancel()
+            channelZapJob = viewLifecycleOwner.lifecycleScope.launch {
+                delay(CHANNEL_ZAP_DEBOUNCE_MS)
+                // Actually navigate to the channel
+                navigateToChannel(channelId, provider)
+            }
+        }
+
+        private fun showChannelOverlay(channelId: String, channelNumber: Int, provider: WiTvProvider) {
+            val channelName = provider.getChannelDisplayName(channelId) ?: channelId.removePrefix("ch::").removePrefix("sport::")
+            val channelLogo = provider.getChannelPoster(channelId)
+
+            binding.tvChannelNumber.text = channelNumber.toString()
+            binding.tvChannelName.text = channelName
+
+            if (!channelLogo.isNullOrBlank()) {
+                Glide.with(this)
+                    .load(channelLogo)
+                    .centerInside()
+                    .into(binding.ivChannelLogo)
+                binding.ivChannelLogo.visibility = View.VISIBLE
+            } else {
+                binding.ivChannelLogo.visibility = View.GONE
+            }
+
+            if (binding.layoutChannelOverlay.visibility != View.VISIBLE) {
+                binding.layoutChannelOverlay.alpha = 0f
+                binding.layoutChannelOverlay.visibility = View.VISIBLE
+                binding.layoutChannelOverlay.animate().alpha(1f).setDuration(200).start()
+            }
+
+            // Auto-hide after delay
+            channelOverlayHideJob?.cancel()
+            channelOverlayHideJob = viewLifecycleOwner.lifecycleScope.launch {
+                delay(CHANNEL_OVERLAY_DISPLAY_MS)
+                hideChannelOverlay()
+            }
+        }
+
+        private fun hideChannelOverlay() {
+            if (binding.layoutChannelOverlay.visibility == View.VISIBLE) {
+                binding.layoutChannelOverlay.animate()
+                    .alpha(0f)
+                    .setDuration(300)
+                    .withEndAction {
+                        if (_binding != null) binding.layoutChannelOverlay.visibility = View.GONE
+                    }
+                    .start()
+            }
+        }
+
+        private fun navigateToChannel(channelId: String, provider: WiTvProvider) {
+            val channelName = provider.getChannelDisplayName(channelId) ?: channelId
+            val channelPoster = provider.getChannelPoster(channelId)
+
+            val videoType = Video.Type.Episode(
+                id = channelId,
+                number = 1,
+                title = channelName,
+                poster = channelPoster,
+                overview = null,
+                tvShow = Video.Type.Episode.TvShow(
+                    id = channelId,
+                    title = channelName,
+                    poster = channelPoster,
+                    banner = null,
+                    releaseDate = null,
+                    imdbId = null,
+                ),
+                season = Video.Type.Episode.Season(
+                    number = 1,
+                    title = "Live",
+                ),
+            )
+            val navArgs = android.os.Bundle().apply {
+                putString("id", channelId)
+                putString("title", channelName)
+                putString("subtitle", channelName)
+                putSerializable("videoType", videoType)
+            }
+            findNavController().navigate(
+                R.id.player,
+                navArgs,
+                androidx.navigation.NavOptions.Builder()
+                    .setPopUpTo(R.id.player, true)
+                    .build()
+            )
         }
 
         /** Try the next untried OLA channel variant. Returns true if a variant was found and is being tried. */
@@ -1618,6 +1720,17 @@ class PlayerTvFragment : Fragment() {
                         binding.pvPlayer.controller.binding.exoPlayPause.nextFocusDownId = -1
                         val videoFormat = player.videoFormat
                         updatePlayerScale()
+
+                        // Preload adjacent channel servers for fast zapping
+                        val isIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
+                        if (isIptv) {
+                            val provider = UserPreferences.currentProvider
+                            if (provider is WiTvProvider) {
+                                viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                                    provider.preloadAdjacentChannels(args.id)
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1780,6 +1893,21 @@ class PlayerTvFragment : Fragment() {
                             viewModel.getVideo(nextServer)
                         } else if (!tryNextChannelVariant(server)) {
                             Log.e("PlayerNetwork", "Connection timeout on ${server.name}, no more servers or variants to try")
+                        }
+                        return
+                    }
+
+                    // Fallback 3 (IPTV): for live channels, auto-failover on ANY playback error
+                    // (HTTP 403/404, source error, decoder error, etc.)
+                    val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
+                    if (isLiveIptv) {
+                        val server = currentServer ?: return
+                        val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
+                        if (nextServer != null) {
+                            Log.w("PlayerTvFragment", "IPTV failover: ${server.name} error (${error.errorCodeName}), trying ${nextServer.name}")
+                            viewModel.getVideo(nextServer)
+                        } else if (!tryNextChannelVariant(server)) {
+                            Log.e("PlayerTvFragment", "IPTV: all sources failed for ${args.id}")
                         }
                     }
                 }
@@ -2172,12 +2300,14 @@ class PlayerTvFragment : Fragment() {
         private var currentSoftwareDecoder = false
 
         private fun buildPlayer(extraBuffering: Boolean): ExoPlayer {
+            val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
             val loadControl = DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
-                    30_000,  // minBuffer 30s (default 50s) — less memory usage
-                    if (extraBuffering) 300_000 else 120_000,  // maxBuffer 120s (default 50s) — fewer re-buffers
-                    1_500,   // bufferForPlayback 1.5s (default 2.5s) — faster start
-                    3_000    // bufferAfterRebuffer 3s (default 5s) — faster recovery
+                    if (isLiveIptv) 5_000 else 30_000,      // minBuffer: 5s live / 30s VOD
+                    if (isLiveIptv) 30_000                   // maxBuffer: 30s live
+                    else if (extraBuffering) 300_000 else 120_000,  // 120s VOD
+                    if (isLiveIptv) 500 else 1_500,          // playback: 500ms live / 1.5s VOD
+                    if (isLiveIptv) 1_500 else 3_000         // rebuffer: 1.5s live / 3s VOD
                 )
                 .build()
 
