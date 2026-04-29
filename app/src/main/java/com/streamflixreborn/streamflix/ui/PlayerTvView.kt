@@ -28,6 +28,11 @@ class PlayerTvView @JvmOverloads constructor(
     var onMediaPreviousClicked: (() -> Boolean)? = null
     var onMediaNextClicked: (() -> Boolean)? = null
 
+    /** IPTV zapping: channel up (D-pad UP when controller hidden) */
+    var onChannelUp: (() -> Unit)? = null
+    /** IPTV zapping: channel down (D-pad DOWN when controller hidden) */
+    var onChannelDown: (() -> Unit)? = null
+
     private var zoomToast: Toast? = null
 
     fun enterManualZoomMode() {
@@ -110,6 +115,33 @@ class PlayerTvView @JvmOverloads constructor(
         if (controller.isVisible) return super.dispatchKeyEvent(event)
 
         return when (event.keyCode) {
+            // IPTV zapping: D-pad UP/DOWN changes channel when callbacks are set
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                if (onChannelUp != null) {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        onChannelUp?.invoke()
+                    }
+                    true
+                } else super.dispatchKeyEvent(event)
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (onChannelDown != null) {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        onChannelDown?.invoke()
+                    }
+                    true
+                } else super.dispatchKeyEvent(event)
+            }
+            // Channel up/down remote buttons
+            KeyEvent.KEYCODE_CHANNEL_UP -> {
+                if (event.action == KeyEvent.ACTION_DOWN) onChannelUp?.invoke()
+                onChannelUp != null
+            }
+            KeyEvent.KEYCODE_CHANNEL_DOWN -> {
+                if (event.action == KeyEvent.ACTION_DOWN) onChannelDown?.invoke()
+                onChannelDown != null
+            }
+
             KeyEvent.KEYCODE_DPAD_LEFT -> {
                 if (event.action == KeyEvent.ACTION_DOWN) {
                     player.seekTo(player.currentPosition - 10_000)

@@ -1771,6 +1771,20 @@ class PlayerMobileFragment : Fragment() {
                     } else if (!tryNextChannelVariant(server)) {
                         Log.e("PlayerNetwork", "Connection timeout on ${server.name}, no more servers or variants to try")
                     }
+                    return
+                }
+
+                // Fallback 3 (IPTV): for live channels, auto-failover on ANY playback error
+                val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
+                if (isLiveIptv) {
+                    val server = currentServer ?: return
+                    val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
+                    if (nextServer != null) {
+                        Log.w("PlayerMobileFragment", "IPTV failover: ${server.name} error (${error.errorCodeName}), trying ${nextServer.name}")
+                        viewModel.getVideo(nextServer)
+                    } else if (!tryNextChannelVariant(server)) {
+                        Log.e("PlayerMobileFragment", "IPTV: all sources failed for ${args.id}")
+                    }
                 }
             }
         })
@@ -2142,12 +2156,14 @@ class PlayerMobileFragment : Fragment() {
     private var currentSoftwareDecoder = false
 
     private fun buildPlayer(extraBuffering: Boolean): ExoPlayer {
+        val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                30_000,  // minBuffer 30s (default 50s) — less memory usage
-                if (extraBuffering) 300_000 else 120_000,  // maxBuffer 120s (default 50s) — fewer re-buffers
-                1_500,   // bufferForPlayback 1.5s (default 2.5s) — faster start
-                3_000    // bufferAfterRebuffer 3s (default 5s) — faster recovery
+                if (isLiveIptv) 5_000 else 30_000,      // minBuffer: 5s live / 30s VOD
+                if (isLiveIptv) 30_000                   // maxBuffer: 30s live
+                else if (extraBuffering) 300_000 else 120_000,  // 120s VOD
+                if (isLiveIptv) 500 else 1_500,          // playback: 500ms live / 1.5s VOD
+                if (isLiveIptv) 1_500 else 3_000         // rebuffer: 1.5s live / 3s VOD
             )
             .build()
 

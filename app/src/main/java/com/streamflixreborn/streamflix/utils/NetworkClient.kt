@@ -76,10 +76,10 @@ object NetworkClient {
         }
     }
 
-    /** Shared connection pool — limits idle connections to reduce memory usage */
+    /** Shared connection pool — enlarged for IPTV zapping (keep CDN connections warm) */
     private val sharedConnectionPool = ConnectionPool(
-        maxIdleConnections = 10,
-        keepAliveDuration = 2,
+        maxIdleConnections = 20,
+        keepAliveDuration = 5,
         timeUnit = TimeUnit.MINUTES
     )
 
