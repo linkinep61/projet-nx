@@ -116,6 +116,11 @@
 # ---- Keep R class for resource references ----
 -keep class com.streamflixreborn.streamflix.R$* { *; }
 
+# ---- ViewPager2 internal field accessed via reflection ----
+-keepclassmembers class androidx.viewpager2.widget.ViewPager2 {
+    androidx.recyclerview.widget.RecyclerView mRecyclerView;
+}
+
 # ---- Suppress common harmless warnings ----
 -dontwarn javax.annotation.**
 -dontwarn org.codehaus.mojo.animal_sniffer.**

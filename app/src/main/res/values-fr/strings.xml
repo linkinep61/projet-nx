@@ -47,6 +47,7 @@
     <string name="global_search_films">Recherche globale films et séries</string>
     <string name="global_search_anime">Recherche globale anime</string>
     <string name="searching">Recherche en cours...</string>
+    <string name="search_empty_query">Veuillez entrer un terme de recherche</string>
     <string name="search_error">Erreur</string>
     <string name="result">Résultat</string>
     <string name="results">Résultats</string>

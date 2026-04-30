@@ -149,6 +149,10 @@ class SearchMobileFragment : Fragment() {
             setOnEditorActionListener { _, actionId, _ ->
                 if (actionId == EditorInfo.IME_ACTION_SEARCH) {
                     val query = binding.etSearch.text.toString()
+                    if (query.isBlank()) {
+                        Toast.makeText(requireContext(), getString(R.string.search_empty_query), Toast.LENGTH_SHORT).show()
+                        return@setOnEditorActionListener true
+                    }
                     hideKeyboard()
 
                     if (binding.swGlobalSearch.isChecked) {

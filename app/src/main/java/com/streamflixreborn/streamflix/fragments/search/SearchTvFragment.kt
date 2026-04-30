@@ -160,6 +160,10 @@ class SearchTvFragment : Fragment() {
 
     private fun submitSearch(): Boolean {
         val query = binding.etSearch.text?.toString().orEmpty()
+        if (query.isBlank()) {
+            Toast.makeText(requireContext(), getString(R.string.search_empty_query), Toast.LENGTH_SHORT).show()
+            return true
+        }
         hideKeyboard()
 
         if (isGlobalSearchChecked) {
@@ -192,8 +196,7 @@ class SearchTvFragment : Fragment() {
                 val isSubmitKey =
                     event?.action == KeyEvent.ACTION_DOWN &&
                         (event.keyCode == KeyEvent.KEYCODE_ENTER ||
-                            event.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER ||
-                            event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER)
+                            event.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER)
 
                 if (isSubmitAction || isSubmitKey) {
                     return@setOnEditorActionListener submitSearch()
@@ -213,7 +216,6 @@ class SearchTvFragment : Fragment() {
                 if (
                     keyCode == KeyEvent.KEYCODE_ENTER ||
                     keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER ||
-                    keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
                     keyCode == KeyEvent.KEYCODE_SEARCH
                 ) {
                     return@setOnKeyListener submitSearch()
