@@ -23,6 +23,12 @@
     <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!-- Pre-Android 10 only: needed to write to /sdcard/Movies/ via legacy File API.
+         Android 10+ uses MediaStore via ContentResolver (no permission needed). -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />

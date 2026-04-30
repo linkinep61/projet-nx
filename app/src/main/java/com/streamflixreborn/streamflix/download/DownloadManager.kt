@@ -78,9 +78,58 @@ object DownloadManager {
                 if (stuck.any { it.isDownloading || it.isPending }) {
                     triggerProcessQueue()
                 }
+
+                // One-time migration: convert pre-MediaStore downloads (file paths in
+                // app-private dir) into proper MediaStore entries so they become visible
+                // to other apps. Idempotent — fast no-op when nothing to migrate.
+                migrateLegacyToMediaStore()
             }
         } catch (e: Exception) {
             Log.e(TAG, "init() FAILED: ${e.javaClass.simpleName}: ${e.message}", e)
+        }
+    }
+
+    /**
+     * For each completed download that still references a plain file path (i.e. a download
+     * created before we switched to MediaStore), copy the bytes into MediaStore and rewrite
+     * the filePath in the DB to the resulting content:// URI.
+     *
+     * Safe to call on every app start. Skips entries already in MediaStore (content://) and
+     * entries whose source file no longer exists.
+     */
+    private suspend fun migrateLegacyToMediaStore() {
+        val all = try {
+            dao.getAllSnapshot()
+        } catch (e: Exception) {
+            Log.e(TAG, "migrateLegacyToMediaStore: getAllSnapshot failed", e)
+            return
+        }
+
+        var migrated = 0
+        for (entry in all) {
+            if (!entry.isCompleted) continue
+            if (entry.filePath.startsWith("content://")) continue
+
+            val src = File(entry.filePath)
+            if (!src.exists() || src.length() == 0L) continue
+
+            val mime = guessMimeType(src, isHls = src.extension.equals("ts", ignoreCase = true))
+            val uri = com.streamflixreborn.streamflix.utils.MediaStoreHelper.publish(
+                context = appContext,
+                srcFile = src,
+                displayName = src.name,
+                mimeType = mime,
+            )
+            if (uri != null) {
+                dao.updateFilePath(entry.id, uri.toString())
+                migrated++
+                Log.d(TAG, "Migrated legacy → MediaStore: ${entry.id} → $uri")
+            } else {
+                Log.w(TAG, "Migration to MediaStore failed for ${entry.id}, keeping original path")
+            }
+        }
+        if (migrated > 0) {
+            Log.d(TAG, "migrateLegacyToMediaStore: migrated $migrated download(s)")
         }
     }
 
@@ -200,7 +249,7 @@ object DownloadManager {
         val download = dao.getById(id) ?: return
         synchronized(pauseRequests) { pauseRequests.add(id) } // stop if active
         delay(200) // let the download loop notice
-        File(download.filePath).delete()
+        deletePhysicalFile(download.filePath)
         dao.deleteById(id)
     }
 
@@ -211,8 +260,20 @@ object DownloadManager {
 
     suspend fun deleteCompleted(id: String) {
         val download = dao.getById(id) ?: return
-        File(download.filePath).delete()
+        deletePhysicalFile(download.filePath)
         dao.deleteById(id)
+    }
+
+    /**
+     * Delete the actual bytes referenced by a download row's filePath.
+     * Handles both legacy file-system paths and MediaStore content:// URIs.
+     */
+    private fun deletePhysicalFile(filePath: String) {
+        if (filePath.startsWith("content://")) {
+            com.streamflixreborn.streamflix.utils.MediaStoreHelper.delete(appContext, filePath)
+        } else {
+            runCatching { File(filePath).delete() }
+        }
     }
 
     // ── Internal ──
@@ -277,6 +338,25 @@ object DownloadManager {
                 synchronized(pauseRequests) { pauseRequests.remove(download.id) }
                 updateNotification("En pause : ${download.title}", 0)
             } else {
+                // Download fully written to app-private dir. Now publish into MediaStore
+                // so the file appears in /Movies/StreamFlix/ and is visible to VLC, gallery,
+                // file managers, etc. The DB filePath becomes the content:// URI.
+                val srcFile = File(download.filePath)
+                val displayName = srcFile.name
+                val mime = guessMimeType(srcFile, isHls)
+                val publishedUri = com.streamflixreborn.streamflix.utils.MediaStoreHelper.publish(
+                    context = appContext,
+                    srcFile = srcFile,
+                    displayName = displayName,
+                    mimeType = mime,
+                )
+                if (publishedUri != null) {
+                    // Replace filePath with the MediaStore URI so playback uses ContentResolver.
+                    dao.updateFilePath(download.id, publishedUri.toString())
+                    Log.d(TAG, "Published to MediaStore: ${download.id} → $publishedUri")
+                } else {
+                    Log.w(TAG, "MediaStore publish failed for ${download.id} — keeping app-private path as fallback")
+                }
                 dao.markCompleted(download.id)
                 showCompletedNotification(download.title)
                 showToast("✅ Téléchargement terminé : ${download.title}")
@@ -819,6 +899,9 @@ object DownloadManager {
     }
 
     private fun getDownloadDir(): File {
+        // Temporary buffer dir for in-progress downloads. Once the download is complete,
+        // bytes are moved into MediaStore (/Movies/StreamFlix/) where they become visible
+        // to other apps. The app-private dir keeps partial files invisible while downloading.
         val dir = File(
             appContext.getExternalFilesDir(Environment.DIRECTORY_MOVIES),
             "StreamFlix"
@@ -831,5 +914,21 @@ object DownloadManager {
         return name.replace("[^a-zA-Z0-9._\\-àâéèêëïîôùûüçÀÂÉÈÊËÏÎÔÙÛÜÇ ]".toRegex(), "_")
             .replace("\\s+".toRegex(), "_")
             .take(200)
+    }
+
+    /**
+     * Guess a sensible MIME type for the downloaded file. We use the file extension first
+     * (since enqueue() sets it explicitly to "ts" for HLS or "mp4" for direct), and fall
+     * back to the original mimeType reported by the provider when possible.
+     */
+    private fun guessMimeType(file: File, isHls: Boolean): String {
+        return when (file.extension.lowercase()) {
+            "mp4" -> "video/mp4"
+            "ts" -> "video/mp2t" // HLS-concatenated transport stream
+            "mkv" -> "video/x-matroska"
+            "webm" -> "video/webm"
+            "m4v" -> "video/x-m4v"
+            else -> if (isHls) "video/mp2t" else "video/mp4"
+        }
     }
 }

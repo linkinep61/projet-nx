@@ -94,8 +94,17 @@ class DownloadsMobileFragment : Fragment() {
     }
 
     private fun playDownload(download: DownloadEntity) {
-        val file = File(download.filePath)
-        if (!file.exists()) {
+        // filePath may be either a plain file path (legacy / pre-MediaStore) or a
+        // content:// URI (post-MediaStore publish). Existence check differs.
+        val available = if (download.filePath.startsWith("content://")) {
+            runCatching {
+                requireContext().contentResolver.openInputStream(android.net.Uri.parse(download.filePath))?.use { true } ?: false
+            }.getOrDefault(false)
+        } else {
+            File(download.filePath).exists()
+        }
+
+        if (!available) {
             Toast.makeText(requireContext(), "Fichier introuvable", Toast.LENGTH_SHORT).show()
             viewLifecycleOwner.lifecycleScope.launch {
                 DownloadManager.deleteCompleted(download.id)

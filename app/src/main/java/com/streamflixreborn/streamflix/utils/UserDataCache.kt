@@ -22,6 +22,11 @@ object UserDataCache {
     private val gson = Gson()
     private val memoryCache = ConcurrentHashMap<String, UserData>()
 
+    // Use TypeToken so generic type info (List<CachedEpisode>, etc.) survives R8 even if
+    // the -keep ProGuard rule on UserDataCache$* is ever stripped or reordered. Belt-and-suspenders
+    // with the ProGuard rule.
+    private val userDataType: java.lang.reflect.Type = object : TypeToken<UserData>() {}.type
+
     data class UserData(
         val favoritesMovies: List<CachedMovie> = emptyList(),
         val favoritesTvShows: List<CachedTvShow> = emptyList(),
@@ -67,10 +72,18 @@ object UserDataCache {
         if (!file.exists()) return null
 
         return runCatching {
-            gson.fromJson(file.readText(), UserData::class.java).normalized().also {
+            gson.fromJson<UserData>(file.readText(), userDataType).normalized().also {
                 memoryCache[key] = it
             }
-        }.getOrNull()
+        }.getOrElse { error ->
+            // Cache file corrupted (e.g., format mismatch after a release build that stripped
+            // generic type info — see ClassCastException LinkedTreeMap → CachedEpisode).
+            // Delete it so subsequent app starts work cleanly; the cache will be regenerated
+            // from the database on next write.
+            Log.w("UserDataCache", "Failed to read cache for $key, deleting corrupted file", error)
+            runCatching { file.delete() }
+            null
+        }
     }
 
     fun write(context: Context, provider: Provider, newData: UserData) {

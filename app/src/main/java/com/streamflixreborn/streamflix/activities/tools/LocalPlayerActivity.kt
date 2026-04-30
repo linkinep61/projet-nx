@@ -107,15 +107,28 @@ class LocalPlayerActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Resolve the input string into a playable Uri.
+     * Accepts: content:// URIs (MediaStore), file:// URIs, or plain absolute file paths.
+     * Returns null if the resolved file doesn't exist (only checked for plain paths).
+     */
+    private fun resolveUri(input: String): Uri? {
+        return when {
+            input.startsWith("content://") || input.startsWith("file://") -> Uri.parse(input)
+            else -> {
+                val file = File(input)
+                if (!file.exists()) null else Uri.fromFile(file)
+            }
+        }
+    }
+
     private fun initPlayer(filePath: String) {
-        val file = File(filePath)
-        if (!file.exists()) {
+        val uri = resolveUri(filePath)
+        if (uri == null) {
             android.widget.Toast.makeText(this, "Fichier introuvable", android.widget.Toast.LENGTH_SHORT).show()
             finish()
             return
         }
-
-        val uri = Uri.fromFile(file)
 
         // Use TS-aware extractors for .ts files and HLS-downloaded .mp4 files
         // This enables seeking in concatenated TS segment files
@@ -132,10 +145,16 @@ class LocalPlayerActivity : AppCompatActivity() {
             .also { exoPlayer ->
                 playerView.player = exoPlayer
 
-                // Hint MIME type based on extension for proper extractor selection
-                // .ts files = HLS downloads (concatenated TS segments)
-                // .mp4 files = direct downloads (real MP4 container)
-                val mimeType = if (filePath.endsWith(".ts", ignoreCase = true)) "video/mp2t" else null
+                // Hint MIME type based on filename for proper extractor selection.
+                // .ts = HLS downloads (concatenated TS segments), .mp4 = direct downloads.
+                // We sniff the original input string since content:// URIs don't carry
+                // the extension in their path.
+                val lowerPath = filePath.lowercase()
+                val mimeType = when {
+                    lowerPath.endsWith(".ts") || lowerPath.contains(".ts?") -> "video/mp2t"
+                    lowerPath.endsWith(".mp4") || lowerPath.contains(".mp4?") -> "video/mp4"
+                    else -> null
+                }
                 val mediaItem = MediaItem.Builder()
                     .setUri(uri)
                     .apply { if (mimeType != null) setMimeType(mimeType) }
@@ -157,10 +176,14 @@ class LocalPlayerActivity : AppCompatActivity() {
 
     private fun fallbackToSystemPlayer(filePath: String) {
         try {
-            val file = File(filePath)
-            val uri = androidx.core.content.FileProvider.getUriForFile(
-                this, "${packageName}.provider", file
-            )
+            val uri: Uri = if (filePath.startsWith("content://")) {
+                Uri.parse(filePath)
+            } else {
+                val file = File(filePath)
+                androidx.core.content.FileProvider.getUriForFile(
+                    this, "${packageName}.provider", file
+                )
+            }
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, "video/*")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

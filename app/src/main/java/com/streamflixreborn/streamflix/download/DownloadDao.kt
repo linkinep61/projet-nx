@@ -9,6 +9,12 @@ interface DownloadDao {
     @Query("SELECT * FROM downloads ORDER BY createdAt DESC")
     fun getAll(): Flow<List<DownloadEntity>>
 
+    @Query("SELECT * FROM downloads ORDER BY createdAt DESC")
+    suspend fun getAllSnapshot(): List<DownloadEntity>
+
+    @Query("UPDATE downloads SET filePath = :filePath WHERE id = :id")
+    suspend fun updateFilePath(id: String, filePath: String)
+
     @Query("SELECT * FROM downloads WHERE status = :status ORDER BY createdAt DESC")
     fun getByStatus(status: String): Flow<List<DownloadEntity>>
 

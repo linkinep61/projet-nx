@@ -30,8 +30,8 @@ android {
         applicationId "com.streamfr.app"
         minSdk 21
         targetSdk 35
-        versionCode 162
-        versionName "1.7.139"
+        versionCode 163
+        versionName "1.7.140"
 
         buildConfigField "String", "APP_LAYOUT", "\"${properties.getProperty("APP_LAYOUT")}\""
         buildConfigField "String", "TMDB_API_KEY", "\"${properties.getProperty("TMDB_API_KEY")}\""

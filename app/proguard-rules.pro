@@ -23,6 +23,11 @@
 -keep class com.streamflixreborn.streamflix.utils.GitHub$* { *; }
 -keep class com.streamflixreborn.streamflix.utils.SubDL$* { *; }
 -keep class com.streamflixreborn.streamflix.utils.OpenSubtitles$* { *; }
+# UserDataCache & inner data classes (CachedMovie/TvShow/Episode, UserData) — Gson deserialises these
+# Without this, R8 strips field Signature attributes → List<CachedEpisode> becomes List<LinkedTreeMap>
+# → ClassCastException at app startup when consuming the cache.
+-keep class com.streamflixreborn.streamflix.utils.UserDataCache { *; }
+-keep class com.streamflixreborn.streamflix.utils.UserDataCache$* { *; }
 
 # ---- kotlinx-serialization ----
 -keepattributes *Annotation*, InnerClasses
