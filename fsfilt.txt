@@ -1,0 +1,664 @@
+05-01 19:50:30.200   610  2873 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: persistent_data_block
+05-01 19:50:30.708  1315  2125 D OneSearchSuggestProvider: java.util.concurrent.CompletionException: java.util.NoSuchElementException: No value present
+05-01 19:50:30.708  1315  2125 D OneSearchSuggestProvider: 	at java.util.concurrent.CompletableFuture.completeExceptionally(CompletableFuture.java:2138)
+05-01 19:50:30.708  1315  2125 D OneSearchSuggestProvider: Caused by: java.util.NoSuchElementException: No value present
+05-01 19:50:31.355   610  1987 W WindowManager: Exception thrown during dispatchAppVisibility Window{3df7b1d u0 com.streamfr.app/com.streamflixreborn.streamflix.activities.main.MainMobileActivity EXITING}
+05-01 19:50:31.355   610  1987 W WindowManager: android.os.DeadObjectException
+05-01 19:50:31.693  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 19:50:36.175  6320  6630 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:50:39.178  6320  6457 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:52:02.672   610  1657 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: persistent_data_block
+05-01 19:52:03.939  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 19:52:09.344  6320  6630 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:52:12.356  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:52:17.099 13487 13599 D PlayerViewModel: Inizio ricerca server per ID: 1007757
+05-01 19:52:17.100 13487 13593 D PlayerViewModel: Inizio ricerca sottotitoli
+05-01 19:52:17.103 13487 13558 D PlayerViewModel: Inizio ricerca SubDL
+05-01 19:52:17.109 13487 13603 D PlayerViewModel: Inizio ricerca OpenSubtitles
+05-01 19:52:17.111 13487 13558 D PlayerViewModel: Ricerca SubDL completata: 0 risultati
+05-01 19:52:17.744 13487 13594 D PlayerViewModel: Ricerca OpenSubtitles completata: 0 risultati
+05-01 19:52:17.764 13487 13593 D PlayerViewModel: Ricerca server completata: 1 server trovati
+05-01 19:52:17.767 13487 13593 D PlayerViewModel: Inizio estrazione video dal server: Filemoon (Link 1)
+05-01 19:52:20.685 13487 13593 D PlayerViewModel: Estrazione video completata con successo
+05-01 19:52:21.372  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:52:24.384  6320  6630 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:52:27.416  6320 10536 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:52:29.223 13487 13604 D PlayerViewModel: Inizio ricerca server per ID: 1007757
+05-01 19:52:29.224 13487 13600 D PlayerViewModel: Inizio ricerca sottotitoli
+05-01 19:52:29.226 13487 13560 D PlayerViewModel: Inizio ricerca SubDL
+05-01 19:52:29.227 13487 13593 D PlayerViewModel: Inizio ricerca OpenSubtitles
+05-01 19:52:29.229 13487 13560 D PlayerViewModel: Ricerca SubDL completata: 0 risultati
+05-01 19:52:29.747 13487 13591 D PlayerViewModel: Ricerca server completata: 1 server trovati
+05-01 19:52:29.751 13487 13591 D PlayerViewModel: Inizio estrazione video dal server: Filemoon (Link 1)
+05-01 19:52:29.753 13487 13591 D PlayerViewModel: Estrazione video completata con successo
+05-01 19:52:29.761 13487 13591 D PlayerViewModel: Ricerca OpenSubtitles completata: 0 risultati
+05-01 19:52:29.773   610   709 W MediaSessionRecord: java.util.NoSuchElementException: Death link does not exist (NAME_NOT_FOUND)
+05-01 19:52:29.773   610  1985 W MediaSessionRecord: java.util.NoSuchElementException: Death link does not exist (NAME_NOT_FOUND)
+05-01 19:52:30.389  6320 10536 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:52:39.440  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:52:42.490  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:53:15.423  6320 13550 W GLSUser : [AppCertManager] Exception while requesting key: 
+05-01 19:53:15.423  6320 13550 W GLSUser : java.util.concurrent.ExecutionException: czle: Parsing Exception
+05-01 19:53:15.423  6320 13550 W GLSUser : Caused by: czle: Parsing Exception
+05-01 19:53:15.728  6320 13773 W Conscrypt: Could not set socket write timeout: java.net.SocketException: Socket closed
+05-01 19:53:16.231  6320 13773 W Conscrypt: Could not set socket write timeout: java.net.SocketException: Socket closed
+05-01 19:53:42.634  6320  7210 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:53:45.638  6320  6330 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:54:09.704  6320  6612 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:54:15.715  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:54:38.311  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 19:54:47.471  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 19:54:48.110  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 19:54:54.449 13487 13832 I okhttp.OkHttpClient: <-- HTTP FAILED: java.io.IOException: Canceled
+05-01 19:54:54.451 13487 13835 I okhttp.OkHttpClient: <-- HTTP FAILED: java.io.IOException: Canceled
+05-01 19:54:54.607 13487 13487 W Glide   : class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 19:54:54.607 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:54:54.607 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:54:54.607 13487 13487 W Glide   :   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 19:54:54.607 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:54:54.607 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:54:54.607 13487 13487 W Glide   :     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 19:54:54.607 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:54:54.607 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:54:54.607 13487 13487 W Glide   :       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:54:54.608 13487 13487 I Glide   : com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:54:54.789  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:55:00.800  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:55:03.813  6320  6612 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:55:06.057 13487 13487 W Glide   : class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 19:55:06.057 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:06.057 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:06.057 13487 13487 W Glide   :   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 19:55:06.057 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:06.057 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:06.057 13487 13487 W Glide   :     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 19:55:06.057 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:06.057 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:06.057 13487 13487 W Glide   :       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:55:06.057 13487 13487 I Glide   : com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:55:09.824  6320 10536 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:55:12.823  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:55:30.850  6320  7210 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:55:33.860  6320  6612 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:55:36.707 13487 13487 W Glide   : class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 19:55:36.707 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:36.707 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:36.707 13487 13487 W Glide   :   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 19:55:36.707 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:36.707 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:36.707 13487 13487 W Glide   :     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 19:55:36.707 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:36.707 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:36.707 13487 13487 W Glide   :       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:55:36.707 13487 13487 I Glide   : com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:55:36.954 13487 13487 W Glide   : class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 19:55:36.954 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:36.954 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:36.954 13487 13487 W Glide   :   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 19:55:36.954 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:36.954 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:36.954 13487 13487 W Glide   :     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 19:55:36.954 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:36.954 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:36.954 13487 13487 W Glide   :       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:55:36.954 13487 13487 I Glide   : com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:55:36.996 13487 13487 W Glide   : class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 19:55:36.996 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:36.996 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:36.996 13487 13487 W Glide   :   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 19:55:36.996 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:36.996 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:36.996 13487 13487 W Glide   :     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 19:55:36.996 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:36.996 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:36.996 13487 13487 W Glide   :       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:55:36.996 13487 13487 I Glide   : com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:55:48.906  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:55:52.007   610   646 E OomConnection: failed waiting for OOM events: java.lang.RuntimeException: listener failed waiting for OOM event
+05-01 19:55:52.024  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:55:53.770 13487 13487 W Glide   : class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 19:55:53.770 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:53.770 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:53.770 13487 13487 W Glide   :   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 19:55:53.770 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:53.770 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:53.770 13487 13487 W Glide   :     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 19:55:53.770 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:55:53.770 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:55:53.770 13487 13487 W Glide   :       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:55:53.770 13487 13487 I Glide   : com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:57:28.167  6320  6612 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:57:31.175  6320  6394 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:58:20.388 13487 13856 E ExoPlayerImplInternal:   androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:58:20.388 13487 13856 E ExoPlayerImplInternal:       at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:58:20.388 13487 13856 E ExoPlayerImplInternal:   Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:58:25.037 13487 13856 E ExoPlayerImplInternal:   androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:58:25.037 13487 13856 E ExoPlayerImplInternal:       at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:58:25.037 13487 13856 E ExoPlayerImplInternal:   Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:58:30.153 13487 13856 E ExoPlayerImplInternal:   androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:58:30.153 13487 13856 E ExoPlayerImplInternal:       at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:58:30.153 13487 13856 E ExoPlayerImplInternal:   Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:58:31.293  6320 10536 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:58:34.290  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:58:34.815 13487 13856 E ExoPlayerImplInternal:   androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:58:34.815 13487 13856 E ExoPlayerImplInternal:       at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:58:34.815 13487 13856 E ExoPlayerImplInternal:   Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:58:37.018 13487 14006 D PlayerViewModel: Inizio ricerca server per ID: ola::tf1
+05-01 19:58:37.019 13487 13560 D PlayerViewModel: Inizio ricerca sottotitoli
+05-01 19:58:37.023 13487 14006 D PlayerViewModel: Ricerca server completata: 1 server trovati
+05-01 19:58:37.026 13487 14021 D PlayerViewModel: Additional server arrived: OLA[tf1] Source 2
+05-01 19:58:37.026 13487 14021 D PlayerViewModel: Additional server arrived: OLA[tf1] UHD
+05-01 19:58:37.026 13487 14021 D PlayerViewModel: Additional server arrived: OLA[tf1] +1 FHD
+05-01 19:58:37.026 13487 14021 D PlayerViewModel: Additional server arrived: OLA[tf1] FHD
+05-01 19:58:37.026 13487 14021 D PlayerViewModel: Additional server arrived: OLA[tf1] 4K
+05-01 19:58:37.026 13487 14021 D PlayerViewModel: Additional server arrived: OLA[tf1] HEVC
+05-01 19:58:37.026 13487 14021 D PlayerViewModel: Additional server arrived: OLA[tf1] Source 8
+05-01 19:58:37.026 13487 14021 D PlayerViewModel: Additional server arrived: OLA[tf1] UHD
+05-01 19:58:37.026 13487 14021 D PlayerViewModel: Additional server arrived: OLA[tf1] +1 FHD
+05-01 19:58:37.026 13487 14021 D PlayerViewModel: Additional server arrived: OLA[tf1] FHD
+05-01 19:58:37.026 13487 14021 D PlayerViewModel: Additional server arrived: OLA[tf1] 4K
+05-01 19:58:37.085  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 19:58:37.095 13487 13871 D PlayerViewModel: Inizio ricerca SubDL
+05-01 19:58:37.095 13487 13871 D PlayerViewModel: Ricerca SubDL completata: 0 risultati
+05-01 19:58:37.096 13487 13871 D PlayerViewModel: Inizio ricerca OpenSubtitles
+05-01 19:58:37.097 13487 13560 D PlayerViewModel: Inizio estrazione video dal server: OLA TV - HEVC
+05-01 19:58:37.183 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] Source 2
+05-01 19:58:37.183 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] UHD
+05-01 19:58:37.183 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] +1 FHD
+05-01 19:58:37.183 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] FHD
+05-01 19:58:37.183 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] 4K
+05-01 19:58:37.183 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] HEVC
+05-01 19:58:37.183 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] Source 8
+05-01 19:58:37.183 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] UHD
+05-01 19:58:37.184 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] +1 FHD
+05-01 19:58:37.184 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] FHD
+05-01 19:58:37.184 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] 4K
+05-01 19:58:37.355 13487 13560 D PlayerViewModel: Estrazione video completata con successo
+05-01 19:58:38.766 13487 13560 D PlayerViewModel: Ricerca OpenSubtitles completata: 0 risultati
+05-01 19:58:41.814 13487 14023 E ExoPlayerImplInternal:   androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:58:41.814 13487 14023 E ExoPlayerImplInternal:       at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:58:41.814 13487 14023 E ExoPlayerImplInternal:   Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:58:41.817 13487 13487 E PlayerDebug:   cause: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:58:41.817 13487 13487 E PlayerMobileFragment: androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:58:41.817 13487 13487 E PlayerMobileFragment: 	at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:58:41.817 13487 13487 E PlayerMobileFragment: Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:58:41.818 13487 13560 D PlayerViewModel: Inizio estrazione video dal server: OLA[tf1] Source 2
+05-01 19:58:42.074 13487 13560 D PlayerViewModel: Estrazione video completata con successo
+05-01 19:58:43.871  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 19:58:44.213 13487 13487 W Glide   : class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 19:58:44.213 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:58:44.213 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:58:44.213 13487 13487 W Glide   :   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 19:58:44.213 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:58:44.213 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:58:44.213 13487 13487 W Glide   :     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 19:58:44.213 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:58:44.213 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:58:44.213 13487 13487 W Glide   :       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:58:44.213 13487 13487 I Glide   : com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:58:44.217 13487 13487 W Glide   : class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 19:58:44.217 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:58:44.217 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:58:44.217 13487 13487 W Glide   :   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 19:58:44.217 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:58:44.217 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:58:44.217 13487 13487 W Glide   :     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 19:58:44.217 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:58:44.217 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:58:44.217 13487 13487 W Glide   :       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:58:44.217 13487 13487 I Glide   : com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:58:46.318  6320 10536 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:58:47.561 13487 14008 D PlayerViewModel: Inizio ricerca server per ID: ola::tf1
+05-01 19:58:47.561 13487 14017 D PlayerViewModel: Inizio ricerca sottotitoli
+05-01 19:58:47.585 13487 14008 D PlayerViewModel: Ricerca server completata: 1 server trovati
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] Source 2
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] UHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] +1 FHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] FHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] 4K
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] HEVC
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] Source 8
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] UHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] +1 FHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] FHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] 4K
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] Source 2
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] UHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] +1 FHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] FHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] 4K
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] HEVC
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] Source 8
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] UHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] +1 FHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] FHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] 4K
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] Source 2
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] UHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] +1 FHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] FHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] 4K
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] HEVC
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] Source 8
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] UHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] +1 FHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] FHD
+05-01 19:58:47.586 13487 14008 D PlayerViewModel: Additional server arrived: OLA[tf1] 4K
+05-01 19:58:47.608  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 19:58:47.620 13487 13871 D PlayerViewModel: Inizio ricerca SubDL
+05-01 19:58:47.621 13487 13871 D PlayerViewModel: Ricerca SubDL completata: 0 risultati
+05-01 19:58:47.622 13487 13871 D PlayerViewModel: Inizio ricerca OpenSubtitles
+05-01 19:58:47.627 13487 14017 D PlayerViewModel: Inizio estrazione video dal server: OLA TV - HEVC
+05-01 19:58:47.628 13487 14017 D PlayerViewModel: Estrazione video completata con successo
+05-01 19:58:47.744 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] Source 2
+05-01 19:58:47.744 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] UHD
+05-01 19:58:47.744 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] +1 FHD
+05-01 19:58:47.744 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] FHD
+05-01 19:58:47.744 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] 4K
+05-01 19:58:47.744 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] HEVC
+05-01 19:58:47.744 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] Source 8
+05-01 19:58:47.744 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] UHD
+05-01 19:58:47.744 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] +1 FHD
+05-01 19:58:47.744 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] FHD
+05-01 19:58:47.744 13487 13871 D PlayerViewModel: Additional server arrived: OLA[tf1] 4K
+05-01 19:58:47.915 13487 13871 D PlayerViewModel: Ricerca OpenSubtitles completata: 0 risultati
+05-01 19:58:52.334  6320 10536 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:58:52.622 13487 14058 E ExoPlayerImplInternal:   androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:58:52.622 13487 14058 E ExoPlayerImplInternal:       at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:58:52.622 13487 14058 E ExoPlayerImplInternal:   Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:58:52.629 13487 13487 E PlayerDebug:   cause: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:58:52.632 13487 13487 E PlayerMobileFragment: androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:58:52.632 13487 13487 E PlayerMobileFragment: 	at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:58:52.632 13487 13487 E PlayerMobileFragment: Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:58:52.633 13487 13871 D PlayerViewModel: Inizio estrazione video dal server: OLA[tf1] Source 2
+05-01 19:58:52.640 13487 13871 D PlayerViewModel: Estrazione video completata con successo
+05-01 19:58:56.838 13487 14058 E ExoPlayerImplInternal:   androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:58:56.838 13487 14058 E ExoPlayerImplInternal:       at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:58:56.838 13487 14058 E ExoPlayerImplInternal:   Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:58:56.843 13487 13487 E PlayerDebug:   cause: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:58:56.843 13487 13487 E PlayerMobileFragment: androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:58:56.843 13487 13487 E PlayerMobileFragment: 	at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:58:56.843 13487 13487 E PlayerMobileFragment: Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:58:56.847 13487 13871 D PlayerViewModel: Inizio estrazione video dal server: OLA[tf1] UHD
+05-01 19:58:57.135 13487 13871 D PlayerViewModel: Estrazione video completata con successo
+05-01 19:58:57.336 13487 13871 D PlayerViewModel: Inizio estrazione video dal server: HEVC
+05-01 19:58:58.219 13487 13871 D PlayerViewModel: Estrazione video completata con successo
+05-01 19:59:01.355  6320  6630 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:59:04.079 13487 14058 E ExoPlayerImplInternal:   androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:59:04.079 13487 14058 E ExoPlayerImplInternal:       at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:59:04.079 13487 14058 E ExoPlayerImplInternal:   Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 458
+05-01 19:59:04.084 13487 13487 E PlayerDebug:   cause: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 458
+05-01 19:59:04.084 13487 13487 E PlayerMobileFragment: androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:59:04.084 13487 13487 E PlayerMobileFragment: 	at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:59:04.084 13487 13487 E PlayerMobileFragment: Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 458
+05-01 19:59:04.086 13487 13871 D PlayerViewModel: Inizio estrazione video dal server: OLA TV - HEVC
+05-01 19:59:04.346 13487 13871 D PlayerViewModel: Estrazione video completata con successo
+05-01 19:59:04.365  6320  6330 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:59:07.361  6320  6630 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:59:08.593 13487 14058 E ExoPlayerImplInternal:   androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:59:08.593 13487 14058 E ExoPlayerImplInternal:       at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:59:08.593 13487 14058 E ExoPlayerImplInternal:   Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:59:08.604 13487 13487 E PlayerDebug:   cause: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:59:08.604 13487 13487 E PlayerMobileFragment: androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:59:08.604 13487 13487 E PlayerMobileFragment: 	at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:59:08.604 13487 13487 E PlayerMobileFragment: Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:59:08.608 13487 14006 D PlayerViewModel: Inizio estrazione video dal server: OLA[tf1] Source 2
+05-01 19:59:08.880 13487 14006 D PlayerViewModel: Estrazione video completata con successo
+05-01 19:59:10.362  6320  6630 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:59:13.151 13487 14058 E ExoPlayerImplInternal:   androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:59:13.151 13487 14058 E ExoPlayerImplInternal:       at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:59:13.151 13487 14058 E ExoPlayerImplInternal:   Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:59:13.155 13487 13487 E PlayerDebug:   cause: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:59:13.155 13487 13487 E PlayerMobileFragment: androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 19:59:13.155 13487 13487 E PlayerMobileFragment: 	at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 19:59:13.155 13487 13487 E PlayerMobileFragment: Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 456
+05-01 19:59:13.157 13487 14006 D PlayerViewModel: Inizio estrazione video dal server: OLA[tf1] UHD
+05-01 19:59:13.157 13487 14006 D PlayerViewModel: Estrazione video completata con successo
+05-01 19:59:13.366  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:59:14.214   610  2519 W MediaSessionRecord: java.util.NoSuchElementException: Death link does not exist (NAME_NOT_FOUND)
+05-01 19:59:14.217   610  2873 W MediaSessionRecord: java.util.NoSuchElementException: Death link does not exist (NAME_NOT_FOUND)
+05-01 19:59:14.273  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 19:59:14.531 13487 13487 W Glide   : class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 19:59:14.531 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:59:14.531 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:59:14.531 13487 13487 W Glide   :   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 19:59:14.531 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:59:14.531 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:59:14.531 13487 13487 W Glide   :     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 19:59:14.531 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:59:14.531 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:59:14.531 13487 13487 W Glide   :       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:59:14.531 13487 13487 I Glide   : com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:59:14.532 13487 13487 W Glide   : class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 19:59:14.532 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:59:14.532 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:59:14.532 13487 13487 W Glide   :   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 19:59:14.532 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:59:14.532 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:59:14.532 13487 13487 W Glide   :     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 19:59:14.532 13487 13487 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 19:59:14.532 13487 13487 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 19:59:14.532 13487 13487 W Glide   :       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:59:14.532 13487 13487 I Glide   : com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 19:59:28.404  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:59:34.413  6320 10536 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:59:40.436  6320  6394 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 19:59:43.444  6320  6330 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:00:06.798   610  2873 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: persistent_data_block
+05-01 20:00:06.895   610   951 E ConnectivityService: RemoteException caught trying to send a callback msg for NetworkRequest [ TRACK_DEFAULT id=384, [ Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VCN_MANAGED&NOT_BANDWIDTH_CONSTRAINED Uid: 10209 RequestorUid: 10209 RequestorPkg: com.streamfr.app UnderlyingNetworks: Null] ]
+05-01 20:00:06.901   610   951 E ConnectivityService: RemoteException caught trying to send a callback msg for NetworkRequest [ LISTEN id=386, [ Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED&FOREGROUND&NOT_VCN_MANAGED&NOT_BANDWIDTH_CONSTRAINED Uid: 10209 RequestorUid: 10209 RequestorPkg: com.streamfr.app UnderlyingNetworks: Null] ]
+05-01 20:00:06.907   610   951 E ConnectivityService: RemoteException caught trying to send a callback msg for NetworkRequest [ TRACK_DEFAULT id=389, [ Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VCN_MANAGED&NOT_BANDWIDTH_CONSTRAINED Uid: 10209 RequestorUid: 10209 RequestorPkg: com.streamfr.app UnderlyingNetworks: Null] ]
+05-01 20:00:07.082  1315  2125 D OneSearchSuggestProvider: java.util.concurrent.CompletionException: java.util.NoSuchElementException: No value present
+05-01 20:00:07.082  1315  2125 D OneSearchSuggestProvider: 	at java.util.concurrent.CompletableFuture.completeExceptionally(CompletableFuture.java:2138)
+05-01 20:00:07.082  1315  2125 D OneSearchSuggestProvider: Caused by: java.util.NoSuchElementException: No value present
+05-01 20:00:07.972   610   628 W WindowManager: Exception thrown during dispatchAppVisibility Window{3c61dc1 u0 com.streamfr.app/com.streamflixreborn.streamflix.activities.main.MainMobileActivity EXITING}
+05-01 20:00:07.972   610   628 W WindowManager: android.os.DeadObjectException
+05-01 20:00:13.499  6320 10536 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:00:16.505  6320  6330 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:00:39.959 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 20:00:39.959 14222 14222 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 20:00:39.959 14222 14222 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 20:00:39.959 14222 14222 W Glide   :   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 20:00:39.959 14222 14222 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 20:00:39.959 14222 14222 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 20:00:39.959 14222 14222 W Glide   :     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 20:00:39.959 14222 14222 W Glide   : com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 20:00:39.959 14222 14222 W Glide   :  call GlideException#logRootCauses(String) for more detail
+05-01 20:00:39.959 14222 14222 W Glide   :       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 20:00:39.962 14222 14222 I Glide   : com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 20:00:41.413 14222 14281 D CACHE_PATH: /data/user/0/com.streamfr.app/files/user-data-cache/FrenchStream__https_fs14.lol.json
+05-01 20:00:41.631 14222 14222 D HomeMobile: initializeMiniPlayer: provider=FrenchStream (FrenchStreamProvider), isIptv=false, miniPlayerEnabled=true
+05-01 20:00:42.211 14222 14331 D DnsResolver: Resolving host: fs14.lol using provider: https://cloudflare-dns.com/dns-query
+05-01 20:00:42.218 14222 14341 D DnsResolver: Resolving host: fs14.lol using provider: https://cloudflare-dns.com/dns-query
+05-01 20:00:42.219 14222 14342 D DnsResolver: Resolving host: fs14.lol using provider: https://cloudflare-dns.com/dns-query
+05-01 20:00:42.520 14222 14331 D DnsResolver: Resolved fs14.lol to: 172.67.175.176, 104.21.56.15, 2606:4700:3033::6815:380f, 2606:4700:3035::ac43:afb0
+05-01 20:00:42.521 14222 14342 D DnsResolver: Resolved fs14.lol to: 2606:4700:3033::6815:380f, 2606:4700:3035::ac43:afb0, 172.67.175.176, 104.21.56.15
+05-01 20:00:42.525 14222 14341 D DnsResolver: Resolved fs14.lol to: 172.67.175.176, 104.21.56.15, 2606:4700:3035::ac43:afb0, 2606:4700:3033::6815:380f
+05-01 20:00:42.570 14222 14298 I okhttp.OkHttpClient: <-- HTTP FAILED: java.io.IOException: Canceled
+05-01 20:00:42.690 14222 14333 E HomeViewModel: kotlinx.coroutines.JobCancellationException: Job was cancelled; job=SupervisorJobImpl{Cancelling}@518991b
+05-01 20:00:43.911 14222 14277 D MoviesViewModel: getMovies: provider=FrenchStream, isFilterable=false, languageFilter=all
+05-01 20:00:45.605 14222 14250 D TvShowsViewModel: getTvShows: provider=FrenchStream, isFilterable=false, languageFilter=all
+05-01 20:01:02.689 14222 14273 D MoviesViewModel: getMovies: provider=FrenchStream, isFilterable=false, languageFilter=all
+05-01 20:01:05.430 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:05.433 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:05.436 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:05.439 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:05.996 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:06.549 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:07.110 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:07.688 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:09.201 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:09.202 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:09.202 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:09.203 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:09.761 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:14.000 14222 14280 D HomeViewModel: Enrichment triggered for FrenchStream
+05-01 20:01:14.002 14222 14279 D HomeViewModel: Enrichment triggered for FrenchStream
+05-01 20:01:37.678  6320  6612 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:01:43.684  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:01:47.633 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:47.635 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:47.635 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:48.191 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:48.748 14222 14222 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:01:49.689  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:01:50.360 14222 14278 D TvShowsViewModel: getTvShows: provider=FrenchStream, isFilterable=false, languageFilter=all
+05-01 20:01:52.695  6320  6330 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:02:46.801  6320  7210 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:02:49.804  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:03:16.521  6320 14406 W GLSUser : [AppCertManager] Exception while requesting key: 
+05-01 20:03:16.521  6320 14406 W GLSUser : java.util.concurrent.ExecutionException: czle: Parsing Exception
+05-01 20:03:16.521  6320 14406 W GLSUser : Caused by: czle: Parsing Exception
+05-01 20:03:16.846  6320 14133 W Conscrypt: Could not set socket write timeout: java.net.SocketException: Socket closed
+05-01 20:03:17.349  6320 14133 W Conscrypt: Could not set socket write timeout: java.net.SocketException: Socket closed
+05-01 20:03:19.863  6320  6330 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:03:22.866  6320  6330 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:03:25.876  6320 10536 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:04:37.997  6320  6330 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:04:41.003  6320  6330 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:05:47.123  6320  6330 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:05:50.128  6320  6394 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:05:53.135  6320 10536 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:06:19.345  6973  7008 W BugleSpam: java.io.IOException: Could not get URI for file:, mdd_file {    id: 20260501070403US
+05-01 20:06:52.430   610  2144 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: persistent_data_block
+05-01 20:06:52.560  1315  2125 D OneSearchSuggestProvider: java.util.concurrent.CompletionException: java.util.NoSuchElementException: No value present
+05-01 20:06:52.560  1315  2125 D OneSearchSuggestProvider: 	at java.util.concurrent.CompletableFuture.completeExceptionally(CompletableFuture.java:2138)
+05-01 20:06:52.560  1315  2125 D OneSearchSuggestProvider: Caused by: java.util.NoSuchElementException: No value present
+05-01 20:06:53.268  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:06:53.473   610   710 W WindowManager: Exception thrown during dispatchAppVisibility Window{d94a655 u0 com.streamfr.app/com.streamflixreborn.streamflix.activities.main.MainMobileActivity EXITING}
+05-01 20:06:53.473   610   710 W WindowManager: android.os.DeadObjectException
+05-01 20:06:56.283  6320  6612 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:06:56.985 14581 14581 D HomeMobile: initializeMiniPlayer: provider=FrenchStream (FrenchStreamProvider), isIptv=false, miniPlayerEnabled=true
+05-01 20:06:56.994 14581 14581 D CACHE_PATH: /data/user/0/com.streamfr.app/files/user-data-cache/FrenchStream__https_fs14.lol.json
+05-01 20:06:59.433 14581 14652 D StreamFlixApp:   FrenchStream: URL refreshed → https://fs14.lol/
+05-01 20:06:59.710 14581 14625 D DnsResolver: Resolving host: fs14.lol using provider: https://cloudflare-dns.com/dns-query
+05-01 20:06:59.712 14581 14673 D DnsResolver: Resolving host: fs14.lol using provider: https://cloudflare-dns.com/dns-query
+05-01 20:06:59.713 14581 14672 D DnsResolver: Resolving host: fs14.lol using provider: https://cloudflare-dns.com/dns-query
+05-01 20:06:59.723 14581 14625 D DnsResolver: Resolved fs14.lol to: 104.21.56.15, 172.67.175.176, 2606:4700:3035::ac43:afb0, 2606:4700:3033::6815:380f
+05-01 20:06:59.730 14581 14673 D DnsResolver: Resolved fs14.lol to: 2606:4700:3035::ac43:afb0, 2606:4700:3033::6815:380f, 104.21.56.15, 172.67.175.176
+05-01 20:06:59.737 14581 14672 D DnsResolver: Resolved fs14.lol to: 104.21.56.15, 172.67.175.176, 2606:4700:3035::ac43:afb0, 2606:4700:3033::6815:380f
+05-01 20:07:04.447 14581 14635 D MoviesViewModel: getMovies: provider=FrenchStream, isFilterable=false, languageFilter=all
+05-01 20:07:08.555 14581 14638 D PlayerViewModel: Inizio ricerca sottotitoli
+05-01 20:07:08.556 14581 14638 D PlayerViewModel: Inizio ricerca SubDL
+05-01 20:07:08.556 14581 14652 D PlayerViewModel: Inizio ricerca OpenSubtitles
+05-01 20:07:08.557 14581 14638 D PlayerViewModel: Ricerca SubDL completata: 0 risultati
+05-01 20:07:08.558 14581 14655 D PlayerViewModel: Inizio ricerca server per ID: aventures-croisees
+05-01 20:07:08.622  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 20:07:09.294 14581 14652 I StreamFlixES: [SERVERS LIST] -> Provider: FrenchStream
+05-01 20:07:09.295 14581 14652 D PlayerViewModel: Ricerca server completata: 10 server trovati
+05-01 20:07:09.298 14581 14652 D PlayerViewModel: Inizio estrazione video dal server: Fsvid
+05-01 20:07:09.819 14581 14652 D PlayerViewModel: Ricerca OpenSubtitles completata: 0 risultati
+05-01 20:07:10.507 14581 14637 E PlayerViewModel: Errore estrazione video: 
+05-01 20:07:10.507 14581 14637 E PlayerViewModel: java.lang.Exception: Unpack failed
+05-01 20:07:10.507 14581 14637 E PlayerViewModel: 	at com.streamflixreborn.streamflix.extractors.FsvidExtractor.extract(FsvidExtractor.kt:36)
+05-01 20:07:10.507 14581 14637 E PlayerViewModel: 	at com.streamflixreborn.streamflix.extractors.FsvidExtractor$extract$1.invokeSuspend(Unknown Source:15)
+05-01 20:07:10.507 14581 14637 E PlayerViewModel: 	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:33)
+05-01 20:07:10.507 14581 14637 E PlayerViewModel: 	at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:104)
+05-01 20:07:10.507 14581 14637 E PlayerViewModel: 	at kotlinx.coroutines.internal.LimitedDispatcher$Worker.run(LimitedDispatcher.kt:111)
+05-01 20:07:10.507 14581 14637 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.TaskImpl.run(Tasks.kt:99)
+05-01 20:07:10.507 14581 14637 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler.runSafely(CoroutineScheduler.kt:584)
+05-01 20:07:10.507 14581 14637 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.executeTask(CoroutineScheduler.kt:811)
+05-01 20:07:10.507 14581 14637 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.runWorker(CoroutineScheduler.kt:715)
+05-01 20:07:10.507 14581 14637 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.run(CoroutineScheduler.kt:702)
+05-01 20:07:10.509 14581 14637 D PlayerViewModel: Inizio estrazione video dal server: Vidzy
+05-01 20:07:12.474 14581 14637 D PlayerViewModel: Estrazione video completata con successo
+05-01 20:07:14.327  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:07:17.327  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:07:29.443 14581 14652 D PlayerViewModel: Inizio estrazione video dal server: Fsvid
+05-01 20:07:29.894 14581 14652 E PlayerViewModel: Errore estrazione video: 
+05-01 20:07:29.894 14581 14652 E PlayerViewModel: java.lang.Exception: Unpack failed
+05-01 20:07:29.894 14581 14652 E PlayerViewModel: 	at com.streamflixreborn.streamflix.extractors.FsvidExtractor.extract(FsvidExtractor.kt:36)
+05-01 20:07:29.894 14581 14652 E PlayerViewModel: 	at com.streamflixreborn.streamflix.extractors.FsvidExtractor$extract$1.invokeSuspend(Unknown Source:15)
+05-01 20:07:29.894 14581 14652 E PlayerViewModel: 	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:33)
+05-01 20:07:29.894 14581 14652 E PlayerViewModel: 	at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:104)
+05-01 20:07:29.894 14581 14652 E PlayerViewModel: 	at kotlinx.coroutines.internal.LimitedDispatcher$Worker.run(LimitedDispatcher.kt:111)
+05-01 20:07:29.894 14581 14652 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.TaskImpl.run(Tasks.kt:99)
+05-01 20:07:29.894 14581 14652 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler.runSafely(CoroutineScheduler.kt:584)
+05-01 20:07:29.894 14581 14652 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.executeTask(CoroutineScheduler.kt:811)
+05-01 20:07:29.894 14581 14652 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.runWorker(CoroutineScheduler.kt:715)
+05-01 20:07:29.894 14581 14652 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.run(CoroutineScheduler.kt:702)
+05-01 20:07:29.897 14581 14652 D PlayerViewModel: Inizio estrazione video dal server: Vidzy
+05-01 20:07:29.899 14581 14652 D PlayerViewModel: Estrazione video completata con successo
+05-01 20:07:31.127 14581 14654 D HomeViewModel: Enrichment triggered for FrenchStream
+05-01 20:07:31.137 14581 14638 D HomeViewModel: Enrichment triggered for FrenchStream
+05-01 20:07:44.933 14581 14649 D CACHE_PATH: /data/user/0/com.streamfr.app/files/user-data-cache/FrenchStream__https_fs14.lol.json
+05-01 20:07:49.054 14581 14647 D TvShowsViewModel: getTvShows: provider=FrenchStream, isFilterable=false, languageFilter=all
+05-01 20:07:55.697 14581 14649 D PlayerViewModel: Inizio ricerca sottotitoli
+05-01 20:07:55.700 14581 14655 D PlayerViewModel: Inizio ricerca server per ID: greys-anatomy-saison-22-2005/1
+05-01 20:07:55.700 14581 14648 D PlayerViewModel: Inizio ricerca OpenSubtitles
+05-01 20:07:55.700 14581 14649 D PlayerViewModel: Inizio ricerca SubDL
+05-01 20:07:55.700 14581 14649 D PlayerViewModel: Ricerca SubDL completata: 0 risultati
+05-01 20:07:56.266 14581 14606 E PlayerViewModel: Errore ricerca server: 
+05-01 20:07:56.266 14581 14606 E PlayerViewModel: java.lang.Exception: No servers found
+05-01 20:07:56.266 14581 14606 E PlayerViewModel: 	at com.streamflixreborn.streamflix.fragments.player.PlayerViewModel$getServers$1.invokeSuspend(PlayerViewModel.kt:113)
+05-01 20:07:56.266 14581 14606 E PlayerViewModel: 	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:33)
+05-01 20:07:56.266 14581 14606 E PlayerViewModel: 	at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:104)
+05-01 20:07:56.266 14581 14606 E PlayerViewModel: 	at kotlinx.coroutines.internal.LimitedDispatcher$Worker.run(LimitedDispatcher.kt:111)
+05-01 20:07:56.266 14581 14606 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.TaskImpl.run(Tasks.kt:99)
+05-01 20:07:56.266 14581 14606 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler.runSafely(CoroutineScheduler.kt:584)
+05-01 20:07:56.266 14581 14606 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.executeTask(CoroutineScheduler.kt:811)
+05-01 20:07:56.266 14581 14606 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.runWorker(CoroutineScheduler.kt:715)
+05-01 20:07:56.266 14581 14606 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.run(CoroutineScheduler.kt:702)
+05-01 20:07:56.310 14581 14650 E PlayerViewModel: Errore OpenSubtitles: 
+05-01 20:07:56.310 14581 14650 E PlayerViewModel: kotlinx.coroutines.JobCancellationException: Job was cancelled; job=SupervisorJobImpl{Cancelling}@5e5245a
+05-01 20:07:56.314 14581 14650 W System.err: kotlinx.coroutines.JobCancellationException: Job was cancelled; job=SupervisorJobImpl{Cancelling}@2179067
+05-01 20:08:01.136 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:01.137 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:02.781 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:05.017 14581 14638 D PlayerViewModel: Inizio ricerca server per ID: greys-anatomy-saison-22-2005/1
+05-01 20:08:05.017 14581 14608 D PlayerViewModel: Inizio ricerca sottotitoli
+05-01 20:08:05.019 14581 14652 D PlayerViewModel: Inizio ricerca SubDL
+05-01 20:08:05.020 14581 14652 D PlayerViewModel: Ricerca SubDL completata: 0 risultati
+05-01 20:08:05.024 14581 14652 D PlayerViewModel: Inizio ricerca OpenSubtitles
+05-01 20:08:05.472  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:08:05.566 14581 14638 D PlayerViewModel: Ricerca OpenSubtitles completata: 1 risultati
+05-01 20:08:05.611 14581 14652 E PlayerViewModel: Errore ricerca server: 
+05-01 20:08:05.611 14581 14652 E PlayerViewModel: java.lang.Exception: No servers found
+05-01 20:08:05.611 14581 14652 E PlayerViewModel: 	at com.streamflixreborn.streamflix.fragments.player.PlayerViewModel$getServers$1.invokeSuspend(PlayerViewModel.kt:113)
+05-01 20:08:05.611 14581 14652 E PlayerViewModel: 	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:33)
+05-01 20:08:05.611 14581 14652 E PlayerViewModel: 	at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:104)
+05-01 20:08:05.611 14581 14652 E PlayerViewModel: 	at kotlinx.coroutines.internal.LimitedDispatcher$Worker.run(LimitedDispatcher.kt:111)
+05-01 20:08:05.611 14581 14652 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.TaskImpl.run(Tasks.kt:99)
+05-01 20:08:05.611 14581 14652 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler.runSafely(CoroutineScheduler.kt:584)
+05-01 20:08:05.611 14581 14652 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.executeTask(CoroutineScheduler.kt:811)
+05-01 20:08:05.611 14581 14652 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.runWorker(CoroutineScheduler.kt:715)
+05-01 20:08:05.611 14581 14652 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.run(CoroutineScheduler.kt:702)
+05-01 20:08:05.658 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:05.661 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:07.686 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:08.485  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:08:08.617 14581 14652 D PlayerViewModel: Inizio ricerca server per ID: greys-anatomy-saison-22-2005/2
+05-01 20:08:08.618 14581 14638 D PlayerViewModel: Inizio ricerca sottotitoli
+05-01 20:08:08.620 14581 14635 D PlayerViewModel: Inizio ricerca OpenSubtitles
+05-01 20:08:08.621 14581 14650 D PlayerViewModel: Inizio ricerca SubDL
+05-01 20:08:08.621 14581 14650 D PlayerViewModel: Ricerca SubDL completata: 0 risultati
+05-01 20:08:09.181 14581 14635 E PlayerViewModel: Errore ricerca server: 
+05-01 20:08:09.181 14581 14635 E PlayerViewModel: java.lang.Exception: No servers found
+05-01 20:08:09.181 14581 14635 E PlayerViewModel: 	at com.streamflixreborn.streamflix.fragments.player.PlayerViewModel$getServers$1.invokeSuspend(PlayerViewModel.kt:113)
+05-01 20:08:09.181 14581 14635 E PlayerViewModel: 	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:33)
+05-01 20:08:09.181 14581 14635 E PlayerViewModel: 	at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:104)
+05-01 20:08:09.181 14581 14635 E PlayerViewModel: 	at kotlinx.coroutines.internal.LimitedDispatcher$Worker.run(LimitedDispatcher.kt:111)
+05-01 20:08:09.181 14581 14635 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.TaskImpl.run(Tasks.kt:99)
+05-01 20:08:09.181 14581 14635 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler.runSafely(CoroutineScheduler.kt:584)
+05-01 20:08:09.181 14581 14635 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.executeTask(CoroutineScheduler.kt:811)
+05-01 20:08:09.181 14581 14635 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.runWorker(CoroutineScheduler.kt:715)
+05-01 20:08:09.181 14581 14635 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.run(CoroutineScheduler.kt:702)
+05-01 20:08:09.205 14581 14635 E PlayerViewModel: Errore OpenSubtitles: 
+05-01 20:08:09.205 14581 14635 E PlayerViewModel: kotlinx.coroutines.JobCancellationException: Job was cancelled; job=SupervisorJobImpl{Cancelling}@c51d512
+05-01 20:08:09.217 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:09.223 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:09.225 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:11.487  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:08:15.262  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 20:08:15.272 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:15.279 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:17.495  6320  6699 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:08:21.739 14581 14650 D PlayerViewModel: Inizio ricerca server per ID: greys-anatomy-saison-22-2005/4
+05-01 20:08:21.739 14581 14652 D PlayerViewModel: Inizio ricerca sottotitoli
+05-01 20:08:21.740 14581 14652 D PlayerViewModel: Inizio ricerca SubDL
+05-01 20:08:21.740 14581 14652 D PlayerViewModel: Ricerca SubDL completata: 0 risultati
+05-01 20:08:21.740 14581 14652 D PlayerViewModel: Inizio ricerca OpenSubtitles
+05-01 20:08:21.774  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 20:08:22.315 14581 14651 E PlayerViewModel: Errore ricerca server: 
+05-01 20:08:22.315 14581 14651 E PlayerViewModel: java.lang.Exception: No servers found
+05-01 20:08:22.315 14581 14651 E PlayerViewModel: 	at com.streamflixreborn.streamflix.fragments.player.PlayerViewModel$getServers$1.invokeSuspend(PlayerViewModel.kt:113)
+05-01 20:08:22.315 14581 14651 E PlayerViewModel: 	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:33)
+05-01 20:08:22.315 14581 14651 E PlayerViewModel: 	at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:104)
+05-01 20:08:22.315 14581 14651 E PlayerViewModel: 	at kotlinx.coroutines.internal.LimitedDispatcher$Worker.run(LimitedDispatcher.kt:111)
+05-01 20:08:22.315 14581 14651 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.TaskImpl.run(Tasks.kt:99)
+05-01 20:08:22.315 14581 14651 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler.runSafely(CoroutineScheduler.kt:584)
+05-01 20:08:22.315 14581 14651 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.executeTask(CoroutineScheduler.kt:811)
+05-01 20:08:22.315 14581 14651 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.runWorker(CoroutineScheduler.kt:715)
+05-01 20:08:22.315 14581 14651 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.run(CoroutineScheduler.kt:702)
+05-01 20:08:22.459 14581 14651 E PlayerViewModel: Errore OpenSubtitles: 
+05-01 20:08:22.459 14581 14651 E PlayerViewModel: kotlinx.coroutines.JobCancellationException: Job was cancelled; job=SupervisorJobImpl{Cancelling}@1fe74ef
+05-01 20:08:22.507 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:22.512 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:22.514 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:22.517  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 20:08:22.524 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:08:22.534 14581 14581 W Glide   : class com.bumptech.glide.load.engine.GlideException: Received null model
+05-01 20:09:05.805 14581 14643 D PlayerViewModel: Inizio ricerca server per ID: monarch-legacy-of-monsters-saison-2-2023/1
+05-01 20:09:05.809 14581 14606 D PlayerViewModel: Inizio ricerca sottotitoli
+05-01 20:09:05.810 14581 14639 D PlayerViewModel: Inizio ricerca OpenSubtitles
+05-01 20:09:05.812 14581 14639 D PlayerViewModel: Inizio ricerca SubDL
+05-01 20:09:05.813 14581 14639 D PlayerViewModel: Ricerca SubDL completata: 0 risultati
+05-01 20:09:05.873  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 20:09:06.388 14581 14643 D PlayerViewModel: Ricerca OpenSubtitles completata: 1 risultati
+05-01 20:09:06.653 14581 14643 E PlayerViewModel: Errore ricerca server: 
+05-01 20:09:06.653 14581 14643 E PlayerViewModel: java.lang.Exception: No servers found
+05-01 20:09:06.653 14581 14643 E PlayerViewModel: 	at com.streamflixreborn.streamflix.fragments.player.PlayerViewModel$getServers$1.invokeSuspend(PlayerViewModel.kt:113)
+05-01 20:09:06.653 14581 14643 E PlayerViewModel: 	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:33)
+05-01 20:09:06.653 14581 14643 E PlayerViewModel: 	at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:104)
+05-01 20:09:06.653 14581 14643 E PlayerViewModel: 	at kotlinx.coroutines.internal.LimitedDispatcher$Worker.run(LimitedDispatcher.kt:111)
+05-01 20:09:06.653 14581 14643 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.TaskImpl.run(Tasks.kt:99)
+05-01 20:09:06.653 14581 14643 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler.runSafely(CoroutineScheduler.kt:584)
+05-01 20:09:06.653 14581 14643 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.executeTask(CoroutineScheduler.kt:811)
+05-01 20:09:06.653 14581 14643 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.runWorker(CoroutineScheduler.kt:715)
+05-01 20:09:06.653 14581 14643 E PlayerViewModel: 	at kotlinx.coroutines.scheduling.CoroutineScheduler$Worker.run(CoroutineScheduler.kt:702)
+05-01 20:09:06.909  1131  1174 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 20:11:50.898  6320  6602 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:11:53.909  6320  6602 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:11:56.924  6320  6602 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:11:59.492 14581 14581 D HomeMobile: initializeMiniPlayer: provider=FrenchStream (FrenchStreamProvider), isIptv=false, miniPlayerEnabled=true
+05-01 20:11:59.930  6320  7210 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:12:27.110   610  1175 E SystemServiceRegistry: android.os.ServiceManager$ServiceNotFoundException: No service published for: persistent_data_block
+05-01 20:12:27.252  1315  2125 D OneSearchSuggestProvider: java.util.concurrent.CompletionException: java.util.NoSuchElementException: No value present
+05-01 20:12:27.252  1315  2125 D OneSearchSuggestProvider: 	at java.util.concurrent.CompletableFuture.completeExceptionally(CompletableFuture.java:2138)
+05-01 20:12:27.252  1315  2125 D OneSearchSuggestProvider: Caused by: java.util.NoSuchElementException: No value present
+05-01 20:12:28.159   610  1175 W WindowManager: Exception thrown during dispatchAppVisibility Window{a235aaa u0 com.streamfr.app/com.streamflixreborn.streamflix.activities.main.MainMobileActivity EXITING}
+05-01 20:12:28.159   610  1175 W WindowManager: android.os.DeadObjectException
+05-01 20:13:05.892 15056 15056 D HomeMobile: initializeMiniPlayer: provider=FrenchStream (FrenchStreamProvider), isIptv=false, miniPlayerEnabled=true
+05-01 20:13:05.899 15056 15056 D CACHE_PATH: /data/user/0/com.streamfr.app/files/user-data-cache/FrenchStream__https_fs14.lol.json
+05-01 20:13:08.182 15056 15112 D StreamFlixApp:   FrenchStream: URL refreshed → https://fs14.lol/
+05-01 20:13:08.465 15056 15100 D DnsResolver: Resolving host: fs14.lol using provider: https://cloudflare-dns.com/dns-query
+05-01 20:13:08.465 15056 15150 D DnsResolver: Resolving host: fs14.lol using provider: https://cloudflare-dns.com/dns-query
+05-01 20:13:08.480 15056 15100 D DnsResolver: Resolved fs14.lol to: 104.21.56.15, 172.67.175.176, 2606:4700:3033::6815:380f, 2606:4700:3035::ac43:afb0
+05-01 20:13:08.487 15056 15150 D DnsResolver: Resolved fs14.lol to: 2606:4700:3033::6815:380f, 2606:4700:3035::ac43:afb0, 104.21.56.15, 172.67.175.176
+05-01 20:13:09.182 15056 15119 D TvShowsViewModel: getTvShows: provider=FrenchStream, isFilterable=false, languageFilter=all
+05-01 20:13:12.076  6320  6330 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:13:17.036  6320 15158 W GLSUser : [AppCertManager] Exception while requesting key: 
+05-01 20:13:17.036  6320 15158 W GLSUser : java.util.concurrent.ExecutionException: czle: Parsing Exception
+05-01 20:13:17.036  6320 15158 W GLSUser : Caused by: czle: Parsing Exception
+05-01 20:13:17.321  6320 15014 W Conscrypt: Could not set socket write timeout: java.net.SocketException: Socket closed
+05-01 20:13:17.820  6320 15014 W Conscrypt: Could not set socket write timeout: java.net.SocketException: Socket closed
+05-01 20:13:18.074  6320  6630 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:13:21.086  6320  7210 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:13:24.083  6320  7210 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:13:29.498 15056 15115 D MoviesViewModel: getMovies: provider=FrenchStream, isFilterable=false, languageFilter=all
+05-01 20:13:32.857 15056 15084 D TvShowsViewModel: getTvShows: provider=FrenchStream, isFilterable=false, languageFilter=all
+05-01 20:13:33.094  6320  7210 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:13:34.514 15056 15056 D HomeMobile: initializeMiniPlayer: provider=FrenchStream (FrenchStreamProvider), isIptv=false, miniPlayerEnabled=true
+05-01 20:13:38.704 15056 15056 D HomeMobile: initializeMiniPlayer: provider=FrenchStream (FrenchStreamProvider), isIptv=false, miniPlayerEnabled=true
+05-01 20:13:39.042 15056 15111 E HomeViewModel: java.net.SocketTimeoutException: timeout
+05-01 20:13:39.042 15056 15111 E HomeViewModel: 	at okhttp3.internal.http2.Http2Stream$StreamTimeout.newTimeoutException(Http2Stream.kt:675)
+05-01 20:13:39.042 15056 15111 E HomeViewModel: 	at com.streamflixreborn.streamflix.providers.FrenchStreamProvider$Service$Companion$special$$inlined$-addInterceptor$1.intercept(OkHttpClient.kt:1081)
+05-01 20:13:39.128  6320  7210 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:13:39.130 15056 15111 E HomeViewModel: java.net.SocketTimeoutException: timeout
+05-01 20:13:39.130 15056 15111 E HomeViewModel: 	at okhttp3.internal.http2.Http2Stream$StreamTimeout.newTimeoutException(Http2Stream.kt:675)
+05-01 20:13:39.130 15056 15111 E HomeViewModel: 	at com.streamflixreborn.streamflix.providers.FrenchStreamProvider$Service$Companion$special$$inlined$-addInterceptor$1.intercept(OkHttpClient.kt:1081)
+05-01 20:13:39.198 15056 15123 E TvShowsViewModel: java.net.SocketTimeoutException: timeout
+05-01 20:13:39.198 15056 15123 E TvShowsViewModel: 	at okhttp3.internal.http2.Http2Stream$StreamTimeout.newTimeoutException(Http2Stream.kt:675)
+05-01 20:13:39.198 15056 15123 E TvShowsViewModel: 	at com.streamflixreborn.streamflix.providers.FrenchStreamProvider$Service$Companion$special$$inlined$-addInterceptor$1.intercept(OkHttpClient.kt:1081)
+05-01 20:13:40.015 15056 15113 E HomeViewModel: kotlinx.coroutines.JobCancellationException: Job was cancelled; job=SupervisorJobImpl{Cancelling}@b494349
+05-01 20:13:40.016 15056 15113 E HomeViewModel: kotlinx.coroutines.JobCancellationException: Job was cancelled; job=SupervisorJobImpl{Cancelling}@b494349
+05-01 20:13:40.016 15056 15113 E TvShowsViewModel: kotlinx.coroutines.JobCancellationException: Job was cancelled; job=SupervisorJobImpl{Cancelling}@9df567c
+05-01 20:13:40.016 15056 15113 E HomeViewModel: kotlinx.coroutines.JobCancellationException: Job was cancelled; job=SupervisorJobImpl{Cancelling}@cf5275a
+05-01 20:13:40.016 15056 15185 E MoviesViewModel: kotlinx.coroutines.JobCancellationException: Job was cancelled; job=SupervisorJobImpl{Cancelling}@9095e68
+05-01 20:13:40.867 15056 15113 D TvShowsViewModel: getTvShows: provider=FrenchStream, isFilterable=false, languageFilter=all
+05-01 20:13:42.123  6320  6330 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:13:48.143  6320  6330 I NullBinder: NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl, calling uid: 1000, calling pid: 0
+05-01 20:14:10.036 15056 15116 E HomeViewModel: java.net.SocketTimeoutException: timeout
+05-01 20:14:10.036 15056 15116 E HomeViewModel: 	at okhttp3.internal.http2.Http2Stream$StreamTimeout.newTimeoutException(Http2Stream.kt:675)
+05-01 20:14:10.036 15056 15116 E HomeViewModel: 	at com.streamflixreborn.streamflix.providers.FrenchStreamProvider$Service$Companion$special$$inlined$-addInterceptor$1.intercept(OkHttpClient.kt:1081)
+05-01 20:14:10.037 15056 15113 E HomeViewModel: java.net.SocketTimeoutException: timeout
+05-01 20:14:10.037 15056 15113 E HomeViewModel: 	at okhttp3.internal.http2.Http2Stream$StreamTimeout.newTimeoutException(Http2Stream.kt:675)
+05-01 20:14:10.037 15056 15113 E HomeViewModel: 	at com.streamflixreborn.streamflix.providers.FrenchStreamProvider$Service$Companion$special$$inlined$-addInterceptor$1.intercept(OkHttpClient.kt:1081)
+05-01 20:14:10.882 15056 15113 E TvShowsViewModel: java.net.SocketTimeoutException: timeout
+05-01 20:14:10.882 15056 15113 E TvShowsViewModel: 	at okhttp3.internal.http2.Http2Stream$StreamTimeout.newTimeoutException(Http2Stream.kt:675)
+05-01 20:14:10.882 15056 15113 E TvShowsViewModel: 	at com.streamflixreborn.streamflix.providers.FrenchStreamProvider$Service$Companion$special$$inlined$-addInterceptor$1.intercept(OkHttpClient.kt:1081)
+05-01 20:14:15.941 15056 15113 W DiskLruCacheWrapper: java.io.IOException: not a readable directory: /data/user/0/com.streamfr.app/cache/glide_cache
+05-01 20:14:16.322 15056 15113 D TvShowsViewModel: getTvShows: provider=FrenchStream, isFilterable=false, languageFilter=all
+05-01 20:14:46.331 15056 15083 E TvShowsViewModel: java.net.SocketTimeoutException: timeout
+05-01 20:14:46.331 15056 15083 E TvShowsViewModel: 	at okhttp3.internal.http2.Http2Stream$StreamTimeout.newTimeoutException(Http2Stream.kt:675)
+05-01 20:14:46.331 15056 15083 E TvShowsViewModel: 	at com.streamflixreborn.streamflix.providers.FrenchStreamProvider$Service$Companion$special$$inlined$-addInterceptor$1.intercept(OkHttpClient.kt:1081)

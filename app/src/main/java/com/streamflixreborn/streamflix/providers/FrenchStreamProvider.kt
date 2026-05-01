@@ -90,17 +90,22 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
             if (items.isNotEmpty()) categories.add(Category(name = sectionTitle, list = items))
         }
-        // Pick a featured banner from the first home item as before.
-        val firstItem = document.selectFirst("div.short a.short-poster")
-        val featuredPoster = firstItem?.selectFirst("img")?.attr("src") ?: ""
-        val featuredHref = firstItem?.attr("href")?.substringAfterLast("/").orEmpty()
-        val featuredTitle = firstItem?.parent()?.selectFirst("div.short-title")?.text() ?: ""
-        if (firstItem != null && featuredHref.isNotBlank()) {
-            val featured = if (firstItem.attr("href").contains("/s-tv/"))
-                TvShow(id = featuredHref, title = featuredTitle, poster = featuredPoster, banner = featuredPoster)
-            else
-                Movie(id = featuredHref, title = featuredTitle, poster = featuredPoster, banner = featuredPoster)
-            categories.add(Category(name = Category.FEATURED, list = listOf(featured)))
+        // Featured carousel — take the first batch of cards from the top "films" section
+        // (or "series" if films is missing) so the home swiper has more than one item.
+        val featuredItems = document.select("div#films div.short, div#series div.short")
+            .take(15)
+            .mapNotNull { item ->
+                val link = item.selectFirst("a.short-poster")?.attr("href") ?: return@mapNotNull null
+                val href = link.substringAfterLast("/")
+                val title = item.selectFirst("div.short-title")?.text() ?: ""
+                val poster = item.selectFirst("img")?.attr("src") ?: ""
+                if (link.contains("/s-tv/") || link.contains("/serie/") || link.contains("-saison-"))
+                    TvShow(id = href, title = title, poster = poster, banner = poster)
+                else
+                    Movie(id = href, title = title, poster = poster, banner = poster)
+            }
+        if (featuredItems.isNotEmpty()) {
+            categories.add(Category(name = Category.FEATURED, list = featuredItems))
         }
         parseShorts("films", "Nouveautés Films", asTvShow = false)
         parseShorts("series", "Nouveautés Séries", asTvShow = true)
