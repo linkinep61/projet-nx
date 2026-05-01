@@ -74,22 +74,9 @@ object WiTvProvider : Provider {
 
     // (OLA TV streams are emitted progressively via _additionalServers flow)
 
-    // ───────── Vavoo API (IPTV channels via oha.to / vavoo.to) ─────────
-    private const val VAVOO_UA = "VAVOO/2.6"
-    private const val MEDIAHUBMX_UA = "MediaHubMX/2"
-    private const val VAVOO_CLIENT_VERSION = "3.0.2"
-    private const val VAVOO_APP_VERSION = "3.1.8"
-    private val VAVOO_BASE_SITES = listOf("https://oha.to", "https://vavoo.to", "https://huhu.to", "https://kool.to")
-    private val VAVOO_PING_URLS = listOf("https://www.lokke.app/api/app/ping", "https://www.vavoo.tv/api/app/ping")
-    private val VAVOO_JSON_TYPE = "application/json; charset=utf-8".toMediaType()
-    @Volatile private var vavooCachedSignature: String? = null
-    @Volatile private var vavooSignatureExpiry = 0L
-    private val VAVOO_COUNTRY_SEPARATORS = listOf("➾", "⟾", "->", "→", "»", "›")
-
-    data class VavooChannel(val id: String, val name: String, val logo: String, val group: String, val url: String)
-    /** Vavoo channels indexed by normalized name — used for resolve in getServers */
-    private val vavooChannelMap = mutableMapOf<String, VavooChannel>()
-    private val vavooChannelLock = Any()
+    // (Vavoo removed — backend (oha.to / vavoo.to / huhu.to / kool.to) returns 404 on /play
+    //  endpoints since approximately late April 2026. All retrieval was speculative — disabled
+    //  to avoid offering broken servers in the picker. See git history if needed.)
 
     // (Dric4rTV and 3BoxTV removed — negligible source coverage)
 
@@ -418,20 +405,14 @@ object WiTvProvider : Provider {
                     try { parseOlaTvServerList() } catch (e: Exception) { Log.e(TAG, "OLA TV list failed: ${e.message}") }
                     Log.d(TAG, "⏱ OLA TV servers: ${System.currentTimeMillis() - t}ms")
                 },
-                async {
-                    val t = System.currentTimeMillis()
-                    try { parseVavooChannels() } catch (e: Exception) { Log.e(TAG, "Vavoo failed: ${e.message}") }
-                    Log.d(TAG, "⏱ Vavoo: ${System.currentTimeMillis() - t}ms")
-                },
             )
             jobs.forEach { it.await() }
 
             phase2Done = true
             val witvCount = channelRegistry.count { it.value.sources.containsKey("WiTV") }
             val otfCount = channelRegistry.count { it.value.sources.containsKey("OTF") }
-            val vavooCount = channelRegistry.count { it.value.sources.containsKey("Vavoo") }
             val multi = channelRegistry.count { it.value.sources.size > 1 }
-            Log.d(TAG, "✓ Phase 2 done in ${System.currentTimeMillis() - t2}ms: ${channelRegistry.size} channels (WiTV=$witvCount, OTF=$otfCount, Vavoo=$vavooCount, multi=$multi), OLA TV=${olaTvServerMap.size} servers cached")
+            Log.d(TAG, "✓ Phase 2 done in ${System.currentTimeMillis() - t2}ms: ${channelRegistry.size} channels (WiTV=$witvCount, OTF=$otfCount, multi=$multi), OLA TV=${olaTvServerMap.size} servers cached")
 
             // Launch background FR server scan after Phase 2
             if (!olaTvFrScanDone && olaTvServerMap.isNotEmpty()) {
@@ -1172,214 +1153,6 @@ object WiTvProvider : Provider {
         return false
     }
 
-    // ───────── Vavoo API helpers ─────────
-
-    private fun vavooPostJson(url: String, body: JSONObject, headers: Map<String, String> = emptyMap()): String {
-        val reqBody = body.toString().toRequestBody(VAVOO_JSON_TYPE)
-        val builder = Request.Builder()
-            .url(url)
-            .post(reqBody)
-            .header("Content-Type", "application/json; charset=utf-8")
-            .header("Accept", "*/*")
-            .header("Connection", "close")
-        headers.forEach { (k, v) -> builder.header(k, v) }
-        val response = client.newCall(builder.build()).execute()
-        val text = response.body?.string() ?: ""
-        if (!response.isSuccessful) throw Exception("HTTP ${response.code} for $url")
-        return text
-    }
-
-    private fun vavooGetAddonSignature(): String {
-        val now = System.currentTimeMillis()
-        vavooCachedSignature?.let { sig ->
-            if (now < vavooSignatureExpiry) return sig
-        }
-        val payload = JSONObject().apply {
-            put("reason", "app-focus")
-            put("locale", "fr")
-            put("theme", "dark")
-            put("metadata", JSONObject().apply {
-                put("device", JSONObject().apply {
-                    put("type", "phone")
-                    put("uniqueId", "sf-${android.os.Build.FINGERPRINT.hashCode().toUInt().toString(16)}")
-                })
-                put("os", JSONObject().apply {
-                    put("name", "android")
-                    put("version", android.os.Build.VERSION.RELEASE)
-                    put("abis", JSONArray(listOf("arm64-v8a")))
-                    put("host", "android")
-                })
-                put("app", JSONObject().apply { put("platform", "android") })
-                put("version", JSONObject().apply {
-                    put("package", "tv.vavoo.app")
-                    put("binary", VAVOO_APP_VERSION)
-                    put("js", VAVOO_APP_VERSION)
-                })
-            })
-            put("appFocusTime", 0); put("playerActive", false); put("playDuration", 0)
-            put("devMode", false); put("hasAddon", true); put("castConnected", false)
-            put("package", "tv.vavoo.app"); put("version", VAVOO_APP_VERSION); put("process", "app")
-            put("firstAppStart", now); put("lastAppStart", now); put("adblockEnabled", true)
-            put("proxy", JSONObject().apply {
-                put("supported", JSONArray(listOf("ss"))); put("engine", "Mu")
-                put("enabled", false); put("autoServer", true)
-            })
-            put("iap", JSONObject().apply { put("supported", false) })
-        }
-        for (url in VAVOO_PING_URLS) {
-            try {
-                val text = vavooPostJson(url, payload)
-                val json = JSONObject(text)
-                val sig = json.optString("addonSig", "")
-                if (sig.isNotBlank()) {
-                    vavooCachedSignature = sig
-                    vavooSignatureExpiry = now + 5 * 60 * 1000
-                    Log.d(TAG, "Vavoo: ✓ addonSig obtained from $url")
-                    return sig
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Vavoo ping failed for $url: ${e.message}")
-            }
-        }
-        throw Exception("Vavoo: unable to obtain addonSig")
-    }
-
-    private fun vavooCatalogHeaders(signature: String): Map<String, String> = mapOf(
-        "mediahubmx-signature" to signature,
-        "user-agent" to MEDIAHUBMX_UA,
-        "Accept-Language" to "fr",
-        "Accept-Encoding" to "gzip, deflate",
-    )
-
-    private fun vavooExtractCountry(group: String): String {
-        val raw = group.trim()
-        if (raw.isBlank()) return "default"
-        for (sep in VAVOO_COUNTRY_SEPARATORS) {
-            if (raw.contains(sep)) return raw.split(sep)[0].trim().ifBlank { "default" }
-        }
-        return raw
-    }
-
-    /** Load Vavoo IPTV catalog, filter France, merge into WiTV channelRegistry. */
-    private fun parseVavooChannels() {
-        try {
-            val signature = vavooGetAddonSignature()
-            val headers = vavooCatalogHeaders(signature)
-            var totalLoaded = 0
-
-            for (base in VAVOO_BASE_SITES) {
-                try {
-                    val catalogUrl = "${base.trimEnd('/')}/mediahubmx-catalog.json"
-                    var cursor: String? = null
-
-                    while (true) {
-                        val body = JSONObject().apply {
-                            put("language", "fr"); put("region", "US")
-                            put("catalogId", "iptv"); put("id", "iptv")
-                            put("adult", false); put("search", ""); put("sort", "")
-                            put("filter", JSONObject()); put("clientVersion", VAVOO_CLIENT_VERSION)
-                            if (cursor != null) put("cursor", cursor)
-                        }
-                        val text = vavooPostJson(catalogUrl, body, headers)
-                        val json = JSONObject(text)
-                        val items = json.optJSONArray("items") ?: JSONArray()
-
-                        for (i in 0 until items.length()) {
-                            val item = items.getJSONObject(i)
-                            if (item.optString("type") != "iptv") continue
-                            val url = item.optString("url", "")
-                            if (url.isBlank()) continue
-
-                            val group = item.optString("group", "")
-                            val country = vavooExtractCountry(group)
-                            if (!country.equals("France", ignoreCase = true)) continue
-
-                            val ids = item.optJSONObject("ids")
-                            val id = ids?.optString("id", "") ?: item.optString("id", url)
-                            val name = item.optString("name", "")
-                            val logo = item.optString("logo", "")
-
-                            val vCh = VavooChannel(id = id, name = name, logo = logo, group = group, url = url)
-                            val key = norm(name)
-                            if (key.isBlank()) continue
-
-                            // Store in vavoo map for resolve
-                            synchronized(vavooChannelLock) { vavooChannelMap[key] = vCh }
-
-                            // Merge into main channelRegistry
-                            synchronized(registryLock) {
-                                val existing = channelRegistry[key]
-                                if (existing != null) {
-                                    // Enrich existing channel with Vavoo source
-                                    existing.sources["Vavoo"] = "vavoo::$id"
-                                    if (existing.logo.isBlank() && logo.isNotBlank()) existing.logo = logo
-                                } else {
-                                    // New channel from Vavoo — extract category from group
-                                    val catName = run {
-                                        for (sep in VAVOO_COUNTRY_SEPARATORS) {
-                                            if (group.contains(sep)) {
-                                                val after = group.substringAfter(sep).trim()
-                                                if (after.isNotBlank()) return@run after
-                                            }
-                                        }
-                                        "Généraliste"
-                                    }
-                                    channelRegistry[key] = ChannelInfo(
-                                        displayName = name,
-                                        logo = logo,
-                                        category = catName,
-                                        sources = mutableMapOf("Vavoo" to "vavoo::$id"),
-                                    )
-                                }
-                            }
-                            totalLoaded++
-                        }
-
-                        cursor = json.optString("nextCursor", "")
-                        if (cursor.isNullOrBlank()) break
-                    }
-                    Log.d(TAG, "Vavoo: ✓ catalog from $base: $totalLoaded FR channels loaded")
-                    break // success from this base, no need to try others
-                } catch (e: Exception) {
-                    Log.w(TAG, "Vavoo catalog failed for $base: ${e.message}")
-                }
-            }
-            Log.d(TAG, "Vavoo: total $totalLoaded FR channels merged into registry")
-        } catch (e: Exception) {
-            Log.e(TAG, "Vavoo: catalog load failed: ${e.message}")
-        }
-    }
-
-    /** Resolve a Vavoo channel stream URL on-demand. */
-    private fun vavooResolveStreamUrl(channel: VavooChannel): String {
-        val signature = vavooGetAddonSignature()
-        val headers = vavooCatalogHeaders(signature)
-        for (base in VAVOO_BASE_SITES) {
-            val resolveUrl = "${base.trimEnd('/')}/mediahubmx-resolve.json"
-            try {
-                val body = JSONObject().apply {
-                    put("language", "fr"); put("region", "US")
-                    put("url", channel.url); put("clientVersion", VAVOO_CLIENT_VERSION)
-                }
-                val text = vavooPostJson(resolveUrl, body, headers)
-                val streamUrl = if (text.trimStart().startsWith("[")) {
-                    val arr = JSONArray(text)
-                    if (arr.length() > 0) arr.getJSONObject(0).optString("url", "") else ""
-                } else {
-                    val json = JSONObject(text)
-                    json.optString("url", json.optString("streamUrl", ""))
-                }
-                if (streamUrl.isNotBlank()) {
-                    Log.d(TAG, "Vavoo: ✓ resolved '${channel.name}' via $base")
-                    return streamUrl
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Vavoo resolve failed via $base: ${e.message}")
-            }
-        }
-        throw Exception("Vavoo: unable to resolve '${channel.name}'")
-    }
-
     /** Phase 2: Just cache the OLA TV server list (cid → category_name).
      *  This is lightweight (~2s). Actual channel fetching happens on-demand in getServers(). */
     private fun parseOlaTvServerList() {
@@ -1751,19 +1524,7 @@ object WiTvProvider : Provider {
                     Log.d(TAG, "OLA TV: done for '$key', emitted ${emittedUrls.size} streams from ${queriedCids.size} CIDs")
                 }
 
-                // ── Priority 4: Vavoo (API-based m3u8 resolve) ──
-                val vavooChannel = synchronized(vavooChannelLock) { vavooChannelMap[key] }
-                if (vavooChannel != null) {
-                    try {
-                        val streamUrl = withContext(Dispatchers.IO) { vavooResolveStreamUrl(vavooChannel) }
-                        if (streamUrl.isNotBlank()) {
-                            Log.d(TAG, "  ✓ server Vavoo → ${streamUrl.take(80)}")
-                            servers.add(Video.Server("m3u8::$streamUrl", "Vavoo"))
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "  Vavoo resolve failed for '$key': ${e.message}")
-                    }
-                }
+                // (Vavoo Priority 4 removed — backend HS, was always returning broken streams)
 
                 // Fallback: raw WiTV page if nothing else worked
                 if (servers.isEmpty()) {
@@ -1808,8 +1569,7 @@ object WiTvProvider : Provider {
             val referer = parts.getOrElse(1) { "" }
             val ua = parts.getOrElse(2) { USER_AGENT }
             Log.d(TAG, "  DIRECT M3U8: $m3u8")
-            val isVavoo = server.name.startsWith("Vavoo", ignoreCase = true)
-            val hdrs = mutableMapOf("User-Agent" to if (isVavoo) VAVOO_UA else ua.ifBlank { USER_AGENT })
+            val hdrs = mutableMapOf("User-Agent" to ua.ifBlank { USER_AGENT })
             if (referer.isNotBlank()) hdrs["Referer"] = referer
             return Video(m3u8, headers = hdrs)
         }
