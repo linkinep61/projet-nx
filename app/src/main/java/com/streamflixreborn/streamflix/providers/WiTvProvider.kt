@@ -5,6 +5,7 @@ import android.util.Log
 import com.streamflixreborn.streamflix.BuildConfig
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.models.*
+import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.EnrichmentTrigger
 import com.streamflixreborn.streamflix.utils.JsUnpacker
 import com.streamflixreborn.streamflix.utils.UserPreferences
@@ -90,6 +91,9 @@ object WiTvProvider : Provider {
         // Force HTTP/1.1 — LiteSpeed server rejects OkHttp's HTTP/2 ALPN on some TLS stacks
         .protocols(listOf(Protocol.HTTP_1_1))
         .connectionSpecs(listOf(ConnectionSpec.COMPATIBLE_TLS, ConnectionSpec.CLEARTEXT))
+        // DNS-over-HTTPS — bypass system DNS filters (AV web protection, ISP DNS blocks, etc.)
+        // Same pattern used by every other provider in the app.
+        .dns(DnsResolver.doh)
         .cookieJar(object : CookieJar {
             private val store = HashMap<String, List<Cookie>>()
             override fun saveFromResponse(u: HttpUrl, c: List<Cookie>) { store[u.host] = c }
