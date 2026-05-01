@@ -72,3 +72,10 @@ NVIDIA Corporation/
 # Screenshots / scratch notes at root
 screen_*.png
 SERVEURS_HS.txt
+# Local debug log dumps
+*.log
+logcat.txt
+crash_lines.txt
+fatal*.txt
+pmf.txt
+
