@@ -236,6 +236,10 @@ class PlayerTvFragment : Fragment() {
     private var awaitTimeoutHandler: android.os.Handler? = null
     private var awaitTimeoutRunnable: Runnable? = null
 
+    // Track the active Player.Listener so we can remove it before attaching a new one,
+    // preventing listener leaks across retries (each old listener used to keep firing).
+    private var activePlayerListener: androidx.media3.common.Player.Listener? = null
+
     private var currentVideo: Video? = null
     private var currentServer: Video.Server? = null
     private var usingCronet = false
@@ -1781,7 +1785,9 @@ class PlayerTvFragment : Fragment() {
                 }
             }
 
-            player.addListener(object : Player.Listener {
+            // Remove previous listener (if any) to avoid leaks across displayVideo() retries.
+            activePlayerListener?.let { try { player.removeListener(it) } catch (_: Exception) {} }
+            val newListener = object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     super.onPlaybackStateChanged(playbackState)
 
@@ -1980,7 +1986,9 @@ class PlayerTvFragment : Fragment() {
                         }
                     }
                 }
-            })
+            }
+            player.addListener(newListener)
+            activePlayerListener = newListener
 
             if (startPositionMs != null) {
                 player.seekTo(startPositionMs)
@@ -3246,8 +3254,10 @@ class PlayerTvFragment : Fragment() {
                 // waiting for hardware codec slots to free. Since the player runs
                 // on its own playback thread, release() is asynchronous and won't
                 // block the main thread.
+                activePlayerListener?.let { try { player.removeListener(it) } catch (_: Exception) {} }
                 player.release()
             }
+            activePlayerListener = null
             if (::mediaSession.isInitialized) {
                 mediaSession.release()
             }
