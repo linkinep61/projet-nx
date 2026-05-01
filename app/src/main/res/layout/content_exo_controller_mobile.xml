@@ -63,14 +63,28 @@
         android:id="@+id/btn_exo_external_player"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginEnd="16dp"
         android:padding="8dp"
         android:src="@drawable/exo_styled_controls_external_player"
         android:tint="#FFFFFF"
         app:layout_constraintBottom_toBottomOf="@id/tv_exo_subtitle"
-        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/exo_settings"
         app:layout_constraintTop_toTopOf="@id/tv_exo_title"
         tools:ignore="ContentDescription,UseAppTint" />
+
+    <!-- Settings (gear) hoisted from the bottom bar to here (top-right). Same ID
+         (exo_settings) so the existing PlayerSettingsView wiring keeps working. -->
+    <ImageView
+        android:id="@+id/exo_settings"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="16dp"
+        android:padding="8dp"
+        android:src="@drawable/exo_styled_controls_settings"
+        android:tint="#FFFFFF"
+        app:layout_constraintBottom_toBottomOf="@id/tv_exo_subtitle"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="@id/tv_exo_title"
+        tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
 
     <LinearLayout
         android:id="@+id/exo_center_controls"
@@ -223,21 +237,8 @@
             android:id="@+id/btn_exo_aspect_ratio"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginEnd="16dp"
             android:padding="12dp"
             android:src="@drawable/exo_styled_controls_aspect_ratio"
-            android:tint="#FFFFFF"
-            app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@id/exo_settings"
-            app:layout_constraintTop_toTopOf="parent"
-            tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
-
-        <ImageView
-            android:id="@+id/exo_settings"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:padding="12dp"
-            android:src="@drawable/exo_styled_controls_settings"
             android:tint="#FFFFFF"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
