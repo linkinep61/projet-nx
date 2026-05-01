@@ -227,7 +227,19 @@ class TvShowViewHolder(
             imageView.setPadding(0, 0, 0, 0)
         }
         imageView.loadTvShowPoster(tvShow) {
-            fallback(R.drawable.glide_fallback_cover)
+            // For IPTV channels: if the primary logo URL 404s (tv-logos repo doesn't have
+            // it), load a generated avatar with the channel's initials so no card stays
+            // blank. ui-avatars.com always returns a renderable image.
+            if (isIptvProvider() && tvShow.providerName == "OLA TV") {
+                val fallbackUrl = com.streamflixreborn.streamflix.providers.OlaTvProvider
+                    .fallbackLogoUrlFor(tvShow.title)
+                error(
+                    com.bumptech.glide.Glide.with(imageView.context)
+                        .load(fallbackUrl)
+                )
+            } else {
+                fallback(R.drawable.glide_fallback_cover)
+            }
             transition(DrawableTransitionOptions.withCrossFade())
         }
     }

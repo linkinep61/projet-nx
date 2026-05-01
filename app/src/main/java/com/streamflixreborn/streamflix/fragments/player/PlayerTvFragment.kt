@@ -538,6 +538,9 @@ class PlayerTvFragment : Fragment() {
                         }
 
                         is PlayerViewModel.State.FailedLoadingVideo -> {
+                            // Drop the broken variant from the Chaîne page so dead entries
+                            // don't pile up. Re-emitted next session if Phase 3 finds it.
+                            pruneBrokenVariant(state.server)
                             val nextServer = servers.getOrNull(servers.indexOf(state.server) + 1)
                             if (nextServer != null) {
                                 viewModel.getVideo(nextServer)
@@ -1477,11 +1480,35 @@ class PlayerTvFragment : Fragment() {
             awaitTimeoutRunnable = null
         }
 
+        /** Mark a server as tried and remove it from the Chaîne page (broken streams
+         *  shouldn't pollute the visible list — they reappear next session if Phase 3
+         *  finds them again). */
+        private fun pruneBrokenVariant(server: Video.Server?) {
+            if (server == null) return
+            triedChannelVariantIds.add(server.id)
+            val variants = PlayerSettingsView.Settings.ChannelVariant.list
+            val removed = variants.removeAll { it.id == server.id }
+            if (removed && _binding != null) {
+                Log.d("PlayerTvFragment", "Pruned broken variant: ${server.name}")
+                binding.settings.refreshChannelVariantList()
+            }
+        }
+
         private fun tryNextChannelVariant(failedServer: Video.Server?): Boolean {
             val variants = PlayerSettingsView.Settings.ChannelVariant.list
             if (variants.isEmpty()) return false
 
-            if (failedServer != null) triedChannelVariantIds.add(failedServer.id)
+            // Mark the failed variant as tried AND remove it from the Chaîne page so
+            // broken entries don't pile up. They reappear next session if Phase 3
+            // finds them again.
+            if (failedServer != null) {
+                triedChannelVariantIds.add(failedServer.id)
+                val removed = variants.removeAll { it.id == failedServer.id }
+                if (removed && _binding != null) {
+                    Log.d("PlayerTvFragment", "Removed broken variant from Chaîne page: ${failedServer.name}")
+                    binding.settings.refreshChannelVariantList()
+                }
+            }
 
             val nextVariant = variants.firstOrNull { it.id !in triedChannelVariantIds }
             if (nextVariant != null) {
@@ -1986,6 +2013,7 @@ class PlayerTvFragment : Fragment() {
                             || errorCauseMsg.contains("WebView fetch timed out")
                     if (isConnectionTimeout) {
                         val server = currentServer ?: return
+                        pruneBrokenVariant(server)
                         val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
                         if (nextServer != null) {
                             Log.w("PlayerNetwork", "Connection timeout on ${server.name}, auto-switching to ${nextServer.name}")
@@ -2001,6 +2029,7 @@ class PlayerTvFragment : Fragment() {
                     val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
                     if (isLiveIptv) {
                         val server = currentServer ?: return
+                        pruneBrokenVariant(server)
                         val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
                         if (nextServer != null) {
                             Log.w("PlayerTvFragment", "IPTV failover: ${server.name} error (${error.errorCodeName}), trying ${nextServer.name}")
