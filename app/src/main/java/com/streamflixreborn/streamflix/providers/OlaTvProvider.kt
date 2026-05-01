@@ -465,7 +465,7 @@ object OlaTvProvider : Provider, IptvProvider {
     // moment doesn't blacklist a working stream for the rest of the session. After the
     // TTL the URL is re-eligible and the player can try it again.
     private val brokenUrlMap = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    private const val BROKEN_URL_TTL_MS = 3L * 60L * 1000L  // 3 minutes
+    private const val BROKEN_URL_TTL_MS = 15L * 60L * 1000L  // 15 minutes
 
     /** Player calls this when a stream URL fails (HTTP error, codec error). Variants
      *  resolving to the same URL will be skipped for the next [BROKEN_URL_TTL_MS]. */
@@ -473,6 +473,8 @@ object OlaTvProvider : Provider, IptvProvider {
     fun reportBrokenStreamUrl(url: String) {
         if (url.isNotBlank()) {
             brokenUrlMap[url] = System.currentTimeMillis()
+            // Drop from probe-OK cache so once the TTL expires we re-probe before trusting again.
+            probeOkCache.remove(url)
             Log.d(TAG, "Marked broken upstream URL: ${url.take(80)}")
         }
     }
@@ -485,6 +487,33 @@ object OlaTvProvider : Provider, IptvProvider {
             return false
         }
         return true
+    }
+
+    // URLs that recently passed a HEAD probe — short-circuit subsequent probes for the
+    // same URL during one session (most channels won't change upstream within minutes).
+    private val probeOkCache = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    private val probeClientFast = client.newBuilder()
+        .connectTimeout(2, TimeUnit.SECONDS)
+        .readTimeout(2, TimeUnit.SECONDS)
+        .callTimeout(3, TimeUnit.SECONDS)
+        .build()
+
+    /** Quick HEAD probe to filter dead upstreams before handing the URL to ExoPlayer.
+     *  Returns true if the response is 2xx/3xx, false on 4xx/5xx/timeout. */
+    private fun probeStreamHead(url: String): Boolean {
+        return try {
+            val req = Request.Builder().url(url).head()
+                .header("User-Agent", USER_AGENT).build()
+            probeClientFast.newCall(req).execute().use { resp ->
+                val ok = resp.isSuccessful || resp.code in 300..399
+                Log.d(TAG, "probe ${if (ok) "OK" else "FAIL"} (${resp.code}) ${url.take(80)}")
+                ok
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "probe TIMEOUT ${url.take(80)} — ${e.message}")
+            false
+        }
     }
 
     private fun getMacCredentials(cid: String): MacCredentials? {
@@ -1234,10 +1263,19 @@ object OlaTvProvider : Provider, IptvProvider {
                 }
             }
             // Skip a variant that resolves to a URL recently known broken (within TTL).
-            // After the TTL it becomes eligible again — gives transient failures a 2nd
-            // chance instead of blacklisting an upstream forever for the session.
             if (isBrokenUrl(streamUrl)) {
-                throw Exception("URL on cool-down (failed in last 3 min): ${streamUrl.take(80)}")
+                throw Exception("URL on cool-down (failed in last 15 min): ${streamUrl.take(80)}")
+            }
+            // Fast HEAD probe (2 s timeout) — catches 4xx/5xx upstreams in ~500 ms-2 s
+            // instead of waiting for the player's 10 s buffering watchdog. Skip if URL
+            // was already probed-OK in the cache.
+            if (!probeOkCache.contains(streamUrl)) {
+                val probeOk = probeStreamHead(streamUrl)
+                if (!probeOk) {
+                    reportBrokenStreamUrl(streamUrl)
+                    throw Exception("HEAD probe failed: ${streamUrl.take(80)}")
+                }
+                probeOkCache.add(streamUrl)
             }
             Log.d(TAG, "getVideo → ${streamUrl.take(120)}")
             Video(streamUrl, headers = mapOf("User-Agent" to USER_AGENT))

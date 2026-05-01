@@ -1,0 +1,252 @@
+05-01 18:23:48.173 I/lowmemorykiller(  168): lmkd data connection established
+05-01 18:23:48.204 I/lowmemorykiller(  168): Using psi monitors for memory pressure detection
+05-01 18:23:48.204 I/lowmemorykiller(  168): Properties reinitilized
+05-01 18:23:48.204 I/lowmemorykiller( 4924): lmkd updated properties successfully
+05-01 18:23:48.204 I/lowmemorykiller(  168): lmkd data connection dropped
+05-01 18:23:48.204 I/lowmemorykiller(  168): closing lmkd data connection
+05-01 18:23:49.680 D/nativeloader( 4954): InitLlndkLibrariesProduct: libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libRS.so:libandroid_net.so:libapexsupport.so:libbinder_ndk.so:libc.so:libcgrouprc.so:libclang_rt.asan-x86_64-android.so:libcom.android.tethering.connectivity_native.so:libdl.so:libft2.so:liblog.so:libm.so:libmediandk.so:libnativewindow.so:libneuralnetworks.so:libselinux.so:libsync.so:libvendorsupport.so:libvndksupport.so:libvulkan.so
+05-01 18:23:55.531 W/libc    ( 2663): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:23:55.531 W/libc    ( 2663): Access denied finding property "service.adb.tls.port"
+05-01 18:24:00.074 W/libc    ( 2663): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:24:00.093 W/libc    ( 2663): Access denied finding property "service.adb.tls.port"
+05-01 18:24:03.515 I/lowmemorykiller(  168): Kill 'com.google.android.packageinstaller' (4601), uid 10101, oom_score_adj 975 to free 51688kB rss, 35460kB swap; reason: low watermark is breached
+05-01 18:24:03.536 I/lowmemorykiller(  168): Kill 'com.google.android.gms.ui' (4130), uid 10144, oom_score_adj 965 to free 61952kB rss, 44392kB swap; reason: low watermark is breached
+05-01 18:24:03.542 W/lowmemorykiller(  168): Failed to open /proc/4601/task; errno=2: process pid(4601) might have died
+05-01 18:24:03.543 E/lowmemorykiller(  168): process_mrelease 4601 failed: No such process
+05-01 18:24:03.549 E/lowmemorykiller(  168): process_mrelease 4130 failed: No such process
+05-01 18:24:03.559 I/lowmemorykiller(  168): Kill 'com.google.android.marvin.talkback' (4161), uid 10168, oom_score_adj 955 to free 50996kB rss, 36144kB swap; reason: low watermark is breached
+05-01 18:24:08.759 D/nativeloader( 5195): InitLlndkLibrariesProduct: libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libRS.so:libandroid_net.so:libapexsupport.so:libbinder_ndk.so:libc.so:libcgrouprc.so:libclang_rt.asan-x86_64-android.so:libcom.android.tethering.connectivity_native.so:libdl.so:libft2.so:liblog.so:libm.so:libmediandk.so:libnativewindow.so:libneuralnetworks.so:libselinux.so:libsync.so:libvendorsupport.so:libvndksupport.so:libvulkan.so
+05-01 18:24:12.471 W/libc    ( 2663): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:24:12.471 W/libc    ( 2663): Access denied finding property "service.adb.tls.port"
+05-01 18:24:12.934 D/nativeloader( 5279): InitLlndkLibrariesProduct: libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libRS.so:libandroid_net.so:libapexsupport.so:libbinder_ndk.so:libc.so:libcgrouprc.so:libclang_rt.asan-x86_64-android.so:libcom.android.tethering.connectivity_native.so:libdl.so:libft2.so:liblog.so:libm.so:libmediandk.so:libnativewindow.so:libneuralnetworks.so:libselinux.so:libsync.so:libvendorsupport.so:libvndksupport.so:libvulkan.so
+05-01 18:24:13.430 I/lowmemorykiller(  168): Kill 'com.google.android.rkpdapp' (4432), uid 10190, oom_score_adj 955 to free 49816kB rss, 36924kB swap; reason: low watermark is breached
+05-01 18:24:13.450 E/lowmemorykiller(  168): process_mrelease 4432 failed: No such process
+05-01 18:24:13.459 I/lowmemorykiller(  168): Kill 'com.google.android.apps.wallpaper' (5131), uid 10180, oom_score_adj 945 to free 59552kB rss, 34008kB swap; reason: low watermark is breached
+05-01 18:24:13.480 I/lowmemorykiller(  168): Kill 'com.google.android.webview:webview_service' (5171), uid 10163, oom_score_adj 935 to free 59924kB rss, 32868kB swap; reason: low watermark is breached
+05-01 18:24:13.579 I/lowmemorykiller(  168): Kill 'com.android.chrome' (3545), uid 10146, oom_score_adj 925 to free 52172kB rss, 36696kB swap; reason: low watermark is breached
+05-01 18:24:13.595 I/lowmemorykiller(  168): Kill 'com.google.android.partnersetup' (2990), uid 10137, oom_score_adj 915 to free 52200kB rss, 34252kB swap; reason: low watermark is breached
+05-01 18:24:13.639 I/lowmemorykiller(  168): Kill 'com.android.settings' (5219), uid 1000, oom_score_adj 905 to free 168208kB rss, 28680kB swap; reason: low watermark is breached
+05-01 18:24:13.663 E/lowmemorykiller(  168): process_mrelease 5219 failed: No such process
+05-01 18:24:13.689 I/lowmemorykiller(  168): Kill 'com.google.android.googlequicksearchbox:search' (1670), uid 10145, oom_score_adj 905 to free 119920kB rss, 45472kB swap; reason: low watermark is breached
+05-01 18:24:13.832 W/atru    ( 1835): 	at libcore.io.IoBridge.write(IoBridge.java:651)
+05-01 18:24:13.832 W/atru    ( 1835): 	at libcore.io.Linux.writeBytes(Native Method)
+05-01 18:24:13.832 W/atru    ( 1835): 	at libcore.io.Linux.write(Linux.java:296)
+05-01 18:24:13.832 W/atru    ( 1835): 	at libcore.io.ForwardingOs.write(ForwardingOs.java:943)
+05-01 18:24:13.832 W/atru    ( 1835): 	at libcore.io.BlockGuardOs.write(BlockGuardOs.java:448)
+05-01 18:24:13.832 W/atru    ( 1835): 	at libcore.io.ForwardingOs.write(ForwardingOs.java:943)
+05-01 18:24:13.832 W/atru    ( 1835): 	at libcore.io.IoBridge.write(IoBridge.java:646)
+05-01 18:24:13.869 W/atru    ( 1835): 	at libcore.io.IoBridge.write(IoBridge.java:651)
+05-01 18:24:13.869 W/atru    ( 1835): 	at libcore.io.Linux.writeBytes(Native Method)
+05-01 18:24:13.869 W/atru    ( 1835): 	at libcore.io.Linux.write(Linux.java:296)
+05-01 18:24:13.869 W/atru    ( 1835): 	at libcore.io.ForwardingOs.write(ForwardingOs.java:943)
+05-01 18:24:13.869 W/atru    ( 1835): 	at libcore.io.BlockGuardOs.write(BlockGuardOs.java:448)
+05-01 18:24:13.869 W/atru    ( 1835): 	at libcore.io.ForwardingOs.write(ForwardingOs.java:943)
+05-01 18:24:13.869 W/atru    ( 1835): 	at libcore.io.IoBridge.write(IoBridge.java:646)
+05-01 18:24:14.160 W/atru    ( 1835): 	at libcore.io.IoBridge.write(IoBridge.java:651)
+05-01 18:24:14.160 W/atru    ( 1835): 	at libcore.io.Linux.writeBytes(Native Method)
+05-01 18:24:14.160 W/atru    ( 1835): 	at libcore.io.Linux.write(Linux.java:296)
+05-01 18:24:14.160 W/atru    ( 1835): 	at libcore.io.ForwardingOs.write(ForwardingOs.java:943)
+05-01 18:24:14.160 W/atru    ( 1835): 	at libcore.io.BlockGuardOs.write(BlockGuardOs.java:448)
+05-01 18:24:14.160 W/atru    ( 1835): 	at libcore.io.ForwardingOs.write(ForwardingOs.java:943)
+05-01 18:24:14.160 W/atru    ( 1835): 	at libcore.io.IoBridge.write(IoBridge.java:646)
+05-01 18:24:14.173 W/atru    ( 1835): 	at libcore.io.IoBridge.write(IoBridge.java:651)
+05-01 18:24:14.173 W/atru    ( 1835): 	at libcore.io.Linux.writeBytes(Native Method)
+05-01 18:24:14.173 W/atru    ( 1835): 	at libcore.io.Linux.write(Linux.java:296)
+05-01 18:24:14.173 W/atru    ( 1835): 	at libcore.io.ForwardingOs.write(ForwardingOs.java:943)
+05-01 18:24:14.173 W/atru    ( 1835): 	at libcore.io.BlockGuardOs.write(BlockGuardOs.java:448)
+05-01 18:24:14.173 W/atru    ( 1835): 	at libcore.io.ForwardingOs.write(ForwardingOs.java:943)
+05-01 18:24:14.173 W/atru    ( 1835): 	at libcore.io.IoBridge.write(IoBridge.java:646)
+05-01 18:24:14.185 W/atru    ( 1835): 	at libcore.io.IoBridge.write(IoBridge.java:651)
+05-01 18:24:14.185 W/atru    ( 1835): 	at libcore.io.Linux.writeBytes(Native Method)
+05-01 18:24:14.185 W/atru    ( 1835): 	at libcore.io.Linux.write(Linux.java:296)
+05-01 18:24:14.185 W/atru    ( 1835): 	at libcore.io.ForwardingOs.write(ForwardingOs.java:943)
+05-01 18:24:14.185 W/atru    ( 1835): 	at libcore.io.BlockGuardOs.write(BlockGuardOs.java:448)
+05-01 18:24:14.185 W/atru    ( 1835): 	at libcore.io.ForwardingOs.write(ForwardingOs.java:943)
+05-01 18:24:14.185 W/atru    ( 1835): 	at libcore.io.IoBridge.write(IoBridge.java:646)
+05-01 18:24:14.210 W/atru    ( 1835): 	at libcore.io.IoBridge.write(IoBridge.java:651)
+05-01 18:24:14.210 W/atru    ( 1835): 	at libcore.io.Linux.writeBytes(Native Method)
+05-01 18:24:14.210 W/atru    ( 1835): 	at libcore.io.Linux.write(Linux.java:296)
+05-01 18:24:14.210 W/atru    ( 1835): 	at libcore.io.ForwardingOs.write(ForwardingOs.java:943)
+05-01 18:24:14.210 W/atru    ( 1835): 	at libcore.io.BlockGuardOs.write(BlockGuardOs.java:448)
+05-01 18:24:14.210 W/atru    ( 1835): 	at libcore.io.ForwardingOs.write(ForwardingOs.java:943)
+05-01 18:24:14.210 W/atru    ( 1835): 	at libcore.io.IoBridge.write(IoBridge.java:646)
+05-01 18:24:14.308 W/atru    ( 1835): 	at libcore.io.IoBridge.write(IoBridge.java:651)
+05-01 18:24:14.308 W/atru    ( 1835): 	at libcore.io.Linux.writeBytes(Native Method)
+05-01 18:24:14.308 W/atru    ( 1835): 	at libcore.io.Linux.write(Linux.java:296)
+05-01 18:24:14.308 W/atru    ( 1835): 	at libcore.io.ForwardingOs.write(ForwardingOs.java:943)
+05-01 18:24:14.308 W/atru    ( 1835): 	at libcore.io.BlockGuardOs.write(BlockGuardOs.java:448)
+05-01 18:24:14.308 W/atru    ( 1835): 	at libcore.io.ForwardingOs.write(ForwardingOs.java:943)
+05-01 18:24:14.308 W/atru    ( 1835): 	at libcore.io.IoBridge.write(IoBridge.java:646)
+05-01 18:24:17.588 W/libc    ( 2663): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:24:17.588 W/libc    ( 2663): Access denied finding property "service.adb.tls.port"
+05-01 18:24:19.423 D/nativeloader( 5485): InitLlndkLibrariesProduct: libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libRS.so:libandroid_net.so:libapexsupport.so:libbinder_ndk.so:libc.so:libcgrouprc.so:libclang_rt.asan-x86_64-android.so:libcom.android.tethering.connectivity_native.so:libdl.so:libft2.so:liblog.so:libm.so:libmediandk.so:libnativewindow.so:libneuralnetworks.so:libselinux.so:libsync.so:libvendorsupport.so:libvndksupport.so:libvulkan.so
+05-01 18:24:21.069 D/StrictMode( 5485): 	at libcore.io.BlockGuardOs.open(BlockGuardOs.java:269)
+05-01 18:24:21.069 D/StrictMode( 5485): 	at libcore.io.ForwardingOs.open(ForwardingOs.java:563)
+05-01 18:24:21.069 D/StrictMode( 5485): 	at libcore.io.IoBridge.open(IoBridge.java:560)
+05-01 18:24:21.072 D/StrictMode( 5485): 	at libcore.io.BlockGuardOs.fstat(BlockGuardOs.java:194)
+05-01 18:24:21.072 D/StrictMode( 5485): 	at libcore.io.ForwardingOs.fstat(ForwardingOs.java:261)
+05-01 18:24:21.072 D/StrictMode( 5485): 	at libcore.io.IoBridge.open(IoBridge.java:563)
+05-01 18:24:21.084 D/StrictMode( 5485): 	at libcore.io.BlockGuardOs.read(BlockGuardOs.java:324)
+05-01 18:24:21.084 D/StrictMode( 5485): 	at libcore.io.ForwardingOs.read(ForwardingOs.java:613)
+05-01 18:24:21.084 D/StrictMode( 5485): 	at libcore.io.IoBridge.read(IoBridge.java:604)
+05-01 18:24:28.749 D/nativeloader( 5351): Load /data/app/~~R0OYk-oGsa2vRnIJgDmWBg==/com.android.vending-CbrWil3OvV72hqPG57D6Cg==/split_config.x86_64.apk!/lib/x86_64/libcronet.147.0.7727.49.so using ns clns-7 from class loader (caller=/data/app/~~R0OYk-oGsa2vRnIJgDmWBg==/com.android.vending-CbrWil3OvV72hqPG57D6Cg==/base.apk): ok
+05-01 18:24:30.290 D/nativeloader( 5764): InitLlndkLibrariesProduct: libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libRS.so:libandroid_net.so:libapexsupport.so:libbinder_ndk.so:libc.so:libcgrouprc.so:libclang_rt.asan-x86_64-android.so:libcom.android.tethering.connectivity_native.so:libdl.so:libft2.so:liblog.so:libm.so:libmediandk.so:libnativewindow.so:libneuralnetworks.so:libselinux.so:libsync.so:libvendorsupport.so:libvndksupport.so:libvulkan.so
+05-01 18:24:31.105 D/nativeloader( 5813): Load /data/app/~~RL619_ZK62iAfp3IbAgbEg==/com.android.chrome-XHUGyQHtCDj93EKl6SWinw==/Chrome.apk!/lib/x86_64/libchromium_android_linker.so using ns clns-8 from class loader (caller=/data/app/~~RL619_ZK62iAfp3IbAgbEg==/com.android.chrome-XHUGyQHtCDj93EKl6SWinw==/Chrome.apk): ok
+05-01 18:24:42.712 E/PlayerDebug( 4621): onPlayerError: code=2004, msg=Source error
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): onPlayerError: 
+05-01 18:24:42.712 D/PlayerMobileFragment( 4621): Pruned broken variant: OLA TV - HD FR
+05-01 18:24:42.712 W/PlayerMobileFragment( 4621): IPTV failover: OLA TV - HD FR error (ERROR_CODE_IO_BAD_HTTP_STATUS), trying OLA[ab1] HD FR
+05-01 18:24:44.065 W/libc    ( 2663): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:24:44.065 W/libc    ( 2663): Access denied finding property "service.adb.tls.port"
+05-01 18:24:48.474 E/PlayerDebug( 4621): onPlayerError: code=2004, msg=Source error
+05-01 18:24:48.475 E/PlayerMobileFragment( 4621): onPlayerError: 
+05-01 18:24:48.475 W/PlayerMobileFragment( 4621): IPTV failover: OLA[ab1] HD FR error (ERROR_CODE_IO_BAD_HTTP_STATUS), trying OLA[ab1] HEVC FR
+05-01 18:24:54.256 E/PlayerDebug( 4621): onPlayerError: code=2004, msg=Source error
+05-01 18:24:54.257 E/PlayerMobileFragment( 4621): onPlayerError: 
+05-01 18:24:54.257 D/PlayerMobileFragment( 4621): Pruned broken variant: OLA[ab1] HEVC FR
+05-01 18:24:54.257 W/PlayerMobileFragment( 4621): IPTV failover: OLA[ab1] HEVC FR error (ERROR_CODE_IO_BAD_HTTP_STATUS), trying OLA[ab1] HD
+05-01 18:24:55.669 E/PlayerDebug( 4621): onPlayerError: code=3003, msg=Source error
+05-01 18:24:55.670 E/PlayerMobileFragment( 4621): onPlayerError: 
+05-01 18:24:55.670 D/PlayerMobileFragment( 4621): Pruned broken variant: OLA[ab1] HD
+05-01 18:24:55.670 W/PlayerMobileFragment( 4621): IPTV failover: OLA[ab1] HD error (ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED), trying OLA[ab1] HEVC
+05-01 18:25:00.477 E/PlayerDebug( 4621): onPlayerError: code=2004, msg=Source error
+05-01 18:25:00.478 E/PlayerMobileFragment( 4621): onPlayerError: 
+05-01 18:25:00.478 D/PlayerMobileFragment( 4621): Pruned broken variant: OLA[ab1] HEVC
+05-01 18:25:00.479 W/PlayerMobileFragment( 4621): IPTV failover: OLA[ab1] HEVC error (ERROR_CODE_IO_BAD_HTTP_STATUS), trying OLA[ab1] Source 5
+05-01 18:25:04.784 E/PlayerDebug( 4621): onPlayerError: code=2004, msg=Source error
+05-01 18:25:04.785 E/PlayerMobileFragment( 4621): onPlayerError: 
+05-01 18:25:04.785 D/PlayerMobileFragment( 4621): Pruned broken variant: OLA[ab1] Source 5
+05-01 18:25:04.787 W/PlayerMobileFragment( 4621): IPTV failover: OLA[ab1] Source 5 error (ERROR_CODE_IO_BAD_HTTP_STATUS), trying OLA[ab1] FHD
+05-01 18:25:09.105 E/PlayerDebug( 4621): onPlayerError: code=2004, msg=Source error
+05-01 18:25:09.106 E/PlayerMobileFragment( 4621): onPlayerError: 
+05-01 18:25:09.106 D/PlayerMobileFragment( 4621): Pruned broken variant: OLA[ab1] FHD
+05-01 18:25:09.106 W/PlayerMobileFragment( 4621): IPTV failover: OLA[ab1] FHD error (ERROR_CODE_IO_BAD_HTTP_STATUS), trying OLA[ab1] UHD
+05-01 18:25:13.470 E/PlayerDebug( 4621): onPlayerError: code=2004, msg=Source error
+05-01 18:25:13.471 E/PlayerMobileFragment( 4621): onPlayerError: 
+05-01 18:25:13.471 D/PlayerMobileFragment( 4621): Pruned broken variant: OLA[ab1] UHD
+05-01 18:25:13.471 W/PlayerMobileFragment( 4621): IPTV failover: OLA[ab1] UHD error (ERROR_CODE_IO_BAD_HTTP_STATUS), trying OLA[ab1] HD
+05-01 18:25:16.422 I/GoldfishComponentStore(  407): loading dll of path libcodec2_goldfish_avcdec.so
+05-01 18:25:19.547 D/nativeloader( 5485): Load /product/priv-app/Velvet/Velvet.apk!/lib/x86_64/libcronet.127.0.6493.0.so using ns product-clns-7 from class loader (caller=/product/priv-app/Velvet/Velvet.apk!classes11.dex): ok
+05-01 18:25:28.338 W/libc    ( 2663): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:25:28.339 W/libc    ( 2663): Access denied finding property "service.adb.tls.port"
+05-01 18:25:44.672 W/libc    ( 2663): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:25:44.673 W/libc    ( 2663): Access denied finding property "service.adb.tls.port"
+05-01 18:27:41.706 W/libc    ( 2663): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:27:41.707 W/libc    ( 2663): Access denied finding property "service.adb.tls.port"
+05-01 18:27:44.055 I/lowmemorykiller(  168): lmkd data connection established
+05-01 18:27:44.101 I/lowmemorykiller(  168): Using psi monitors for memory pressure detection
+05-01 18:27:44.101 I/lowmemorykiller(  168): Properties reinitilized
+05-01 18:27:44.101 I/lowmemorykiller( 6203): lmkd updated properties successfully
+05-01 18:27:44.101 I/lowmemorykiller(  168): lmkd data connection dropped
+05-01 18:27:44.101 I/lowmemorykiller(  168): closing lmkd data connection
+05-01 18:27:46.058 W/libc    ( 2663): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:27:46.058 W/libc    ( 2663): Access denied finding property "service.adb.tls.port"
+05-01 18:27:49.398 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_fsverity"
+05-01 18:27:49.398 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_fsverity"
+05-01 18:27:49.398 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_fsverity"
+05-01 18:27:49.398 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_fsverity"
+05-01 18:27:49.399 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_fsverity"
+05-01 18:27:49.399 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_fsverity"
+05-01 18:27:49.399 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_fsverity"
+05-01 18:27:49.399 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_fsverity"
+05-01 18:27:49.399 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_fsverity"
+05-01 18:27:49.399 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_fsverity"
+05-01 18:27:49.608 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_manifest"
+05-01 18:27:49.609 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_manifest"
+05-01 18:27:49.610 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_manifest"
+05-01 18:27:49.610 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_manifest"
+05-01 18:27:49.611 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_manifest"
+05-01 18:27:49.612 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_manifest"
+05-01 18:27:49.613 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_manifest"
+05-01 18:27:49.614 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_manifest"
+05-01 18:27:49.615 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_manifest"
+05-01 18:27:49.616 W/libc    (  610): Access denied finding property "pm.dexopt.dm.require_manifest"
+05-01 18:28:00.016 D/nativeloader( 6332): Load /data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/base.apk!/lib/x86_64/libconscrypt_gmscore_jni.so using ns clns-9 from class loader (caller=/data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/base.apk): ok
+05-01 18:28:00.174 D/nativeloader( 6320): Load /data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/base.apk!/lib/x86_64/libconscrypt_gmscore_jni.so using ns clns-9 from class loader (caller=/data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/base.apk): ok
+05-01 18:28:01.951 D/nativeloader( 6477): InitLlndkLibrariesProduct: libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libRS.so:libandroid_net.so:libapexsupport.so:libbinder_ndk.so:libc.so:libcgrouprc.so:libclang_rt.asan-x86_64-android.so:libcom.android.tethering.connectivity_native.so:libdl.so:libft2.so:liblog.so:libm.so:libmediandk.so:libnativewindow.so:libneuralnetworks.so:libselinux.so:libsync.so:libvendorsupport.so:libvndksupport.so:libvulkan.so
+05-01 18:28:02.073 I/GmsActivityDetector( 6320): 	at libcore.io.IoBridge.open(IoBridge.java:574)
+05-01 18:28:02.073 I/GmsActivityDetector( 6320): 	at libcore.io.Linux.open(Native Method)
+05-01 18:28:02.073 I/GmsActivityDetector( 6320): 	at libcore.io.ForwardingOs.open(ForwardingOs.java:563)
+05-01 18:28:02.073 I/GmsActivityDetector( 6320): 	at libcore.io.BlockGuardOs.open(BlockGuardOs.java:274)
+05-01 18:28:02.073 I/GmsActivityDetector( 6320): 	at libcore.io.ForwardingOs.open(ForwardingOs.java:563)
+05-01 18:28:02.073 I/GmsActivityDetector( 6320): 	at libcore.io.IoBridge.open(IoBridge.java:560)
+05-01 18:28:02.642 E/RecoverySnapshotStorage(  610): 	at libcore.io.IoBridge.open(IoBridge.java:574)
+05-01 18:28:02.642 E/RecoverySnapshotStorage(  610): 	at libcore.io.Linux.open(Native Method)
+05-01 18:28:02.642 E/RecoverySnapshotStorage(  610): 	at libcore.io.ForwardingOs.open(ForwardingOs.java:563)
+05-01 18:28:02.642 E/RecoverySnapshotStorage(  610): 	at libcore.io.BlockGuardOs.open(BlockGuardOs.java:274)
+05-01 18:28:02.642 E/RecoverySnapshotStorage(  610): 	at libcore.io.IoBridge.open(IoBridge.java:560)
+05-01 18:28:02.794 D/nativeloader( 6550): InitLlndkLibrariesProduct: libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libRS.so:libandroid_net.so:libapexsupport.so:libbinder_ndk.so:libc.so:libcgrouprc.so:libclang_rt.asan-x86_64-android.so:libcom.android.tethering.connectivity_native.so:libdl.so:libft2.so:liblog.so:libm.so:libmediandk.so:libnativewindow.so:libneuralnetworks.so:libselinux.so:libsync.so:libvendorsupport.so:libvndksupport.so:libvulkan.so
+05-01 18:28:02.796 W/libc    ( 6332): Access denied finding property "ro.hardware.chipname"
+05-01 18:28:03.289 D/nativeloader( 6640): Load /data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/base.apk!/lib/x86_64/libconscrypt_gmscore_jni.so using ns clns-9 from class loader (caller=/data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/base.apk): ok
+05-01 18:28:03.855 D/nativeloader( 6640): Load /data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!/lib/x86_64/libcronet.147.0.7727.49.so using isolated ns clns-11 (caller=/data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!classes2.dex): ok
+05-01 18:28:03.997 D/nativeloader( 6550): Load /data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!/lib/x86_64/libcronet.147.0.7727.49.so using isolated ns clns-9 (caller=/data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!classes2.dex): ok
+05-01 18:28:05.218 W/libc    ( 6332): Access denied finding property "ro.hardware.chipname"
+05-01 18:28:05.552 D/nativeloader( 6798): InitLlndkLibrariesProduct: libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libRS.so:libandroid_net.so:libapexsupport.so:libbinder_ndk.so:libc.so:libcgrouprc.so:libclang_rt.asan-x86_64-android.so:libcom.android.tethering.connectivity_native.so:libdl.so:libft2.so:liblog.so:libm.so:libmediandk.so:libnativewindow.so:libneuralnetworks.so:libselinux.so:libsync.so:libvendorsupport.so:libvndksupport.so:libvulkan.so
+05-01 18:28:05.569 W/libc    ( 6332): Access denied finding property "ro.hardware.chipname"
+05-01 18:28:06.369 D/nativeloader( 6332): Load /data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!/lib/x86_64/libcronet.147.0.7727.49.so using isolated ns clns-11 (caller=/data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!classes2.dex): ok
+05-01 18:28:06.461 D/nativeloader( 6851):   com_android_tethering: libandroid_net_connectivity_com_android_net_module_util_jni.so:libcrypto.so:libframework-connectivity-jni.so:libframework-connectivity-tiramisu-jni.so:libmainlinecronet.121.0.6167.71.so:libservice-connectivity.so:libservice-thread-jni.so:libssl.so
+05-01 18:28:07.287 D/StrictMode( 6477): 	at libcore.io.BlockGuardOs.access(BlockGuardOs.java:74)
+05-01 18:28:07.287 D/StrictMode( 6477): 	at libcore.io.ForwardingOs.access(ForwardingOs.java:128)
+05-01 18:28:07.287 D/StrictMode( 6477): 	at libcore.io.BlockGuardOs.access(BlockGuardOs.java:74)
+05-01 18:28:07.287 D/StrictMode( 6477): 	at libcore.io.ForwardingOs.access(ForwardingOs.java:128)
+05-01 18:28:07.418 W/libc    ( 6640): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:28:07.429 W/libc    ( 6640): Access denied finding property "service.adb.tls.port"
+05-01 18:28:07.452 W/libc    ( 6640): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:28:07.453 W/libc    ( 6640): Access denied finding property "service.adb.tls.port"
+05-01 18:28:07.565 D/StrictMode( 6477): 	at libcore.io.BlockGuardOs.access(BlockGuardOs.java:74)
+05-01 18:28:07.565 D/StrictMode( 6477): 	at libcore.io.ForwardingOs.access(ForwardingOs.java:128)
+05-01 18:28:07.565 D/StrictMode( 6477): 	at libcore.io.BlockGuardOs.access(BlockGuardOs.java:74)
+05-01 18:28:07.565 D/StrictMode( 6477): 	at libcore.io.ForwardingOs.access(ForwardingOs.java:128)
+05-01 18:28:07.832 W/libc    ( 6640): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:28:07.832 W/libc    ( 6640): Access denied finding property "service.adb.tls.port"
+05-01 18:28:08.116 D/nativeloader( 6320): Load /data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!/lib/x86_64/libcronet.147.0.7727.49.so using isolated ns clns-12 (caller=/data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!classes2.dex): ok
+05-01 18:28:08.198 W/libc    ( 6640): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:28:08.201 W/libc    ( 6640): Access denied finding property "service.adb.tls.port"
+05-01 18:28:08.695 D/StrictMode( 6477): 	at libcore.io.BlockGuardOs.open(BlockGuardOs.java:269)
+05-01 18:28:08.695 D/StrictMode( 6477): 	at libcore.io.ForwardingOs.open(ForwardingOs.java:563)
+05-01 18:28:08.695 D/StrictMode( 6477): 	at libcore.io.IoBridge.open(IoBridge.java:560)
+05-01 18:28:08.696 D/StrictMode( 6477): 	at libcore.io.BlockGuardOs.fstat(BlockGuardOs.java:194)
+05-01 18:28:08.696 D/StrictMode( 6477): 	at libcore.io.ForwardingOs.fstat(ForwardingOs.java:261)
+05-01 18:28:08.696 D/StrictMode( 6477): 	at libcore.io.IoBridge.open(IoBridge.java:563)
+05-01 18:28:08.698 D/StrictMode( 6477): 	at libcore.io.BlockGuardOs.read(BlockGuardOs.java:324)
+05-01 18:28:08.698 D/StrictMode( 6477): 	at libcore.io.ForwardingOs.read(ForwardingOs.java:613)
+05-01 18:28:08.698 D/StrictMode( 6477): 	at libcore.io.IoBridge.read(IoBridge.java:604)
+05-01 18:28:10.728 D/nativeloader( 6973): InitLlndkLibrariesProduct: libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libRS.so:libandroid_net.so:libapexsupport.so:libbinder_ndk.so:libc.so:libcgrouprc.so:libclang_rt.asan-x86_64-android.so:libcom.android.tethering.connectivity_native.so:libdl.so:libft2.so:liblog.so:libm.so:libmediandk.so:libnativewindow.so:libneuralnetworks.so:libselinux.so:libsync.so:libvendorsupport.so:libvndksupport.so:libvulkan.so
+05-01 18:28:13.632 W/libc    ( 6640): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:28:13.636 W/libc    ( 6640): Access denied finding property "service.adb.tls.port"
+05-01 18:28:14.584 I/lowmemorykiller(  168): lmkd data connection established
+05-01 18:28:14.634 I/lowmemorykiller(  168): Using psi monitors for memory pressure detection
+05-01 18:28:14.634 I/lowmemorykiller(  168): Properties reinitilized
+05-01 18:28:14.635 I/lowmemorykiller( 7044): lmkd updated properties successfully
+05-01 18:28:14.635 I/lowmemorykiller(  168): lmkd data connection dropped
+05-01 18:28:14.635 I/lowmemorykiller(  168): closing lmkd data connection
+05-01 18:28:18.493 I/lowmemorykiller(  168): lmkd data connection established
+05-01 18:28:18.527 I/lowmemorykiller(  168): Using psi monitors for memory pressure detection
+05-01 18:28:18.527 I/lowmemorykiller(  168): Properties reinitilized
+05-01 18:28:18.527 I/lowmemorykiller( 7059): lmkd updated properties successfully
+05-01 18:28:18.527 I/lowmemorykiller(  168): lmkd data connection dropped
+05-01 18:28:18.527 I/lowmemorykiller(  168): closing lmkd data connection
+05-01 18:28:26.077 D/nativeloader( 6973): Load /data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/base.apk!/lib/x86_64/libconscrypt_gmscore_jni.so using ns clns-11 from class loader (caller=/data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/base.apk): ok
+05-01 18:28:26.188 D/nativeloader( 6973): Load /data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!/lib/x86_64/libcronet.147.0.7727.49.so using isolated ns clns-13 (caller=/data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!classes2.dex): ok
+05-01 18:28:27.117 D/NativeLibraryHelper(  610): Punching extracted elf file libconscrypt_jni.so on fs:61267
+05-01 18:28:27.118 D/FileSystemUtils(  610): Punching holes in file: /data/app/vmdl737297014.tmp/lib/x86_64/libconscrypt_jni.so programHeaderOffset: 64 programHeaderNum: 8
+05-01 18:28:27.469 W/libc    ( 6640): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:28:27.469 W/libc    ( 6640): Access denied finding property "service.adb.tls.port"
+05-01 18:29:26.204 W/libc    ( 6640): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:29:26.204 W/libc    ( 6640): Access denied finding property "service.adb.tls.port"
+05-01 18:30:27.563 D/nativeloader( 7248): Load /data/app/~~Mt04jecrFFSlInn2rOQQpg==/com.streamfr.app-RCJi8cMSaF5mk8NYZTN1eA==/lib/x86_64/libconscrypt_jni.so using ns clns-7 from class loader (caller=/data/app/~~Mt04jecrFFSlInn2rOQQpg==/com.streamfr.app-RCJi8cMSaF5mk8NYZTN1eA==/base.apk!classes20.dex): ok
+05-01 18:30:27.789 D/nativeloader( 7248): Load /data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!/lib/x86_64/libcronet.147.0.7727.49.so using isolated ns clns-9 (caller=/data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!classes2.dex): ok
+05-01 18:31:22.901 W/libc    ( 6640): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:31:22.902 W/libc    ( 6640): Access denied finding property "service.adb.tls.port"
+05-01 18:31:47.084 W/libc    ( 6640): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:31:47.085 W/libc    ( 6640): Access denied finding property "service.adb.tls.port"
+05-01 18:31:48.945 D/nativeloader( 6477): Load /product/priv-app/Velvet/Velvet.apk!/lib/x86_64/libcronet.127.0.6493.0.so using ns product-clns-7 from class loader (caller=/product/priv-app/Velvet/Velvet.apk!classes11.dex): ok
+05-01 18:33:09.142 W/libc    ( 6640): Access denied finding property "persist.adb.tls_server.enable"
+05-01 18:33:09.142 W/libc    ( 6640): Access denied finding property "service.adb.tls.port"
+05-01 18:33:12.833 I/GoldfishComponentStore(  407): loading dll of path libcodec2_goldfish_avcdec.so
+05-01 18:33:21.054 I/GoldfishComponentStore(  407): loading dll of path libcodec2_goldfish_avcdec.so
+05-01 18:33:39.441 D/NativeLibraryHelper(  610): Punching extracted elf file libconscrypt_jni.so on fs:61267
+05-01 18:33:39.442 D/FileSystemUtils(  610): Punching holes in file: /data/app/vmdl317316995.tmp/lib/x86_64/libconscrypt_jni.so programHeaderOffset: 64 programHeaderNum: 8
+05-01 18:33:40.127 D/nativeloader( 6477): Load /data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!/lib/x86_64/libcronet.147.0.7727.49.so using isolated ns clns-9 (caller=/data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!classes2.dex): ok
+05-01 18:34:23.495 D/nativeloader( 7849): Load /data/app/~~27VoA7-GN1A2Y1-UTidGTw==/com.streamfr.app-dUwQJFcMEgk7tM_Ao1qHkg==/lib/x86_64/libconscrypt_jni.so using ns clns-7 from class loader (caller=/data/app/~~27VoA7-GN1A2Y1-UTidGTw==/com.streamfr.app-dUwQJFcMEgk7tM_Ao1qHkg==/base.apk!classes20.dex): ok
+05-01 18:34:23.762 D/nativeloader( 7849): Load /data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!/lib/x86_64/libcronet.147.0.7727.49.so using isolated ns clns-9 (caller=/data/app/~~2lK9jcDK3yWLFp943EZxqQ==/com.google.android.gms-us3Y_ikr7H5W-4gGc6z7iQ==/split_CronetDynamite_installtime.apk!classes2.dex): ok
