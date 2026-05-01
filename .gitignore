@@ -62,3 +62,13 @@ claude-context/
 build_output*.txtbuild_log.txt
 adb_out.txt
 adb_err.txt
+
+
+# Backups & old experiments (local only)
+backup-before-perf-optimizations/
+cloudflare-hls-proxy/
+NVIDIA Corporation/
+
+# Screenshots / scratch notes at root
+screen_*.png
+SERVEURS_HS.txt
