@@ -400,14 +400,9 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
             val providerSupport = Provider.Companion.providers[provider]
             val shouldEnrich = providerSupport?.enrichHome ?: true
             if (shouldEnrich) try {
-                // Wait until the player has opened and started loading the first
-                // channel before firing 20 enrichment requests.  This avoids
-                // competing for CPU/network with ExoPlayer init on Chromecast.
-                // Safety timeout: if the user never opens the player, enrich
-                // after 30 seconds anyway so the home screen isn't left bare.
-                withTimeoutOrNull(30_000) {
-                    EnrichmentTrigger.playerReadyFlow.first()
-                }
+                // Short delay so the initial home screen renders first,
+                // then enrich with pages 1-5 of movies/series.
+                kotlinx.coroutines.delay(1_500)
                 Log.d("HomeViewModel", "Enrichment triggered for ${provider.name}")
 
                 val allMovies = mutableListOf<Movie>()

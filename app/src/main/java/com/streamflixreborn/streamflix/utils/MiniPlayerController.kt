@@ -100,6 +100,13 @@ object MiniPlayerController {
                     cancelBufferingWatchdog()
                     retryCycle = 0 // reset cycle counter on success
                     _state.value = State.Playing(chId, currentChannelName ?: "", currentChannelPoster)
+                    // Report success to OlaTvProvider so this host gets prioritized
+                    val playingUri = player?.currentMediaItem?.localConfiguration?.uri?.toString()
+                    if (!playingUri.isNullOrBlank()) {
+                        try {
+                            com.streamflixreborn.streamflix.providers.OlaTvProvider.reportWorkingStreamUrl(playingUri)
+                        } catch (_: Throwable) { }
+                    }
                 }
                 Player.STATE_BUFFERING -> {
                     // Start a watchdog: if buffering doesn't reach READY within
@@ -342,28 +349,7 @@ object MiniPlayerController {
             val mediaItem = MediaItem.Builder()
                 .setUri(video.source.toUri())
                 .setMimeType(video.type)
-                .apply {
-                    val headers = video.headers
-                    if (!headers.isNullOrEmpty()) {
-                        setRequestMetadata(
-                            MediaItem.RequestMetadata.Builder().build()
-                        )
-                    }
-                }
                 .build()
-
-            // Set headers on the data source factory if needed
-            val headers = video.headers ?: emptyMap()
-            if (headers.isNotEmpty()) {
-                val httpDs = DefaultHttpDataSource.Factory()
-                    .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                    .setDefaultRequestProperties(
-                        mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36") + headers
-                    )
-                    .setConnectTimeoutMs(15_000)
-                    .setReadTimeoutMs(15_000)
-                    .setAllowCrossProtocolRedirects(true)
-            }
 
             p.setMediaItem(mediaItem)
             p.prepare()
