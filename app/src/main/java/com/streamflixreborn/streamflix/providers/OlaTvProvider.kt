@@ -117,7 +117,8 @@ object OlaTvProvider : Provider, IptvProvider {
     // (skip Phase 1 server-list parse + Phase 2 primary-cid ingestion ~30s).
     // 6h TTL: long enough to skip the heavy work, short enough that channel changes
     // upstream don't go stale. Phase 3 still refreshes opportunistically in background.
-    private const val REGISTRY_CACHE_FILE = "olatv_registry.json"
+    // v2 — busts the previous disk cache after norm() now keeps "+" → "plus".
+    private const val REGISTRY_CACHE_FILE = "olatv_registry_v2.json"
     private const val REGISTRY_CACHE_TTL_MS = 6L * 60 * 60 * 1000L
 
     // ───────── Normalization & TNT order ─────────
@@ -157,7 +158,11 @@ object OlaTvProvider : Provider, IptvProvider {
             if (next == s) break
             s = next
         }
-        return s.replace(Regex("[^a-z0-9]"), "").replace("sports", "sport")
+        // Replace "+" with "plus" so curated keys (which use the same convention via
+        // normalizeForLogo) match registry keys: "Canal+ Family" → "canalplusfamily".
+        // Also "&" → "and" to keep parity.
+        return s.replace("+", "plus").replace("&", "and")
+            .replace(Regex("[^a-z0-9]"), "").replace("sports", "sport")
     }
 
     /** Extract the variant label ("HD", "FHD", "+1", "FR") from a raw channel name so
@@ -297,7 +302,7 @@ object OlaTvProvider : Provider, IptvProvider {
             CuratedChannel("ocsgeants", "OCS Géants", "Cinéma"),
             CuratedChannel("ocschoc", "OCS Choc", "Cinéma"),
             CuratedChannel("ocscity", "OCS City", "Cinéma"),
-            CuratedChannel("cineplupremier", "Ciné+ Premier", "Cinéma"),
+            CuratedChannel("cinepluspremier", "Ciné+ Premier", "Cinéma"),
             CuratedChannel("cineplusfrisson", "Ciné+ Frisson", "Cinéma"),
             CuratedChannel("cineplusemotion", "Ciné+ Émotion", "Cinéma"),
             CuratedChannel("cineplusfamiz", "Ciné+ Famiz", "Cinéma"),

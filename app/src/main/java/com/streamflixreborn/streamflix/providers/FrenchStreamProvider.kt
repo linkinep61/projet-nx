@@ -51,7 +51,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             return cachePortalURL.ifEmpty { field }
         }
 
-    override val defaultBaseUrl: String = "https://fs14.lol/"
+    override val defaultBaseUrl: String = "https://fs03.lol/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
@@ -626,21 +626,28 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     /** Extract the episode list from a /serie/{slug} page's inline Next.js JSON.
      *  Episode block: {id, number, title, description, thumbnail, duration, players}.
-     *  The escape sequence in the HTML uses `\\\"` (backslash-quote). */
+     *  Description can be 500-2000 chars long, so the gap between title and thumbnail
+     *  needs a wide span. We do TWO passes: pick number+title from one regex, then
+     *  search for thumbnail starting from the same id within a wider window. */
     private fun parseEpisodesFromPage(raw: String, seasonId: String): List<Episode> {
         val out = mutableListOf<Episode>()
-        val rx = Regex(
+        val episodeRx = Regex(
             "\\\\\"id\\\\\":(\\d+)" +
-                "[^}]{0,80}\\\\\"number\\\\\":(\\d+)" +
-                "[^}]{0,80}\\\\\"title\\\\\":\\\\\"([^\\\\]*)\\\\\"" +
-                "(?:[^}]{0,200}\\\\\"thumbnail\\\\\":(?:\\\\\"([^\\\\]*)\\\\\"|null))?"
+                "[^}]{0,200}\\\\\"number\\\\\":(\\d+)" +
+                "[^}]{0,200}\\\\\"title\\\\\":\\\\\"([^\\\\]*)\\\\\""
         )
         val seen = HashSet<Int>()
-        rx.findAll(raw).forEach { m ->
+        episodeRx.findAll(raw).forEach { m ->
             val number = m.groupValues[2].toIntOrNull() ?: return@forEach
             if (!seen.add(number)) return@forEach
             val title = m.groupValues[3]
-            val thumb = m.groupValues.getOrNull(4)?.ifBlank { null }
+            // Look for the thumbnail in the next ~3000 chars after the match.
+            val from = m.range.last
+            val window = raw.substring(from, (from + 3000).coerceAtMost(raw.length))
+            val thumb = Regex("\\\\\"thumbnail\\\\\":(?:\\\\\"([^\\\\]+)\\\\\"|null)")
+                .find(window)?.groupValues?.getOrNull(1)
+                ?.replace("\\/", "/")
+                ?.ifBlank { null }
             out.add(
                 Episode(
                     id = "$seasonId/$number",
