@@ -515,25 +515,143 @@ object OlaTvProvider : Provider, IptvProvider {
         }
     }
 
+    /** Manual map of channel display name (lowercased, accents stripped) → verified
+     *  tv-logos GitHub URL. Used as a primary lookup so popular French channels always
+     *  show a logo even when the auto-generated slug doesn't match the repo convention. */
+    private val manualLogoMap: Map<String, String> by lazy {
+        val base = "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/france"
+        mapOf(
+            // TNT généraliste
+            "tf1" to "$base/tf1-fr.png",
+            "tf1 series films" to "$base/tf1-series-films-fr.png",
+            "tfx" to "$base/tfx-fr.png",
+            "tmc" to "$base/tmc-fr.png",
+            "france 2" to "$base/france-2-fr.png",
+            "france 3" to "$base/france-3-fr.png",
+            "france 4" to "$base/france-4-fr.png",
+            "france 5" to "$base/france-5-fr.png",
+            "france info" to "$base/franceinfo-fr.png",
+            "franceinfo" to "$base/franceinfo-fr.png",
+            "france o" to "$base/france-o-fr.png",
+            "m6" to "$base/m6-fr.png",
+            "w9" to "$base/w9-fr.png",
+            "6ter" to "$base/6ter-fr.png",
+            "arte" to "$base/arte-fr.png",
+            "c8" to "$base/c8-fr.png",
+            "cstar" to "$base/cstar-fr.png",
+            "cnews" to "$base/cnews-fr.png",
+            "nrj 12" to "$base/nrj-12-fr.png",
+            "lcp" to "$base/lcp-fr.png",
+            "gulli" to "$base/gulli-fr.png",
+            "l equipe" to "$base/l-equipe-fr.png",
+            "la chaine l equipe" to "$base/l-equipe-fr.png",
+            "rmc story" to "$base/rmc-story-fr.png",
+            "rmc decouverte" to "$base/rmc-decouverte-fr.png",
+            "cherie 25" to "$base/cherie-25-fr.png",
+            "lci" to "$base/lci-fr.png",
+            "bfm tv" to "$base/bfm-tv-fr.png",
+            "bfmtv" to "$base/bfm-tv-fr.png",
+            "bfm business" to "$base/bfm-business-fr.png",
+            // Info internationale
+            "france 24" to "$base/france-24-fr.png",
+            "tv5 monde" to "$base/tv5-monde-fr.png",
+            "tv5monde" to "$base/tv5-monde-fr.png",
+            "euronews" to "$base/euronews-fr.png",
+            "i24 news" to "$base/i24-news-fr.png",
+            "i24news" to "$base/i24-news-fr.png",
+            // Canal+ family
+            "canal plus" to "$base/canal-plus-fr.png",
+            "canal+" to "$base/canal-plus-fr.png",
+            "canal plus cinema" to "$base/canal-plus-cinema-fr.png",
+            "canal plus series" to "$base/canal-plus-series-fr.png",
+            "canal plus family" to "$base/canal-plus-family-fr.png",
+            "canal plus docs" to "$base/canal-plus-docs-fr.png",
+            "canal plus sport" to "$base/canal-plus-sport-fr.png",
+            "canal plus sport 360" to "$base/canal-plus-sport-360-fr.png",
+            // Cinéma & séries
+            "ocs max" to "$base/ocs-max-fr.png",
+            "ocs geants" to "$base/ocs-geants-fr.png",
+            "ocs choc" to "$base/ocs-choc-fr.png",
+            "ocs city" to "$base/ocs-city-fr.png",
+            "cine plus premier" to "$base/cine-plus-premier-fr.png",
+            "cine plus frisson" to "$base/cine-plus-frisson-fr.png",
+            "cine plus emotion" to "$base/cine-plus-emotion-fr.png",
+            "cine plus famiz" to "$base/cine-plus-famiz-fr.png",
+            "cine plus club" to "$base/cine-plus-club-fr.png",
+            "cine plus classic" to "$base/cine-plus-classic-fr.png",
+            "paramount channel" to "$base/paramount-channel-fr.png",
+            "13eme rue" to "$base/13eme-rue-fr.png",
+            "syfy" to "$base/syfy-fr.png",
+            "warner tv" to "$base/warner-tv-fr.png",
+            "tcm cinema" to "$base/tcm-cinema-fr.png",
+            // Sport
+            "bein sports 1" to "$base/bein-sports-1-fr.png",
+            "bein sports 2" to "$base/bein-sports-2-fr.png",
+            "bein sports 3" to "$base/bein-sports-3-fr.png",
+            "bein sports 4" to "$base/bein-sports-4-fr.png",
+            "rmc sport 1" to "$base/rmc-sport-1-fr.png",
+            "rmc sport 2" to "$base/rmc-sport-2-fr.png",
+            "rmc sport 3" to "$base/rmc-sport-3-fr.png",
+            "rmc sport 4" to "$base/rmc-sport-4-fr.png",
+            "eurosport 1" to "$base/eurosport-1-fr.png",
+            "eurosport 2" to "$base/eurosport-2-fr.png",
+            "infosport plus" to "$base/infosport-plus-fr.png",
+            // Musique
+            "mtv" to "$base/mtv-fr.png",
+            "mtv hits" to "$base/mtv-hits-fr.png",
+            "mcm" to "$base/mcm-fr.png",
+            "m6 music" to "$base/m6-music-fr.png",
+            "nrj hits" to "$base/nrj-hits-fr.png",
+            "trace urban" to "$base/trace-urban-fr.png",
+            "mezzo" to "$base/mezzo-fr.png",
+            // Documentaire
+            "planete plus" to "$base/planete-plus-fr.png",
+            "ushuaia tv" to "$base/ushuaia-tv-fr.png",
+            "histoire tv" to "$base/histoire-tv-fr.png",
+            "toute l histoire" to "$base/toute-l-histoire-fr.png",
+            "science et vie tv" to "$base/science-vie-tv-fr.png",
+            "national geographic" to "$base/national-geographic-fr.png",
+            "nat geo wild" to "$base/nat-geo-wild-fr.png",
+            "discovery channel" to "$base/discovery-channel-fr.png",
+            "trek" to "$base/trek-fr.png",
+            // Enfants
+            "disney channel" to "$base/disney-channel-fr.png",
+            "disney junior" to "$base/disney-junior-fr.png",
+            "cartoon network" to "$base/cartoon-network-fr.png",
+            "boomerang" to "$base/boomerang-fr.png",
+            "nickelodeon" to "$base/nickelodeon-fr.png",
+            "nick jr" to "$base/nick-jr-fr.png",
+            "tiji" to "$base/tiji-fr.png",
+            "piwi plus" to "$base/piwi-plus-fr.png",
+            "canal j" to "$base/canal-j-fr.png",
+            "tfou max" to "$base/tfou-max-fr.png",
+        )
+    }
+
     /** Build a tv-logo/tv-logos GitHub URL from a channel name (slug FR convention).
      *  Strips quality/locale markers (FR, FHD, HD, +1, etc.) anywhere in the name —
-     *  the tv-logo repo uses minimal slugs like "tf1-fr.png" / "france-2-fr.png". */
+     *  the tv-logo repo uses minimal slugs like "tf1-fr.png" / "france-2-fr.png".
+     *  Falls back to manualLogoMap for popular channels whose tv-logos slug doesn't
+     *  match our heuristic. */
     private fun logoUrlFor(name: String): String {
-        val slug = name.lowercase()
+        // Normalised lookup key for the manual map
+        val lookup = name.lowercase()
             .replace(Regex("[éèêë]"), "e")
             .replace(Regex("[àâä]"), "a")
             .replace(Regex("[ùûü]"), "u")
             .replace(Regex("[îï]"), "i")
             .replace(Regex("[ôö]"), "o")
             .replace("ç", "c")
-            // Strip locale/quality markers anywhere (word-boundary safe via spaces)
-            .replace(Regex("\\b(fr|fhd|uhd|hd|sd|4k|raw|hevc|h265|ppv)\\b", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("\\b(fr|fhd|uhd|hd|sd|4k|raw|hevc|h265|ppv)\\b"), " ")
             .replace(Regex("\\+\\s?1\\b"), " ")
-            .replace("+", "-plus")
-            .replace(Regex("\\s+"), " ")
+            .replace("+", " plus ")
+            .replace(Regex("[^a-z0-9]+"), " ")
             .trim()
-            .replace(Regex("[^a-z0-9]+"), "-")
-            .trim('-')
+            .replace(Regex("\\s+"), " ")
+        manualLogoMap[lookup]?.let { return it }
+
+        val slug = lookup.replace(' ', '-').trim('-')
+        if (slug.isBlank()) return ""
         return "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/france/$slug-fr.png"
     }
 
