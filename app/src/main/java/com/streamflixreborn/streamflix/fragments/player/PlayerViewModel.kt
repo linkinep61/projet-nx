@@ -183,16 +183,22 @@ class PlayerViewModel(
         launch {
             try {
                 Log.d("PlayerViewModel", "Inizio ricerca OpenSubtitles")
+                // App-wide policy: French subtitles only. ISO 639-2/B code "fre".
+                val frenchOnly = "fre"
                 val subtitles = when (videoType) {
                     is Video.Type.Episode -> {
                         OpenSubtitles.search(
                             query = videoType.tvShow.title,
                             season = videoType.season.number,
                             episode = videoType.number,
+                            subLanguageId = frenchOnly,
                         )
                     }
                     is Video.Type.Movie -> {
-                        OpenSubtitles.search(query = videoType.title)
+                        OpenSubtitles.search(
+                            query = videoType.title,
+                            subLanguageId = frenchOnly,
+                        )
                     }
                 }.sortedWith(compareBy({ it.languageName }, { it.subDownloadsCnt }))
                 

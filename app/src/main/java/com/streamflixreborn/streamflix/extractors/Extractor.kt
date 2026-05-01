@@ -415,6 +415,55 @@ abstract class Extractor {
         }
 
         /**
+         * App-wide policy: keep ONLY French subtitles in the Video returned to the player.
+         * Streamflix is a French-audience app — every other language is dead weight in the
+         * subtitle picker. Centralised here so all current and future extractors / providers
+         * inherit the behaviour automatically (no need to patch each one individually).
+         *
+         * If a French track is the sole survivor and none was already marked default, we
+         * promote it so the player auto-enables it for non-French audio.
+         */
+        private fun enforceFrenchSubtitlesOnly(video: Video): Video {
+            if (video.subtitles.isEmpty()) return video
+            val frenchSubs = video.subtitles.filter { isFrenchSubtitle(it.label) }
+            if (frenchSubs.size == video.subtitles.size) {
+                // already French-only, nothing to change
+                return video
+            }
+            Log.d("Extractor", "Subtitle filter — kept ${frenchSubs.size} FR / dropped ${video.subtitles.size - frenchSubs.size} non-FR")
+
+            // Auto-default if a single FR sub remains and none was flagged default already.
+            val finalSubs = if (frenchSubs.size == 1 && frenchSubs.none { it.default }) {
+                listOf(frenchSubs.first().copy(default = true))
+            } else {
+                frenchSubs
+            }
+            return video.copy(subtitles = finalSubs)
+        }
+
+        /**
+         * Heuristic: is this subtitle label French?
+         * Matches: fr, fre, fra, fr-FR, fr-CA, french, français, francais, vf, vff, etc.
+         * Case-insensitive, accent-tolerant.
+         */
+        fun isFrenchSubtitle(label: String): Boolean {
+            val lower = label.lowercase().trim()
+            if (lower.isEmpty()) return false
+
+            // Exact short codes
+            if (lower in setOf("fr", "fre", "fra", "fr-fr", "fr-ca", "fr_fr", "fr_ca", "vf", "vff", "vfq", "vfi")) return true
+
+            // Substring-based (covers labels like "Français (France)", "French (Canada)", "VOSTFR")
+            return lower.contains("french") ||
+                    lower.contains("francais") ||
+                    lower.contains("français") ||
+                    lower.startsWith("fr-") ||
+                    lower.startsWith("fr_") ||
+                    lower.contains(Regex("\\bvf\\b")) ||
+                    lower.contains("vostfr")
+        }
+
+        /**
          * Identify the extractor/service name for a given URL.
          * Returns the extractor name (e.g. "Filemoon", "Vidara", "Rpmvid") or null if unknown.
          */

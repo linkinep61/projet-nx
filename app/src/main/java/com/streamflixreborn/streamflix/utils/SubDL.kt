@@ -71,13 +71,14 @@ object SubDL {
         episodeNumber: Int? = null,
         type: String? = null,
         subsPerPage: Int = 30,
+        languages: String = "FR",
     ): List<Subtitle> {
-        
+
         // If no API key is configured, do not search
         if (UserPreferences.subdlApiKey.isEmpty()) {
             return emptyList()
         }
-        
+
         return try {
             val response = service.search(
                 apiKey = UserPreferences.subdlApiKey,
@@ -85,7 +86,8 @@ object SubDL {
                 seasonNumber = seasonNumber,
                 episodeNumber = episodeNumber,
                 type = type,
-                subsPerPage = subsPerPage
+                subsPerPage = subsPerPage,
+                languages = languages,
             )
             val subtitles = response.subtitles ?: emptyList()
             subtitles
@@ -125,6 +127,7 @@ object SubDL {
             @Query("episode_number") episodeNumber: Int? = null,
             @Query("type") type: String? = null,
             @Query("subs_per_page") subsPerPage: Int? = null,
+            @Query("languages") languages: String? = null,
         ): SearchResponse
     }
 
