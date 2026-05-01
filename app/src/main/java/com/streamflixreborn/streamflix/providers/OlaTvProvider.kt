@@ -432,61 +432,89 @@ object OlaTvProvider : Provider {
         if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return
         registryMutex.withLock {
             if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return@withLock
+
+            // ↓ KEY: do NOT clear on retry. If a previous (possibly-cancelled) load already
+            // populated the registry, we keep it and just retry the load to top it up.
+            // We only clear on a full cache expiry (i.e. registry is loaded but stale).
+            val cacheExpired = registryLoaded &&
+                System.currentTimeMillis() - lastLoadTime >= CACHE_DURATION
+            if (cacheExpired) synchronized(registryLock) { channelRegistry.clear() }
             registryLoaded = false
-            synchronized(registryLock) { channelRegistry.clear() }
 
             val t0 = System.currentTimeMillis()
-            withContext(Dispatchers.IO) {
-                // Step 1: get the global server list (1159 cids)
-                parseOlaTvServerList()
-                if (olaTvServerMap.isEmpty()) {
-                    Log.e(TAG, "Server list empty — cannot proceed")
-                    return@withContext
-                }
 
-                // Step 2: find the cid mapped to category_name "2020" (primary FR per OLA TV)
-                val primaryCid = olaTvServerMap.entries.find { it.value == OLA_TV_PRIMARY_FR }?.key
-                if (primaryCid == null) {
-                    Log.e(TAG, "Primary FR cid (category_name=$OLA_TV_PRIMARY_FR) not found in server list")
-                    return@withContext
-                }
-                Log.d(TAG, "Primary FR cid = $primaryCid (category_name=$OLA_TV_PRIMARY_FR)")
+            // ↓ KEY: NonCancellable wraps the load so navigation-away doesn't lose the
+            // result mid-flight. The user can leave; the load completes; next visit finds
+            // cached data ready.
+            withContext(Dispatchers.IO + NonCancellable) {
+                try {
+                    // Step 1: get the global server list (1159 cids)
+                    parseOlaTvServerList()
+                    if (olaTvServerMap.isEmpty()) {
+                        Log.e(TAG, "Server list empty — cannot proceed")
+                        return@withContext
+                    }
 
-                // Step 3: get MAC credentials + scrape MAC portal channel list
-                val creds = getMacCredentials(primaryCid)
-                if (creds == null) {
-                    Log.e(TAG, "Could not extract MAC credentials for primary cid")
-                    return@withContext
-                }
-                Log.d(TAG, "Primary FR portal: ${creds.baseUrl}")
+                    // Step 2: find the cid mapped to category_name "2020" (primary FR per OLA TV)
+                    val primaryCid = olaTvServerMap.entries.find { it.value == OLA_TV_PRIMARY_FR }?.key
+                    if (primaryCid == null) {
+                        Log.e(TAG, "Primary FR cid (category_name=$OLA_TV_PRIMARY_FR) not found in server list")
+                        return@withContext
+                    }
+                    Log.d(TAG, "Primary FR cid = $primaryCid (category_name=$OLA_TV_PRIMARY_FR)")
 
-                // Primary cid is user-confirmed FR → fetch all genres even if not tagged "FR|"
-                val channels = olaListMacPortalChannels(creds.baseUrl, creds.mac, forceAllGenres = true)
-                Log.d(TAG, "Primary FR portal returned ${channels.size} channels")
+                    // Step 3: get MAC credentials + scrape MAC portal channel list
+                    val creds = getMacCredentials(primaryCid)
+                    if (creds == null) {
+                        Log.e(TAG, "Could not extract MAC credentials for primary cid")
+                        return@withContext
+                    }
+                    Log.d(TAG, "Primary FR portal: ${creds.baseUrl}")
 
-                // Step 4: ingest into the registry (group by normalized name to merge variants)
-                synchronized(registryLock) {
-                    for (ch in channels) {
-                        val key = norm(ch.name)
-                        if (key.isBlank()) continue
-                        val info = channelRegistry.getOrPut(key) {
-                            val displayName = ch.name
-                                .replace(Regex("\\s*(HD|SD|FHD|UHD|4K|RAW|HEVC|H265|PPV)\\s*$", RegexOption.IGNORE_CASE), "")
-                                .trim()
-                                .ifBlank { ch.name }
-                            ChannelInfo(
-                                displayName = displayName,
-                                category = guessCategory(displayName),
-                                logo = logoUrlFor(displayName),
-                            )
+                    // Primary cid is user-confirmed FR → fetch all genres even if not tagged "FR|"
+                    val channels = olaListMacPortalChannels(creds.baseUrl, creds.mac, forceAllGenres = true)
+                    Log.d(TAG, "Primary FR portal returned ${channels.size} channels")
+
+                    // Step 4: ingest into the registry (group by normalized name to merge variants)
+                    synchronized(registryLock) {
+                        for (ch in channels) {
+                            val key = norm(ch.name)
+                            if (key.isBlank()) continue
+                            val info = channelRegistry.getOrPut(key) {
+                                val displayName = ch.name
+                                    .replace(Regex("\\s*(HD|SD|FHD|UHD|4K|RAW|HEVC|H265|PPV)\\s*$", RegexOption.IGNORE_CASE), "")
+                                    .trim()
+                                    .ifBlank { ch.name }
+                                ChannelInfo(
+                                    displayName = displayName,
+                                    category = guessCategory(displayName),
+                                    logo = logoUrlFor(displayName),
+                                )
+                            }
+                            // Avoid duplicate streams (same cid + same cmd already added)
+                            if (info.streams.none { it.cid == primaryCid && it.url == ch.cmd }) {
+                                info.streams.add(OlaStreamRef(primaryCid, ch.name, ch.cmd))
+                            }
                         }
-                        info.streams.add(OlaStreamRef(primaryCid, ch.name, ch.cmd))
+                    }
+                    Log.d(TAG, "Registry built: ${channelRegistry.size} unique channels in ${System.currentTimeMillis() - t0}ms")
+
+                    // ↓ KEY: set the loaded flag INSIDE the IO block, right after registry is
+                    // populated. This way even if the calling scope cancels right after,
+                    // subsequent calls see registryLoaded=true and skip the costly reload.
+                    if (channelRegistry.isNotEmpty()) {
+                        registryLoaded = true
+                        lastLoadTime = System.currentTimeMillis()
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Load failed: ${e.message}", e)
+                    // Even on partial failure, mark loaded if we got something
+                    if (channelRegistry.isNotEmpty()) {
+                        registryLoaded = true
+                        lastLoadTime = System.currentTimeMillis()
                     }
                 }
-                Log.d(TAG, "Registry built: ${channelRegistry.size} unique channels in ${System.currentTimeMillis() - t0}ms")
             }
-            registryLoaded = true
-            lastLoadTime = System.currentTimeMillis()
         }
     }
 
@@ -557,9 +585,15 @@ object OlaTvProvider : Provider {
         return try {
             ensureRegistry()
             val key = id.removePrefix("ola_ep::").removePrefix("ola::")
-            val info = synchronized(registryLock) { channelRegistry[key] } ?: return emptyList()
+            val info = synchronized(registryLock) { channelRegistry[key] }
+            if (info == null) {
+                Log.w(TAG, "getServers: channel '$key' not found in registry (size=${channelRegistry.size})")
+                return emptyList()
+            }
+            Log.d(TAG, "getServers '$key' (${info.displayName}): ${info.streams.size} stream(s)")
             val servers = mutableListOf<Video.Server>()
-            for (stream in info.streams) {
+            for ((idx, stream) in info.streams.withIndex()) {
+                Log.d(TAG, "  server[$idx] cid=${stream.cid} label='${stream.label}' cmd=${stream.url.take(80)}")
                 // Encode the cmd into the server id; resolve at getVideo time.
                 servers.add(Video.Server(
                     id = "ola_stream::${stream.cid}::${stream.label}::${stream.url}",
