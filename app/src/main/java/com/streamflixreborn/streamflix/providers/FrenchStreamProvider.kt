@@ -69,12 +69,44 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun getHome(): List<Category> {
         initializeService()
-        // PATCH 2026-05: Site migrated to Next.js CSR (fs14.lol) - static HTML selectors no longer work
-        // All CSS selectors (section.vod-section, div.vod-header, div.short, etc.) return empty
-        // Provider functionality suspended until API endpoints are found or JS rendering implemented
+        // 2026-05: site is still classic server-rendered HTML (DataLifeEngine /templates/FSV1/),
+        // not Next.js as a previous patch wrongly assumed. Sections are now wrapped in
+        // <div class="sect-c floats clearfix" id="films|series|commu|box"> instead of
+        // div#dle-content. The legacy "VFV25 vod-section" interface no longer exists, so we
+        // skip it and parse the sections directly.
+        val document = service.getHome("dle_skin=VFV1")
         val categories = mutableListOf<Category>()
 
-        // Placeholder: Return empty list with notice
+        fun parseShorts(sectionId: String, sectionTitle: String, asTvShow: Boolean) {
+            val items = document.select("div#$sectionId div.short").mapNotNull { item ->
+                val link = item.selectFirst("a.short-poster")?.attr("href") ?: return@mapNotNull null
+                val href = link.substringAfterLast("/")
+                val title = item.selectFirst("div.short-title")?.text() ?: ""
+                val poster = item.selectFirst("img")?.attr("src") ?: ""
+                if (asTvShow || link.contains("/s-tv/") || link.contains("-saison-"))
+                    TvShow(id = href, title = title, poster = poster)
+                else
+                    Movie(id = href, title = title, poster = poster)
+            }
+            if (items.isNotEmpty()) categories.add(Category(name = sectionTitle, list = items))
+        }
+        // Pick a featured banner from the first home item as before.
+        val firstItem = document.selectFirst("div.short a.short-poster")
+        val featuredPoster = firstItem?.selectFirst("img")?.attr("src") ?: ""
+        val featuredHref = firstItem?.attr("href")?.substringAfterLast("/").orEmpty()
+        val featuredTitle = firstItem?.parent()?.selectFirst("div.short-title")?.text() ?: ""
+        if (firstItem != null && featuredHref.isNotBlank()) {
+            val featured = if (firstItem.attr("href").contains("/s-tv/"))
+                TvShow(id = featuredHref, title = featuredTitle, poster = featuredPoster, banner = featuredPoster)
+            else
+                Movie(id = featuredHref, title = featuredTitle, poster = featuredPoster, banner = featuredPoster)
+            categories.add(Category(name = Category.FEATURED, list = listOf(featured)))
+        }
+        parseShorts("films", "Nouveautés Films", asTvShow = false)
+        parseShorts("series", "Nouveautés Séries", asTvShow = true)
+        parseShorts("commu", "Ajouts de la Commu", asTvShow = false)
+        parseShorts("box", "BOX OFFICE", asTvShow = false)
+
         return categories
 
         /*
@@ -242,110 +274,72 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     }
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
-        // PATCH 2026-05: Provider suspended - fs14.lol migrated to Next.js CSR
-        return emptyList()
-
-        /*
         if (page > 1) return emptyList()
         initializeService()
         if (query.isEmpty()) {
             val document = service.getHome()
-
             val genres = document.selectFirst("div.menu-section")?.select(">a")?.map {
                 Genre(
                     id = it.attr("href").substringBeforeLast("/").substringAfterLast("/"),
                     name = it.text(),
                 )
             }?.toMutableList() ?: mutableListOf()
-
-            // Ajouter K-Drama (recherche par mots-clés via GenreViewModel)
             if (genres.none { (it as? Genre)?.id == "k-drama" }) {
                 genres.add(Genre(id = "k-drama", name = "K-Drama"))
             }
-
             return genres
         }
-        val document = service.search(
-            query = query
-        )
-        val results = document.select("div.search-item")
-            .mapNotNull {
-                val id = it
-                    .attr("onclick").substringAfter("/").substringBefore("'")
-                if (id.isEmpty()) return@mapNotNull null
-                val title = it.selectFirst("div.search-title")
-                    ?.text()?.replace("\\'","'")
-                    ?: ""
-                var poster = it.selectFirst("img")
-                    ?.attr("src")
-                    ?: ""
-                if (id.contains("-saison-") || title.contains(" - Saison "))
-                    TvShow(
-                        id = id,
-                        title = title,
-                        poster = poster,
-                    )
-                else
-                    Movie(
-                        id = id,
-                        title = title,
-                        poster = poster,
-                    )
-            }
-
-        return results
-        */
+        val document = service.search(query = query)
+        // 2026-05: same loosening as getMovies/getTvShows. Search results may render in
+        // either the legacy div.search-item layout OR the new div.short layout.
+        val items = document.select("div.search-item, div.short").mapNotNull {
+            val link = it.selectFirst("a.short-poster, a")?.attr("href").orEmpty()
+            val onclickId = it.attr("onclick").substringAfter("/").substringBefore("'")
+            val id = link.substringAfterLast("/").ifBlank { onclickId }
+            if (id.isBlank()) return@mapNotNull null
+            val title = (it.selectFirst("div.short-title")?.text()
+                ?: it.selectFirst("div.search-title")?.text())
+                ?.replace("\\'", "'") ?: ""
+            val poster = it.selectFirst("img")?.attr("src") ?: ""
+            if (id.contains("-saison-") || title.contains(" - Saison ") || link.contains("/s-tv/"))
+                TvShow(id = id, title = title, poster = poster)
+            else
+                Movie(id = id, title = title, poster = poster)
+        }
+        return items
     }
 
     override suspend fun getMovies(page: Int): List<Movie> {
-        // PATCH 2026-05: Provider suspended - fs14.lol migrated to Next.js CSR
-        return emptyList()
-
-        /*
         initializeService()
-
         val document = service.getMovies(page)
-
-        val movies = document.select("div#dle-content>div.short").map {
+        // 2026-05: parent wrapper changed from div#dle-content to div.sect-c (sections like
+        // #films, #series). Use the looser div.short selector — works on both home and
+        // category/listing pages. We filter to movie-style hrefs to be safe on home.
+        return document.select("div.short").mapNotNull { item ->
+            val link = item.selectFirst("a.short-poster")?.attr("href") ?: return@mapNotNull null
+            // Skip TV-show entries that the same selector also picks up on the home page.
+            if (link.contains("/s-tv/") || link.contains("-saison-")) return@mapNotNull null
             Movie(
-                id = it.selectFirst("a.short-poster")
-                    ?.attr("href")?.substringAfterLast("/")
-                    ?: "",
-                title = it.selectFirst("div.short-title")
-                    ?.text()
-                    ?: "",
-                poster = it.selectFirst("img")
-                    ?.attr("src"),
+                id = link.substringAfterLast("/"),
+                title = item.selectFirst("div.short-title")?.text() ?: "",
+                poster = item.selectFirst("img")?.attr("src"),
             )
         }
-
-        return movies
-        */
     }
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
-        // PATCH 2026-05: Provider suspended - fs14.lol migrated to Next.js CSR
-        return emptyList()
-
-        /*
         initializeService()
         val document = service.getTvShows(page)
-
-        val tvShows = document.select("div#dle-content>div.short").map {
+        return document.select("div.short").mapNotNull { item ->
+            val link = item.selectFirst("a.short-poster")?.attr("href") ?: return@mapNotNull null
+            // Only keep TV shows (filter out movies that share the same listing on home).
+            if (!link.contains("/s-tv/") && !link.contains("-saison-")) return@mapNotNull null
             TvShow(
-                id = it.selectFirst("a.short-poster")
-                    ?.attr("href")?.substringAfterLast("/")
-                    ?: "",
-                title = it.selectFirst("div.short-title")
-                    ?.text()
-                    ?: "",
-                poster = it.selectFirst("img")
-                    ?.attr("src"),
+                id = link.substringAfterLast("/"),
+                title = item.selectFirst("div.short-title")?.text() ?: "",
+                poster = item.selectFirst("img")?.attr("src"),
             )
         }
-
-        return tvShows
-        */
     }
 
     suspend fun getRating(votes: Element): Double {

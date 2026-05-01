@@ -105,6 +105,10 @@ object OlaTvProvider : Provider, IptvProvider {
     private const val PHASE3_MAX_FR_CIDS = 20     // stop once we have N healthy FR cids (incl primary)
     private const val PHASE3_PARALLELISM = 4      // concurrent probes
 
+    // Cap of progressive variants emitted per channel — keeps the Chaîne page tidy
+    // and the failover loop from drowning in dozens of dead duplicates.
+    private const val MAX_VARIANTS_PER_CHANNEL = 12
+
     // Disk cache for the discovered FR cid list — 24h TTL
     private const val FR_CIDS_CACHE_FILE = "olatv_fr_cids.json"
     private const val FR_CIDS_CACHE_TTL_MS = 24L * 60 * 60 * 1000L
