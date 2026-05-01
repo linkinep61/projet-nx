@@ -7,6 +7,8 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
+import androidx.constraintlayout.widget.ConstraintLayout
+import androidx.constraintlayout.widget.ConstraintSet
 import androidx.fragment.app.Fragment
 import androidx.navigation.fragment.findNavController
 import androidx.recyclerview.widget.GridLayoutManager
@@ -121,6 +123,7 @@ class TvShowsMobileFragment : Fragment() {
         super.onConfigurationChanged(newConfig)
         val spanCount = if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) 6 else 3
         (binding.rvTvShows.layoutManager as? GridLayoutManager)?.spanCount = spanCount
+        updateMiniPlayerLayout(newConfig.orientation)
     }
 
     override fun onDestroyView() {
@@ -302,6 +305,72 @@ class TvShowsMobileFragment : Fragment() {
                 true
             }
         }
+
+        // Apply correct layout for current orientation
+        updateMiniPlayerLayout(resources.configuration.orientation)
+    }
+
+    /**
+     * Adjusts mini player layout based on orientation:
+     * - Portrait: full width at top, ~200dp height
+     * - Landscape: 1/3 screen on the right side, RecyclerView takes 2/3
+     */
+    private fun updateMiniPlayerLayout(orientation: Int) {
+        if (_binding == null) return
+        val container = binding.miniPlayerContainer
+        val recycler = binding.rvTvShows
+        val tabLang = binding.tabLanguage
+        val root = binding.root as ConstraintLayout
+        val cs = ConstraintSet()
+        cs.clone(root)
+
+        if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            // Landscape: mini player on the right 1/3
+            cs.connect(container.id, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)
+            cs.connect(container.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
+            cs.connect(container.id, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)
+            cs.clear(container.id, ConstraintSet.START)
+            cs.constrainPercentWidth(container.id, 0.33f)
+            cs.constrainHeight(container.id, ConstraintSet.MATCH_CONSTRAINT)
+
+            // Tab language: left 2/3
+            cs.connect(tabLang.id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
+            cs.connect(tabLang.id, ConstraintSet.END, container.id, ConstraintSet.START)
+            cs.connect(tabLang.id, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)
+
+            // RecyclerView: fill left 2/3 below tabs
+            cs.connect(recycler.id, ConstraintSet.TOP, tabLang.id, ConstraintSet.BOTTOM)
+            cs.connect(recycler.id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
+            cs.connect(recycler.id, ConstraintSet.END, container.id, ConstraintSet.START)
+            cs.connect(recycler.id, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)
+
+            // Smaller player view height in landscape (fill the container)
+            binding.miniPlayerView.layoutParams.height = ViewGroup.LayoutParams.MATCH_PARENT
+        } else {
+            // Portrait: full width at top
+            cs.connect(container.id, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)
+            cs.connect(container.id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
+            cs.connect(container.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
+            cs.clear(container.id, ConstraintSet.BOTTOM)
+            cs.constrainPercentWidth(container.id, 1f)
+            cs.constrainHeight(container.id, ConstraintSet.WRAP_CONTENT)
+
+            // Tab language: full width below mini player
+            cs.connect(tabLang.id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
+            cs.connect(tabLang.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
+            cs.connect(tabLang.id, ConstraintSet.TOP, container.id, ConstraintSet.BOTTOM)
+
+            // RecyclerView: below tabs
+            cs.connect(recycler.id, ConstraintSet.TOP, tabLang.id, ConstraintSet.BOTTOM)
+            cs.connect(recycler.id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
+            cs.connect(recycler.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
+            cs.connect(recycler.id, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)
+
+            // Reset player height to 200dp
+            binding.miniPlayerView.layoutParams.height = (200 * resources.displayMetrics.density).toInt()
+        }
+
+        cs.applyTo(root)
     }
 
     private fun updatePauseButton() {

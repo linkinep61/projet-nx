@@ -637,6 +637,20 @@ object OlaTvProvider : Provider, IptvProvider {
             demotedUrls.add(url)
             probeOkCache.remove(url)
             recordHostFail(url)
+            // Invalidate resolved URL cache so next attempt does a fresh create_link
+            // (tokens in MAC portal URLs expire quickly → 401 errors)
+            resolvedUrlCache.entries.removeIf { it.value == url }
+            // Also invalidate MAC credentials for the host — token may have expired
+            val host = hostnameOf(url)
+            if (host.isNotBlank()) {
+                val failCount = (hostHealth[host]?.fail ?: 0)
+                if (failCount >= 2) {
+                    // Multiple failures from this host — clear cached MAC credentials
+                    // so next resolve does a fresh handshake
+                    macCredsCache.entries.removeIf { hostnameOf(it.value.baseUrl) == host }
+                    Log.d(TAG, "Cleared MAC creds for host $host after $failCount failures")
+                }
+            }
             Log.d(TAG, "Demoted upstream URL (will retry last): ${url.take(80)}")
         }
     }
@@ -655,9 +669,9 @@ object OlaTvProvider : Provider, IptvProvider {
     private val probeOkCache = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     private val probeClientFast = client.newBuilder()
-        .connectTimeout(2, TimeUnit.SECONDS)
-        .readTimeout(2, TimeUnit.SECONDS)
-        .callTimeout(3, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .callTimeout(8, TimeUnit.SECONDS)
         .build()
 
     /** Quick HEAD probe to filter dead upstreams before handing the URL to ExoPlayer.
@@ -1441,11 +1455,14 @@ object OlaTvProvider : Provider, IptvProvider {
                 spawnLateRegistryWatcher(key)
                 return emptyList()
             }
-            // Rotation: order streams by (1) demoted last, (2) host with best historical
-            // success rate first. So portals that are healthy this session bubble up
-            // across all channels, dead/saturated ones get pushed down.
+            // Rotation: order streams by
+            // (1) previously-working streams first (probeOkCache = already played OK)
+            // (2) demoted (recently failed) last
+            // (3) host with best historical success rate first
+            // This ensures channels that worked before play instantly on re-click.
             val streamsSnapshot = info.streams.sortedWith(
-                compareBy<OlaStreamRef> { it.url in demotedUrls }
+                compareByDescending<OlaStreamRef> { it.url in probeOkCache }
+                    .thenBy { it.url in demotedUrls }
                     .thenByDescending { hostScore(it.url) }
             )
             Log.d(TAG, "getServers '$key' (${info.displayName}): ${streamsSnapshot.size} stream(s) — progressive emission")
@@ -1560,35 +1577,32 @@ object OlaTvProvider : Provider, IptvProvider {
             val cacheKey = "$cid::$cmd"
 
             val streamUrl = when {
-                // Already-resolved URL cached from a previous play — instant play.
-                resolvedUrlCache[cacheKey] != null -> {
-                    Log.d(TAG, "getVideo cache hit for $cid")
-                    resolvedUrlCache[cacheKey]!!
-                }
                 // Direct upstream URL (no resolution needed) — instant play.
                 rawCmd.startsWith("http") && !isLocalhost -> rawCmd
                 // Localhost placeholder — must hit create_link to get the real URL.
+                // Never cache these: MAC portal tokens expire within minutes → 401 errors.
+                // Always resolve fresh for reliability.
                 else -> {
                     val creds = getMacCredentials(cid) ?: throw Exception("Could not get MAC creds for cid=$cid")
                     val resolved = resolveStreamCmd(creds.baseUrl, creds.mac, cmd)
                         ?: throw Exception("create_link returned null")
-                    resolvedUrlCache[cacheKey] = resolved
+                    Log.d(TAG, "getVideo resolved fresh for cid=$cid: ${resolved.take(80)}")
                     resolved
                 }
             }
-            // Fast HEAD probe (2 s timeout) — catches 4xx/5xx upstreams in ~500 ms-2 s
-            // instead of waiting for the player's 10 s buffering watchdog. Skip if URL
-            // was already probed-OK in the cache. On fail we demote (URL goes to the
-            // bottom of future rotations) and throw so the failover advances.
+            // Soft HEAD probe — demotes streams that fail but does NOT block playback.
+            // The player's buffering watchdog (10s) handles truly dead streams.
+            // This lets slow-responding but working streams play immediately.
             if (!probeOkCache.contains(streamUrl)) {
                 val probeOk = probeStreamHead(streamUrl)
-                if (!probeOk) {
-                    reportBrokenStreamUrl(streamUrl)
-                    throw Exception("HEAD probe failed: ${streamUrl.take(80)}")
+                if (probeOk) {
+                    probeOkCache.add(streamUrl)
+                    demotedUrls.remove(streamUrl)
+                } else {
+                    Log.w(TAG, "HEAD probe failed (soft) — will try anyway: ${streamUrl.take(80)}")
+                    // Demote but don't throw — let ExoPlayer attempt the stream.
+                    demotedUrls.add(streamUrl)
                 }
-                probeOkCache.add(streamUrl)
-                // URL just passed — clear any prior demotion (working again, promote).
-                demotedUrls.remove(streamUrl)
             }
             Log.d(TAG, "getVideo → ${streamUrl.take(120)}")
             Video(streamUrl, headers = mapOf("User-Agent" to USER_AGENT))
