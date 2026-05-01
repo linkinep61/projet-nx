@@ -461,18 +461,30 @@ object OlaTvProvider : Provider, IptvProvider {
     // of the same variant don't trigger redundant create_link calls.
     private val resolvedUrlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
-    // URLs the player has reported as broken in the current process — getVideo will throw
-    // immediately for them so the failover loop moves to a genuinely different source.
-    private val brokenUrlSet = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    // URLs the player has reported as broken — TTL'd so a transient hiccup at one
+    // moment doesn't blacklist a working stream for the rest of the session. After the
+    // TTL the URL is re-eligible and the player can try it again.
+    private val brokenUrlMap = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private const val BROKEN_URL_TTL_MS = 3L * 60L * 1000L  // 3 minutes
 
-    /** Player calls this when a stream URL fails (HTTP error, codec error). Future calls
-     *  to getVideo for any variant resolving to the same URL will throw fast. */
+    /** Player calls this when a stream URL fails (HTTP error, codec error). Variants
+     *  resolving to the same URL will be skipped for the next [BROKEN_URL_TTL_MS]. */
     @JvmStatic
     fun reportBrokenStreamUrl(url: String) {
         if (url.isNotBlank()) {
-            brokenUrlSet.add(url)
+            brokenUrlMap[url] = System.currentTimeMillis()
             Log.d(TAG, "Marked broken upstream URL: ${url.take(80)}")
         }
+    }
+
+    /** True when the URL is currently blacklisted (failed within TTL). */
+    private fun isBrokenUrl(url: String): Boolean {
+        val ts = brokenUrlMap[url] ?: return false
+        if (System.currentTimeMillis() - ts > BROKEN_URL_TTL_MS) {
+            brokenUrlMap.remove(url)
+            return false
+        }
+        return true
     }
 
     private fun getMacCredentials(cid: String): MacCredentials? {
@@ -1221,10 +1233,11 @@ object OlaTvProvider : Provider, IptvProvider {
                     resolved
                 }
             }
-            // Skip a variant that resolves to a URL already known broken — saves the
-            // player from looping on multiple variants pointing to the same dead stream.
-            if (streamUrl in brokenUrlSet) {
-                throw Exception("URL already failed earlier this session: ${streamUrl.take(80)}")
+            // Skip a variant that resolves to a URL recently known broken (within TTL).
+            // After the TTL it becomes eligible again — gives transient failures a 2nd
+            // chance instead of blacklisting an upstream forever for the session.
+            if (isBrokenUrl(streamUrl)) {
+                throw Exception("URL on cool-down (failed in last 3 min): ${streamUrl.take(80)}")
             }
             Log.d(TAG, "getVideo → ${streamUrl.take(120)}")
             Video(streamUrl, headers = mapOf("User-Agent" to USER_AGENT))
