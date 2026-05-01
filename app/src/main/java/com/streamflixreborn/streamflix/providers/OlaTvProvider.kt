@@ -411,7 +411,9 @@ object OlaTvProvider : Provider {
         }
     }
 
-    /** Build a tv-logo/tv-logos GitHub URL from a channel name (slug FR convention). */
+    /** Build a tv-logo/tv-logos GitHub URL from a channel name (slug FR convention).
+     *  Strips quality/locale markers (FR, FHD, HD, +1, etc.) anywhere in the name —
+     *  the tv-logo repo uses minimal slugs like "tf1-fr.png" / "france-2-fr.png". */
     private fun logoUrlFor(name: String): String {
         val slug = name.lowercase()
             .replace(Regex("[éèêë]"), "e")
@@ -420,7 +422,12 @@ object OlaTvProvider : Provider {
             .replace(Regex("[îï]"), "i")
             .replace(Regex("[ôö]"), "o")
             .replace("ç", "c")
+            // Strip locale/quality markers anywhere (word-boundary safe via spaces)
+            .replace(Regex("\\b(fr|fhd|uhd|hd|sd|4k|raw|hevc|h265|ppv)\\b", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("\\+\\s?1\\b"), " ")
             .replace("+", "-plus")
+            .replace(Regex("\\s+"), " ")
+            .trim()
             .replace(Regex("[^a-z0-9]+"), "-")
             .trim('-')
         return "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/france/$slug-fr.png"
@@ -564,18 +571,24 @@ object OlaTvProvider : Provider {
         val key = id.removePrefix("ola::")
         val info = synchronized(registryLock) { channelRegistry[key] }
             ?: throw Exception("Channel '$key' not found")
+        // Use the SAME id for TvShow / Season / Episode so getServers(episodeId)
+        // can extract the same key. Mirrors WiTvProvider's pattern.
+        val logo = info.logo.ifBlank { null }
         toTvShow(key, info).copy(
             seasons = listOf(
-                Season(id = "ola_season::$key", number = 1, title = "En direct",
-                    episodes = listOf(Episode(id = "ola_ep::$key", number = 1,
-                        title = "Regarder en Direct", poster = info.logo.ifBlank { null })))
+                Season(id = id, number = 1, title = "En Direct",
+                    episodes = listOf(Episode(id = id, number = 1,
+                        title = "Regarder en Direct", poster = logo)))
             )
         )
     } catch (e: Exception) {
         Log.e(TAG, "getTvShow($id) error", e); throw e
     }
 
-    override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> = emptyList()
+    /** Returns the single live "Regarder en Direct" episode for the season.
+     *  seasonId == tvShowId == episodeId == "ola::<channelKey>" by design. */
+    override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> =
+        listOf(Episode(id = seasonId, number = 1, title = "Regarder en Direct"))
 
     override suspend fun getGenre(id: String, page: Int): Genre = throw Exception("Not supported")
 
