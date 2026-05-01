@@ -101,13 +101,14 @@ object OlaTvProvider : Provider, IptvProvider {
     private val phase3Mutex = Mutex()
 
     // Phase 3 tuning
-    private const val PHASE3_MAX_CANDIDATES = 30  // probe at most this many cids per scan
-    private const val PHASE3_MAX_FR_CIDS = 20     // stop once we have N healthy FR cids (incl primary)
+    private const val PHASE3_MAX_CANDIDATES = 20  // probe at most this many cids per scan
+    private const val PHASE3_MAX_FR_CIDS = 8      // stop once we have N healthy FR cids (incl primary)
     private const val PHASE3_PARALLELISM = 4      // concurrent probes
 
     // Cap of progressive variants emitted per channel — keeps the Chaîne page tidy
     // and the failover loop from drowning in dozens of dead duplicates.
-    private const val MAX_VARIANTS_PER_CHANNEL = 12
+    // Lower = faster channel switch (fewer dead servers to cycle through).
+    private const val MAX_VARIANTS_PER_CHANNEL = 5
 
     // Disk cache for the discovered FR cid list — 24h TTL
     private const val FR_CIDS_CACHE_FILE = "olatv_fr_cids.json"
@@ -656,11 +657,48 @@ object OlaTvProvider : Provider, IptvProvider {
     }
 
     /** Player reports a successful playback — we promote the host so its other streams
-     *  bubble up in the rotation across other channels. */
+     *  bubble up in the rotation across other channels. Also persists the working
+     *  stream info for this channel so the next app session starts with the best server. */
     @JvmStatic
-    fun reportWorkingStreamUrl(url: String) {
+    fun reportWorkingStreamUrl(url: String, channelKey: String? = null) {
         if (url.isNotBlank()) {
             recordHostOk(url)
+            probeOkCache.add(url)
+            // Persist the working URL for this channel
+            if (!channelKey.isNullOrBlank()) {
+                workingChannelUrls[channelKey] = url
+                saveWorkingChannelUrls()
+            }
+        }
+    }
+
+    // ───────── Persistent working-URL cache ─────────
+    // Maps channelKey (e.g. "tf1") to the last resolved URL that successfully played.
+    // Saved to disk so that even after app restart, we try the best server first.
+    private const val WORKING_URLS_FILE = "olatv_working_urls.json"
+    private val workingChannelUrls = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private fun loadWorkingChannelUrls() {
+        try {
+            val f = java.io.File(StreamFlixApp.instance.filesDir, WORKING_URLS_FILE)
+            if (!f.exists()) return
+            val json = org.json.JSONObject(f.readText())
+            json.keys().forEach { key ->
+                workingChannelUrls[key] = json.getString(key)
+            }
+            Log.d(TAG, "Loaded ${workingChannelUrls.size} working channel URLs from disk")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load working URLs: ${e.message}")
+        }
+    }
+
+    private fun saveWorkingChannelUrls() {
+        try {
+            val json = org.json.JSONObject()
+            workingChannelUrls.forEach { (k, v) -> json.put(k, v) }
+            java.io.File(StreamFlixApp.instance.filesDir, WORKING_URLS_FILE).writeText(json.toString())
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to save working URLs: ${e.message}")
         }
     }
 
@@ -1221,6 +1259,8 @@ object OlaTvProvider : Provider, IptvProvider {
 
     private suspend fun ensureRegistry() {
         if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return
+        // Load persistent working URLs on first call
+        if (workingChannelUrls.isEmpty()) loadWorkingChannelUrls()
         registryMutex.withLock {
             if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return@withLock
 
@@ -1460,25 +1500,42 @@ object OlaTvProvider : Provider, IptvProvider {
             // (2) demoted (recently failed) last
             // (3) host with best historical success rate first
             // This ensures channels that worked before play instantly on re-click.
+            // Smart sort: direct streams first, previously-working first, dead hosts last.
+            // "Direct" = real URL (http://...), not a localhost MAC portal placeholder.
+            // MAC portals require handshake + create_link and tokens expire fast → unreliable.
             val streamsSnapshot = info.streams.sortedWith(
-                compareByDescending<OlaStreamRef> { it.url in probeOkCache }
-                    .thenBy { it.url in demotedUrls }
-                    .thenByDescending { hostScore(it.url) }
+                compareByDescending<OlaStreamRef> { it.url in probeOkCache }  // known-good first
+                    .thenBy { it.url in demotedUrls }                         // known-bad last
+                    .thenByDescending {                                        // direct > MAC portal
+                        val raw = it.url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
+                        raw.startsWith("http") && !raw.contains("localhost") && !raw.contains("127.0.0.1")
+                    }
+                    .thenByDescending { hostScore(it.url) }                   // best host score
             )
             Log.d(TAG, "getServers '$key' (${info.displayName}): ${streamsSnapshot.size} stream(s) — progressive emission")
 
-            // Build a Video.Server for the first stream (synchronous result so the
-            // player can open immediately) and emit ALL variants (including the first)
-            // via the progressive flow so they all appear in the player's "Chaîne" page.
+            // Fast-track: if we have a previously-working URL for this channel (persisted
+            // to disk), inject it as the FIRST server. This URL is a resolved direct URL
+            // (not a MAC portal placeholder), so getVideo will play it immediately without
+            // any handshake — instant channel switch for known-good channels.
+            val fastTrackUrl = workingChannelUrls[key]
+            val initialServers = mutableListOf<Video.Server>()
+            if (!fastTrackUrl.isNullOrBlank()) {
+                Log.d(TAG, "  fast-track for '$key': ${fastTrackUrl.take(80)}")
+                initialServers.add(Video.Server(
+                    id = "ola_fasttrack::$key::$fastTrackUrl",
+                    name = "OLA TV - Last Working",
+                ))
+            }
+
+            // Build a Video.Server for the first stream
             val first = streamsSnapshot.firstOrNull()
-            val initialServers = if (first != null) {
+            if (first != null) {
                 Log.d(TAG, "  primary[0] cid=${first.cid} label='${first.label}' cmd=${first.url.take(80)}")
-                listOf(Video.Server(
+                initialServers.add(Video.Server(
                     id = "ola_stream::${first.cid}::${first.label}::${first.url}",
                     name = "OLA TV - ${first.label}",
                 ))
-            } else {
-                emptyList()
             }
 
             // Cancel any previous emit job (channel switch) and start a new one.
@@ -1566,6 +1623,13 @@ object OlaTvProvider : Provider, IptvProvider {
 
     override suspend fun getVideo(server: Video.Server): Video = withContext(Dispatchers.IO) {
         try {
+            // Fast-track: direct URL from working cache — skip all MAC portal resolution.
+            if (server.id.startsWith("ola_fasttrack::")) {
+                val ftParts = server.id.removePrefix("ola_fasttrack::").split("::", limit = 2)
+                val ftUrl = ftParts.getOrNull(1) ?: throw Exception("Bad fast-track id")
+                Log.d(TAG, "getVideo fast-track → ${ftUrl.take(120)}")
+                return@withContext Video(ftUrl, headers = mapOf("User-Agent" to USER_AGENT))
+            }
             // Format: "ola_stream::<cid>::<label>::<cmd>"
             val parts = server.id.removePrefix("ola_stream::").split("::", limit = 3)
             if (parts.size < 3) throw Exception("Bad server id: ${server.id}")

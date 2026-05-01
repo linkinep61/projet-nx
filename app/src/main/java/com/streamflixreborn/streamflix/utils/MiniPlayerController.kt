@@ -74,6 +74,22 @@ object MiniPlayerController {
     private var retryCycle: Int = 0
     @Volatile private var serversExhausted: Boolean = false
 
+    // Host-level failure tracking: if a host fails >= HOST_FAIL_THRESHOLD times,
+    // skip all remaining servers on that host immediately instead of wasting 5s each.
+    private val hostFailCounts: MutableMap<String, Int> = mutableMapOf()
+    private const val HOST_FAIL_THRESHOLD = 2
+
+    private fun extractHost(url: String): String {
+        return try { java.net.URI(url).host ?: "" } catch (_: Exception) { "" }
+    }
+
+    private fun recordHostFail(url: String) {
+        val host = extractHost(url)
+        if (host.isNotBlank()) {
+            hostFailCounts[host] = (hostFailCounts[host] ?: 0) + 1
+        }
+    }
+
     fun getPlayer(): ExoPlayer? = player
 
     private val playerListener = object : Player.Listener {
@@ -84,6 +100,7 @@ object MiniPlayerController {
             // Report the dead URL so OlaTvProvider blacklists it for the rest of the session.
             val playingUri = player?.currentMediaItem?.localConfiguration?.uri?.toString()
             if (!playingUri.isNullOrBlank()) {
+                recordHostFail(playingUri)
                 try {
                     com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
                 } catch (_: Throwable) { }
@@ -100,11 +117,13 @@ object MiniPlayerController {
                     cancelBufferingWatchdog()
                     retryCycle = 0 // reset cycle counter on success
                     _state.value = State.Playing(chId, currentChannelName ?: "", currentChannelPoster)
-                    // Report success to OlaTvProvider so this host gets prioritized
+                    // Report success to OlaTvProvider so this host gets prioritized.
+                    // Pass the channel key so the working URL is persisted to disk.
                     val playingUri = player?.currentMediaItem?.localConfiguration?.uri?.toString()
                     if (!playingUri.isNullOrBlank()) {
                         try {
-                            com.streamflixreborn.streamflix.providers.OlaTvProvider.reportWorkingStreamUrl(playingUri)
+                            val channelKey = chId.removePrefix("ola_ep::").removePrefix("ola::")
+                            com.streamflixreborn.streamflix.providers.OlaTvProvider.reportWorkingStreamUrl(playingUri, channelKey)
                         } catch (_: Throwable) { }
                     }
                 }
@@ -133,6 +152,7 @@ object MiniPlayerController {
                 Log.w(TAG, "Buffering watchdog: $serverName stuck >${BUFFERING_WATCHDOG_MS / 1000}s, switching")
                 val playingUri = player?.currentMediaItem?.localConfiguration?.uri?.toString()
                 if (!playingUri.isNullOrBlank()) {
+                    recordHostFail(playingUri)
                     try {
                         com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
                     } catch (_: Throwable) { }
@@ -191,6 +211,7 @@ object MiniPlayerController {
         currentChannelPoster = channelPoster
         availableServers.clear()
         triedServerUrls.clear()
+        hostFailCounts.clear()
         currentServerIndex = 0
         retryCycle = 0
         serversExhausted = false
@@ -327,6 +348,7 @@ object MiniPlayerController {
         serversExhausted = false
         currentServerIndex = index
         val server = availableServers[index]
+
         triedServerUrls.add(server.id)
         Log.d(TAG, "Trying server [$index/${availableServers.size}] ${server.name}")
         _state.value = State.Loading(channelId, currentChannelName ?: "")
@@ -340,6 +362,15 @@ object MiniPlayerController {
 
             if (video.source.isEmpty()) {
                 Log.w(TAG, "Server [$index] ${server.name} returned empty source, trying next")
+                playServerAtIndex(channelId, provider, index + 1)
+                return
+            }
+
+            // Host-level skip: if this resolved URL's host has already failed >= threshold,
+            // skip it immediately instead of wasting 5s waiting for ExoPlayer to time out.
+            val resolvedHost = extractHost(video.source)
+            if (resolvedHost.isNotBlank() && (hostFailCounts[resolvedHost] ?: 0) >= HOST_FAIL_THRESHOLD) {
+                Log.d(TAG, "Skipping server [$index] ${server.name} — host $resolvedHost already failed ${hostFailCounts[resolvedHost]} times")
                 playServerAtIndex(channelId, provider, index + 1)
                 return
             }
@@ -361,6 +392,7 @@ object MiniPlayerController {
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "Server [$index] ${server.name} failed: ${e.message}")
+            recordHostFail(server.id)
             if (currentChannelId == channelId) {
                 playServerAtIndex(channelId, provider, index + 1)
             }
@@ -426,6 +458,7 @@ object MiniPlayerController {
         currentChannelPoster = null
         availableServers.clear()
         triedServerUrls.clear()
+        hostFailCounts.clear()
         currentServerIndex = 0
         retryCycle = 0
         serversExhausted = false
@@ -557,6 +590,7 @@ object MiniPlayerController {
         currentChannelPoster = null
         availableServers.clear()
         triedServerUrls.clear()
+        hostFailCounts.clear()
         currentServerIndex = 0
         retryCycle = 0
         serversExhausted = false
