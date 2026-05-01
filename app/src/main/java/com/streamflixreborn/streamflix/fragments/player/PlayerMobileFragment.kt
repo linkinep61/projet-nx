@@ -237,6 +237,12 @@ class PlayerMobileFragment : Fragment() {
     private var usingBrowserOkHttp = false
     private var usingWebView = false
 
+    // Track the active Player.Listener so we can remove it before attaching a new one.
+    // Without this, every retry/displayVideo() call piled a new listener on top of the
+    // previous, causing onPlayerError to fire N times per error and accumulating
+    // ExoPlayer/MediaSession resources until the OS killed the process.
+    private var activePlayerListener: androidx.media3.common.Player.Listener? = null
+
     // ── WebView overlay (Netu anti-bot bypass — touch-friendly for mobile) ──
     private var webViewOverlay: FrameLayout? = null
     private var overlayWebView: WebView? = null
@@ -1673,7 +1679,10 @@ class PlayerMobileFragment : Fragment() {
                 startActivity(Intent.createChooser(intent, getString(R.string.player_external_player_title)))
             }
         }
-        player.addListener(object : Player.Listener {
+        // Detach previous listener (if any) before adding the new one — otherwise each
+        // displayVideo() call leaks a listener and onPlayerError fires multiple times.
+        activePlayerListener?.let { try { player.removeListener(it) } catch (_: Exception) {} }
+        val newListener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 super.onPlaybackStateChanged(playbackState)
                 val stateName = when (playbackState) {
@@ -1861,7 +1870,9 @@ class PlayerMobileFragment : Fragment() {
                     }
                 }
             }
-        })
+        }
+        player.addListener(newListener)
+        activePlayerListener = newListener
 
         if (currentPosition == 0L) {
             val videoType = args.videoType
@@ -2990,8 +3001,10 @@ class PlayerMobileFragment : Fragment() {
         binding.settings.player = null
         binding.settings.subtitleView = null
         if (::player.isInitialized) {
+            activePlayerListener?.let { try { player.removeListener(it) } catch (_: Exception) {} }
             player.release()
         }
+        activePlayerListener = null
         if (::mediaSession.isInitialized) {
             mediaSession.release()
         }
