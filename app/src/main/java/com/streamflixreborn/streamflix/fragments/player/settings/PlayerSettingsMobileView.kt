@@ -26,7 +26,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
         true
     )
 
-    private val settingsAdapter = SettingsAdapter(this, Settings.listMobile)
+    private val settingsAdapter = SettingsAdapter(this, Settings.listMobileForCurrentProvider())
     private val qualityAdapter = SettingsAdapter(this, Settings.Quality.list)
     private val audioAdapter = SettingsAdapter(this, Settings.Audio.list)
     private val subtitlesAdapter = SettingsAdapter(this, Settings.Subtitle.list)

@@ -310,9 +310,14 @@ class MainMobileActivity : FragmentActivity() {
         }
         binding.bnvMain.menu.findItem(R.id.tv_shows)?.apply {
             isVisible = supportsTvShows
-            title = when (provider.name) {
-                "CableVisionHD", "TvporinternetHD", "WiTV" -> getString(R.string.main_menu_all_channels)
-                "VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga" -> getString(R.string.main_menu_series)
+            // IPTV providers (WiTv, OlaTv, …) show "Toutes les chaînes" instead of "Séries TV"
+            // — covers any provider implementing IptvProvider, no need to maintain a list.
+            val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
+            title = when {
+                isIptv || provider.name in setOf("CableVisionHD", "TvporinternetHD") ->
+                    getString(R.string.main_menu_all_channels)
+                provider.name in setOf("VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga") ->
+                    getString(R.string.main_menu_series)
                 else -> getString(R.string.main_menu_tv_shows)
             }
         }
