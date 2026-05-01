@@ -628,11 +628,13 @@ object OlaTvProvider : Provider {
             val cmd = parts[2]
 
             val rawCmd = cmd.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
-            // If it's already a direct URL, use it.
-            val streamUrl = if (rawCmd.startsWith("http")) {
+            // localhost URLs are placeholders — the MAC portal expects you to call
+            // create_link to get the real upstream URL. Only direct external HTTP URLs
+            // can be played as-is.
+            val isLocalhost = rawCmd.contains("localhost") || rawCmd.contains("127.0.0.1")
+            val streamUrl = if (rawCmd.startsWith("http") && !isLocalhost) {
                 rawCmd
             } else {
-                // Resolve via create_link
                 val creds = getMacCredentials(cid) ?: throw Exception("Could not get MAC creds for cid=$cid")
                 resolveStreamCmd(creds.baseUrl, creds.mac, cmd) ?: throw Exception("create_link returned null")
             }
