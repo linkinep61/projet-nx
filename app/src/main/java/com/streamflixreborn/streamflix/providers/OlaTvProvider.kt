@@ -461,32 +461,22 @@ object OlaTvProvider : Provider, IptvProvider {
     // of the same variant don't trigger redundant create_link calls.
     private val resolvedUrlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
-    // URLs the player has reported as broken — TTL'd so a transient hiccup at one
-    // moment doesn't blacklist a working stream for the rest of the session. After the
-    // TTL the URL is re-eligible and the player can try it again.
-    private val brokenUrlMap = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    private const val BROKEN_URL_TTL_MS = 15L * 60L * 1000L  // 15 minutes
+    // URLs that have recently failed — used for ordering: demoted URLs are emitted
+    // LAST so the player tries fresh URLs first. No TTL throw: a demoted URL is still
+    // playable if the player walks down to it (rotation, not blacklist).
+    private val demotedUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-    /** Player calls this when a stream URL fails (HTTP error, codec error). Variants
-     *  resolving to the same URL will be skipped for the next [BROKEN_URL_TTL_MS]. */
+    /** Player calls this when a stream URL fails. The URL is demoted to the bottom of
+     *  the rotation but stays playable so the failover can wrap back to it if all
+     *  fresher URLs also fail. */
     @JvmStatic
     fun reportBrokenStreamUrl(url: String) {
         if (url.isNotBlank()) {
-            brokenUrlMap[url] = System.currentTimeMillis()
-            // Drop from probe-OK cache so once the TTL expires we re-probe before trusting again.
+            demotedUrls.add(url)
+            // Drop from probe-OK cache so the next HEAD probe re-validates it.
             probeOkCache.remove(url)
-            Log.d(TAG, "Marked broken upstream URL: ${url.take(80)}")
+            Log.d(TAG, "Demoted upstream URL (will retry last): ${url.take(80)}")
         }
-    }
-
-    /** True when the URL is currently blacklisted (failed within TTL). */
-    private fun isBrokenUrl(url: String): Boolean {
-        val ts = brokenUrlMap[url] ?: return false
-        if (System.currentTimeMillis() - ts > BROKEN_URL_TTL_MS) {
-            brokenUrlMap.remove(url)
-            return false
-        }
-        return true
     }
 
     // URLs that recently passed a HEAD probe — short-circuit subsequent probes for the
@@ -1137,7 +1127,10 @@ object OlaTvProvider : Provider, IptvProvider {
                 spawnLateRegistryWatcher(key)
                 return emptyList()
             }
-            val streamsSnapshot = info.streams.toList()
+            // Rotation: known-demoted streams (failed earlier this session) go to the END
+            // so the failover tries fresh ones first. They stay playable — wraparound
+            // brings them back if every fresher option also fails.
+            val streamsSnapshot = info.streams.sortedBy { it.url in demotedUrls }
             Log.d(TAG, "getServers '$key' (${info.displayName}): ${streamsSnapshot.size} stream(s) — progressive emission")
 
             // Build a Video.Server for the first stream (synchronous result so the
@@ -1262,13 +1255,10 @@ object OlaTvProvider : Provider, IptvProvider {
                     resolved
                 }
             }
-            // Skip a variant that resolves to a URL recently known broken (within TTL).
-            if (isBrokenUrl(streamUrl)) {
-                throw Exception("URL on cool-down (failed in last 15 min): ${streamUrl.take(80)}")
-            }
             // Fast HEAD probe (2 s timeout) — catches 4xx/5xx upstreams in ~500 ms-2 s
             // instead of waiting for the player's 10 s buffering watchdog. Skip if URL
-            // was already probed-OK in the cache.
+            // was already probed-OK in the cache. On fail we demote (URL goes to the
+            // bottom of future rotations) and throw so the failover advances.
             if (!probeOkCache.contains(streamUrl)) {
                 val probeOk = probeStreamHead(streamUrl)
                 if (!probeOk) {
@@ -1276,6 +1266,8 @@ object OlaTvProvider : Provider, IptvProvider {
                     throw Exception("HEAD probe failed: ${streamUrl.take(80)}")
                 }
                 probeOkCache.add(streamUrl)
+                // URL just passed — clear any prior demotion (working again, promote).
+                demotedUrls.remove(streamUrl)
             }
             Log.d(TAG, "getVideo → ${streamUrl.take(120)}")
             Video(streamUrl, headers = mapOf("User-Agent" to USER_AGENT))
