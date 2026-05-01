@@ -297,11 +297,15 @@ object OlaTvProvider : Provider {
     }
 
     /** Resolve a "cmd" (from get_ordered_list) to an actual playable stream URL.
-     *  If cmd already starts with http://, return it directly. Else (localhost:* form),
-     *  call create_link to get the real URL. */
+     *  If cmd is already a direct *external* http URL, return it directly. Else
+     *  (localhost:* form, which is how the MAC portal encodes "you must call create_link"),
+     *  call create_link to get the real upstream URL. */
     private fun resolveStreamCmd(baseUrl: String, mac: String, cmd: String): String? {
         val rawCmd = cmd.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
-        if (rawCmd.startsWith("http")) return rawCmd
+        // Direct external HTTP URLs are playable as-is. Localhost URLs are placeholders
+        // that ALWAYS need create_link resolution.
+        val isLocalhost = rawCmd.contains("localhost") || rawCmd.contains("127.0.0.1")
+        if (rawCmd.startsWith("http") && !isLocalhost) return rawCmd
 
         try {
             val encodedMac = java.net.URLEncoder.encode(mac, "UTF-8")
