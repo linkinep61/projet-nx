@@ -20,7 +20,7 @@ class RpmvidExtractor : Extractor() {
         "https://totocoutouno.rpmlive.online", "https://dismoiceline.uns.bio", "https://doremifasol.ezplayer.me", "https://marcus.p2pstream.vip","https://animeav1.uns.bio",
         "https://serix.upns.live",
         "https://coflix.upn.one",
-        "https://flemmix.farm", "https://flemmix.rpmlive.online", "https://flemmix.upns.xyz", "https://flemmix.rpmstream.live", "https://flemmix.strp2p.com", "https://flemmix.ezplayer.me", "https://flemmix.uns.bio", "https://flemmix.upns.live", "https://flemmix.upn.one", "https://flemmix.p2pstream.vip")
+        "https://flemmix.farm", "https://flemmix.rpmlive.online", "https://flemmix.upns.xyz", "https://flemmix.rpmstream.live", "https://flemmix.strp2p.com", "https://flemmix.ezplayer.me", "https://flemmix.uns.bio", "https://flemmix.upns.live", "https://flemmix.upn.one", "https://flemmix.p2pstream.vip", "https://flemmix.prof")
 
     override val rotatingDomain = listOf(
         Regex("flemmix\\.[a-z]+(?:\\.[a-z]+)?/embed"),
