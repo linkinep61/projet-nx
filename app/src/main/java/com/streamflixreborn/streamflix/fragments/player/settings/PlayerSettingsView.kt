@@ -423,6 +423,20 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                 SoftwareDecoder,
                 ManualZoom,
             )
+
+            /** ChannelVariant only makes sense on IPTV providers (WiTv / OlaTv) — they
+             *  emit progressive stream variants for live channels. Hide it everywhere
+             *  else so non-IPTV users don't see an empty "Chaîne" entry. */
+            fun listMobileForCurrentProvider(): List<Item> {
+                val isIptv = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider is
+                    com.streamflixreborn.streamflix.providers.IptvProvider
+                return if (isIptv) listMobile else listMobile.filter { it != ChannelVariant }
+            }
+            fun listTvForCurrentProvider(): List<Item> {
+                val isIptv = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider is
+                    com.streamflixreborn.streamflix.providers.IptvProvider
+                return if (isIptv) listTv else listTv.filter { it != ChannelVariant }
+            }
         }
 
         data object ManualZoom : Settings()

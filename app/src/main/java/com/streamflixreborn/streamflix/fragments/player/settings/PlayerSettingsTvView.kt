@@ -28,7 +28,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
         true
     )
 
-    private val settingsAdapter = SettingsAdapter(this, Settings.listTv)
+    private val settingsAdapter = SettingsAdapter(this, Settings.listTvForCurrentProvider())
     private val qualityAdapter = SettingsAdapter(this, Settings.Quality.list)
     private val audioAdapter = SettingsAdapter(this, Settings.Audio.list)
     private val subtitlesAdapter = SettingsAdapter(this, Settings.Subtitle.list)
