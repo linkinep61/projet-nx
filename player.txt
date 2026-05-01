@@ -1,0 +1,129 @@
+05-01 18:23:49.872 I/ExoPlayerImpl( 4954): Init 207c66b [AndroidXMedia3/1.3.0] [emu64xa, sdk_gphone64_x86_64, Google, 35]
+05-01 18:23:49.938 I/ExoPlayerImpl( 4954): Init 1aecf3f [AndroidXMedia3/1.3.0] [emu64xa, sdk_gphone64_x86_64, Google, 35]
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621): Playback error
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):   androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):       at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):       at androidx.media3.exoplayer.ExoPlayerImplInternal.handleMessage(ExoPlayerImplInternal.java:899)
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):       at android.os.Handler.dispatchMessage(Handler.java:103)
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):       at android.os.Looper.loopOnce(Looper.java:232)
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):       at android.os.Looper.loop(Looper.java:317)
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):       at android.os.HandlerThread.run(HandlerThread.java:85)
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):   Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 401
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):       at androidx.media3.datasource.DefaultHttpDataSource.open(DefaultHttpDataSource.java:400)
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):       at androidx.media3.datasource.DefaultDataSource.open(DefaultDataSource.java:275)
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):       at androidx.media3.datasource.StatsDataSource.open(StatsDataSource.java:88)
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):       at androidx.media3.exoplayer.source.ProgressiveMediaPeriod$ExtractingLoadable.load(ProgressiveMediaPeriod.java:1109)
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):       at androidx.media3.exoplayer.upstream.Loader$LoadTask.run(Loader.java:453)
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):       at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1145)
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):       at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:644)
+05-01 18:24:35.122 E/ExoPlayerImplInternal( 4621):       at java.lang.Thread.run(Thread.java:1012)
+05-01 18:24:35.427 D/PlayerNetwork( 4621): URL does not need Cronet (), using DefaultHttp
+05-01 18:24:35.427 D/PlayerNetwork( 4621): Using DefaultHttpDataSource (Java HttpURLConnection, system DNS)
+05-01 18:24:35.428 I/ExoPlayerImpl( 4621): Init 27a2aa0 [AndroidXMedia3/1.8.0] [emu64xa, sdk_gphone64_x86_64, Google, 35]
+05-01 18:24:35.757 D/PlayerViewModel( 4621): Inizio ricerca sottotitoli
+05-01 18:24:35.758 D/PlayerViewModel( 4621): Inizio ricerca server per ID: ola::ab1
+05-01 18:24:35.762 D/PlayerViewModel( 4621): Inizio ricerca OpenSubtitles
+05-01 18:24:35.763 D/PlayerViewModel( 4621): Inizio ricerca SubDL
+05-01 18:24:35.769 D/PlayerViewModel( 4621): Ricerca SubDL completata: 0 risultati
+05-01 18:24:35.918 D/PlayerNetwork( 4621): Cronet engine pre-initialized: org.chromium.net.impl.CronetUrlRequestContext
+05-01 18:24:35.957 I/ExoPlayerImpl( 4621): Release 3ace2eb [AndroidXMedia3/1.8.0] [emu64xa, sdk_gphone64_x86_64, Google, 35] [media3.common, media3.ui, media3.exoplayer, media3.decoder, media3.datasource, media3.session]
+05-01 18:24:36.825 D/PlayerViewModel( 4621): Ricerca OpenSubtitles completata: 0 risultati
+05-01 18:24:36.950 D/PlayerViewModel( 4621): Ricerca server completata: 1 server trovati
+05-01 18:24:36.951 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] HD FR
+05-01 18:24:36.952 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] HEVC FR
+05-01 18:24:36.952 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] HD
+05-01 18:24:36.952 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] HEVC
+05-01 18:24:36.952 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] Source 5
+05-01 18:24:36.952 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] FHD
+05-01 18:24:36.952 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] UHD
+05-01 18:24:36.952 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] HD
+05-01 18:24:36.952 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] FHD
+05-01 18:24:36.952 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] HD
+05-01 18:24:36.957 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: HD FR
+05-01 18:24:36.957 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: HEVC FR
+05-01 18:24:36.957 D/PlayerViewModel( 4621): Inizio estrazione video dal server: OLA TV - HD FR
+05-01 18:24:36.957 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: HD
+05-01 18:24:36.957 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: HEVC
+05-01 18:24:36.957 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: Source 5
+05-01 18:24:36.957 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: FHD
+05-01 18:24:36.957 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: UHD
+05-01 18:24:36.957 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: HD
+05-01 18:24:36.957 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: FHD
+05-01 18:24:36.957 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: HD
+05-01 18:24:36.959 D/PlayerViewModel( 4621): Estrazione video completata con successo
+05-01 18:24:36.962 D/PlayerDebug( 4621): displayVideo: server=OLA TV - HD FR, source=http://iiilllaaiiiiiiiia1.funtogether.xyz:8080/JsTgLBAFQ2/i5yDhRdi1b/1405?play_token=4RMuSgfAey, type=null, headers={User-Agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36}
+05-01 18:24:36.974 D/PlayerDebug( 4621): onPlaybackStateChanged: BUFFERING, uri=http://iiilllaaiiiiiiiia1.funtogether.xyz:8080/JsTgLBAFQ2/i5yDhRdi1b/1405?play_t
+05-01 18:24:37.101 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] HD FR
+05-01 18:24:37.101 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] HEVC FR
+05-01 18:24:37.101 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] HD
+05-01 18:24:37.102 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: HD FR
+05-01 18:24:37.102 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: HEVC FR
+05-01 18:24:37.102 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: HD
+05-01 18:24:37.103 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] HEVC
+05-01 18:24:37.103 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: HEVC
+05-01 18:24:37.105 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] Source 5
+05-01 18:24:37.105 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] FHD
+05-01 18:24:37.105 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] UHD
+05-01 18:24:37.105 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] HD
+05-01 18:24:37.105 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] FHD
+05-01 18:24:37.105 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] HD
+05-01 18:24:37.106 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: Source 5
+05-01 18:24:37.106 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: FHD
+05-01 18:24:37.106 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: UHD
+05-01 18:24:37.106 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: HD
+05-01 18:24:37.106 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: FHD
+05-01 18:24:37.106 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: HD
+05-01 18:24:38.315 I/ExoPlayerImpl( 4621): Release 3ace2eb [AndroidXMedia3/1.8.0] [emu64xa, sdk_gphone64_x86_64, Google, 35] [media3.common, media3.ui, media3.exoplayer, media3.decoder, media3.datasource, media3.session]
+05-01 18:24:41.777 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] HEVC
+05-01 18:24:41.777 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] Source 12
+05-01 18:24:41.778 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: HEVC
+05-01 18:24:41.779 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] FHD
+05-01 18:24:41.779 D/PlayerViewModel( 4621): Additional server arrived: OLA[ab1] UHD
+05-01 18:24:41.779 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: Source 12
+05-01 18:24:41.779 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: FHD
+05-01 18:24:41.779 D/PlayerMobileFragment( 4621): OLA stream added to Chaîne: UHD
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621): Playback error
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):   androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):       at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):       at androidx.media3.exoplayer.ExoPlayerImplInternal.handleMessage(ExoPlayerImplInternal.java:899)
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):       at android.os.Handler.dispatchMessage(Handler.java:103)
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):       at android.os.Looper.loopOnce(Looper.java:232)
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):       at android.os.Looper.loop(Looper.java:317)
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):       at android.os.HandlerThread.run(HandlerThread.java:85)
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):   Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 401
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):       at androidx.media3.datasource.DefaultHttpDataSource.open(DefaultHttpDataSource.java:400)
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):       at androidx.media3.datasource.DefaultDataSource.open(DefaultDataSource.java:275)
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):       at androidx.media3.datasource.StatsDataSource.open(StatsDataSource.java:88)
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):       at androidx.media3.exoplayer.source.ProgressiveMediaPeriod$ExtractingLoadable.load(ProgressiveMediaPeriod.java:1109)
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):       at androidx.media3.exoplayer.upstream.Loader$LoadTask.run(Loader.java:453)
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):       at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1145)
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):       at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:644)
+05-01 18:24:42.707 E/ExoPlayerImplInternal( 4621):       at java.lang.Thread.run(Thread.java:1012)
+05-01 18:24:42.712 E/PlayerDebug( 4621): onPlayerError: code=2004, msg=Source error
+05-01 18:24:42.712 E/PlayerDebug( 4621):   cause: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 401
+05-01 18:24:42.712 E/PlayerDebug( 4621):   cause.cause: null
+05-01 18:24:42.712 E/PlayerDebug( 4621):   uri: http://iiilllaaiiiiiiiia1.funtogether.xyz:8080/JsTgLBAFQ2/i5yDhRdi1b/1405?play_token=4RMuSgfAey
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): onPlayerError: 
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): androidx.media3.exoplayer.ExoPlaybackException: Source error
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): 	at androidx.media3.exoplayer.ExoPlayerImplInternal.handleIoException(ExoPlayerImplInternal.java:927)
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): 	at androidx.media3.exoplayer.ExoPlayerImplInternal.handleMessage(ExoPlayerImplInternal.java:899)
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): 	at android.os.Handler.dispatchMessage(Handler.java:103)
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): 	at android.os.Looper.loopOnce(Looper.java:232)
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): 	at android.os.Looper.loop(Looper.java:317)
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): 	at android.os.HandlerThread.run(HandlerThread.java:85)
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): Caused by: androidx.media3.datasource.HttpDataSource$InvalidResponseCodeException: Response code: 401
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): 	at androidx.media3.datasource.DefaultHttpDataSource.open(DefaultHttpDataSource.java:400)
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): 	at androidx.media3.datasource.DefaultDataSource.open(DefaultDataSource.java:275)
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): 	at androidx.media3.datasource.StatsDataSource.open(StatsDataSource.java:88)
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): 	at androidx.media3.exoplayer.source.ProgressiveMediaPeriod$ExtractingLoadable.load(ProgressiveMediaPeriod.java:1109)
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): 	at androidx.media3.exoplayer.upstream.Loader$LoadTask.run(Loader.java:453)
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): 	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1145)
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): 	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:644)
+05-01 18:24:42.712 E/PlayerMobileFragment( 4621): 	at java.lang.Thread.run(Thread.java:1012)
+05-01 18:24:42.712 D/PlayerMobileFragment( 4621): Pruned broken variant: OLA TV - HD FR
+05-01 18:24:42.712 W/PlayerMobileFragment( 4621): IPTV failover: OLA TV - HD FR error (ERROR_CODE_IO_BAD_HTTP_STATUS), trying OLA[ab1] HD FR
+05-01 18:24:42.714 D/PlayerViewModel( 4621): Inizio estrazione video dal server: OLA[ab1] HD FR
+05-01 18:24:42.716 D/PlayerDebug( 4621): onPlaybackStateChanged: IDLE, uri=http://iiilllaaiiiiiiiia1.funtogether.xyz:8080/JsTgLBAFQ2/i5yDhRdi1b/1405?play_t
+05-01 18:24:42.716 D/PlayerViewModel( 4621): Estrazione video completata con successo
+05-01 18:24:42.719 D/PlayerDebug( 4621): displayVideo: server=OLA[ab1] HD FR, source=http://iiilllaaiiiiiiiia1.funtogether.xyz:8080/JsTgLBAFQ2/i5yDhRdi1b/1405?play_token=4RMuSgfAey, type=null, headers={User-Agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36}
+05-01 18:24:42.725 D/PlayerDebug( 4621): onPlaybackStateChanged: BUFFERING, uri=http://iiilllaaiiiiiiiia1.funtogether.xyz:8080/JsTgLBAFQ2/i5yDhRdi1b/1405?play_t
