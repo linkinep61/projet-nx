@@ -113,7 +113,9 @@ object OlaTvProvider : Provider, IptvProvider {
 
     /** Strip accents, brackets, quality tags, country suffixes, and "+1" markers — *anywhere*
      *  in the name (not just at the end), so all variants of a given channel collapse to the
-     *  same base key. Iterates until no changes so that combos like "TF1 +1 HD" reduce to "tf1". */
+     *  same base key. Iterates until no changes so that combos like "TF1 +1 HD" reduce to "tf1".
+     *  KEEPS the word "France" as part of the channel name (e.g. "France 2" → "france2") because
+     *  it's a real part of the channel identity — only strips "FR"/"French" at boundaries. */
     private fun norm(raw: String): String {
         var s = raw.lowercase()
             .replace(Regex("[éèêë]"), "e")
@@ -124,15 +126,23 @@ object OlaTvProvider : Provider, IptvProvider {
             .replace("ç", "c")
             .replace(Regex("\\[.*?]"), " ")
             .replace(Regex("\\(.*?\\)"), " ")
+            // Strip "FR:" / "France:" / "FR -" prefix only (an explicit channel-list prefix).
             .replace(Regex("^\\s*(fr|france)\\s*[:|\\-]\\s*"), "")
-        // Repeatedly strip quality tags, country tags, and +1 markers until stable.
-        val tag = Regex(
+        // Quality tags and "+1": stripped anywhere.
+        val midTag = Regex(
             "\\b(hd|sd|fhd|uhd|4k|raw|hevc|h\\.?265|ppv|ott|live|test|backup|fhdr|sdr)\\b" +
-                "|\\b(france|fr|french|francais|belgique|be|suisse|ch|lux)\\b" +
-                "|(?:\\+\\s?1)|(?:1080p|720p|480p|360p)|\\.fr\\b"
+                "|(?:\\+\\s?1)|(?:1080p|720p|480p|360p)"
+        )
+        // Country qualifiers: only stripped at end (so "France 2" stays intact, but "TF1 FR" → "TF1").
+        val endQualifier = Regex(
+            "\\s+(fr|french|francais|belgique|be|suisse|ch|lux)\\s*$"
         )
         while (true) {
-            val next = s.replace(tag, " ").replace(Regex("\\s+"), " ").trim()
+            val next = s.replace(midTag, " ")
+                .replace(endQualifier, "")
+                .replace(Regex("\\.fr\\b"), "")
+                .replace(Regex("\\s+"), " ")
+                .trim()
             if (next == s) break
             s = next
         }
@@ -157,13 +167,16 @@ object OlaTvProvider : Provider, IptvProvider {
         return parts.distinct().joinToString(" ")
     }
 
-    /** Pretty display name: same logic as norm but preserves case/accents and word spacing.
-     *  Used for the UI label on a channel card. */
+    /** Pretty display name: keeps the channel identity ("France 2", "France Info") but
+     *  strips quality / country / "+1" markers at appropriate positions. */
     private fun baseDisplayName(raw: String): String {
-        val tag = Regex(
+        val midTag = Regex(
             "\\b(HD|SD|FHD|UHD|4K|RAW|HEVC|H\\.?265|PPV|OTT|LIVE|TEST|BACKUP|FHDR|SDR)\\b" +
-                "|\\b(France|FR|French|Francais|Belgique|BE|Suisse|CH|LUX)\\b" +
-                "|(?:\\+\\s?1)|(?:1080p|720p|480p|360p)|\\.fr\\b",
+                "|(?:\\+\\s?1)|(?:1080p|720p|480p|360p)",
+            RegexOption.IGNORE_CASE
+        )
+        val endQualifier = Regex(
+            "\\s+(FR|French|Francais|Belgique|BE|Suisse|CH|LUX)\\s*$",
             RegexOption.IGNORE_CASE
         )
         var s = raw
@@ -171,7 +184,11 @@ object OlaTvProvider : Provider, IptvProvider {
             .replace(Regex("\\(.*?\\)"), " ")
             .replace(Regex("^\\s*(FR|France)\\s*[:|\\-]\\s*", RegexOption.IGNORE_CASE), "")
         while (true) {
-            val next = s.replace(tag, " ").replace(Regex("\\s+"), " ").trim()
+            val next = s.replace(midTag, " ")
+                .replace(endQualifier, "")
+                .replace(Regex("\\.fr\\b", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("\\s+"), " ")
+                .trim()
             if (next == s) break
             s = next
         }
@@ -515,9 +532,54 @@ object OlaTvProvider : Provider, IptvProvider {
         }
     }
 
-    /** Manual map of channel display name (lowercased, accents stripped) → verified
-     *  tv-logos GitHub URL. Used as a primary lookup so popular French channels always
-     *  show a logo even when the auto-generated slug doesn't match the repo convention. */
+    /** Comprehensive logo lookup built from iptv-org's channels.json + logos.json (FR
+     *  channels in use). Bundled in app/src/main/assets/fr_channel_logos.json — keyed
+     *  by official channel name, value is a real logo URL.
+     *  Loaded once on first use, normalised on the fly. */
+    private val iptvOrgLogoMap: Map<String, String> by lazy {
+        try {
+            val ctx = StreamFlixApp.instance
+            ctx.assets.open("fr_channel_logos.json").bufferedReader(Charsets.UTF_8).use { reader ->
+                val raw = reader.readText()
+                val json = JSONObject(raw)
+                val out = HashMap<String, String>(json.length() * 2)
+                val it = json.keys()
+                while (it.hasNext()) {
+                    val name = it.next()
+                    val url = json.optString(name, "")
+                    if (url.isBlank()) continue
+                    out[normalizeForLogo(name)] = url
+                }
+                Log.d(TAG, "iptv-org FR logos loaded: ${out.size} entries")
+                out
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load fr_channel_logos.json: ${e.message}")
+            emptyMap()
+        }
+    }
+
+    /** Same key shape as the manual map / iptv-org map: lowercased, accents stripped,
+     *  quality and country-suffix tags removed, plus collapse to single spaces. */
+    private fun normalizeForLogo(name: String): String {
+        return name.lowercase()
+            .replace(Regex("[éèêë]"), "e")
+            .replace(Regex("[àâä]"), "a")
+            .replace(Regex("[ùûü]"), "u")
+            .replace(Regex("[îï]"), "i")
+            .replace(Regex("[ôö]"), "o")
+            .replace("ç", "c")
+            .replace(Regex("\\b(fhd|uhd|hd|sd|4k|raw|hevc|h265|ppv)\\b"), " ")
+            .replace(Regex("\\+\\s?1\\b"), " ")
+            .replace("+", " plus ")
+            .replace(Regex("\\s+(fr|french|francais)\\s*$"), "")
+            .replace(Regex("[^a-z0-9]+"), " ")
+            .trim()
+            .replace(Regex("\\s+"), " ")
+    }
+
+    /** Manual map of channel display name → verified tv-logos GitHub URL.
+     *  Used as primary lookup before iptv-org for top-priority TNT channels. */
     private val manualLogoMap: Map<String, String> by lazy {
         val base = "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/france"
         mapOf(
@@ -635,21 +697,15 @@ object OlaTvProvider : Provider, IptvProvider {
      *   3. ui-avatars.com fallback (always renders a colored circle with the channel
      *      initials, color picked from category — guarantees no blank cards). */
     private fun logoUrlFor(name: String): String {
-        val lookup = name.lowercase()
-            .replace(Regex("[éèêë]"), "e")
-            .replace(Regex("[àâä]"), "a")
-            .replace(Regex("[ùûü]"), "u")
-            .replace(Regex("[îï]"), "i")
-            .replace(Regex("[ôö]"), "o")
-            .replace("ç", "c")
-            .replace(Regex("\\b(fr|fhd|uhd|hd|sd|4k|raw|hevc|h265|ppv)\\b"), " ")
-            .replace(Regex("\\+\\s?1\\b"), " ")
-            .replace("+", " plus ")
-            .replace(Regex("[^a-z0-9]+"), " ")
-            .trim()
-            .replace(Regex("\\s+"), " ")
+        val lookup = normalizeForLogo(name)
+
+        // 1. Manual map first — TNT channels we want to be sure about
         manualLogoMap[lookup]?.let { return it }
 
+        // 2. iptv-org's curated FR logos — covers ~580 chaines avec une vraie image
+        iptvOrgLogoMap[lookup]?.let { return it }
+
+        // 3. tv-logos slug heuristic — works for many channels
         val slug = lookup.replace(' ', '-').trim('-')
         if (slug.isNotBlank()) {
             return "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/france/$slug-fr.png"
