@@ -109,6 +109,13 @@ object OlaTvProvider : Provider, IptvProvider {
     private const val FR_CIDS_CACHE_FILE = "olatv_fr_cids.json"
     private const val FR_CIDS_CACHE_TTL_MS = 24L * 60 * 60 * 1000L
 
+    // Disk cache for the full channel registry — boot fast on subsequent launches
+    // (skip Phase 1 server-list parse + Phase 2 primary-cid ingestion ~30s).
+    // 6h TTL: long enough to skip the heavy work, short enough that channel changes
+    // upstream don't go stale. Phase 3 still refreshes opportunistically in background.
+    private const val REGISTRY_CACHE_FILE = "olatv_registry.json"
+    private const val REGISTRY_CACHE_TTL_MS = 6L * 60 * 60 * 1000L
+
     // ───────── Normalization & TNT order ─────────
 
     /** Strip accents, brackets, quality tags, country suffixes, and "+1" markers — *anywhere*
@@ -466,6 +473,42 @@ object OlaTvProvider : Provider, IptvProvider {
     // playable if the player walks down to it (rotation, not blacklist).
     private val demotedUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+    // Per-hostname success/failure counters. Used to sort streams: portals with a
+    // higher success ratio come first. Detects automatically when an upstream is
+    // having a bad day and pushes its streams down the rotation across all channels.
+    private data class HostHealth(var ok: Int = 0, var fail: Int = 0) {
+        // Wilson lower-bound score on the success ratio — penalises low-data portals
+        // less than naive ratio so a single fail doesn't tank a previously-perfect host.
+        fun score(): Double {
+            val n = (ok + fail).toDouble()
+            if (n < 1.0) return 0.5  // unknown — neutral
+            val p = ok.toDouble() / n
+            val z = 1.0
+            return (p + z * z / (2 * n) - z * Math.sqrt((p * (1 - p) + z * z / (4 * n)) / n)) /
+                (1 + z * z / n)
+        }
+    }
+    private val hostHealth = java.util.concurrent.ConcurrentHashMap<String, HostHealth>()
+
+    private fun hostnameOf(url: String): String = try {
+        java.net.URI(url).host ?: ""
+    } catch (_: Exception) { "" }
+
+    private fun recordHostOk(url: String) {
+        val h = hostnameOf(url).ifBlank { return }
+        hostHealth.compute(h) { _, v -> (v ?: HostHealth()).also { it.ok++ } }
+    }
+
+    private fun recordHostFail(url: String) {
+        val h = hostnameOf(url).ifBlank { return }
+        hostHealth.compute(h) { _, v -> (v ?: HostHealth()).also { it.fail++ } }
+    }
+
+    private fun hostScore(url: String): Double {
+        val h = hostnameOf(url).ifBlank { return 0.5 }
+        return hostHealth[h]?.score() ?: 0.5
+    }
+
     /** Player calls this when a stream URL fails. The URL is demoted to the bottom of
      *  the rotation but stays playable so the failover can wrap back to it if all
      *  fresher URLs also fail. */
@@ -473,9 +516,18 @@ object OlaTvProvider : Provider, IptvProvider {
     fun reportBrokenStreamUrl(url: String) {
         if (url.isNotBlank()) {
             demotedUrls.add(url)
-            // Drop from probe-OK cache so the next HEAD probe re-validates it.
             probeOkCache.remove(url)
+            recordHostFail(url)
             Log.d(TAG, "Demoted upstream URL (will retry last): ${url.take(80)}")
+        }
+    }
+
+    /** Player reports a successful playback — we promote the host so its other streams
+     *  bubble up in the rotation across other channels. */
+    @JvmStatic
+    fun reportWorkingStreamUrl(url: String) {
+        if (url.isNotBlank()) {
+            recordHostOk(url)
         }
     }
 
@@ -877,6 +929,85 @@ object OlaTvProvider : Provider, IptvProvider {
         }
     }
 
+    // ─────────────── Channel registry disk cache ───────────────
+
+    private fun registryCacheFile() = java.io.File(StreamFlixApp.instance.filesDir, REGISTRY_CACHE_FILE)
+
+    /** Serialise the in-memory channelRegistry as JSON: { ts, channels: { key: {name, cat, logo, streams: [{cid,label,url}, ...]} } }
+     *  Saved after Phase 2/3 to skip the heavy startup work on next launches. */
+    private fun saveRegistryCache() {
+        try {
+            val snapshot = synchronized(registryLock) { LinkedHashMap(channelRegistry) }
+            if (snapshot.isEmpty()) return
+            val channels = JSONObject()
+            for ((key, info) in snapshot) {
+                val streams = JSONArray()
+                for (s in info.streams) {
+                    streams.put(JSONObject().apply {
+                        put("cid", s.cid); put("label", s.label); put("url", s.url)
+                    })
+                }
+                channels.put(key, JSONObject().apply {
+                    put("name", info.displayName)
+                    put("cat", info.category)
+                    put("logo", info.logo)
+                    put("streams", streams)
+                })
+            }
+            val obj = JSONObject().apply {
+                put("ts", System.currentTimeMillis())
+                put("channels", channels)
+            }
+            registryCacheFile().writeText(obj.toString())
+            Log.d(TAG, "Registry cache saved: ${snapshot.size} channels")
+        } catch (e: Exception) {
+            Log.w(TAG, "Registry cache save failed: ${e.message}")
+        }
+    }
+
+    /** Load the registry from disk if cache is fresh (<TTL). Returns true on success. */
+    private fun loadRegistryCache(): Boolean {
+        return try {
+            val f = registryCacheFile()
+            if (!f.exists()) return false
+            val obj = JSONObject(f.readText())
+            val ts = obj.optLong("ts", 0)
+            if (System.currentTimeMillis() - ts > REGISTRY_CACHE_TTL_MS) {
+                Log.d(TAG, "Registry cache expired, will re-fetch")
+                return false
+            }
+            val channels = obj.optJSONObject("channels") ?: return false
+            synchronized(registryLock) {
+                channelRegistry.clear()
+                val it = channels.keys()
+                while (it.hasNext()) {
+                    val key = it.next()
+                    val ch = channels.optJSONObject(key) ?: continue
+                    val info = ChannelInfo(
+                        displayName = ch.optString("name"),
+                        category = ch.optString("cat", "Généraliste"),
+                        logo = ch.optString("logo"),
+                    )
+                    val arr = ch.optJSONArray("streams") ?: continue
+                    for (i in 0 until arr.length()) {
+                        val s = arr.optJSONObject(i) ?: continue
+                        info.streams.add(OlaStreamRef(
+                            cid = s.optString("cid"),
+                            label = s.optString("label"),
+                            url = s.optString("url"),
+                        ))
+                    }
+                    if (info.streams.isNotEmpty()) channelRegistry[key] = info
+                }
+            }
+            Log.d(TAG, "Registry cache loaded: ${channelRegistry.size} channels (age=${(System.currentTimeMillis() - ts) / 1000}s)")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Registry cache load failed: ${e.message}")
+            false
+        }
+    }
+
     /** Phase 3: scan up to PHASE3_MAX_CANDIDATES candidate cids in parallel.
      *  For each FR-tagged cid found, ingest channels into the existing registry.
      *  Stops at PHASE3_MAX_FR_CIDS cids found OR candidates exhausted. */
@@ -970,6 +1101,29 @@ object OlaTvProvider : Provider, IptvProvider {
 
             val t0 = System.currentTimeMillis()
 
+            // ── Step 0: try the disk cache first — restores ~800 channels in <100ms vs
+            // ~30s for the full Phase 1+2 fetch. Phase 3 still refreshes in background.
+            if (loadRegistryCache()) {
+                registryLoaded = true
+                lastLoadTime = System.currentTimeMillis()
+                Log.d(TAG, "Registry restored from disk in ${System.currentTimeMillis() - t0}ms — refreshing in background")
+                // Kick off Phase 3 anyway to top up streams from any new cids.
+                scope.launch {
+                    withContext(Dispatchers.IO + NonCancellable) {
+                        try {
+                            // Need olaTvServerMap for Phase 3 candidate selection — parse it.
+                            parseOlaTvServerList()
+                            val primaryCid = olaTvServerMap.entries.find { it.value == OLA_TV_PRIMARY_FR }?.key
+                            if (primaryCid != null) {
+                                scanAdditionalFrCids(primaryCid)
+                                saveRegistryCache()  // refresh disk with newly enriched streams
+                            }
+                        } catch (e: Exception) { Log.w(TAG, "Background refresh after cache hit: ${e.message}") }
+                    }
+                }
+                return@withLock
+            }
+
             // ↓ KEY: NonCancellable wraps the load so navigation-away doesn't lose the
             // result mid-flight. The user can leave; the load completes; next visit finds
             // cached data ready.
@@ -1016,8 +1170,11 @@ object OlaTvProvider : Provider, IptvProvider {
                     // and ingested, channels gain more OlaStreamRef entries. User sees more
                     // servers in the picker the next time they open a channel.
                     scope.launch {
-                        try { scanAdditionalFrCids(primaryCid) }
-                        catch (e: Exception) { Log.w(TAG, "Phase 3 background scan failed: ${e.message}") }
+                        try {
+                            scanAdditionalFrCids(primaryCid)
+                            // Save full registry to disk so next launch boots in <100ms.
+                            saveRegistryCache()
+                        } catch (e: Exception) { Log.w(TAG, "Phase 3 background scan failed: ${e.message}") }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Load failed: ${e.message}", e)
@@ -1127,10 +1284,13 @@ object OlaTvProvider : Provider, IptvProvider {
                 spawnLateRegistryWatcher(key)
                 return emptyList()
             }
-            // Rotation: known-demoted streams (failed earlier this session) go to the END
-            // so the failover tries fresh ones first. They stay playable — wraparound
-            // brings them back if every fresher option also fails.
-            val streamsSnapshot = info.streams.sortedBy { it.url in demotedUrls }
+            // Rotation: order streams by (1) demoted last, (2) host with best historical
+            // success rate first. So portals that are healthy this session bubble up
+            // across all channels, dead/saturated ones get pushed down.
+            val streamsSnapshot = info.streams.sortedWith(
+                compareBy<OlaStreamRef> { it.url in demotedUrls }
+                    .thenByDescending { hostScore(it.url) }
+            )
             Log.d(TAG, "getServers '$key' (${info.displayName}): ${streamsSnapshot.size} stream(s) — progressive emission")
 
             // Build a Video.Server for the first stream (synchronous result so the
@@ -1153,14 +1313,17 @@ object OlaTvProvider : Provider, IptvProvider {
                 // Tiny delay so the player has time to subscribe to the flow.
                 delay(150)
                 // Emit additional variants — SKIP the first stream because it's already
-                // the initial server (re-emitting it would make the failover pick a
-                // duplicate with the same resolved URL, looping on a dead stream).
-                // De-duplicate emissions by stream URL so the same source served from two
-                // cids doesn't appear twice and waste failover slots.
+                // the initial server. De-duplicate by URL. Cap to MAX_VARIANTS_PER_CHANNEL
+                // so a hot channel with 50 cids doesn't flood the Chaîne page (memory + UX).
                 val emittedUrls = HashSet<String>()
                 streamsSnapshot.firstOrNull()?.let { emittedUrls.add(it.url) }
+                var emittedCount = 0
                 streamsSnapshot.drop(1).forEach { stream ->
                     if (!isActive) return@launch
+                    if (emittedCount >= MAX_VARIANTS_PER_CHANNEL) {
+                        Log.d(TAG, "  cap reached ($MAX_VARIANTS_PER_CHANNEL variants) — skipping rest")
+                        return@forEach
+                    }
                     if (!emittedUrls.add(stream.url)) {
                         Log.d(TAG, "  skip duplicate URL ${stream.label} (cid=${stream.cid})")
                         return@forEach
@@ -1171,6 +1334,7 @@ object OlaTvProvider : Provider, IptvProvider {
                     )
                     Log.d(TAG, "  → emit OLA[$key] ${stream.label} (cid=${stream.cid})")
                     _additionalServers.emit(server)
+                    emittedCount++
                 }
 
                 // Wait for Phase 3 / late additions for up to ~60s and emit any new streams

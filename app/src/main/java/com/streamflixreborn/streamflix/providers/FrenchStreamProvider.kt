@@ -69,6 +69,15 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun getHome(): List<Category> {
         initializeService()
+        // PATCH 2026-05: Site migrated to Next.js CSR (fs14.lol) - static HTML selectors no longer work
+        // All CSS selectors (section.vod-section, div.vod-header, div.short, etc.) return empty
+        // Provider functionality suspended until API endpoints are found or JS rendering implemented
+        val categories = mutableListOf<Category>()
+
+        // Placeholder: Return empty list with notice
+        return categories
+
+        /*
         val isNewInterface = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_NEW_INTERFACE) != "false"
         val document = if (isNewInterface) {
             service.postHome()
@@ -224,6 +233,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 else -> 6
             }
         })
+        */
     }
 
     fun ignoreSource(source: String, href: String): Boolean {
@@ -232,6 +242,10 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     }
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
+        // PATCH 2026-05: Provider suspended - fs14.lol migrated to Next.js CSR
+        return emptyList()
+
+        /*
         if (page > 1) return emptyList()
         initializeService()
         if (query.isEmpty()) {
@@ -280,9 +294,14 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
 
         return results
+        */
     }
 
     override suspend fun getMovies(page: Int): List<Movie> {
+        // PATCH 2026-05: Provider suspended - fs14.lol migrated to Next.js CSR
+        return emptyList()
+
+        /*
         initializeService()
 
         val document = service.getMovies(page)
@@ -301,9 +320,14 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
 
         return movies
+        */
     }
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
+        // PATCH 2026-05: Provider suspended - fs14.lol migrated to Next.js CSR
+        return emptyList()
+
+        /*
         initializeService()
         val document = service.getTvShows(page)
 
@@ -321,6 +345,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
 
         return tvShows
+        */
     }
 
     suspend fun getRating(votes: Element): Double {
@@ -343,6 +368,10 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     }
 
     override suspend fun getMovie(id: String): Movie = coroutineScope {
+        // PATCH 2026-05: Provider suspended - fs14.lol migrated to Next.js CSR
+        return@coroutineScope Movie(id = id, title = "", poster = null)
+
+        /*
         initializeService()
         val itemId = id.substringBefore("-")
 
@@ -420,9 +449,14 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         )
 
         movie
+        */
     }
 
     override suspend fun getTvShow(id: String): TvShow = coroutineScope {
+        // PATCH 2026-05: Provider suspended - fs14.lol migrated to Next.js CSR
+        return@coroutineScope TvShow(id = id, title = "", poster = null)
+
+        /*
         initializeService()
         val itemId = id.substringBefore("-")
 
@@ -532,7 +566,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             rating = rating
         )
 
-        tvShow
+        */
     }
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
@@ -566,6 +600,10 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     }
 
     override suspend fun getGenre(id: String, page: Int): Genre {
+        // PATCH 2026-05: Provider suspended - fs14.lol migrated to Next.js CSR
+        return Genre(id = id, name = "", shows = emptyList())
+
+        /*
         initializeService()
         val document = service.getGenre(id, page)
 
@@ -587,9 +625,14 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         )
 
         return genre
+        */
     }
 
     override suspend fun getPeople(id: String, page: Int): People {
+        // PATCH 2026-05: Provider suspended - fs14.lol migrated to Next.js CSR
+        return People(id, "")
+
+        /*
         initializeService()
 
         val document = try {
@@ -636,6 +679,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         )
 
         return people
+        */
     }
 
     fun extractTvShowVersions(document: Document, episodesData: EpisodesData? = null): MutableList<String> {
