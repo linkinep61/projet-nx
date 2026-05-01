@@ -628,13 +628,13 @@ object OlaTvProvider : Provider, IptvProvider {
         )
     }
 
-    /** Build a tv-logo/tv-logos GitHub URL from a channel name (slug FR convention).
-     *  Strips quality/locale markers (FR, FHD, HD, +1, etc.) anywhere in the name —
-     *  the tv-logo repo uses minimal slugs like "tf1-fr.png" / "france-2-fr.png".
-     *  Falls back to manualLogoMap for popular channels whose tv-logos slug doesn't
-     *  match our heuristic. */
+    /** Build a logo URL for a channel — guaranteed to return SOMETHING displayable.
+     *  Priority order:
+     *   1. manualLogoMap (verified tv-logos URL for popular FR channels)
+     *   2. tv-logos slug heuristic (works for many channels)
+     *   3. ui-avatars.com fallback (always renders a colored circle with the channel
+     *      initials, color picked from category — guarantees no blank cards). */
     private fun logoUrlFor(name: String): String {
-        // Normalised lookup key for the manual map
         val lookup = name.lowercase()
             .replace(Regex("[éèêë]"), "e")
             .replace(Regex("[àâä]"), "a")
@@ -651,8 +651,37 @@ object OlaTvProvider : Provider, IptvProvider {
         manualLogoMap[lookup]?.let { return it }
 
         val slug = lookup.replace(' ', '-').trim('-')
-        if (slug.isBlank()) return ""
-        return "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/france/$slug-fr.png"
+        if (slug.isNotBlank()) {
+            return "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/france/$slug-fr.png"
+        }
+        return uiAvatarFallback(name)
+    }
+
+    /** Used by callers (Glide error handler) when the primary URL 404s. Always
+     *  returns a renderable image: a colored circle with the channel's initials. */
+    fun fallbackLogoUrlFor(name: String): String = uiAvatarFallback(name)
+
+    private fun uiAvatarFallback(name: String): String {
+        // Pick a category-themed background so different channel types are distinguishable.
+        val color = when (guessCategory(name)) {
+            "Sport" -> "388E3C"           // green
+            "Cinéma" -> "8E24AA"          // purple
+            "Info" -> "D32F2F"            // red
+            "Musique" -> "F57C00"         // orange
+            "Documentaire" -> "00897B"    // teal
+            "Enfants" -> "F06292"         // pink
+            else -> "1E88E5"              // blue (généraliste)
+        }
+        // ui-avatars accepts up to 3 letters. Keep first letter of up to first 3 words.
+        val initials = name
+            .replace(Regex("[\\[\\(].*?[\\]\\)]"), " ")
+            .split(Regex("\\s+"))
+            .filter { it.isNotBlank() }
+            .take(3)
+            .joinToString("+")
+            .ifBlank { name.take(3) }
+        val safeName = java.net.URLEncoder.encode(initials, "UTF-8")
+        return "https://ui-avatars.com/api/?name=$safeName&background=$color&color=fff&size=512&font-size=0.5&bold=true&format=png"
     }
 
     // ───────── Phase 3 helpers: ingest one cid, probe FR genres, disk cache ─────────
