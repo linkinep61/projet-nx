@@ -180,6 +180,15 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
     }
 
     fun refreshChannelVariantList() {
+        // Sort variants by name (case-insensitive) so "HD FR" entries group together,
+        // "FHD FR" group together, "+1 FR" group together, etc. Selected entry stays
+        // selected because we sort the same list, not a copy.
+        val list = PlayerSettingsView.Settings.ChannelVariant.list
+        if (list.size > 1) {
+            val sorted = list.sortedBy { it.name.lowercase() }
+            list.clear()
+            list.addAll(sorted)
+        }
         channelVariantAdapter.notifyDataSetChanged()
         settingsAdapter.notifyDataSetChanged()
     }

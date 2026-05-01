@@ -182,6 +182,14 @@ class PlayerSettingsTvView @JvmOverloads constructor(
     }
 
     fun refreshChannelVariantList() {
+        // Sort variants by name so identical labels (e.g. multiple "HD FR" from different
+        // cids) group together — keeps the Chaîne page tidy when many variants stream in.
+        val list = PlayerSettingsView.Settings.ChannelVariant.list
+        if (list.size > 1) {
+            val sorted = list.sortedBy { it.name.lowercase() }
+            list.clear()
+            list.addAll(sorted)
+        }
         channelVariantAdapter.notifyDataSetChanged()
         settingsAdapter.notifyDataSetChanged()
     }
