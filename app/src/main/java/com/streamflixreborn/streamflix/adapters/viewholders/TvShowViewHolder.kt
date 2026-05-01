@@ -114,9 +114,15 @@ class TvShowViewHolder(
     }
 
     private fun isIptvProvider(): Boolean {
+        // Match WiTv (ch::, sport::) AND OlaTv (ola::, ola_ep::) IDs, plus the provider names
+        // for both. Keeping the prefix checks too because tvShow objects sometimes lack
+        // providerName.
         return tvShow.providerName == "WiTV"
+            || tvShow.providerName == "OLA TV"
             || tvShow.id.startsWith("ch::")
             || tvShow.id.startsWith("sport::")
+            || tvShow.id.startsWith("ola::")
+            || tvShow.id.startsWith("ola_ep::")
     }
 
     private fun checkProviderAndRun(action: () -> Unit) {

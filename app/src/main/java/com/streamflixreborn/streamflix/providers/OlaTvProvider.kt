@@ -9,6 +9,8 @@ import com.streamflixreborn.streamflix.models.*
 import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.*
@@ -733,6 +735,15 @@ object OlaTvProvider : Provider, IptvProvider {
     // App-scoped supervisor for Phase 3 background work. Outlives the calling fragment scope.
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    // Progressive servers flow — same pattern as WiTvProvider. Player collects this
+    // and adds each emitted server to the "Chaîne" page so the user can switch
+    // between OLA TV variants without closing the player.
+    private val _additionalServers = MutableSharedFlow<Video.Server>(extraBufferCapacity = 100)
+    override val additionalServersFlow: SharedFlow<Video.Server> = _additionalServers
+
+    // Track current emit job so we can cancel it when the user switches channels.
+    private var currentEmitJob: Job? = null
+
     // ───────── Provider API ─────────
 
     override suspend fun getHome(): List<Category> = try {
@@ -809,21 +820,92 @@ object OlaTvProvider : Provider, IptvProvider {
             val info = synchronized(registryLock) { channelRegistry[key] }
             if (info == null) {
                 Log.w(TAG, "getServers: channel '$key' not found in registry (size=${channelRegistry.size})")
+                // Player will keep itself open in IPTV mode and wait for progressive servers.
+                // Even with no streams known yet, kick off a Phase-3 wait + retry loop so a
+                // late discovery can still feed the player.
+                spawnLateRegistryWatcher(key)
                 return emptyList()
             }
-            Log.d(TAG, "getServers '$key' (${info.displayName}): ${info.streams.size} stream(s)")
-            val servers = mutableListOf<Video.Server>()
-            for ((idx, stream) in info.streams.withIndex()) {
-                Log.d(TAG, "  server[$idx] cid=${stream.cid} label='${stream.label}' cmd=${stream.url.take(80)}")
-                // Encode the cmd into the server id; resolve at getVideo time.
-                servers.add(Video.Server(
-                    id = "ola_stream::${stream.cid}::${stream.label}::${stream.url}",
-                    name = if (info.streams.size == 1) "OLA TV" else "OLA TV - ${stream.label}",
+            val streamsSnapshot = info.streams.toList()
+            Log.d(TAG, "getServers '$key' (${info.displayName}): ${streamsSnapshot.size} stream(s) — progressive emission")
+
+            // Build a Video.Server for the first stream (synchronous result so the
+            // player can open immediately) and emit the rest via the progressive flow.
+            val first = streamsSnapshot.firstOrNull()
+            val initialServers = if (first != null) {
+                Log.d(TAG, "  primary[0] cid=${first.cid} label='${first.label}' cmd=${first.url.take(80)}")
+                listOf(Video.Server(
+                    id = "ola_stream::${first.cid}::${first.label}::${first.url}",
+                    name = "OLA TV - ${first.label}",
                 ))
+            } else {
+                emptyList()
             }
-            servers
+
+            // Cancel any previous emit job (channel switch) and start a new one.
+            currentEmitJob?.cancel()
+            currentEmitJob = scope.launch {
+                // Emit known additional streams first (skip the one already returned).
+                streamsSnapshot.drop(1).forEach { stream ->
+                    if (!isActive) return@launch
+                    val server = Video.Server(
+                        id = "ola_stream::${stream.cid}::${stream.label}::${stream.url}",
+                        name = "OLA[$key] ${stream.label}",
+                    )
+                    Log.d(TAG, "  → emit OLA[$key] ${stream.label} (cid=${stream.cid})")
+                    _additionalServers.emit(server)
+                }
+
+                // Wait for Phase 3 / late additions for up to ~60s and emit any new streams
+                // that arrive after the initial snapshot. We poll the registry for size growth.
+                val seenUrls = streamsSnapshot.map { it.url }.toMutableSet()
+                val waitDeadlineMs = System.currentTimeMillis() + 60_000L
+                while (isActive && System.currentTimeMillis() < waitDeadlineMs && !phase3Done) {
+                    delay(1500)
+                    val latest = synchronized(registryLock) { channelRegistry[key]?.streams?.toList() } ?: continue
+                    for (s in latest) {
+                        if (!isActive) return@launch
+                        if (seenUrls.add(s.url)) {
+                            val server = Video.Server(
+                                id = "ola_stream::${s.cid}::${s.label}::${s.url}",
+                                name = "OLA[$key] ${s.label}",
+                            )
+                            Log.d(TAG, "  → late emit OLA[$key] ${s.label} (cid=${s.cid})")
+                            _additionalServers.emit(server)
+                        }
+                    }
+                }
+                Log.d(TAG, "OLA TV emit done for '$key' — ${seenUrls.size} stream(s)")
+            }
+
+            initialServers
         } catch (e: Exception) {
             Log.e(TAG, "getServers($id) error", e); emptyList()
+        }
+    }
+
+    /** When getServers is called on a channel that has 0 streams yet (very rare —
+     *  Phase 2 not finished), spawn a watcher that emits as soon as streams appear. */
+    private fun spawnLateRegistryWatcher(key: String) {
+        currentEmitJob?.cancel()
+        currentEmitJob = scope.launch {
+            val seenUrls = mutableSetOf<String>()
+            val deadline = System.currentTimeMillis() + 90_000L
+            while (isActive && System.currentTimeMillis() < deadline) {
+                delay(1000)
+                val latest = synchronized(registryLock) { channelRegistry[key]?.streams?.toList() } ?: continue
+                for (s in latest) {
+                    if (seenUrls.add(s.url)) {
+                        val server = Video.Server(
+                            id = "ola_stream::${s.cid}::${s.label}::${s.url}",
+                            name = "OLA[$key] ${s.label}",
+                        )
+                        Log.d(TAG, "  → late-watch emit OLA[$key] ${s.label} (cid=${s.cid})")
+                        _additionalServers.emit(server)
+                    }
+                }
+                if (phase3Done && seenUrls.isNotEmpty()) break
+            }
         }
     }
 
