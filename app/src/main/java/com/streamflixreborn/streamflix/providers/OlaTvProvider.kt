@@ -453,7 +453,16 @@ object OlaTvProvider : Provider, IptvProvider {
 
     /** Get MAC portal credentials for a cid via getToken128910. */
     private data class MacCredentials(val baseUrl: String, val mac: String)
+
+    // Cache MAC creds per cid — they don't change during a session and the API call is slow.
+    private val macCredsCache = java.util.concurrent.ConcurrentHashMap<String, MacCredentials>()
+
+    // Cache resolved upstream URLs (localhost → upstream) per (cid, cmd) so repeated plays
+    // of the same variant don't trigger redundant create_link calls.
+    private val resolvedUrlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     private fun getMacCredentials(cid: String): MacCredentials? {
+        macCredsCache[cid]?.let { return it }
         try {
             val b64 = olaBuildPayload("getToken128910", mapOf("cid" to cid))
             val formBody = FormBody.Builder().add("data", b64).build()
@@ -473,7 +482,9 @@ object OlaTvProvider : Provider, IptvProvider {
             if (t1.isBlank() || t2.isBlank()) return null
             val baseUrl = olaDecodeToken(t1) ?: return null
             val mac = olaDecodeToken2(t2) ?: return null
-            return MacCredentials(baseUrl, mac)
+            val creds = MacCredentials(baseUrl, mac)
+            macCredsCache[cid] = creds
+            return creds
         } catch (e: Exception) {
             Log.e(TAG, "getMacCredentials($cid) failed: ${e.message}")
             return null
@@ -1177,17 +1188,27 @@ object OlaTvProvider : Provider, IptvProvider {
             val cmd = parts[2]
 
             val rawCmd = cmd.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
-            // localhost URLs are placeholders — the MAC portal expects you to call
-            // create_link to get the real upstream URL. Only direct external HTTP URLs
-            // can be played as-is.
             val isLocalhost = rawCmd.contains("localhost") || rawCmd.contains("127.0.0.1")
-            val streamUrl = if (rawCmd.startsWith("http") && !isLocalhost) {
-                rawCmd
-            } else {
-                val creds = getMacCredentials(cid) ?: throw Exception("Could not get MAC creds for cid=$cid")
-                resolveStreamCmd(creds.baseUrl, creds.mac, cmd) ?: throw Exception("create_link returned null")
+            val cacheKey = "$cid::$cmd"
+
+            val streamUrl = when {
+                // Already-resolved URL cached from a previous play — instant play.
+                resolvedUrlCache[cacheKey] != null -> {
+                    Log.d(TAG, "getVideo cache hit for $cid")
+                    resolvedUrlCache[cacheKey]!!
+                }
+                // Direct upstream URL (no resolution needed) — instant play.
+                rawCmd.startsWith("http") && !isLocalhost -> rawCmd
+                // Localhost placeholder — must hit create_link to get the real URL.
+                else -> {
+                    val creds = getMacCredentials(cid) ?: throw Exception("Could not get MAC creds for cid=$cid")
+                    val resolved = resolveStreamCmd(creds.baseUrl, creds.mac, cmd)
+                        ?: throw Exception("create_link returned null")
+                    resolvedUrlCache[cacheKey] = resolved
+                    resolved
+                }
             }
-            Log.d(TAG, "getVideo resolved → ${streamUrl.take(120)}")
+            Log.d(TAG, "getVideo → ${streamUrl.take(120)}")
             Video(streamUrl, headers = mapOf("User-Agent" to USER_AGENT))
         } catch (e: Exception) {
             Log.e(TAG, "getVideo error", e); throw e
