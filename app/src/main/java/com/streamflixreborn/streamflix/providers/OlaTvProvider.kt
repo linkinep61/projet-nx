@@ -194,6 +194,8 @@ object OlaTvProvider : Provider, IptvProvider {
             .replace(Regex("\\[.*?]"), " ")
             .replace(Regex("\\(.*?\\)"), " ")
             .replace(Regex("^\\s*(FR|France)\\s*[:|\\-]\\s*", RegexOption.IGNORE_CASE), "")
+            // Strip leading bullets / dashes / chevrons that some upstream providers prepend.
+            .replace(Regex("^[\\-•●○▪►•‣⮞›»\\u2022]+\\s*"), "")
         while (true) {
             val next = s.replace(midTag, " ")
                 .replace(endQualifier, "")
@@ -242,6 +244,112 @@ object OlaTvProvider : Provider, IptvProvider {
             { tntOrder[norm(it.title)] ?: 999 },
             { it.title.lowercase() }
         ))
+    }
+
+    /** FROZEN curated channel list — the home page shows these in this exact order with
+     *  their hardcoded logos, regardless of whether streams have been ingested yet.
+     *  Streams are linked at click time via the registry; the visible list never moves. */
+    private data class CuratedChannel(
+        val key: String,        // norm() output — used to match the registry
+        val displayName: String,
+        val category: String,
+    )
+
+    private val curatedChannels: List<CuratedChannel> by lazy {
+        listOf(
+            // Généraliste TNT
+            CuratedChannel("tf1", "TF1", "Généraliste"),
+            CuratedChannel("france2", "France 2", "Généraliste"),
+            CuratedChannel("france3", "France 3", "Généraliste"),
+            CuratedChannel("france4", "France 4", "Généraliste"),
+            CuratedChannel("france5", "France 5", "Généraliste"),
+            CuratedChannel("m6", "M6", "Généraliste"),
+            CuratedChannel("arte", "Arte", "Généraliste"),
+            CuratedChannel("c8", "C8", "Généraliste"),
+            CuratedChannel("w9", "W9", "Généraliste"),
+            CuratedChannel("tmc", "TMC", "Généraliste"),
+            CuratedChannel("tfx", "TFX", "Généraliste"),
+            CuratedChannel("nrj12", "NRJ 12", "Généraliste"),
+            CuratedChannel("lcp", "LCP", "Généraliste"),
+            CuratedChannel("gulli", "Gulli", "Généraliste"),
+            CuratedChannel("tf1seriesfilms", "TF1 Séries Films", "Généraliste"),
+            CuratedChannel("6ter", "6ter", "Généraliste"),
+            CuratedChannel("cherie25", "Chérie 25", "Généraliste"),
+            CuratedChannel("franceo", "France Ô", "Généraliste"),
+            CuratedChannel("rmcstory", "RMC Story", "Généraliste"),
+            // Info
+            CuratedChannel("bfmtv", "BFM TV", "Info"),
+            CuratedChannel("cnews", "CNews", "Info"),
+            CuratedChannel("lci", "LCI", "Info"),
+            CuratedChannel("franceinfo", "Franceinfo", "Info"),
+            CuratedChannel("bfmbusiness", "BFM Business", "Info"),
+            CuratedChannel("france24", "France 24", "Info"),
+            CuratedChannel("tv5monde", "TV5 Monde", "Info"),
+            CuratedChannel("euronews", "Euronews", "Info"),
+            CuratedChannel("i24news", "i24 News", "Info"),
+            // Cinéma & Séries
+            CuratedChannel("canalplus", "Canal+", "Cinéma"),
+            CuratedChannel("canalpluscinema", "Canal+ Cinéma", "Cinéma"),
+            CuratedChannel("canalplusseries", "Canal+ Séries", "Cinéma"),
+            CuratedChannel("canalplusfamily", "Canal+ Family", "Cinéma"),
+            CuratedChannel("canalplusdocs", "Canal+ Docs", "Cinéma"),
+            CuratedChannel("ocsmax", "OCS Max", "Cinéma"),
+            CuratedChannel("ocsgeants", "OCS Géants", "Cinéma"),
+            CuratedChannel("ocschoc", "OCS Choc", "Cinéma"),
+            CuratedChannel("ocscity", "OCS City", "Cinéma"),
+            CuratedChannel("cineplupremier", "Ciné+ Premier", "Cinéma"),
+            CuratedChannel("cineplusfrisson", "Ciné+ Frisson", "Cinéma"),
+            CuratedChannel("cineplusemotion", "Ciné+ Émotion", "Cinéma"),
+            CuratedChannel("cineplusfamiz", "Ciné+ Famiz", "Cinéma"),
+            CuratedChannel("cineplusclub", "Ciné+ Club", "Cinéma"),
+            CuratedChannel("cineplusclassic", "Ciné+ Classic", "Cinéma"),
+            CuratedChannel("paramountchannel", "Paramount Channel", "Cinéma"),
+            CuratedChannel("13emerue", "13ème Rue", "Cinéma"),
+            CuratedChannel("syfy", "Syfy", "Cinéma"),
+            CuratedChannel("warnertv", "Warner TV", "Cinéma"),
+            // Sport
+            CuratedChannel("canalplussport", "Canal+ Sport", "Sport"),
+            CuratedChannel("canalplussport360", "Canal+ Sport 360", "Sport"),
+            CuratedChannel("beinsports1", "beIN Sports 1", "Sport"),
+            CuratedChannel("beinsports2", "beIN Sports 2", "Sport"),
+            CuratedChannel("beinsports3", "beIN Sports 3", "Sport"),
+            CuratedChannel("rmcsport1", "RMC Sport 1", "Sport"),
+            CuratedChannel("rmcsport2", "RMC Sport 2", "Sport"),
+            CuratedChannel("rmcsport3", "RMC Sport 3", "Sport"),
+            CuratedChannel("eurosport1", "Eurosport 1", "Sport"),
+            CuratedChannel("eurosport2", "Eurosport 2", "Sport"),
+            CuratedChannel("lachainelequipe", "La Chaîne L'Équipe", "Sport"),
+            CuratedChannel("infosportplus", "Infosport+", "Sport"),
+            // Musique
+            CuratedChannel("mtv", "MTV", "Musique"),
+            CuratedChannel("mcm", "MCM", "Musique"),
+            CuratedChannel("m6music", "M6 Music", "Musique"),
+            CuratedChannel("nrjhits", "NRJ Hits", "Musique"),
+            CuratedChannel("traceurban", "Trace Urban", "Musique"),
+            CuratedChannel("mezzo", "Mezzo", "Musique"),
+            // Documentaire
+            CuratedChannel("planeteplus", "Planète+", "Documentaire"),
+            CuratedChannel("ushuaiatv", "Ushuaïa TV", "Documentaire"),
+            CuratedChannel("histoiretv", "Histoire TV", "Documentaire"),
+            CuratedChannel("rmcdecouverte", "RMC Découverte", "Documentaire"),
+            CuratedChannel("nationalgeographic", "National Geographic", "Documentaire"),
+            CuratedChannel("natgeowild", "Nat Geo Wild", "Documentaire"),
+            CuratedChannel("discoverychannel", "Discovery Channel", "Documentaire"),
+            CuratedChannel("trek", "Trek", "Documentaire"),
+            // Enfants
+            CuratedChannel("disneychannel", "Disney Channel", "Enfants"),
+            CuratedChannel("disneyjunior", "Disney Junior", "Enfants"),
+            CuratedChannel("cartoonnetwork", "Cartoon Network", "Enfants"),
+            CuratedChannel("boomerang", "Boomerang", "Enfants"),
+            CuratedChannel("nickelodeon", "Nickelodeon", "Enfants"),
+            CuratedChannel("nickjr", "Nick Jr.", "Enfants"),
+            CuratedChannel("tiji", "Tiji", "Enfants"),
+            CuratedChannel("piwiplus", "Piwi+", "Enfants"),
+            CuratedChannel("canalj", "Canal J", "Enfants"),
+            CuratedChannel("tfoumax", "Tfou Max", "Enfants"),
+            // L'Équipe (sport généraliste)
+            CuratedChannel("lequipe", "L'Équipe", "Sport"),
+        )
     }
 
     // ───────── OLA TV API helpers (protocol identical to WiTv's, duplicated for decoupling) ─────────
@@ -381,6 +489,8 @@ object OlaTvProvider : Provider, IptvProvider {
                         if (cmd.isBlank()) continue
                         val cleaned = rawName
                             .replace(Regex("^(FR|ES|PT|EN|DE|IT|AR|TR|NL|PL|RO|US|UK|BE|CH)[|:\\s]+", RegexOption.IGNORE_CASE), "")
+                            // Strip leading punctuation/decoration like "- TF1", "› France 2", "● Canal+".
+                            .replace(Regex("^[\\-•●○▪►•‣⮞›»\\u2022]+\\s*"), "")
                             .replace(Regex("\\s+"), " ").trim()
                         if (cleaned.isBlank()) continue
                         synchronized(nameLock) {

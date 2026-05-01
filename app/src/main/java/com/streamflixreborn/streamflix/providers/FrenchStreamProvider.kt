@@ -363,20 +363,16 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun getMovie(id: String): Movie = coroutineScope {
         initializeService()
-        // 2026-05: detail page is at /film/{slug}. The page is server-rendered HTML
-        // with a Next.js streaming JSON inline (escaped with \\\") containing players[]
-        // and metadata. We parse the DOM for visible fields and fall back to the JSON
-        // for poster/banner/players which aren't readily exposed in clean HTML attrs.
+        // 2026-05: detail page is at /film/{slug}. Server-rendered HTML with inline
+        // Next.js streaming JSON. Show-level fields: year (int), duration, description,
+        // genres[], plus the embedded players[]. Poster/banner come from the DOM.
         val document = service.getMovie(id)
         val raw = document.html()
-        val poster = extractFromInlineJson(raw, "poster_path")?.let { tmdbImg(it) }
-        val banner = extractFromInlineJson(raw, "backdrop_path")?.let { tmdbImg(it) }
-        val title = document.selectFirst("h1#s-title")?.ownText()?.trim()
+        val title = document.selectFirst("h1#s-title")?.ownText()?.trim()?.ifBlank { null }
             ?: document.selectFirst("meta[property=og:title]")?.attr("content").orEmpty()
         val overview = document.selectFirst("p.fdesc-text")?.text()?.trim().orEmpty()
-        val releaseYear = extractFromInlineJson(raw, "release_date")
-            ?.takeIf { it.length >= 4 }
-            ?.substring(0, 4)
+        val releaseYear = extractNumberFromInlineJson(raw, "year")?.toString()
+        val poster = document.selectFirst(".fposter img, img.dvd-thumbnail")?.attr("src")
         val genres = document.select("ul#s-list a[href*=genre]").map {
             Genre(
                 id = it.attr("href").substringAfter("genre=").substringBefore("&"),
@@ -388,8 +384,8 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             title = title,
             overview = overview,
             released = releaseYear,
-            poster = poster ?: document.selectFirst("img.dvd-img, .fposter img")?.attr("src"),
-            banner = banner,
+            poster = poster,
+            banner = poster,
             genres = genres,
         )
 
@@ -468,35 +464,32 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun getTvShow(id: String): TvShow = coroutineScope {
         initializeService()
-        // 2026-05: serie page is /serie/{slug}. Same Next.js inline JSON pattern.
-        // The slug usually carries -saison-N — we use it as the only season since
-        // /serie/<slug-with-saison-N> already pins to one season's episode list.
+        // 2026-05: /serie/{slug-with-saison-N} renders a single-season page. Show-level
+        // JSON has year/description/genres; episodes[] sits next to it with each
+        // {id, number, title, thumbnail, players[]} block.
         val document = service.getTvShow(id)
         val raw = document.html()
-        val title = document.selectFirst("h1#s-title")?.ownText()?.trim()
+        val title = document.selectFirst("h1#s-title")?.ownText()?.trim()?.ifBlank { null }
             ?: document.selectFirst("meta[property=og:title]")?.attr("content").orEmpty()
-        val cleanTitle = title.substringBeforeLast("- Saison").trim()
+        val cleanTitle = title.substringBeforeLast("- Saison").trim().ifBlank { title }
         val overview = document.selectFirst("p.fdesc-text")?.text()?.trim().orEmpty()
-        val poster = extractFromInlineJson(raw, "poster_path")?.let { tmdbImg(it) }
-            ?: document.selectFirst("img.dvd-img, .fposter img")?.attr("src")
-        val banner = extractFromInlineJson(raw, "backdrop_path")?.let { tmdbImg(it) }
-        val releaseYear = extractFromInlineJson(raw, "release_date")
-            ?.takeIf { it.length >= 4 }
-            ?.substring(0, 4)
+        val releaseYear = extractNumberFromInlineJson(raw, "year")?.toString()
+        val poster = document.selectFirst(".fposter img, img.dvd-thumbnail")?.attr("src")
         val genres = document.select("ul#s-list a[href*=genre]").map {
             Genre(
                 id = it.attr("href").substringAfter("genre=").substringBefore("&"),
                 name = it.text().trim(),
             )
         }
-        val seasonNumber = title.substringAfter("Saison ", "").trim().toIntOrNull() ?: 1
+        val seasonNumber = title.substringAfter("Saison ", "").trim().substringBefore(" ")
+            .toIntOrNull() ?: 1
         TvShow(
             id = id,
-            title = cleanTitle.ifBlank { title },
+            title = cleanTitle,
             overview = overview,
             released = releaseYear,
             poster = poster,
-            banner = banner,
+            banner = poster,
             genres = genres,
             seasons = listOf(
                 Season(
@@ -632,25 +625,27 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     }
 
     /** Extract the episode list from a /serie/{slug} page's inline Next.js JSON.
-     *  Looks for `episodeNumber\":N` markers, then captures the surrounding name and
-     *  thumbnail. The escape sequence in the HTML uses `\\\"` (backslash-quote). */
+     *  Episode block: {id, number, title, description, thumbnail, duration, players}.
+     *  The escape sequence in the HTML uses `\\\"` (backslash-quote). */
     private fun parseEpisodesFromPage(raw: String, seasonId: String): List<Episode> {
         val out = mutableListOf<Episode>()
-        // Each episode block carries id + episodeNumber + name + thumbnail.
         val rx = Regex(
-            "\\\\\"id\\\\\":(\\d+)[^}]*?\\\\\"episodeNumber\\\\\":(\\d+)[^}]*?\\\\\"name\\\\\":\\\\\"([^\\\\]*)\\\\\"[^}]*?\\\\\"thumbnail\\\\\":(?:\\\\\"([^\\\\]*)\\\\\"|null)"
+            "\\\\\"id\\\\\":(\\d+)" +
+                "[^}]{0,80}\\\\\"number\\\\\":(\\d+)" +
+                "[^}]{0,80}\\\\\"title\\\\\":\\\\\"([^\\\\]*)\\\\\"" +
+                "(?:[^}]{0,200}\\\\\"thumbnail\\\\\":(?:\\\\\"([^\\\\]*)\\\\\"|null))?"
         )
         val seen = HashSet<Int>()
         rx.findAll(raw).forEach { m ->
             val number = m.groupValues[2].toIntOrNull() ?: return@forEach
             if (!seen.add(number)) return@forEach
-            val name = m.groupValues[3]
-            val thumb = m.groupValues[4].ifBlank { null }
+            val title = m.groupValues[3]
+            val thumb = m.groupValues.getOrNull(4)?.ifBlank { null }
             out.add(
                 Episode(
                     id = "$seasonId/$number",
                     number = number,
-                    title = name.ifBlank { "Episode $number" },
+                    title = title.ifBlank { "Épisode $number" },
                     poster = thumb?.let { tmdbImg(it) },
                 )
             )
@@ -663,6 +658,11 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private fun extractFromInlineJson(raw: String, key: String): String? {
         val m = Regex("\\\\\"$key\\\\\":\\\\\"([^\\\\]*)\\\\\"").find(raw) ?: return null
         return m.groupValues[1].ifBlank { null }
+    }
+
+    /** Pull a numeric field (e.g. \\"year\\":2026, \\"duration\\":53) from the inline JSON. */
+    private fun extractNumberFromInlineJson(raw: String, key: String): Int? {
+        return Regex("\\\\\"$key\\\\\":(\\d+)").find(raw)?.groupValues?.get(1)?.toIntOrNull()
     }
 
     /** Build a TMDB image URL from a /path/to/img.jpg slug. */
