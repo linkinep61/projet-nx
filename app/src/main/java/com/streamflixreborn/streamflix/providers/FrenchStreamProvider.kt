@@ -362,19 +362,39 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     }
 
     override suspend fun getMovie(id: String): Movie = coroutineScope {
-        // PATCH 2026-05: Provider suspended - fs14.lol migrated to Next.js CSR
-        return@coroutineScope Movie(id = id, title = "", poster = null)
+        initializeService()
+        // 2026-05: detail page is at /film/{slug}. The page is server-rendered HTML
+        // with a Next.js streaming JSON inline (escaped with \\\") containing players[]
+        // and metadata. We parse the DOM for visible fields and fall back to the JSON
+        // for poster/banner/players which aren't readily exposed in clean HTML attrs.
+        val document = service.getMovie(id)
+        val raw = document.html()
+        val poster = extractFromInlineJson(raw, "poster_path")?.let { tmdbImg(it) }
+        val banner = extractFromInlineJson(raw, "backdrop_path")?.let { tmdbImg(it) }
+        val title = document.selectFirst("h1#s-title")?.ownText()?.trim()
+            ?: document.selectFirst("meta[property=og:title]")?.attr("content").orEmpty()
+        val overview = document.selectFirst("p.fdesc-text")?.text()?.trim().orEmpty()
+        val releaseYear = extractFromInlineJson(raw, "release_date")
+            ?.takeIf { it.length >= 4 }
+            ?.substring(0, 4)
+        val genres = document.select("ul#s-list a[href*=genre]").map {
+            Genre(
+                id = it.attr("href").substringAfter("genre=").substringBefore("&"),
+                name = it.text().trim(),
+            )
+        }
+        Movie(
+            id = id,
+            title = title,
+            overview = overview,
+            released = releaseYear,
+            poster = poster ?: document.selectFirst("img.dvd-img, .fposter img")?.attr("src"),
+            banner = banner,
+            genres = genres,
+        )
 
         /*
-        initializeService()
-        val itemId = id.substringBefore("-")
-
-        val documentDeferred = async { service.getItem(id) }
-        val filmDataDeferred = async {
-            try { service.getFilmData(itemId) } catch (_: Exception) { null }
-        }
-
-        val document = documentDeferred.await()
+        val document = service.getItem(id)
         val filmData = filmDataDeferred.await()
         val actors = extractActors(document)
         val trailerURL = filmData ?.meta?.trailer
@@ -447,14 +467,49 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     }
 
     override suspend fun getTvShow(id: String): TvShow = coroutineScope {
-        // PATCH 2026-05: Provider suspended - fs14.lol migrated to Next.js CSR
-        return@coroutineScope TvShow(id = id, title = "", poster = null)
+        initializeService()
+        // 2026-05: serie page is /serie/{slug}. Same Next.js inline JSON pattern.
+        // The slug usually carries -saison-N — we use it as the only season since
+        // /serie/<slug-with-saison-N> already pins to one season's episode list.
+        val document = service.getTvShow(id)
+        val raw = document.html()
+        val title = document.selectFirst("h1#s-title")?.ownText()?.trim()
+            ?: document.selectFirst("meta[property=og:title]")?.attr("content").orEmpty()
+        val cleanTitle = title.substringBeforeLast("- Saison").trim()
+        val overview = document.selectFirst("p.fdesc-text")?.text()?.trim().orEmpty()
+        val poster = extractFromInlineJson(raw, "poster_path")?.let { tmdbImg(it) }
+            ?: document.selectFirst("img.dvd-img, .fposter img")?.attr("src")
+        val banner = extractFromInlineJson(raw, "backdrop_path")?.let { tmdbImg(it) }
+        val releaseYear = extractFromInlineJson(raw, "release_date")
+            ?.takeIf { it.length >= 4 }
+            ?.substring(0, 4)
+        val genres = document.select("ul#s-list a[href*=genre]").map {
+            Genre(
+                id = it.attr("href").substringAfter("genre=").substringBefore("&"),
+                name = it.text().trim(),
+            )
+        }
+        val seasonNumber = title.substringAfter("Saison ", "").trim().toIntOrNull() ?: 1
+        TvShow(
+            id = id,
+            title = cleanTitle.ifBlank { title },
+            overview = overview,
+            released = releaseYear,
+            poster = poster,
+            banner = banner,
+            genres = genres,
+            seasons = listOf(
+                Season(
+                    id = id,
+                    number = seasonNumber,
+                    title = "Saison $seasonNumber",
+                    poster = poster,
+                )
+            ),
+        )
 
         /*
-        initializeService()
-        val itemId = id.substringBefore("-")
-
-        val documentDeferred = async { service.getItem(id, "dle_skin=VFV25") }
+        val document = service.getItem(id, "dle_skin=VFV25")
         val filmDataDeferred = async {
             try { service.getFilmData(itemId) } catch (_: Exception) { null }
         }
@@ -565,61 +620,125 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
         initializeService()
-
-        val episodesData = try {
-            service.getEpisodesData(seasonId)
-        } catch (e: Exception) {
-            return emptyList()
+        // 2026-05: AJAX endpoint /engine/ajax/episodes_np.php is gone (404). Episodes
+        // are now embedded in the /serie/{slug} page's Next.js JSON. We parse the page
+        // and extract every {episodeNumber, name, thumbnail, ...} block.
+        return try {
+            val raw = service.getTvShow(seasonId).html()
+            parseEpisodesFromPage(raw, seasonId)
+        } catch (_: Exception) {
+            emptyList()
         }
+    }
 
-        val result = mutableListOf<Episode>()
-        var number = 1
-        val maps = listOf(episodesData.vf, episodesData.vostfr, episodesData.vo )
-        while (maps.any { it?.containsKey(number.toString()) == true }) {
-            val info = episodesData.info?.get(number.toString())
-            result.add(
+    /** Extract the episode list from a /serie/{slug} page's inline Next.js JSON.
+     *  Looks for `episodeNumber\":N` markers, then captures the surrounding name and
+     *  thumbnail. The escape sequence in the HTML uses `\\\"` (backslash-quote). */
+    private fun parseEpisodesFromPage(raw: String, seasonId: String): List<Episode> {
+        val out = mutableListOf<Episode>()
+        // Each episode block carries id + episodeNumber + name + thumbnail.
+        val rx = Regex(
+            "\\\\\"id\\\\\":(\\d+)[^}]*?\\\\\"episodeNumber\\\\\":(\\d+)[^}]*?\\\\\"name\\\\\":\\\\\"([^\\\\]*)\\\\\"[^}]*?\\\\\"thumbnail\\\\\":(?:\\\\\"([^\\\\]*)\\\\\"|null)"
+        )
+        val seen = HashSet<Int>()
+        rx.findAll(raw).forEach { m ->
+            val number = m.groupValues[2].toIntOrNull() ?: return@forEach
+            if (!seen.add(number)) return@forEach
+            val name = m.groupValues[3]
+            val thumb = m.groupValues[4].ifBlank { null }
+            out.add(
                 Episode(
                     id = "$seasonId/$number",
                     number = number,
-                    poster = info?.poster ?: "",
-                    title = info?.title?.replace("\\'", "'") ?: "Episode $number",
-                    overview = info?.synopsis?.replace("\\'", "'") ?: ""
+                    title = name.ifBlank { "Episode $number" },
+                    poster = thumb?.let { tmdbImg(it) },
                 )
             )
-
-            number++
         }
+        return out.sortedBy { it.number }
+    }
 
-        return result
+    /** Pull a single string field from the Next.js streaming JSON inline in a page.
+     *  Pattern: \\"<key>\\":\\"<value>\\". Returns null if not found or value is null. */
+    private fun extractFromInlineJson(raw: String, key: String): String? {
+        val m = Regex("\\\\\"$key\\\\\":\\\\\"([^\\\\]*)\\\\\"").find(raw) ?: return null
+        return m.groupValues[1].ifBlank { null }
+    }
+
+    /** Build a TMDB image URL from a /path/to/img.jpg slug. */
+    private fun tmdbImg(slug: String): String =
+        if (slug.startsWith("http")) slug
+        else "https://image.tmdb.org/t/p/w500$slug"
+
+    /** Parse the Next.js inline JSON of a /film/{slug} or /serie/{slug} page and turn
+     *  every {hostName, embedUrl, language} entry into a Video.Server.
+     *
+     *  For series, [forEpisodeNumber] filters: only players whose surrounding
+     *  episodeNumber field matches the requested episode are returned. For movies,
+     *  pass null and we take all players on the page.
+     *
+     *  Server names follow the existing extractor convention so the dispatcher in
+     *  Extractor.extract() routes them (e.g. "fsvid" → FilemoonExtractor via aliasUrls). */
+    private fun parsePlayersFromPage(raw: String, forEpisodeNumber: Int?): List<Video.Server> {
+        if (raw.isBlank()) return emptyList()
+
+        // Slice the page into per-episode segments when filtering. Each segment is the
+        // text between two `\"episodeNumber\":N` markers — and contains the players[]
+        // array for that episode only.
+        val haystack: String = if (forEpisodeNumber != null) {
+            val markerRegex = Regex("\\\\\"episodeNumber\\\\\":(\\d+)")
+            val markers = markerRegex.findAll(raw).toList()
+            val target = markers.firstOrNull { it.groupValues[1].toIntOrNull() == forEpisodeNumber }
+                ?: return emptyList()
+            val nextStart = markers.firstOrNull { it.range.first > target.range.first }
+                ?.range?.first ?: raw.length
+            raw.substring(target.range.first, nextStart)
+        } else raw
+
+        // Each player block in the JSON: {"id":N,"hostName":"X","embedUrl":"Y","language":"Z",...}
+        val rx = Regex(
+            "\\\\\"hostName\\\\\":\\\\\"([^\\\\]+)\\\\\"" +
+                "[^}]*?\\\\\"embedUrl\\\\\":\\\\\"([^\\\\]+)\\\\\"" +
+                "(?:[^}]*?\\\\\"language\\\\\":(?:\\\\\"([^\\\\]*)\\\\\"|null))?"
+        )
+
+        val seen = HashSet<String>()
+        val out = mutableListOf<Video.Server>()
+        rx.findAll(haystack).forEachIndexed { i, m ->
+            val host = m.groupValues[1].trim()
+            // The HTML escapes "/" as "\\/" in some cases — clean it up.
+            val embedUrl = m.groupValues[2].replace("\\/", "/").trim()
+            val lang = m.groupValues.getOrNull(3)?.uppercase()?.takeIf { it.isNotBlank() }
+            if (embedUrl.isBlank() || !seen.add(embedUrl)) return@forEachIndexed
+            val niceHost = host.replaceFirstChar { it.uppercase() }
+            val displayName = if (lang != null) "$niceHost ($lang)" else niceHost
+            out.add(
+                Video.Server(
+                    id = "fs_player_$i",
+                    name = displayName,
+                    src = embedUrl,
+                )
+            )
+        }
+        return out
     }
 
     override suspend fun getGenre(id: String, page: Int): Genre {
-        // PATCH 2026-05: Provider suspended - fs14.lol migrated to Next.js CSR
-        return Genre(id = id, name = "", shows = emptyList())
-
-        /*
         initializeService()
+        // 2026-05: /films?genre=<slug> serves filtered listings. The same div.short cards
+        // as the home page; we route /s-tv/ entries to TvShow as before.
         val document = service.getGenre(id, page)
-
-        val genre = Genre(
-            id = id,
-            name = "",
-            shows = document.select("div#dle-content>div.short").map {
-                Movie(
-                    id = it.selectFirst("a.short-poster")
-                        ?.attr("href")?.substringAfterLast("/")
-                        ?: "",
-                    title = it.selectFirst("div.short-title")
-                        ?.text()
-                        ?: "",
-                    poster = it.selectFirst("img")
-                        ?.attr("src"),
-                )
-            },
-        )
-
-        return genre
-        */
+        val shows = document.select("div.short").mapNotNull { item ->
+            val link = item.selectFirst("a.short-poster")?.attr("href") ?: return@mapNotNull null
+            val href = link.substringAfterLast("/")
+            val title = item.selectFirst("div.short-title")?.text() ?: ""
+            val poster = item.selectFirst("img")?.attr("src")
+            if (link.contains("/s-tv/") || link.contains("/serie/") || link.contains("-saison-"))
+                TvShow(id = href, title = title, poster = poster)
+            else
+                Movie(id = href, title = title, poster = poster)
+        }
+        return Genre(id = id, name = "", shows = shows)
     }
 
     override suspend fun getPeople(id: String, page: Int): People {
@@ -762,114 +881,22 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         initializeService()
 
+        // 2026-05: AJAX endpoints (film_api.php, episodes_np.php) are dead. The new site
+        // ships a Next.js streaming JSON inline in /film/{slug} and /serie/{slug} pages
+        // with each player's embed URL. We fetch the page once and regex out the players.
         val servers = when (videoType) {
             is Video.Type.Episode -> {
                 val parts = id.split("/")
                 val tvShowId = parts.getOrElse(0) { id }
-                // Épisode index : depuis l'ID (format showId/epNum) ou depuis videoType
-                val tvShowNumber = parts.getOrElse(1) {
-                    // Fallback : utiliser le numéro d'épisode du videoType (index base 0)
-                    (videoType.number - 1).coerceAtLeast(0).toString()
-                }
-                val episodesData = try {
-                    service.getEpisodesData(tvShowId)
-                } catch (e: Exception) {
-                    null
-                }
-                val tvShowServers = mutableListOf<Video.Server>()
-
-                episodesData?.vf?.get(tvShowNumber)?.forEach { (provider, url) ->
-                    tvShowServers.add(Video.Server(
-                        id = "vf$provider",
-                        name = provider.replaceFirstChar { it.uppercase() }+" (VF)",
-                        src = url
-                    ))
-                }
-                episodesData?.vostfr?.get(tvShowNumber)?.forEach { (provider, url) ->
-                    tvShowServers.add(Video.Server(
-                        id = "vostfr$provider",
-                        name = provider.replaceFirstChar { it.uppercase() }+" (VOSTFR)",
-                        src = url
-                    ))
-                }
-                episodesData?.vo?.get(tvShowNumber)?.forEach { (provider, url) ->
-                    tvShowServers.add(Video.Server(
-                        id = "vo$provider",
-                        name = provider.replaceFirstChar { it.uppercase() }+" (VO)",
-                        src = url
-                    ))
-                }
-                tvShowServers
+                val episodeNum = parts.getOrElse(1) { videoType.number.toString() }.toIntOrNull()
+                    ?: videoType.number
+                val raw = try { service.getTvShow(tvShowId).html() } catch (_: Exception) { "" }
+                parsePlayersFromPage(raw, forEpisodeNumber = episodeNum)
             }
 
             is Video.Type.Movie -> {
-                val itemId = id.substringBefore("-")
-                val filmData = try {
-                    service.getFilmData(itemId)
-                } catch (e: Exception) {
-                    null
-                }
-                var serverIndex = 0
-
-                val labels = mapOf(
-                    "vff" to "TrueFrench",
-                    "vfq" to "French",
-                    "vostfr" to "VOSTFR",
-                    "vo" to "VO"
-                )
-
-                val movieServers = mutableListOf<Video.Server>()
-
-                if (filmData?.players != null) {
-                    val langOrder = listOf("vff", "vfq", "vostfr", "vo")
-
-                    filmData.players.forEach { (provider, langMap) ->
-
-                        val seenUrlsForProvider = mutableSetOf<String>()
-                        val defaultUrl = langMap["default"]
-
-                        langMap.entries
-                            .filter { it.key != "default" }
-                            .sortedBy { langOrder.indexOf(it.key).let { i -> if (i == -1) Int.MAX_VALUE else i } }
-                            .forEach { (lang, url) ->
-
-                                if (url.startsWith("http") || url.isNotBlank()) {
-
-                                    if (seenUrlsForProvider.add(url) && !ignoreSource(provider, url)) {
-
-                                        val langLabel = labels[lang] ?: lang
-                                        val displayName =
-                                            provider.replaceFirstChar { it.uppercase() } +
-                                                    if (langLabel.isNotBlank()) " ($langLabel)" else ""
-
-                                        movieServers.add(
-                                            Video.Server(
-                                                id = "vid${serverIndex++}",
-                                                name = displayName,
-                                                src = url
-                                            )
-                                        )
-                                    }
-                                }
-                            }
-
-                        // only add the "default" URL if it is not already present
-                        if (!defaultUrl.isNullOrBlank()
-                            && defaultUrl !in seenUrlsForProvider
-                            && !ignoreSource(provider, defaultUrl)
-                        ) {
-                            movieServers.add(
-                                Video.Server(
-                                    id = "vid${serverIndex++}",
-                                    name = provider.replaceFirstChar { it.uppercase() },
-                                    src = defaultUrl
-                                )
-                            )
-                        }
-                    }
-                }
-
-                movieServers
+                val raw = try { service.getMovie(id).html() } catch (_: Exception) { "" }
+                parsePlayersFromPage(raw, forEpisodeNumber = null)
             }
         }
 
@@ -1024,11 +1051,13 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             @Field("page") page: Int = 1
         ): Document
 
-        @GET("films/page/{page}/")
-        suspend fun getMovies(@Path("page") page: Int): Document
+        // 2026-05: catalog routes simplified — /films and /series replace /films/page/N
+        // and /s-tv/page/N. Pagination is now via ?page=N query.
+        @GET("films")
+        suspend fun getMovies(@Query("page") page: Int): Document
 
-        @GET("s-tv/page/{page}")
-        suspend fun getTvShows(@Path("page") page: Int): Document
+        @GET("series")
+        suspend fun getTvShows(@Query("page") page: Int): Document
 
         @GET("/{id}")
         suspend fun getItem(
@@ -1036,23 +1065,26 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             @Header("Cookie") cookie: String = "dle_skin=VFV1"
         ): Document
 
-        @GET("films/{id}")
+        // Detail pages — slugs now live under /film/<slug> and /serie/<slug>.
+        @GET("film/{id}")
         suspend fun getMovie(
             @Path("id") id: String,
             @Header("Cookie") cookie: String = "dle_skin=VFV1"
         ): Document
 
-        @GET("s-tv/{id}")
+        @GET("serie/{id}")
         suspend fun getTvShow(
             @Path("id") id: String,
             @Header("Cookie") cookie: String = "dle_skin=VFV1"
         ): Document
 
 
-        @GET("film-en-streaming/{genre}/page/{page}")
+        // Genre listing is now /films?genre=<slug> (and /series?genre=<slug>); the
+        // separate "/film-en-streaming/X/page/Y" route is gone.
+        @GET("films")
         suspend fun getGenre(
-            @Path("genre") genre: String,
-            @Path("page") page: Int,
+            @Query("genre") genre: String,
+            @Query("page") page: Int,
         ): Document
 
         @GET("xfsearch/actors/{id}/page/{page}")
