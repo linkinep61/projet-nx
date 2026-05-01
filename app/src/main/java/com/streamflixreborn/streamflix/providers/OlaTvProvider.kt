@@ -39,8 +39,7 @@ object OlaTvProvider : Provider {
 
     override val name = "OLA TV"
     override val baseUrl = "https://iptvdroid.monster"
-    // TODO: replace with custom logo_olatv drawable. Reuses witv for now.
-    override val logo = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_witv"
+    override val logo = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_olatv"
     override val language = "fr"
 
     private const val TAG = "OlaTvProvider"
