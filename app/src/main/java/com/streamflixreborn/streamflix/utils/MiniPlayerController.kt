@@ -151,8 +151,8 @@ object MiniPlayerController {
         loadJob = scope.launch {
             try {
                 val provider = UserPreferences.currentProvider
-                if (provider !is WiTvProvider) {
-                    _state.value = State.Error(channelId, "Not a WiTV provider")
+                if (provider !is IptvProvider) {
+                    _state.value = State.Error(channelId, "Not an IPTV provider")
                     return@launch
                 }
 
@@ -179,8 +179,11 @@ object MiniPlayerController {
                     provider.getServers(channelId, videoType)
                 }
 
-                // Start collecting progressive OLA TV servers (variants)
-                startCollectingProgressiveServers(channelId, provider)
+                // Start collecting progressive OLA TV servers (variants) — WiTv only.
+                // OlaTvProvider doesn't have additionalServersFlow.
+                if (provider is WiTvProvider) {
+                    startCollectingProgressiveServers(channelId, provider)
+                }
 
                 if (servers.isEmpty()) {
                     Log.w(TAG, "No initial servers for $channelName, waiting for progressive servers...")
@@ -259,7 +262,7 @@ object MiniPlayerController {
      * Try to play the server at [index]. If extraction fails or source is empty,
      * automatically moves to the next server.
      */
-    private suspend fun playServerAtIndex(channelId: String, provider: WiTvProvider, index: Int) {
+    private suspend fun playServerAtIndex(channelId: String, provider: Provider, index: Int) {
         if (currentChannelId != channelId) return // channel changed
         if (index >= availableServers.size) {
             Log.w(TAG, "All ${availableServers.size} servers exhausted for $channelId (progressive servers may still arrive)")
@@ -349,8 +352,8 @@ object MiniPlayerController {
         loadJob?.cancel()
         loadJob = scope.launch {
             val provider = UserPreferences.currentProvider
-            if (provider !is WiTvProvider) {
-                _state.value = State.Error(channelId, "Not a WiTV provider")
+            if (provider !is IptvProvider) {
+                _state.value = State.Error(channelId, "Not an IPTV provider")
                 return@launch
             }
             playServerAtIndex(channelId, provider, nextIndex)

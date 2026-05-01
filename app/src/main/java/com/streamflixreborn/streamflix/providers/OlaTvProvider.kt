@@ -35,7 +35,7 @@ import javax.crypto.spec.SecretKeySpec
  * OLA TV protocol (same as WiTv's helpers but duplicated here to keep
  * providers decoupled — explicitly per user request "ne touche pas à WiTv").
  */
-object OlaTvProvider : Provider {
+object OlaTvProvider : Provider, IptvProvider {
 
     override val name = "OLA TV"
     override val baseUrl = "https://iptvdroid.monster"

@@ -36,7 +36,7 @@ import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-object WiTvProvider : Provider {
+object WiTvProvider : Provider, IptvProvider {
 
     override val name = "WiTV"
     override val baseUrl = "https://witv.team"

@@ -27,6 +27,11 @@ interface FilterableProvider {
     suspend fun getFilteredTvShows(language: String, page: Int = 1): List<TvShow>
 }
 
+/** Marker interface for providers that expose live TV channels (IPTV).
+ *  Used to gate features like the mini-player and channel-specific player UI
+ *  that should apply to ALL IPTV providers, not just WiTV. */
+interface IptvProvider
+
 interface Provider {
 
     val baseUrl: String

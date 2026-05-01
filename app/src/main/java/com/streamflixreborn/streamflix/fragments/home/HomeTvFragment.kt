@@ -222,8 +222,8 @@ class HomeTvFragment : Fragment() {
 
 
     private fun initializeMiniPlayer() {
-        val isWiTv = UserPreferences.currentProvider is WiTvProvider
-        if (!isWiTv || !UserPreferences.miniPlayerEnabled) {
+        val isIptv = UserPreferences.currentProvider is IptvProvider
+        if (!isIptv || !UserPreferences.miniPlayerEnabled) {
             binding.miniPlayerContainer.visibility = View.GONE
             MiniPlayerController.onIptvChannelClick = null
             return
@@ -404,7 +404,7 @@ class HomeTvFragment : Fragment() {
     private var swiperHasLastFocus: Boolean = false
     fun updateBackground(uri: String?, swiperHasFocus: Boolean? = false) {
         // IPTV channel logos don't work as backgrounds — skip
-        if (UserPreferences.currentProvider is WiTvProvider) return
+        if (UserPreferences.currentProvider is IptvProvider) return
         if (swiperHasFocus == null && isBackgroundPinned) return
         if (swiperHasFocus == null && !swiperHasLastFocus) return
 
@@ -417,7 +417,7 @@ class HomeTvFragment : Fragment() {
 
     fun pinBackground(uri: String?) {
         // IPTV channel logos don't work as backgrounds — skip
-        if (UserPreferences.currentProvider is WiTvProvider) return
+        if (UserPreferences.currentProvider is IptvProvider) return
         isBackgroundPinned = true
         Glide.with(requireContext())
             .load(uri)

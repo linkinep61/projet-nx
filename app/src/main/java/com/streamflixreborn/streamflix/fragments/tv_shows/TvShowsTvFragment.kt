@@ -245,8 +245,8 @@ class TvShowsTvFragment : Fragment() {
     }
 
     private fun initializeMiniPlayer() {
-        val isWiTv = UserPreferences.currentProvider is WiTvProvider
-        if (!isWiTv || !UserPreferences.miniPlayerEnabled) {
+        val isIptv = UserPreferences.currentProvider is IptvProvider
+        if (!isIptv || !UserPreferences.miniPlayerEnabled) {
             binding.miniPlayerContainer.visibility = View.GONE
             MiniPlayerController.onIptvChannelClick = null
             return

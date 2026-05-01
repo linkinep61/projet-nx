@@ -200,9 +200,9 @@ class HomeMobileFragment : Fragment() {
 
     private fun initializeMiniPlayer() {
         val provider = UserPreferences.currentProvider
-        val isWiTv = provider is WiTvProvider
-        Log.d("HomeMobile", "initializeMiniPlayer: provider=${provider?.name} (${provider?.javaClass?.simpleName}), isWiTv=$isWiTv, miniPlayerEnabled=${UserPreferences.miniPlayerEnabled}")
-        if (!isWiTv || !UserPreferences.miniPlayerEnabled) {
+        val isIptv = provider is IptvProvider
+        Log.d("HomeMobile", "initializeMiniPlayer: provider=${provider?.name} (${provider?.javaClass?.simpleName}), isIptv=$isIptv, miniPlayerEnabled=${UserPreferences.miniPlayerEnabled}")
+        if (!isIptv || !UserPreferences.miniPlayerEnabled) {
             binding.miniPlayerContainer.visibility = View.GONE
             MiniPlayerController.onIptvChannelClick = null
             return
