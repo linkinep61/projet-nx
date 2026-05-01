@@ -190,10 +190,13 @@ object OlaTvProvider : Provider {
     /** Catalog entry from MAC portal: name + cmd (raw stream URL or localhost:create_link). */
     private data class MacChannel(val name: String, val cmd: String)
 
-    /** List ALL channels from a MAC portal in FR genres.
-     *  This is the catalog-building variant of olaFetchMacPortal — no name filtering.
+    /** List ALL channels from a MAC portal.
+     *  - If `forceAllGenres = true` (used for the user-confirmed primary FR cid): fetch all genres.
+     *    Useful when the portal doesn't tag FR explicitly — we already know it's FR-only.
+     *  - Else: only fetch genres whose title matches FR keywords (used for background scan
+     *    of unconfirmed cids).
      *  Returns channel name → cmd. We resolve cmd to actual stream URLs lazily in getServers. */
-    private fun olaListMacPortalChannels(baseUrl: String, mac: String): List<MacChannel> {
+    private fun olaListMacPortalChannels(baseUrl: String, mac: String, forceAllGenres: Boolean = false): List<MacChannel> {
         val results = mutableListOf<MacChannel>()
         val encodedMac = java.net.URLEncoder.encode(mac, "UTF-8")
         val portalBase = "${baseUrl.trimEnd('/')}/portal.php"
@@ -239,11 +242,19 @@ object OlaTvProvider : Provider {
                 }
             } catch (_: Exception) {}
 
+            // Fallback: when no FR-tagged genre is found and forceAllGenres=true (primary cid),
+            // we treat the whole portal as French and fetch all genres. This is needed for
+            // FR-only portals that don't bother tagging language in genre titles.
             if (frGenreIds.isEmpty()) {
-                Log.d(TAG, "MAC portal $baseUrl: no FR genre found, skipping")
-                return results
+                if (!forceAllGenres) {
+                    Log.d(TAG, "MAC portal $baseUrl: no FR genre found, skipping")
+                    return results
+                }
+                Log.d(TAG, "MAC portal $baseUrl: no FR genre found — forceAllGenres=true, using genre=*")
+                frGenreIds.add("*")
+            } else {
+                Log.d(TAG, "MAC portal $baseUrl: ${frGenreIds.size} FR genres → ${frGenreIds.take(3)}")
             }
-            Log.d(TAG, "MAC portal $baseUrl: ${frGenreIds.size} FR genres → ${frGenreIds.take(3)}")
 
             // Step 4: For each FR genre, paginate get_ordered_list
             val seenNames = mutableSetOf<String>()
@@ -449,7 +460,8 @@ object OlaTvProvider : Provider {
                 }
                 Log.d(TAG, "Primary FR portal: ${creds.baseUrl}")
 
-                val channels = olaListMacPortalChannels(creds.baseUrl, creds.mac)
+                // Primary cid is user-confirmed FR → fetch all genres even if not tagged "FR|"
+                val channels = olaListMacPortalChannels(creds.baseUrl, creds.mac, forceAllGenres = true)
                 Log.d(TAG, "Primary FR portal returned ${channels.size} channels")
 
                 // Step 4: ingest into the registry (group by normalized name to merge variants)
