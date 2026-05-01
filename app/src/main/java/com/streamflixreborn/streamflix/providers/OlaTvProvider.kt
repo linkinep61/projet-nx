@@ -195,8 +195,11 @@ object OlaTvProvider : Provider, IptvProvider {
      *    Useful when the portal doesn't tag FR explicitly — we already know it's FR-only.
      *  - Else: only fetch genres whose title matches FR keywords (used for background scan
      *    of unconfirmed cids).
+     *
+     *  Pages are fetched in **parallel** (after page 1 reveals the total count) to keep the
+     *  initial load short — primary cid was 50s sequential, ~10s parallel.
      *  Returns channel name → cmd. We resolve cmd to actual stream URLs lazily in getServers. */
-    private fun olaListMacPortalChannels(baseUrl: String, mac: String, forceAllGenres: Boolean = false): List<MacChannel> {
+    private suspend fun olaListMacPortalChannels(baseUrl: String, mac: String, forceAllGenres: Boolean = false): List<MacChannel> {
         val results = mutableListOf<MacChannel>()
         val encodedMac = java.net.URLEncoder.encode(mac, "UTF-8")
         val portalBase = "${baseUrl.trimEnd('/')}/portal.php"
@@ -256,17 +259,21 @@ object OlaTvProvider : Provider, IptvProvider {
                 Log.d(TAG, "MAC portal $baseUrl: ${frGenreIds.size} FR genres → ${frGenreIds.take(3)}")
             }
 
-            // Step 4: For each FR genre, paginate get_ordered_list
+            // Step 4: For each FR genre, fetch page 1 (sequential — gives totalItems),
+            // then fetch pages 2..N in PARALLEL. This drops 50s → ~10s on the primary cid.
             val seenNames = mutableSetOf<String>()
-            for (genreId in frGenreIds) {
-                for (page in 1..30) {
+            val nameLock = Any()
+            // Page fetcher — returns the list of MacChannels found on a single page.
+            suspend fun fetchPage(genreId: String, page: Int): Triple<List<MacChannel>, Int, Int> = withContext(Dispatchers.IO) {
+                val pageChannels = mutableListOf<MacChannel>()
+                try {
                     val chReq = Request.Builder()
                         .url("$portalBase?type=itv&action=get_ordered_list&genre=$genreId&force_ch_link_check=&fav=0&sortby=name&p=$page&JsHttpRequest=1-xml")
                         .header("User-Agent", stbUA).header("Cookie", cookie)
                         .header("Authorization", "Bearer $token").build()
                     val chBody = probeClient.newCall(chReq).execute().body?.string() ?: ""
-                    val js = try { JSONObject(chBody).getJSONObject("js") } catch (_: Exception) { break }
-                    val data = js.optJSONArray("data") ?: break
+                    val js = JSONObject(chBody).getJSONObject("js")
+                    val data = js.optJSONArray("data") ?: JSONArray()
                     val totalItems = js.optInt("total_items", 0)
                     val maxPageItems = js.optInt("max_page_items", 14)
 
@@ -276,17 +283,42 @@ object OlaTvProvider : Provider, IptvProvider {
                         if (rawName.isBlank() || rawName.startsWith("#")) continue
                         val cmd = ch.optString("cmd", "").trim()
                         if (cmd.isBlank()) continue
-
-                        // Strip country prefix "FR|" / "FR " etc.
                         val cleaned = rawName
                             .replace(Regex("^(FR|ES|PT|EN|DE|IT|AR|TR|NL|PL|RO|US|UK|BE|CH)[|:\\s]+", RegexOption.IGNORE_CASE), "")
                             .replace(Regex("\\s+"), " ").trim()
                         if (cleaned.isBlank()) continue
-                        if (cleaned in seenNames) continue
-                        seenNames.add(cleaned)
-                        results.add(MacChannel(cleaned, cmd))
+                        synchronized(nameLock) {
+                            if (cleaned in seenNames) return@synchronized
+                            seenNames.add(cleaned)
+                            pageChannels.add(MacChannel(cleaned, cmd))
+                        }
                     }
-                    if (data.length() == 0 || (page * maxPageItems) >= totalItems) break
+                    return@withContext Triple(pageChannels, totalItems, maxPageItems)
+                } catch (e: Exception) {
+                    Log.w(TAG, "page $page genre=$genreId failed: ${e.message}")
+                    return@withContext Triple(pageChannels, 0, 14)
+                }
+            }
+
+            for (genreId in frGenreIds) {
+                // 4a: page 1 → discover total_items
+                val (page1Channels, totalItems, maxPageItems) = fetchPage(genreId, 1)
+                results.addAll(page1Channels)
+                if (totalItems <= maxPageItems || page1Channels.isEmpty()) continue
+
+                // 4b: pages 2..N in parallel (cap at 30 pages defensively)
+                val totalPages = minOf(30, ((totalItems + maxPageItems - 1) / maxPageItems))
+                if (totalPages < 2) continue
+                Log.d(TAG, "Genre $genreId: $totalItems items / $maxPageItems per page = $totalPages pages, fetching 2..$totalPages in parallel")
+                coroutineScope {
+                    val sem = kotlinx.coroutines.sync.Semaphore(6)  // cap at 6 parallel requests
+                    val jobs = (2..totalPages).map { page ->
+                        async {
+                            sem.acquire()
+                            try { fetchPage(genreId, page).first } finally { sem.release() }
+                        }
+                    }
+                    jobs.awaitAll().forEach { results.addAll(it) }
                 }
             }
         } catch (e: Exception) {
