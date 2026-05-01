@@ -69,7 +69,7 @@ object WiTvProvider : Provider, IptvProvider {
     // ── Progressive OLA TV server loading ──
     // Emits OLA CID servers (not streams) as background scan discovers them
     private val _additionalServers = MutableSharedFlow<Video.Server>(extraBufferCapacity = 100)
-    val additionalServersFlow: SharedFlow<Video.Server> = _additionalServers
+    override val additionalServersFlow: SharedFlow<Video.Server> = _additionalServers
     private val olaScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var currentOlaJob: kotlinx.coroutines.Job? = null
 
@@ -206,7 +206,7 @@ object WiTvProvider : Provider, IptvProvider {
         return synchronized(registryLock) {
             sortByTnt(
                 channelRegistry
-                    .filter { it.value.hasServer() && !UserPreferences.isChannelFailed("ch::${it.key}") }
+                    .filter { it.value.hasServer() }
                     .map { (k, v) -> toTvShow(k, v) }
             ).map { it.id }
         }
@@ -1276,7 +1276,7 @@ object WiTvProvider : Provider, IptvProvider {
         // Sport events inserted right after Musique
         for ((catName, _) in witvCategories) {
             val items = sortByTnt(snapshot
-                .filter { it.value.category == catName && it.value.hasServer() && !UserPreferences.isChannelFailed("ch::${it.key}") }
+                .filter { it.value.category == catName && it.value.hasServer() }
                 .map { (k, v) -> toTvShow(k, v) })
             if (items.isNotEmpty()) sections.add(Category(name = catName, list = items))
 
@@ -1299,7 +1299,7 @@ object WiTvProvider : Provider, IptvProvider {
         ensureRegistry()
         val snapshot = synchronized(registryLock) { LinkedHashMap(channelRegistry) }
         snapshot
-            .filter { it.value.displayName.contains(query, true) && it.value.hasServer() && !UserPreferences.isChannelFailed("ch::${it.key}") }
+            .filter { it.value.displayName.contains(query, true) && it.value.hasServer() }
             .map { (k, v) -> toTvShow(k, v) }
     } catch (_: Exception) {
         emptyList()
@@ -1312,7 +1312,7 @@ object WiTvProvider : Provider, IptvProvider {
         else try {
             ensureRegistry()
             val snapshot = synchronized(registryLock) { LinkedHashMap(channelRegistry) }
-            sortByTnt(snapshot.filter { it.value.hasServer() && !UserPreferences.isChannelFailed("ch::${it.key}") }.map { (k, v) -> toTvShow(k, v) })
+            sortByTnt(snapshot.filter { it.value.hasServer() }.map { (k, v) -> toTvShow(k, v) })
         } catch (_: Exception) {
             emptyList()
         }

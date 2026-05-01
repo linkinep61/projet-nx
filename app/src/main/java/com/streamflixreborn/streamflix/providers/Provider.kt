@@ -29,8 +29,14 @@ interface FilterableProvider {
 
 /** Marker interface for providers that expose live TV channels (IPTV).
  *  Used to gate features like the mini-player and channel-specific player UI
- *  that should apply to ALL IPTV providers, not just WiTV. */
-interface IptvProvider
+ *  that should apply to ALL IPTV providers, not just WiTV.
+ *
+ *  IPTV providers expose a [additionalServersFlow] of progressively-discovered
+ *  channel variants — the player surfaces these as "Chaîne" entries so the
+ *  user can switch streams without closing the player. */
+interface IptvProvider {
+    val additionalServersFlow: kotlinx.coroutines.flow.SharedFlow<Video.Server>
+}
 
 interface Provider {
 

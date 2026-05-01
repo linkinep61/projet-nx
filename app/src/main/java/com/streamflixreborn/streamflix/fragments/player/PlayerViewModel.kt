@@ -9,7 +9,7 @@ import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.CustomTabHelper
 import com.streamflixreborn.streamflix.utils.EpisodeManager
 import com.streamflixreborn.streamflix.utils.OpenSubtitles
-import com.streamflixreborn.streamflix.providers.WiTvProvider
+import com.streamflixreborn.streamflix.providers.IptvProvider
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.format
 import kotlinx.coroutines.Dispatchers
@@ -130,9 +130,9 @@ class PlayerViewModel(
             Log.d("PlayerViewModel", "Ricerca server completata: ${servers.size} server trovati")
             _state.emit(State.SuccessLoadingServers(servers))
 
-            // Start collecting progressive OLA TV servers if provider is WiTV
-            if (provider is WiTvProvider) {
-                additionalServerJob?.cancel()
+            // Start collecting progressive servers for any IPTV provider (WiTv / OlaTv).
+            additionalServerJob?.cancel()
+            if (provider is IptvProvider) {
                 additionalServerJob = viewModelScope.launch(Dispatchers.IO) {
                     provider.additionalServersFlow.collect { server ->
                         Log.d("PlayerViewModel", "Additional server arrived: ${server.name}")

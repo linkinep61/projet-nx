@@ -181,11 +181,9 @@ object MiniPlayerController {
                     provider.getServers(channelId, videoType)
                 }
 
-                // Start collecting progressive OLA TV servers (variants) — WiTv only.
-                // OlaTvProvider doesn't have additionalServersFlow.
-                if (provider is WiTvProvider) {
-                    startCollectingProgressiveServers(channelId, provider)
-                }
+                // Start collecting progressive OLA TV servers (variants) — works for any
+                // IPTV provider since IptvProvider declares additionalServersFlow.
+                startCollectingProgressiveServers(channelId, provider)
 
                 if (servers.isEmpty()) {
                     Log.w(TAG, "No initial servers for $channelName, waiting for progressive servers...")
@@ -219,10 +217,10 @@ object MiniPlayerController {
 
     /**
      * Collects progressive OLA TV servers (channel variants like TF1 HD, TF1 FHD)
-     * from WiTvProvider.additionalServersFlow.
+     * from any IptvProvider's additionalServersFlow.
      * When a new server arrives and we've exhausted current servers, try it immediately.
      */
-    private fun startCollectingProgressiveServers(channelId: String, provider: WiTvProvider) {
+    private fun startCollectingProgressiveServers(channelId: String, provider: IptvProvider) {
         progressiveServerJob?.cancel()
         progressiveServerJob = scope.launch {
             provider.additionalServersFlow.collect { server ->
@@ -248,12 +246,10 @@ object MiniPlayerController {
                     retryJob?.cancel() // cancel pending retry delay
                     Log.d(TAG, "Servers were exhausted — trying new progressive server: ${server.name}")
                     _state.value = State.Loading(channelId, currentChannelName ?: "")
-                    val prov = UserPreferences.currentProvider
-                    if (prov is WiTvProvider) {
-                        loadJob?.cancel()
-                        loadJob = scope.launch {
-                            playServerAtIndex(channelId, prov, newIndex)
-                        }
+                    val prov = UserPreferences.currentProvider as? Provider ?: return@collect
+                    loadJob?.cancel()
+                    loadJob = scope.launch {
+                        playServerAtIndex(channelId, prov, newIndex)
                     }
                 }
             }

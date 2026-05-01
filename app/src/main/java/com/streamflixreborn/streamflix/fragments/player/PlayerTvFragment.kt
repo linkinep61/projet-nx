@@ -102,6 +102,7 @@ import com.streamflixreborn.streamflix.utils.plus
 import com.streamflixreborn.streamflix.utils.setMediaServerId
 import com.streamflixreborn.streamflix.utils.setMediaServers
 import com.streamflixreborn.streamflix.utils.toSubtitleMimeType
+import com.streamflixreborn.streamflix.providers.IptvProvider
 import com.streamflixreborn.streamflix.providers.WiTvProvider
 import com.streamflixreborn.streamflix.utils.viewModelsFactory
 import kotlinx.coroutines.launch
@@ -228,6 +229,12 @@ class PlayerTvFragment : Fragment() {
 
     private var servers = listOf<Video.Server>()
     private var zoomToast: Toast? = null
+
+    // IPTV: when all initial servers fail but progressive (OLA) servers may still arrive,
+    // keep the player open and wait for additionalServer emissions instead of navigating up.
+    private var awaitingMoreServers = false
+    private var awaitTimeoutHandler: android.os.Handler? = null
+    private var awaitTimeoutRunnable: Runnable? = null
 
     private var currentVideo: Video? = null
     private var currentServer: Video.Server? = null
@@ -518,8 +525,9 @@ class PlayerTvFragment : Fragment() {
                         }
 
                         is PlayerViewModel.State.SuccessLoadingVideo -> {
-                            // Channel works — unmark as failed if it was
+                            // Channel works — unmark as failed if it was, cancel any pending wait
                             UserPreferences.unmarkChannelFailed(args.id)
+                            cancelAwaitMoreServers()
                             PlayerSettingsView.Settings.ExtraBuffering.init(state.video.extraBuffering)
                             PlayerSettingsView.Settings.SoftwareDecoder.init(false)
                             displayVideo(state.video, state.server)
@@ -532,40 +540,50 @@ class PlayerTvFragment : Fragment() {
                             } else if (tryNextChannelVariant(state.server)) {
                                 // OLA channel variant fallback succeeded
                             } else {
-                                // Mark channel as failed for WiTV so it's hidden next time
                                 val provider = UserPreferences.currentProvider
-                                if (provider is com.streamflixreborn.streamflix.providers.WiTvProvider) {
-                                    UserPreferences.markChannelFailed(args.id)
-                                }
-
-                                val providerName = provider?.name ?: ""
-                                val isTmdb = providerName.contains("TMDb", ignoreCase = true)
-
-                                val message = if (isTmdb) {
-                                    val langCode =
-                                        providerName.substringAfter("(").substringBefore(")")
-                                    val locale = Locale.forLanguageTag(langCode)
-                                    val langDisplayName =
-                                        locale.getDisplayLanguage(Locale.getDefault())
-                                            .replaceFirstChar {
-                                                if (it.isLowerCase()) it.titlecase(
-                                                    Locale.getDefault()
-                                                ) else it.toString()
-                                            }
-                                    getString(
-                                        R.string.player_not_available_lang_message,
-                                        langDisplayName
-                                    )
+                                // For IPTV providers (WiTv / OlaTv) keep the player open and wait
+                                // for additional progressive servers instead of closing immediately.
+                                val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
+                                if (isIptv) {
+                                    if (!awaitingMoreServers) {
+                                        Log.d("PlayerTvFragment", "All initial servers failed — awaiting progressive sources…")
+                                        Toast.makeText(
+                                            requireContext(),
+                                            "Recherche d'autres sources…",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                    startAwaitMoreServers()
                                 } else {
-                                    "All servers failed to load the video."
-                                }
+                                    val providerName = provider?.name ?: ""
+                                    val isTmdb = providerName.contains("TMDb", ignoreCase = true)
 
-                                Toast.makeText(
-                                    requireContext(),
-                                    message,
-                                    Toast.LENGTH_LONG
-                                ).show()
-                                findNavController().navigateUp()
+                                    val message = if (isTmdb) {
+                                        val langCode =
+                                            providerName.substringAfter("(").substringBefore(")")
+                                        val locale = Locale.forLanguageTag(langCode)
+                                        val langDisplayName =
+                                            locale.getDisplayLanguage(Locale.getDefault())
+                                                .replaceFirstChar {
+                                                    if (it.isLowerCase()) it.titlecase(
+                                                        Locale.getDefault()
+                                                    ) else it.toString()
+                                                }
+                                        getString(
+                                            R.string.player_not_available_lang_message,
+                                            langDisplayName
+                                        )
+                                    } else {
+                                        "All servers failed to load the video."
+                                    }
+
+                                    Toast.makeText(
+                                        requireContext(),
+                                        message,
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                    findNavController().navigateUp()
+                                }
                             }
                         }
                     }
@@ -573,7 +591,11 @@ class PlayerTvFragment : Fragment() {
             }
 
             // Progressive additional servers (OLA TV streams go to Chaîne, others to Serveurs)
-            val currentChannelKeyTv = args.id.removePrefix("ch::").removePrefix("sport::")
+            val currentChannelKeyTv = args.id
+                .removePrefix("ch::")
+                .removePrefix("sport::")
+                .removePrefix("ola_ep::")
+                .removePrefix("ola::")
 
             viewLifecycleOwner.lifecycleScope.launch {
                 viewModel.additionalServer.collect { server ->
@@ -608,7 +630,13 @@ class PlayerTvFragment : Fragment() {
                         }
 
                         val hasNonOla = servers.any { !it.name.startsWith("OLA[") }
-                        if (!hasNonOla && PlayerSettingsView.Settings.ChannelVariant.list.size == 1) {
+                        val firstOla = !hasNonOla && PlayerSettingsView.Settings.ChannelVariant.list.size == 1
+                        if (firstOla) {
+                            viewModel.getVideo(server)
+                        } else if (awaitingMoreServers) {
+                            Log.d("PlayerTvFragment", "Awaiting more servers — trying newly arrived OLA stream: $label")
+                            cancelAwaitMoreServers()
+                            triedChannelVariantIds.add(server.id)
                             viewModel.getVideo(server)
                         }
                         Log.d("PlayerTvFragment", "OLA stream added to Chaîne: $label")
@@ -624,6 +652,12 @@ class PlayerTvFragment : Fragment() {
                         )
                         binding.settings.refreshServerList()
                         Log.d("PlayerTvFragment", "Additional server added: ${server.name}")
+
+                        if (awaitingMoreServers) {
+                            Log.d("PlayerTvFragment", "Awaiting more servers — trying newly arrived server: ${server.name}")
+                            cancelAwaitMoreServers()
+                            viewModel.getVideo(server)
+                        }
                     }
 
                     binding.settings.setOnServerSelectedListener { sel ->
@@ -814,6 +848,7 @@ class PlayerTvFragment : Fragment() {
             if (::progressHandler.isInitialized && ::progressRunnable.isInitialized) {
                 progressHandler.removeCallbacks(progressRunnable)
             }
+            cancelAwaitMoreServers()
 
             // Cleanup DaddyLive proxy WebView
             daddyLiveProxyWebView?.let {
@@ -1379,6 +1414,40 @@ class PlayerTvFragment : Fragment() {
 
         /** Try the next untried OLA channel variant. Returns true if a variant was found and is being tried. */
         private val triedChannelVariantIds = mutableSetOf<String>()
+
+        /** Keep the player open while progressive (OLA) servers are still being fetched. */
+        private fun startAwaitMoreServers(timeoutMs: Long = 90_000L) {
+            awaitingMoreServers = true
+            cancelAwaitTimeoutOnly()
+            val handler = android.os.Handler(android.os.Looper.getMainLooper())
+            val r = Runnable {
+                if (!awaitingMoreServers) return@Runnable
+                awaitingMoreServers = false
+                if (isAdded) {
+                    Toast.makeText(
+                        requireContext(),
+                        "Aucune source disponible.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    try { findNavController().navigateUp() } catch (_: Exception) { }
+                }
+            }
+            awaitTimeoutHandler = handler
+            awaitTimeoutRunnable = r
+            handler.postDelayed(r, timeoutMs)
+        }
+
+        /** Cancel the timeout AND clear the awaiting flag. */
+        private fun cancelAwaitMoreServers() {
+            awaitingMoreServers = false
+            cancelAwaitTimeoutOnly()
+        }
+
+        private fun cancelAwaitTimeoutOnly() {
+            awaitTimeoutRunnable?.let { awaitTimeoutHandler?.removeCallbacks(it) }
+            awaitTimeoutHandler = null
+            awaitTimeoutRunnable = null
+        }
 
         private fun tryNextChannelVariant(failedServer: Video.Server?): Boolean {
             val variants = PlayerSettingsView.Settings.ChannelVariant.list
