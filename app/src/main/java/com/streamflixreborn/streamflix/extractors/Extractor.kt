@@ -1,12 +1,17 @@
 package com.streamflixreborn.streamflix.extractors
 
 import android.util.Log
+import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
+import okhttp3.Cache
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
+import retrofit2.converter.scalars.ScalarsConverterFactory
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 abstract class Extractor {
@@ -32,7 +37,21 @@ abstract class Extractor {
         const val DEFAULT_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-        /** Base OkHttpClient shared by all extractors. Has DoH, redirects, 30s timeouts, User-Agent. */
+        /**
+         * HTTP cache for the shared client. 20 MB on disk, lets OkHttp respect Cache-Control
+         * headers from upstream provider pages and API endpoints (e.g. Filemoon `details`,
+         * Wiflix HTML pages). Falls back to no-cache if appContext isn't ready yet — the
+         * client still works, just without HTTP cache.
+         */
+        private val httpCache: Cache? by lazy {
+            runCatching {
+                val ctx = StreamFlixApp.instance.applicationContext
+                val dir = File(ctx.cacheDir, "extractor-http")
+                Cache(dir, 20L * 1024L * 1024L)
+            }.getOrNull()
+        }
+
+        /** Base OkHttpClient shared by all extractors. Has DoH, redirects, 30s timeouts, User-Agent, HTTP cache. */
         val sharedClient: OkHttpClient by lazy {
             OkHttpClient.Builder()
                 .dns(DnsResolver.doh)
@@ -40,6 +59,7 @@ abstract class Extractor {
                 .followSslRedirects(true)
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
+                .apply { httpCache?.let { cache(it) } }
                 .addInterceptor { chain ->
                     val request = chain.request().newBuilder()
                         .header("User-Agent", DEFAULT_USER_AGENT)
@@ -68,11 +88,19 @@ abstract class Extractor {
                 .addConverterFactory(JsoupConverterFactory.create())
                 .build()
 
-        /** Build a Retrofit with GsonConverterFactory. */
+        /**
+         * Build a Retrofit with ScalarsConverterFactory + GsonConverterFactory.
+         * Order matters: Scalars is tried first and only handles primitive return types
+         * (String, Boolean, Number). Service methods returning typed objects fall through
+         * to Gson. This lets a single Retrofit instance serve services like Rpmvid that
+         * receive raw text/hex bodies (`suspend fun get(...): String`) alongside services
+         * that deserialize JSON into data classes.
+         */
         fun gsonRetrofit(baseUrl: String, client: OkHttpClient = sharedClient): Retrofit =
             Retrofit.Builder()
                 .baseUrl(baseUrl)
                 .client(client)
+                .addConverterFactory(ScalarsConverterFactory.create())
                 .addConverterFactory(GsonConverterFactory.create())
                 .build()
 
@@ -188,8 +216,73 @@ abstract class Extractor {
             Up4StreamExtractor()
         )
 
+        // ── A: Extraction cache ─────────────────────────────────────────────
+        // Memoise resolved Video objects by source link. Avoids replaying the full
+        // pipeline (DNS → details → playback POST → AES decrypt → m3u8) when the user
+        // re-selects the same server within the cache window. m3u8 URLs carry tokens
+        // typically valid for 1–3h server-side; we use a conservative TTL of 10 min so
+        // we don't hand back URLs about to expire mid-playback.
+        private const val EXTRACTION_TTL_MS = 10L * 60L * 1000L
+        private data class CachedExtraction(val video: Video, val expiresAtMillis: Long)
+        private val extractionCache = ConcurrentHashMap<String, CachedExtraction>()
+
+        // ── C: Server health tracking ──────────────────────────────────────
+        // Per-extractor counters of recent failures. The provider's server-list sort
+        // uses healthScore() to push servers that just blew up to the bottom, so the
+        // user doesn't waste taps on something we know to be broken.
+        private const val HEALTH_FAILURE_THRESHOLD = 3      // failures within window
+        private const val HEALTH_FAILURE_WINDOW_MS = 5L * 60L * 1000L
+        private const val HEALTH_BROKEN_DURATION_MS = 5L * 60L * 1000L
+        private data class ServerHealth(
+            var failureCount: Int = 0,
+            var firstFailureAtMs: Long = 0L,
+            var brokenUntilMs: Long = 0L,
+        )
+        private val serverHealth = ConcurrentHashMap<String, ServerHealth>()
+
+        private fun recordSuccess(serverName: String) {
+            // Successful extraction resets the failure counter for that server.
+            serverHealth.remove(serverName)
+        }
+
+        private fun recordFailure(serverName: String) {
+            val now = System.currentTimeMillis()
+            val rec = serverHealth.getOrPut(serverName) { ServerHealth() }
+            synchronized(rec) {
+                if (now - rec.firstFailureAtMs > HEALTH_FAILURE_WINDOW_MS) {
+                    rec.firstFailureAtMs = now
+                    rec.failureCount = 1
+                } else {
+                    rec.failureCount++
+                }
+                if (rec.failureCount >= HEALTH_FAILURE_THRESHOLD) {
+                    rec.brokenUntilMs = now + HEALTH_BROKEN_DURATION_MS
+                    Log.w("Extractor", "Server '$serverName' marked broken until ${rec.brokenUntilMs} (${rec.failureCount} failures in window)")
+                }
+            }
+        }
+
+        /**
+         * Returns 1.0 for healthy servers, 0.0 for ones currently in the "broken" window.
+         * Providers can use this as an extra sort criterion to deprioritise dodgy servers.
+         */
+        fun healthScore(serverName: String): Float {
+            val rec = serverHealth[serverName] ?: return 1f
+            return if (System.currentTimeMillis() < rec.brokenUntilMs) 0f else 1f
+        }
+
         suspend fun extract(link: String, server: Video.Server? = null): Video {
             Log.d("Extractor", "extract() called with link=$link server=${server?.name}")
+
+            // A: cache hit?
+            extractionCache[link]?.let { cached ->
+                if (System.currentTimeMillis() < cached.expiresAtMillis) {
+                    Log.i("StreamFlixES", "[EXTRACTOR] -> Cache HIT for $link")
+                    return cached.video
+                }
+                extractionCache.remove(link)
+            }
+
             var finalLink = link
 
             // 1. RISOLUZIONE BRIDGE UNIVERSALE (StreamHG/Sync/Cuevana)
@@ -292,9 +385,29 @@ abstract class Extractor {
 
             if (foundExtractor != null) {
                 Log.i("StreamFlixES", "[EXTRACTOR] -> Starting: ${foundExtractor.name} (URL: $finalLink)")
-                val video = foundExtractor.extract(finalLink)
+                val name = foundExtractor.name
+                val video = try {
+                    foundExtractor.extract(finalLink)
+                } catch (e: Exception) {
+                    // C: track the failure so the provider can grey/sort this server out
+                    recordFailure(name)
+                    throw e
+                }
                 Log.i("StreamFlixES", "[VIDEO] -> Extracted: ${video.source}")
-                return video
+                // C: success → wipe any prior failure counter
+                recordSuccess(name)
+
+                // App-wide subtitle filter (French only).
+                val filtered = enforceFrenchSubtitlesOnly(video)
+
+                // A: stash the resolved video so the next click on the same server is instant.
+                // Cached against the original link (pre-bridge resolution) so the lookup at the
+                // top of extract() actually hits.
+                extractionCache[link] = CachedExtraction(
+                    video = filtered,
+                    expiresAtMillis = System.currentTimeMillis() + EXTRACTION_TTL_MS,
+                )
+                return filtered
             }
 
             Log.e("Extractor", "No extractors found for URL: $finalLink (original: $link)")

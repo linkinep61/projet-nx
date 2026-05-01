@@ -4,8 +4,10 @@ import android.util.Base64
 import android.util.Log
 import com.streamflixreborn.streamflix.models.Video
 import org.json.JSONObject
+import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.HeaderMap
+import retrofit2.http.POST
 import retrofit2.http.Url
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -38,6 +40,7 @@ open class FilemoonExtractor : Extractor() {
         val headers = mutableMapOf<String, String>()
         headers["User-Agent"] = Extractor.DEFAULT_USER_AGENT
         headers["Accept"] = "application/json"
+        headers["Content-Type"] = "application/json"
 
         if (linkType == "d") {
             playbackDomain = currentDomain
@@ -46,11 +49,21 @@ open class FilemoonExtractor : Extractor() {
             playbackDomain = Regex("""(https?://[^/]+)""").find(embedFrameUrl)?.groupValues?.get(1)
                 ?: throw Exception("Could not extract domain from embed_frame_url")
             headers["Referer"] = embedFrameUrl
+            // Required by current API (April 2026) — server returns 405 without these.
+            // Reverse-engineered from the official SPA Vite bundle (Lt + Nt helpers in
+            // videoPagesBundle-CQv1AfZY.js). The X-Embed-* trio identifies the parent
+            // frame so the WAF lets the request through.
             headers["X-Embed-Parent"] = link
+            headers["X-Embed-Origin"] = playbackDomain
+            headers["X-Embed-Referer"] = link
         }
 
+        // POST /api/videos/{id}/embed/playback with a fingerprint body. The server only
+        // validates that `fingerprint` is a JSON object with token/viewer_id/device_id/
+        // confidence keys; the actual values are not checked, so we send placeholders.
+        // Returns AES-256-GCM encrypted JSON with iv/payload/key_parts → decryptPlayback().
         val playbackUrl = "$playbackDomain/api/videos/$videoId/embed/playback"
-        val playbackResponse = service.getPlayback(playbackUrl, headers)
+        val playbackResponse = service.getPlayback(playbackUrl, headers, FingerprintBody())
         val playbackData = playbackResponse.playback
             ?: throw Exception("No playback data")
 
@@ -106,8 +119,12 @@ open class FilemoonExtractor : Extractor() {
         @GET
         suspend fun getDetails(@Url url: String): DetailsResponse
 
-        @GET
-        suspend fun getPlayback(@Url url: String, @HeaderMap headers: Map<String, String>): PlaybackResponse
+        @POST
+        suspend fun getPlayback(
+            @Url url: String,
+            @HeaderMap headers: Map<String, String>,
+            @Body body: FingerprintBody,
+        ): PlaybackResponse
     }
 
     data class DetailsResponse(val embed_frame_url: String?)
@@ -116,6 +133,22 @@ open class FilemoonExtractor : Extractor() {
         val iv: String,
         val payload: String,
         val key_parts: List<String>
+    )
+
+    /**
+     * Body required by the embed/playback endpoint as of April 2026. The server validates
+     * the JSON shape (a `fingerprint` object with token/viewer_id/device_id/confidence
+     * fields) but doesn't currently check the actual values — placeholders work.
+     */
+    data class FingerprintBody(
+        val fingerprint: Fingerprint = Fingerprint()
+    )
+
+    data class Fingerprint(
+        val token: String = "x",
+        val viewer_id: String = "y",
+        val device_id: String = "z",
+        val confidence: Double = 0.5,
     )
 
 }
