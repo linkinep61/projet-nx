@@ -1,0 +1,247 @@
+05-01 18:23:45.376 D/OlaTvProvider( 4621): Primary FR portal: http://owliptv.streamtv.to:8080
+05-01 18:23:45.558 W/ModernMediaScanner( 1636): Failed to visit /data/data/com.android.providers.downloads/cache/08202014-metadata.txt: java.nio.file.NoSuchFileException: /data/data/com.android.providers.downloads/cache/08202014-metadata.txt
+05-01 18:23:45.714 W/ModernMediaScanner( 1636): Failed to visit /data/data/com.android.providers.downloads/cache/08202014-pins.txt: java.nio.file.NoSuchFileException: /data/data/com.android.providers.downloads/cache/08202014-pins.txt
+05-01 18:23:45.923 W/ModernMediaScanner( 1636): Failed to visit /data/data/com.android.providers.downloads/cache/03242026-sms-denylist-metadata.txt: java.nio.file.NoSuchFileException: /data/data/com.android.providers.downloads/cache/03242026-sms-denylist-metadata.txt
+05-01 18:23:45.943 W/ModernMediaScanner( 1636): Failed to visit /data/data/com.android.providers.downloads/cache/03242026-sms-denylist.txt: java.nio.file.NoSuchFileException: /data/data/com.android.providers.downloads/cache/03242026-sms-denylist.txt
+05-01 18:23:47.080 E/Finsky:background( 2435): org.chromium.net.impl.QuicExceptionImpl: Exception in CronetUrlRequest: net::ERR_QUIC_PROTOCOL_ERROR, ErrorCode=10, InternalErrorCode=-356, Retryable=false, QuicDetailedErrorCode=85
+05-01 18:23:47.108 E/Finsky:background( 2435): com.google.android.finsky.downloadservicecommon.DownloadServiceException: Download Service Error: HTTP_DATA_ERROR (5)
+05-01 18:23:47.108 E/Finsky:background( 2435): Caused by: org.chromium.net.impl.QuicExceptionImpl: Exception in CronetUrlRequest: net::ERR_QUIC_PROTOCOL_ERROR, ErrorCode=10, InternalErrorCode=-356, Retryable=false, QuicDetailedErrorCode=85
+05-01 18:23:48.071 D/OlaTvProvider( 4621): MAC portal http://owliptv.streamtv.to:8080: 2 FR genres → [10, 348]
+05-01 18:23:49.073 W/ModernMediaScanner( 1636): Failed to visit /data/data/com.android.providers.downloads/cache/model.smfb.metadata: java.nio.file.NoSuchFileException: /data/data/com.android.providers.downloads/cache/model.smfb.metadata
+05-01 18:23:49.118 W/ModernMediaScanner( 1636): Failed to visit /data/data/com.android.providers.downloads/cache/model.smfb: java.nio.file.NoSuchFileException: /data/data/com.android.providers.downloads/cache/model.smfb
+05-01 18:23:49.173 D/OlaTvProvider( 4621): Genre 10: 448 items / 14 per page = 30 pages, fetching 2..30 in parallel
+05-01 18:23:49.524 E/AmbientMusicServiceMana( 1608): xrv: java.lang.reflect.InvocationTargetException
+05-01 18:23:49.524 E/AmbientMusicServiceMana( 1608): Caused by: java.lang.reflect.InvocationTargetException
+05-01 18:23:49.524 E/AmbientMusicServiceMana( 1608): Caused by: java.lang.IllegalStateException: No underlying SoundTriggerModule available
+05-01 18:23:49.872 I/ExoPlayerImpl( 4954): Init 207c66b [AndroidXMedia3/1.3.0] [emu64xa, sdk_gphone64_x86_64, Google, 35]
+05-01 18:23:49.938 I/ExoPlayerImpl( 4954): Init 1aecf3f [AndroidXMedia3/1.3.0] [emu64xa, sdk_gphone64_x86_64, Google, 35]
+05-01 18:23:50.408 I/VoiceDataManager( 4954): Caused by: java.util.concurrent.CancellationException: Task was cancelled.
+05-01 18:23:50.963 W/ModernMediaScanner( 1636): Failed to visit /data/data/com.android.providers.downloads/cache/en.fb.metadata: java.nio.file.NoSuchFileException: /data/data/com.android.providers.downloads/cache/en.fb.metadata
+05-01 18:23:50.972 W/ModernMediaScanner( 1636): Failed to visit /data/data/com.android.providers.downloads/cache/en.fb: java.nio.file.NoSuchFileException: /data/data/com.android.providers.downloads/cache/en.fb
+05-01 18:23:51.806 W/AsyncOperation( 1421): OperationException[Status{statusCode=Stale snapshot for com.google.android.libraries.consentverifier#com.google.android.tts(change count changed - expected 3  but was 0), resolution=null}]
+05-01 18:23:52.178 I/ChimeraSrvcProxy( 1421): NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl
+05-01 18:23:52.749 W/PeoplePU( 1606): java.lang.IllegalArgumentException: Unknown component: ComponentInfo{com.google.android.syncadapters.contacts/com.google.android.syncadapters.contacts.ContactsSyncAdapterService}
+05-01 18:23:52.749 W/PeoplePU( 1606): 	at android.os.Parcel.createExceptionOrNull(Parcel.java:3246)
+05-01 18:23:52.749 W/PeoplePU( 1606): 	at android.os.Parcel.createException(Parcel.java:3226)
+05-01 18:23:52.749 W/PeoplePU( 1606): 	at android.os.Parcel.readException(Parcel.java:3209)
+05-01 18:23:52.749 W/PeoplePU( 1606): 	at android.os.Parcel.readException(Parcel.java:3151)
+05-01 18:23:52.749 W/PeoplePU( 1606): Caused by: android.os.RemoteException: Remote stack trace:
+05-01 18:23:52.758 W/PeoplePU( 1606): java.lang.IllegalArgumentException: Unknown component: ComponentInfo{com.google.android.syncadapters.contacts/com.google.android.syncadapters.contacts.ContactsSyncAdapterService}
+05-01 18:23:52.758 W/PeoplePU( 1606): 	at android.os.Parcel.createExceptionOrNull(Parcel.java:3246)
+05-01 18:23:52.758 W/PeoplePU( 1606): 	at android.os.Parcel.createException(Parcel.java:3226)
+05-01 18:23:52.758 W/PeoplePU( 1606): 	at android.os.Parcel.readException(Parcel.java:3209)
+05-01 18:23:52.758 W/PeoplePU( 1606): 	at android.os.Parcel.readException(Parcel.java:3151)
+05-01 18:23:52.760 W/PeoplePU( 1606): java.lang.IllegalArgumentException: Unknown component: ComponentInfo{com.google.android.syncadapters.contacts/com.google.android.syncadapters.contacts.ProxyGalProvider}
+05-01 18:23:52.760 W/PeoplePU( 1606): 	at android.os.Parcel.createExceptionOrNull(Parcel.java:3246)
+05-01 18:23:52.760 W/PeoplePU( 1606): 	at android.os.Parcel.createException(Parcel.java:3226)
+05-01 18:23:52.760 W/PeoplePU( 1606): 	at android.os.Parcel.readException(Parcel.java:3209)
+05-01 18:23:52.760 W/PeoplePU( 1606): 	at android.os.Parcel.readException(Parcel.java:3151)
+05-01 18:23:53.693 W/ModernMediaScanner( 1636): Failed to visit /data/data/com.android.providers.downloads/cache/en.model.metadata: java.nio.file.NoSuchFileException: /data/data/com.android.providers.downloads/cache/en.model.metadata
+05-01 18:23:53.736 W/ModernMediaScanner( 1636): Failed to visit /data/data/com.android.providers.downloads/cache/en.model: java.nio.file.NoSuchFileException: /data/data/com.android.providers.downloads/cache/en.model
+05-01 18:23:55.488 I/ChimeraSrvcProxy( 1421): NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl
+05-01 18:23:57.144 W/NearbyFastPair( 1421): java.util.concurrent.ExecutionException: alqy: 17: API: Wearable.API is not available on this device. Connection failed with: ConnectionResult{statusCode=API_UNAVAILABLE, resolution=null, message=null}
+05-01 18:23:57.149 W/NearbyFastPair( 1421): java.util.concurrent.ExecutionException: alqy: 17: API: Wearable.API is not available on this device. Connection failed with: ConnectionResult{statusCode=API_UNAVAILABLE, resolution=null, message=null}
+05-01 18:23:57.154 W/NearbyFastPair( 1421): java.util.concurrent.ExecutionException: alqy: 17: API: Wearable.API is not available on this device. Connection failed with: ConnectionResult{statusCode=API_UNAVAILABLE, resolution=null, message=null}
+05-01 18:23:57.167 W/NearbyFastPair( 1421): java.util.concurrent.ExecutionException: alqy: 17: API: Wearable.API is not available on this device. Connection failed with: ConnectionResult{statusCode=API_UNAVAILABLE, resolution=null, message=null}
+05-01 18:23:58.140 D/OlaTvProvider( 4621): Genre 348: 99 items / 14 per page = 8 pages, fetching 2..8 in parallel
+05-01 18:23:59.625 W/NetworkScheduler( 1421): java.lang.IllegalArgumentException: Only the following extra parameter types are supported: Integer, Long, Double, String, Boolean, and nested Bundles with the same restrictions.
+05-01 18:24:00.500 D/OlaTvProvider( 4621): MAC portal http://owliptv.streamtv.to:8080: 518 unique FR channels
+05-01 18:24:01.108 D/OlaTvProvider( 4621): iptv-org FR logos loaded: 679 entries
+05-01 18:24:01.657 W/Conscrypt( 1606): Could not set socket write timeout: java.net.SocketException: Socket closed
+05-01 18:24:01.841 W/Conscrypt( 1606): Could not set socket write timeout: java.net.SocketException: Socket closed
+05-01 18:24:01.891 W/TapAndPay( 1421): java.lang.NullPointerException: NfcAdapter is null
+05-01 18:24:02.155 D/OlaTvProvider( 4621): Primary FR cid ingested: 518 streams, registry size=310 in 19314ms
+05-01 18:24:02.162 D/OlaTvProvider( 4621): Phase 3 fresh scan: probing 30 candidate cids…
+05-01 18:24:02.908 E/Finsky:background( 2435): org.chromium.net.impl.QuicExceptionImpl: Exception in CronetUrlRequest: net::ERR_QUIC_PROTOCOL_ERROR, ErrorCode=10, InternalErrorCode=-356, Retryable=false, QuicDetailedErrorCode=85
+05-01 18:24:02.919 E/Finsky:background( 2435): com.google.android.finsky.downloadservicecommon.DownloadServiceException: Download Service Error: HTTP_DATA_ERROR (5)
+05-01 18:24:02.919 E/Finsky:background( 2435): Caused by: org.chromium.net.impl.QuicExceptionImpl: Exception in CronetUrlRequest: net::ERR_QUIC_PROTOCOL_ERROR, ErrorCode=10, InternalErrorCode=-356, Retryable=false, QuicDetailedErrorCode=85
+05-01 18:24:03.740 W/NetworkScheduler( 1421): java.lang.IllegalArgumentException: Only the following extra parameter types are supported: Integer, Long, Double, String, Boolean, and nested Bundles with the same restrictions.
+05-01 18:24:05.680 D/OlaTvProvider( 4621): MAC portal http://main2.cwdn.cx: 12 FR genres → [1363, 768, 765]
+05-01 18:24:06.085 W/Glide   ( 4621): class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 18:24:06.085 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:06.085 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:06.085 W/Glide   ( 4621):   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 18:24:06.085 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:06.085 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:06.085 W/Glide   ( 4621):     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 18:24:06.085 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:06.085 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:06.085 W/Glide   ( 4621):       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 18:24:06.097 I/Glide   ( 4621): com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 18:24:06.210 D/OlaTvProvider( 4621): Genre 1363: 162 items / 14 per page = 12 pages, fetching 2..12 in parallel
+05-01 18:24:08.195 D/OlaTvProvider( 4621): MAC portal http://mag.greatott.me:80: 26 FR genres → [1011, 2340, 2351]
+05-01 18:24:08.341 D/OlaTvProvider( 4621): Genre 768: 129 items / 14 per page = 10 pages, fetching 2..10 in parallel
+05-01 18:24:08.506 D/OlaTvProvider( 4621): Genre 1011: 28 items / 14 per page = 2 pages, fetching 2..2 in parallel
+05-01 18:24:09.133 D/OlaTvProvider( 4621): Genre 2340: 218 items / 14 per page = 16 pages, fetching 2..16 in parallel
+05-01 18:24:09.502 W/SliceDataConverter( 5219): java.lang.IllegalStateException: Invalid preference controller: com.android.settings.development.DevelopmentMemtagFooterPreferenceController
+05-01 18:24:09.502 W/SliceDataConverter( 5219): Caused by: java.lang.ClassNotFoundException: com.android.settings.development.DevelopmentMemtagFooterPreferenceController
+05-01 18:24:09.502 W/SliceDataConverter( 5219): Caused by: java.lang.ClassNotFoundException: com.android.settings.development.DevelopmentMemtagFooterPreferenceController
+05-01 18:24:09.579 W/SliceDataConverter( 5219): java.lang.IllegalStateException: Invalid preference controller: com.android.settings.applications.credentials.CredentialManagerPreferenceController
+05-01 18:24:09.579 W/SliceDataConverter( 5219): Caused by: java.lang.reflect.InvocationTargetException
+05-01 18:24:09.579 W/SliceDataConverter( 5219): Caused by: java.lang.RuntimeException: Can't create handler inside thread Thread[binder:5219_3,5,main] that has not called Looper.prepare()
+05-01 18:24:09.587 W/SliceDataConverter( 5219): java.lang.IllegalStateException: Invalid preference controller: com.android.settings.fuelgauge.batteryusage.BatteryChartPreferenceController
+05-01 18:24:09.587 W/SliceDataConverter( 5219): Caused by: java.lang.NoSuchMethodException: com.android.settings.fuelgauge.batteryusage.BatteryChartPreferenceController.<init> [class android.content.Context, class java.lang.String]
+05-01 18:24:09.607 W/SliceDataConverter( 5219): java.lang.IllegalStateException: Invalid preference controller: com.android.settings.applications.appinfo.ManageAppLocalePreferenceController
+05-01 18:24:09.607 W/SliceDataConverter( 5219): Caused by: java.lang.ClassNotFoundException: com.android.settings.applications.appinfo.ManageAppLocalePreferenceController
+05-01 18:24:09.607 W/SliceDataConverter( 5219): Caused by: java.lang.ClassNotFoundException: com.android.settings.applications.appinfo.ManageAppLocalePreferenceController
+05-01 18:24:09.708 W/SliceDataConverter( 5219): java.lang.IllegalStateException: Invalid preference controller: com.android.settings.accessibility.VibrationMainSwitchPreferenceController
+05-01 18:24:09.708 W/SliceDataConverter( 5219): Caused by: java.lang.reflect.InvocationTargetException
+05-01 18:24:09.708 W/SliceDataConverter( 5219): Caused by: java.lang.RuntimeException: Can't create handler inside thread Thread[binder:5219_3,5,main] that has not called Looper.prepare()
+05-01 18:24:09.712 W/SliceDataConverter( 5219): java.lang.IllegalStateException: Invalid preference controller: com.android.settings.accessibility.VibrationMainSwitchPreferenceController
+05-01 18:24:09.712 W/SliceDataConverter( 5219): Caused by: java.lang.reflect.InvocationTargetException
+05-01 18:24:09.712 W/SliceDataConverter( 5219): Caused by: java.lang.RuntimeException: Can't create handler inside thread Thread[binder:5219_3,5,main] that has not called Looper.prepare()
+05-01 18:24:09.892 W/AsyncOperation( 1421): OperationException[Status{statusCode=Stale snapshot for com.google.android.gms.backup(change count changed - expected 4  but was 3), resolution=null}]
+05-01 18:24:09.892 W/PhenotypeFlagCommitter( 1421): java.util.concurrent.ExecutionException: alqy: 29501: Stale snapshot for com.google.android.gms.backup(change count changed - expected 4  but was 3)
+05-01 18:24:09.900 W/PhenotypeCommitHelper( 1421): java.util.concurrent.ExecutionException: alqy: 29501: Stale snapshot for com.google.android.gms.backup(change count changed - expected 4  but was 3)
+05-01 18:24:10.211 I/ChimeraSrvcProxy( 1421): NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl
+05-01 18:24:10.239 D/OlaTvProvider( 4621): Genre 765: 101 items / 14 per page = 8 pages, fetching 2..8 in parallel
+05-01 18:24:10.328 E/HardwareInfoFeatureProviderImpl( 5219): java.lang.NumberFormatException: For input string: "E"
+05-01 18:24:10.491 W/SliceDataConverter( 5219): java.lang.IllegalStateException: Invalid preference controller: com.google.android.settings.accessibility.AdaptiveVibrationTogglePreferenceController
+05-01 18:24:10.491 W/SliceDataConverter( 5219): Caused by: java.lang.reflect.InvocationTargetException
+05-01 18:24:10.491 W/SliceDataConverter( 5219): Caused by: java.lang.RuntimeException: Can't create handler inside thread Thread[binder:5219_3,5,main] that has not called Looper.prepare()
+05-01 18:24:10.683 W/PeoplePU( 1606): java.lang.IllegalArgumentException: Unknown component: ComponentInfo{com.google.android.syncadapters.contacts/com.google.android.syncadapters.contacts.ContactsSyncAdapterService}
+05-01 18:24:10.683 W/PeoplePU( 1606): 	at android.os.Parcel.createExceptionOrNull(Parcel.java:3246)
+05-01 18:24:10.683 W/PeoplePU( 1606): 	at android.os.Parcel.createException(Parcel.java:3226)
+05-01 18:24:10.683 W/PeoplePU( 1606): 	at android.os.Parcel.readException(Parcel.java:3209)
+05-01 18:24:10.683 W/PeoplePU( 1606): 	at android.os.Parcel.readException(Parcel.java:3151)
+05-01 18:24:10.687 W/PeoplePU( 1606): java.lang.IllegalArgumentException: Unknown component: ComponentInfo{com.google.android.syncadapters.contacts/com.google.android.syncadapters.contacts.ContactsSyncAdapterService}
+05-01 18:24:10.687 W/PeoplePU( 1606): 	at android.os.Parcel.createExceptionOrNull(Parcel.java:3246)
+05-01 18:24:10.687 W/PeoplePU( 1606): 	at android.os.Parcel.createException(Parcel.java:3226)
+05-01 18:24:10.687 W/PeoplePU( 1606): 	at android.os.Parcel.readException(Parcel.java:3209)
+05-01 18:24:10.687 W/PeoplePU( 1606): 	at android.os.Parcel.readException(Parcel.java:3151)
+05-01 18:24:10.700 W/PeoplePU( 1606): java.lang.IllegalArgumentException: Unknown component: ComponentInfo{com.google.android.syncadapters.contacts/com.google.android.syncadapters.contacts.ProxyGalProvider}
+05-01 18:24:10.700 W/PeoplePU( 1606): 	at android.os.Parcel.createExceptionOrNull(Parcel.java:3246)
+05-01 18:24:10.700 W/PeoplePU( 1606): 	at android.os.Parcel.createException(Parcel.java:3226)
+05-01 18:24:10.700 W/PeoplePU( 1606): 	at android.os.Parcel.readException(Parcel.java:3209)
+05-01 18:24:10.700 W/PeoplePU( 1606): 	at android.os.Parcel.readException(Parcel.java:3151)
+05-01 18:24:11.603 D/OlaTvProvider( 4621): Genre 1493: 37 items / 14 per page = 3 pages, fetching 2..3 in parallel
+05-01 18:24:11.996 D/OlaTvProvider( 4621): Genre 1001: 173 items / 14 per page = 13 pages, fetching 2..13 in parallel
+05-01 18:24:12.584 E/SystemServiceRegistry( 5219): android.os.ServiceManager$ServiceNotFoundException: No service published for: ethernet
+05-01 18:24:12.873 W/BaseSearchIndex( 5219): Error initializing controller in fragment: com.android.settings.network.NetworkDashboardFragment$1@688c832, e: java.lang.IllegalArgumentException: Lifecycle must be set
+05-01 18:24:12.893 D/OlaTvProvider( 4621): Genre 1531: 20 items / 14 per page = 2 pages, fetching 2..2 in parallel
+05-01 18:24:12.920 W/NetworkScheduler( 1421): java.lang.IllegalArgumentException: Only the following extra parameter types are supported: Integer, Long, Double, String, Boolean, and nested Bundles with the same restrictions.
+05-01 18:24:13.009 W/BaseSearchIndex( 5219): Error initializing controller in fragment: com.android.settings.deviceinfo.aboutphone.MyDeviceInfoFragment$1@14f0c24, e: java.lang.IllegalStateException: Cannot invoke setValue on a background thread
+05-01 18:24:13.084 W/PackageManager( 1315): android.content.res.Resources$NotFoundException: String resource ID #0x7f130786
+05-01 18:24:13.276 I/ChimeraSrvcProxy( 1421): NullBinder for android.net.action.RECOMMEND_NETWORKS triggering remote TransactionTooLargeException due to Service without Chimera impl
+05-01 18:24:13.304 W/BaseSearchIndex( 5219): Error initializing controller in fragment: com.android.settings.network.NetworkDashboardFragment$1@688c832, e: java.lang.IllegalArgumentException: Lifecycle must be set
+05-01 18:24:13.310 W/BaseSearchIndex( 5219): Error initializing controller in fragment: com.android.settings.network.NetworkDashboardFragment$1@688c832, e: java.lang.IllegalArgumentException: Lifecycle must be set
+05-01 18:24:13.403 E/HardwareInfoFeatureProviderImpl( 5219): java.lang.NumberFormatException: For input string: "E"
+05-01 18:24:13.412 W/BaseSearchIndex( 5219): Error initializing controller in fragment: com.android.settings.deviceinfo.aboutphone.MyDeviceInfoFragment$1@14f0c24, e: java.lang.IllegalStateException: Cannot invoke setValue on a background thread
+05-01 18:24:13.600 I/okhttp.OkHttpClient( 4621): <-- HTTP FAILED: java.io.IOException: Canceled
+05-01 18:24:13.632 D/OlaTvProvider( 4621): Genre 766: 83 items / 14 per page = 6 pages, fetching 2..6 in parallel
+05-01 18:24:13.793 E/MediaControllerCompat( 1196): android.os.DeadObjectException
+05-01 18:24:13.832 W/atru    ( 1835): IOException thrown while closing Closeable.
+05-01 18:24:13.832 W/atru    ( 1835): java.io.IOException: write failed: EBADF (Bad file descriptor)
+05-01 18:24:13.832 W/atru    ( 1835): Caused by: android.system.ErrnoException: write failed: EBADF (Bad file descriptor)
+05-01 18:24:13.869 W/atru    ( 1835): IOException thrown while closing Closeable.
+05-01 18:24:13.869 W/atru    ( 1835): java.io.IOException: write failed: EBADF (Bad file descriptor)
+05-01 18:24:13.869 W/atru    ( 1835): Caused by: android.system.ErrnoException: write failed: EBADF (Bad file descriptor)
+05-01 18:24:13.876 D/OlaTvProvider( 4621): Genre 616: 199 items / 14 per page = 15 pages, fetching 2..15 in parallel
+05-01 18:24:13.907 D/OlaTvProvider( 4621): MAC portal http://5.mdtv.me:80: 2 FR genres → [172, 130]
+05-01 18:24:14.160 W/atru    ( 1835): IOException thrown while closing Closeable.
+05-01 18:24:14.160 W/atru    ( 1835): java.io.IOException: write failed: EBADF (Bad file descriptor)
+05-01 18:24:14.160 W/atru    ( 1835): Caused by: android.system.ErrnoException: write failed: EBADF (Bad file descriptor)
+05-01 18:24:14.173 W/atru    ( 1835): IOException thrown while closing Closeable.
+05-01 18:24:14.173 W/atru    ( 1835): java.io.IOException: write failed: EBADF (Bad file descriptor)
+05-01 18:24:14.173 W/atru    ( 1835): Caused by: android.system.ErrnoException: write failed: EBADF (Bad file descriptor)
+05-01 18:24:14.185 W/atru    ( 1835): IOException thrown while closing Closeable.
+05-01 18:24:14.185 W/atru    ( 1835): java.io.IOException: write failed: EBADF (Bad file descriptor)
+05-01 18:24:14.185 W/atru    ( 1835): Caused by: android.system.ErrnoException: write failed: EBADF (Bad file descriptor)
+05-01 18:24:14.210 W/atru    ( 1835): IOException thrown while closing Closeable.
+05-01 18:24:14.210 W/atru    ( 1835): java.io.IOException: write failed: EBADF (Bad file descriptor)
+05-01 18:24:14.210 W/atru    ( 1835): Caused by: android.system.ErrnoException: write failed: EBADF (Bad file descriptor)
+05-01 18:24:14.308 W/atru    ( 1835): IOException thrown while closing Closeable.
+05-01 18:24:14.308 W/atru    ( 1835): java.io.IOException: write failed: EBADF (Bad file descriptor)
+05-01 18:24:14.308 W/atru    ( 1835): Caused by: android.system.ErrnoException: write failed: EBADF (Bad file descriptor)
+05-01 18:24:14.317 E/SystemServiceRegistry(  610): android.os.ServiceManager$ServiceNotFoundException: No service published for: persistent_data_block
+05-01 18:24:15.097 D/OlaTvProvider( 4621): Genre 130: 211 items / 14 per page = 16 pages, fetching 2..16 in parallel
+05-01 18:24:15.175 D/OlaTvProvider( 4621): Genre 1152: 29 items / 14 per page = 3 pages, fetching 2..3 in parallel
+05-01 18:24:15.443 D/OlaTvProvider( 4621): Genre 1002: 126 items / 14 per page = 9 pages, fetching 2..9 in parallel
+05-01 18:24:16.186 D/OlaTvProvider( 4621): Genre 764: 86 items / 14 per page = 7 pages, fetching 2..7 in parallel
+05-01 18:24:16.668 D/OlaTvProvider( 4621): Genre 1395: 42 items / 14 per page = 3 pages, fetching 2..3 in parallel
+05-01 18:24:16.739 W/Glide   ( 4621): class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 18:24:16.739 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:16.739 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:16.739 W/Glide   ( 4621):   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 18:24:16.739 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:16.739 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:16.739 W/Glide   ( 4621):     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 18:24:16.739 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:16.739 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:16.739 W/Glide   ( 4621):       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 18:24:16.739 I/Glide   ( 4621): com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 18:24:17.244 W/Glide   ( 4621): class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 18:24:17.244 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:17.244 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:17.244 W/Glide   ( 4621):   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 18:24:17.244 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:17.244 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:17.244 W/Glide   ( 4621):     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 18:24:17.244 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:17.244 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:17.244 W/Glide   ( 4621):       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 18:24:17.244 I/Glide   ( 4621): com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 18:24:17.310 D/OlaTvProvider( 4621): MAC portal http://5.mdtv.me:80: 222 unique FR channels
+05-01 18:24:17.605 D/OlaTvProvider( 4621):   Phase 3 cid=20875 IS FR → +222 streams (total FR cids: 2)
+05-01 18:24:17.653 D/OlaTvProvider( 4621): Genre 620: 74 items / 14 per page = 6 pages, fetching 2..6 in parallel
+05-01 18:24:17.758 D/OlaTvProvider( 4621): Genre 1375: 65 items / 14 per page = 5 pages, fetching 2..5 in parallel
+05-01 18:24:17.931 W/GLSUser ( 1421): [AppCertManager] Exception while requesting key: 
+05-01 18:24:17.931 W/GLSUser ( 1421): java.util.concurrent.ExecutionException: bpcw: Parse Proto Exception with response code 400
+05-01 18:24:17.931 W/GLSUser ( 1421): Caused by: bpcw: Parse Proto Exception with response code 400
+05-01 18:24:18.787 D/OlaTvProvider( 4621): Genre 763: 69 items / 14 per page = 5 pages, fetching 2..5 in parallel
+05-01 18:24:18.897 I/Finsky  ( 5351): [2] SettingNotFoundException, fall through to G.downloadBytesOverMobileMaximum
+05-01 18:24:18.897 I/Finsky  ( 5351): [2] SettingNotFoundException, fall through to G.downloadBytesOverMobileRecommended
+05-01 18:24:18.943 D/OlaTvProvider( 4621): Genre 2188: 209 items / 14 per page = 15 pages, fetching 2..15 in parallel
+05-01 18:24:19.049 W/Glide   ( 4621): class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 18:24:19.049 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:19.049 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:19.049 W/Glide   ( 4621):   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 18:24:19.049 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:19.049 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:19.049 W/Glide   ( 4621):     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 18:24:19.049 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:19.049 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:19.049 W/Glide   ( 4621):       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 18:24:19.049 I/Glide   ( 4621): com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 18:24:19.152 E/Finsky  ( 5351): [46] Failed refreshing cache rebuild with error: java.lang.IllegalStateException: Trying to refresh recommendations for null or empty account.
+05-01 18:24:19.152 E/Finsky  ( 5351): [47] Failed refreshing cache rebuild with error: java.lang.IllegalStateException: Trying to refresh recommendations for null or empty account.
+05-01 18:24:19.521 I/Finsky:background( 5396): [58] SettingNotFoundException, fall through to G.downloadBytesOverMobileMaximum
+05-01 18:24:19.540 I/Finsky:background( 5396): [58] SettingNotFoundException, fall through to G.downloadBytesOverMobileRecommended
+05-01 18:24:19.851 W/FontLog ( 1421): java.lang.IllegalStateException: Cannot perform this operation because the connection pool has been closed.
+05-01 18:24:19.997 D/OlaTvProvider( 4621): Genre 1275: 40 items / 14 per page = 3 pages, fetching 2..3 in parallel
+05-01 18:24:20.015 W/Glide   ( 4621): class com.bumptech.glide.load.engine.GlideException: Failed to load resource
+05-01 18:24:20.015 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:20.015 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:20.015 W/Glide   ( 4621):   Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetching data failed, class java.io.InputStream, REMOTE
+05-01 18:24:20.015 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:20.015 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:20.015 W/Glide   ( 4621):     Cause (1 of 1): class com.bumptech.glide.load.engine.GlideException: Fetch failed
+05-01 18:24:20.015 W/Glide   ( 4621): com.bumptech.glide.load.HttpException(Not Found, status code: 404)
+05-01 18:24:20.015 W/Glide   ( 4621):  call GlideException#logRootCauses(String) for more detail
+05-01 18:24:20.015 W/Glide   ( 4621):       Cause (1 of 1): class com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 18:24:20.015 I/Glide   ( 4621): com.bumptech.glide.load.HttpException: Not Found, status code: 404
+05-01 18:24:20.641 D/OlaTvProvider( 4621): Genre 2400: 20 items / 14 per page = 2 pages, fetching 2..2 in parallel
+05-01 18:24:21.012 D/StrictMode( 1610): 	at android.os.Parcel.readExceptionCode(Parcel.java:3187)
+05-01 18:24:21.012 D/StrictMode( 1610): 	at android.os.Parcel.readException(Parcel.java:3148)
+05-01 18:24:21.012 D/StrictMode( 1610): 	at android.os.Parcel.readExceptionCode(Parcel.java:3187)
+05-01 18:24:21.012 D/StrictMode( 1610): 	at android.os.Parcel.readException(Parcel.java:3148)
+05-01 18:24:21.012 D/StrictMode( 1610): 	at android.os.Parcel.readExceptionCode(Parcel.java:3187)
+05-01 18:24:21.012 D/StrictMode( 1610): 	at android.os.Parcel.readException(Parcel.java:3148)
+05-01 18:24:21.012 D/StrictMode( 1610): 	at android.os.Parcel.readExceptionCode(Parcel.java:3187)
+05-01 18:24:21.012 D/StrictMode( 1610): 	at android.os.Parcel.readException(Parcel.java:3148)
+05-01 18:24:21.012 D/StrictMode( 1610): 	at android.os.Parcel.readExceptionCode(Parcel.java:3187)
+05-01 18:24:21.012 D/StrictMode( 1610): 	at android.database.DatabaseUtils.readExceptionFromParcel(DatabaseUtils.java:152)
+05-01 18:24:21.013 D/StrictMode( 1610): 	at android.os.Parcel.readExceptionCode(Parcel.java:3187)
+05-01 18:24:21.013 D/StrictMode( 1610): 	at android.os.Parcel.readException(Parcel.java:3148)
+05-01 18:24:21.013 D/StrictMode( 1610): 	at android.os.Parcel.readExceptionCode(Parcel.java:3187)
+05-01 18:24:21.013 D/StrictMode( 1610): 	at android.os.Parcel.readException(Parcel.java:3148)
+05-01 18:24:21.013 D/StrictMode( 1610): 	at android.os.Parcel.readExceptionCode(Parcel.java:3187)
+05-01 18:24:21.013 D/StrictMode( 1610): 	at android.os.Parcel.readException(Parcel.java:3148)
+05-01 18:24:21.013 D/StrictMode( 1610): 	at android.os.Parcel.readExceptionCode(Parcel.java:3187)
+05-01 18:24:21.013 D/StrictMode( 1610): 	at android.os.Parcel.readException(Parcel.java:3148)
+05-01 18:24:21.182 D/OlaTvProvider( 4621): Genre 1058: 30 items / 14 per page = 3 pages, fetching 2..3 in parallel
+05-01 18:24:21.299 D/OlaTvProvider( 4621): Genre 2182: 45 items / 14 per page = 4 pages, fetching 2..4 in parallel
+05-01 18:24:21.514 D/OlaTvProvider( 4621): MAC portal http://main2.cwdn.cx: 814 unique FR channels
+05-01 18:24:21.969 D/OlaTvProvider( 4621):   Phase 3 cid=20183 IS FR → +814 streams (total FR cids: 3)
+05-01 18:24:22.033 D/OlaTvProvider( 4621): Genre 2206: 16 items / 14 per page = 2 pages, fetching 2..2 in parallel
+05-01 18:24:22.138 W/HeterodyneSyncer( 5351): com.google.android.gms.phenotype.core.common.PhenotypeRuntimeException: 29504: Null server response, http status code 500: 6

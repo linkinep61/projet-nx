@@ -48,11 +48,15 @@ object MiniPlayerController {
 
     private const val RETRY_DELAY_MS = 30_000L  // 30s before retrying full cycle
     private const val MAX_RETRY_CYCLES = 3       // max full cycles before giving up
+    // If a stream stays BUFFERING for this long without reaching READY, force-failover
+    // to the next server. ExoPlayer may otherwise stay buffering forever on a dead URL.
+    private const val BUFFERING_WATCHDOG_MS = 10_000L
 
     private var player: ExoPlayer? = null
     private var loadJob: Job? = null
     private var retryJob: Job? = null
     private var progressiveServerJob: Job? = null
+    private var bufferingWatchdogJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     // Current channel info
@@ -76,6 +80,14 @@ object MiniPlayerController {
         override fun onPlayerError(error: PlaybackException) {
             val serverName = availableServers.getOrNull(currentServerIndex)?.name ?: "?"
             Log.e(TAG, "Player error on server [$currentServerIndex] $serverName: ${error.message}")
+            cancelBufferingWatchdog()
+            // Report the dead URL so OlaTvProvider blacklists it for the rest of the session.
+            val playingUri = player?.currentMediaItem?.localConfiguration?.uri?.toString()
+            if (!playingUri.isNullOrBlank()) {
+                try {
+                    com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
+                } catch (_: Throwable) { }
+            }
             tryNextServer()
         }
 
@@ -85,17 +97,47 @@ object MiniPlayerController {
                     val chId = currentChannelId ?: return
                     val serverName = availableServers.getOrNull(currentServerIndex)?.name ?: ""
                     Log.d(TAG, "Playback ready on server [$currentServerIndex] $serverName")
+                    cancelBufferingWatchdog()
                     retryCycle = 0 // reset cycle counter on success
                     _state.value = State.Playing(chId, currentChannelName ?: "", currentChannelPoster)
                 }
                 Player.STATE_BUFFERING -> {
-                    // keep Loading state
+                    // Start a watchdog: if buffering doesn't reach READY within
+                    // BUFFERING_WATCHDOG_MS, force-failover. ExoPlayer can otherwise hang
+                    // on a stream that returns headers but no segments.
+                    armBufferingWatchdog()
                 }
                 Player.STATE_ENDED, Player.STATE_IDLE -> {
-                    // no-op
+                    cancelBufferingWatchdog()
                 }
             }
         }
+    }
+
+    private fun armBufferingWatchdog() {
+        cancelBufferingWatchdog()
+        val channelAtArm = currentChannelId
+        val indexAtArm = currentServerIndex
+        bufferingWatchdogJob = scope.launch {
+            delay(BUFFERING_WATCHDOG_MS)
+            // Only fire if we're still on the same channel + same server still buffering.
+            if (currentChannelId == channelAtArm && currentServerIndex == indexAtArm) {
+                val serverName = availableServers.getOrNull(currentServerIndex)?.name ?: "?"
+                Log.w(TAG, "Buffering watchdog: $serverName stuck >${BUFFERING_WATCHDOG_MS / 1000}s, switching")
+                val playingUri = player?.currentMediaItem?.localConfiguration?.uri?.toString()
+                if (!playingUri.isNullOrBlank()) {
+                    try {
+                        com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
+                    } catch (_: Throwable) { }
+                }
+                tryNextServer()
+            }
+        }
+    }
+
+    private fun cancelBufferingWatchdog() {
+        bufferingWatchdogJob?.cancel()
+        bufferingWatchdogJob = null
     }
 
     fun initPlayer(context: Context) {
@@ -147,6 +189,7 @@ object MiniPlayerController {
         serversExhausted = false
         retryJob?.cancel()
         progressiveServerJob?.cancel()
+        cancelBufferingWatchdog()
         _state.value = State.Loading(channelId, channelName)
 
         loadJob?.cancel()
@@ -389,6 +432,7 @@ object MiniPlayerController {
         loadJob?.cancel()
         retryJob?.cancel()
         progressiveServerJob?.cancel()
+        cancelBufferingWatchdog()
         player?.stop()
         player?.clearMediaItems()
         currentChannelId = null
