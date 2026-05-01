@@ -580,6 +580,31 @@ class PlayerMobileFragment : Fragment() {
             .removePrefix("ola_ep::")
             .removePrefix("ola::")
 
+        // Coalesce many rapid emissions into a single UI refresh — without this,
+        // 50+ progressive emissions in a few hundred ms saturate the main thread
+        // (sort + notifyDataSetChanged per emit) and trigger an ANR.
+        val refreshHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        var refreshChannelPending = false
+        val refreshChannelRunnable = Runnable {
+            refreshChannelPending = false
+            if (_binding != null) binding.settings.refreshChannelVariantList()
+        }
+        fun scheduleChannelRefresh() {
+            if (refreshChannelPending) return
+            refreshChannelPending = true
+            refreshHandler.postDelayed(refreshChannelRunnable, 200)
+        }
+        var refreshServerPending = false
+        val refreshServerRunnable = Runnable {
+            refreshServerPending = false
+            if (_binding != null) binding.settings.refreshServerList()
+        }
+        fun scheduleServerRefresh() {
+            if (refreshServerPending) return
+            refreshServerPending = true
+            refreshHandler.postDelayed(refreshServerRunnable, 200)
+        }
+
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.additionalServer.collect { server ->
                 servers = servers + server
@@ -606,10 +631,10 @@ class PlayerMobileFragment : Fragment() {
                         if (PlayerSettingsView.Settings.ChannelVariant.list.size == 1) {
                             PlayerSettingsView.Settings.ChannelVariant.list.first().isSelected = true
                         }
-                        binding.settings.refreshChannelVariantList()
+                        scheduleChannelRefresh()
                     }
 
-                    // Set up variant click handler
+                    // Set up variant click handler (idempotent — same listener every time)
                     binding.settings.setOnChannelVariantSelectedListener { variant ->
                         viewModel.getVideo(Video.Server(variant.id, variant.name))
                     }
@@ -640,7 +665,7 @@ class PlayerMobileFragment : Fragment() {
                     PlayerSettingsView.Settings.Server.list.add(
                         PlayerSettingsView.Settings.Server(id = server.id, name = server.name)
                     )
-                    binding.settings.refreshServerList()
+                    scheduleServerRefresh()
                     Log.d("PlayerMobileFragment", "Additional server added: ${server.name}")
 
                     // If we were waiting for more servers after a failure, try this one now.

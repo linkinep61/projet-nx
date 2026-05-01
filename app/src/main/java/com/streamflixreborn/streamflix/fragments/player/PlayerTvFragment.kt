@@ -601,6 +601,30 @@ class PlayerTvFragment : Fragment() {
                 .removePrefix("ola_ep::")
                 .removePrefix("ola::")
 
+            // Coalesce many rapid emissions into a single UI refresh — without this,
+            // dozens of progressive emissions saturate the main thread and trigger an ANR.
+            val refreshHandler = android.os.Handler(android.os.Looper.getMainLooper())
+            var refreshChannelPending = false
+            val refreshChannelRunnable = Runnable {
+                refreshChannelPending = false
+                if (_binding != null) binding.settings.refreshChannelVariantList()
+            }
+            fun scheduleChannelRefresh() {
+                if (refreshChannelPending) return
+                refreshChannelPending = true
+                refreshHandler.postDelayed(refreshChannelRunnable, 200)
+            }
+            var refreshServerPending = false
+            val refreshServerRunnable = Runnable {
+                refreshServerPending = false
+                if (_binding != null) binding.settings.refreshServerList()
+            }
+            fun scheduleServerRefresh() {
+                if (refreshServerPending) return
+                refreshServerPending = true
+                refreshHandler.postDelayed(refreshServerRunnable, 200)
+            }
+
             viewLifecycleOwner.lifecycleScope.launch {
                 viewModel.additionalServer.collect { server ->
                     servers = servers + server
@@ -626,7 +650,7 @@ class PlayerTvFragment : Fragment() {
                             if (PlayerSettingsView.Settings.ChannelVariant.list.size == 1) {
                                 PlayerSettingsView.Settings.ChannelVariant.list.first().isSelected = true
                             }
-                            binding.settings.refreshChannelVariantList()
+                            scheduleChannelRefresh()
                         }
 
                         binding.settings.setOnChannelVariantSelectedListener { variant ->
@@ -654,7 +678,7 @@ class PlayerTvFragment : Fragment() {
                         PlayerSettingsView.Settings.Server.list.add(
                             PlayerSettingsView.Settings.Server(id = server.id, name = server.name)
                         )
-                        binding.settings.refreshServerList()
+                        scheduleServerRefresh()
                         Log.d("PlayerTvFragment", "Additional server added: ${server.name}")
 
                         if (awaitingMoreServers) {
