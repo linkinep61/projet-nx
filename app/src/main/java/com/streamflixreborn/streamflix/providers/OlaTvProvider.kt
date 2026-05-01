@@ -787,7 +787,9 @@ object OlaTvProvider : Provider, IptvProvider {
     // Progressive servers flow — same pattern as WiTvProvider. Player collects this
     // and adds each emitted server to the "Chaîne" page so the user can switch
     // between OLA TV variants without closing the player.
-    private val _additionalServers = MutableSharedFlow<Video.Server>(extraBufferCapacity = 100)
+    // replay = 50 so that variants emitted between getServers() and the player's
+    // collector subscribing are still delivered (otherwise they would be lost).
+    private val _additionalServers = MutableSharedFlow<Video.Server>(replay = 50, extraBufferCapacity = 100)
     override val additionalServersFlow: SharedFlow<Video.Server> = _additionalServers
 
     // Track current emit job so we can cancel it when the user switches channels.
@@ -879,7 +881,8 @@ object OlaTvProvider : Provider, IptvProvider {
             Log.d(TAG, "getServers '$key' (${info.displayName}): ${streamsSnapshot.size} stream(s) — progressive emission")
 
             // Build a Video.Server for the first stream (synchronous result so the
-            // player can open immediately) and emit the rest via the progressive flow.
+            // player can open immediately) and emit ALL variants (including the first)
+            // via the progressive flow so they all appear in the player's "Chaîne" page.
             val first = streamsSnapshot.firstOrNull()
             val initialServers = if (first != null) {
                 Log.d(TAG, "  primary[0] cid=${first.cid} label='${first.label}' cmd=${first.url.take(80)}")
@@ -894,8 +897,12 @@ object OlaTvProvider : Provider, IptvProvider {
             // Cancel any previous emit job (channel switch) and start a new one.
             currentEmitJob?.cancel()
             currentEmitJob = scope.launch {
-                // Emit known additional streams first (skip the one already returned).
-                streamsSnapshot.drop(1).forEach { stream ->
+                // Tiny delay so the player has time to subscribe to the flow.
+                // (replay=50 also covers this, but the delay keeps logs clean.)
+                delay(150)
+                // Emit ALL known streams as variants (including the one already returned
+                // as initialServers) so the user sees them all in the Chaîne page.
+                streamsSnapshot.forEach { stream ->
                     if (!isActive) return@launch
                     val server = Video.Server(
                         id = "ola_stream::${stream.cid}::${stream.label}::${stream.url}",
