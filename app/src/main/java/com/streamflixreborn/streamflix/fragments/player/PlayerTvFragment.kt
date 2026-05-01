@@ -1155,7 +1155,7 @@ class PlayerTvFragment : Fragment() {
             val btnNext = binding.pvPlayer.controller.binding.btnCustomNext
 
             // IPTV channel navigation: prev/next channel buttons
-            val isIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::")
+            val isIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
             if (isIptvChannel) {
                 setupChannelNavigationButtons(btnPrevious, btnNext)
                 return
@@ -1295,7 +1295,7 @@ class PlayerTvFragment : Fragment() {
          */
         private fun setupChannelZapping() {
             val provider = UserPreferences.currentProvider as? WiTvProvider ?: return
-            val isIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
+            val isIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
             if (!isIptv) return
 
             val orderedIds = provider.getOrderedChannelIds()
@@ -1791,7 +1791,7 @@ class PlayerTvFragment : Fragment() {
                         updatePlayerScale()
 
                         // Preload adjacent channel servers for fast zapping
-                        val isIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
+                        val isIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
                         if (isIptv) {
                             val provider = UserPreferences.currentProvider
                             if (provider is WiTvProvider) {
@@ -1968,7 +1968,7 @@ class PlayerTvFragment : Fragment() {
 
                     // Fallback 3 (IPTV): for live channels, auto-failover on ANY playback error
                     // (HTTP 403/404, source error, decoder error, etc.)
-                    val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
+                    val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
                     if (isLiveIptv) {
                         val server = currentServer ?: return
                         val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
@@ -2369,7 +2369,7 @@ class PlayerTvFragment : Fragment() {
         private var currentSoftwareDecoder = false
 
         private fun buildPlayer(extraBuffering: Boolean): ExoPlayer {
-            val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
+            val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
             val loadControl = DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
                     if (isLiveIptv) 5_000 else 30_000,      // minBuffer: 5s live / 30s VOD
