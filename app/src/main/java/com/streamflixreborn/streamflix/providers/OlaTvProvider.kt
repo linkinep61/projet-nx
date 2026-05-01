@@ -1319,15 +1319,25 @@ object OlaTvProvider : Provider, IptvProvider {
     // ───────── Provider API ─────────
 
     override suspend fun getHome(): List<Category> = try {
-        ensureRegistry()
-        val snapshot = synchronized(registryLock) { LinkedHashMap(channelRegistry) }
+        // Kick off registry loading in background — never blocks the home render. The
+        // page always shows the same FROZEN curated list with hardcoded logos. Streams
+        // get linked at click-time; if they aren't ingested yet, the click waits.
+        scope.launch { try { ensureRegistry() } catch (_: Exception) { } }
 
         val categoryOrder = listOf("Généraliste", "Cinéma", "Info", "Sport", "Musique", "Documentaire", "Enfants")
         val sections = mutableListOf<Category>()
         for (catName in categoryOrder) {
-            val items = sortByTnt(snapshot
-                .filter { it.value.category == catName }
-                .map { (k, v) -> toTvShow(k, v) })
+            val items = curatedChannels
+                .filter { it.category == catName }
+                .map { c ->
+                    TvShow(
+                        id = "ola::${c.key}",
+                        title = c.displayName,
+                        poster = logoUrlFor(c.displayName),
+                        banner = logoUrlFor(c.displayName),
+                        providerName = name,
+                    )
+                }
             if (items.isNotEmpty()) sections.add(Category(name = catName, list = items))
         }
         sections
@@ -1338,11 +1348,17 @@ object OlaTvProvider : Provider, IptvProvider {
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> = try {
         if (page > 1) emptyList<AppAdapter.Item>()
-        ensureRegistry()
-        val snapshot = synchronized(registryLock) { LinkedHashMap(channelRegistry) }
-        snapshot
-            .filter { it.value.displayName.contains(query, ignoreCase = true) }
-            .map { (k, v) -> toTvShow(k, v) }
+        // Search across the curated list — instantaneous, no network.
+        curatedChannels
+            .filter { it.displayName.contains(query, ignoreCase = true) }
+            .map { c ->
+                TvShow(
+                    id = "ola::${c.key}",
+                    title = c.displayName,
+                    poster = logoUrlFor(c.displayName),
+                    providerName = name,
+                )
+            }
     } catch (_: Exception) { emptyList() }
 
     override suspend fun getMovies(page: Int): List<Movie> = emptyList()
@@ -1350,28 +1366,50 @@ object OlaTvProvider : Provider, IptvProvider {
     override suspend fun getTvShows(page: Int): List<TvShow> =
         if (page > 1) emptyList()
         else try {
-            ensureRegistry()
-            val snapshot = synchronized(registryLock) { LinkedHashMap(channelRegistry) }
-            sortByTnt(snapshot.map { (k, v) -> toTvShow(k, v) })
+            scope.launch { try { ensureRegistry() } catch (_: Exception) { } }
+            // Frozen curated list — same display order as the home, no shuffle.
+            curatedChannels.map { c ->
+                TvShow(
+                    id = "ola::${c.key}",
+                    title = c.displayName,
+                    poster = logoUrlFor(c.displayName),
+                    providerName = name,
+                )
+            }
         } catch (_: Exception) { emptyList() }
 
     override suspend fun getMovie(id: String): Movie = throw Exception("Not supported")
 
     override suspend fun getTvShow(id: String): TvShow = try {
+        // Click-time wait for the registry — by now Phase 1+2 are usually done since
+        // the home triggered them in background. If a channel isn't ingested yet, we
+        // synthesise a minimal TvShow so navigation doesn't crash.
         ensureRegistry()
         val key = id.removePrefix("ola::")
         val info = synchronized(registryLock) { channelRegistry[key] }
-            ?: throw Exception("Channel '$key' not found")
-        // Use the SAME id for TvShow / Season / Episode so getServers(episodeId)
-        // can extract the same key. Mirrors WiTvProvider's pattern.
-        val logo = info.logo.ifBlank { null }
-        toTvShow(key, info).copy(
-            seasons = listOf(
-                Season(id = id, number = 1, title = "En Direct",
-                    episodes = listOf(Episode(id = id, number = 1,
-                        title = "Regarder en Direct", poster = logo)))
+        if (info == null) {
+            val curated = curatedChannels.firstOrNull { it.key == key }
+            TvShow(
+                id = id,
+                title = curated?.displayName ?: key,
+                poster = curated?.let { logoUrlFor(it.displayName) },
+                providerName = name,
+                seasons = listOf(
+                    Season(id = id, number = 1, title = "En Direct",
+                        episodes = listOf(Episode(id = id, number = 1,
+                            title = "Regarder en Direct")))
+                ),
             )
-        )
+        } else {
+            val logo = info.logo.ifBlank { null }
+            toTvShow(key, info).copy(
+                seasons = listOf(
+                    Season(id = id, number = 1, title = "En Direct",
+                        episodes = listOf(Episode(id = id, number = 1,
+                            title = "Regarder en Direct", poster = logo)))
+                )
+            )
+        }
     } catch (e: Exception) {
         Log.e(TAG, "getTvShow($id) error", e); throw e
     }
