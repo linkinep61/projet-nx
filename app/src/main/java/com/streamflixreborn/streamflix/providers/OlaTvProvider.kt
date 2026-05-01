@@ -111,22 +111,72 @@ object OlaTvProvider : Provider, IptvProvider {
 
     // ───────── Normalization & TNT order ─────────
 
-    /** Same as WiTv's norm — strip accents, quality tags, country suffixes. */
-    private fun norm(raw: String): String =
-        raw.lowercase()
+    /** Strip accents, brackets, quality tags, country suffixes, and "+1" markers — *anywhere*
+     *  in the name (not just at the end), so all variants of a given channel collapse to the
+     *  same base key. Iterates until no changes so that combos like "TF1 +1 HD" reduce to "tf1". */
+    private fun norm(raw: String): String {
+        var s = raw.lowercase()
             .replace(Regex("[éèêë]"), "e")
             .replace(Regex("[àâä]"), "a")
             .replace(Regex("[ùûü]"), "u")
             .replace(Regex("[îï]"), "i")
             .replace(Regex("[ôö]"), "o")
             .replace("ç", "c")
-            .replace(Regex("\\[.*?]"), "")
-            .replace(Regex("\\(.*?\\)"), "")
-            .replace(Regex("\\s+(france|fr|french|belgique|be|suisse|ch)\\s*$"), "")
-            .replace(Regex("\\s*(hd|sd|fhd|uhd|4k|\\+1|1080p|720p|480p|360p)\\s*$"), "")
-            .trim()
-            .replace(Regex("[^a-z0-9]"), "")
-            .replace("sports", "sport")
+            .replace(Regex("\\[.*?]"), " ")
+            .replace(Regex("\\(.*?\\)"), " ")
+            .replace(Regex("^\\s*(fr|france)\\s*[:|\\-]\\s*"), "")
+        // Repeatedly strip quality tags, country tags, and +1 markers until stable.
+        val tag = Regex(
+            "\\b(hd|sd|fhd|uhd|4k|raw|hevc|h\\.?265|ppv|ott|live|test|backup|fhdr|sdr)\\b" +
+                "|\\b(france|fr|french|francais|belgique|be|suisse|ch|lux)\\b" +
+                "|(?:\\+\\s?1)|(?:1080p|720p|480p|360p)|\\.fr\\b"
+        )
+        while (true) {
+            val next = s.replace(tag, " ").replace(Regex("\\s+"), " ").trim()
+            if (next == s) break
+            s = next
+        }
+        return s.replace(Regex("[^a-z0-9]"), "").replace("sports", "sport")
+    }
+
+    /** Extract the variant label ("HD", "FHD", "+1", "FR") from a raw channel name so
+     *  the player's "Chaîne" page can show meaningful entries instead of the full
+     *  channel name. Returns "" when no qualifier is present. */
+    private fun extractVariantLabel(raw: String): String {
+        val parts = mutableListOf<String>()
+        Regex(
+            "\\b(HD|SD|FHD|UHD|4K|RAW|HEVC|H\\.?265|PPV|OTT|LIVE|FHDR|SDR)\\b" +
+                "|(?:\\+\\s?1)|(?:1080p|720p|480p|360p)",
+            RegexOption.IGNORE_CASE
+        ).findAll(raw).forEach { parts.add(it.value.uppercase()) }
+        // Country qualifier kept separately so e.g. "TF1 FR" stays distinguishable from "TF1 BE".
+        Regex(
+            "\\b(FRANCE|FR|FRENCH|FRANCAIS|BELGIQUE|BE|SUISSE|CH|LUX)\\b",
+            RegexOption.IGNORE_CASE
+        ).findAll(raw).forEach { m -> parts.add(m.value.uppercase()) }
+        return parts.distinct().joinToString(" ")
+    }
+
+    /** Pretty display name: same logic as norm but preserves case/accents and word spacing.
+     *  Used for the UI label on a channel card. */
+    private fun baseDisplayName(raw: String): String {
+        val tag = Regex(
+            "\\b(HD|SD|FHD|UHD|4K|RAW|HEVC|H\\.?265|PPV|OTT|LIVE|TEST|BACKUP|FHDR|SDR)\\b" +
+                "|\\b(France|FR|French|Francais|Belgique|BE|Suisse|CH|LUX)\\b" +
+                "|(?:\\+\\s?1)|(?:1080p|720p|480p|360p)|\\.fr\\b",
+            RegexOption.IGNORE_CASE
+        )
+        var s = raw
+            .replace(Regex("\\[.*?]"), " ")
+            .replace(Regex("\\(.*?\\)"), " ")
+            .replace(Regex("^\\s*(FR|France)\\s*[:|\\-]\\s*", RegexOption.IGNORE_CASE), "")
+        while (true) {
+            val next = s.replace(tag, " ").replace(Regex("\\s+"), " ").trim()
+            if (next == s) break
+            s = next
+        }
+        return s.ifBlank { raw }
+    }
 
     /** Channel display order (TNT FR + popular non-TNT). Channels not in this list go alphabetical. */
     private val tntOrder: Map<String, Int> by lazy {
@@ -499,10 +549,7 @@ object OlaTvProvider : Provider, IptvProvider {
                 val key = norm(ch.name)
                 if (key.isBlank()) continue
                 val info = channelRegistry.getOrPut(key) {
-                    val displayName = ch.name
-                        .replace(Regex("\\s*(HD|SD|FHD|UHD|4K|RAW|HEVC|H265|PPV)\\s*$", RegexOption.IGNORE_CASE), "")
-                        .trim()
-                        .ifBlank { ch.name }
+                    val displayName = baseDisplayName(ch.name)
                     ChannelInfo(
                         displayName = displayName,
                         category = guessCategory(displayName),
@@ -511,7 +558,9 @@ object OlaTvProvider : Provider, IptvProvider {
                 }
                 // Avoid duplicate streams (same cid + same cmd already added)
                 if (info.streams.none { it.cid == cid && it.url == ch.cmd }) {
-                    info.streams.add(OlaStreamRef(cid, ch.name, ch.cmd))
+                    // Use a clean variant label (e.g. "HD", "+1", "FR") for the player's "Chaîne" page.
+                    val variantLabel = extractVariantLabel(ch.name).ifBlank { "Source ${info.streams.size + 1}" }
+                    info.streams.add(OlaStreamRef(cid, variantLabel, ch.cmd))
                     added++
                 }
             }
