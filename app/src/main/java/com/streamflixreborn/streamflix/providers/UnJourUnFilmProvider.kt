@@ -1137,7 +1137,14 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private val defaultReliability = 5
 
     private fun sortServersByLanguage(servers: List<Video.Server>): List<Video.Server> {
-        return servers.sortedWith(compareBy<Video.Server> { server ->
+        return servers.sortedWith(
+            // Servers that have been failing recently get pushed to the bottom
+            // (Extractor.healthScore returns 0f for "broken", 1f for healthy).
+            // We invert so 0f sorts higher in compareBy → at the bottom of the list.
+            compareByDescending<Video.Server> { server ->
+                val serviceName = Extractor.identifyServiceName(server.src) ?: ""
+                Extractor.healthScore(serviceName)
+            }.thenBy { server ->
             val name = server.name.uppercase()
             when {
                 name.contains("VFF") -> 0
