@@ -31,6 +31,7 @@ import com.streamflixreborn.streamflix.utils.dp
 import com.streamflixreborn.streamflix.utils.CacheUtils
 import com.streamflixreborn.streamflix.utils.LoggingUtils
 import com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
+import com.streamflixreborn.streamflix.providers.IptvProvider
 import com.streamflixreborn.streamflix.providers.WiTvProvider
 import kotlinx.coroutines.launch
 import androidx.lifecycle.ViewModel
