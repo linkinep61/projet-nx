@@ -180,17 +180,32 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
     }
 
     fun refreshChannelVariantList() {
-        // Sort variants by name (case-insensitive) so "HD FR" entries group together,
-        // "FHD FR" group together, "+1 FR" group together, etc. Selected entry stays
-        // selected because we sort the same list, not a copy.
+        // Sort variants by quality (ascending), then by name. Putting low-quality
+        // streams first means auto-failover tries the lighter (more likely to play
+        // smoothly) feeds before promoting to FHD/4K — avoids freezes from a 4K
+        // first-pick on a weak connection.
         val list = PlayerSettingsView.Settings.ChannelVariant.list
         if (list.size > 1) {
-            val sorted = list.sortedBy { it.name.lowercase() }
+            val sorted = list.sortedWith(compareBy({ qualityRank(it.name) }, { it.name.lowercase() }))
             list.clear()
             list.addAll(sorted)
         }
         channelVariantAdapter.notifyDataSetChanged()
         settingsAdapter.notifyDataSetChanged()
+    }
+
+    /** Quality rank used for sorting variant labels — lower = lighter / try first. */
+    private fun qualityRank(label: String): Int {
+        val l = label.uppercase()
+        return when {
+            "360P" in l -> 0
+            "480P" in l || "SD" in l -> 1
+            "720P" in l -> 2
+            "FHD" in l -> 4   // 1080p
+            "UHD" in l || "4K" in l -> 5
+            "HD" in l -> 3    // 720p (after 720P)
+            else -> 2          // unspecified — treat as middle
+        }
     }
 
     fun hide() {

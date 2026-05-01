@@ -182,16 +182,29 @@ class PlayerSettingsTvView @JvmOverloads constructor(
     }
 
     fun refreshChannelVariantList() {
-        // Sort variants by name so identical labels (e.g. multiple "HD FR" from different
-        // cids) group together — keeps the Chaîne page tidy when many variants stream in.
+        // Sort variants by quality (ascending), then by name. Lower-quality streams come
+        // first so auto-failover tries the lightest feeds before 4K — avoids freezes.
         val list = PlayerSettingsView.Settings.ChannelVariant.list
         if (list.size > 1) {
-            val sorted = list.sortedBy { it.name.lowercase() }
+            val sorted = list.sortedWith(compareBy({ qualityRank(it.name) }, { it.name.lowercase() }))
             list.clear()
             list.addAll(sorted)
         }
         channelVariantAdapter.notifyDataSetChanged()
         settingsAdapter.notifyDataSetChanged()
+    }
+
+    private fun qualityRank(label: String): Int {
+        val l = label.uppercase()
+        return when {
+            "360P" in l -> 0
+            "480P" in l || "SD" in l -> 1
+            "720P" in l -> 2
+            "FHD" in l -> 4
+            "UHD" in l || "4K" in l -> 5
+            "HD" in l -> 3
+            else -> 2
+        }
     }
 
     fun hide() {
