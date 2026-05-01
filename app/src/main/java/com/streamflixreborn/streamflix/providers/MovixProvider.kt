@@ -1189,14 +1189,27 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
      * Trie les serveurs par priorité de langue :
      * 1. VF (Version Française) en premier — sous-trié par fiabilité extracteur
      * 2. VO / Multi / sans langue spécifiée au milieu
-     * 3. VOSTFR (Version Originale Sous-Titrée FR) en dernier (max 2)
+     * 3. VOSTFR (Version Originale Sous-Titrée FR) en dernier — tous gardés, sous-triés
+     *    par fiabilité d'extracteur. (Avant : capé à 2 — décision arbitraire qui virait
+     *    jusqu'à 4-6 sources sur les épisodes anime où cpasmal renvoie une grosse liste
+     *    VOSTFR. L'utilisateur veut TOUTES les sources françaises, sous-titres inclus.)
+     *
+     * Dédup par URL en bonus pour éviter qu'une même source remonte deux fois si plusieurs
+     * APIs amont la signalent.
      */
     private fun sortServersByLanguage(servers: List<Video.Server>): List<Video.Server> {
+        // Dédup par src URL (case-insensitive) — garde le 1er rencontré.
+        val seen = HashSet<String>()
+        val unique = servers.filter { server ->
+            val key = server.src.lowercase().trim()
+            key.isEmpty() || seen.add(key)
+        }
+
         val vfServers = mutableListOf<Video.Server>()
         val vostfrServers = mutableListOf<Video.Server>()
         val defaultServers = mutableListOf<Video.Server>()
 
-        servers.forEach { server ->
+        unique.forEach { server ->
             val name = server.name.lowercase()
             when {
                 name.contains("vostfr") || name.contains("sous-titr") -> vostfrServers.add(server)
@@ -1206,17 +1219,17 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             }
         }
 
-        // Sous-trier VF et DEFAULT par fiabilité des extracteurs
+        // Sous-trier chaque groupe par fiabilité des extracteurs
         val sortedVf = vfServers.sortedBy { serverReliabilityScore(it) }
         val sortedDefault = defaultServers.sortedBy { serverReliabilityScore(it) }
+        val sortedVostfr = vostfrServers.sortedBy { serverReliabilityScore(it) }
 
-        // Garder tous les VF + DEFAULT, et max 2 VOSTFR
         val result = mutableListOf<Video.Server>()
         result.addAll(sortedVf)
         result.addAll(sortedDefault)
-        result.addAll(vostfrServers.take(2))
+        result.addAll(sortedVostfr)
 
-        Log.d("MovixProvider", "Servers: ${vfServers.size} VF, ${defaultServers.size} DEFAULT, ${vostfrServers.size} VOSTFR (kept ${vostfrServers.take(2).size})")
+        Log.d("MovixProvider", "Servers (after dedup ${servers.size}→${unique.size}): ${vfServers.size} VF, ${defaultServers.size} DEFAULT, ${vostfrServers.size} VOSTFR — all kept")
         return result
     }
 
