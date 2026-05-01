@@ -1,1 +1,0 @@
-05-01 17:33:24.080   657   670 W system_server: ApkAssets: Deleting an ApkAssets object '<empty> and /data/app/~~dHzsW3hn83X-Bpp78GgUbA==/com.streamfr.app-p9LdpJhm6iWFaIB9lHu3KQ==/base.apk' with 1 weak references
