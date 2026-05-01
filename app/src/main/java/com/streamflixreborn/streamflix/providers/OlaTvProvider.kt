@@ -3,6 +3,7 @@ package com.streamflixreborn.streamflix.providers
 import android.util.Base64
 import android.util.Log
 import com.streamflixreborn.streamflix.BuildConfig
+import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.models.*
 import com.streamflixreborn.streamflix.utils.DnsResolver
@@ -90,6 +91,21 @@ object OlaTvProvider : Provider, IptvProvider {
 
     // cid → category_name (numeric tag)
     @Volatile private var olaTvServerMap: Map<String, String> = emptyMap()
+
+    // ───────── Phase 3: multi-cid background scan ─────────
+    // FR cids confirmed to have FR channels. Includes the primary + any discovered via scan.
+    private val frCids = java.util.concurrent.CopyOnWriteArrayList<String>()
+    @Volatile private var phase3Done = false
+    private val phase3Mutex = Mutex()
+
+    // Phase 3 tuning
+    private const val PHASE3_MAX_CANDIDATES = 30  // probe at most this many cids per scan
+    private const val PHASE3_MAX_FR_CIDS = 20     // stop once we have N healthy FR cids (incl primary)
+    private const val PHASE3_PARALLELISM = 4      // concurrent probes
+
+    // Disk cache for the discovered FR cid list — 24h TTL
+    private const val FR_CIDS_CACHE_FILE = "olatv_fr_cids.json"
+    private const val FR_CIDS_CACHE_TTL_MS = 24L * 60 * 60 * 1000L
 
     // ───────── Normalization & TNT order ─────────
 
@@ -469,6 +485,173 @@ object OlaTvProvider : Provider, IptvProvider {
         return "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/france/$slug-fr.png"
     }
 
+    // ───────── Phase 3 helpers: ingest one cid, probe FR genres, disk cache ─────────
+
+    /** Ingest ALL channels from a cid into the registry. Reusable for primary + scan.
+     *  Returns the number of stream refs added (channels merged by normalized name). */
+    private suspend fun ingestCidChannels(cid: String, creds: MacCredentials, forceAllGenres: Boolean = false): Int {
+        val channels = olaListMacPortalChannels(creds.baseUrl, creds.mac, forceAllGenres)
+        var added = 0
+        synchronized(registryLock) {
+            for (ch in channels) {
+                val key = norm(ch.name)
+                if (key.isBlank()) continue
+                val info = channelRegistry.getOrPut(key) {
+                    val displayName = ch.name
+                        .replace(Regex("\\s*(HD|SD|FHD|UHD|4K|RAW|HEVC|H265|PPV)\\s*$", RegexOption.IGNORE_CASE), "")
+                        .trim()
+                        .ifBlank { ch.name }
+                    ChannelInfo(
+                        displayName = displayName,
+                        category = guessCategory(displayName),
+                        logo = logoUrlFor(displayName),
+                    )
+                }
+                // Avoid duplicate streams (same cid + same cmd already added)
+                if (info.streams.none { it.cid == cid && it.url == ch.cmd }) {
+                    info.streams.add(OlaStreamRef(cid, ch.name, ch.cmd))
+                    added++
+                }
+            }
+        }
+        return added
+    }
+
+    /** Quick probe: does this cid's MAC portal have at least one FR-tagged genre?
+     *  Used to filter the 1159 cids down to FR-relevant ones in Phase 3.
+     *  Skips channel pagination — only does handshake + get_genres (~3s). */
+    private suspend fun cidHasFrenchGenre(cid: String): Boolean = withContext(Dispatchers.IO) {
+        val creds = getMacCredentials(cid) ?: return@withContext false
+        val portalBase = "${creds.baseUrl.trimEnd('/')}/portal.php"
+        val cookie = "mac=${java.net.URLEncoder.encode(creds.mac, "UTF-8")}; stb_lang=en; timezone=Europe%2FLondon"
+        val stbUA = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3"
+        try {
+            val hsBody = probeClient.newCall(Request.Builder()
+                .url("$portalBase?type=stb&action=handshake&token=&JsHttpRequest=1-xml")
+                .header("User-Agent", stbUA).header("Cookie", cookie).build()
+            ).execute().body?.string() ?: return@withContext false
+            val token = JSONObject(hsBody).getJSONObject("js").getString("token")
+            val genreBody = probeClient.newCall(Request.Builder()
+                .url("$portalBase?type=itv&action=get_genres&JsHttpRequest=1-xml")
+                .header("User-Agent", stbUA).header("Cookie", cookie)
+                .header("Authorization", "Bearer $token").build()
+            ).execute().body?.string() ?: return@withContext false
+            val arr = JSONObject(genreBody).optJSONArray("js") ?: return@withContext false
+            for (g in 0 until arr.length()) {
+                val title = arr.optJSONObject(g)?.optString("title", "")?.lowercase() ?: continue
+                if (title.startsWith("fr|") || title.startsWith("fr ")
+                    || title.contains("france") || title.contains("french") || title.contains("français")) {
+                    return@withContext true
+                }
+            }
+            false
+        } catch (_: Exception) { false }
+    }
+
+    private fun frCidsCacheFile() = java.io.File(StreamFlixApp.instance.filesDir, FR_CIDS_CACHE_FILE)
+
+    private fun loadFrCidsCache(): List<String>? {
+        return try {
+            val f = frCidsCacheFile()
+            if (!f.exists()) return null
+            val obj = JSONObject(f.readText())
+            val ts = obj.optLong("ts", 0)
+            if (System.currentTimeMillis() - ts > FR_CIDS_CACHE_TTL_MS) return null
+            val arr = obj.optJSONArray("cids") ?: return null
+            (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotBlank() } }
+        } catch (_: Exception) { null }
+    }
+
+    private fun saveFrCidsCache(cids: List<String>) {
+        try {
+            val f = frCidsCacheFile()
+            val obj = JSONObject().apply {
+                put("ts", System.currentTimeMillis())
+                put("cids", JSONArray(cids))
+            }
+            f.writeText(obj.toString())
+            Log.d(TAG, "FR cids cache saved: ${cids.size} cids")
+        } catch (e: Exception) {
+            Log.w(TAG, "FR cids cache save failed: ${e.message}")
+        }
+    }
+
+    /** Phase 3: scan up to PHASE3_MAX_CANDIDATES candidate cids in parallel.
+     *  For each FR-tagged cid found, ingest channels into the existing registry.
+     *  Stops at PHASE3_MAX_FR_CIDS cids found OR candidates exhausted. */
+    private suspend fun scanAdditionalFrCids(primaryCid: String) {
+        if (phase3Done) return
+        phase3Mutex.withLock {
+            if (phase3Done) return@withLock
+            val t0 = System.currentTimeMillis()
+
+            // Try disk cache first — if valid, skip the expensive probe
+            val cachedCids = loadFrCidsCache()
+            if (cachedCids != null && cachedCids.isNotEmpty()) {
+                Log.d(TAG, "Phase 3: using cached FR cids (${cachedCids.size}) — ingesting directly")
+                val toIngest = cachedCids.filter { it != primaryCid }.take(PHASE3_MAX_FR_CIDS - 1)
+                coroutineScope {
+                    val sem = kotlinx.coroutines.sync.Semaphore(PHASE3_PARALLELISM)
+                    toIngest.map { cid ->
+                        async {
+                            sem.acquire()
+                            try {
+                                val creds = getMacCredentials(cid) ?: return@async
+                                val n = ingestCidChannels(cid, creds, forceAllGenres = false)
+                                if (n > 0) {
+                                    frCids.add(cid)
+                                    Log.d(TAG, "  cached cid=$cid → +$n streams")
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "  cached cid=$cid failed: ${e.message}")
+                            } finally { sem.release() }
+                        }
+                    }.awaitAll()
+                }
+                phase3Done = true
+                Log.d(TAG, "Phase 3 (cached) done in ${System.currentTimeMillis() - t0}ms — ${frCids.size} FR cids active")
+                return@withLock
+            }
+
+            // No cache → fresh scan
+            val candidates = olaTvServerMap.keys
+                .filter { it != primaryCid }
+                .shuffled()
+                .take(PHASE3_MAX_CANDIDATES)
+            Log.d(TAG, "Phase 3 fresh scan: probing ${candidates.size} candidate cids…")
+
+            val foundCids = java.util.concurrent.CopyOnWriteArrayList<String>()
+            foundCids.add(primaryCid)
+
+            coroutineScope {
+                val sem = kotlinx.coroutines.sync.Semaphore(PHASE3_PARALLELISM)
+                val jobs = candidates.map { cid ->
+                    async {
+                        sem.acquire()
+                        try {
+                            if (foundCids.size >= PHASE3_MAX_FR_CIDS) return@async
+                            if (!cidHasFrenchGenre(cid)) return@async
+                            val creds = getMacCredentials(cid) ?: return@async
+                            val n = ingestCidChannels(cid, creds, forceAllGenres = false)
+                            if (n > 0) {
+                                foundCids.add(cid)
+                                frCids.add(cid)
+                                Log.d(TAG, "  Phase 3 cid=$cid IS FR → +$n streams (total FR cids: ${foundCids.size})")
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "  Phase 3 cid=$cid failed: ${e.message}")
+                        } finally { sem.release() }
+                    }
+                }
+                jobs.awaitAll()
+            }
+
+            saveFrCidsCache(foundCids.toList())
+            phase3Done = true
+            Log.d(TAG, "Phase 3 fresh done in ${System.currentTimeMillis() - t0}ms — ${foundCids.size} FR cids active")
+        }
+    }
+
     // ───────── Catalog loading ─────────
 
     private suspend fun ensureRegistry() {
@@ -515,32 +698,9 @@ object OlaTvProvider : Provider, IptvProvider {
                     Log.d(TAG, "Primary FR portal: ${creds.baseUrl}")
 
                     // Primary cid is user-confirmed FR → fetch all genres even if not tagged "FR|"
-                    val channels = olaListMacPortalChannels(creds.baseUrl, creds.mac, forceAllGenres = true)
-                    Log.d(TAG, "Primary FR portal returned ${channels.size} channels")
-
-                    // Step 4: ingest into the registry (group by normalized name to merge variants)
-                    synchronized(registryLock) {
-                        for (ch in channels) {
-                            val key = norm(ch.name)
-                            if (key.isBlank()) continue
-                            val info = channelRegistry.getOrPut(key) {
-                                val displayName = ch.name
-                                    .replace(Regex("\\s*(HD|SD|FHD|UHD|4K|RAW|HEVC|H265|PPV)\\s*$", RegexOption.IGNORE_CASE), "")
-                                    .trim()
-                                    .ifBlank { ch.name }
-                                ChannelInfo(
-                                    displayName = displayName,
-                                    category = guessCategory(displayName),
-                                    logo = logoUrlFor(displayName),
-                                )
-                            }
-                            // Avoid duplicate streams (same cid + same cmd already added)
-                            if (info.streams.none { it.cid == primaryCid && it.url == ch.cmd }) {
-                                info.streams.add(OlaStreamRef(primaryCid, ch.name, ch.cmd))
-                            }
-                        }
-                    }
-                    Log.d(TAG, "Registry built: ${channelRegistry.size} unique channels in ${System.currentTimeMillis() - t0}ms")
+                    val added = ingestCidChannels(primaryCid, creds, forceAllGenres = true)
+                    frCids.add(primaryCid)
+                    Log.d(TAG, "Primary FR cid ingested: $added streams, registry size=${channelRegistry.size} in ${System.currentTimeMillis() - t0}ms")
 
                     // ↓ KEY: set the loaded flag INSIDE the IO block, right after registry is
                     // populated. This way even if the calling scope cancels right after,
@@ -548,6 +708,15 @@ object OlaTvProvider : Provider, IptvProvider {
                     if (channelRegistry.isNotEmpty()) {
                         registryLoaded = true
                         lastLoadTime = System.currentTimeMillis()
+                    }
+
+                    // ─── Phase 3: scan additional FR cids in BACKGROUND ───
+                    // Don't block ensureRegistry — fire-and-forget. As more cids are confirmed FR
+                    // and ingested, channels gain more OlaStreamRef entries. User sees more
+                    // servers in the picker the next time they open a channel.
+                    scope.launch {
+                        try { scanAdditionalFrCids(primaryCid) }
+                        catch (e: Exception) { Log.w(TAG, "Phase 3 background scan failed: ${e.message}") }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Load failed: ${e.message}", e)
@@ -560,6 +729,9 @@ object OlaTvProvider : Provider, IptvProvider {
             }
         }
     }
+
+    // App-scoped supervisor for Phase 3 background work. Outlives the calling fragment scope.
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // ───────── Provider API ─────────
 
