@@ -461,6 +461,20 @@ object OlaTvProvider : Provider, IptvProvider {
     // of the same variant don't trigger redundant create_link calls.
     private val resolvedUrlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
+    // URLs the player has reported as broken in the current process — getVideo will throw
+    // immediately for them so the failover loop moves to a genuinely different source.
+    private val brokenUrlSet = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Player calls this when a stream URL fails (HTTP error, codec error). Future calls
+     *  to getVideo for any variant resolving to the same URL will throw fast. */
+    @JvmStatic
+    fun reportBrokenStreamUrl(url: String) {
+        if (url.isNotBlank()) {
+            brokenUrlSet.add(url)
+            Log.d(TAG, "Marked broken upstream URL: ${url.take(80)}")
+        }
+    }
+
     private fun getMacCredentials(cid: String): MacCredentials? {
         macCredsCache[cid]?.let { return it }
         try {
@@ -1103,12 +1117,20 @@ object OlaTvProvider : Provider, IptvProvider {
             currentEmitJob?.cancel()
             currentEmitJob = scope.launch {
                 // Tiny delay so the player has time to subscribe to the flow.
-                // (replay=50 also covers this, but the delay keeps logs clean.)
                 delay(150)
-                // Emit ALL known streams as variants (including the one already returned
-                // as initialServers) so the user sees them all in the Chaîne page.
-                streamsSnapshot.forEach { stream ->
+                // Emit additional variants — SKIP the first stream because it's already
+                // the initial server (re-emitting it would make the failover pick a
+                // duplicate with the same resolved URL, looping on a dead stream).
+                // De-duplicate emissions by stream URL so the same source served from two
+                // cids doesn't appear twice and waste failover slots.
+                val emittedUrls = HashSet<String>()
+                streamsSnapshot.firstOrNull()?.let { emittedUrls.add(it.url) }
+                streamsSnapshot.drop(1).forEach { stream ->
                     if (!isActive) return@launch
+                    if (!emittedUrls.add(stream.url)) {
+                        Log.d(TAG, "  skip duplicate URL ${stream.label} (cid=${stream.cid})")
+                        return@forEach
+                    }
                     val server = Video.Server(
                         id = "ola_stream::${stream.cid}::${stream.label}::${stream.url}",
                         name = "OLA[$key] ${stream.label}",
@@ -1198,6 +1220,11 @@ object OlaTvProvider : Provider, IptvProvider {
                     resolvedUrlCache[cacheKey] = resolved
                     resolved
                 }
+            }
+            // Skip a variant that resolves to a URL already known broken — saves the
+            // player from looping on multiple variants pointing to the same dead stream.
+            if (streamUrl in brokenUrlSet) {
+                throw Exception("URL already failed earlier this session: ${streamUrl.take(80)}")
             }
             Log.d(TAG, "getVideo → ${streamUrl.take(120)}")
             Video(streamUrl, headers = mapOf("User-Agent" to USER_AGENT))

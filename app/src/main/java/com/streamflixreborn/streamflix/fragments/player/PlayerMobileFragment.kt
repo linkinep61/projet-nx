@@ -1278,10 +1278,20 @@ class PlayerMobileFragment : Fragment() {
 
     /** Mark a server as tried and remove it from the Chaîne page so broken variants
      *  don't pollute the visible list. They'll re-emit at next session if Phase 3
-     *  finds them again and they happen to work that time. */
+     *  finds them again and they happen to work that time. Also reports the resolved
+     *  upstream URL to OlaTvProvider so other variants pointing to the same dead URL
+     *  fail fast. */
     private fun pruneBrokenVariant(server: Video.Server?) {
         if (server == null) return
         triedChannelVariantIds.add(server.id)
+        // Report the upstream URL we were just playing — multiple variants may resolve
+        // to the same dead URL (different cmd, same upstream).
+        val playingUri = player.currentMediaItem?.localConfiguration?.uri?.toString()
+        if (!playingUri.isNullOrBlank()) {
+            try {
+                com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
+            } catch (_: Throwable) { /* WiTv lacks this method, ignore */ }
+        }
         val variants = PlayerSettingsView.Settings.ChannelVariant.list
         val removed = variants.removeAll { it.id == server.id }
         if (removed && _binding != null) {

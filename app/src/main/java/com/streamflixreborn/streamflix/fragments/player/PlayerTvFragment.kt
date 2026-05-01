@@ -1482,10 +1482,17 @@ class PlayerTvFragment : Fragment() {
 
         /** Mark a server as tried and remove it from the Chaîne page (broken streams
          *  shouldn't pollute the visible list — they reappear next session if Phase 3
-         *  finds them again). */
+         *  finds them again). Also reports the URL so other variants pointing to the
+         *  same dead upstream fail immediately. */
         private fun pruneBrokenVariant(server: Video.Server?) {
             if (server == null) return
             triedChannelVariantIds.add(server.id)
+            val playingUri = player.currentMediaItem?.localConfiguration?.uri?.toString()
+            if (!playingUri.isNullOrBlank()) {
+                try {
+                    com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
+                } catch (_: Throwable) { }
+            }
             val variants = PlayerSettingsView.Settings.ChannelVariant.list
             val removed = variants.removeAll { it.id == server.id }
             if (removed && _binding != null) {
