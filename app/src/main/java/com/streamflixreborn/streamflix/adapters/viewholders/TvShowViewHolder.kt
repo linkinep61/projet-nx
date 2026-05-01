@@ -233,16 +233,21 @@ class TvShowViewHolder(
         imageView.loadTvShowPoster(tvShow) {
             if (isIptvProvider() && tvShow.providerName == "OLA TV") {
                 // Channel logos often have transparent backgrounds. The default placeholder
-                // (a gray rectangle with a photo/magnifier icon) would show *behind* a
-                // partially-transparent logo, creating a "double image" effect. Replace it
-                // with a transparent drawable so nothing leaks through during loading.
-                placeholder(android.R.color.transparent)
+                // (gray rect + magnifier icon) would show *behind* a partially-transparent
+                // PNG, creating a "double image" effect. Override with an explicit
+                // transparent ColorDrawable — passing the color resource id as a drawable id
+                // doesn't actually clear the placeholder in Glide.
+                val transparentDrawable = android.graphics.drawable.ColorDrawable(0)
+                placeholder(transparentDrawable)
+                fallback(transparentDrawable)
                 val fallbackUrl = com.streamflixreborn.streamflix.providers.OlaTvProvider
                     .fallbackLogoUrlFor(tvShow.title)
                 error(
                     com.bumptech.glide.Glide.with(imageView.context)
                         .load(fallbackUrl)
-                        .placeholder(android.R.color.transparent)
+                        .placeholder(transparentDrawable)
+                        .fallback(transparentDrawable)
+                        .error(transparentDrawable)
                 )
             } else {
                 fallback(R.drawable.glide_fallback_cover)
