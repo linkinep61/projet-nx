@@ -232,22 +232,29 @@ class TvShowViewHolder(
         }
         imageView.loadTvShowPoster(tvShow) {
             if (isIptvProvider() && tvShow.providerName == "OLA TV") {
-                // Channel logos often have transparent backgrounds. The default placeholder
-                // (gray rect + magnifier icon) would show *behind* a partially-transparent
-                // PNG, creating a "double image" effect. Override with an explicit
-                // transparent ColorDrawable — passing the color resource id as a drawable id
-                // doesn't actually clear the placeholder in Glide.
+                // POSTER_LIST_OPTIONS in ArtworkLoader.kt sets placeholder + error to the
+                // gray "glide_fallback_cover" drawable. For IPTV logos (transparent PNGs)
+                // that drawable bleeds through. Wipe BOTH via a fresh RequestOptions
+                // applied AFTER POSTER_LIST_OPTIONS — chained .placeholder() alone doesn't
+                // reset it because the underlying RequestOptions has been merged already.
                 val transparentDrawable = android.graphics.drawable.ColorDrawable(0)
-                placeholder(transparentDrawable)
-                fallback(transparentDrawable)
+                apply(
+                    com.bumptech.glide.request.RequestOptions()
+                        .placeholder(transparentDrawable)
+                        .fallback(transparentDrawable)
+                        .error(transparentDrawable)
+                )
                 val fallbackUrl = com.streamflixreborn.streamflix.providers.OlaTvProvider
                     .fallbackLogoUrlFor(tvShow.title)
                 error(
                     com.bumptech.glide.Glide.with(imageView.context)
                         .load(fallbackUrl)
-                        .placeholder(transparentDrawable)
-                        .fallback(transparentDrawable)
-                        .error(transparentDrawable)
+                        .apply(
+                            com.bumptech.glide.request.RequestOptions()
+                                .placeholder(transparentDrawable)
+                                .fallback(transparentDrawable)
+                                .error(transparentDrawable)
+                        )
                 )
             } else {
                 fallback(R.drawable.glide_fallback_cover)
