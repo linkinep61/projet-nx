@@ -682,11 +682,12 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private fun parsePlayersFromPage(raw: String, forEpisodeNumber: Int?): List<Video.Server> {
         if (raw.isBlank()) return emptyList()
 
-        // Slice the page into per-episode segments when filtering. Each segment is the
-        // text between two `\"episodeNumber\":N` markers — and contains the players[]
-        // array for that episode only.
+        // Slice the page into per-episode segments when filtering. Each episode block
+        // in the inline JSON is keyed by `\"number\":N` (e.g. {"id":...,"number":1,
+        // "title":"Épisode 1",...}). We slice the text between successive `number`
+        // markers so the regex below only matches players for the requested episode.
         val haystack: String = if (forEpisodeNumber != null) {
-            val markerRegex = Regex("\\\\\"episodeNumber\\\\\":(\\d+)")
+            val markerRegex = Regex("\\\\\"number\\\\\":(\\d+)")
             val markers = markerRegex.findAll(raw).toList()
             val target = markers.firstOrNull { it.groupValues[1].toIntOrNull() == forEpisodeNumber }
                 ?: return emptyList()
