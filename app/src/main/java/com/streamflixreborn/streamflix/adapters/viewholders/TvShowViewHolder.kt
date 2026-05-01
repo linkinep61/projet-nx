@@ -218,9 +218,13 @@ class TvShowViewHolder(
 
     private fun setPoster(imageView: ImageView) {
         if (isIptvProvider()) {
+            // IPTV channel logos are rectangular and don't fill a 2:3 portrait card.
+            // FIT_CENTER preserves the aspect ratio without cropping; leave background
+            // transparent so the natural card background shows around the logo (no
+            // double-frame "gray square" artefact from our previous solid bg).
             imageView.scaleType = ImageView.ScaleType.FIT_CENTER
-            imageView.setBackgroundColor(0xFF1a1a2e.toInt())
-            imageView.setPadding(16, 16, 16, 16)
+            imageView.setBackgroundColor(0x00000000)
+            imageView.setPadding(0, 0, 0, 0)
         } else {
             imageView.scaleType = ImageView.ScaleType.CENTER_CROP
             imageView.setBackgroundColor(0x00000000)
