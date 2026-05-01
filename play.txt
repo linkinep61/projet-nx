@@ -1,0 +1,71 @@
+05-01 18:23:45.376 D/OlaTvProvider( 4621): Primary FR portal: http://owliptv.streamtv.to:8080
+05-01 18:23:48.071 D/OlaTvProvider( 4621): MAC portal http://owliptv.streamtv.to:8080: 2 FR genres → [10, 348]
+05-01 18:23:49.173 D/OlaTvProvider( 4621): Genre 10: 448 items / 14 per page = 30 pages, fetching 2..30 in parallel
+05-01 18:23:58.140 D/OlaTvProvider( 4621): Genre 348: 99 items / 14 per page = 8 pages, fetching 2..8 in parallel
+05-01 18:24:00.500 D/OlaTvProvider( 4621): MAC portal http://owliptv.streamtv.to:8080: 518 unique FR channels
+05-01 18:24:01.108 D/OlaTvProvider( 4621): iptv-org FR logos loaded: 679 entries
+05-01 18:24:02.155 D/OlaTvProvider( 4621): Primary FR cid ingested: 518 streams, registry size=310 in 19314ms
+05-01 18:24:02.162 D/OlaTvProvider( 4621): Phase 3 fresh scan: probing 30 candidate cids…
+05-01 18:24:05.680 D/OlaTvProvider( 4621): MAC portal http://main2.cwdn.cx: 12 FR genres → [1363, 768, 765]
+05-01 18:24:06.210 D/OlaTvProvider( 4621): Genre 1363: 162 items / 14 per page = 12 pages, fetching 2..12 in parallel
+05-01 18:24:08.195 D/OlaTvProvider( 4621): MAC portal http://mag.greatott.me:80: 26 FR genres → [1011, 2340, 2351]
+05-01 18:24:08.341 D/OlaTvProvider( 4621): Genre 768: 129 items / 14 per page = 10 pages, fetching 2..10 in parallel
+05-01 18:24:08.506 D/OlaTvProvider( 4621): Genre 1011: 28 items / 14 per page = 2 pages, fetching 2..2 in parallel
+05-01 18:24:09.133 D/OlaTvProvider( 4621): Genre 2340: 218 items / 14 per page = 16 pages, fetching 2..16 in parallel
+05-01 18:24:10.239 D/OlaTvProvider( 4621): Genre 765: 101 items / 14 per page = 8 pages, fetching 2..8 in parallel
+05-01 18:24:11.603 D/OlaTvProvider( 4621): Genre 1493: 37 items / 14 per page = 3 pages, fetching 2..3 in parallel
+05-01 18:24:11.996 D/OlaTvProvider( 4621): Genre 1001: 173 items / 14 per page = 13 pages, fetching 2..13 in parallel
+05-01 18:24:12.893 D/OlaTvProvider( 4621): Genre 1531: 20 items / 14 per page = 2 pages, fetching 2..2 in parallel
+05-01 18:24:13.632 D/OlaTvProvider( 4621): Genre 766: 83 items / 14 per page = 6 pages, fetching 2..6 in parallel
+05-01 18:24:13.876 D/OlaTvProvider( 4621): Genre 616: 199 items / 14 per page = 15 pages, fetching 2..15 in parallel
+05-01 18:24:13.907 D/OlaTvProvider( 4621): MAC portal http://5.mdtv.me:80: 2 FR genres → [172, 130]
+05-01 18:24:15.097 D/OlaTvProvider( 4621): Genre 130: 211 items / 14 per page = 16 pages, fetching 2..16 in parallel
+05-01 18:24:15.175 D/OlaTvProvider( 4621): Genre 1152: 29 items / 14 per page = 3 pages, fetching 2..3 in parallel
+05-01 18:24:15.443 D/OlaTvProvider( 4621): Genre 1002: 126 items / 14 per page = 9 pages, fetching 2..9 in parallel
+05-01 18:24:16.186 D/OlaTvProvider( 4621): Genre 764: 86 items / 14 per page = 7 pages, fetching 2..7 in parallel
+05-01 18:24:16.668 D/OlaTvProvider( 4621): Genre 1395: 42 items / 14 per page = 3 pages, fetching 2..3 in parallel
+05-01 18:24:17.310 D/OlaTvProvider( 4621): MAC portal http://5.mdtv.me:80: 222 unique FR channels
+05-01 18:24:17.605 D/OlaTvProvider( 4621):   Phase 3 cid=20875 IS FR → +222 streams (total FR cids: 2)
+05-01 18:24:17.653 D/OlaTvProvider( 4621): Genre 620: 74 items / 14 per page = 6 pages, fetching 2..6 in parallel
+05-01 18:24:17.758 D/OlaTvProvider( 4621): Genre 1375: 65 items / 14 per page = 5 pages, fetching 2..5 in parallel
+05-01 18:24:18.787 D/OlaTvProvider( 4621): Genre 763: 69 items / 14 per page = 5 pages, fetching 2..5 in parallel
+05-01 18:24:18.943 D/OlaTvProvider( 4621): Genre 2188: 209 items / 14 per page = 15 pages, fetching 2..15 in parallel
+05-01 18:24:19.997 D/OlaTvProvider( 4621): Genre 1275: 40 items / 14 per page = 3 pages, fetching 2..3 in parallel
+05-01 18:24:20.641 D/OlaTvProvider( 4621): Genre 2400: 20 items / 14 per page = 2 pages, fetching 2..2 in parallel
+05-01 18:24:21.182 D/OlaTvProvider( 4621): Genre 1058: 30 items / 14 per page = 3 pages, fetching 2..3 in parallel
+05-01 18:24:21.299 D/OlaTvProvider( 4621): Genre 2182: 45 items / 14 per page = 4 pages, fetching 2..4 in parallel
+05-01 18:24:21.514 D/OlaTvProvider( 4621): MAC portal http://main2.cwdn.cx: 814 unique FR channels
+05-01 18:24:21.969 D/OlaTvProvider( 4621):   Phase 3 cid=20183 IS FR → +814 streams (total FR cids: 3)
+05-01 18:24:22.033 D/OlaTvProvider( 4621): Genre 2206: 16 items / 14 per page = 2 pages, fetching 2..2 in parallel
+05-01 18:24:22.963 D/OlaTvProvider( 4621): Genre 1938: 19 items / 14 per page = 2 pages, fetching 2..2 in parallel
+05-01 18:24:23.576 D/OlaTvProvider( 4621): Genre 1555: 106 items / 14 per page = 8 pages, fetching 2..8 in parallel
+05-01 18:24:25.164 D/OlaTvProvider( 4621): Genre 1942: 19 items / 14 per page = 2 pages, fetching 2..2 in parallel
+05-01 18:24:25.798 D/OlaTvProvider( 4621): Genre 619: 87 items / 14 per page = 7 pages, fetching 2..7 in parallel
+05-01 18:24:26.144 D/OlaTvProvider( 4621): MAC portal http://4y-ott.online:80: 12 FR genres → [1363, 768, 765]
+05-01 18:24:26.502 D/OlaTvProvider( 4621): Genre 1363: 162 items / 14 per page = 12 pages, fetching 2..12 in parallel
+05-01 18:24:26.995 D/OlaTvProvider( 4621): MAC portal http://16243-sides.cdn-o2.me:80: 12 FR genres → [1363, 768, 765]
+05-01 18:24:27.280 D/OlaTvProvider( 4621): Genre 1363: 162 items / 14 per page = 12 pages, fetching 2..12 in parallel
+05-01 18:24:27.363 D/OlaTvProvider( 4621): Genre 1874: 101 items / 14 per page = 8 pages, fetching 2..8 in parallel
+05-01 18:24:27.641 D/OlaTvProvider( 4621): MAC portal http://line.linehunt.org:80: 1 FR genres → [579]
+05-01 18:24:27.874 D/OlaTvProvider( 4621): getServers 'ab1' (AB1): 7 stream(s) — progressive emission
+05-01 18:24:27.876 D/OlaTvProvider( 4621):   primary[0] cid=21338 label='HD FR' cmd=ffmpeg http://localhost/ch/1405_
+05-01 18:24:27.999 D/OlaTvProvider( 4621): Genre 579: 55 items / 14 per page = 4 pages, fetching 2..4 in parallel
+05-01 18:24:28.028 D/OlaTvProvider( 4621):   → emit OLA[ab1] HD FR (cid=21338)
+05-01 18:24:28.028 D/OlaTvProvider( 4621):   → emit OLA[ab1] HEVC FR (cid=21338)
+05-01 18:24:28.028 D/OlaTvProvider( 4621):   → emit OLA[ab1] HD (cid=20875)
+05-01 18:24:28.028 D/OlaTvProvider( 4621):   → emit OLA[ab1] HEVC (cid=20183)
+05-01 18:24:28.028 D/OlaTvProvider( 4621):   → emit OLA[ab1] Source 5 (cid=20183)
+05-01 18:24:28.028 D/OlaTvProvider( 4621):   → emit OLA[ab1] FHD (cid=20183)
+05-01 18:24:28.028 D/OlaTvProvider( 4621):   → emit OLA[ab1] UHD (cid=20183)
+05-01 18:24:28.210 D/OlaTvProvider( 4621): Genre 768: 129 items / 14 per page = 10 pages, fetching 2..10 in parallel
+05-01 18:24:28.952 D/OlaTvProvider( 4621): MAC portal http://line.linehunt.org:80: 55 unique FR channels
+05-01 18:24:28.993 D/OlaTvProvider( 4621): Genre 768: 129 items / 14 per page = 10 pages, fetching 2..10 in parallel
+05-01 18:24:29.094 D/OlaTvProvider( 4621):   Phase 3 cid=21359 IS FR → +55 streams (total FR cids: 4)
+05-01 18:24:29.199 D/OlaTvProvider( 4621): Genre 1077: 180 items / 14 per page = 13 pages, fetching 2..13 in parallel
+05-01 18:24:29.251 D/OlaTvProvider( 4621): getVideo → http://iiilllaaiiiiiiiia1.funtogether.xyz:8080/JsTgLBAFQ2/i5yDhRdi1b/1405?play_token=4RMuSgfAey
+05-01 18:24:30.020 D/OlaTvProvider( 4621): Genre 765: 101 items / 14 per page = 8 pages, fetching 2..8 in parallel
+05-01 18:24:30.669 D/OlaTvProvider( 4621): Genre 765: 101 items / 14 per page = 8 pages, fetching 2..8 in parallel
+05-01 18:24:31.539 D/OlaTvProvider( 4621): Genre 1493: 37 items / 14 per page = 3 pages, fetching 2..3 in parallel
+05-01 18:24:31.583 D/OlaTvProvider( 4621): Genre 906: 27 items / 14 per page = 2 pages, fetching 2..2 in parallel
+05-01 18:24:32.085 D/OlaTvProvider( 4621): Genre 1493: 37 items / 14 per page = 3 pages, fetching 2..3 in parallel
+05-01 18:24:32.207 D/OlaTvProvider( 4621): Genre 1085: 164 items / 14 per page = 12 pages, fetching 2..12 in parallel

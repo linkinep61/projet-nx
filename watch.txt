@@ -1,0 +1,39 @@
+05-01 18:23:48.173 I/lowmemorykiller(  168): lmkd data connection established
+05-01 18:23:48.204 I/lowmemorykiller(  168): Using psi monitors for memory pressure detection
+05-01 18:23:48.204 I/lowmemorykiller(  168): Properties reinitilized
+05-01 18:23:48.204 I/lowmemorykiller( 4924): lmkd updated properties successfully
+05-01 18:23:48.204 I/lowmemorykiller(  168): lmkd data connection dropped
+05-01 18:23:48.204 I/lowmemorykiller(  168): closing lmkd data connection
+05-01 18:24:03.515 I/lowmemorykiller(  168): Kill 'com.google.android.packageinstaller' (4601), uid 10101, oom_score_adj 975 to free 51688kB rss, 35460kB swap; reason: low watermark is breached
+05-01 18:24:03.536 I/lowmemorykiller(  168): Kill 'com.google.android.gms.ui' (4130), uid 10144, oom_score_adj 965 to free 61952kB rss, 44392kB swap; reason: low watermark is breached
+05-01 18:24:03.542 W/lowmemorykiller(  168): Failed to open /proc/4601/task; errno=2: process pid(4601) might have died
+05-01 18:24:03.543 E/lowmemorykiller(  168): process_mrelease 4601 failed: No such process
+05-01 18:24:03.549 E/lowmemorykiller(  168): process_mrelease 4130 failed: No such process
+05-01 18:24:03.559 I/lowmemorykiller(  168): Kill 'com.google.android.marvin.talkback' (4161), uid 10168, oom_score_adj 955 to free 50996kB rss, 36144kB swap; reason: low watermark is breached
+05-01 18:24:13.430 I/lowmemorykiller(  168): Kill 'com.google.android.rkpdapp' (4432), uid 10190, oom_score_adj 955 to free 49816kB rss, 36924kB swap; reason: low watermark is breached
+05-01 18:24:13.450 E/lowmemorykiller(  168): process_mrelease 4432 failed: No such process
+05-01 18:24:13.459 I/lowmemorykiller(  168): Kill 'com.google.android.apps.wallpaper' (5131), uid 10180, oom_score_adj 945 to free 59552kB rss, 34008kB swap; reason: low watermark is breached
+05-01 18:24:13.480 I/lowmemorykiller(  168): Kill 'com.google.android.webview:webview_service' (5171), uid 10163, oom_score_adj 935 to free 59924kB rss, 32868kB swap; reason: low watermark is breached
+05-01 18:24:13.579 I/lowmemorykiller(  168): Kill 'com.android.chrome' (3545), uid 10146, oom_score_adj 925 to free 52172kB rss, 36696kB swap; reason: low watermark is breached
+05-01 18:24:13.595 I/lowmemorykiller(  168): Kill 'com.google.android.partnersetup' (2990), uid 10137, oom_score_adj 915 to free 52200kB rss, 34252kB swap; reason: low watermark is breached
+05-01 18:24:13.639 I/lowmemorykiller(  168): Kill 'com.android.settings' (5219), uid 1000, oom_score_adj 905 to free 168208kB rss, 28680kB swap; reason: low watermark is breached
+05-01 18:24:13.663 E/lowmemorykiller(  168): process_mrelease 5219 failed: No such process
+05-01 18:24:13.689 I/lowmemorykiller(  168): Kill 'com.google.android.googlequicksearchbox:search' (1670), uid 10145, oom_score_adj 905 to free 119920kB rss, 45472kB swap; reason: low watermark is breached
+05-01 18:27:44.055 I/lowmemorykiller(  168): lmkd data connection established
+05-01 18:27:44.101 I/lowmemorykiller(  168): Using psi monitors for memory pressure detection
+05-01 18:27:44.101 I/lowmemorykiller(  168): Properties reinitilized
+05-01 18:27:44.101 I/lowmemorykiller( 6203): lmkd updated properties successfully
+05-01 18:27:44.101 I/lowmemorykiller(  168): lmkd data connection dropped
+05-01 18:27:44.101 I/lowmemorykiller(  168): closing lmkd data connection
+05-01 18:28:14.584 I/lowmemorykiller(  168): lmkd data connection established
+05-01 18:28:14.634 I/lowmemorykiller(  168): Using psi monitors for memory pressure detection
+05-01 18:28:14.634 I/lowmemorykiller(  168): Properties reinitilized
+05-01 18:28:14.635 I/lowmemorykiller( 7044): lmkd updated properties successfully
+05-01 18:28:14.635 I/lowmemorykiller(  168): lmkd data connection dropped
+05-01 18:28:14.635 I/lowmemorykiller(  168): closing lmkd data connection
+05-01 18:28:18.493 I/lowmemorykiller(  168): lmkd data connection established
+05-01 18:28:18.527 I/lowmemorykiller(  168): Using psi monitors for memory pressure detection
+05-01 18:28:18.527 I/lowmemorykiller(  168): Properties reinitilized
+05-01 18:28:18.527 I/lowmemorykiller( 7059): lmkd updated properties successfully
+05-01 18:28:18.527 I/lowmemorykiller(  168): lmkd data connection dropped
+05-01 18:28:18.527 I/lowmemorykiller(  168): closing lmkd data connection
