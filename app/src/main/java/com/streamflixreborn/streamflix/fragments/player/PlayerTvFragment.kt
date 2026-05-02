@@ -496,14 +496,9 @@ class PlayerTvFragment : Fragment() {
                         binding.settings.setOnServerSelectedListener { server ->
                             viewModel.getVideo(state.servers.find { server.id == it.id }!!)
                         }
-                        binding.settings.setOnServerDownloadClickedListener { serverSetting ->
-                            val server = servers.find { it.id == serverSetting.id } ?: return@setOnServerDownloadClickedListener
-                            downloadFromServer(server)
-                        }
-                        binding.settings.onDownloadsClicked = {
-                            com.streamflixreborn.streamflix.download.DownloadsBottomSheet()
-                                .show(childFragmentManager, com.streamflixreborn.streamflix.download.DownloadsBottomSheet.TAG)
-                        }
+                        // Downloads disabled on TV — not enough storage
+                        // binding.settings.setOnServerDownloadClickedListener { ... }
+                        // binding.settings.onDownloadsClicked = { ... }
 
                         // Chaîne starts empty — clear old entries from previous channel
                         PlayerSettingsView.Settings.ChannelVariant.list.clear()
@@ -694,14 +689,7 @@ class PlayerTvFragment : Fragment() {
                     binding.settings.setOnServerSelectedListener { sel ->
                         servers.find { sel.id == it.id }?.let { viewModel.getVideo(it) }
                     }
-                    binding.settings.setOnServerDownloadClickedListener { serverSetting ->
-                        val server = servers.find { it.id == serverSetting.id } ?: return@setOnServerDownloadClickedListener
-                        downloadFromServer(server)
-                    }
-                    binding.settings.onDownloadsClicked = {
-                        com.streamflixreborn.streamflix.download.DownloadsBottomSheet()
-                            .show(childFragmentManager, com.streamflixreborn.streamflix.download.DownloadsBottomSheet.TAG)
-                    }
+                    // Downloads disabled on TV
                 }
             }
 
@@ -1091,13 +1079,8 @@ class PlayerTvFragment : Fragment() {
 
             updatePlayerHeader()
 
-            binding.pvPlayer.controller.binding.btnExoExternalPlayer.setOnClickListener {
-                Toast.makeText(
-                    requireContext(),
-                    getString(R.string.player_external_player_error_video),
-                    Toast.LENGTH_SHORT
-                ).show()
-            }
+            // Hide external player button on TV — Projectivy Launcher intercepts ACTION_VIEW intents
+            binding.pvPlayer.controller.binding.btnExoExternalPlayer.visibility = View.GONE
 
             binding.pvPlayer.controller.binding.exoReplay.setOnClickListener {
                 player.seekTo(0)
@@ -1741,107 +1724,10 @@ class PlayerTvFragment : Fragment() {
                 usingWebView = false
             }
 
-            binding.pvPlayer.controller.binding.btnExoExternalPlayer.setOnClickListener {
-                val videoTitle = when (val type = args.videoType) {
-                    is Video.Type.Movie -> type.title
-                    is Video.Type.Episode -> "${type.tvShow.title} • S${type.season.number} E${type.number}"
-                }
-
-                var sourceUri: Uri
-                val mimeType = "video/*"
-
-                val initialSource = video.source
-
-                if (initialSource.startsWith("data:application/vnd.apple.mpegurl;base64,")) {
-                    val playlistContent = decodeBase64Uri(initialSource)
-                    val extractedUrl =
-                        if (playlistContent != null) extractUrlFromPlaylist(playlistContent) else null
-
-                    if (extractedUrl != null) {
-                        sourceUri = extractedUrl.toUri()
-                        Log.i("ExternalPlayer", "Link reale estratto TV: $sourceUri")
-                    } else {
-                        try {
-                            val file = File(requireContext().cacheDir, "stream.m3u8")
-                            FileOutputStream(file).use {
-                                it.write(
-                                    playlistContent?.toByteArray() ?: ByteArray(0)
-                                )
-                            }
-                            sourceUri = FileProvider.getUriForFile(
-                                requireContext(),
-                                "${requireContext().packageName}.provider",
-                                file
-                            )
-                        } catch (ignored: Exception) {
-                            sourceUri = initialSource.toUri()
-                        }
-                    }
-                } else {
-                    sourceUri = initialSource.toUri()
-                }
-
-                Log.i("ExternalPlayer", "Avvio intent TV con URI: $sourceUri e MIME: $mimeType")
-
-                val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(sourceUri, mimeType)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-
-                    putExtra("title", videoTitle)
-                    putExtra("position", player.currentPosition.toInt())
-                    putExtra("return_result", true)
-
-                    video.headers?.forEach { (key, value) ->
-                        putExtra(key, value)
-                    }
-
-                    putExtra(
-                        "extra_headers",
-                        video.headers?.map { "${it.key}: ${it.value}" }?.toTypedArray()
-                    )
-
-                    if (video.headers != null) {
-                        val headersArray =
-                            video.headers.flatMap { listOf(it.key, it.value) }.toTypedArray()
-                        putExtra("headers", headersArray)
-                    }
-                }
-
-                try {
-                    val receiverIntent = Intent("ACTION_PLAYER_CHOSEN_TV").apply {
-                        setPackage(requireContext().packageName)
-                    }
-                    val pendingIntent = PendingIntent.getBroadcast(
-                        requireContext(), 0, receiverIntent,
-                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
-                    )
-
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
-                        startActivity(
-                            Intent.createChooser(
-                                intent,
-                                getString(R.string.player_external_player_title),
-                                pendingIntent.intentSender
-                            )
-                        )
-                    } else {
-                        startActivity(
-                            Intent.createChooser(
-                                intent,
-                                getString(R.string.player_external_player_title)
-                            )
-                        )
-                    }
-                } catch (e: Exception) {
-                    Log.e("ExternalPlayer", "Errore selettore app TV", e)
-                    startActivity(
-                        Intent.createChooser(
-                            intent,
-                            getString(R.string.player_external_player_title)
-                        )
-                    )
-                }
-            }
+            // Hide external player button on TV to prevent Projectivy Launcher
+            // (or any other launcher) from intercepting the ACTION_VIEW intent
+            // and overlaying on top of our built-in ExoPlayer.
+            binding.pvPlayer.controller.binding.btnExoExternalPlayer.visibility = View.GONE
 
             // Remove previous listener (if any) to avoid leaks across displayVideo() retries.
             activePlayerListener?.let { try { player.removeListener(it) } catch (_: Exception) {} }

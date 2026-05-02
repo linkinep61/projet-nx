@@ -388,10 +388,22 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
         this.onServerDownloadClicked = listener
     }
 
+    /** Called when the user bans an IPTV server (✕ button). */
+    var onServerBanned: ((Settings.Server) -> Unit)? = null
+
+    /** Called when the user toggles favorite on an IPTV server (★ button). */
+    var onServerFavoriteToggled: ((Settings.Server) -> Unit)? = null
+
     protected var onChannelVariantSelected: ((Settings.ChannelVariant) -> Unit)? = null
     fun setOnChannelVariantSelectedListener(listener: (variant: Settings.ChannelVariant) -> Unit) {
         this.onChannelVariantSelected = listener
     }
+
+    /** Called when the user bans an IPTV channel variant (✕ button in Chaîne). */
+    var onChannelVariantBanned: ((Settings.ChannelVariant) -> Unit)? = null
+
+    /** Called when the user toggles favorite on an IPTV channel variant (★ button in Chaîne). */
+    var onChannelVariantFavoriteToggled: ((Settings.ChannelVariant) -> Unit)? = null
 
 
     interface Item
@@ -1258,10 +1270,15 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
          *  Populated by the provider when getServers returns OLA TV results.
          *  Selecting a variant switches to that specific OLA TV stream. */
         class ChannelVariant(
-            val id: String,    // "m3u8::<url>"
-            val name: String,  // "M6 4K", "M6 HEVC FR", etc.
+            val id: String,          // "ola_stream::cid::label::url"
+            val name: String,        // "FRANCE", "HEVC FRANCE", etc.
+            val channelKey: String = "",  // visual channel key, e.g. "France 4"
         ) : Item {
             var isSelected: Boolean = false
+            var isFavorite: Boolean = false
+
+            /** True if this is an IPTV (OLA TV) variant — enables ban/favorite UI. */
+            val isIptv: Boolean get() = id.startsWith("ola_stream::")
 
             companion object : Settings() {
                 val list = mutableListOf<ChannelVariant>()
@@ -1272,6 +1289,27 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                 /** True when there are variants to show (hide button if empty). */
                 val hasVariants: Boolean
                     get() = list.size > 1
+
+                /**
+                 * Ban a channel variant: remove it from the list.
+                 * Returns the index it was at, or -1 if not found.
+                 */
+                fun ban(variant: ChannelVariant): Int {
+                    val index = list.indexOf(variant)
+                    if (index >= 0) {
+                        list.removeAt(index)
+                        IptvFavorites.removeFavorite(variant.channelKey, variant.id)
+                    }
+                    return index
+                }
+
+                /**
+                 * Add a replacement variant at the given index (from pool renewal).
+                 */
+                fun addReplacement(variant: ChannelVariant, atIndex: Int = list.size) {
+                    val safeIndex = atIndex.coerceIn(0, list.size)
+                    list.add(safeIndex, variant)
+                }
             }
         }
 
@@ -1295,7 +1333,6 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                             name = it.name,
                         )
                     })
-
                     list.firstOrNull()?.isSelected = true
                 }
 

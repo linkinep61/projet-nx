@@ -457,12 +457,14 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                             settingsView.onServerSelected?.invoke(item)
                             settingsView.displaySettings(Setting.MAIN)
                         }
+
+                        // (ban and favorite are handled by their own buttons below)
                         else -> {}
                     }
                 }
             }
 
-            // Download button — visible only for server items
+            // Download button — visible only for non-IPTV server items
             if (item is Settings.Server) {
                 val knownBad = isKnownWebViewOnlyServer(item.name)
                 binding.ivSettingDownload.visibility = View.VISIBLE
@@ -472,6 +474,44 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                 }
             } else {
                 binding.ivSettingDownload.visibility = View.GONE
+            }
+
+            // IPTV-specific buttons: favorite (★) and ban (✕) — for ChannelVariant items
+            if (item is Settings.ChannelVariant && item.isIptv) {
+                // Favorite button
+                binding.ivSettingFavorite.visibility = View.VISIBLE
+                binding.ivSettingFavorite.setImageResource(
+                    if (item.isFavorite) R.drawable.ic_favorite_enable
+                    else R.drawable.ic_favorite_disable
+                )
+                binding.ivSettingFavorite.imageTintList = android.content.res.ColorStateList.valueOf(
+                    if (item.isFavorite) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                )
+                binding.ivSettingFavorite.setOnClickListener {
+                    val nowFav = IptvFavorites.toggleFavorite(item.channelKey, item.id)
+                    item.isFavorite = nowFav
+                    // Unfavorite all others in the same channel
+                    if (nowFav) {
+                        Settings.ChannelVariant.list.filter { it !== item && it.isIptv }.forEach {
+                            it.isFavorite = false
+                        }
+                    }
+                    settingsView.onChannelVariantFavoriteToggled?.invoke(item)
+                    settingsView.refreshChannelVariantList()
+                }
+
+                // Ban button (✕)
+                binding.ivSettingBan.visibility = View.VISIBLE
+                binding.ivSettingBan.imageTintList = android.content.res.ColorStateList.valueOf(0xFF808080.toInt())
+                binding.ivSettingBan.setOnClickListener {
+                    settingsView.onChannelVariantBanned?.invoke(item)
+                    // Remove from list and refresh
+                    Settings.ChannelVariant.ban(item)
+                    settingsView.refreshChannelVariantList()
+                }
+            } else {
+                binding.ivSettingFavorite.visibility = View.GONE
+                binding.ivSettingBan.visibility = View.GONE
             }
 
             // CLEAN RESET
@@ -601,10 +641,25 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
 
                     is Settings.KeepScreenOn -> context.getString(item.stringId)
 
-                    is Settings.ChannelVariant -> item.name
+                    is Settings.ChannelVariant -> {
+                        val prefix = when {
+                            item.isSelected && item.isIptv -> "▶ "
+                            item.isFavorite && item.isIptv -> "★ "
+                            else -> ""
+                        }
+                        prefix + item.name
+                    }
                     is Settings.Server -> item.name
                     else -> ""
                 }
+
+                // Green text for the active IPTV source, default for others
+                setTextColor(
+                    if (item is Settings.ChannelVariant && item.isIptv && item.isSelected)
+                        0xFF4CAF50.toInt()  // Material Green
+                    else
+                        ContextCompat.getColor(context, R.color.setting_text)
+                )
             }
 
             binding.tvSettingSubText.apply {

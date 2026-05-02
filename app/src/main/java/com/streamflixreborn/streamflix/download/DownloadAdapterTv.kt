@@ -116,6 +116,20 @@ class DownloadAdapterTv(
             binding.root.setOnClickListener {
                 if (item.isCompleted) onClick(item)
             }
+
+            // D-pad: RIGHT from row → action button → delete button
+            if (binding.btnAction.visibility == View.VISIBLE) {
+                binding.root.nextFocusRightId = binding.btnAction.id
+                binding.btnAction.nextFocusLeftId = binding.root.id
+                if (binding.btnDelete.visibility == View.VISIBLE) {
+                    binding.btnAction.nextFocusRightId = binding.btnDelete.id
+                    binding.btnDelete.nextFocusLeftId = binding.btnAction.id
+                    binding.btnDelete.nextFocusRightId = binding.btnDelete.id // stay
+                }
+            } else if (binding.btnDelete.visibility == View.VISIBLE) {
+                binding.root.nextFocusRightId = binding.btnDelete.id
+                binding.btnDelete.nextFocusLeftId = binding.root.id
+            }
         }
     }
 

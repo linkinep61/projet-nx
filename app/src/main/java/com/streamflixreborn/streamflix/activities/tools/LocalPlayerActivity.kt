@@ -103,7 +103,8 @@ class LocalPlayerActivity : AppCompatActivity() {
             initPlayer(filePath)
         } catch (e: Exception) {
             android.util.Log.e("LocalPlayer", "onCreate failed", e)
-            fallbackToSystemPlayer(filePath)
+            android.widget.Toast.makeText(this, "Erreur de lecture vidéo", android.widget.Toast.LENGTH_SHORT).show()
+            finish()
         }
     }
 
