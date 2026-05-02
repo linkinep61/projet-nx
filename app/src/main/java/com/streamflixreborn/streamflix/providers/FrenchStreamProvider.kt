@@ -1,5 +1,6 @@
 package com.streamflixreborn.streamflix.providers
 
+import android.util.Log
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.BuildConfig
 import com.streamflixreborn.streamflix.adapters.AppAdapter
@@ -390,7 +391,12 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     /** Parse episodes from div#episodeN.fullsfeature blocks.
      *  Each block is delimited by <!-- episode N --> comments in the HTML
-     *  and contains a div.selink with the episode title and embed links. */
+     *  and contains a div.selink with the episode title and embed links.
+     *
+     *  If the page has no episode blocks but DOES have movie players, we
+     *  synthesize a single "episode 1" so the user can still launch playback
+     *  — this happens when FrenchStream lists a movie on its /series catalog
+     *  (e.g. "Le Mage du Kremlin") and the item gets typed as TvShow. */
     private fun parseEpisodesFromPage(document: Document, seasonId: String): List<Episode> {
         val out = mutableListOf<Episode>()
         document.select("div.fullsfeature[id^=episode]").forEach { epDiv ->
@@ -405,6 +411,23 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     title = title,
                 )
             )
+        }
+        if (out.isEmpty()) {
+            val hasMoviePlayers = document.selectFirst("button.player-option") != null
+            if (hasMoviePlayers) {
+                Log.d("FrenchStream",
+                    "No episode blocks but page has movie players — " +
+                    "synthesizing fake episode 1 for $seasonId")
+                val movieTitle = document.selectFirst("h1#s-title")?.ownText()?.trim()
+                    ?: document.selectFirst("meta[property=og:title]")?.attr("content").orEmpty()
+                out.add(
+                    Episode(
+                        id = "$seasonId/1",
+                        number = 1,
+                        title = movieTitle.ifBlank { "Film" },
+                    )
+                )
+            }
         }
         return out.sortedBy { it.number }
     }
@@ -429,24 +452,40 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         if (forEpisodeNumber != null) {
             // ── Series episode: extract embed links from the episode block ──
             val epDiv = document.selectFirst("div#episode${forEpisodeNumber}.fullsfeature")
-                ?: return emptyList()
-            epDiv.select("a[href]").forEachIndexed { i, link ->
-                val href = link.attr("href").trim()
-                if (href.isBlank() || href.startsWith("#") || href.startsWith("javascript")) return@forEachIndexed
-                if (!href.startsWith("http")) return@forEachIndexed
-                if (!seen.add(href)) return@forEachIndexed
-                if (ignoreSource("", href)) return@forEachIndexed
-                val serviceName = Extractor.identifyServiceName(href)
-                    ?: href.substringAfter("//").substringBefore("/")
-                        .substringBeforeLast(".").substringAfterLast(".")
-                val displayName = serviceName.replaceFirstChar { it.uppercase() }
-                out.add(Video.Server(
-                    id = "fs_ep${forEpisodeNumber}_$i",
-                    name = displayName,
-                    src = href,
-                ))
+            if (epDiv == null) {
+                // The /series catalog on FrenchStream sometimes lists movies
+                // (e.g. "Le Mage du Kremlin", "Aventures Croisées") which then
+                // get classified as TvShow upstream. The detail page has NO
+                // episode blocks — but it has the movie button.player-option
+                // structure. Fall through to the movie-parsing branch so the
+                // user still gets the players instead of an empty list.
+                Log.d("FrenchStream",
+                    "Episode #$forEpisodeNumber not found in detail page — " +
+                    "falling back to movie player parsing")
+                // (don't return; let the movie branch run below)
+            } else {
+                epDiv.select("a[href]").forEachIndexed { i, link ->
+                    val href = link.attr("href").trim()
+                    if (href.isBlank() || href.startsWith("#") || href.startsWith("javascript")) return@forEachIndexed
+                    if (!href.startsWith("http")) return@forEachIndexed
+                    if (!seen.add(href)) return@forEachIndexed
+                    if (ignoreSource("", href)) return@forEachIndexed
+                    val serviceName = Extractor.identifyServiceName(href)
+                        ?: href.substringAfter("//").substringBefore("/")
+                            .substringBeforeLast(".").substringAfterLast(".")
+                    val displayName = serviceName.replaceFirstChar { it.uppercase() }
+                    out.add(Video.Server(
+                        id = "fs_ep${forEpisodeNumber}_$i",
+                        name = displayName,
+                        src = href,
+                    ))
+                }
+                return out
             }
-        } else {
+        }
+        // Movie OR fallback when episode block was missing (movie wrongly
+        // classified as series upstream). Both paths land here.
+        run {
             // ── Movie: parse button.player-option elements ──
             document.select("button.player-option").forEachIndexed { i, button ->
                 val playerName = button.attr("data-player").trim()
