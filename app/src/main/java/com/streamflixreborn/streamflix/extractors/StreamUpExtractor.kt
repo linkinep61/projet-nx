@@ -12,6 +12,7 @@ class StreamUpExtractor : Extractor() {
 
     override val name = "StreamUp"
     override val mainUrl = "https://strmup.to"
+    override val aliasUrls = listOf("https://strmup.cc")
 
     override suspend fun extract(link: String): Video {
         val fileCode = URL(link).path.split("/").last { it.isNotEmpty() }

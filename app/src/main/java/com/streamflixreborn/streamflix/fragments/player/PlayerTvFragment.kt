@@ -684,9 +684,14 @@ class PlayerTvFragment : Fragment() {
 
                         val sameNameCount = PlayerSettingsView.Settings.ChannelVariant.list.count { it.name == label }
                         if (sameNameCount < 3) {
-                            PlayerSettingsView.Settings.ChannelVariant.list.add(
-                                PlayerSettingsView.Settings.ChannelVariant(id = server.id, name = label)
+                            val newVariant = PlayerSettingsView.Settings.ChannelVariant(
+                                id = server.id, name = label, channelKey = currentChannelKeyTv,
                             )
+                            // Restore favorite state from persistence
+                            if (IptvFavorites.isFavorite(currentChannelKeyTv, server.id)) {
+                                newVariant.isFavorite = true
+                            }
+                            PlayerSettingsView.Settings.ChannelVariant.list.add(newVariant)
                             if (PlayerSettingsView.Settings.ChannelVariant.list.size == 1) {
                                 PlayerSettingsView.Settings.ChannelVariant.list.first().isSelected = true
                             }
@@ -2490,8 +2495,13 @@ class PlayerTvFragment : Fragment() {
         private fun needsDoH(url: String): Boolean {
             // sprintcdn/r66nv9ed.com: Filemoon CDN — system DNS resolves to wrong edge,
             // token is edge-bound so we need DoH to hit the correct server
+            // cloudatacdn.com: Dood final CDN — DefaultHttpDataSource breaks after
+            // ~4s with "UnknownHostException (no network)" mid-stream because the
+            // HttpURLConnection keepalive drops; OkHttp + DoH keeps the connection
+            // alive and retries cleanly.
             return url.contains("sprintcdn", ignoreCase = true)
                 || url.contains("r66nv9ed.com", ignoreCase = true)
+                || url.contains("cloudatacdn.com", ignoreCase = true)
         }
 
         /**

@@ -12,29 +12,7 @@ class USTRExtractor: Extractor() {
     override val aliasUrls = listOf("https://up4stream.com", "https://up4fun.top")
 
     override suspend fun extract(link: String): Video {
-        val service = Extractor.createJsoupService<Service>(mainUrl)
-        val linkJustParameter = link.replace(mainUrl, "")
-
-        val document = service.getSource(linkJustParameter)
-        val packedJS = Regex("(eval\\(function\\(p,a,c,k,e,d\\)(.|\\n)*?)</script>")
-            .find(document.toString())?.let { it.groupValues[1] }
-            ?: throw Exception("Packed JS not found")
-        val unPacked = JsUnpacker(packedJS).unpack()
-            ?: throw Exception("Unpacked is null")
-        val sources = Regex("""file:"(.*?)"""")
-            .findAll(
-                Regex("""sources:\[(.*?)]""")
-                    .find(unPacked)?.groupValues?.get(1)
-                    ?: throw Exception("No sources found")
-            )
-            .map { it.groupValues[1] }
-            .toList()
-
-
-        return Video(
-            source = sources.firstOrNull()
-                ?: throw Exception("USTR: No stream URL found in sources"),
-        )
+        throw Exception("[USTR] is offline (domain ups2up.fun dead, last checked 2026-05-01)")
     }
 
 

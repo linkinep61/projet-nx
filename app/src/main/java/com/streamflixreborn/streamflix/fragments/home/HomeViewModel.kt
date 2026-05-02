@@ -65,6 +65,13 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
     var hasLoaded: Boolean = false
         private set
 
+    /** Tracks the in-flight getHome() job so we can cancel any previous one
+     *  before launching a new one. Without this, two ProviderChangeNotifier
+     *  bursts at startup (or any race) would launch concurrent enrichments,
+     *  each emitting its own category list — the UI then flickers between
+     *  "Séries Récentes" / "Films Récents" / etc. for the same row. */
+    private var homeJob: kotlinx.coroutines.Job? = null
+
     @OptIn(ExperimentalCoroutinesApi::class)
     val state: Flow<State> = combine(
         _state,
@@ -370,11 +377,22 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         }.awaitAll()
     }
 
-    fun getHome() = viewModelScope.launch(Dispatchers.IO) {
+    fun getHome() {
+        // Cancel any previous getHome() — without this, init + ProviderChangeNotifier
+        // can race and launch 2-4 concurrent enrichments that each rebuild the
+        // home with different category labels at the same row, causing the UI
+        // to flicker between "Séries Récentes" and "Films Récents" indefinitely.
+        homeJob?.cancel()
+        homeJob = viewModelScope.launch(Dispatchers.IO) {
+            getHomeInternal()
+        }
+    }
+
+    private suspend fun getHomeInternal() {
         hasLoaded = true
         val provider = UserPreferences.currentProvider ?: run {
             _state.emit(State.FailedLoading(IllegalStateException("No provider selected")))
-            return@launch
+            return
         }
         currentProvider = provider
         val appContext = StreamFlixApp.instance.applicationContext

@@ -30,17 +30,6 @@ class EinschaltenExtractor : Extractor() {
     }
 
     override suspend fun extract(link: String): Video {
-        if (link.isEmpty()) throw Exception("Invalid link")
-
-        val responseBody = service.getWatch(link)
-        val body = responseBody.string()
-        val json = JSONObject(body)
-        val streamUrl = json.optString("streamUrl", "").trim()
-
-        if (streamUrl.isBlank()) {
-            throw Exception("No stream found")
-        }
-
-        return DoodLaExtractor().extract(streamUrl)
+        throw Exception("[Einschalten] is offline (domain einschalten.in inaccessible/SSL timeout, last checked 2026-05-01)")
     }
 }

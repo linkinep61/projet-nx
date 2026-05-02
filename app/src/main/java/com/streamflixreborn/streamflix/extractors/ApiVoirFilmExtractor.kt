@@ -51,7 +51,7 @@ class ApiVoirFilmExtractor : Extractor() {
     }
 
     override suspend fun extract(link: String): Video {
-        throw Exception("None")
+        throw Exception("[ApiVoirFilm] is offline (domain api.voirfilm.cam dead, last checked 2026-05-01)")
     }
 
     private interface Service {

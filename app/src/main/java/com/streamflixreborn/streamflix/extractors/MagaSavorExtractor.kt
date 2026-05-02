@@ -17,24 +17,7 @@ class MagaSavorExtractor : Extractor() {
     override val mainUrl = "https://magasavor.net"
 
     override suspend fun extract(link: String): Video {
-        val service = Extractor.createJsoupService<Service>(mainUrl)
-        val source = service.get(link, mainUrl)
-        val scriptTag = source.selectFirst("script[type=application/json]")
-        val encodedStringInScriptTag = scriptTag?.data()?.trim().orEmpty()
-        val encodedString = DecryptHelper.findEncodedRegex(source.html())
-        val decryptedContent = if (encodedString != null) {
-            DecryptHelper.decrypt(encodedString)
-        } else {
-            DecryptHelper.decrypt(encodedStringInScriptTag)
-        }
-        val m3u8 = decryptedContent.get("source")?.asString?.takeIf { it.isNotBlank() }
-            ?: throw Exception("MagaSavor: source URL not found in decrypted content")
-
-        return Video(
-            source = m3u8,
-            subtitles = listOf()
-        )
-
+        throw Exception("[MagaSavor] is offline (domain magasavor.net dead, last checked 2026-05-01)")
     }
 
     private interface Service {

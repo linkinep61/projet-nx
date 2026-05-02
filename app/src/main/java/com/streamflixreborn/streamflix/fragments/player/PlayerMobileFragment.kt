@@ -2498,8 +2498,13 @@ class PlayerMobileFragment : Fragment() {
     private fun needsDoH(url: String): Boolean {
         // sprintcdn/r66nv9ed.com: Filemoon CDN — system DNS resolves to wrong edge,
         // token is edge-bound so we need DoH to hit the correct server
+        // cloudatacdn.com: Dood final CDN — DefaultHttpDataSource breaks after
+        // ~4s with "UnknownHostException (no network)" mid-stream because the
+        // HttpURLConnection keepalive drops; OkHttp + DoH keeps the connection
+        // alive and retries cleanly.
         return url.contains("sprintcdn", ignoreCase = true)
             || url.contains("r66nv9ed.com", ignoreCase = true)
+            || url.contains("cloudatacdn.com", ignoreCase = true)
     }
 
     private fun needsBrowserOkHttp(url: String): Boolean {

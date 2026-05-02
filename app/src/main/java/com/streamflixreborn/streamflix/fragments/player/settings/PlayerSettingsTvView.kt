@@ -818,7 +818,17 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     if (item.isFavorite) 0xFFFF4444.toInt() else 0xFF808080.toInt()
                 )
                 binding.ivSettingFavorite.setOnClickListener {
+                    android.util.Log.d("FavoriteDebug",
+                        "★ click TV: channelKey='${item.channelKey}' id='${item.id}' " +
+                        "name='${item.name}' isIptv=${item.isIptv} " +
+                        "wasFav=${item.isFavorite}")
+                    if (item.channelKey.isBlank()) {
+                        android.util.Log.w("FavoriteDebug",
+                            "channelKey is BLANK on TV — toggleFavorite will no-op!")
+                    }
                     val nowFav = IptvFavorites.toggleFavorite(item.channelKey, item.id)
+                    android.util.Log.d("FavoriteDebug",
+                        "toggleFavorite returned $nowFav, persisted=${IptvFavorites.isFavorite(item.channelKey, item.id)}")
                     item.isFavorite = nowFav
                     // Unfavorite all others in the same channel
                     if (nowFav) {

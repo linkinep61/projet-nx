@@ -13,23 +13,7 @@ class LamovieExtractor : Extractor() {
     override val aliasUrls = listOf("https://vimeos.net")
 
     override suspend fun extract(link: String): Video {
-        val service = Extractor.createJsoupService<Service>(mainUrl)
-
-        val document = service.get(link)
-        val packedJS = Regex("(eval\\(function\\(p,a,c,k,e,d\\)(.|\\n)*?)</script>")
-            .find(document.toString())?.let { it.groupValues[1] }
-            ?: throw Exception("Packed JS not found")
-        
-        val unPacked = JsUnpacker(packedJS).unpack()
-            ?: throw Exception("Unpacked is null")
-        
-        val fileMatch = Regex("""file\s*:\s*["']([^"']+)["']""").find(unPacked)
-        val streamUrl = fileMatch?.groupValues?.get(1)
-            ?: throw Exception("No file found")
-
-        return Video(
-            source = streamUrl ?: throw Exception("Can't retrieve source")
-        )
+        throw Exception("[Lamovie] is offline (domain lamovie.link inaccessible/timeout, last checked 2026-05-01)")
     }
 
 
