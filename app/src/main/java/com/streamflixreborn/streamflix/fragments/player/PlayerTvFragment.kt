@@ -380,6 +380,21 @@ class PlayerTvFragment : Fragment() {
             }
         }
         initializeVideo()
+
+        // For IPTV (WiTv / OlaTv) extraction can take 5-15s; the PlayerView
+        // controller doesn't auto-show until a MediaItem is set, so the user
+        // is left staring at a black screen with no buttons. Force the
+        // controller visible immediately and disable auto-hide; once playback
+        // actually starts (STATE_READY) we restore the normal 2s timeout.
+        run {
+            val provider = UserPreferences.currentProvider
+            val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
+            if (isIptv) {
+                binding.pvPlayer.useController = true
+                binding.pvPlayer.controllerShowTimeoutMs = 0
+                binding.pvPlayer.showController()
+            }
+        }
         binding.pvPlayer.onMediaPreviousClicked = ::handleMediaPrevious
         binding.pvPlayer.onMediaNextClicked = ::handleMediaNext
         gestureHelper = PlayerGestureHelper(
@@ -1795,6 +1810,12 @@ class PlayerTvFragment : Fragment() {
                     super.onPlaybackStateChanged(playbackState)
 
                     if (playbackState == Player.STATE_READY) {
+                        // Restore the normal 2s auto-hide for the controller
+                        // (we forced it to 0 during IPTV extraction so the
+                        // controls would be visible immediately).
+                        if (binding.pvPlayer.controllerShowTimeoutMs == 0) {
+                            binding.pvPlayer.controllerShowTimeoutMs = 2000
+                        }
                         binding.pvPlayer.controller.binding.exoPlayPause.nextFocusDownId = -1
                         val videoFormat = player.videoFormat
                         updatePlayerScale()

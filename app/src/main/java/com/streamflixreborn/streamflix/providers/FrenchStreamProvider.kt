@@ -17,7 +17,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
-import retrofit2.HttpException
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
@@ -33,11 +32,7 @@ import retrofit2.http.FormUrlEncoded
 import retrofit2.http.Header
 import retrofit2.http.POST
 import retrofit2.http.Query
-import kotlin.collections.map
-import kotlin.collections.mapNotNull
-import kotlin.collections.mapIndexedNotNull
 import kotlin.math.round
-import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 
 object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
@@ -67,216 +62,112 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private var serviceInitialized = false
     private val initializationMutex = Mutex()
 
-    override suspend fun getHome(): List<Category> {
-        initializeService()
-        // 2026-05: site is still classic server-rendered HTML (DataLifeEngine /templates/FSV1/),
-        // not Next.js as a previous patch wrongly assumed. Sections are now wrapped in
-        // <div class="sect-c floats clearfix" id="films|series|commu|box"> instead of
-        // div#dle-content. The legacy "VFV25 vod-section" interface no longer exists, so we
-        // skip it and parse the sections directly.
-        val document = service.getHome("dle_skin=VFV1")
-        val categories = mutableListOf<Category>()
+    // ── Helpers ──────────────────────────────────────────────────────────
 
-        fun parseShorts(sectionId: String, sectionTitle: String, asTvShow: Boolean) {
-            val items = document.select("div#$sectionId div.short").mapNotNull { item ->
-                val link = item.selectFirst("a.short-poster")?.attr("href") ?: return@mapNotNull null
-                val href = link.substringAfterLast("/")
-                val title = item.selectFirst("div.short-title")?.text() ?: ""
-                val poster = item.selectFirst("img")?.attr("src") ?: ""
-                if (asTvShow || link.contains("/s-tv/") || link.contains("/serie/") || link.contains("-saison-"))
-                    TvShow(id = href, title = title, poster = poster)
-                else
-                    Movie(id = href, title = title, poster = poster)
-            }
-            if (items.isNotEmpty()) categories.add(Category(name = sectionTitle, list = items))
+    /** Extract newsid from href like /index.php?newsid=15126799.
+     *  Falls back to slug (last path segment) for legacy URLs. */
+    private fun extractNewsId(href: String): String? {
+        if (href.contains("newsid=")) {
+            return href.substringAfter("newsid=").substringBefore("&").takeIf { it.isNotBlank() }
         }
-        // Featured carousel — take the first batch of cards from the top "films" section
-        // (or "series" if films is missing) so the home swiper has more than one item.
-        val featuredItems = document.select("div#films div.short, div#series div.short")
-            .take(15)
-            .mapNotNull { item ->
-                val link = item.selectFirst("a.short-poster")?.attr("href") ?: return@mapNotNull null
-                val href = link.substringAfterLast("/")
-                val title = item.selectFirst("div.short-title")?.text() ?: ""
-                val poster = item.selectFirst("img")?.attr("src") ?: ""
-                if (link.contains("/s-tv/") || link.contains("/serie/") || link.contains("-saison-"))
-                    TvShow(id = href, title = title, poster = poster, banner = poster)
-                else
-                    Movie(id = href, title = title, poster = poster, banner = poster)
-            }
-        if (featuredItems.isNotEmpty()) {
-            categories.add(Category(name = Category.FEATURED, list = featuredItems))
-        }
-        parseShorts("films", "Nouveautés Films", asTvShow = false)
-        parseShorts("series", "Nouveautés Séries", asTvShow = true)
-        parseShorts("commu", "Ajouts de la Commu", asTvShow = false)
-        parseShorts("box", "BOX OFFICE", asTvShow = false)
+        return href.substringAfterLast("/").takeIf { it.isNotBlank() }
+    }
 
-        return categories
-
-        /*
-        val isNewInterface = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_NEW_INTERFACE) != "false"
-        val document = if (isNewInterface) {
-            service.postHome()
+    /** Fetch a detail page, routing numeric IDs through ?newsid= and slugs
+     *  through the legacy /{slug} path. */
+    private suspend fun fetchDetailPage(id: String): Document {
+        return if (id.all { it.isDigit() }) {
+            service.getItemByNewsId(id)
         } else {
-            service.getHome("dle_skin=VFV1")
-        }
-        val cookie = if (isNewInterface) "dle_skin=VFV25" else "dle_skin=VFV1"
-        val categories = mutableListOf<Category>()
-        if ( cookie.contains("VFV25")) {
-            var first = true
-            document.select("section.vod-section").map { cat_item ->
-                val title = cat_item
-                    .selectFirst("> div.vod-header h2.vod-title-section")
-                    ?.let {
-                        listOfNotNull(
-                            it.ownText().trim(),
-                            it.select("span").firstOrNull()?.text()?.trim()
-                        ).joinToString(" ")
-                    } ?: ""
-
-                val movies = cat_item
-                    .select("> div.vod-wrap > div.vod-slider > article.vod-card")
-                    .mapNotNull { item ->
-                        val a = item.selectFirst("a") ?: return@mapNotNull null
-                        val link = a.attr("href")
-                        val href = link.substringAfterLast("/")
-                        val title = a.selectFirst("div.vod-name")?.text() ?: ""
-                        val poster = a.selectFirst("div.vod-poster > img")?.attr("src") ?: ""
-                        val mtype = item.selectFirst("> div.vod-br > span.vod-tag a")?.attr("href") ?: ""
-                        if (link.startsWith("/s-tv/") || link.contains("-saison-") || title.contains(" - Saison ") || mtype.contains("-serie"))
-                            TvShow(
-                                id = href,
-                                title = title,
-                                poster = poster,
-                                banner = if (first) poster else null
-                            )
-                        else
-                            Movie(
-                                id = href,
-                                title = title,
-                                poster = poster,
-                                banner = if (first) poster else null
-                            )
-                    }
-
-                if (movies.isNotEmpty()) {
-                    categories.add(
-                        Category(
-                            name = if (first) Category.FEATURED else title,
-                            list = movies
-                        )
-                    )
-                    first = false
-                }
+            // Legacy slug — try /film/ then /serie/ then bare /{id}
+            try { service.getMovie(id) }
+            catch (_: Exception) {
+                try { service.getTvShow(id) }
+                catch (_: Exception) { service.getItem(id) }
             }
-        } else {
-            categories.add(
-                Category(
-                    name = "Nouveautés Séries",
-                    list = document.select("div.pages.clearfix").getOrNull(1)?.select("div.short")
-                        ?.map {
-                            TvShow(
-                                id = it.selectFirst("a.short-poster")
-                                    ?.attr("href")?.substringAfterLast("/")
-                                    ?: "",
-                                title = listOfNotNull(
-                                    it.selectFirst("div.short-title")?.text(),
-                                    it.selectFirst("span.film-version")?.text(),
-                                ).joinToString(" - "),
-                                poster = it.selectFirst("img")
-                                    ?.attr("src")
-                                    ?: "",
-                            )
-                        } ?: emptyList(),
-                )
-            )
-
-            categories.add(
-                Category(
-                    name = "Nouveautés Films",
-                    list = document.select("div.pages.clearfix").getOrNull(0)?.select("div.short")
-                        ?.map {
-                            Movie(
-                                id = it.selectFirst("a.short-poster")
-                                    ?.attr("href")?.substringAfterLast("/")
-                                    ?: "",
-                                title = it.selectFirst("div.short-title")
-                                    ?.text()
-                                    ?: "",
-                                poster = it.selectFirst("img")
-                                    ?.attr("src")
-                                    ?: "",
-                            )
-                        } ?: emptyList(),
-                )
-            )
-
-            categories.add(
-                Category(
-                    name = "Ajouts de la Commu",
-                    list = document.select("div.pages.clearfix").getOrNull(2)?.select("div.short")
-                        ?.map {
-                            Movie(
-                                id = it.selectFirst("a.short-poster")
-                                    ?.attr("href")?.substringAfterLast("/")
-                                    ?: "",
-                                title = it.selectFirst("div.short-title")
-                                    ?.text()
-                                    ?: "",
-                                poster = it.selectFirst("img")
-                                    ?.attr("src")
-                                    ?: "",
-                            )
-                        } ?: emptyList(),
-                )
-            )
-
-            categories.add(
-                Category(
-                    name = "BOX OFFICE",
-                    list = document.select("div.pages.clearfix").getOrNull(3)?.select("div.short")
-                        ?.map {
-                            Movie(
-                                id = it.selectFirst("a.short-poster")
-                                    ?.attr("href")?.substringAfterLast("/")
-                                    ?: "",
-                                title = it.selectFirst("div.short-title")
-                                    ?.text()
-                                    ?: "",
-                                poster = it.selectFirst("img")
-                                    ?.attr("src")
-                                    ?: "",
-                            )
-                        } ?: emptyList(),
-                )
-            )
         }
-
-        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films
-        return categories.sortedWith(compareBy { cat ->
-            val n = cat.name.lowercase()
-            val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
-            val isSeries = n.contains("séri") || n.contains("seri") || n.contains("saison") || n.contains("tv")
-            val isFilm = n.contains("film") || n.contains("movie") || n.contains("cinéma")
-            when {
-                cat.name == Category.FEATURED -> 0
-                n.contains("épisode") || n.contains("episode") -> 1
-                isRecent && isSeries -> 2
-                isRecent && isFilm -> 3
-                isSeries -> 4
-                isFilm -> 5
-                isRecent -> 1
-                else -> 6
-            }
-        })
-        */
     }
 
     fun ignoreSource(source: String, href: String): Boolean {
         if (source.trim().equals("Dood.Stream", ignoreCase = true) && href.contains("/bigwar5/")) return true
         return false
     }
+
+    suspend fun getRating(votes: Element): Double {
+        val voteplus = votes
+            .selectFirst("span.ratingtypeplusminus")
+            ?.text()
+            ?.toIntOrNull() ?: 0
+
+        val votenum = votes
+            .select("span[id]")
+            .last()
+            ?.text()
+            ?.toIntOrNull() ?: 0
+
+        val rating = if (votenum >= voteplus && votenum > 0) {
+            round((votenum - (votenum - voteplus) / 2.0) / votenum * 100) / 10
+        } else 0.0
+
+        return rating
+    }
+
+    // ── Home ─────────────────────────────────────────────────────────────
+
+    override suspend fun getHome(): List<Category> {
+        initializeService()
+        val document = service.getHome()
+        val categories = mutableListOf<Category>()
+        val allItems = mutableListOf<AppAdapter.Item>()
+
+        // 2026-05: site redesign — sections are now <div class="sect"> with
+        // title in <div class="sect-t">. Cards are div.short; movies have an
+        // extra .film class, series don't. Links are /index.php?newsid=XXXXX.
+        document.select("div.sect").forEach { section ->
+            val sectionTitle = section.selectFirst(".sect-t")?.text()?.trim()
+                ?: return@forEach
+            val items = section.select("div.short").mapNotNull { item ->
+                val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
+                val href = linkEl.attr("href")
+                val id = extractNewsId(href) ?: return@mapNotNull null
+                val title = item.selectFirst("div.short-title")?.text() ?: ""
+                val poster = item.selectFirst("img")?.attr("src") ?: ""
+                // Detect series vs movie by URL/title patterns. The site no
+                // longer uses a `.film` class on cards, so we look at href
+                // segments and the title (e.g. "Saison N") instead.
+                val isSeries = title.contains("Saison", ignoreCase = true)
+                    || href.contains("/s-tv/") || href.contains("/serie/")
+                    || id.contains("-saison-")
+                    || sectionTitle.contains("Série", ignoreCase = true)
+                if (isSeries)
+                    TvShow(id = id, title = title, poster = poster)
+                else
+                    Movie(id = id, title = title, poster = poster)
+            }
+            if (items.isNotEmpty()) {
+                categories.add(Category(name = sectionTitle, list = items))
+                allItems.addAll(items)
+            }
+        }
+
+        // Featured carousel from the first items across all sections
+        if (allItems.isNotEmpty()) {
+            val featured = allItems.take(15).map { item ->
+                when (item) {
+                    is Movie -> Movie(id = item.id, title = item.title,
+                        poster = item.poster, banner = item.poster)
+                    is TvShow -> TvShow(id = item.id, title = item.title,
+                        poster = item.poster, banner = item.poster)
+                    else -> item
+                }
+            }
+            categories.add(0, Category(name = Category.FEATURED, list = featured))
+        }
+
+        return categories
+    }
+
+    // ── Search ───────────────────────────────────────────────────────────
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
         if (page > 1) return emptyList()
@@ -295,199 +186,162 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             return genres
         }
         val document = service.search(query = query)
-        // 2026-05: same loosening as getMovies/getTvShows. Search results may render in
-        // either the legacy div.search-item layout OR the new div.short layout.
-        val items = document.select("div.search-item, div.short").mapNotNull {
-            val link = it.selectFirst("a.short-poster, a")?.attr("href").orEmpty()
-            val onclickId = it.attr("onclick").substringAfter("/").substringBefore("'")
-            val id = link.substringAfterLast("/").ifBlank { onclickId }
-            if (id.isBlank()) return@mapNotNull null
-            val title = (it.selectFirst("div.short-title")?.text()
-                ?: it.selectFirst("div.search-title")?.text())
+        return document.select("div.search-item, div.short").mapNotNull { item ->
+            val linkEl = item.selectFirst("a.short-poster, a") ?: return@mapNotNull null
+            val href = linkEl.attr("href")
+            val id = extractNewsId(href)
+            if (id.isNullOrBlank()) return@mapNotNull null
+            val title = (item.selectFirst("div.short-title")?.text()
+                ?: item.selectFirst("div.search-title")?.text())
                 ?.replace("\\'", "'") ?: ""
-            val poster = it.selectFirst("img")?.attr("src") ?: ""
-            if (id.contains("-saison-") || title.contains(" - Saison ") || link.contains("/s-tv/") || link.contains("/serie/"))
+            val poster = item.selectFirst("img")?.attr("src") ?: ""
+            val isSeries = title.contains("Saison", ignoreCase = true)
+                || href.contains("/s-tv/") || href.contains("/serie/")
+                || id.contains("-saison-")
+            if (isSeries)
                 TvShow(id = id, title = title, poster = poster)
             else
                 Movie(id = id, title = title, poster = poster)
         }
-        return items
     }
 
+    // ── Catalog (Movies / TV Shows) ──────────────────────────────────────
+
     override suspend fun getMovies(page: Int): List<Movie> {
+        if (page > 1) return emptyList()
         initializeService()
-        val document = service.getMovies(page)
-        // 2026-05: parent wrapper changed from div#dle-content to div.sect-c (sections like
-        // #films, #series). Use the looser div.short selector — works on both home and
-        // category/listing pages. We filter to movie-style hrefs to be safe on home.
-        return document.select("div.short").mapNotNull { item ->
-            val link = item.selectFirst("a.short-poster")?.attr("href") ?: return@mapNotNull null
-            // Skip TV-show entries that the same selector also picks up on the home page.
-            if (link.contains("/s-tv/") || link.contains("/serie/") || link.contains("-saison-")) return@mapNotNull null
-            Movie(
-                id = link.substringAfterLast("/"),
-                title = item.selectFirst("div.short-title")?.text() ?: "",
-                poster = item.selectFirst("img")?.attr("src"),
-            )
+        // /films endpoint may return MySQL errors on the redesigned site.
+        // Try it first, fall back to home page movies.
+        return try {
+            val document = service.getMovies(page)
+            val items = document.select("div.short").mapNotNull { item ->
+                val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
+                val href = linkEl.attr("href")
+                val id = extractNewsId(href) ?: return@mapNotNull null
+                val title = item.selectFirst("div.short-title")?.text() ?: ""
+                // Skip series entries
+                if (title.contains("Saison", ignoreCase = true)
+                    || href.contains("/serie/") || href.contains("/s-tv/")) return@mapNotNull null
+                Movie(id = id, title = title, poster = item.selectFirst("img")?.attr("src"))
+            }
+            items.ifEmpty { throw Exception("empty") }
+        } catch (_: Exception) {
+            // Fallback: films from home page (div.short.film)
+            try {
+                val doc = service.getHome()
+                doc.select("div.short.film").mapNotNull { item ->
+                    val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
+                    val id = extractNewsId(linkEl.attr("href")) ?: return@mapNotNull null
+                    Movie(
+                        id = id,
+                        title = item.selectFirst("div.short-title")?.text() ?: "",
+                        poster = item.selectFirst("img")?.attr("src"),
+                    )
+                }
+            } catch (_: Exception) { emptyList() }
         }
     }
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
+        if (page > 1) return emptyList()
         initializeService()
-        val document = service.getTvShows(page)
-        return document.select("div.short").mapNotNull { item ->
-            val link = item.selectFirst("a.short-poster")?.attr("href") ?: return@mapNotNull null
-            // Only keep TV shows (filter out movies that share the same listing on home).
-            if (!link.contains("/s-tv/") && !link.contains("/serie/") && !link.contains("-saison-")) return@mapNotNull null
-            TvShow(
-                id = link.substringAfterLast("/"),
-                title = item.selectFirst("div.short-title")?.text() ?: "",
-                poster = item.selectFirst("img")?.attr("src"),
-            )
+        return try {
+            val document = service.getTvShows(page)
+            val items = document.select("div.short").mapNotNull { item ->
+                val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
+                val id = extractNewsId(linkEl.attr("href")) ?: return@mapNotNull null
+                TvShow(id = id,
+                    title = item.selectFirst("div.short-title")?.text() ?: "",
+                    poster = item.selectFirst("img")?.attr("src"))
+            }
+            items.ifEmpty { throw Exception("empty") }
+        } catch (_: Exception) {
+            try {
+                val doc = service.getHome()
+                doc.select("div.short").filter { !it.hasClass("film") }.mapNotNull { item ->
+                    val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
+                    val id = extractNewsId(linkEl.attr("href")) ?: return@mapNotNull null
+                    TvShow(id = id,
+                        title = item.selectFirst("div.short-title")?.text() ?: "",
+                        poster = item.selectFirst("img")?.attr("src"))
+                }
+            } catch (_: Exception) { emptyList() }
         }
     }
 
-    suspend fun getRating(votes: Element): Double {
-        val voteplus = votes
-            ?.selectFirst("span.ratingtypeplusminus")
-            ?.text()
-            ?.toIntOrNull() ?: 0
-
-        val votenum = votes
-            ?.select("span[id]")
-            ?.last()
-            ?.text()
-            ?.toIntOrNull() ?: 0
-
-        val rating = if (votenum >= voteplus && votenum > 0) {
-            round((votenum - (votenum - voteplus) / 2.0) / votenum * 100) / 10
-        } else 0.0
-
-        return rating
-    }
+    // ── Movie detail ─────────────────────────────────────────────────────
 
     override suspend fun getMovie(id: String): Movie = coroutineScope {
         initializeService()
-        // 2026-05: detail page is at /film/{slug}. Server-rendered HTML with inline
-        // Next.js streaming JSON. Show-level fields: year (int), duration, description,
-        // genres[], plus the embedded players[]. Poster/banner come from the DOM.
-        val document = service.getMovie(id)
-        val raw = document.html()
+        val document = fetchDetailPage(id)
         val title = document.selectFirst("h1#s-title")?.ownText()?.trim()?.ifBlank { null }
             ?: document.selectFirst("meta[property=og:title]")?.attr("content").orEmpty()
-        val overview = document.selectFirst("p.fdesc-text")?.text()?.trim().orEmpty()
-        val releaseYear = extractNumberFromInlineJson(raw, "year")?.toString()
+        val overview = document.selectFirst("div#s-desc")?.also {
+            it.selectFirst("p.desc-text")?.remove()
+        }?.text()?.trim()
+            ?: document.selectFirst("div.fdesc p, p.fdesc-text")?.text()?.trim().orEmpty()
         val poster = document.selectFirst(".fposter img, img.dvd-thumbnail")?.attr("src")
-        val genres = document.select("ul#s-list a[href*=genre]").map {
+        val releaseYear = document.selectFirst("span.release_date")?.text()
+            ?.substringAfter("-")?.trim()
+        val runtime = document.selectFirst("span.runtime")?.text()?.let { rt ->
+            val hours = rt.substringBefore("h").trim().toIntOrNull() ?: 0
+            val minutes = rt.substringAfter("h").trim().toIntOrNull() ?: 0
+            (hours * 60 + minutes).takeIf { it > 0 }
+        }
+        val genres = document.select("span.genres a").map {
             Genre(
-                id = it.attr("href").substringAfter("genre=").substringBefore("&"),
+                id = it.attr("href").substringBeforeLast("/").substringAfterLast("/"),
                 name = it.text().trim(),
             )
         }
+        val directors = document.select("ul#s-list li")
+            .find { it.selectFirst("span")?.text()?.contains("alisateur") == true }
+            ?.select("a")?.mapIndexedNotNull { index, el ->
+                People(id = "director$index", name = el.text())
+            } ?: emptyList()
+        val votes = document.selectFirst("div.fr-votes")
+        val rating = if (votes != null) getRating(votes) else null
+
         Movie(
             id = id,
             title = title,
             overview = overview,
             released = releaseYear,
+            runtime = runtime,
             poster = poster,
             banner = poster,
-            genres = genres,
+            genres = genres.ifEmpty { listOf(Genre(id = "unknown", name = "")) },
+            directors = directors,
+            rating = rating,
         )
-
-        /*
-        val document = service.getItem(id)
-        val filmData = filmDataDeferred.await()
-        val actors = extractActors(document)
-        val trailerURL = filmData ?.meta?.trailer
-                                  ?.let { "https://www.youtube.com/watch?v=$it" }
-        val poster = filmData ?.meta?.affiche
-        val banner = filmData ?.meta?.affiche2
-
-        val votes = document.selectFirst("div.fr-votes")
-        val rating = if (votes != null) getRating(votes) else null
-        val movie = Movie(
-            id = id,
-            title = document.selectFirst("meta[property=og:title]")?.attr("content")
-                ?: "",
-            overview = document.selectFirst("div#s-desc")
-                ?.apply {
-                    selectFirst("p.desc-text")?.remove()
-                }
-                ?.text()
-                ?.trim()
-                ?: "",
-            released = document.selectFirst("span.release_date")
-                ?.text()
-                ?.substringAfter("-")
-                ?.trim(),
-            runtime = document.select("span.runtime")
-                .text().substringAfter(" ").let {
-                    val hours = it.substringBefore("h").toIntOrNull() ?: 0
-                    val minutes =
-                        it.substringAfter("h").trim().toIntOrNull() ?: 0
-                    hours * 60 + minutes
-                }.takeIf { it != 0 },
-            quality = document.selectFirst("span[id=film_quality]")
-                ?.text(),
-            poster = poster,
-            banner = banner,
-            trailer = trailerURL,
-            genres = document.select("span.genres")
-                .select("a").mapNotNull {
-                    Genre(
-                        id = it.attr("href").substringBeforeLast("/").substringAfterLast("/"),
-                        name = it.text(),
-                    )
-                }.ifEmpty {
-                    listOf(Genre(id = "unknown", name = ""))
-                },
-            directors = document.select("ul#s-list li")
-                .find {
-                    it.selectFirst("span")?.text()?.contains("alisateur") == true
-                }
-                ?.select("a")?.mapIndexedNotNull { index, it ->
-                    People(
-                        id = "director$index",
-                        name = it.text(),
-                    )
-                }
-                ?: emptyList(),
-            cast = actors.map {
-                People(
-                    id = it[0].replace(" ", "+"),
-                    name = it[0],
-                    image = it[1]
-                )
-            },
-            rating = rating
-
-        )
-
-        movie
-        */
     }
+
+    // ── TV Show detail ───────────────────────────────────────────────────
 
     override suspend fun getTvShow(id: String): TvShow = coroutineScope {
         initializeService()
-        // 2026-05: /serie/{slug-with-saison-N} renders a single-season page. Show-level
-        // JSON has year/description/genres; episodes[] sits next to it with each
-        // {id, number, title, thumbnail, players[]} block.
-        val document = service.getTvShow(id)
-        val raw = document.html()
+        val document = fetchDetailPage(id)
         val title = document.selectFirst("h1#s-title")?.ownText()?.trim()?.ifBlank { null }
             ?: document.selectFirst("meta[property=og:title]")?.attr("content").orEmpty()
         val cleanTitle = title.substringBeforeLast("- Saison").trim().ifBlank { title }
-        val overview = document.selectFirst("p.fdesc-text")?.text()?.trim().orEmpty()
-        val releaseYear = extractNumberFromInlineJson(raw, "year")?.toString()
+        val overview = document.selectFirst("div#s-desc")?.also {
+            it.selectFirst("p.desc-text")?.remove()
+        }?.text()?.trim()
+            ?: document.selectFirst("div.fdesc p, p.fdesc-text")?.text()?.trim().orEmpty()
         val poster = document.selectFirst(".fposter img, img.dvd-thumbnail")?.attr("src")
-        val genres = document.select("ul#s-list a[href*=genre]").map {
+        val releaseYear = document.selectFirst("span.release_date")?.text()
+            ?.substringBefore("-")?.trim()
+        val genres = document.select("span.genres a").map {
             Genre(
-                id = it.attr("href").substringAfter("genre=").substringBefore("&"),
+                id = it.attr("href").substringBeforeLast("/").substringAfterLast("/"),
                 name = it.text().trim(),
             )
         }
-        val seasonNumber = title.substringAfter("Saison ", "").trim().substringBefore(" ")
-            .toIntOrNull() ?: 1
+        val seasonNumber = title.substringAfter("Saison ", "").trim()
+            .substringBefore(" ").toIntOrNull() ?: 1
+        val votes = document.selectFirst("div.fr-votes")
+        val rating = if (votes != null) getRating(votes) else null
+
         TvShow(
             id = id,
             title = cleanTitle,
@@ -504,412 +358,134 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     poster = poster,
                 )
             ),
+            rating = rating,
         )
-
-        /*
-        val document = service.getItem(id, "dle_skin=VFV25")
-        val filmDataDeferred = async {
-            try { service.getFilmData(itemId) } catch (_: Exception) { null }
-        }
-
-        val document = documentDeferred.await()
-        val tvShowData = filmDataDeferred.await()
-        val actors = extractActors(document)
-        val seasonsData = try {
-            service.getSeasonsData(tvShowData?.meta?.tagz ?: "")
-        } catch (_: Exception) {
-            null
-        }
-
-        val trailerURL = tvShowData ?.meta?.trailer
-            ?.let { "https://www.youtube.com/watch?v=$it" }
-        val poster = tvShowData ?.meta?.affiche
-        val banner = tvShowData ?.meta?.affiche2
-        val votes = document.selectFirst("div.fr-votes")
-        val rating = if (votes != null) getRating(votes) else null
-        val title = document.selectFirst("meta[property=og:title]")
-            ?.attr("content")
-            ?: ""
-
-        val seasonNumber = title.substringAfter("Saison ").trim().toIntOrNull() ?: 0
-
-        val seasons = seasonsData
-            ?.mapIndexed { idx, season ->
-                Season(
-                    id = season.id ?: idx.toString(),
-                    number = season.title?.substringAfter("Saison ")?.toIntOrNull() ?: (idx + 1),
-                    title = season.title ?: "Saison ${idx + 1}",
-                    poster = season.affiche
-                )
-            }
-            ?.toMutableList()
-            ?: mutableListOf()
-
-        if (seasons.none { it.number == seasonNumber }) {
-            seasons.add(
-                Season(
-                    id = itemId,
-                    number = seasonNumber,
-                    title = if (title.contains("- Saison")) "Saison "+title.substringAfter("- Saison ") else title,
-                    poster = poster
-                )
-            )
-        }
-
-        seasons.sortBy { it.number }
-
-        val tvShow = TvShow(
-            id = id,
-            title = title.substringBeforeLast("- Saison"),
-            overview = document.selectFirst("div.fdesc > p")
-                ?.text()
-                ?.trim()
-                ?: "",
-            released = document.selectFirst("span.release")
-                ?.text()
-                ?.substringBefore("-")
-                ?.trim(),
-            runtime = document.select("span.runtime")
-                .text().substringAfter(" ").let {
-                    val hours = it.substringBefore("h").toIntOrNull() ?: 0
-                    val minutes =
-                        it.substringAfter("h").trim().toIntOrNull() ?: 0
-                    hours * 60 + minutes
-                }.takeIf { it != 0 },
-            quality = document.selectFirst("span[id=film_quality]")
-                ?.text(),
-            poster = poster,
-            banner = banner,
-            trailer = trailerURL,
-            seasons = seasons,
-            genres = document.select("span.genres").text().
-                split(",")
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .map {
-                    Genre(
-                        id = it,
-                        name = it,
-                    )
-                },
-            directors = document.select("ul#s-list li")
-                .find {
-                    it.selectFirst("span")?.text()?.contains("alisateur") == true
-                }
-                ?.select("a")?.mapIndexedNotNull { index, it ->
-                    People(
-                        id = "director$index",
-                        name = it.text(),
-                    )
-                }
-                ?: emptyList(),
-            cast = actors.map {
-                People(
-                    id = it[0].replace(" ", "+"),
-                    name = it[0],
-                    image = it[1]
-                )
-            },
-            rating = rating
-        )
-
-        */
     }
+
+    // ── Episodes ─────────────────────────────────────────────────────────
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
         initializeService()
-        // 2026-05: AJAX endpoint /engine/ajax/episodes_np.php is gone (404). Episodes
-        // are now embedded in the /serie/{slug} page's Next.js JSON. We parse the page
-        // and extract every {episodeNumber, name, thumbnail, ...} block.
         return try {
-            val raw = service.getTvShow(seasonId).html()
-            parseEpisodesFromPage(raw, seasonId)
+            val document = fetchDetailPage(seasonId)
+            parseEpisodesFromPage(document, seasonId)
         } catch (_: Exception) {
             emptyList()
         }
     }
 
-    /** Extract the episode list from a /serie/{slug} page's inline Next.js JSON.
-     *  Episode block: {id, number, title, description, thumbnail, duration, players}.
-     *  Description can be 500-2000 chars long, so the gap between title and thumbnail
-     *  needs a wide span. We do TWO passes: pick number+title from one regex, then
-     *  search for thumbnail starting from the same id within a wider window. */
-    private fun parseEpisodesFromPage(raw: String, seasonId: String): List<Episode> {
+    /** Parse episodes from div#episodeN.fullsfeature blocks.
+     *  Each block is delimited by <!-- episode N --> comments in the HTML
+     *  and contains a div.selink with the episode title and embed links. */
+    private fun parseEpisodesFromPage(document: Document, seasonId: String): List<Episode> {
         val out = mutableListOf<Episode>()
-        val episodeRx = Regex(
-            "\\\\\"id\\\\\":(\\d+)" +
-                "[^}]{0,200}\\\\\"number\\\\\":(\\d+)" +
-                "[^}]{0,200}\\\\\"title\\\\\":\\\\\"([^\\\\]*)\\\\\""
-        )
-        val seen = HashSet<Int>()
-        episodeRx.findAll(raw).forEach { m ->
-            val number = m.groupValues[2].toIntOrNull() ?: return@forEach
-            if (!seen.add(number)) return@forEach
-            val title = m.groupValues[3]
-            // Look for the thumbnail in the next ~3000 chars after the match.
-            val from = m.range.last
-            val window = raw.substring(from, (from + 3000).coerceAtMost(raw.length))
-            val thumb = Regex("\\\\\"thumbnail\\\\\":(?:\\\\\"([^\\\\]+)\\\\\"|null)")
-                .find(window)?.groupValues?.getOrNull(1)
-                ?.replace("\\/", "/")
-                ?.ifBlank { null }
+        document.select("div.fullsfeature[id^=episode]").forEach { epDiv ->
+            val epId = epDiv.id() // e.g. "episode3"
+            val number = epId.removePrefix("episode").toIntOrNull() ?: return@forEach
+            val titleText = epDiv.selectFirst("div.selink span")?.text()?.trim()
+            val title = if (!titleText.isNullOrBlank()) titleText else "Épisode $number"
             out.add(
                 Episode(
                     id = "$seasonId/$number",
                     number = number,
-                    title = title.ifBlank { "Épisode $number" },
-                    poster = thumb?.let { tmdbImg(it) },
+                    title = title,
                 )
             )
         }
         return out.sortedBy { it.number }
     }
 
-    /** Pull a single string field from the Next.js streaming JSON inline in a page.
-     *  Pattern: \\"<key>\\":\\"<value>\\". Returns null if not found or value is null. */
-    private fun extractFromInlineJson(raw: String, key: String): String? {
-        val m = Regex("\\\\\"$key\\\\\":\\\\\"([^\\\\]*)\\\\\"").find(raw) ?: return null
-        return m.groupValues[1].ifBlank { null }
-    }
+    // ── Servers / Players ────────────────────────────────────────────────
 
-    /** Pull a numeric field (e.g. \\"year\\":2026, \\"duration\\":53) from the inline JSON. */
-    private fun extractNumberFromInlineJson(raw: String, key: String): Int? {
-        return Regex("\\\\\"$key\\\\\":(\\d+)").find(raw)?.groupValues?.get(1)?.toIntOrNull()
-    }
-
-    /** Build a TMDB image URL from a /path/to/img.jpg slug. */
-    private fun tmdbImg(slug: String): String =
-        if (slug.startsWith("http")) slug
-        else "https://image.tmdb.org/t/p/w500$slug"
-
-    /** Parse the Next.js inline JSON of a /film/{slug} or /serie/{slug} page and turn
-     *  every {hostName, embedUrl, language} entry into a Video.Server.
+    /** Parse players from the detail page HTML.
      *
-     *  For series, [forEpisodeNumber] filters: only players whose surrounding
-     *  episodeNumber field matches the requested episode are returned. For movies,
-     *  pass null and we take all players on the page.
+     *  **Movies**: button.player-option elements carry data-player (name) and
+     *  data-url-default (embed URL). Each button may contain children
+     *  div.version-option with data-version (language) and data-url.
      *
-     *  Server names follow the existing extractor convention so the dispatcher in
-     *  Extractor.extract() routes them (e.g. "fsvid" → FilemoonExtractor via aliasUrls). */
-    private fun parsePlayersFromPage(raw: String, forEpisodeNumber: Int?): List<Video.Server> {
-        if (raw.isBlank()) return emptyList()
-
-        // Slice the page into per-episode segments when filtering. Each episode block
-        // in the inline JSON is keyed by `\"number\":N` (e.g. {"id":...,"number":1,
-        // "title":"Épisode 1",...}). We slice the text between successive `number`
-        // markers so the regex below only matches players for the requested episode.
-        val haystack: String = if (forEpisodeNumber != null) {
-            val markerRegex = Regex("\\\\\"number\\\\\":(\\d+)")
-            val markers = markerRegex.findAll(raw).toList()
-            val target = markers.firstOrNull { it.groupValues[1].toIntOrNull() == forEpisodeNumber }
-                ?: return emptyList()
-            val nextStart = markers.firstOrNull { it.range.first > target.range.first }
-                ?.range?.first ?: raw.length
-            raw.substring(target.range.first, nextStart)
-        } else raw
-
-        // Each player block in the JSON: {"id":N,"hostName":"X","embedUrl":"Y","language":"Z",...}
-        val rx = Regex(
-            "\\\\\"hostName\\\\\":\\\\\"([^\\\\]+)\\\\\"" +
-                "[^}]*?\\\\\"embedUrl\\\\\":\\\\\"([^\\\\]+)\\\\\"" +
-                "(?:[^}]*?\\\\\"language\\\\\":(?:\\\\\"([^\\\\]*)\\\\\"|null))?"
-        )
-
-        val seen = HashSet<String>()
+     *  **Series episodes**: the episode block div#episodeN.fullsfeature contains
+     *  a href="https://embed-url" links — one per available server. */
+    private fun parsePlayersFromPage(
+        document: Document,
+        forEpisodeNumber: Int?
+    ): List<Video.Server> {
         val out = mutableListOf<Video.Server>()
-        rx.findAll(haystack).forEachIndexed { i, m ->
-            val host = m.groupValues[1].trim()
-            // The HTML escapes "/" as "\\/" in some cases — clean it up.
-            val embedUrl = m.groupValues[2].replace("\\/", "/").trim()
-            val lang = m.groupValues.getOrNull(3)?.uppercase()?.takeIf { it.isNotBlank() }
-            if (embedUrl.isBlank() || !seen.add(embedUrl)) return@forEachIndexed
-            val niceHost = host.replaceFirstChar { it.uppercase() }
-            val displayName = if (lang != null) "$niceHost ($lang)" else niceHost
-            out.add(
-                Video.Server(
-                    id = "fs_player_$i",
+        val seen = HashSet<String>()
+
+        if (forEpisodeNumber != null) {
+            // ── Series episode: extract embed links from the episode block ──
+            val epDiv = document.selectFirst("div#episode${forEpisodeNumber}.fullsfeature")
+                ?: return emptyList()
+            epDiv.select("a[href]").forEachIndexed { i, link ->
+                val href = link.attr("href").trim()
+                if (href.isBlank() || href.startsWith("#") || href.startsWith("javascript")) return@forEachIndexed
+                if (!href.startsWith("http")) return@forEachIndexed
+                if (!seen.add(href)) return@forEachIndexed
+                if (ignoreSource("", href)) return@forEachIndexed
+                val serviceName = Extractor.identifyServiceName(href)
+                    ?: href.substringAfter("//").substringBefore("/")
+                        .substringBeforeLast(".").substringAfterLast(".")
+                val displayName = serviceName.replaceFirstChar { it.uppercase() }
+                out.add(Video.Server(
+                    id = "fs_ep${forEpisodeNumber}_$i",
                     name = displayName,
-                    src = embedUrl,
-                )
-            )
+                    src = href,
+                ))
+            }
+        } else {
+            // ── Movie: parse button.player-option elements ──
+            document.select("button.player-option").forEachIndexed { i, button ->
+                val playerName = button.attr("data-player").trim()
+                    .ifBlank { "Player ${i + 1}" }
+                val defaultUrl = button.attr("data-url-default").trim()
+
+                val versionOptions = button.select("div.version-option")
+                if (versionOptions.isNotEmpty()) {
+                    versionOptions.forEach { version ->
+                        val versionName = version.attr("data-version").trim()
+                        val versionUrl = version.attr("data-url").trim()
+                        if (versionUrl.isNotBlank() && seen.add(versionUrl)) {
+                            if (ignoreSource(playerName, versionUrl)) return@forEach
+                            val displayName = if (versionName.isNotBlank())
+                                "$playerName ($versionName)" else playerName
+                            out.add(Video.Server(
+                                id = "fs_player_${i}_${versionName}",
+                                name = displayName,
+                                src = versionUrl,
+                            ))
+                        }
+                    }
+                } else if (defaultUrl.isNotBlank() && seen.add(defaultUrl)) {
+                    if (!ignoreSource(playerName, defaultUrl)) {
+                        out.add(Video.Server(
+                            id = "fs_player_$i",
+                            name = playerName,
+                            src = defaultUrl,
+                        ))
+                    }
+                }
+            }
         }
         return out
     }
 
-    override suspend fun getGenre(id: String, page: Int): Genre {
-        initializeService()
-        // 2026-05: /films?genre=<slug> serves filtered listings. The same div.short cards
-        // as the home page; we route /s-tv/ entries to TvShow as before.
-        val document = service.getGenre(id, page)
-        val shows = document.select("div.short").mapNotNull { item ->
-            val link = item.selectFirst("a.short-poster")?.attr("href") ?: return@mapNotNull null
-            val href = link.substringAfterLast("/")
-            val title = item.selectFirst("div.short-title")?.text() ?: ""
-            val poster = item.selectFirst("img")?.attr("src")
-            if (link.contains("/s-tv/") || link.contains("/serie/") || link.contains("-saison-"))
-                TvShow(id = href, title = title, poster = poster)
-            else
-                Movie(id = href, title = title, poster = poster)
-        }
-        return Genre(id = id, name = "", shows = shows)
-    }
-
-    override suspend fun getPeople(id: String, page: Int): People {
-        // PATCH 2026-05: Provider suspended - fs14.lol migrated to Next.js CSR
-        return People(id, "")
-
-        /*
-        initializeService()
-
-        val document = try {
-            service.getPeople(id, page)
-        } catch (e: HttpException) {
-            when (e.code()) {
-                404 -> return People(id, "")
-                else -> throw e
-            }
-        }
-
-        val people = People(
-            id = id,
-            name = "",
-            filmography = document.select("div#dle-content > div.short").mapNotNull {
-                val href = it.selectFirst("a.short-poster")
-                    ?.attr("href")
-                    ?: ""
-                val id = href.substringAfterLast("/")
-
-                val title = it.selectFirst("div.short-title")
-                    ?.text()
-                    ?: ""
-                val poster = it.selectFirst("img")
-                    ?.attr("src")
-                    ?: ""
-
-                if (href.contains("-saison-") || href.contains("s-tv/") || title.contains(" - Saison ")) {
-                    TvShow(
-                        id = id,
-                        title = title,
-                        poster = poster,
-                    )
-                } else if (href.isNotBlank()) {
-                    Movie(
-                        id = id,
-                        title = title,
-                        poster = poster,
-                    )
-                } else {
-                    null
-                }
-            },
-        )
-
-        return people
-        */
-    }
-
-    fun extractTvShowVersions(document: Document, episodesData: EpisodesData? = null): MutableList<String> {
-        val versions = listOf("vostfr", "vf", "vo")
-        val found = mutableListOf<String>()
-
-        for (version in versions) {
-            val hasAtLeastOneEpInJson = episodesData?.let {
-                when (version) {
-                    "vf" -> !it.vf.isNullOrEmpty()
-                    "vostfr" -> !it.vostfr.isNullOrEmpty()
-                    "vo" -> !it.vo.isNullOrEmpty()
-                    else -> false
-                }
-            } ?: false
-
-            if (hasAtLeastOneEpInJson) {
-                found.add(version)
-            }
-        }
-
-        return found
-    }
-
-    suspend fun extractActors(document: Document): List<List<String>> {
-        val scriptContent = document.select("script").joinToString("\n") { it.data() }
-        val arrayContentRegex = Regex("""actorData\s*=\s*\[(.*?)];""", RegexOption.DOT_MATCHES_ALL)
-
-        return arrayContentRegex.find(scriptContent)
-            ?.groupValues?.get(1)
-            ?.let { content ->
-                Regex(""""(.+?)\s*\(.*?\)\s*-\s*([^"]+)"""")
-                    .findAll(content)
-                    .map { match ->
-                        val actorName = match.groupValues[1].trim()
-                        val poster = match.groupValues[2].trim()
-                        listOf(actorName, poster)
-                    }
-                    .toList()
-            } ?: emptyList()
-    }
-
-    data class VideoProvider(
-        val id: Number,
-        val order: Int,
-        val name: String,
-        val lang: String,
-        val url: String
-    )
-
-    data class EpisodesData(
-        val vf: Map<String, Map<String, String>>? = null,
-        val vostfr: Map<String, Map<String, String>>? = null,
-        val vo: Map<String, Map<String, String>>? = null,
-        val info: Map<String, EpisodeInfo>? = null
-    )
-
-    data class EpisodeInfo(
-        val title: String? = null,
-        val synopsis: String? = null,
-        val poster: String? = null
-    )
-
-    data class FilmData(
-        val players: Map<String, Map<String, String>>? = null,
-        val meta: FilmMeta? = null
-    )
-
-    data class FilmMeta(
-        val affiche: String? = null,
-        val affiche2: String? = null,
-        val trailer: String? = null,
-        val tagz: String? = null,
-        val bkp: String? = null
-    )
-
-    data class SeasonData(
-        val affiche: String? = null,
-        val alt_name: String? = null,
-        val full_url: String? = null,
-        val id: String? = null,
-        val serie_annee: String? = null,
-        val title: String? = null
-    )
-
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         initializeService()
 
-        // 2026-05: AJAX endpoints (film_api.php, episodes_np.php) are dead. The new site
-        // ships a Next.js streaming JSON inline in /film/{slug} and /serie/{slug} pages
-        // with each player's embed URL. We fetch the page once and regex out the players.
         val servers = when (videoType) {
             is Video.Type.Episode -> {
                 val parts = id.split("/")
                 val tvShowId = parts.getOrElse(0) { id }
-                val episodeNum = parts.getOrElse(1) { videoType.number.toString() }.toIntOrNull()
-                    ?: videoType.number
-                val raw = try { service.getTvShow(tvShowId).html() } catch (_: Exception) { "" }
-                parsePlayersFromPage(raw, forEpisodeNumber = episodeNum)
+                val episodeNum = parts.getOrElse(1) { videoType.number.toString() }
+                    .toIntOrNull() ?: videoType.number
+                val document = try { fetchDetailPage(tvShowId) }
+                    catch (_: Exception) { return emptyList() }
+                parsePlayersFromPage(document, forEpisodeNumber = episodeNum)
             }
-
             is Video.Type.Movie -> {
-                val raw = try { service.getMovie(id).html() } catch (_: Exception) { "" }
-                parsePlayersFromPage(raw, forEpisodeNumber = null)
+                val document = try { fetchDetailPage(id) }
+                    catch (_: Exception) { return emptyList() }
+                parsePlayersFromPage(document, forEpisodeNumber = null)
             }
         }
 
@@ -918,8 +494,8 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             val name = server.name.uppercase()
             when {
                 name.contains("TRUEFRENCH") || name.contains("VFF") -> 0
-                name.contains("VF") && !name.contains("VOSTFR") -> 1
-                name.contains("FRENCH") && !name.contains("VOSTFR") -> 2
+                name.contains("VFQ") || (name.contains("FRENCH") && !name.contains("VOSTFR")) -> 1
+                name.contains("VF") && !name.contains("VOSTFR") -> 2
                 name.contains("VOSTFR") -> 5
                 name.contains("VO") -> 6
                 else -> 3
@@ -946,40 +522,64 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         } else {
             server.src
         }
-
-        val video = Extractor.extract(finalUrl)
-
-        return video
+        return Extractor.extract(finalUrl)
     }
 
-    /**
-     * Initializes the service with the current domain URL.
-     * This function is necessary because the provider's domain frequently changes.
-     * We fetch the latest URL from a dedicated website that tracks these changes.
-     */
+    // ── Genre ────────────────────────────────────────────────────────────
+
+    override suspend fun getGenre(id: String, page: Int): Genre {
+        initializeService()
+        val document = try {
+            service.getGenre(id, page)
+        } catch (_: Exception) {
+            return Genre(id = id, name = "", shows = emptyList())
+        }
+        val shows = document.select("div.short").mapNotNull { item ->
+            val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
+            val href = linkEl.attr("href")
+            val itemId = extractNewsId(href) ?: return@mapNotNull null
+            val title = item.selectFirst("div.short-title")?.text() ?: ""
+            val poster = item.selectFirst("img")?.attr("src")
+            val isSeries = !item.hasClass("film")
+                && (title.contains("Saison", ignoreCase = true)
+                || href.contains("/serie/") || href.contains("/s-tv/"))
+            if (isSeries)
+                TvShow(id = itemId, title = title, poster = poster)
+            else
+                Movie(id = itemId, title = title, poster = poster)
+        }
+        return Genre(id = id, name = "", shows = shows)
+    }
+
+    // ── People ───────────────────────────────────────────────────────────
+
+    override suspend fun getPeople(id: String, page: Int): People {
+        return People(id, "")
+    }
+
+    // ── URL management ───────────────────────────────────────────────────
+
     override suspend fun onChangeUrl(forceRefresh: Boolean): String {
         changeUrlMutex.withLock {
-            if (forceRefresh || UserPreferences.getProviderCache(this,UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
+            if (forceRefresh || UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
                 val addressService = Service.buildAddressFetcher()
                 try {
                     val document = addressService.getHome()
-
                     val newUrl = document.select("div.container > div.url-card")
                         .selectFirst("a")
                         ?.attr("href")
                         ?.trim()
                     if (!newUrl.isNullOrEmpty()) {
-                        val newUrl = if (newUrl.endsWith("/")) newUrl else "$newUrl/"
-                        UserPreferences.setProviderCache(this,UserPreferences.PROVIDER_URL, newUrl)
+                        val finalUrl = if (newUrl.endsWith("/")) newUrl else "$newUrl/"
+                        UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_URL, finalUrl)
                         UserPreferences.setProviderCache(
                             this,
                             UserPreferences.PROVIDER_LOGO,
-                            newUrl + "favicon-96x96.png"
+                            finalUrl + "favicon-96x96.png"
                         )
                     }
-                } catch (e: Exception) {
-                    // In case of failure, we'll use the default URL
-                    // No need to throw as we already have a fallback URL
+                } catch (_: Exception) {
+                    // Fallback to default URL
                 }
             }
             service = Service.build(baseUrl)
@@ -995,6 +595,8 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
     }
 
+    // ── Retrofit Service ─────────────────────────────────────────────────
+
     private interface Service {
 
         companion object {
@@ -1002,7 +604,6 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 .readTimeout(60, TimeUnit.SECONDS)
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .dns(DnsResolver.doh)
-                // Preserve POST method & body on redirects (site may change domain)
                 .followRedirects(false)
                 .addInterceptor { chain ->
                     var request = chain.request()
@@ -1021,26 +622,22 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 .build()
 
             fun buildAddressFetcher(): Service {
-                val addressRetrofit = Retrofit.Builder()
+                return Retrofit.Builder()
                     .baseUrl(portalUrl)
-
                     .addConverterFactory(JsoupConverterFactory.create())
                     .client(client)
-
                     .build()
-
-                return addressRetrofit.create(Service::class.java)
+                    .create(Service::class.java)
             }
 
             fun build(baseUrl: String): Service {
-                val retrofit = Retrofit.Builder()
+                return Retrofit.Builder()
                     .baseUrl(baseUrl)
                     .addConverterFactory(JsoupConverterFactory.create())
                     .addConverterFactory(GsonConverterFactory.create())
                     .client(client)
                     .build()
-
-                return retrofit.create(Service::class.java)
+                    .create(Service::class.java)
             }
         }
 
@@ -1050,35 +647,33 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         ): Document
 
         @FormUrlEncoded
-        @POST(".")
-        suspend fun postHome(
-            @Field("skin_name") skinName: String = "VFV25",
-            @Field("action_skin_change") actionSkinChange: String = "yes",
-            @Header("Cookie") cookie: String = "dle_skin=VFV25"
-        ): Document
-
-        @FormUrlEncoded
         @POST("engine/ajax/search.php")
         suspend fun search(
             @Field("query") query: String,
             @Field("page") page: Int = 1
         ): Document
 
-        // 2026-05: catalog routes simplified — /films and /series replace /films/page/N
-        // and /s-tv/page/N. Pagination is now via ?page=N query.
+        // Catalog pages — may return MySQL errors on redesigned site
         @GET("films")
         suspend fun getMovies(@Query("page") page: Int): Document
 
         @GET("series")
         suspend fun getTvShows(@Query("page") page: Int): Document
 
+        // Detail page by newsid (new URL scheme: /index.php?newsid=XXXXX)
+        @GET("index.php")
+        suspend fun getItemByNewsId(
+            @Query("newsid") id: String,
+            @Header("Cookie") cookie: String = "dle_skin=VFV1"
+        ): Document
+
+        // Legacy detail pages (slug-based, kept for backwards compatibility)
         @GET("/{id}")
         suspend fun getItem(
             @Path("id") id: String,
             @Header("Cookie") cookie: String = "dle_skin=VFV1"
         ): Document
 
-        // Detail pages — slugs now live under /film/<slug> and /serie/<slug>.
         @GET("film/{id}")
         suspend fun getMovie(
             @Path("id") id: String,
@@ -1091,9 +686,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             @Header("Cookie") cookie: String = "dle_skin=VFV1"
         ): Document
 
-
-        // Genre listing is now /films?genre=<slug> (and /series?genre=<slug>); the
-        // separate "/film-en-streaming/X/page/Y" route is gone.
+        // Genre listing
         @GET("films")
         suspend fun getGenre(
             @Query("genre") genre: String,
@@ -1105,28 +698,6 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             @Path("id") id: String,
             @Path("page") page: Int,
         ): Document
-
-        @GET("engine/ajax/episodes_np.php")
-        suspend fun getEpisodesData(
-            @Query("id") id: String,
-            @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("X-Requested-With") requestedWith: String = "XMLHttpRequest"
-        ): EpisodesData
-
-        @GET("engine/ajax/film_api.php")
-        suspend fun getFilmData(
-            @Query("id") id: String,
-            @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("X-Requested-With") requestedWith: String = "XMLHttpRequest"
-        ): FilmData
-
-        @POST("engine/ajax/get_seasons.php")
-        @FormUrlEncoded
-        suspend fun getSeasonsData(
-            @Field("serie_tag") id: String,
-            @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("X-Requested-With") requestedWith: String = "XMLHttpRequest"
-        ): List<SeasonData>
 
         @GET
         suspend fun getRedirectLink(@Url url: String): Response<ResponseBody>
