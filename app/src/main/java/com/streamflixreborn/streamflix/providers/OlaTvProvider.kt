@@ -820,7 +820,7 @@ object OlaTvProvider : Provider, IptvProvider {
 
     // ── Channel navigation (prev/next) for mobile zapping ──
 
-    private fun getOrderedChannelIds(): List<String> {
+    fun getOrderedChannelIds(): List<String> {
         return curatedChannels.map { "ola::${it.key}" }
     }
 

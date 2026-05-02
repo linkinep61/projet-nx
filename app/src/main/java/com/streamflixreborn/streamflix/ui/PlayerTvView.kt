@@ -142,6 +142,17 @@ class PlayerTvView @JvmOverloads constructor(
                 onChannelDown != null
             }
 
+            // OK / DPAD_CENTER / MEDIA_PLAY_PAUSE → toggle play/pause directly
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER,
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    if (player.isPlaying) player.pause() else player.play()
+                }
+                true
+            }
+
             KeyEvent.KEYCODE_DPAD_LEFT -> {
                 if (event.action == KeyEvent.ACTION_DOWN) {
                     player.seekTo(player.currentPosition - 10_000)
