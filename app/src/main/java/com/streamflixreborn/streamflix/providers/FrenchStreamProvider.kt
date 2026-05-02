@@ -120,25 +120,39 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         val categories = mutableListOf<Category>()
         val allItems = mutableListOf<AppAdapter.Item>()
 
-        // 2026-05: site redesign — sections are now <div class="sect"> with
-        // title in <div class="sect-t">. Cards are div.short; movies have an
-        // extra .film class, series don't. Links are /index.php?newsid=XXXXX.
+        // 2026-05: site redesign — sections are now <div class="sect">
+        // wrapping a header <div class="sect-t">. The clean title lives in
+        // <a class="st-capt"> (e.g. "Nouveautés Films", "Nouveautés Séries");
+        // the rest of .sect-t is filled with tab spans ("Par Défault",
+        // "Animation", "Comédie"…) which we MUST NOT include in the title.
+        // Each card is a div.short with a poster link, no .film class —
+        // movie/series detection has to come from URL/title heuristics and
+        // the parent section's "kind".
         document.select("div.sect").forEach { section ->
-            val sectionTitle = section.selectFirst(".sect-t")?.text()?.trim()
+            val capt = section.selectFirst(".sect-t a.st-capt")
+            val sectionTitle = capt?.ownText()?.trim()
+                ?: section.selectFirst(".sect-t .st-capt")?.ownText()?.trim()
                 ?: return@forEach
+            val sectionHref = capt?.attr("href") ?: ""
+            // A section is "series-only" when its capt link points to /s-tv/
+            // or /serie/. Sections like /films/ or /film-commu/ are movies.
+            val sectionIsSeries = sectionHref.contains("/s-tv/")
+                || sectionHref.contains("/serie/")
+                || sectionTitle.contains("Série", ignoreCase = true)
+
             val items = section.select("div.short").mapNotNull { item ->
                 val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
                 val href = linkEl.attr("href")
                 val id = extractNewsId(href) ?: return@mapNotNull null
                 val title = item.selectFirst("div.short-title")?.text() ?: ""
                 val poster = item.selectFirst("img")?.attr("src") ?: ""
-                // Detect series vs movie by URL/title patterns. The site no
-                // longer uses a `.film` class on cards, so we look at href
-                // segments and the title (e.g. "Saison N") instead.
-                val isSeries = title.contains("Saison", ignoreCase = true)
+                // Series detection: parent section first (most reliable),
+                // then per-card URL/title fallbacks (in case the section
+                // mixes types — e.g. "Ajouts de la Commu").
+                val isSeries = sectionIsSeries
+                    || title.contains("Saison", ignoreCase = true)
                     || href.contains("/s-tv/") || href.contains("/serie/")
                     || id.contains("-saison-")
-                    || sectionTitle.contains("Série", ignoreCase = true)
                 if (isSeries)
                     TvShow(id = id, title = title, poster = poster)
                 else
