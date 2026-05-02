@@ -117,13 +117,35 @@ object MiniPlayerController {
                     cancelBufferingWatchdog()
                     retryCycle = 0 // reset cycle counter on success
                     _state.value = State.Playing(chId, currentChannelName ?: "", currentChannelPoster)
+                    // Stop background server emission — no need to keep loading more
+                    // servers when we already have a working stream. This avoids
+                    // unnecessary network calls and potential interference with playback.
+                    progressiveServerJob?.cancel()
+                    com.streamflixreborn.streamflix.providers.OlaTvProvider.stopEmission()
+                    Log.d(TAG, "Stopped progressive server emission — playback is working")
                     // Report success to OlaTvProvider so this host gets prioritized.
-                    // Pass the channel key so the working URL is persisted to disk.
+                    // Only persist the working URL to disk if the stream is DIRECT (not
+                    // MAC-portal-resolved). MAC portal URLs contain ephemeral tokens that
+                    // expire within minutes — caching them causes channels to play the wrong
+                    // content on next launch (the expired token may redirect to a default
+                    // stream, so TF1 and France 2 end up playing the same thing).
                     val playingUri = player?.currentMediaItem?.localConfiguration?.uri?.toString()
                     if (!playingUri.isNullOrBlank()) {
                         try {
+                            val serverId = availableServers.getOrNull(currentServerIndex)?.id ?: ""
+                            // A MAC portal server's cmd contains "localhost" or "127.0.0.1".
+                            // Fast-track servers (ola_fasttrack::) played a previously-cached
+                            // URL — don't re-cache to avoid perpetuating stale entries.
+                            val isMacPortal = serverId.contains("localhost") || serverId.contains("127.0.0.1")
+                            val isFastTrack = serverId.startsWith("ola_fasttrack::")
+                            val isDirect = !isMacPortal && !isFastTrack
                             val channelKey = chId.removePrefix("ola_ep::").removePrefix("ola::")
-                            com.streamflixreborn.streamflix.providers.OlaTvProvider.reportWorkingStreamUrl(playingUri, channelKey)
+                            // Always report for host scoring (probeOkCache), but only
+                            // persist to disk (channelKey) for direct streams.
+                            com.streamflixreborn.streamflix.providers.OlaTvProvider.reportWorkingStreamUrl(
+                                playingUri,
+                                if (isDirect) channelKey else null
+                            )
                         } catch (_: Throwable) { }
                     }
                 }
@@ -334,11 +356,35 @@ object MiniPlayerController {
     private suspend fun playServerAtIndex(channelId: String, provider: Provider, index: Int) {
         if (currentChannelId != channelId) return // channel changed
         if (index >= availableServers.size) {
-            Log.w(TAG, "All ${availableServers.size} servers exhausted for $channelId (progressive servers may still arrive)")
+            Log.w(TAG, "All ${availableServers.size} servers exhausted for $channelId — requesting renewal batch")
             serversExhausted = true
-            // Don't immediately retry — wait a bit for progressive OLA TV servers
+
+            // Server renewal: ask OlaTvProvider for the next batch from the remaining pool.
+            // This is seamless — the user doesn't see any interruption.
+            val provider2 = UserPreferences.currentProvider
+            if (provider2 is com.streamflixreborn.streamflix.providers.OlaTvProvider) {
+                val channelKey = channelId.removePrefix("ola_ep::").removePrefix("ola::")
+                val newCount = provider2.requestNextBatch(channelKey, triedServerUrls)
+                if (newCount > 0) {
+                    Log.d(TAG, "Renewal: $newCount new servers incoming — waiting for progressive delivery")
+                    // Servers are emitted via additionalServersFlow and will be picked up
+                    // by the progressive server collector, which auto-tries when exhausted.
+                    // Give it a moment to arrive.
+                    delay(500)
+                    if (currentChannelId == channelId && serversExhausted) {
+                        // If still exhausted after 500ms, wait a bit more for progressive servers
+                        delay(2500)
+                    }
+                    if (currentChannelId == channelId && serversExhausted) {
+                        scheduleRetryOrFail(channelId, "All servers failed after renewal")
+                    }
+                    return
+                }
+                Log.d(TAG, "Renewal: pool fully exhausted — no more servers available")
+            }
+
+            // No renewal available — wait a bit for progressive OLA TV servers
             delay(3000)
-            // Check if a progressive server arrived and already started playing
             if (currentChannelId == channelId && serversExhausted) {
                 scheduleRetryOrFail(channelId, "All servers failed")
             }
@@ -351,6 +397,21 @@ object MiniPlayerController {
 
         triedServerUrls.add(server.id)
         Log.d(TAG, "Trying server [$index/${availableServers.size}] ${server.name}")
+
+        // Pre-flight host check: extract the host from the server ID (which embeds the
+        // stream cmd URL) BEFORE calling getVideo. This avoids wasting 250ms+ on a
+        // create_link call to a host we already know is dead.
+        if (server.id.startsWith("ola_stream::")) {
+            val cmdPart = server.id.substringAfterLast("::", "")
+            val rawCmd = cmdPart.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
+            val cmdHost = extractHost(rawCmd)
+            if (cmdHost.isNotBlank() && (hostFailCounts[cmdHost] ?: 0) >= HOST_FAIL_THRESHOLD) {
+                Log.d(TAG, "Pre-skip server [$index] ${server.name} — cmd host $cmdHost already failed ${hostFailCounts[cmdHost]} times")
+                playServerAtIndex(channelId, provider, index + 1)
+                return
+            }
+        }
+
         _state.value = State.Loading(channelId, currentChannelName ?: "")
 
         try {

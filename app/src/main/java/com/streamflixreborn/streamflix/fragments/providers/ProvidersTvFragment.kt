@@ -13,6 +13,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.flowWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.RecyclerView
+import androidx.navigation.fragment.findNavController
 import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.databinding.FragmentProvidersTvBinding
@@ -45,6 +46,9 @@ class ProvidersTvFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
 
         initializeProviders()
+
+        // Downloads disabled on TV — not enough storage on these devices
+        binding.btnProvidersDownloads.visibility = View.GONE
 
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->

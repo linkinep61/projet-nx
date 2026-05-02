@@ -17,6 +17,8 @@
         app:show_subtitle_button="false"
         app:show_timeout="5000"
         app:use_controller="true"
+        app:use_artwork="false"
+        app:default_artwork="@null"
         app:surface_type="texture_view" />
 
     <!-- Title overlay at the top -->

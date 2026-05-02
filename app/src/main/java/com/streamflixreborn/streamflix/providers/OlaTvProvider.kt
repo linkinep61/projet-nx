@@ -101,14 +101,18 @@ object OlaTvProvider : Provider, IptvProvider {
     private val phase3Mutex = Mutex()
 
     // Phase 3 tuning
-    private const val PHASE3_MAX_CANDIDATES = 20  // probe at most this many cids per scan
-    private const val PHASE3_MAX_FR_CIDS = 8      // stop once we have N healthy FR cids (incl primary)
-    private const val PHASE3_PARALLELISM = 4      // concurrent probes
+    private const val PHASE3_MAX_CANDIDATES = 60  // probe more cids — most are dead, need breadth
+    private const val PHASE3_MAX_FR_CIDS = 15     // collect up to N healthy FR cids for stream diversity
+    private const val PHASE3_PARALLELISM = 8      // aggressive parallelism — dead domains fail fast anyway
 
-    // Cap of progressive variants emitted per channel — keeps the Chaîne page tidy
-    // and the failover loop from drowning in dozens of dead duplicates.
-    // Lower = faster channel switch (fewer dead servers to cycle through).
+    // Cap of progressive variants emitted per channel for the initial batch.
+    // Keeps the "Chaîne" page tidy so the user can pick a source manually.
+    // Server renewal (requestNextBatch) bypasses this cap — those extra servers
+    // are only used by the automatic failover, not shown in the Chaîne list.
     private const val MAX_VARIANTS_PER_CHANNEL = 5
+
+    // Max servers per renewal batch (host-diversity cap applied fresh each batch)
+    private const val RENEWAL_BATCH_SIZE = 24
 
     // Disk cache for the discovered FR cid list — 24h TTL
     private const val FR_CIDS_CACHE_FILE = "olatv_fr_cids.json"
@@ -574,6 +578,17 @@ object OlaTvProvider : Provider, IptvProvider {
             return resolved.removePrefix("ffrt ").removePrefix("ffmpeg ").trim().ifBlank { null }
         } catch (e: Exception) {
             Log.e(TAG, "create_link failed for cmd='${rawCmd.take(60)}': ${e.message}")
+            // If it's a DNS/connection failure, blacklist the domain for this session.
+            val msg = e.message?.lowercase() ?: ""
+            if (msg.contains("nxdomain") || msg.contains("unable to resolve") ||
+                msg.contains("connect timed out") || msg.contains("failed to connect") ||
+                msg.contains("connection refused") || msg.contains("no address associated")) {
+                val domain = try { java.net.URI(baseUrl).host ?: "" } catch (_: Exception) { "" }
+                if (domain.isNotBlank()) {
+                    markDomainDead(domain)
+                    saveDeadDomains()
+                }
+            }
             return null
         }
     }
@@ -650,6 +665,11 @@ object OlaTvProvider : Provider, IptvProvider {
                     // so next resolve does a fresh handshake
                     macCredsCache.entries.removeIf { hostnameOf(it.value.baseUrl) == host }
                     Log.d(TAG, "Cleared MAC creds for host $host after $failCount failures")
+                    // 3+ failures: blacklist the domain to skip it entirely on future channels
+                    if (failCount >= 3) {
+                        markDomainDead(host)
+                        saveDeadDomains()
+                    }
                 }
             }
             Log.d(TAG, "Demoted upstream URL (will retry last): ${url.take(80)}")
@@ -678,18 +698,199 @@ object OlaTvProvider : Provider, IptvProvider {
     private const val WORKING_URLS_FILE = "olatv_working_urls.json"
     private val workingChannelUrls = java.util.concurrent.ConcurrentHashMap<String, String>()
 
+    // ───────── Persistent dead-domain blacklist ─────────
+    // Domains that returned NXDOMAIN, connection refused, or repeated failures.
+    // Persisted to disk so we skip them instantly on next launch instead of
+    // wasting 5s per dead domain. TTL = 6h (domains can come back).
+    private const val DEAD_DOMAINS_FILE = "olatv_dead_domains.json"
+    private const val DEAD_DOMAINS_TTL_MS = 6L * 60 * 60 * 1000L
+    private val deadDomains = java.util.concurrent.ConcurrentHashMap<String, Long>() // domain → timestamp
+
+    // ───────── Server renewal pool ─────────
+    // Full sorted stream list per channel (before host-diversity cap).
+    // When the player exhausts the current batch, it can request the next batch
+    // from this pool — seamless renewal without user-visible interruption.
+    private val fullStreamPool = mutableMapOf<String, List<OlaStreamRef>>()
+    private val emittedStreamUrls = mutableMapOf<String, MutableSet<String>>()
+
+    /**
+     * Request a new batch of servers for [channelKey] from the remaining pool.
+     * Excludes URLs already tried (tracked in [triedServerIds]).
+     * Returns the number of new servers emitted to the additionalServers flow.
+     * Called by MiniPlayerController when all current servers are exhausted.
+     */
+    suspend fun requestNextBatch(channelKey: String, triedServerIds: Set<String>): Int {
+        val key = channelKey.removePrefix("ola_ep::").removePrefix("ola::")
+        val pool = synchronized(registryLock) { fullStreamPool[key] } ?: run {
+            Log.d(TAG, "requestNextBatch('$key'): no pool available")
+            return 0
+        }
+        val alreadyEmitted = synchronized(registryLock) { emittedStreamUrls[key] ?: emptySet() }
+
+        // Extract tried URLs from server IDs (format: "ola_stream::cid::label::url")
+        val triedUrls = triedServerIds.mapNotNull { id ->
+            if (id.startsWith("ola_stream::")) {
+                id.removePrefix("ola_stream::").split("::", limit = 3).getOrNull(2)
+            } else null
+        }.toSet()
+
+        // Filter pool: exclude already emitted + dead domains
+        val remaining = pool.filter { stream ->
+            val url = stream.url
+            if (url in alreadyEmitted) return@filter false
+            if (url in triedUrls) return@filter false
+            val raw = url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
+            val host = try { java.net.URI(raw).host ?: "" } catch (_: Exception) { "" }
+            if (host.isNotBlank() && isDomainDead(host)) return@filter false
+            true
+        }
+
+        if (remaining.isEmpty()) {
+            Log.d(TAG, "requestNextBatch('$key'): pool exhausted — 0 remaining from ${pool.size} total")
+            return 0
+        }
+
+        // Apply host-diversity cap to the remaining streams
+        val hostCounts = mutableMapOf<String, Int>()
+        val batch = remaining.filter { stream ->
+            val raw = stream.url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
+            val host = try { java.net.URI(raw).host ?: "" } catch (_: Exception) { "" }
+            if (host.isBlank()) return@filter true
+            val count = hostCounts.getOrDefault(host, 0)
+            if (count >= 2) false  // MAX_PER_HOST for renewal
+            else { hostCounts[host] = count + 1; true }
+        }.take(RENEWAL_BATCH_SIZE)
+
+        Log.d(TAG, "requestNextBatch('$key'): emitting ${batch.size} new servers from ${remaining.size} remaining (${pool.size} total pool)")
+
+        var emitted = 0
+        for (stream in batch) {
+            val server = Video.Server(
+                id = "ola_stream::${stream.cid}::${stream.label}::${stream.url}",
+                name = "OLA[$key] ${stream.label}",
+            )
+            synchronized(registryLock) {
+                emittedStreamUrls.getOrPut(key) { mutableSetOf() }.add(stream.url)
+            }
+            Log.d(TAG, "  → renewal emit OLA[$key] ${stream.label} (cid=${stream.cid})")
+            _additionalServers.emit(server)
+            emitted++
+        }
+        return emitted
+    }
+
+    /**
+     * Request a single replacement server for a banned source.
+     * Returns the replacement Video.Server or null if pool exhausted.
+     * Unlike requestNextBatch, this doesn't emit to the flow — the caller
+     * adds it to the Settings.Server list directly.
+     */
+    fun requestSingleReplacement(bannedServerId: String): Video.Server? {
+        // Extract channel key and URL from "ola_stream::cid::label::url"
+        val parts = bannedServerId.removePrefix("ola_stream::").split("::", limit = 3)
+        if (parts.size < 3) return null
+        val channelKey = parts[0]
+        val bannedUrl = parts[2]
+
+        val pool = synchronized(registryLock) { fullStreamPool[channelKey] } ?: return null
+        val alreadyEmitted = synchronized(registryLock) { emittedStreamUrls[channelKey] ?: emptySet() }
+
+        // Find a stream from pool that wasn't already emitted and isn't on a dead domain
+        val replacement = pool.firstOrNull { stream ->
+            val url = stream.url
+            if (url in alreadyEmitted) return@firstOrNull false
+            if (url == bannedUrl) return@firstOrNull false
+            val raw = url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
+            val host = try { java.net.URI(raw).host ?: "" } catch (_: Exception) { "" }
+            if (host.isNotBlank() && isDomainDead(host)) return@firstOrNull false
+            true
+        } ?: return null
+
+        // Mark as emitted
+        synchronized(registryLock) {
+            emittedStreamUrls.getOrPut(channelKey) { mutableSetOf() }.add(replacement.url)
+        }
+
+        Log.d(TAG, "requestSingleReplacement('$channelKey'): replacing banned with ${replacement.label}")
+        return Video.Server(
+            id = "ola_stream::${replacement.cid}::${replacement.label}::${replacement.url}",
+            name = "OLA[$channelKey] ${replacement.label}",
+        )
+    }
+
+    // ── Channel navigation (prev/next) for mobile zapping ──
+
+    private fun getOrderedChannelIds(): List<String> {
+        return curatedChannels.map { "ola::${it.key}" }
+    }
+
+    fun getPreviousChannelId(currentId: String): String? {
+        val list = getOrderedChannelIds()
+        val idx = list.indexOf(currentId)
+        return if (idx > 0) list[idx - 1] else null
+    }
+
+    fun getNextChannelId(currentId: String): String? {
+        val list = getOrderedChannelIds()
+        val idx = list.indexOf(currentId)
+        return if (idx in 0 until list.lastIndex) list[idx + 1] else null
+    }
+
+    fun getChannelDisplayName(channelId: String): String? {
+        val key = channelId.removePrefix("ola::").removePrefix("ola_ep::")
+        return curatedChannels.firstOrNull { it.key == key }?.displayName
+            ?: synchronized(registryLock) { channelRegistry[key]?.displayName }
+    }
+
+    fun getChannelPoster(channelId: String): String? {
+        val key = channelId.removePrefix("ola::").removePrefix("ola_ep::")
+        val name = getChannelDisplayName(channelId) ?: return null
+        return logoUrlFor(name)
+    }
+
     private fun loadWorkingChannelUrls() {
         try {
             val f = java.io.File(StreamFlixApp.instance.filesDir, WORKING_URLS_FILE)
             if (!f.exists()) return
             val json = org.json.JSONObject(f.readText())
+            var loaded = 0
+            var skipped = 0
             json.keys().forEach { key ->
-                workingChannelUrls[key] = json.getString(key)
+                val url = json.getString(key)
+                // Only keep direct stream URLs — MAC portal resolved URLs contain
+                // ephemeral tokens that expire. Discard them on load to avoid playing
+                // the wrong channel (expired tokens can redirect to default streams).
+                if (isDirectStreamUrl(url)) {
+                    workingChannelUrls[key] = url
+                    loaded++
+                } else {
+                    Log.d(TAG, "Skipping cached URL for '$key' — looks like expired MAC portal URL")
+                    skipped++
+                }
             }
-            Log.d(TAG, "Loaded ${workingChannelUrls.size} working channel URLs from disk")
+            Log.d(TAG, "Loaded $loaded working channel URLs from disk (skipped $skipped non-direct)")
+            // If we skipped entries, rewrite the file without them.
+            if (skipped > 0) saveWorkingChannelUrls()
         } catch (e: Exception) {
             Log.w(TAG, "Failed to load working URLs: ${e.message}")
         }
+    }
+
+    /** Returns true if the URL looks like a stable direct stream (not a MAC portal
+     *  resolved URL with ephemeral tokens). MAC portal URLs typically contain /live/
+     *  or /play/ with token parameters, or domains like funtogether.xyz, wowtv.cc, etc.
+     *  Direct OTF/Vavoo/CDN streams are stable across sessions. */
+    private fun isDirectStreamUrl(url: String): Boolean {
+        val u = url.lowercase()
+        // Localhost = MAC portal proxy — never cache
+        if (u.contains("localhost") || u.contains("127.0.0.1")) return false
+        // MAC portal resolved URLs typically have /live/ + token params or /play/
+        // and come from known MAC portal domains. If URL has a "token=" param, it's ephemeral.
+        if (u.contains("token=")) return false
+        // Very short-lived MAC portal patterns
+        if (Regex("/live/[^/]+/[^/]+/\\d+").containsMatchIn(u)) return false
+        // If it looks like a normal stream URL, it's direct
+        return u.startsWith("http")
     }
 
     private fun saveWorkingChannelUrls() {
@@ -700,6 +901,53 @@ object OlaTvProvider : Provider, IptvProvider {
         } catch (e: Exception) {
             Log.w(TAG, "Failed to save working URLs: ${e.message}")
         }
+    }
+
+    private fun loadDeadDomains() {
+        try {
+            val f = java.io.File(StreamFlixApp.instance.filesDir, DEAD_DOMAINS_FILE)
+            if (!f.exists()) return
+            val json = org.json.JSONObject(f.readText())
+            val now = System.currentTimeMillis()
+            json.keys().forEach { domain ->
+                val ts = json.optLong(domain, 0)
+                if (now - ts < DEAD_DOMAINS_TTL_MS) {
+                    deadDomains[domain] = ts
+                }
+            }
+            Log.d(TAG, "Loaded ${deadDomains.size} dead domains from disk")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load dead domains: ${e.message}")
+        }
+    }
+
+    private fun saveDeadDomains() {
+        try {
+            val json = org.json.JSONObject()
+            val now = System.currentTimeMillis()
+            deadDomains.forEach { (domain, ts) ->
+                if (now - ts < DEAD_DOMAINS_TTL_MS) json.put(domain, ts)
+            }
+            java.io.File(StreamFlixApp.instance.filesDir, DEAD_DOMAINS_FILE).writeText(json.toString())
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to save dead domains: ${e.message}")
+        }
+    }
+
+    private fun markDomainDead(domain: String) {
+        if (domain.isNotBlank()) {
+            deadDomains[domain] = System.currentTimeMillis()
+            Log.d(TAG, "Domain blacklisted: $domain")
+        }
+    }
+
+    private fun isDomainDead(domain: String): Boolean {
+        val ts = deadDomains[domain] ?: return false
+        if (System.currentTimeMillis() - ts >= DEAD_DOMAINS_TTL_MS) {
+            deadDomains.remove(domain)
+            return false
+        }
+        return true
     }
 
     // URLs that recently passed a HEAD probe — short-circuit subsequent probes for the
@@ -750,11 +998,28 @@ object OlaTvProvider : Provider, IptvProvider {
             if (t1.isBlank() || t2.isBlank()) return null
             val baseUrl = olaDecodeToken(t1) ?: return null
             val mac = olaDecodeToken2(t2) ?: return null
+
+            // Check if this MAC portal domain is blacklisted (dead).
+            // Saves 5-15s per dead domain instead of waiting for TCP timeout.
+            val domain = try { java.net.URI(baseUrl).host ?: "" } catch (_: Exception) { "" }
+            if (domain.isNotBlank() && isDomainDead(domain)) {
+                Log.d(TAG, "getMacCredentials($cid) — domain $domain is blacklisted, skipping")
+                return null
+            }
+
             val creds = MacCredentials(baseUrl, mac)
             macCredsCache[cid] = creds
             return creds
         } catch (e: Exception) {
             Log.e(TAG, "getMacCredentials($cid) failed: ${e.message}")
+            // If the failure looks like a DNS or connection error, blacklist the domain.
+            val msg = e.message?.lowercase() ?: ""
+            if (msg.contains("nxdomain") || msg.contains("unable to resolve") ||
+                msg.contains("connect timed out") || msg.contains("failed to connect") ||
+                msg.contains("connection refused")) {
+                // Try to extract domain from the OLA TV API response we already parsed — but
+                // at this point we may not have it. Mark based on error if we had a baseUrl.
+            }
             return null
         }
     }
@@ -1259,8 +1524,9 @@ object OlaTvProvider : Provider, IptvProvider {
 
     private suspend fun ensureRegistry() {
         if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return
-        // Load persistent working URLs on first call
+        // Load persistent caches on first call
         if (workingChannelUrls.isEmpty()) loadWorkingChannelUrls()
+        if (deadDomains.isEmpty()) loadDeadDomains()
         registryMutex.withLock {
             if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return@withLock
 
@@ -1374,6 +1640,13 @@ object OlaTvProvider : Provider, IptvProvider {
 
     // Track current emit job so we can cancel it when the user switches channels.
     private var currentEmitJob: Job? = null
+
+    /** Stop background server emission (e.g. when playback is working). */
+    fun stopEmission() {
+        currentEmitJob?.cancel()
+        currentEmitJob = null
+        Log.d(TAG, "stopEmission: background server loading cancelled")
+    }
 
     // ───────── Provider API ─────────
 
@@ -1503,7 +1776,16 @@ object OlaTvProvider : Provider, IptvProvider {
             // Smart sort: direct streams first, previously-working first, dead hosts last.
             // "Direct" = real URL (http://...), not a localhost MAC portal placeholder.
             // MAC portals require handshake + create_link and tokens expire fast → unreliable.
-            val streamsSnapshot = info.streams.sortedWith(
+            // Filter out streams whose host is blacklisted (dead domain) — no point
+            // handing them to the player only to waste 5-10s per dead host.
+            val aliveStreams = info.streams.filter { stream ->
+                val raw = stream.url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
+                val host = try { java.net.URI(raw).host ?: "" } catch (_: Exception) { "" }
+                val dead = host.isNotBlank() && isDomainDead(host)
+                if (dead) Log.d(TAG, "  filtered dead-domain stream: ${stream.label} ($host)")
+                !dead
+            }
+            val sorted = aliveStreams.sortedWith(
                 compareByDescending<OlaStreamRef> { it.url in probeOkCache }  // known-good first
                     .thenBy { it.url in demotedUrls }                         // known-bad last
                     .thenByDescending {                                        // direct > MAC portal
@@ -1512,7 +1794,31 @@ object OlaTvProvider : Provider, IptvProvider {
                     }
                     .thenByDescending { hostScore(it.url) }                   // best host score
             )
-            Log.d(TAG, "getServers '$key' (${info.displayName}): ${streamsSnapshot.size} stream(s) — progressive emission")
+            // Host diversity: limit to MAX_PER_HOST streams per MAC portal host.
+            // Without this, 96 streams from wowtv.cc = cycling through 96 dead variants
+            // of the same broken host. With cap=2, we try 2 from host A, 2 from host B, etc.
+            val MAX_PER_HOST = 2
+            val hostCounts = mutableMapOf<String, Int>()
+            val streamsSnapshot = sorted.filter { stream ->
+                val raw = stream.url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
+                val host = try { java.net.URI(raw).host ?: "" } catch (_: Exception) { "" }
+                if (host.isBlank()) return@filter true  // can't determine host, keep it
+                val count = hostCounts.getOrDefault(host, 0)
+                if (count >= MAX_PER_HOST) {
+                    false  // already have enough from this host
+                } else {
+                    hostCounts[host] = count + 1
+                    true
+                }
+            }
+            Log.d(TAG, "getServers '$key' (${info.displayName}): ${sorted.size} total → ${streamsSnapshot.size} after host-diversity cap — progressive emission")
+
+            // Store full sorted pool for server renewal — when the player exhausts
+            // the current batch, it can call requestNextBatch() to get more.
+            synchronized(registryLock) {
+                fullStreamPool[key] = sorted.toList()
+                emittedStreamUrls[key] = streamsSnapshot.map { it.url }.toMutableSet()
+            }
 
             // Fast-track: if we have a previously-working URL for this channel (persisted
             // to disk), inject it as the FIRST server. This URL is a resolved direct URL
@@ -1540,6 +1846,9 @@ object OlaTvProvider : Provider, IptvProvider {
 
             // Cancel any previous emit job (channel switch) and start a new one.
             currentEmitJob?.cancel()
+            // CRITICAL: clear the replay buffer so a new subscriber (e.g. MiniPlayerController
+            // switching from TF1 to France 2) doesn't receive stale servers from the previous channel.
+            _additionalServers.resetReplayCache()
             currentEmitJob = scope.launch {
                 // Tiny delay so the player has time to subscribe to the flow.
                 delay(150)
@@ -1568,26 +1877,25 @@ object OlaTvProvider : Provider, IptvProvider {
                     emittedCount++
                 }
 
-                // Wait for Phase 3 / late additions for up to ~60s and emit any new streams
-                // that arrive after the initial snapshot. We poll the registry for size growth.
+                // DON'T emit late Phase 3 servers to the player — they flood the Chaîne page
+                // and cause unnecessary loading. The renewal mechanism (requestNextBatch)
+                // will pull from the full pool when the player exhausts current servers.
+                // Just update the fullStreamPool so renewal has access to late discoveries.
                 val seenUrls = streamsSnapshot.map { it.url }.toMutableSet()
                 val waitDeadlineMs = System.currentTimeMillis() + 60_000L
                 while (isActive && System.currentTimeMillis() < waitDeadlineMs && !phase3Done) {
                     delay(1500)
                     val latest = synchronized(registryLock) { channelRegistry[key]?.streams?.toList() } ?: continue
-                    for (s in latest) {
-                        if (!isActive) return@launch
-                        if (seenUrls.add(s.url)) {
-                            val server = Video.Server(
-                                id = "ola_stream::${s.cid}::${s.label}::${s.url}",
-                                name = "OLA[$key] ${s.label}",
-                            )
-                            Log.d(TAG, "  → late emit OLA[$key] ${s.label} (cid=${s.cid})")
-                            _additionalServers.emit(server)
+                    val newStreams = latest.filter { seenUrls.add(it.url) }
+                    if (newStreams.isNotEmpty()) {
+                        // Update the full pool for renewal — but don't emit to the player
+                        synchronized(registryLock) {
+                            fullStreamPool[key] = latest
                         }
+                        Log.d(TAG, "  ${newStreams.size} late streams added to pool for '$key' (total: ${latest.size})")
                     }
                 }
-                Log.d(TAG, "OLA TV emit done for '$key' — ${seenUrls.size} stream(s)")
+                Log.d(TAG, "OLA TV emit done for '$key' — ${seenUrls.size} stream(s) in pool")
             }
 
             initialServers

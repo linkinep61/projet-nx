@@ -86,6 +86,7 @@ import androidx.media3.datasource.cronet.CronetDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import org.chromium.net.CronetEngine
 import com.google.android.gms.net.CronetProviderInstaller
+import com.streamflixreborn.streamflix.fragments.player.settings.IptvFavorites
 import com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsView
 import java.util.Base64 
 import java.io.File
@@ -212,6 +213,15 @@ class PlayerMobileFragment : Fragment() {
     private val args by navArgs<PlayerMobileFragmentArgs>()
     private val database by lazy { AppDatabase.getInstance(requireContext()) }
     private val viewModel by viewModelsFactory { PlayerViewModel(args.videoType, args.id) }
+
+    /** Visual channel key (e.g. "France 4") — used for IPTV favorites persistence. */
+    private val currentChannelKey: String by lazy {
+        args.id
+            .removePrefix("ch::")
+            .removePrefix("sport::")
+            .removePrefix("ola_ep::")
+            .removePrefix("ola::")
+    }
 
     private lateinit var player: ExoPlayer
     private lateinit var httpDataSource: HttpDataSource.Factory
@@ -410,6 +420,7 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+
         // Pre-install Play Services Cronet provider asynchronously so it's ready
         // by the time a LuluVdo/vidzy video needs Chrome's TLS stack
         initCronetEngine()
@@ -490,11 +501,42 @@ class PlayerMobileFragment : Fragment() {
                                 viewModel.getVideo(state.servers.find { server.id == it.id }!!)
                             }
 
+                            // IPTV ban callback: remove source and replace from pool
+                            binding.settings.onChannelVariantBanned = { bannedVariant ->
+                                val provider = UserPreferences.currentProvider
+                                if (provider is com.streamflixreborn.streamflix.providers.OlaTvProvider) {
+                                    val replacement = provider.requestSingleReplacement(bannedVariant.id)
+                                    if (replacement != null) {
+                                        val closeBracket = replacement.name.indexOf(']')
+                                        val label = if (closeBracket >= 0) replacement.name.substring(closeBracket + 2) else replacement.name
+                                        val newVariant = PlayerSettingsView.Settings.ChannelVariant(
+                                            id = replacement.id,
+                                            name = label,
+                                            channelKey = currentChannelKey,
+                                        )
+                                        PlayerSettingsView.Settings.ChannelVariant.addReplacement(newVariant)
+                                        // Also add to servers list so getVideo can find it
+                                        servers = servers + replacement
+                                    }
+                                    binding.settings.refreshChannelVariantList()
+                                }
+                            }
+
+                            // IPTV favorite callback: just refresh UI (persistence handled by IptvFavorites)
+                            binding.settings.onChannelVariantFavoriteToggled = { _ ->
+                                binding.settings.refreshChannelVariantList()
+                            }
+
                             // Chaîne starts empty — clear old entries from previous channel
                             PlayerSettingsView.Settings.ChannelVariant.list.clear()
                             binding.settings.refreshChannelVariantList()
 
-                            viewModel.getVideo(state.servers.first())
+                            // If there's a favorite, prioritize it
+                            val favServer = state.servers.firstOrNull { server ->
+                                server.id.startsWith("ola_stream::") &&
+                                    IptvFavorites.isFavorite(currentChannelKey, server.id)
+                            }
+                            viewModel.getVideo(favServer ?: state.servers.first())
                         }
 
                     }
@@ -576,12 +618,6 @@ class PlayerMobileFragment : Fragment() {
         }
 
         // Progressive additional servers (OLA TV streams go to Chaîne, others to Serveurs)
-        // Extract channel key from args.id (e.g. "ch::france2" → "france2")
-        val currentChannelKey = args.id
-            .removePrefix("ch::")
-            .removePrefix("sport::")
-            .removePrefix("ola_ep::")
-            .removePrefix("ola::")
 
         // Coalesce many rapid emissions into a single UI refresh — without this,
         // 50+ progressive emissions in a few hundred ms saturate the main thread
@@ -627,10 +663,16 @@ class PlayerMobileFragment : Fragment() {
 
                     // OLA TV stream → add to Chaîne page (max 3 per same name)
                     val sameNameCount = PlayerSettingsView.Settings.ChannelVariant.list.count { it.name == label }
+                    var addedVariant: PlayerSettingsView.Settings.ChannelVariant? = null
                     if (sameNameCount < 3) {
-                        PlayerSettingsView.Settings.ChannelVariant.list.add(
-                            PlayerSettingsView.Settings.ChannelVariant(id = server.id, name = label)
+                        addedVariant = PlayerSettingsView.Settings.ChannelVariant(
+                            id = server.id, name = label, channelKey = currentChannelKey,
                         )
+                        // Restore favorite state from persistence
+                        if (IptvFavorites.isFavorite(currentChannelKey, server.id)) {
+                            addedVariant.isFavorite = true
+                        }
+                        PlayerSettingsView.Settings.ChannelVariant.list.add(addedVariant)
                         if (PlayerSettingsView.Settings.ChannelVariant.list.size == 1) {
                             PlayerSettingsView.Settings.ChannelVariant.list.first().isSelected = true
                         }
@@ -642,17 +684,38 @@ class PlayerMobileFragment : Fragment() {
                         viewModel.getVideo(Video.Server(variant.id, variant.name))
                     }
 
-                    // Auto-play first OLA stream if nothing else is playing OR if all initial
-                    // servers failed and we're waiting for progressive sources.
+                    // Auto-play logic:
+                    // 1. If this stream is the favorite → play it immediately (switch to it)
+                    // 2. If no favorite exists → play the first OLA stream that arrives
+                    // 3. If a favorite exists but this isn't it → don't auto-play (wait for fav)
+                    val isFav = IptvFavorites.isFavorite(currentChannelKey, server.id)
                     val hasNonOla = servers.any { !it.name.startsWith("OLA[") }
                     val firstOla = !hasNonOla && PlayerSettingsView.Settings.ChannelVariant.list.size == 1
-                    if (firstOla) {
-                        Log.d("PlayerMobileFragment", "No non-OLA servers — auto-playing first OLA stream")
+                    val hasFavoriteForChannel = server.id.startsWith("ola_stream::") &&
+                        IptvFavorites.getFavoriteForChannel(currentChannelKey) != null
+
+                    if (isFav) {
+                        // This is the favorite → play it NOW, even if something else is already playing
+                        Log.d("PlayerMobileFragment", "★ Favorite OLA stream arrived — switching to: $label")
+                        PlayerSettingsView.Settings.ChannelVariant.list.forEach { it.isSelected = false }
+                        // Mark the variant in the list (may be the one just added, or an existing one)
+                        val favVariant = addedVariant
+                            ?: PlayerSettingsView.Settings.ChannelVariant.list.find { it.id == server.id }
+                        favVariant?.isSelected = true
+                        viewModel.getVideo(server)
+                    } else if (firstOla && !hasFavoriteForChannel) {
+                        // No favorite set for this channel → play first available
+                        Log.d("PlayerMobileFragment", "No non-OLA servers, no favorite — auto-playing first OLA stream")
                         viewModel.getVideo(server)
                     } else if (awaitingMoreServers) {
                         Log.d("PlayerMobileFragment", "Awaiting more servers — trying newly arrived OLA stream: $label")
                         cancelAwaitMoreServers()
                         triedChannelVariantIds.add(server.id)
+                        viewModel.getVideo(server)
+                    } else if (firstOla && hasFavoriteForChannel) {
+                        // First stream but a favorite exists — play this temporarily,
+                        // the favorite will auto-switch when it arrives
+                        Log.d("PlayerMobileFragment", "Playing first OLA stream while waiting for favorite")
                         viewModel.getVideo(server)
                     }
 
@@ -1178,21 +1241,39 @@ class PlayerMobileFragment : Fragment() {
 
     private fun setupChannelNavigationButtons(btnPrevious: ImageView, btnNext: ImageView) {
         val provider = UserPreferences.currentProvider
-        if (provider !is WiTvProvider) {
-            btnPrevious.isGone = true
-            btnNext.isGone = true
-            return
-        }
 
-        val prevId = provider.getPreviousChannelId(args.id)
-        val nextId = provider.getNextChannelId(args.id)
+        // Resolve prev/next IDs depending on provider type
+        val prevId: String?
+        val nextId: String?
+        val resolveDisplayName: (String) -> String?
+        val resolvePoster: (String) -> String?
+
+        when (provider) {
+            is WiTvProvider -> {
+                prevId = provider.getPreviousChannelId(args.id)
+                nextId = provider.getNextChannelId(args.id)
+                resolveDisplayName = { provider.getChannelDisplayName(it) }
+                resolvePoster = { provider.getChannelPoster(it) }
+            }
+            is com.streamflixreborn.streamflix.providers.OlaTvProvider -> {
+                prevId = provider.getPreviousChannelId(args.id)
+                nextId = provider.getNextChannelId(args.id)
+                resolveDisplayName = { provider.getChannelDisplayName(it) }
+                resolvePoster = { provider.getChannelPoster(it) }
+            }
+            else -> {
+                btnPrevious.isGone = true
+                btnNext.isGone = true
+                return
+            }
+        }
 
         btnPrevious.isGone = prevId == null
         btnNext.isGone = nextId == null
 
         fun navigateToChannel(channelId: String) {
-            val channelName = provider.getChannelDisplayName(channelId) ?: channelId
-            val channelPoster = provider.getChannelPoster(channelId)
+            val channelName = resolveDisplayName(channelId) ?: channelId
+            val channelPoster = resolvePoster(channelId)
 
             val videoType = Video.Type.Episode(
                 id = channelId,
@@ -1925,6 +2006,30 @@ class PlayerMobileFragment : Fragment() {
                 if (isLiveIptv) {
                     val server = currentServer ?: return
                     pruneBrokenVariant(server)
+
+                    // Remove failed source from Chaîne list and replace with a new one from pool
+                    val failedVariant = PlayerSettingsView.Settings.ChannelVariant.list.find { it.id == server.id }
+                    if (failedVariant != null) {
+                        val removedIndex = PlayerSettingsView.Settings.ChannelVariant.ban(failedVariant)
+                        // Try to get a replacement from the pool
+                        val provider = UserPreferences.currentProvider
+                        if (provider is com.streamflixreborn.streamflix.providers.OlaTvProvider) {
+                            val replacement = provider.requestSingleReplacement(server.id)
+                            if (replacement != null) {
+                                val closeBracket = replacement.name.indexOf(']')
+                                val label = if (closeBracket >= 0) replacement.name.substring(closeBracket + 2) else replacement.name
+                                val newVariant = PlayerSettingsView.Settings.ChannelVariant(
+                                    id = replacement.id,
+                                    name = label,
+                                    channelKey = currentChannelKey,
+                                )
+                                PlayerSettingsView.Settings.ChannelVariant.addReplacement(newVariant, removedIndex)
+                                servers = servers + replacement
+                            }
+                        }
+                        binding.settings.refreshChannelVariantList()
+                    }
+
                     val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
                     if (nextServer != null) {
                         Log.w("PlayerMobileFragment", "IPTV failover: ${server.name} error (${error.errorCodeName}), trying ${nextServer.name}")

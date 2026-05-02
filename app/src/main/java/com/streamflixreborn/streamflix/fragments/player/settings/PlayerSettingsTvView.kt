@@ -96,10 +96,24 @@ class PlayerSettingsTvView @JvmOverloads constructor(
     }
 
     override fun focusSearch(focused: View, direction: Int): View {
-        return when {
-            binding.rvSettings.hasFocus() -> focused
-            else -> super.focusSearch(focused, direction)
+        if (binding.rvSettings.hasFocus()) {
+            // UP → explicitly go to downloads button when at top of list
+            if (direction == View.FOCUS_UP) {
+                val lm = binding.rvSettings.layoutManager
+                    as? androidx.recyclerview.widget.LinearLayoutManager
+                val firstPos = lm?.findFirstCompletelyVisibleItemPosition() ?: 0
+                if (firstPos == 0) {
+                    return binding.btnSettingsDownloads
+                }
+            }
+            // LEFT/RIGHT → allow navigation within items (row ↔ download icon)
+            if (direction == View.FOCUS_RIGHT || direction == View.FOCUS_LEFT) {
+                return super.focusSearch(focused, direction)
+            }
+            // Block DOWN escape from the list
+            return focused
         }
+        return super.focusSearch(focused, direction)
     }
 
 
@@ -772,22 +786,10 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                 }
             }
 
+            // Downloads disabled on TV — not enough storage on these devices
             binding.ivSettingDownload.apply {
-                if (item is Settings.Server) {
-                    val knownBad = PlayerSettingsMobileView.isKnownWebViewOnlyServer(item.name)
-                    visibility = View.VISIBLE
-                    alpha = if (knownBad) 0.25f else 1.0f
-                    setOnClickListener {
-                        settingsView.onServerDownloadClicked?.invoke(item)
-                    }
-                    // D-pad: LEFT from download button returns to the row
-                    nextFocusLeftId = binding.root.id
-                    // D-pad: RIGHT from the row goes to the download button
-                    binding.root.nextFocusRightId = this.id
-                } else {
-                    visibility = View.GONE
-                    binding.root.nextFocusRightId = View.NO_ID
-                }
+                visibility = View.GONE
+                binding.root.nextFocusRightId = View.NO_ID
             }
 
             binding.ivSettingEnter.apply {

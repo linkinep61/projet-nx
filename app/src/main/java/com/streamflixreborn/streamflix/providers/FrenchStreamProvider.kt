@@ -83,7 +83,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 val href = link.substringAfterLast("/")
                 val title = item.selectFirst("div.short-title")?.text() ?: ""
                 val poster = item.selectFirst("img")?.attr("src") ?: ""
-                if (asTvShow || link.contains("/s-tv/") || link.contains("-saison-"))
+                if (asTvShow || link.contains("/s-tv/") || link.contains("/serie/") || link.contains("-saison-"))
                     TvShow(id = href, title = title, poster = poster)
                 else
                     Movie(id = href, title = title, poster = poster)
@@ -306,7 +306,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 ?: it.selectFirst("div.search-title")?.text())
                 ?.replace("\\'", "'") ?: ""
             val poster = it.selectFirst("img")?.attr("src") ?: ""
-            if (id.contains("-saison-") || title.contains(" - Saison ") || link.contains("/s-tv/"))
+            if (id.contains("-saison-") || title.contains(" - Saison ") || link.contains("/s-tv/") || link.contains("/serie/"))
                 TvShow(id = id, title = title, poster = poster)
             else
                 Movie(id = id, title = title, poster = poster)
@@ -323,7 +323,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         return document.select("div.short").mapNotNull { item ->
             val link = item.selectFirst("a.short-poster")?.attr("href") ?: return@mapNotNull null
             // Skip TV-show entries that the same selector also picks up on the home page.
-            if (link.contains("/s-tv/") || link.contains("-saison-")) return@mapNotNull null
+            if (link.contains("/s-tv/") || link.contains("/serie/") || link.contains("-saison-")) return@mapNotNull null
             Movie(
                 id = link.substringAfterLast("/"),
                 title = item.selectFirst("div.short-title")?.text() ?: "",
@@ -338,7 +338,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         return document.select("div.short").mapNotNull { item ->
             val link = item.selectFirst("a.short-poster")?.attr("href") ?: return@mapNotNull null
             // Only keep TV shows (filter out movies that share the same listing on home).
-            if (!link.contains("/s-tv/") && !link.contains("-saison-")) return@mapNotNull null
+            if (!link.contains("/s-tv/") && !link.contains("/serie/") && !link.contains("-saison-")) return@mapNotNull null
             TvShow(
                 id = link.substringAfterLast("/"),
                 title = item.selectFirst("div.short-title")?.text() ?: "",
@@ -999,7 +999,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         companion object {
             private val client = OkHttpClient.Builder()
-                .readTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .dns(DnsResolver.doh)
                 // Preserve POST method & body on redirects (site may change domain)
