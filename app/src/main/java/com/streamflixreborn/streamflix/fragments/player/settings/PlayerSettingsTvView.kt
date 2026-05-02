@@ -95,7 +95,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
         return true
     }
 
-    override fun focusSearch(focused: View, direction: Int): View {
+    override fun focusSearch(focused: View?, direction: Int): View? {
         if (binding.rvSettings.hasFocus()) {
             // UP → explicitly go to downloads button when at top of list
             if (direction == View.FOCUS_UP) {
@@ -106,14 +106,14 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     return binding.btnSettingsDownloads
                 }
             }
-            // LEFT/RIGHT → allow navigation within items (row ↔ download icon)
+            // LEFT/RIGHT → allow navigation within items (row ↔ favorite/ban buttons)
             if (direction == View.FOCUS_RIGHT || direction == View.FOCUS_LEFT) {
-                return super.focusSearch(focused, direction)
+                return super.focusSearch(focused, direction) ?: focused
             }
             // Block DOWN escape from the list
             return focused
         }
-        return super.focusSearch(focused, direction)
+        return super.focusSearch(focused, direction) ?: focused
     }
 
 
@@ -626,11 +626,26 @@ class PlayerSettingsTvView @JvmOverloads constructor(
 
                     is Settings.SoftwareDecoder -> context.getString(item.stringId)
 
-                    is Settings.ChannelVariant -> item.name
+                    is Settings.ChannelVariant -> {
+                        val prefix = when {
+                            item.isSelected && item.isIptv -> "▶ "
+                            item.isFavorite && item.isIptv -> "★ "
+                            else -> ""
+                        }
+                        prefix + item.name
+                    }
                     is Settings.Server -> item.name
 
                     else -> ""
                 }
+
+                // Green text for the active IPTV source, default for others
+                setTextColor(
+                    if (item is Settings.ChannelVariant && item.isIptv && item.isSelected)
+                        0xFF4CAF50.toInt()  // Material Green
+                    else
+                        ContextCompat.getColor(context, R.color.setting_text)
+                )
             }
 
             binding.tvSettingSubText.apply {
@@ -782,14 +797,64 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                         else -> View.GONE
                     }
 
+                    is Settings.ChannelVariant -> when {
+                        item.isSelected -> View.VISIBLE
+                        else -> View.GONE
+                    }
+
                     else -> View.GONE
                 }
+            }
+
+            // IPTV-specific buttons: favorite (★) and ban (✕) — for ChannelVariant items
+            if (item is Settings.ChannelVariant && item.isIptv) {
+                // Favorite button
+                binding.ivSettingFavorite.visibility = View.VISIBLE
+                binding.ivSettingFavorite.setImageResource(
+                    if (item.isFavorite) R.drawable.ic_favorite_enable
+                    else R.drawable.ic_favorite_disable
+                )
+                binding.ivSettingFavorite.imageTintList = android.content.res.ColorStateList.valueOf(
+                    if (item.isFavorite) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                )
+                binding.ivSettingFavorite.setOnClickListener {
+                    val nowFav = IptvFavorites.toggleFavorite(item.channelKey, item.id)
+                    item.isFavorite = nowFav
+                    // Unfavorite all others in the same channel
+                    if (nowFav) {
+                        Settings.ChannelVariant.list.filter { it !== item && it.isIptv }.forEach {
+                            it.isFavorite = false
+                        }
+                    }
+                    settingsView.onChannelVariantFavoriteToggled?.invoke(item)
+                    settingsView.refreshChannelVariantList()
+                }
+
+                // Ban button (✕)
+                binding.ivSettingBan.visibility = View.VISIBLE
+                binding.ivSettingBan.imageTintList = android.content.res.ColorStateList.valueOf(0xFF808080.toInt())
+                binding.ivSettingBan.setOnClickListener {
+                    settingsView.onChannelVariantBanned?.invoke(item)
+                    // Remove from list and refresh
+                    Settings.ChannelVariant.ban(item)
+                    settingsView.refreshChannelVariantList()
+                }
+
+                // D-pad: right goes to favorite, then ban
+                binding.root.nextFocusRightId = R.id.iv_setting_favorite
+                binding.ivSettingFavorite.nextFocusRightId = R.id.iv_setting_ban
+                binding.ivSettingBan.nextFocusRightId = View.NO_ID
+            } else {
+                binding.ivSettingFavorite.visibility = View.GONE
+                binding.ivSettingBan.visibility = View.GONE
             }
 
             // Downloads disabled on TV — not enough storage on these devices
             binding.ivSettingDownload.apply {
                 visibility = View.GONE
-                binding.root.nextFocusRightId = View.NO_ID
+                if (item !is Settings.ChannelVariant || !(item as? Settings.ChannelVariant)?.isIptv.let { it == true }) {
+                    binding.root.nextFocusRightId = View.NO_ID
+                }
             }
 
             binding.ivSettingEnter.apply {
@@ -800,6 +865,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                             Settings.Audio,
                             Settings.Subtitle,
                             Settings.Speed,
+                            Settings.ChannelVariant,
                             Settings.ExtraBuffering,
                             Settings.SoftwareDecoder,
                             Settings.Server -> View.VISIBLE

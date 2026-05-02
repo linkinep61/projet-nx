@@ -75,6 +75,7 @@ import androidx.navigation.fragment.navArgs
 import com.bumptech.glide.Glide
 import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
 import com.streamflixreborn.streamflix.R
+import com.streamflixreborn.streamflix.fragments.player.settings.IptvFavorites
 import com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsView
 import com.streamflixreborn.streamflix.database.AppDatabase
 import com.streamflixreborn.streamflix.databinding.ContentExoControllerTvBinding
@@ -499,6 +500,32 @@ class PlayerTvFragment : Fragment() {
                         // Downloads disabled on TV — not enough storage
                         // binding.settings.setOnServerDownloadClickedListener { ... }
                         // binding.settings.onDownloadsClicked = { ... }
+
+                        // IPTV ban callback: remove source and replace from pool
+                        binding.settings.onChannelVariantBanned = { bannedVariant ->
+                            val provider = UserPreferences.currentProvider
+                            if (provider is com.streamflixreborn.streamflix.providers.OlaTvProvider) {
+                                val replacement = provider.requestSingleReplacement(bannedVariant.id)
+                                if (replacement != null) {
+                                    val closeBracket = replacement.name.indexOf(']')
+                                    val variantItem = PlayerSettingsView.Settings.ChannelVariant(
+                                        id = replacement.id,
+                                        name = if (closeBracket >= 0) replacement.name.substring(closeBracket + 1).trim()
+                                               else replacement.name,
+                                        channelKey = bannedVariant.channelKey,
+                                    ).apply {
+                                        isFavorite = IptvFavorites.isFavorite(bannedVariant.channelKey, replacement.id)
+                                    }
+                                    PlayerSettingsView.Settings.ChannelVariant.list.add(variantItem)
+                                }
+                                binding.settings.refreshChannelVariantList()
+                            }
+                        }
+
+                        // IPTV favorite callback: just refresh UI (persistence handled by IptvFavorites)
+                        binding.settings.onChannelVariantFavoriteToggled = { _ ->
+                            binding.settings.refreshChannelVariantList()
+                        }
 
                         // Chaîne starts empty — clear old entries from previous channel
                         PlayerSettingsView.Settings.ChannelVariant.list.clear()
@@ -1270,17 +1297,29 @@ class PlayerTvFragment : Fragment() {
 
         private fun setupChannelNavigationButtons(btnPrevious: ImageView, btnNext: ImageView) {
             val provider = UserPreferences.currentProvider
-            if (provider !is WiTvProvider) {
-                btnPrevious.visibility = View.GONE
-                btnNext.visibility = View.GONE
-                return
+
+            // Resolve prev/next IDs depending on provider type
+            val prevId: String?
+            val nextId: String?
+
+            when (provider) {
+                is WiTvProvider -> {
+                    prevId = provider.getPreviousChannelId(args.id)
+                    nextId = provider.getNextChannelId(args.id)
+                }
+                is com.streamflixreborn.streamflix.providers.OlaTvProvider -> {
+                    prevId = provider.getPreviousChannelId(args.id)
+                    nextId = provider.getNextChannelId(args.id)
+                }
+                else -> {
+                    btnPrevious.visibility = View.GONE
+                    btnNext.visibility = View.GONE
+                    return
+                }
             }
 
             // Setup D-pad zapping (UP/DOWN channel switch with overlay)
             setupChannelZapping()
-
-            val prevId = provider.getPreviousChannelId(args.id)
-            val nextId = provider.getNextChannelId(args.id)
 
             btnPrevious.visibility = if (prevId != null) View.VISIBLE else View.GONE
             btnNext.visibility = if (nextId != null) View.VISIBLE else View.GONE
@@ -1308,11 +1347,15 @@ class PlayerTvFragment : Fragment() {
          * Called from setupChannelNavigationButtons after the provider check.
          */
         private fun setupChannelZapping() {
-            val provider = UserPreferences.currentProvider as? WiTvProvider ?: return
+            val provider = UserPreferences.currentProvider
             val isIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
             if (!isIptv) return
 
-            val orderedIds = provider.getOrderedChannelIds()
+            val orderedIds = when (provider) {
+                is WiTvProvider -> provider.getOrderedChannelIds()
+                is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getOrderedChannelIds()
+                else -> return
+            }
             if (orderedIds.size < 2) return
 
             binding.pvPlayer.onChannelUp = {
@@ -1332,7 +1375,7 @@ class PlayerTvFragment : Fragment() {
             }
         }
 
-        private fun scheduleChannelZap(channelId: String, channelNumber: Int, provider: WiTvProvider) {
+        private fun scheduleChannelZap(channelId: String, channelNumber: Int, provider: Any?) {
             pendingZapChannelId = channelId
             showChannelOverlay(channelId, channelNumber, provider)
 
@@ -1345,9 +1388,17 @@ class PlayerTvFragment : Fragment() {
             }
         }
 
-        private fun showChannelOverlay(channelId: String, channelNumber: Int, provider: WiTvProvider) {
-            val channelName = provider.getChannelDisplayName(channelId) ?: channelId.removePrefix("ch::").removePrefix("sport::")
-            val channelLogo = provider.getChannelPoster(channelId)
+        private fun showChannelOverlay(channelId: String, channelNumber: Int, provider: Any?) {
+            val channelName = when (provider) {
+                is WiTvProvider -> provider.getChannelDisplayName(channelId)
+                is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(channelId)
+                else -> null
+            } ?: channelId.removePrefix("ch::").removePrefix("sport::").removePrefix("ola::")
+            val channelLogo = when (provider) {
+                is WiTvProvider -> provider.getChannelPoster(channelId)
+                is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(channelId)
+                else -> null
+            }
 
             binding.tvChannelNumber.text = channelNumber.toString()
             binding.tvChannelName.text = channelName
@@ -1388,9 +1439,17 @@ class PlayerTvFragment : Fragment() {
             }
         }
 
-        private fun navigateToChannel(channelId: String, provider: WiTvProvider) {
-            val channelName = provider.getChannelDisplayName(channelId) ?: channelId
-            val channelPoster = provider.getChannelPoster(channelId)
+        private fun navigateToChannel(channelId: String, provider: Any?) {
+            val channelName = when (provider) {
+                is WiTvProvider -> provider.getChannelDisplayName(channelId)
+                is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(channelId)
+                else -> null
+            } ?: channelId
+            val channelPoster = when (provider) {
+                is WiTvProvider -> provider.getChannelPoster(channelId)
+                is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(channelId)
+                else -> null
+            }
 
             val videoType = Video.Type.Episode(
                 id = channelId,
