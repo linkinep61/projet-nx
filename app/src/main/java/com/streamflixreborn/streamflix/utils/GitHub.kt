@@ -9,14 +9,20 @@ import retrofit2.http.Path
 
 object GitHub {
 
+    // 2026-05-03 : remplacement du PAT admin (qui pouvait push/admin sur le repo
+    // = risque distribution de malware via update auto si extrait de l'APK) par
+    // un PAT fine-grained read-only (Contents:Read + Metadata:Read uniquement,
+    // scope = mobile-client-v2 seulement). Si extrait, l'attaquant peut juste
+    // lire le repo, aucun écriture/admin possible.
+    // Ancien token à révoquer côté GitHub après que les users aient updaté.
     val token: String by lazy {
         val parts = arrayOf(
             "github_pat_11BMK",
-            "YM6Q08XwHzjprTY7H",
-            "_uHR2qMXnngf4sKOv",
-            "3aRYuyaes9mw1K8p3",
-            "e4NiAQKqfLWJT673",
-            "GBEoqMxgMg"
+            "YM6Q0q1tpN5tn7m1G",
+            "_QD0NmpXJCOaMhffZ",
+            "rgRi7TeuggjQtGQ25",
+            "TQq3EMqgvhB42MDC",
+            "IClSQgtdVn"
         )
         parts.joinToString("")
     }
