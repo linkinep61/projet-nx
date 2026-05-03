@@ -211,6 +211,12 @@ open class RabbitstreamExtractor : Extractor() {
     class DokicloudExtractor : RabbitstreamExtractor() {
         override val name = "Dokicloud"
         override val mainUrl = "https://dokicloud.one"
+
+        override suspend fun extract(link: String): Video {
+            // 2026-05-03: tous les TLDs Dokicloud (.one/.to/.live/.io/.cc) renvoient
+            // NXDOMAIN. Aucun miroir actif trouvé. Désactivé proprement.
+            throw Exception("[Dokicloud] is offline (all known domains NXDOMAIN, last checked 2026-05-03)")
+        }
     }
 
     class PremiumEmbedingExtractor : RabbitstreamExtractor() {
