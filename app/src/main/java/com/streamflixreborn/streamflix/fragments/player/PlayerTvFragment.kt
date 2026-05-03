@@ -598,7 +598,14 @@ class PlayerTvFragment : Fragment() {
                             // Drop the broken variant from the Chaîne page so dead entries
                             // don't pile up. Re-emitted next session if Phase 3 finds it.
                             pruneBrokenVariant(state.server)
-                            val nextServer = servers.getOrNull(servers.indexOf(state.server) + 1)
+                            // IPTV: never auto-advance on extractor failure (same sticky
+                            // policy as onPlayerError). Auto-jumping between OLA/Vegeta
+                            // variants during initial loading was breaking playback.
+                            val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
+                                    || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
+                                    || args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                            val nextServer = if (isLiveIptv) null
+                                else servers.getOrNull(servers.indexOf(state.server) + 1)
                             if (nextServer != null) {
                                 viewModel.getVideo(nextServer)
                             } else if (tryNextChannelVariant(state.server)) {

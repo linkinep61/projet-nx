@@ -592,7 +592,18 @@ class PlayerMobileFragment : Fragment() {
                         // Drop this broken variant from the visible Chaîne page so the user
                         // doesn't see piling up dead entries. Re-emitted next session.
                         pruneBrokenVariant(state.server)
-                        val nextServer = servers.getOrNull(servers.indexOf(state.server) + 1)
+                        // IPTV (live channels): NEVER auto-advance to a different server on
+                        // extractor failure. Same sticky policy as onPlayerError. Without
+                        // this, OLA/Vegeta jumped from variant to variant during initial
+                        // loading which churned the buffer and broke playback. The
+                        // tryNextChannelVariant call below still handles same-channel
+                        // variants, and the IPTV ingestion keeps running in the background
+                        // so additional sources show up in the Chaîne page.
+                        val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
+                                || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
+                                || args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                        val nextServer = if (isLiveIptv) null
+                            else servers.getOrNull(servers.indexOf(state.server) + 1)
                         if (nextServer != null) {
                             viewModel.getVideo(nextServer)
                         } else if (tryNextChannelVariant(state.server)) {
