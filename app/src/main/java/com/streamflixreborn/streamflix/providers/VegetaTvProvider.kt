@@ -130,6 +130,9 @@ object VegetaTvProvider : Provider, IptvProvider {
 
     // Pagination size for getTvShows() — full "Toutes les chaînes" page.
     private const val TV_SHOWS_PAGE_SIZE = 50
+
+    // Cap on search results to avoid TV RecyclerView ANR on logo loads.
+    private const val SEARCH_RESULT_LIMIT = 30
     private const val PHASE3_MAX_FR_SERVERS = 8
     private const val PHASE3_PARALLELISM = 2
 
@@ -1297,36 +1300,40 @@ object VegetaTvProvider : Provider, IptvProvider {
         emptyList()
     }
 
-    override suspend fun search(query: String, page: Int): List<AppAdapter.Item> = try {
-        if (page > 1) emptyList<AppAdapter.Item>()
-        // Curated list first, then any registry channel that matches but isn't
-        // already in the curated set — covers chaînes "Autres".
-        val curatedKeys = curatedChannels.map { it.key }.toSet()
-        val curatedHits = curatedChannels
-            .filter { it.displayName.contains(query, ignoreCase = true) }
-            .map { c ->
-                TvShow(
-                    id = "vegeta::${c.key}",
-                    title = c.displayName,
-                    poster = logoUrlFor(c.displayName),
-                    providerName = name,
-                )
-            }
-        val registryHits = synchronized(registryLock) {
-            channelRegistry.entries
-                .filter { (key, info) -> key !in curatedKeys && info.displayName.contains(query, ignoreCase = true) }
-                .map { (key, info) ->
+    override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
+        if (page > 1) return emptyList()
+        return try {
+            // Curated first, then registry-only matches. Capped at SEARCH_RESULT_LIMIT
+            // so a generic query doesn't ANR the TV RecyclerView on logo loads.
+            val curatedKeys = curatedChannels.map { it.key }.toSet()
+            val curatedHits = curatedChannels
+                .filter { it.displayName.contains(query, ignoreCase = true) }
+                .map { c ->
                     TvShow(
-                        id = "vegeta::$key",
-                        title = info.displayName,
-                        poster = info.logo.ifEmpty { logoUrlFor(info.displayName) },
+                        id = "vegeta::${c.key}",
+                        title = c.displayName,
+                        poster = logoUrlFor(c.displayName),
                         providerName = name,
                     )
                 }
-                .sortedBy { it.title.lowercase() }
-        }
-        curatedHits + registryHits
-    } catch (_: Exception) { emptyList() }
+            val registrySnapshot = synchronized(registryLock) {
+                channelRegistry.entries
+                    .filter { (key, info) -> key !in curatedKeys && info.displayName.contains(query, ignoreCase = true) }
+                    .map { (key, info) -> Triple(key, info.displayName, info.logo) }
+            }
+            val registryHits = registrySnapshot
+                .sortedBy { it.second.lowercase() }
+                .map { (key, displayName, logo) ->
+                    TvShow(
+                        id = "vegeta::$key",
+                        title = displayName,
+                        poster = logo.ifEmpty { logoUrlFor(displayName) },
+                        providerName = name,
+                    )
+                }
+            (curatedHits + registryHits).take(SEARCH_RESULT_LIMIT)
+        } catch (_: Exception) { emptyList() }
+    }
 
     override suspend fun getMovies(page: Int): List<Movie> = emptyList()
 
