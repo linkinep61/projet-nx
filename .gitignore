@@ -90,3 +90,7 @@ near_crash.txt
 proc*.txt
 logcat*.txt
 
+
+# Memoire perso Claude (jamais commit)
+CLAUDE.md
+TODO.md
