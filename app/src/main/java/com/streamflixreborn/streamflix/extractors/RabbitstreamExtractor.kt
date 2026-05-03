@@ -224,56 +224,11 @@ open class RabbitstreamExtractor : Extractor() {
         override val mainUrl = "https://premiumembeding.cloud"
 
         override suspend fun extract(link: String): Video {
-            // Build API URL from the embed link itself instead of relying on RABBITSTREAM_SOURCE_API
-            val httpUrl = link.toHttpUrl()
-            val hostUrl = "${httpUrl.scheme}://${httpUrl.host}"
-            val sourceId = httpUrl.pathSegments.lastOrNull { it.isNotEmpty() }
-                ?: link.substringAfterLast("/").substringBefore("?")
-
-            val service = Service.build(hostUrl)
-
-            // Try the standard rabbitstream getSources endpoint
-            val apiUrl = "$hostUrl/$embed/getSources"
-
-            val response = try {
-                service.getSources(
-                    url = apiUrl,
-                    id = sourceId,
-                    token = null,
-                    referer = link,
-                )
-            } catch (e: Exception) {
-                // Fallback: try without embed path
-                service.getSources(
-                    url = "$hostUrl/getSources",
-                    id = sourceId,
-                    token = null,
-                    referer = link,
-                )
-            }
-
-            val sources = when (response) {
-                is Service.Sources -> response
-                is Service.Sources.Encrypted -> response.decrypt(
-                    key = service.getSourceEncryptedKey(key).rabbitstream.keys.key,
-                )
-            }
-
-            return Video(
-                source = sources.sources.map { it.file }.firstOrNull() ?: "",
-                headers = mapOf(
-                    "Referer" to hostUrl,
-                    "User-Agent" to DEFAULT_USER_AGENT
-                ),
-                subtitles = sources.tracks
-                    .filter { it.kind == "captions" }
-                    .map {
-                        Video.Subtitle(
-                            label = it.label,
-                            file = it.file,
-                        )
-                    }
-            )
+            // 2026-05-03: premiumembeding.cloud/.com/premiumembed.net tous NXDOMAIN
+            // ou TIMEOUT. Aucun miroir actif. Désactivé proprement.
+            // L'ancienne implémentation (getSources via embed path + fallback)
+            // est préservée dans l'historique git si le service revient.
+            throw Exception("[PremiumEmbeding] is offline (premiumembeding.* unreachable, last checked 2026-05-03)")
         }
     }
 
