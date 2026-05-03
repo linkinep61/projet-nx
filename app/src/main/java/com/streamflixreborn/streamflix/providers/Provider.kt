@@ -83,6 +83,13 @@ interface Provider {
 
         val providers: Map<Provider, ProviderSupport> = linkedMapOf(
             // French providers — custom display order
+            // 2026-05-03: Nakios mis en tête (request user) — API TMDB-shape sur
+            // api.nakios.fit, catalogue accessible sans compte (juste header
+            // Origin requis), sources VOD via /api/sources/movie/{tmdbId} et
+            // /api/sources/tv/{id}/{s}/{e}. Auto-rediscovery domaine via
+            // nakios.online si jamais le TLD change. enrichHome = false car
+            // NakiosProvider.getHome() construit déjà 6 catégories propres.
+            NakiosProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             // FrenchStream: enrichment disabled — the site's natural home
             // already has "Nouveautés Films" + "Nouveautés Séries" sections,
             // and enrichment caused the rows to flip ("Films Récents" ↔
