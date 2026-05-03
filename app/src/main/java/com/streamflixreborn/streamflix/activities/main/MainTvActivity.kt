@@ -34,6 +34,13 @@ import kotlinx.coroutines.launch
 
 class MainTvActivity : FragmentActivity() {
 
+    private companion object {
+        // True the first time the JVM/process starts. Survives activity restarts
+        // (provider clicks re-launch with FLAG_ACTIVITY_NEW_TASK|CLEAR_TASK) but
+        // resets on a true cold start (process kill).
+        private var isFreshProcessLaunch = true
+    }
+
     private var _binding: ActivityMainTvBinding? = null
     private val binding get() = _binding!!
 
@@ -78,8 +85,19 @@ class MainTvActivity : FragmentActivity() {
             return
         }
 
-        if (savedInstanceState == null) {
-            UserPreferences.currentProvider?.let {
+        // Per user request: cold start lands on the Providers home with NO
+        // active provider. This avoids auto-loading a memory-heavy provider
+        // (which can crash low-RAM devices) and forces the user to consciously
+        // pick which category/provider they want to use today.
+        if (savedInstanceState == null && isFreshProcessLaunch) {
+            UserPreferences.currentProvider = null
+            isFreshProcessLaunch = false
+            // Stay on R.id.providers (the start destination).
+        } else if (savedInstanceState == null) {
+            // Activity restart from a provider click — jump to home if a
+            // provider is now selected so the user actually lands on it.
+            isFreshProcessLaunch = false
+            if (UserPreferences.currentProvider != null) {
                 navController.navigate(R.id.home)
             }
         } else {
@@ -177,7 +195,24 @@ class MainTvActivity : FragmentActivity() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 when (navController.currentDestination?.id) {
-                    R.id.home -> if (binding.navMain.hasFocus()) finish() else binding.navMain.requestFocus()
+                    R.id.home -> {
+                        // Back from a provider's home = return to the
+                        // Providers selection (so the user can pick another
+                        // one) instead of exiting to the TV launcher.
+                        if (binding.navMain.hasFocus()) {
+                            UserPreferences.currentProvider = null
+                            navController.navigate(
+                                R.id.providers,
+                                null,
+                                navOptions {
+                                    launchSingleTop = true
+                                    popUpTo(R.id.home) { inclusive = true }
+                                }
+                            )
+                        } else {
+                            binding.navMain.requestFocus()
+                        }
+                    }
                     R.id.settings, R.id.search, R.id.movies, R.id.tv_shows, R.id.downloads -> {
                         navigateToProviderHome(navController)
                         binding.navMain.requestFocus()

@@ -51,7 +51,6 @@
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
-                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
             <intent-filter>
@@ -59,6 +58,22 @@
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="streamflix" android:host="resolve"/>
+            </intent-filter>
+        </activity>
+
+        <!-- TV launcher entry point. Same APK works on phones (MainMobileActivity)
+             AND on Android TV / Chromecast (MainTvActivity here). When upgrading
+             from a TV-variant APK to a mobile-variant APK on a TV, the launcher
+             cached MainTvActivity intent still resolves so the user can open the
+             app from the home screen without a launcher refresh / reboot. -->
+        <activity
+            android:name=".activities.main.MainTvActivity"
+            android:banner="@mipmap/ic_banner"
+            android:exported="true"
+            android:theme="@style/AppTheme.Tv">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
 
@@ -100,6 +115,14 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/provider_paths" />
         </provider>
+
+        <receiver
+            android:name="com.streamflixreborn.streamflix.download.LiveRecorderStopReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.streamflixreborn.streamflix.LIVE_RECORDER_STOP" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

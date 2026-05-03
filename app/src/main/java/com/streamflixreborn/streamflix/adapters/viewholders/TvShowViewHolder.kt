@@ -114,15 +114,18 @@ class TvShowViewHolder(
     }
 
     private fun isIptvProvider(): Boolean {
-        // Match WiTv (ch::, sport::) AND OlaTv (ola::, ola_ep::) IDs, plus the provider names
-        // for both. Keeping the prefix checks too because tvShow objects sometimes lack
-        // providerName.
+        // Match WiTv (ch::, sport::), OlaTv (ola::, ola_ep::), Vegeta TV (vegeta::,
+        // vegeta_ep::) IDs, plus the provider names. Keeping the prefix checks too
+        // because tvShow objects sometimes lack providerName.
         return tvShow.providerName == "WiTV"
             || tvShow.providerName == "OLA TV"
+            || tvShow.providerName == "Vegeta TV"
             || tvShow.id.startsWith("ch::")
             || tvShow.id.startsWith("sport::")
             || tvShow.id.startsWith("ola::")
             || tvShow.id.startsWith("ola_ep::")
+            || tvShow.id.startsWith("vegeta::")
+            || tvShow.id.startsWith("vegeta_ep::")
     }
 
     private fun checkProviderAndRun(action: () -> Unit) {
@@ -231,12 +234,14 @@ class TvShowViewHolder(
             imageView.setPadding(0, 0, 0, 0)
         }
         imageView.loadTvShowPoster(tvShow) {
-            if (isIptvProvider() && tvShow.providerName == "OLA TV") {
-                // POSTER_LIST_OPTIONS in ArtworkLoader.kt sets placeholder + error to the
-                // gray "glide_fallback_cover" drawable. For IPTV logos (transparent PNGs)
-                // that drawable bleeds through. Wipe BOTH via a fresh RequestOptions
-                // applied AFTER POSTER_LIST_OPTIONS — chained .placeholder() alone doesn't
-                // reset it because the underlying RequestOptions has been merged already.
+            if (isIptvProvider()) {
+                // POSTER_LIST_OPTIONS in ArtworkLoader.kt sets placeholder + error to
+                // the gray "glide_fallback_cover" drawable. For IPTV logos (which are
+                // transparent PNGs sitting on the channel card) the gray drawable
+                // bleeds through and shows behind the logo. Wipe BOTH via a fresh
+                // RequestOptions applied AFTER POSTER_LIST_OPTIONS — chained
+                // .placeholder() alone won't reset it because the underlying
+                // RequestOptions has been merged already.
                 val transparentDrawable = android.graphics.drawable.ColorDrawable(0)
                 apply(
                     com.bumptech.glide.request.RequestOptions()
@@ -244,18 +249,21 @@ class TvShowViewHolder(
                         .fallback(transparentDrawable)
                         .error(transparentDrawable)
                 )
-                val fallbackUrl = com.streamflixreborn.streamflix.providers.OlaTvProvider
-                    .fallbackLogoUrlFor(tvShow.title)
-                error(
-                    com.bumptech.glide.Glide.with(imageView.context)
-                        .load(fallbackUrl)
-                        .apply(
-                            com.bumptech.glide.request.RequestOptions()
-                                .placeholder(transparentDrawable)
-                                .fallback(transparentDrawable)
-                                .error(transparentDrawable)
-                        )
-                )
+                // For OlaTv we also have a curated fallback URL (initials avatar).
+                if (tvShow.providerName == "OLA TV") {
+                    val fallbackUrl = com.streamflixreborn.streamflix.providers.OlaTvProvider
+                        .fallbackLogoUrlFor(tvShow.title)
+                    error(
+                        com.bumptech.glide.Glide.with(imageView.context)
+                            .load(fallbackUrl)
+                            .apply(
+                                com.bumptech.glide.request.RequestOptions()
+                                    .placeholder(transparentDrawable)
+                                    .fallback(transparentDrawable)
+                                    .error(transparentDrawable)
+                            )
+                    )
+                }
             } else {
                 fallback(R.drawable.glide_fallback_cover)
             }

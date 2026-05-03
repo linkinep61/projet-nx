@@ -474,10 +474,42 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
             val document = service.getPage(url)
 
             val servers = mutableListOf<Video.Server>()
+            val seenSrcs = mutableSetOf<String>()
 
-            // Sur VoirDrama : iframe unique dans div.chapter-video-frame
+            // 1) Same Madara WP theme as VoirAnime: ALL players are stored in
+            //    `var thisChapterSources = {"LECTEUR X":"<iframe src=...>...}` —
+            //    the page only displays the first one. Without parsing this
+            //    JS map we miss every alternate player and end up stuck on
+            //    a single (often dead) embed.
+            val html = document.outerHtml()
+            // Same JS-aware regex as VoirAnime: tolerant to `\"` inside the
+            // value (lazy match) AND restricted to `\/` only inside the URL
+            // group (so the trailing `\"` doesn't leak into the captured URL
+            // and break extractors with a literal `"` suffix).
+            val srcRegex = Regex(
+                "\"([^\"]*LECTEUR[^\"]*)\"\\s*:\\s*\"(?:[^\"\\\\]|\\\\.)*?src=\\\\?[\"']?(https?:(?:[^\"'\\\\\\s]|\\\\/)+)",
+                RegexOption.IGNORE_CASE
+            )
+            srcRegex.findAll(html).forEach { match ->
+                val rawName = match.groupValues[1].trim()
+                val rawSrc = match.groupValues[2]
+                    .replace("\\/", "/")
+                    .replace("\\\"", "\"")
+                    .takeIf { it.startsWith("http") } ?: return@forEach
+                if (!seenSrcs.add(rawSrc)) return@forEach
+                val hostShort = try {
+                    java.net.URL(rawSrc).host.split(".").first { it != "www" }
+                        .replaceFirstChar { it.uppercase() }
+                } catch (_: Exception) { "Lecteur" }
+                servers.add(Video.Server(id = rawSrc, name = "$rawName ($hostShort)", src = rawSrc))
+                Log.w("VoirDramaProvider", "JS source matched: $rawName -> $rawSrc")
+            }
+            Log.w("VoirDramaProvider", "After JS parse: ${servers.size} servers")
+
+            // 2) DOM iframe fallback (older episodes / different page templates).
             document.select(".chapter-video-frame iframe, .reading-content iframe, .entry-content iframe, iframe[src]").forEach { iframe ->
                 val src = iframe.attr("src").takeIf { it.isNotBlank() && it.startsWith("http") } ?: return@forEach
+                if (!seenSrcs.add(src)) return@forEach
                 val serverName = try {
                     java.net.URL(src).host.split(".").first { it != "www" }
                         .replaceFirstChar { it.uppercase() }
@@ -495,11 +527,25 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
                 else -> "VOSTFR" // Par défaut pour les dramas coréens
             }
 
-            servers.map { server ->
+            // Same reliability sort as VoirAnime.
+            val priority = mapOf(
+                "vidmoly" to 0,
+                "voe" to 1, "voe.sx" to 1,
+                "streamtape" to 2,
+                "filemoon" to 3, "weneverbeenfree" to 3,
+                "yourupload" to 4, "www.yourupload.com" to 4,
+                "mail.ru" to 5, "my.mail.ru" to 5,
+                "streamhide" to 6
+            )
+            val withLang = servers.map { server ->
                 if (!server.name.contains("VF") && !server.name.contains("VOSTFR") && !server.name.contains("VO")) {
                     Video.Server(id = server.id, name = "${server.name} ($lang)", src = server.src)
                 } else server
             }.distinctBy { it.id }
+            withLang.sortedBy { server ->
+                val host = try { java.net.URL(server.src).host.lowercase() } catch (_: Exception) { "" }
+                priority.entries.firstOrNull { host.contains(it.key) }?.value ?: 50
+            }
         } catch (e: Exception) {
             Log.e("VoirDramaProvider", "getServers error: ", e)
             emptyList()

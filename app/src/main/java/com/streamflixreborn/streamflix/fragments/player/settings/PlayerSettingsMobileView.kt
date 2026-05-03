@@ -663,13 +663,15 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                     else -> ""
                 }
 
-                // Green text for the active IPTV source, default for others
-                setTextColor(
-                    if (item is Settings.ChannelVariant && item.isIptv && item.isSelected)
-                        0xFF4CAF50.toInt()  // Material Green
-                    else
-                        ContextCompat.getColor(context, R.color.setting_text)
-                )
+                // Green text for the active IPTV source, default for others.
+                // Use ColorStateList for the default case so focused state can
+                // switch text to black on the white focus background — otherwise
+                // text becomes invisible when the row is focused.
+                if (item is Settings.ChannelVariant && item.isIptv && item.isSelected) {
+                    setTextColor(0xFF4CAF50.toInt())  // Material Green
+                } else {
+                    setTextColor(ContextCompat.getColorStateList(context, R.color.setting_text))
+                }
             }
 
             binding.tvSettingSubText.apply {

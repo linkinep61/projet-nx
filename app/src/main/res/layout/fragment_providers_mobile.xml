@@ -44,34 +44,62 @@
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginStart="64dp"
-        android:layout_marginTop="32dp"
         android:layout_marginEnd="64dp"
         android:gravity="center"
         android:text="@string/providers_choose_title"
         android:textColor="#FFFFFF"
         android:textSize="22sp"
-        app:layout_constraintBottom_toTopOf="@id/rv_providers"
+        app:layout_constraintBottom_toBottomOf="@id/iv_downloads"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/s_providers_language"
-        app:layout_constraintVertical_chainStyle="packed" />
+        app:layout_constraintTop_toTopOf="@id/iv_downloads" />
+
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/tl_provider_groups"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="32dp"
+        android:layout_marginTop="4dp"
+        android:layout_marginEnd="32dp"
+        android:background="@android:color/transparent"
+        app:tabIndicatorColor="#FFFFFF"
+        app:tabIndicatorHeight="3dp"
+        app:tabMode="fixed"
+        app:tabSelectedTextColor="#FFFFFF"
+        app:tabTextColor="#AAFFFFFF"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/tv_providers_label">
+        <com.google.android.material.tabs.TabItem
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Films / Séries" />
+        <com.google.android.material.tabs.TabItem
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Animés" />
+        <com.google.android.material.tabs.TabItem
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="TV / IPTV" />
+    </com.google.android.material.tabs.TabLayout>
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rv_providers"
         android:layout_width="0dp"
         android:layout_height="0dp"
         android:layout_marginStart="64dp"
-        android:layout_marginTop="16dp"
+        android:layout_marginTop="0dp"
         android:layout_marginEnd="64dp"
         android:clipToPadding="false"
         android:orientation="vertical"
-        android:paddingTop="16dp"
+        android:paddingTop="8dp"
         android:paddingBottom="32dp"
         app:layoutManager="androidx.recyclerview.widget.GridLayoutManager"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/tv_providers_label"
+        app:layout_constraintTop_toBottomOf="@id/tl_provider_groups"
         app:spanCount="2"
         tools:itemCount="3"
         tools:listitem="@layout/item_provider_mobile" />
@@ -91,7 +119,7 @@
         android:layout_width="44dp"
         android:layout_height="44dp"
         android:layout_marginEnd="12dp"
-        android:layout_marginTop="28dp"
+        android:layout_marginTop="12dp"
         android:padding="10dp"
         android:src="@drawable/ic_downloads"
         android:background="?attr/selectableItemBackgroundBorderless"

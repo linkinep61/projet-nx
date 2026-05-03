@@ -116,6 +116,15 @@ object OlaTvProvider : Provider, IptvProvider {
 
     // Disk cache for the discovered FR cid list — 24h TTL
     private const val FR_CIDS_CACHE_FILE = "olatv_fr_cids.json"
+
+    // Cap on the "Autres chaînes" home row to keep the TV RecyclerView responsive
+    // (ANR if hundreds of items try to bind + load logos at the same time).
+    private const val OTHER_CHANNELS_HOME_LIMIT = 60
+
+    // Pagination size for getTvShows() — full "Toutes les chaînes" page. 50 keeps
+    // the RecyclerView feed reasonable; the framework requests page+1 when the
+    // user scrolls near the bottom.
+    private const val TV_SHOWS_PAGE_SIZE = 50
     private const val FR_CIDS_CACHE_TTL_MS = 24L * 60 * 60 * 1000L
 
     // Disk cache for the full channel registry — boot fast on subsequent launches
@@ -359,6 +368,61 @@ object OlaTvProvider : Provider, IptvProvider {
             CuratedChannel("tfoumax", "Tfou Max", "Enfants"),
             // L'Équipe (sport généraliste)
             CuratedChannel("lequipe", "L'Équipe", "Sport"),
+
+            // ─── Extension list — common FR channels missing from the original
+            // 80-channel curation. Keys all run through norm(): accents stripped,
+            // "+" → "plus", "&" → "and", "sports" → "sport", non-alphanumeric removed.
+            // Généraliste / séries
+            CuratedChannel("rtl9", "RTL9", "Généraliste"),
+            CuratedChannel("ab1", "AB1", "Généraliste"),
+            CuratedChannel("teva", "Téva", "Généraliste"),
+            CuratedChannel("numero23", "Numéro 23", "Généraliste"),
+            // Cinéma & Séries
+            CuratedChannel("tcmcinema", "TCM Cinéma", "Cinéma"),
+            CuratedChannel("polarplus", "Polar+", "Cinéma"),
+            CuratedChannel("action", "Action", "Cinéma"),
+            CuratedChannel("canalplusboxoffice", "Canal+ Box Office", "Cinéma"),
+            CuratedChannel("canalplusgrandecran", "Canal+ Grand Écran", "Cinéma"),
+            CuratedChannel("canalplusfoot", "Canal+ Foot", "Sport"),
+            // Sport extras
+            CuratedChannel("beinsportmax4", "beIN Sports MAX 4", "Sport"),
+            CuratedChannel("beinsportmax5", "beIN Sports MAX 5", "Sport"),
+            CuratedChannel("beinsportmax6", "beIN Sports MAX 6", "Sport"),
+            CuratedChannel("beinsportmax7", "beIN Sports MAX 7", "Sport"),
+            CuratedChannel("beinsportmax8", "beIN Sports MAX 8", "Sport"),
+            CuratedChannel("beinsportmax9", "beIN Sports MAX 9", "Sport"),
+            CuratedChannel("beinsportmax10", "beIN Sports MAX 10", "Sport"),
+            CuratedChannel("rmcsport4", "RMC Sport 4", "Sport"),
+            CuratedChannel("eurosportnews", "Eurosport News", "Sport"),
+            CuratedChannel("equidia", "Equidia", "Sport"),
+            CuratedChannel("abmoteurs", "AB Moteurs", "Sport"),
+            CuratedChannel("automotolachaine", "Auto Moto La Chaîne", "Sport"),
+            CuratedChannel("motorvisiontv", "Motorvision TV", "Sport"),
+            // Documentaire
+            CuratedChannel("animaux", "Animaux", "Documentaire"),
+            CuratedChannel("voyage", "Voyage", "Documentaire"),
+            CuratedChannel("chasseetpeche", "Chasse et Pêche", "Documentaire"),
+            CuratedChannel("seasons", "Seasons", "Documentaire"),
+            CuratedChannel("crimedistrict", "Crime District", "Documentaire"),
+            CuratedChannel("crimeplusinvestigation", "Crime + Investigation", "Documentaire"),
+            CuratedChannel("discoveryinvestigation", "Discovery Investigation", "Documentaire"),
+            CuratedChannel("discoveryfamily", "Discovery Family", "Documentaire"),
+            CuratedChannel("discoveryscience", "Discovery Science", "Documentaire"),
+            CuratedChannel("abxplore", "ABXplore", "Documentaire"),
+            // Enfants
+            CuratedChannel("toonami", "Toonami", "Enfants"),
+            CuratedChannel("boing", "Boing", "Enfants"),
+            CuratedChannel("mangas", "Mangas", "Enfants"),
+            CuratedChannel("gameone", "Game One", "Enfants"),
+            // Musique
+            CuratedChannel("m6musichits", "M6 Music Hits", "Musique"),
+            CuratedChannel("traceafrica", "Trace Africa", "Musique"),
+            CuratedChannel("tracelatina", "Trace Latina", "Musique"),
+            CuratedChannel("tracetropical", "Trace Tropical", "Musique"),
+            CuratedChannel("funradiotv", "Fun Radio TV", "Musique"),
+            // Info / régionales
+            CuratedChannel("bfmparisidf", "BFM Paris Île-de-France", "Info"),
+            CuratedChannel("bfmregions", "BFM Régions", "Info"),
         )
     }
 
@@ -1652,8 +1716,8 @@ object OlaTvProvider : Provider, IptvProvider {
 
     override suspend fun getHome(): List<Category> = try {
         // Kick off registry loading in background — never blocks the home render. The
-        // page always shows the same FROZEN curated list with hardcoded logos. Streams
-        // get linked at click-time; if they aren't ingested yet, the click waits.
+        // page shows the FROZEN curated list with hardcoded logos for known channels.
+        // Streams get linked at click-time; if they aren't ingested yet, the click waits.
         scope.launch { try { ensureRegistry() } catch (_: Exception) { } }
 
         val categoryOrder = listOf("Généraliste", "Cinéma", "Info", "Sport", "Musique", "Documentaire", "Enfants")
@@ -1672,6 +1736,35 @@ object OlaTvProvider : Provider, IptvProvider {
                 }
             if (items.isNotEmpty()) sections.add(Category(name = catName, list = items))
         }
+
+        // ─── "Autres chaînes" — FR channels in the registry not in the curated
+        // list. Capped at OTHER_CHANNELS_HOME_LIMIT to keep the home RecyclerView
+        // responsive on TV (full lists with hundreds of items + image loads can
+        // ANR the main thread when the user scrolls onto the row). Use the
+        // dedicated "Toutes les chaînes" page (getTvShows) for the full set.
+        val curatedKeys = curatedChannels.map { it.key }.toSet()
+        // Snapshot quickly under the lock, do filtering/sorting/mapping outside
+        // so the lock isn't held during String.lowercase() and TvShow allocation.
+        val registrySnapshot = synchronized(registryLock) {
+            channelRegistry.entries
+                .filter { (key, _) -> key !in curatedKeys }
+                .map { (key, info) -> Triple(key, info.displayName, info.logo) }
+        }
+        val extraItems = registrySnapshot
+            .sortedBy { it.second.lowercase() }
+            .take(OTHER_CHANNELS_HOME_LIMIT)
+            .map { (key, displayName, logo) ->
+                TvShow(
+                    id = "ola::$key",
+                    title = displayName,
+                    poster = logo.ifEmpty { logoUrlFor(displayName) },
+                    banner = logo.ifEmpty { logoUrlFor(displayName) },
+                    providerName = name,
+                )
+            }
+        if (extraItems.isNotEmpty()) {
+            sections.add(Category(name = "Autres chaînes", list = extraItems))
+        }
         sections
     } catch (e: Exception) {
         Log.e(TAG, "getHome error", e)
@@ -1680,8 +1773,10 @@ object OlaTvProvider : Provider, IptvProvider {
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> = try {
         if (page > 1) emptyList<AppAdapter.Item>()
-        // Search across the curated list — instantaneous, no network.
-        curatedChannels
+        // Curated list first (instantaneous), then any registry channel that matches
+        // but isn't already in the curated set — covers chaînes "Autres".
+        val curatedKeys = curatedChannels.map { it.key }.toSet()
+        val curatedHits = curatedChannels
             .filter { it.displayName.contains(query, ignoreCase = true) }
             .map { c ->
                 TvShow(
@@ -1691,16 +1786,32 @@ object OlaTvProvider : Provider, IptvProvider {
                     providerName = name,
                 )
             }
+        val registryHits = synchronized(registryLock) {
+            channelRegistry.entries
+                .filter { (key, info) -> key !in curatedKeys && info.displayName.contains(query, ignoreCase = true) }
+                .map { (key, info) ->
+                    TvShow(
+                        id = "ola::$key",
+                        title = info.displayName,
+                        poster = info.logo.ifEmpty { logoUrlFor(info.displayName) },
+                        providerName = name,
+                    )
+                }
+                .sortedBy { it.title.lowercase() }
+        }
+        curatedHits + registryHits
     } catch (_: Exception) { emptyList() }
 
     override suspend fun getMovies(page: Int): List<Movie> = emptyList()
 
-    override suspend fun getTvShows(page: Int): List<TvShow> =
-        if (page > 1) emptyList()
-        else try {
+    override suspend fun getTvShows(page: Int): List<TvShow> {
+        return try {
             scope.launch { try { ensureRegistry() } catch (_: Exception) { } }
-            // Frozen curated list — same display order as the home, no shuffle.
-            curatedChannels.map { c ->
+            // Paginated catalog: curated list first (fixed order), then alphabetically-sorted
+            // upstream-only channels. Returning all 80+ curated + 100-300 registry channels
+            // at once on TV ANRs the RecyclerView. PAGE_SIZE chunks keep it responsive.
+            val curatedKeys = curatedChannels.map { it.key }.toSet()
+            val curatedItems = curatedChannels.map { c ->
                 TvShow(
                     id = "ola::${c.key}",
                     title = c.displayName,
@@ -1708,7 +1819,27 @@ object OlaTvProvider : Provider, IptvProvider {
                     providerName = name,
                 )
             }
+            val extraSnapshot = synchronized(registryLock) {
+                channelRegistry.entries
+                    .filter { (key, _) -> key !in curatedKeys }
+                    .map { (key, info) -> Triple(key, info.displayName, info.logo) }
+            }
+            val extraItems = extraSnapshot
+                .sortedBy { it.second.lowercase() }
+                .map { (key, displayName, logo) ->
+                    TvShow(
+                        id = "ola::$key",
+                        title = displayName,
+                        poster = logo.ifEmpty { logoUrlFor(displayName) },
+                        providerName = name,
+                    )
+                }
+            val all = curatedItems + extraItems
+            val from = ((page - 1).coerceAtLeast(0)) * TV_SHOWS_PAGE_SIZE
+            if (from >= all.size) emptyList()
+            else all.subList(from, (from + TV_SHOWS_PAGE_SIZE).coerceAtMost(all.size))
         } catch (_: Exception) { emptyList() }
+    }
 
     override suspend fun getMovie(id: String): Movie = throw Exception("Not supported")
 

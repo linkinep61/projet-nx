@@ -3,6 +3,7 @@ package com.streamflixreborn.streamflix.extractors
 import android.util.Base64
 import android.util.Log
 import com.streamflixreborn.streamflix.models.Video
+import com.streamflixreborn.streamflix.utils.UserPreferences
 import org.json.JSONObject
 import retrofit2.http.Body
 import retrofit2.http.GET
@@ -17,7 +18,7 @@ open class FilemoonExtractor : Extractor() {
 
     override val name = "Filemoon"
     override val mainUrl = "https://filemoon.org"
-    override val aliasUrls = listOf("https://bf0skv.org","https://bysejikuar.com","https://moflix-stream.link","https://bysezoxexe.com","https://bysebuho.com","https://filemoon.sx","https://bysekoze.com","https://bysesayeveum.com","https://lukefirst.lol","https://filemoon.site")
+    override val aliasUrls = listOf("https://bf0skv.org","https://bysejikuar.com","https://moflix-stream.link","https://bysezoxexe.com","https://bysebuho.com","https://filemoon.sx","https://bysekoze.com","https://bysesayeveum.com","https://lukefirst.lol","https://filemoon.site","https://weneverbeenfree.com")
 
     override suspend fun extract(link: String): Video {
         val service = Extractor.createGsonService<Service>(mainUrl)
@@ -31,10 +32,27 @@ open class FilemoonExtractor : Extractor() {
         val currentDomain = Regex("""(https?://[^/]+)""").find(link)?.groupValues?.get(1)
             ?: throw Exception("Could not extract Base URL")
 
+        // Parent provider URL — required by some Filemoon variants that enforce a
+        // per-video allowlist of embedding domains (e.g. weneverbeenfree.com — a
+        // "Byse Frontend" SPA used by VoirAnime/VoirDrama). Without these headers,
+        // the details endpoint returns 403 "embedding from this domain is not allowed".
+        val parentUrl = try {
+            UserPreferences.currentProvider?.baseUrl
+        } catch (_: Throwable) { null }
+        val parentOrigin = parentUrl?.trimEnd('/')
+
+        val detailsHeaders = mutableMapOf(
+            "User-Agent" to Extractor.DEFAULT_USER_AGENT,
+            "Accept" to "application/json"
+        )
+        if (parentUrl != null) {
+            detailsHeaders["Referer"] = parentUrl
+            detailsHeaders["Origin"] = parentOrigin!!
+        }
+
         val detailsUrl = "$currentDomain/api/videos/$videoId/embed/details"
-        val details = service.getDetails(detailsUrl)
-        val embedFrameUrl = details.embed_frame_url 
-            ?: throw Exception("embed_frame_url not found")
+        val details = service.getDetails(detailsUrl, detailsHeaders)
+        val embedFrameUrl = details.embed_frame_url
 
         var playbackDomain = ""
         val headers = mutableMapOf<String, String>()
@@ -42,7 +60,17 @@ open class FilemoonExtractor : Extractor() {
         headers["Accept"] = "application/json"
         headers["Content-Type"] = "application/json"
 
-        if (linkType == "d") {
+        if (embedFrameUrl == null) {
+            // Byse-frontend variant (e.g. weneverbeenfree.com): no embed_frame_url
+            // returned. Playback lives on the same domain as the embed; the WAF
+            // requires Referer + Origin = parent provider URL.
+            if (parentUrl == null) {
+                throw Exception("embed_frame_url missing and no parent provider URL")
+            }
+            playbackDomain = currentDomain
+            headers["Referer"] = parentUrl
+            headers["Origin"] = parentOrigin!!
+        } else if (linkType == "d") {
             playbackDomain = currentDomain
             headers["Referer"] = link
         } else {
@@ -80,11 +108,20 @@ open class FilemoonExtractor : Extractor() {
 
         Log.i("StreamFlixES", "[Filemoon] -> Source found: $sourceUrl")
 
-        val videoHeaders = mutableMapOf(
-            "Referer" to embedFrameUrl,
-            "User-Agent" to Extractor.DEFAULT_USER_AGENT,
-            "Origin" to playbackDomain
-        )
+        val videoHeaders = if (embedFrameUrl == null) {
+            // Byse variant: hot-link the source with parent-provider headers
+            mutableMapOf(
+                "Referer" to (parentUrl ?: currentDomain),
+                "User-Agent" to Extractor.DEFAULT_USER_AGENT,
+                "Origin" to (parentOrigin ?: currentDomain)
+            )
+        } else {
+            mutableMapOf(
+                "Referer" to embedFrameUrl,
+                "User-Agent" to Extractor.DEFAULT_USER_AGENT,
+                "Origin" to playbackDomain
+            )
+        }
         return Video(
             source = sourceUrl,
             headers = videoHeaders
@@ -117,7 +154,10 @@ open class FilemoonExtractor : Extractor() {
 
     private interface Service {
         @GET
-        suspend fun getDetails(@Url url: String): DetailsResponse
+        suspend fun getDetails(
+            @Url url: String,
+            @HeaderMap headers: Map<String, String>,
+        ): DetailsResponse
 
         @POST
         suspend fun getPlayback(

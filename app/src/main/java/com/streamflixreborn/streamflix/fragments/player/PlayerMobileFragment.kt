@@ -253,6 +253,13 @@ class PlayerMobileFragment : Fragment() {
     // ExoPlayer/MediaSession resources until the OS killed the process.
     private var activePlayerListener: androidx.media3.common.Player.Listener? = null
 
+    /** IPTV sticky-server: once the current stream has reached STATE_READY, we never
+     *  auto-switch on transient errors — we just re-prepare. The user can always
+     *  switch manually. Reset when the user changes server or channel. */
+    private var iptvRetryCount = 0
+    private val IPTV_MAX_RETRIES_SAME_STREAM = 3
+    private var iptvCurrentStreamHasWorked = false
+
     // ── WebView overlay (Netu anti-bot bypass — touch-friendly for mobile) ──
     private var webViewOverlay: FrameLayout? = null
     private var overlayWebView: WebView? = null
@@ -1439,6 +1446,16 @@ class PlayerMobileFragment : Fragment() {
             }
         }
 
+        // Live IPTV: tap into the player's DataSource to record while playing
+        // (avoids segment-auth issues from separate OkHttp fetches).
+        val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+        if (isLiveIptv) {
+            handleLiveRecord(server)
+            return
+        }
+
         val providerName = UserPreferences.currentProvider?.name ?: "unknown"
         val videoType = currentVideoTypeForUi()
 
@@ -1511,6 +1528,78 @@ class PlayerMobileFragment : Fragment() {
         if (video.source.contains("cfglobalcdn.com", ignoreCase = true)) return true
 
         return false
+    }
+
+    /** Show the inline REC button on the player controls. Visible on ANY video
+     *  (live IPTV + VOD): the user can capture a portion of any stream by
+     *  toggling start/stop. The icon goes RED when recording so the state is
+     *  visible at a glance. Called whenever the playing video changes. */
+    private fun updateLiveRecordButton() {
+        val btn = binding.pvPlayer.findViewById<android.widget.ImageView>(R.id.btn_live_record)
+            ?: return
+        btn.visibility = View.VISIBLE
+        val recording = com.streamflixreborn.streamflix.download.LiveRecorder.isRecording
+        val tint = if (recording) {
+            android.graphics.Color.parseColor("#FF3B30")
+        } else {
+            android.graphics.Color.WHITE
+        }
+        androidx.core.widget.ImageViewCompat.setImageTintList(
+            btn, android.content.res.ColorStateList.valueOf(tint)
+        )
+        btn.setOnClickListener {
+            val server = currentServer ?: return@setOnClickListener
+            handleLiveRecord(server)
+            // Refresh icon tint after toggling.
+            updateLiveRecordButton()
+        }
+    }
+
+    /** Live IPTV recording: tap into ExoPlayer's DataSource (no separate auth-failing
+     *  fetch). Toggle: 1st click starts recording, 2nd click stops. The user MUST
+     *  keep the channel playing — closing the player ends the recording. */
+    private fun handleLiveRecord(server: Video.Server) {
+        if (com.streamflixreborn.streamflix.download.LiveRecorder.isRecording) {
+            // Stop and finalize
+            val channel = currentChannelKey.ifBlank { server.name }
+            val savedPath = com.streamflixreborn.streamflix.download.LiveRecorder.stopRecording(requireContext().applicationContext)
+            if (savedPath != null) {
+                Toast.makeText(requireContext(),
+                    "✅ Enregistrement sauvegardé dans Movies/StreamFlix",
+                    Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(requireContext(),
+                    "Aucun segment capturé — restez sur la chaîne pendant l'enregistrement",
+                    Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+        // Start recording
+        val channelDisplayName = when (val type = args.videoType) {
+            is Video.Type.Episode -> type.tvShow.title
+            is Video.Type.Movie -> type.title
+        }.ifBlank { server.name }
+        val outFile = com.streamflixreborn.streamflix.download.LiveRecorder.startRecording(
+            context = requireContext().applicationContext,
+            channelDisplayName = channelDisplayName,
+        )
+        if (outFile == null) {
+            Toast.makeText(requireContext(),
+                "Un enregistrement est déjà en cours",
+                Toast.LENGTH_SHORT).show()
+            return
+        }
+        Toast.makeText(requireContext(),
+            "🔴 Enregistrement démarré — RESTEZ sur la chaîne. Re-tapez le bouton pour arrêter.",
+            Toast.LENGTH_LONG).show()
+        // Force the buffer to drain to live edge so new segments are fetched and
+        // captured right away (with our big 30s/120s buffer, otherwise we could
+        // wait minutes before any new fetch happens).
+        try {
+            if (::player.isInitialized) {
+                player.seekToDefaultPosition()
+            }
+        } catch (_: Exception) {}
     }
 
     private fun refreshEpisodeNavigation(type: Video.Type.Episode) {
@@ -1633,8 +1722,14 @@ class PlayerMobileFragment : Fragment() {
 
     private fun displayVideo(video: Video, server: Video.Server) {
         currentVideo = video
+        // Reset IPTV stickiness when switching to a different server (manual or auto).
+        if (currentServer?.id != server.id) {
+            iptvRetryCount = 0
+            iptvCurrentStreamHasWorked = false
+        }
         currentServer = server
         updatePlayerHeader()
+        updateLiveRecordButton()
 
         // Clean up any existing WebView overlay (e.g. switching servers)
         if (webViewOverlay != null && !(video.needsWebViewClick && !video.webViewUrl.isNullOrBlank())) {
@@ -1755,7 +1850,25 @@ class PlayerMobileFragment : Fragment() {
             usingWebView = true
             Log.d("PlayerNetwork", "WebView bypass: using WebViewDataSource for HLS playback (${if (isLuluVdoCdn(video)) "LuluVdo" else "Netu"})")
         } else {
-            player.setMediaItem(mediaItem)
+            // Route HLS sources (live IPTV AND VOD .m3u8) through TeeDataSource so
+            // LiveRecorder can capture played segments on demand. This lets the
+            // user tap REC during ANY HLS playback to capture a portion. For
+            // non-HLS sources (mp4, etc.) the TeeDataSource still wraps fine.
+            val isHls = video.source.contains(".m3u8") || video.source.contains("/live/")
+            val teeFactory = com.streamflixreborn.streamflix.download.TeeDataSourceFactory(dataSourceFactory)
+            if (isHls) {
+                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(teeFactory)
+                    .createMediaSource(mediaItem)
+                player.setMediaSource(hlsSource)
+                Log.d("PlayerDebug", "HLS: using TeeDataSource (REC button can tap)")
+            } else {
+                // Non-HLS (mp4 progressive). Wrap with TeeDataSource for REC.
+                val progressiveSource = androidx.media3.exoplayer.source.ProgressiveMediaSource
+                    .Factory(teeFactory)
+                    .createMediaSource(mediaItem)
+                player.setMediaSource(progressiveSource)
+                Log.d("PlayerDebug", "Progressive: using TeeDataSource (REC button can tap)")
+            }
             usingWebView = false
         }
 
@@ -1853,11 +1966,36 @@ class PlayerMobileFragment : Fragment() {
 
                 // Once we actually reach READY, restore the normal 2s auto-hide
                 // (we forced it to 0 during IPTV extraction so the controls
-                // would be visible immediately).
-                if (playbackState == Player.STATE_READY
-                    && binding.pvPlayer.controllerShowTimeoutMs == 0
-                ) {
-                    binding.pvPlayer.controllerShowTimeoutMs = 2000
+                // would be visible immediately). Also mark IPTV server as sticky.
+                if (playbackState == Player.STATE_READY) {
+                    if (binding.pvPlayer.controllerShowTimeoutMs == 0) {
+                        binding.pvPlayer.controllerShowTimeoutMs = 2000
+                    }
+                    if (iptvRetryCount > 0) {
+                        Log.d("PlayerMobileFragment", "Stream recovered, resetting IPTV retry counter")
+                        iptvRetryCount = 0
+                    }
+                    if (!iptvCurrentStreamHasWorked) {
+                        iptvCurrentStreamHasWorked = true
+                        Log.d("PlayerMobileFragment", "IPTV stream marked as working — sticky server enabled")
+                    }
+                }
+
+                // Live IPTV auto-resume: re-prepare on STATE_ENDED (playlist tail
+                // exhausted) AND on STATE_IDLE (transient blip with no error).
+                val isLiveIptvStream = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                    args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                    args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                if (isLiveIptvStream && (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE)) {
+                    if (playbackState == Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
+                    Log.w("PlayerMobileFragment", "Live IPTV stuck in $playbackState — re-preparing")
+                    try {
+                        player.seekToDefaultPosition()
+                        player.prepare()
+                        player.playWhenReady = true
+                    } catch (e: Exception) {
+                        Log.w("PlayerMobileFragment", "Auto-resume failed: ${e.message}")
+                    }
                 }
             }
 
@@ -2025,41 +2163,53 @@ class PlayerMobileFragment : Fragment() {
                     return
                 }
 
-                // Fallback 3 (IPTV): for live channels, auto-failover on ANY playback error
-                val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
+                // Fallback 3 (IPTV): for live channels — sticky server pattern.
+                // Once a server has worked (STATE_READY), we never auto-switch on
+                // transient errors; we just re-prepare. Switch only happens before
+                // first successful playback (after N retries) or on permanent HTTP errors.
+                val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") || args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
                 if (isLiveIptv) {
                     val server = currentServer ?: return
-                    pruneBrokenVariant(server)
-
-                    // Remove failed source from Chaîne list and replace with a new one from pool
-                    val failedVariant = PlayerSettingsView.Settings.ChannelVariant.list.find { it.id == server.id }
-                    if (failedVariant != null) {
-                        val removedIndex = PlayerSettingsView.Settings.ChannelVariant.ban(failedVariant)
-                        // Try to get a replacement from the pool
-                        val provider = UserPreferences.currentProvider
-                        if (provider is com.streamflixreborn.streamflix.providers.OlaTvProvider) {
-                            val replacement = provider.requestSingleReplacement(server.id)
-                            if (replacement != null) {
-                                val closeBracket = replacement.name.indexOf(']')
-                                val label = if (closeBracket >= 0) replacement.name.substring(closeBracket + 2) else replacement.name
-                                val newVariant = PlayerSettingsView.Settings.ChannelVariant(
-                                    id = replacement.id,
-                                    name = label,
-                                    channelKey = currentChannelKey,
-                                )
-                                PlayerSettingsView.Settings.ChannelVariant.addReplacement(newVariant, removedIndex)
-                                servers = servers + replacement
-                            }
-                        }
-                        binding.settings.refreshChannelVariantList()
+                    val errCodeName = error.errorCodeName
+                    // Per user request: NEVER auto-switch on IPTV. Always re-prepare
+                    // the same server. If a server is bad the user picks another
+                    // manually via Settings → Serveurs.
+                    iptvRetryCount++
+                    Log.w("PlayerMobileFragment", "IPTV retry on ${server.name} ($errCodeName) — retry #$iptvRetryCount, sticky (never auto-switch)")
+                    try {
+                        player.seekToDefaultPosition()
+                        player.prepare()
+                        player.playWhenReady = true
+                    } catch (e: Exception) {
+                        Log.w("PlayerMobileFragment", "Sticky retry failed: ${e.message}")
                     }
+                    return
+                }
 
+                // Fallback 4 (catch-all VOD): any other error code we didn't match
+                // explicitly above (404 Not Found, 410 Gone, manifest malformed,
+                // decoding failure, generic IO, etc.) used to leave the screen frozen
+                // black with no auto-advance — the user had to back out and pick
+                // another server manually. For anime/film providers we now always
+                // try the next server when an error fires, so a dead first lecteur
+                // (e.g. vidmoly with an expired token) auto-fails over to the
+                // following one.
+                run {
+                    val server = currentServer ?: return
+                    val errCodeName = error.errorCodeName
+                    pruneBrokenVariant(server)
                     val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
                     if (nextServer != null) {
-                        Log.w("PlayerMobileFragment", "IPTV failover: ${server.name} error (${error.errorCodeName}), trying ${nextServer.name}")
+                        Log.w(
+                            "PlayerNetwork",
+                            "Unhandled player error on ${server.name} ($errCodeName: ${error.message}) — auto-switching to ${nextServer.name}"
+                        )
                         viewModel.getVideo(nextServer)
                     } else if (!tryNextChannelVariant(server)) {
-                        Log.e("PlayerMobileFragment", "IPTV: all sources failed for ${args.id}")
+                        Log.e(
+                            "PlayerNetwork",
+                            "Unhandled player error on ${server.name} ($errCodeName) and no more servers to try"
+                        )
                     }
                 }
             }
@@ -2434,15 +2584,20 @@ class PlayerMobileFragment : Fragment() {
     private var currentSoftwareDecoder = false
 
     private fun buildPlayer(extraBuffering: Boolean): ExoPlayer {
-        val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
+        val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+        // Per user request: precharge as much as possible so the live stream
+        // never cuts. Bigger buffer windows + longer rebuffer threshold.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                if (isLiveIptv) 5_000 else 30_000,      // minBuffer: 5s live / 30s VOD
-                if (isLiveIptv) 30_000                   // maxBuffer: 30s live
-                else if (extraBuffering) 300_000 else 120_000,  // 120s VOD
-                if (isLiveIptv) 500 else 1_500,          // playback: 500ms live / 1.5s VOD
-                if (isLiveIptv) 1_500 else 3_000         // rebuffer: 1.5s live / 3s VOD
+                if (isLiveIptv) 30_000 else 30_000,      // minBuffer: 30s live (was 5s)
+                if (isLiveIptv) 120_000                  // maxBuffer: 120s live (was 30s)
+                else if (extraBuffering) 300_000 else 120_000,
+                if (isLiveIptv) 2_000 else 1_500,        // playback start: 2s buffered (was 500ms)
+                if (isLiveIptv) 5_000 else 3_000         // rebuffer threshold: 5s (was 1.5s)
             )
+            .setPrioritizeTimeOverSizeThresholds(true)   // prefer time-based buffer over size cap
             .build()
 
         val baseBuilder = if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1 && !currentSoftwareDecoder) {

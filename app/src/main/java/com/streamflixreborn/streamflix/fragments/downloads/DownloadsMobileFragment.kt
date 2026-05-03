@@ -67,10 +67,15 @@ class DownloadsMobileFragment : Fragment() {
 
     private fun deleteDownload(download: DownloadEntity) {
         viewLifecycleOwner.lifecycleScope.launch {
-            if (download.isCompleted) {
-                DownloadManager.deleteCompleted(download.id)
-            } else {
-                DownloadManager.cancel(download.id)
+            when {
+                download.isCompleted -> DownloadManager.deleteCompleted(download.id)
+                download.isFailed -> {
+                    // FAILED entries can stay stuck if cancel() expects an
+                    // active job. Force-delete wipes the row + any leftover
+                    // partial file unconditionally.
+                    try { DownloadManager.forceDelete(download.id) } catch (_: Exception) {}
+                }
+                else -> DownloadManager.cancel(download.id)
             }
         }
     }

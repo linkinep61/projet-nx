@@ -79,7 +79,11 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
                     parseHomeItem(item)
                 }
                 if (allItems.isNotEmpty()) {
-                    // FEATURED carousel with deep copies to avoid shared itemType conflicts
+                    // FEATURED carousel — keep poster as a SAFE fallback for banner
+                    // so the carousel slot is never empty. TMDb enrichment below
+                    // will overwrite with a proper landscape backdrop when a match
+                    // exists; a stretched poster still looks better than an empty
+                    // "not found" placeholder.
                     val featuredItems = allItems.take(10).map { item ->
                         when (item) {
                             is Movie -> item.copy(banner = item.banner ?: item.poster)
@@ -87,36 +91,55 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
                             else -> item
                         }
                     }
-                    // Enhance banners with TMDB HD backdrops (filter Japanese/anime content)
-                    val animeLanguages = setOf("ja", "ko", "zh")
+                    // Enhance banners with TMDB HD backdrops in parallel — sequential
+                    // was slow enough to stall the home for several seconds while
+                    // featuredItems resolved one-by-one. async + awaitAll keeps the
+                    // home fast, and any individual lookup failure is silently
+                    // swallowed so a slow TMDb call doesn't block the others.
                     if (UserPreferences.enableTmdb) {
-                        for (item in featuredItems) {
-                            try {
-                                val title = when (item) {
-                                    is Movie -> item.title
-                                    is TvShow -> item.title
-                                    else -> null
-                                } ?: continue
-                                val results = TMDb3.Search.multi(title)
-                                val match = results.results.firstOrNull { result ->
-                                    when (result) {
-                                        is TMDb3.Movie -> result.originalLanguage in animeLanguages && result.backdropPath != null
-                                        is TMDb3.Tv -> result.originalLanguage in animeLanguages && result.backdropPath != null
-                                        else -> false
-                                    }
+                        // Prefer Japanese / Korean / Chinese matches first (real anime
+                        // backdrops), but accept any match as a fallback so titles
+                        // licensed by Western studios (Netflix originals, etc.) still
+                        // get a proper backdrop instead of the portrait poster.
+                        val animeLanguages = setOf("ja", "ko", "zh")
+                        coroutineScope {
+                            featuredItems.map { item ->
+                                async {
+                                    try {
+                                        val title = when (item) {
+                                            is Movie -> item.title
+                                            is TvShow -> item.title
+                                            else -> null
+                                        } ?: return@async
+                                        val results = TMDb3.Search.multi(title)
+                                        val animeMatch = results.results.firstOrNull { result ->
+                                            when (result) {
+                                                is TMDb3.Movie -> result.originalLanguage in animeLanguages && result.backdropPath != null
+                                                is TMDb3.Tv -> result.originalLanguage in animeLanguages && result.backdropPath != null
+                                                else -> false
+                                            }
+                                        }
+                                        val anyMatch = animeMatch ?: results.results.firstOrNull { result ->
+                                            when (result) {
+                                                is TMDb3.Movie -> result.backdropPath != null
+                                                is TMDb3.Tv -> result.backdropPath != null
+                                                else -> false
+                                            }
+                                        }
+                                        val banner = when (anyMatch) {
+                                            is TMDb3.Movie -> anyMatch.backdropPath?.original
+                                            is TMDb3.Tv -> anyMatch.backdropPath?.original
+                                            else -> null
+                                        }
+                                        if (banner != null) {
+                                            when (item) {
+                                                is Movie -> item.banner = banner
+                                                is TvShow -> item.banner = banner
+                                            }
+                                        }
+                                    } catch (_: Exception) {}
                                 }
-                                val banner = when (match) {
-                                    is TMDb3.Movie -> match.backdropPath?.original
-                                    is TMDb3.Tv -> match.backdropPath?.original
-                                    else -> null
-                                }
-                                if (banner != null) {
-                                    when (item) {
-                                        is Movie -> item.banner = banner
-                                        is TvShow -> item.banner = banner
-                                    }
-                                }
-                            } catch (_: Exception) {}
+                            }.awaitAll()
                         }
                     }
                     categories.add(Category(name = Category.FEATURED, list = featuredItems))
@@ -452,9 +475,61 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
             val document = service.getPage(url)
 
             val servers = mutableListOf<Video.Server>()
+            val seenSrcs = mutableSetOf<String>()
 
+            // 1) Parse the JS `thisChapterSources` map — the page stores ALL
+            //    available players (LECTEUR MOON, SB, VOE, Stape, mail.ru,
+            //    YourUpload, …) in this map and only displays the first one
+            //    in an iframe. Without this, we miss 6/7 of the working
+            //    players and fall back to a single dead vidmoly link.
+            //    We use the RAW HTML (outerHtml) — Jsoup's pretty-printed
+            //    document.html() may already collapse the JS `\"` escapes.
+            val html = document.outerHtml()
+            // Find ALL "LECTEUR X" : "<iframe ... src=...XXX..." patterns.
+            // Tolerant to:
+            //   - escaped quotes (`\"`) and forward slashes (`\/`)
+            //   - extra whitespace
+            //   - single OR double quotes around src
+            //   - any iframe attribute order
+            // The JS value is `"<iframe src=\"https:\/\/host\/...\"…"`.
+            // Two traps:
+            //  (a) the value contains escaped quotes `\"`, so a naive lazy
+            //      match `[^"]*?` stops at the first `"` and the regex fails;
+            //      use a JS-aware lazy match `(?:[^"\\]|\\.)*?`.
+            //  (b) the URL itself contains `\/` (escaped slashes) but is
+            //      terminated by `\"` (the closing iframe-src quote). If we
+            //      allow ANY escape (`\\.`) inside the URL group, the
+            //      trailing `\"` gets sucked into the URL → every extractor
+            //      gets a URL with a literal `"` at the end and 404s/fails.
+            //      So we ONLY allow `\/` inside the URL group.
+            val srcRegex = Regex(
+                "\"([^\"]*LECTEUR[^\"]*)\"\\s*:\\s*\"(?:[^\"\\\\]|\\\\.)*?src=\\\\?[\"']?(https?:(?:[^\"'\\\\\\s]|\\\\/)+)",
+                RegexOption.IGNORE_CASE
+            )
+            srcRegex.findAll(html).forEach { match ->
+                val rawName = match.groupValues[1].trim()
+                val rawSrc = match.groupValues[2]
+                    .replace("\\/", "/")
+                    .replace("\\\"", "\"")
+                    .takeIf { it.startsWith("http") } ?: return@forEach
+                if (!seenSrcs.add(rawSrc)) return@forEach
+                val hostShort = try {
+                    java.net.URL(rawSrc).host.split(".").first { it != "www" }
+                        .replaceFirstChar { it.uppercase() }
+                } catch (_: Exception) { "Lecteur" }
+                val displayName = "$rawName ($hostShort)"
+                servers.add(Video.Server(id = rawSrc, name = displayName, src = rawSrc))
+                // Log.w (preserved by R8 in release) so we can diagnose on
+                // production devices via `adb logcat | grep VoirAnime`.
+                Log.w("VoirAnimeProvider", "JS source matched: $rawName -> $rawSrc")
+            }
+            Log.w("VoirAnimeProvider", "After JS parse: ${servers.size} servers")
+
+            // 2) Fallback / fill-in from the DOM iframes (catches pages that
+            //    don't have thisChapterSources, e.g. older episodes or movies).
             document.select(".chapter-video-frame iframe, .reading-content iframe, .entry-content iframe, iframe[src]").forEach { iframe ->
                 val src = iframe.attr("src").takeIf { it.isNotBlank() && it.startsWith("http") } ?: return@forEach
+                if (!seenSrcs.add(src)) return@forEach
                 val serverName = try {
                     java.net.URL(src).host.split(".").first { it != "www" }
                         .replaceFirstChar { it.uppercase() }
@@ -471,11 +546,29 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
                 else -> "VOSTFR"
             }
 
-            servers.map { server ->
+            // Sort by host reliability so the auto-play tries proven hosts
+            // first. Order chosen with the user after testing: vidmoly first
+            // (when it works it's the smoothest), VOE / Streamtape next as
+            // proven fallbacks, MOON (Filemoon/weneverbeenfree) fourth — now
+            // that the Byse-Frontend headers are wired in — then the rest.
+            val priority = mapOf(
+                "vidmoly" to 0,
+                "voe" to 1, "voe.sx" to 1,
+                "streamtape" to 2,
+                "filemoon" to 3, "weneverbeenfree" to 3,
+                "yourupload" to 4, "www.yourupload.com" to 4,
+                "mail.ru" to 5, "my.mail.ru" to 5,
+                "streamhide" to 6
+            )
+            val withLang = servers.map { server ->
                 if (!server.name.contains("VF") && !server.name.contains("VOSTFR") && !server.name.contains("VO")) {
                     Video.Server(id = server.id, name = "${server.name} ($lang)", src = server.src)
                 } else server
             }.distinctBy { it.id }
+            withLang.sortedBy { server ->
+                val host = try { java.net.URL(server.src).host.lowercase() } catch (_: Exception) { "" }
+                priority.entries.firstOrNull { host.contains(it.key) }?.value ?: 50
+            }
         } catch (e: Exception) {
             Log.e("VoirAnimeProvider", "getServers error: ", e)
             emptyList()

@@ -24,11 +24,11 @@
         android:layout_marginStart="16dp"
         android:padding="8dp"
         android:src="@drawable/ic_player_back"
-        android:tint="#FFFFFF"
+        app:tint="#FFFFFF"
         app:layout_constraintBottom_toBottomOf="@id/tv_exo_subtitle"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="@id/tv_exo_title"
-        tools:ignore="ContentDescription,UseAppTint" />
+        tools:ignore="ContentDescription" />
 
     <TextView
         android:id="@+id/tv_exo_title"
@@ -66,11 +66,11 @@
         android:layout_marginEnd="16dp"
         android:padding="8dp"
         android:src="@drawable/exo_styled_controls_external_player"
-        android:tint="#FFFFFF"
+        app:tint="#FFFFFF"
         app:layout_constraintBottom_toBottomOf="@id/tv_exo_subtitle"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="@id/tv_exo_title"
-        tools:ignore="ContentDescription,UseAppTint" />
+        tools:ignore="ContentDescription" />
 
     <LinearLayout
         android:id="@+id/exo_center_controls"
@@ -96,8 +96,8 @@
             android:layout_height="match_parent"
             android:padding="10dp"
             android:src="@drawable/exo_styled_controls_rewind"
-            android:tint="#FFFFFF"
-            tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
+            app:tint="#FFFFFF"
+            tools:ignore="ContentDescription,PrivateResource" />
 
         <ImageView
             android:id="@+id/exo_replay"
@@ -108,6 +108,10 @@
             app:tint="#FFFFFF"
             tools:ignore="ContentDescription" />
 
+        <!-- Media3's PlayerControlView swaps the drawable at runtime (play↔
+             pause) and the runtime swap ignores app:tint, so the button
+             ended up rendering black on dark video. Use android:tint here
+             specifically so the swap inherits the white color. -->
         <ImageView
             android:id="@+id/exo_play_pause"
             android:layout_width="90dp"
@@ -115,6 +119,7 @@
             android:padding="15dp"
             android:src="@drawable/exo_styled_controls_play"
             android:tint="#FFFFFF"
+            app:tint="#FFFFFF"
             tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
 
         <ImageView
@@ -123,8 +128,8 @@
             android:layout_height="match_parent"
             android:padding="10dp"
             android:src="@drawable/exo_styled_controls_fastforward"
-            android:tint="#FFFFFF"
-            tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
+            app:tint="#FFFFFF"
+            tools:ignore="ContentDescription,PrivateResource" />
 
         <ImageView
             android:id="@+id/btn_custom_next"
@@ -135,7 +140,8 @@
             app:tint="#FFFFFF" />
 
         <!-- Settings (gear) inline with the playback controls — directly to the right of
-             skip-forward (▶▶). Lock / PiP / aspect-ratio stay at the bottom-right. -->
+             skip-forward (▶▶). Lock / PiP / aspect-ratio stay at the bottom-right.
+             Media3 also rebinds this drawable at runtime, hence both tints. -->
         <ImageView
             android:id="@+id/exo_settings"
             android:layout_width="60dp"
@@ -143,6 +149,7 @@
             android:padding="10dp"
             android:src="@drawable/exo_styled_controls_settings"
             android:tint="#FFFFFF"
+            app:tint="#FFFFFF"
             tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
 
     </LinearLayout>
@@ -211,11 +218,11 @@
             android:layout_marginEnd="16dp"
             android:padding="12dp"
             android:src="@drawable/exo_styled_controls_lock"
-            android:tint="#FFFFFF"
+            app:tint="#FFFFFF"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toStartOf="@id/btn_exo_picture_in_picture"
             app:layout_constraintTop_toTopOf="parent"
-            tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
+            tools:ignore="ContentDescription,PrivateResource" />
 
         <ImageView
             android:id="@+id/btn_exo_picture_in_picture"
@@ -224,11 +231,28 @@
             android:layout_marginEnd="16dp"
             android:padding="12dp"
             android:src="@drawable/exo_styled_controls_picture_in_picture"
-            android:tint="#FFFFFF"
+            app:tint="#FFFFFF"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toStartOf="@id/btn_live_record"
+            app:layout_constraintTop_toTopOf="parent"
+            tools:ignore="ContentDescription,PrivateResource" />
+
+        <!-- Live recording button — sits between PiP and Zoom in the
+             bottom-right corner, away from the central playback controls so
+             users don't tap it by accident while seeking. Visible on any
+             video; tap to start/stop a live capture (turns red while active). -->
+        <ImageView
+            android:id="@+id/btn_live_record"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="16dp"
+            android:padding="12dp"
+            android:src="@android:drawable/ic_menu_save"
+            android:contentDescription="Enregistrer"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toStartOf="@id/btn_exo_aspect_ratio"
             app:layout_constraintTop_toTopOf="parent"
-            tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
+            app:tint="#FFFFFF" />
 
         <ImageView
             android:id="@+id/btn_exo_aspect_ratio"
@@ -236,11 +260,11 @@
             android:layout_height="wrap_content"
             android:padding="12dp"
             android:src="@drawable/exo_styled_controls_aspect_ratio"
-            android:tint="#FFFFFF"
+            app:tint="#FFFFFF"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintTop_toTopOf="parent"
-            tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
+            tools:ignore="ContentDescription,PrivateResource" />
 
     </androidx.constraintlayout.widget.ConstraintLayout>
 
@@ -273,12 +297,12 @@
         android:layout_marginBottom="24dp"
         android:padding="12dp"
         android:src="@drawable/exo_styled_controls_unlock"
-        android:tint="#FFFFFF"
+        app:tint="#FFFFFF"
         android:visibility="gone"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        tools:ignore="ContentDescription,PrivateResource,UseAppTint"
+        tools:ignore="ContentDescription,PrivateResource"
         tools:visibility="visible" />
 
     <androidx.constraintlayout.widget.Group

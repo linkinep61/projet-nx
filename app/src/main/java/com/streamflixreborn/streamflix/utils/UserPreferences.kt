@@ -122,6 +122,12 @@ object UserPreferences {
         get() = Key.PROVIDER_LANGUAGE.getString()
         set(value) = Key.PROVIDER_LANGUAGE.setString(value)
 
+    /** Index of the selected tab on the providers home (mobile): 0=Films/Séries,
+     *  1=Animés, 2=TV/IPTV. Persisted across app restarts. */
+    var providerTabIndex: Int
+        get() = Key.PROVIDER_TAB_INDEX.getInt() ?: 0
+        set(value) = Key.PROVIDER_TAB_INDEX.setInt(value)
+
     // ── Failed channels (hidden until a working server is found) ──
 
     private fun getFailedChannels(): MutableSet<String> {
@@ -575,6 +581,7 @@ object UserPreferences {
         BYPASS_WS_ADVERTISED_HOST,
         UPDATE_CHECK_ENABLED,
         PROVIDER_LANGUAGE,
+        PROVIDER_TAB_INDEX,
         HLS_PROXY_URL,
         MINI_PLAYER_ENABLED,
         FAILED_CHANNELS;
