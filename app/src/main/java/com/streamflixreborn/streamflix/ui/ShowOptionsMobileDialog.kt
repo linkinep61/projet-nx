@@ -12,6 +12,7 @@ import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.database.AppDatabase
 import com.streamflixreborn.streamflix.databinding.DialogShowOptionsMobileBinding
+import com.streamflixreborn.streamflix.download.QuickDownload
 import com.streamflixreborn.streamflix.fragments.home.HomeMobileFragment
 import com.streamflixreborn.streamflix.fragments.home.HomeMobileFragmentDirections
 import com.streamflixreborn.streamflix.models.Episode
@@ -163,6 +164,20 @@ class ShowOptionsMobileDialog(
             } else {
                 visibility = View.GONE
             }
+        }
+
+        // Bouton "Télécharger" — appel direct QuickDownload.downloadEpisode()
+        binding.btnOptionDownload.apply {
+            setOnClickListener {
+                checkProviderAndRun(episode) {
+                    val activity = context.toActivity()
+                    if (activity != null) {
+                        QuickDownload.downloadEpisode(context, activity.lifecycleScope, episode)
+                    }
+                }
+                hide()
+            }
+            visibility = View.VISIBLE
         }
 
         binding.btnOptionShowWatched.apply {
@@ -355,6 +370,20 @@ class ShowOptionsMobileDialog(
             visibility = View.VISIBLE
         }
 
+        // Bouton "Télécharger" — appel direct QuickDownload.downloadMovie()
+        binding.btnOptionDownload.apply {
+            setOnClickListener {
+                checkProviderAndRun(freshMovie) {
+                    val activity = context.toActivity()
+                    if (activity != null) {
+                        QuickDownload.downloadMovie(context, activity.lifecycleScope, freshMovie)
+                    }
+                }
+                hide()
+            }
+            visibility = View.VISIBLE
+        }
+
         binding.btnOptionShowWatched.apply {
             setOnClickListener {
                 checkProviderAndRun(freshMovie) {
@@ -421,6 +450,10 @@ class ShowOptionsMobileDialog(
 
 
         binding.btnOptionEpisodeOpenTvShow.visibility = View.GONE
+
+        // Pour les séries, le téléchargement passe forcément par un épisode
+        // (on ne télécharge pas une série entière en un clic). Bouton caché.
+        binding.btnOptionDownload.visibility = View.GONE
 
         var freshTvShow = tvShow
 
