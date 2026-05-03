@@ -29,6 +29,15 @@ object GitHub {
 
     private val service = ApiService.build()
 
+    /**
+     * 2026-05-03: service "public" sans Authorization header. Sert au fallback
+     * dans InAppUpdater quand le repo principal (Xx-nanico-xX) n'est pas
+     * joignable et qu'on tape un repo backup PUBLIC (ex: Logami61). Le token
+     * read-only de l'app a un scope verrouillé sur mobile-client-v2 et renvoie
+     * 401 sur les autres repos — sans auth on accède à tout repo public.
+     */
+    private val publicService = ApiService.buildPublic()
+
     object Releases {
 
         suspend fun getReleases(
@@ -50,6 +59,28 @@ object GitHub {
                 repo = repo,
             )
         }
+
+        /** Variante sans auth pour repos publics (utilisée par le fallback). */
+        suspend fun getLatestReleasePublic(
+            owner: String,
+            repo: String,
+        ): Release {
+            return publicService.getLatestRelease(
+                owner = owner,
+                repo = repo,
+            )
+        }
+
+        /** Variante sans auth pour repos publics (utilisée par le fallback). */
+        suspend fun getReleasesPublic(
+            owner: String,
+            repo: String,
+        ): List<Release> {
+            return publicService.getReleases(
+                owner = owner,
+                repo = repo,
+            )
+        }
     }
 
     private interface ApiService {
@@ -60,6 +91,32 @@ object GitHub {
                     .addInterceptor { chain ->
                         val request = chain.request().newBuilder()
                             .addHeader("Authorization", "Bearer $token")
+                            .addHeader("Accept", "application/vnd.github+json")
+                            .build()
+                        chain.proceed(request)
+                    }
+                    .build()
+
+                val retrofit = Retrofit.Builder()
+                    .baseUrl("https://api.github.com/")
+                    .client(client)
+                    .addConverterFactory(GsonConverterFactory.create())
+                    .build()
+
+                return retrofit.create(ApiService::class.java)
+            }
+
+            /**
+             * Variante SANS Authorization header — utilisée par le fallback de
+             * InAppUpdater pour interroger un repo backup public (Logami61) si
+             * le repo principal (Xx-nanico-xX) est indisponible. Le token de
+             * l'app a un scope verrouillé sur Xx-nanico-xX/mobile-client-v2 et
+             * renverrait 401 sur tout autre repo, même public.
+             */
+            fun buildPublic(): ApiService {
+                val client = OkHttpClient.Builder()
+                    .addInterceptor { chain ->
+                        val request = chain.request().newBuilder()
                             .addHeader("Accept", "application/vnd.github+json")
                             .build()
                         chain.proceed(request)
