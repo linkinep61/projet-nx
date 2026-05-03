@@ -480,37 +480,56 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                     .filter { (it.id.ifBlank { it.title }) !in featuredTvShowKeys }
                     .filter { !it.isMovie } // Exclude films marked as TvShow — they belong in "Films" not "Séries"
 
-                // Rebuild: keep featured banner, replace everything else
-                // Order: FEATURED → Séries Récentes → Films Récents → Séries Populaires → Films Populaires
+                // 2026-05-03: Fix flicker des listes home (signalé sur 9 providers).
+                // L'ancien code écrasait TOUTES les catégories du provider et les
+                // remplaçait par 4 catégories hardcodées (Films/Séries Récents/Populaires).
+                // À l'ouverture le user voyait les vraies sections du site, puis ~1.5s
+                // plus tard l'enrichment swap par les 4 génériques → flicker.
+                // Nouveau comportement : on PRÉSERVE les catégories du provider et on
+                // AJOUTE l'enrichment en fin avec dédup par nom (case-insensitive).
                 if (uniqueMovies.size > 5 || uniqueTvShows.size > 5) {
                     val enrichedCategories = mutableListOf<Category>()
-                    val featured = categories.firstOrNull()
+
+                    // 1. FEATURED banner en tête
+                    val featured = categories.firstOrNull { it.name == Category.FEATURED }
                     if (featured != null) enrichedCategories.add(featured)
 
+                    // 2. Catégories non-FEATURED du provider — PRÉSERVÉES telles quelles
+                    val providerCategories = categories.filter { it.name != Category.FEATURED }
+                    enrichedCategories.addAll(providerCategories)
+
+                    // 3. Tracker les noms déjà utilisés pour éviter doublons exacts
+                    val usedNames = enrichedCategories
+                        .map { it.name.lowercase().trim() }
+                        .toMutableSet()
+
+                    // 4. Ajout des chunks enrichment EN SUFFIXE (skip si nom déjà présent)
                     val seriesNames = listOf("Séries Récentes", "Séries Populaires", "Encore plus de Séries", "Séries à Découvrir")
                     val filmNames = listOf("Films Récents", "Films Populaires", "Encore plus de Films", "Films à Découvrir")
                     val tvChunks = uniqueTvShows.chunked(20)
                     val movieChunks = uniqueMovies.chunked(20)
                     val maxChunks = maxOf(tvChunks.size, movieChunks.size)
 
-                    // Interleave: Films first, then Séries, alternating chunks.
-                    // Per user request: keep Films above Séries everywhere — this
-                    // matches what FrenchStream typically shows on its home page,
-                    // so the section order doesn't change between the cached
-                    // initial view and the enriched view (which used to flip
-                    // "Derniers Films" ↔ "Séries Récentes" at the same position).
                     for (i in 0 until maxChunks) {
                         if (i < movieChunks.size) {
                             val name = filmNames.getOrElse(i) { "Films #${i + 1}" }
-                            enrichedCategories.add(Category(name = name, list = movieChunks[i]))
+                            val key = name.lowercase().trim()
+                            if (key !in usedNames) {
+                                enrichedCategories.add(Category(name = name, list = movieChunks[i]))
+                                usedNames += key
+                            }
                         }
                         if (i < tvChunks.size) {
                             val name = seriesNames.getOrElse(i) { "Séries #${i + 1}" }
-                            enrichedCategories.add(Category(name = name, list = tvChunks[i]))
+                            val key = name.lowercase().trim()
+                            if (key !in usedNames) {
+                                enrichedCategories.add(Category(name = name, list = tvChunks[i]))
+                                usedNames += key
+                            }
                         }
                     }
 
-                    // Update UI with enriched content
+                    // Update UI with enriched content (provider categories préservées)
                     HomeCacheStore.write(appContext, provider, enrichedCategories)
                     _state.emit(State.SuccessLoading(enrichedCategories))
                 }
