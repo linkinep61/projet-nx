@@ -264,6 +264,18 @@ object DownloadManager {
         dao.deleteById(id)
     }
 
+    /** Force-remove a download row from the DB regardless of state, ignoring any
+     *  file cleanup errors. Used as fallback when the regular delete path fails
+     *  (e.g. failed live recording with broken filePath). */
+    suspend fun forceDelete(id: String) {
+        val download = dao.getById(id)
+        if (download != null) {
+            try { deletePhysicalFile(download.filePath) } catch (_: Exception) {}
+        }
+        try { synchronized(pauseRequests) { pauseRequests.remove(id) } } catch (_: Exception) {}
+        dao.deleteById(id)
+    }
+
     /**
      * Delete the actual bytes referenced by a download row's filePath.
      * Handles both legacy file-system paths and MediaStore content:// URIs.
@@ -332,6 +344,14 @@ object DownloadManager {
             } else {
                 downloadDirect(download)
             }
+
+            // Clean up live-stop flag (set by downloadHlsLive when user stops a live
+            // recording — we already cleared pauseRequests so the if-pause branch
+            // below skips and we go straight to COMPLETED + publish to MediaStore).
+            val wasLiveStop = synchronized(liveStopRequests) {
+                liveStopRequests.remove(download.id)
+            }
+            if (wasLiveStop) Log.d(TAG, "Live recording stop → finalizing as COMPLETED: ${download.id}")
 
             if (isPauseRequested(download.id)) {
                 Log.d(TAG, "Download paused: ${download.id}")
@@ -611,8 +631,20 @@ object DownloadManager {
         file.parentFile?.mkdirs()
         val headers = parseHeaders(download.headersJson)
 
-        // Fetch and parse HLS playlist
-        val segments = fetchHlsSegments(download.sourceUrl, headers)
+        // Fetch the playlist body once to detect live vs VOD
+        val (playlistBody, mediaPlaylistUrl) = fetchHlsPlaylist(download.sourceUrl, headers)
+        val isLive = !playlistBody.contains("#EXT-X-ENDLIST")
+        if (isLive) {
+            Log.d(TAG, "HLS LIVE detected for ${download.id} — switching to continuous live recording")
+            // Pass the body we just fetched to avoid an immediate re-fetch (which can
+            // return a different segment window or fail).
+            downloadHlsLive(download, mediaPlaylistUrl, headers, initialBody = playlistBody)
+            return
+        }
+
+        // VOD path: parse all segments and download in parallel as before
+        val segBaseUrl = mediaPlaylistUrl.substringBeforeLast("/") + "/"
+        val segments = parseSegmentPlaylist(playlistBody, segBaseUrl)
         if (segments.isEmpty()) throw Exception("No segments found in HLS playlist")
 
         Log.d(TAG, "HLS parallel download: ${segments.size} segments × $PARALLEL_CONNECTIONS connections for ${download.id}")
@@ -729,6 +761,226 @@ object DownloadManager {
     }
 
     /**
+     * Live HLS recording: poll the playlist forever and append new segments to the
+     * output file as they arrive. Stops when isPauseRequested(download.id) returns
+     * true (user paused / cancelled). Hard cap at 4 hours.
+     */
+    /** Set of download IDs whose pause was actually a "stop" on a live recording.
+     *  processDownload checks this to decide whether to publish to MediaStore or
+     *  just leave the file in app-private storage. */
+    private val liveStopRequests = mutableSetOf<String>()
+
+    private suspend fun downloadHlsLive(
+        download: DownloadEntity,
+        mediaPlaylistUrl: String,
+        headers: Map<String, String>,
+        initialBody: String? = null,
+    ) {
+        val file = File(download.filePath)
+        val outputStream = FileOutputStream(file)
+        val seenSegments = mutableSetOf<String>()
+        var totalSegments = 0
+        val recordingStart = System.currentTimeMillis()
+        val MAX_RECORDING_MS = 4L * 60L * 60L * 1000L // 4h cap
+        val baseUrl = mediaPlaylistUrl.substringBeforeLast("/") + "/"
+
+        // Session cookies (captured from playlist Set-Cookie headers). Some Xtream-style
+        // servers gate /hlsr/<token>.ts segments behind a session cookie set during
+        // the initial m3u8 fetch — without forwarding it we get HTTP 401 on every seg.
+        val sessionCookies = mutableMapOf<String, String>()
+
+        // Helper to capture cookies from a response
+        fun captureCookies(resp: okhttp3.Response) {
+            for (header in resp.headers("Set-Cookie")) {
+                val pair = header.substringBefore(";").trim()
+                val eq = pair.indexOf('=')
+                if (eq > 0) sessionCookies[pair.substring(0, eq)] = pair.substring(eq + 1)
+            }
+        }
+
+        // Refetch the playlist with cookie capture (overrides initialBody if needed)
+        suspend fun fetchPlaylistWithCookies(): String = withContext(Dispatchers.IO) {
+            val req = Request.Builder().url(mediaPlaylistUrl)
+                .header("User-Agent", Extractor.DEFAULT_USER_AGENT)
+                .apply {
+                    headers.forEach { (k, v) -> header(k, v) }
+                    if (sessionCookies.isNotEmpty()) {
+                        header("Cookie", sessionCookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
+                    }
+                }
+                .build()
+            Extractor.sharedClient.newCall(req).execute().use { resp ->
+                captureCookies(resp)
+                resp.body?.string() ?: ""
+            }
+        }
+
+        try {
+            // Always fetch with cookie capture (initialBody from caller didn't capture cookies).
+            // CRITICAL: this fetch must happen RIGHT BEFORE the segment fetches, on the
+            // same OkHttp client (connection pool reuses TCP socket). Some IPTV servers
+            // tie the segment token to the TCP connection that fetched the playlist.
+            val initBody = fetchPlaylistWithCookies().ifBlank { initialBody ?: "" }
+            val targetDurationSec = Regex("#EXT-X-TARGETDURATION:(\\d+)")
+                .find(initBody)?.groupValues?.get(1)?.toLongOrNull() ?: 6L
+            val initSegs = parseSegmentPlaylist(initBody, baseUrl)
+            Log.d(TAG, "LIVE init: ${initSegs.size} segments parsed from ${initBody.length}B body, ${sessionCookies.size} cookies captured")
+            if (initSegs.isEmpty()) {
+                Log.w(TAG, "LIVE init body sample: ${initBody.take(300)}")
+            }
+            // Build effective headers (with session cookies + Referer)
+            fun effectiveHeaders(): Map<String, String> {
+                val h = headers.toMutableMap()
+                if (sessionCookies.isNotEmpty()) {
+                    h["Cookie"] = sessionCookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+                }
+                h["Referer"] = mediaPlaylistUrl
+                return h
+            }
+            for (seg in initSegs) {
+                if (isPauseRequested(download.id)) break
+                if (seenSegments.add(seg)) {
+                    try {
+                        appendOneSegment(seg, effectiveHeaders(), outputStream, download.id)
+                        totalSegments++
+                    } catch (e: Exception) {
+                        Log.w(TAG, "LIVE init segment failed: ${e.message} url=${seg.take(120)}")
+                    }
+                }
+            }
+            Log.d(TAG, "LIVE recording started: $totalSegments initial segments downloaded, target=${targetDurationSec}s")
+
+            // Main loop
+            while (!isPauseRequested(download.id)) {
+                if (System.currentTimeMillis() - recordingStart > MAX_RECORDING_MS) {
+                    Log.w(TAG, "LIVE recording: hit 4h cap — stopping")
+                    break
+                }
+                val waitMs = (targetDurationSec * 1000L).coerceAtLeast(4000L)
+                delay(waitMs)
+                if (isPauseRequested(download.id)) break
+
+                val refreshBody = try {
+                    fetchPlaylistWithCookies()
+                } catch (e: Exception) {
+                    Log.w(TAG, "LIVE refresh failed: ${e.message}, retrying")
+                    continue
+                }
+                val newList = parseSegmentPlaylist(refreshBody, baseUrl)
+                val newSegs = newList.filter { seenSegments.add(it) }
+                if (newSegs.isEmpty()) continue
+
+                for (segUrl in newSegs) {
+                    if (isPauseRequested(download.id)) break
+                    try {
+                        appendOneSegment(segUrl, effectiveHeaders(), outputStream, download.id)
+                        totalSegments++
+                    } catch (e: Exception) {
+                        Log.w(TAG, "LIVE segment failed: ${e.message}")
+                    }
+                }
+
+                val elapsedSec = (System.currentTimeMillis() - recordingStart) / 1000
+                val mins = elapsedSec / 60; val secs = elapsedSec % 60
+                dao.updateProgress(download.id, DownloadEntity.Status.DOWNLOADING, totalSegments.toLong(), -1L)
+                updateNotification("${download.title} — Live ${mins}m${secs}s ($totalSegments segments)", -1)
+            }
+
+            Log.d(TAG, "LIVE recording stopped: $totalSegments segments captured for ${download.id}")
+            // Mark this as a "stop" (not a pause). processDownload will treat the
+            // pause as completion: publish file to MediaStore + mark COMPLETED.
+            // Also clear the pause flag so processDownload's "if isPauseRequested"
+            // branch doesn't fire.
+            if (totalSegments > 0) {
+                synchronized(liveStopRequests) { liveStopRequests.add(download.id) }
+                synchronized(pauseRequests) { pauseRequests.remove(download.id) }
+            }
+        } finally {
+            outputStream.close()
+        }
+    }
+
+    /** Append one HLS segment's bytes to outputStream. */
+    private suspend fun appendOneSegment(
+        segmentUrl: String,
+        headers: Map<String, String>,
+        outputStream: FileOutputStream,
+        downloadId: String,
+    ) = withContext(Dispatchers.IO) {
+        // Respect the User-Agent provided by the Video.headers (e.g. Vegeta uses
+        // VLC/3.0.18 — the IPTV server gates /hlsr/<token>.ts by UA pattern).
+        // Only fall back to ExoPlayer-style UA if caller didn't supply one.
+        val callerUa = headers.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value
+        val effectiveUa = callerUa ?: "ExoPlayer/2.19.1 (Linux; Android 14)"
+        val req = Request.Builder().url(segmentUrl)
+            .apply {
+                headers.forEach { (k, v) -> header(k, v) }
+                header("User-Agent", effectiveUa)
+                if (headers.keys.none { it.equals("Accept", true) }) header("Accept", "*/*")
+                header("Connection", "keep-alive")
+            }
+            .build()
+        Extractor.sharedClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                // Diagnostic: log response headers + first 200 chars of body on 4xx
+                if (resp.code == 401 || resp.code == 403) {
+                    val headerSummary = resp.headers.toMultimap().entries
+                        .filter { it.key.lowercase() in setOf("www-authenticate", "set-cookie", "server", "content-type", "x-error") }
+                        .joinToString(", ") { "${it.key}=${it.value.joinToString(";")}" }
+                    val body = try { resp.body?.string()?.take(300) ?: "" } catch (_: Exception) { "" }
+                    Log.w(TAG, "Segment ${resp.code} headers: $headerSummary | UA used: $effectiveUa | body: ${body.replace("\n", " ")}")
+                }
+                throw Exception("Segment HTTP ${resp.code}")
+            }
+            resp.body?.byteStream()?.use { input ->
+                val buffer = ByteArray(BUFFER_SIZE)
+                var bytesRead: Int
+                while (input.read(buffer).also { bytesRead = it } != -1) {
+                    if (isPauseRequested(downloadId)) return@withContext
+                    outputStream.write(buffer, 0, bytesRead)
+                }
+            }
+        }
+    }
+
+    /**
+     * Fetch the HLS playlist. If it's a master playlist, resolve to the highest-quality
+     * media playlist. Returns (mediaPlaylistBody, mediaPlaylistUrl).
+     */
+    private suspend fun fetchHlsPlaylist(sourceUrl: String, headers: Map<String, String>): Pair<String, String> {
+        val playlistResponse = withContext(Dispatchers.IO) {
+            Extractor.sharedClient.newCall(
+                Request.Builder()
+                    .url(sourceUrl)
+                    .header("User-Agent", Extractor.DEFAULT_USER_AGENT)
+                    .apply { headers.forEach { (k, v) -> header(k, v) } }
+                    .build()
+            ).execute()
+        }
+        val playlistBody = playlistResponse.body?.string() ?: throw Exception("Empty HLS playlist")
+        playlistResponse.close()
+
+        return if (playlistBody.contains("#EXT-X-STREAM-INF")) {
+            val baseUrl = sourceUrl.substringBeforeLast("/") + "/"
+            val bestStreamUrl = parseMasterPlaylist(playlistBody, baseUrl)
+                ?: throw Exception("No streams found in master playlist")
+            val segResponse = withContext(Dispatchers.IO) {
+                Extractor.sharedClient.newCall(
+                    Request.Builder().url(bestStreamUrl)
+                        .header("User-Agent", Extractor.DEFAULT_USER_AGENT)
+                        .apply { headers.forEach { (k, v) -> header(k, v) } }
+                        .build()
+                ).execute()
+            }
+            val segBody = segResponse.body?.string() ?: throw Exception("Empty media playlist")
+            segResponse.close()
+            segBody to bestStreamUrl
+        } else {
+            playlistBody to sourceUrl
+        }
+    }
+
+    /**
      * Fetch and parse HLS playlist, resolving master playlists to segment lists.
      */
     private suspend fun fetchHlsSegments(sourceUrl: String, headers: Map<String, String>): List<String> {
@@ -787,10 +1039,23 @@ object DownloadManager {
     }
 
     private fun parseSegmentPlaylist(content: String, baseUrl: String): List<String> {
+        // Resolve relative URLs properly: handle absolute paths (/foo/bar), protocol-
+        // relative URLs (//host/path), and relative paths (foo/bar.ts).
+        // baseUrl is the directory containing the playlist (e.g. http://host:port/live/path/).
+        val origin = try {
+            val u = java.net.URL(baseUrl)
+            "${u.protocol}://${u.authority}"  // e.g. "http://81.31.194.66:8080"
+        } catch (_: Exception) { "" }
         return content.lines()
+            .map { it.trim() }
             .filter { it.isNotBlank() && !it.startsWith("#") }
             .map { url ->
-                if (url.startsWith("http")) url else baseUrl + url.trim()
+                when {
+                    url.startsWith("http://") || url.startsWith("https://") -> url
+                    url.startsWith("//") -> "http:$url"
+                    url.startsWith("/") -> origin + url
+                    else -> baseUrl + url
+                }
             }
     }
 

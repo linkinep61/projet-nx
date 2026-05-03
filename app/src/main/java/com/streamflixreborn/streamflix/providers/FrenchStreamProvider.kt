@@ -13,7 +13,11 @@ import com.streamflixreborn.streamflix.models.People
 import com.streamflixreborn.streamflix.models.Season
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
+import com.streamflixreborn.streamflix.utils.TMDb3
+import com.streamflixreborn.streamflix.utils.TMDb3.original
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
@@ -91,6 +95,13 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     fun ignoreSource(source: String, href: String): Boolean {
         if (source.trim().equals("Dood.Stream", ignoreCase = true) && href.contains("/bigwar5/")) return true
+        // kakaflix.lol is a phantom domain that FrenchStream lists for the
+        // VFF/VFQ/VOSTFR variants of Dood/Voe/Filmoon but every endpoint
+        // returns a clean 404 from the LiteSpeed server (verified across
+        // multiple URLs, methods, headers, networks). Filter them out so
+        // the user only sees working sources (typically the Default entry
+        // which routes through kokoflix.lol → playmogo.com).
+        if (href.contains("kakaflix.lol", ignoreCase = true)) return true
         return false
     }
 
@@ -165,7 +176,11 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
         }
 
-        // Featured carousel from the first items across all sections
+        // Featured carousel from the first items across all sections.
+        // The site only has the small portrait poster (no wide backdrop),
+        // so when the carousel renders fullscreen the upscaled portrait
+        // looks ugly and eats RAM. Pull a proper landscape backdrop from
+        // TMDb when enabled — same pattern as WiflixProvider does.
         if (allItems.isNotEmpty()) {
             val featured = allItems.take(15).map { item ->
                 when (item) {
@@ -174,6 +189,41 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     is TvShow -> TvShow(id = item.id, title = item.title,
                         poster = item.poster, banner = item.poster)
                     else -> item
+                }
+            }
+            // Parallel TMDb lookup for backdrops (capped to 15 items so we
+            // never block home loading on slow TMDb responses; failures are
+            // silent — falls back to portrait poster).
+            if (UserPreferences.enableTmdb) {
+                runCatching {
+                    coroutineScope {
+                        featured.map { item ->
+                            async {
+                                runCatching {
+                                    val title = when (item) {
+                                        is Movie -> item.title
+                                        is TvShow -> item.title.substringBefore(" - ")
+                                        else -> return@async
+                                    }
+                                    val results = TMDb3.Search.multi(title, language = "fr-FR")
+                                    val tmdbBanner = results.results
+                                        .firstNotNullOfOrNull { r ->
+                                            when (r) {
+                                                is TMDb3.Movie -> r.backdropPath?.original
+                                                is TMDb3.Tv -> r.backdropPath?.original
+                                                else -> null
+                                            }
+                                        }
+                                    if (tmdbBanner != null) {
+                                        when (item) {
+                                            is Movie -> item.banner = tmdbBanner
+                                            is TvShow -> item.banner = tmdbBanner
+                                        }
+                                    }
+                                }
+                            }
+                        }.forEach { it.await() }
+                    }
                 }
             }
             categories.add(0, Category(name = Category.FEATURED, list = featured))
@@ -225,6 +275,13 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     override suspend fun getMovies(page: Int): List<Movie> {
         if (page > 1) return emptyList()
         initializeService()
+        fun looksLikeSeries(href: String, title: String, id: String): Boolean {
+            return href.contains("/serie/")
+                || href.contains("/s-tv/")
+                || id.contains("-saison-")
+                || title.contains("Saison", ignoreCase = true)
+                || title.matches(Regex(".*\\bS\\d{1,2}\\b.*", RegexOption.IGNORE_CASE))
+        }
         // /films endpoint may return MySQL errors on the redesigned site.
         // Try it first, fall back to home page movies.
         return try {
@@ -234,17 +291,17 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 val href = linkEl.attr("href")
                 val id = extractNewsId(href) ?: return@mapNotNull null
                 val title = item.selectFirst("div.short-title")?.text() ?: ""
-                // Skip series entries
-                if (title.contains("Saison", ignoreCase = true)
-                    || href.contains("/serie/") || href.contains("/s-tv/")) return@mapNotNull null
+                // Defensive: drop series that occasionally leak into /films/ (e.g.
+                // a series titled "X - Saison 1" can be mis-tagged on the site).
+                if (looksLikeSeries(href, title, id)) return@mapNotNull null
                 Movie(id = id, title = title, poster = item.selectFirst("img")?.attr("src"))
             }
             items.ifEmpty { throw Exception("empty") }
         } catch (_: Exception) {
-            // Fallback: films from home page (div.short.film)
+            // Fallback: films from home page (div.short.film, then heuristic for redesigned site)
             try {
                 val doc = service.getHome()
-                doc.select("div.short.film").mapNotNull { item ->
+                val list = doc.select("div.short.film").mapNotNull { item ->
                     val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
                     val id = extractNewsId(linkEl.attr("href")) ?: return@mapNotNull null
                     Movie(
@@ -253,6 +310,15 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                         poster = item.selectFirst("img")?.attr("src"),
                     )
                 }
+                if (list.isNotEmpty()) list else doc.select("div.short").mapNotNull { item ->
+                    val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
+                    val href = linkEl.attr("href")
+                    val id = extractNewsId(href) ?: return@mapNotNull null
+                    val title = item.selectFirst("div.short-title")?.text() ?: ""
+                    if (looksLikeSeries(href, title, id)) return@mapNotNull null
+                    Movie(id = id, title = title,
+                        poster = item.selectFirst("img")?.attr("src"))
+                }
             } catch (_: Exception) { emptyList() }
         }
     }
@@ -260,24 +326,41 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     override suspend fun getTvShows(page: Int): List<TvShow> {
         if (page > 1) return emptyList()
         initializeService()
+        // Helper: looks like an actual TV series (not a film mis-classified).
+        // The redesigned site doesn't use .film class anymore, so we have to
+        // detect series by URL/title heuristics — otherwise films leak into
+        // the "Séries Récentes" carousel and the type badge ends up flipping.
+        fun looksLikeSeries(href: String, title: String, id: String): Boolean {
+            return href.contains("/serie/")
+                || href.contains("/s-tv/")
+                || id.contains("-saison-")
+                || title.contains("Saison", ignoreCase = true)
+                || title.matches(Regex(".*\\bS\\d{1,2}\\b.*", RegexOption.IGNORE_CASE))
+        }
         return try {
             val document = service.getTvShows(page)
+            // /series/ endpoint returns ONLY series — trust it (filtering would
+            // drop legitimate series whose title doesn't have "Saison" / "S1").
             val items = document.select("div.short").mapNotNull { item ->
                 val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
-                val id = extractNewsId(linkEl.attr("href")) ?: return@mapNotNull null
-                TvShow(id = id,
-                    title = item.selectFirst("div.short-title")?.text() ?: "",
+                val href = linkEl.attr("href")
+                val id = extractNewsId(href) ?: return@mapNotNull null
+                val title = item.selectFirst("div.short-title")?.text() ?: ""
+                TvShow(id = id, title = title,
                     poster = item.selectFirst("img")?.attr("src"))
             }
             items.ifEmpty { throw Exception("empty") }
         } catch (_: Exception) {
+            // Fallback: home page mixes types — must filter to only keep series.
             try {
                 val doc = service.getHome()
-                doc.select("div.short").filter { !it.hasClass("film") }.mapNotNull { item ->
+                doc.select("div.short").mapNotNull { item ->
                     val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
-                    val id = extractNewsId(linkEl.attr("href")) ?: return@mapNotNull null
-                    TvShow(id = id,
-                        title = item.selectFirst("div.short-title")?.text() ?: "",
+                    val href = linkEl.attr("href")
+                    val id = extractNewsId(href) ?: return@mapNotNull null
+                    val title = item.selectFirst("div.short-title")?.text() ?: ""
+                    if (!looksLikeSeries(href, title, id)) return@mapNotNull null
+                    TvShow(id = id, title = title,
                         poster = item.selectFirst("img")?.attr("src"))
                 }
             } catch (_: Exception) { emptyList() }
@@ -486,35 +569,96 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         // Movie OR fallback when episode block was missing (movie wrongly
         // classified as series upstream). Both paths land here.
         run {
-            // ── Movie: parse button.player-option elements ──
-            document.select("button.player-option").forEachIndexed { i, button ->
-                val playerName = button.attr("data-player").trim()
-                    .ifBlank { "Player ${i + 1}" }
-                val defaultUrl = button.attr("data-url-default").trim()
-
-                val versionOptions = button.select("div.version-option")
-                if (versionOptions.isNotEmpty()) {
-                    versionOptions.forEach { version ->
-                        val versionName = version.attr("data-version").trim()
-                        val versionUrl = version.attr("data-url").trim()
-                        if (versionUrl.isNotBlank() && seen.add(versionUrl)) {
-                            if (ignoreSource(playerName, versionUrl)) return@forEach
-                            val displayName = if (versionName.isNotBlank())
-                                "$playerName ($versionName)" else playerName
+            // ── Movie: parse the JS `playerUrls = {...}` dictionary ──
+            // The HTML <button class="player-option"> elements only carry
+            // data-url-default for legacy players (ViDZY, Dood). Newer
+            // players (Uqload, Voe, Filmoon, Premium, Netu) have empty
+            // version-options and rely entirely on the JS dictionary.
+            // Parsing the dict gives us every player + every version URL.
+            val htmlText = document.toString()
+            val dictMatch = Regex(
+                """playerUrls\s*=\s*(\{[\s\S]*?\});""",
+                RegexOption.MULTILINE
+            ).find(htmlText)
+            val playerOrder = mutableListOf<String>()
+            document.select("button.player-option").forEach { button ->
+                val name = button.attr("data-player").trim()
+                if (name.isNotBlank()) playerOrder.add(name)
+            }
+            if (dictMatch != null) {
+                try {
+                    val json = org.json.JSONObject(dictMatch.groupValues[1])
+                    val keys = json.keys().asSequence().toList()
+                    // Iterate in HTML button order if available, else dict order
+                    val orderedKeys = if (playerOrder.isNotEmpty())
+                        playerOrder.filter { json.has(it) } +
+                            keys.filter { it !in playerOrder }
+                    else keys
+                    orderedKeys.forEachIndexed { i, playerName ->
+                        val versions = json.optJSONObject(playerName) ?: return@forEachIndexed
+                        // Order versions: Default → VFF → VFQ → VOSTFR
+                        val versionOrder = listOf("Default", "VFF", "VFQ", "VOSTFR")
+                        val allKeys = versions.keys().asSequence().toList()
+                        val orderedVersions = versionOrder.filter { allKeys.contains(it) } +
+                            allKeys.filter { it !in versionOrder }
+                        // Track URLs already added per player to dedupe Default
+                        // when it equals one of the versions.
+                        val seenForPlayer = HashSet<String>()
+                        orderedVersions.forEach { versionName ->
+                            val url = versions.optString(versionName, "").trim()
+                            if (url.isBlank()) return@forEach
+                            // Skip the Multiup placeholder Netu URL (vid= empty)
+                            if (url.contains("vid=&", ignoreCase = true)) return@forEach
+                            // Dedupe within this player (Default often dupes a version)
+                            if (!seenForPlayer.add(url)) return@forEach
+                            // Global dedupe across players too
+                            if (!seen.add(url)) return@forEach
+                            if (ignoreSource(playerName, url)) return@forEach
+                            val displayName = if (versionName == "Default")
+                                playerName else "$playerName ($versionName)"
                             out.add(Video.Server(
                                 id = "fs_player_${i}_${versionName}",
                                 name = displayName,
-                                src = versionUrl,
+                                src = url,
                             ))
                         }
                     }
-                } else if (defaultUrl.isNotBlank() && seen.add(defaultUrl)) {
-                    if (!ignoreSource(playerName, defaultUrl)) {
-                        out.add(Video.Server(
-                            id = "fs_player_$i",
-                            name = playerName,
-                            src = defaultUrl,
-                        ))
+                } catch (e: Exception) {
+                    Log.w("FrenchStream", "playerUrls JSON parse failed: ${e.message} — falling back to HTML buttons")
+                    // Fall through to HTML parsing below
+                }
+            }
+            // Legacy / fallback: parse button.player-option from HTML.
+            // Runs only when JS dict was missing or unparseable.
+            if (out.isEmpty()) {
+                document.select("button.player-option").forEachIndexed { i, button ->
+                    val playerName = button.attr("data-player").trim()
+                        .ifBlank { "Player ${i + 1}" }
+                    val defaultUrl = button.attr("data-url-default").trim()
+                    val versionOptions = button.select("div.version-option")
+                    if (versionOptions.isNotEmpty()) {
+                        versionOptions.forEach { version ->
+                            val versionName = version.attr("data-version").trim()
+                            val versionUrl = version.attr("data-url").trim()
+                            if (versionUrl.isNotBlank() && seen.add(versionUrl)) {
+                                if (ignoreSource(playerName, versionUrl)) return@forEach
+                                val displayName = if (versionName.isNotBlank())
+                                    "$playerName ($versionName)" else playerName
+                                out.add(Video.Server(
+                                    id = "fs_player_${i}_${versionName}",
+                                    name = displayName,
+                                    src = versionUrl,
+                                ))
+                            }
+                        }
+                    } else if (defaultUrl.isNotBlank() && seen.add(defaultUrl)) {
+                        if (!ignoreSource(playerName, defaultUrl)) {
+                            out.add(Video.Server(
+                                id = "fs_player_$i",
+                                name = playerName,
+                                src = defaultUrl,
+                            ))
+                        }
                     }
                 }
             }

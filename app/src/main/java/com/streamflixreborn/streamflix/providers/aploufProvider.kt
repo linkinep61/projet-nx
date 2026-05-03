@@ -354,16 +354,19 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         initializeService()
         val document = service.loadPage(id)
 
-        val url = document.selectFirst("iframe")?.attr("src")
-        if (url == null) throw Exception("Video unavailable")
-        val urlobj = url.toHttpUrl()
-        val serviceName = Extractor.identifyServiceName(url)
-        val displayName = serviceName ?: urlobj.host.replace(".com", "")
-
-        return listOf(Video.Server(
-            id = urlobj.host,
-            name = displayName,
-            src = url))
+        // Take ALL iframes (not just the first one): when the site lists
+        // multiple players the first iframe might be dead while a later one
+        // works — same trap that hit VoirAnime. Dedup by URL.
+        val iframeUrls = document.select("iframe").mapNotNull { it.attr("src").takeIf { s -> s.startsWith("http") } }
+        if (iframeUrls.isEmpty()) throw Exception("Video unavailable")
+        val seen = mutableSetOf<String>()
+        return iframeUrls.mapNotNull { url ->
+            if (!seen.add(url)) return@mapNotNull null
+            val urlobj = url.toHttpUrl()
+            val serviceName = Extractor.identifyServiceName(url)
+            val displayName = serviceName ?: urlobj.host.replace(".com", "")
+            Video.Server(id = url, name = displayName, src = url)
+        }
     }
 
     override suspend fun getVideo(server: Video.Server): Video {

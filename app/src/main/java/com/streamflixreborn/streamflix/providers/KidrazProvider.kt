@@ -353,16 +353,18 @@ object KidrazProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         initializeService()
         val document = service.loadPage(id)
 
-        val url = document.selectFirst("iframe")?.attr("src")
-        if (url == null) throw Exception("Video unavailable")
-        val urlobj = url.toHttpUrl()
-        val serviceName = Extractor.identifyServiceName(url)
-        val displayName = serviceName ?: urlobj.host.replace(".com", "")
-
-        return listOf(Video.Server(
-            id = urlobj.host,
-            name = displayName,
-            src = url))
+        // Same fix as VoirAnime + aplouf: take ALL iframes so a dead first
+        // player doesn't hide the working alternates.
+        val iframeUrls = document.select("iframe").mapNotNull { it.attr("src").takeIf { s -> s.startsWith("http") } }
+        if (iframeUrls.isEmpty()) throw Exception("Video unavailable")
+        val seen = mutableSetOf<String>()
+        return iframeUrls.mapNotNull { url ->
+            if (!seen.add(url)) return@mapNotNull null
+            val urlobj = url.toHttpUrl()
+            val serviceName = Extractor.identifyServiceName(url)
+            val displayName = serviceName ?: urlobj.host.replace(".com", "")
+            Video.Server(id = url, name = displayName, src = url)
+        }
     }
 
     override suspend fun getVideo(server: Video.Server): Video {

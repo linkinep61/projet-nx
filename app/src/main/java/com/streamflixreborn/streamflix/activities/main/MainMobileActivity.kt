@@ -56,6 +56,10 @@ class MainMobileActivity : FragmentActivity() {
 
     private companion object {
         const val RESOLVER_TIMEOUT_MS = 12_000L
+        // True the first time the JVM/process starts. Static fields survive
+        // activity restarts (FLAG_ACTIVITY_NEW_TASK|CLEAR_TASK from a provider
+        // click) but reset on a true cold start (process kill).
+        private var isFreshProcessLaunch = true
     }
 
     private data class ResolverPayload(
@@ -142,18 +146,28 @@ class MainMobileActivity : FragmentActivity() {
             return
         }
 
-        if (savedInstanceState == null) {
-            UserPreferences.currentProvider?.let {
-                navController.navigate(
-                    R.id.home,
-                    null,
-                    navOptions {
-                        launchSingleTop = true
-                        popUpTo(R.id.providers) {
-                            inclusive = true
-                        }
-                    }
-                )
+        // Per user request: cold start lands on the Providers home with NO
+        // active provider. This avoids auto-loading a memory-heavy provider
+        // (which can crash low-RAM devices) and forces the user to consciously
+        // pick which category/provider they want to use today.
+        if (savedInstanceState == null && isFreshProcessLaunch) {
+            // First activity in this OS process → wipe selection so we land on
+            // the Providers home (avoids auto-loading a memory-heavy provider
+            // that crashes low-RAM devices). The static flag survives activity
+            // restarts (provider clicks re-launch with FLAG_ACTIVITY_NEW_TASK
+            // |CLEAR_TASK) but is reset by the JVM on a real cold start.
+            UserPreferences.currentProvider = null
+            isFreshProcessLaunch = false
+            // Stay on R.id.providers (the start destination of the nav graph).
+        } else if (savedInstanceState == null) {
+            // Activity restart inside the same process — typically triggered by
+            // a provider click (ProviderViewHolder restarts MainMobileActivity
+            // with FLAG_ACTIVITY_NEW_TASK|CLEAR_TASK after setting
+            // currentProvider). If a provider is now selected, jump to home so
+            // the user actually lands on the provider they picked.
+            isFreshProcessLaunch = false
+            if (UserPreferences.currentProvider != null) {
+                navController.navigate(R.id.home)
             }
         }
 
@@ -228,7 +242,18 @@ class MainMobileActivity : FragmentActivity() {
                 }
 
                 if (UserPreferences.currentProvider != null && currentDestinationId == R.id.home) {
-                    closeTask()
+                    // Back from a provider's home = return to the Providers
+                    // selection screen (so the user can pick a different
+                    // provider) instead of exiting to the phone launcher.
+                    UserPreferences.currentProvider = null
+                    navController.navigate(
+                        R.id.providers,
+                        null,
+                        navOptions {
+                            launchSingleTop = true
+                            popUpTo(R.id.home) { inclusive = true }
+                        }
+                    )
                     return
                 }
 

@@ -79,8 +79,11 @@ class DownloadAdapter(
                 }
             }
 
-            // Contextual action buttons
-            val showCancel = item.isDownloading || item.isPaused || item.isPending
+            // Contextual action buttons.
+            // Show the trash icon for in-flight downloads AND failed ones, so
+            // the user can always wipe a stuck/failed entry without having to
+            // reach into the file manager.
+            val showCancel = item.isDownloading || item.isPaused || item.isPending || item.isFailed
             binding.ivCancel.visibility = if (showCancel) View.VISIBLE else View.GONE
             if (showCancel) {
                 binding.ivCancel.setImageResource(R.drawable.ic_delete)

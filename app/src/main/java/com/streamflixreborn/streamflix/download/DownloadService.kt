@@ -300,41 +300,126 @@ class DownloadService : Service() {
 
         if (segments.isEmpty()) throw Exception("No segments found in HLS playlist")
 
-        Log.d(TAG, "HLS download: ${segments.size} segments for ${download.id}")
+        // Detect LIVE stream: VOD playlists end with #EXT-X-ENDLIST. Live ones don't.
+        val effectivePlaylistBody = if (playlistBody.contains("#EXT-X-STREAM-INF")) {
+            // We resolved a master playlist — re-fetch the chosen variant to check ENDLIST
+            try {
+                val bestUrl = parseMasterPlaylist(playlistBody, baseUrl)
+                if (bestUrl != null) {
+                    Extractor.sharedClient.newCall(
+                        Request.Builder().url(bestUrl).header("User-Agent", Extractor.DEFAULT_USER_AGENT).build()
+                    ).execute().use { it.body?.string() ?: "" }
+                } else playlistBody
+            } catch (_: Exception) { playlistBody }
+        } else playlistBody
+        val isLive = !effectivePlaylistBody.contains("#EXT-X-ENDLIST")
+        val targetDurationSec = Regex("#EXT-X-TARGETDURATION:(\\d+)")
+            .find(effectivePlaylistBody)?.groupValues?.get(1)?.toLongOrNull() ?: 6L
+        val livePlaylistUrl = if (playlistBody.contains("#EXT-X-STREAM-INF"))
+            (parseMasterPlaylist(playlistBody, baseUrl) ?: download.sourceUrl)
+        else download.sourceUrl
+
+        Log.d(TAG, "HLS download: ${segments.size} initial segments, isLive=$isLive, target=${targetDurationSec}s for ${download.id}")
 
         // Download all segments into the output file
         val outputStream = FileOutputStream(file)
         try {
-            segments.forEachIndexed { index, segmentUrl ->
-                if (isCancelled || isPauseRequested()) return
-
-                val segResponse = Extractor.sharedClient.newCall(
-                    Request.Builder().url(segmentUrl)
-                        .header("User-Agent", Extractor.DEFAULT_USER_AGENT).build()
-                ).execute()
-
-                segResponse.body?.byteStream()?.use { input ->
-                    val buffer = ByteArray(BUFFER_SIZE)
-                    var bytesRead: Int
-                    while (input.read(buffer).also { bytesRead = it } != -1) {
-                        if (isCancelled || isPauseRequested()) return
-                        outputStream.write(buffer, 0, bytesRead)
-                    }
+            if (!isLive) {
+                // VOD: fixed segment count, classic progress reporting
+                segments.forEachIndexed { index, segmentUrl ->
+                    if (isCancelled || isPauseRequested()) return
+                    appendSegment(segmentUrl, outputStream)
+                    val progress = ((index + 1) * 100) / segments.size
+                    dao.updateProgress(
+                        download.id, DownloadEntity.Status.DOWNLOADING,
+                        (index + 1).toLong(), segments.size.toLong()
+                    )
+                    updateNotification("Téléchargement : ${download.title}", progress)
                 }
-                segResponse.close()
+            } else {
+                // LIVE: poll the playlist forever, download NEW segments only.
+                // Stops when user pauses/cancels (isPauseRequested/isCancelled).
+                // Hard safety cap: 4 hours of recording.
+                val seenSegments = mutableSetOf<String>()
+                segments.forEach { seenSegments.add(it) }
+                Log.d(TAG, "LIVE recording started — write segments as they arrive, stop on user action")
 
-                // Update progress based on segment count
-                val progress = ((index + 1) * 100) / segments.size
-                dao.updateProgress(
-                    download.id,
-                    DownloadEntity.Status.DOWNLOADING,
-                    (index + 1).toLong(),
-                    segments.size.toLong()
-                )
-                updateNotification("Téléchargement : ${download.title}", progress)
+                // Write initial segments first
+                segments.forEachIndexed { index, segmentUrl ->
+                    if (isCancelled || isPauseRequested()) return
+                    appendSegment(segmentUrl, outputStream)
+                }
+                var totalSegments = segments.size
+                val recordingStart = System.currentTimeMillis()
+                val MAX_RECORDING_MS = 4L * 60L * 60L * 1000L // 4 hours
+
+                while (!isCancelled && !isPauseRequested()) {
+                    // Safety: stop after 4 hours
+                    if (System.currentTimeMillis() - recordingStart > MAX_RECORDING_MS) {
+                        Log.w(TAG, "LIVE recording: hit 4h cap — stopping")
+                        break
+                    }
+                    // Wait one segment duration (or 4s min) before re-polling
+                    val waitMs = (targetDurationSec * 1000L).coerceAtLeast(4000L)
+                    Thread.sleep(waitMs)
+
+                    // Re-fetch the playlist
+                    val refreshBody = try {
+                        Extractor.sharedClient.newCall(
+                            Request.Builder().url(livePlaylistUrl)
+                                .header("User-Agent", Extractor.DEFAULT_USER_AGENT).build()
+                        ).execute().use { it.body?.string() ?: "" }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "LIVE refresh failed: ${e.message}, retrying")
+                        continue
+                    }
+                    val refreshBaseUrl = livePlaylistUrl.substringBeforeLast("/") + "/"
+                    val newSegList = parseSegmentPlaylist(refreshBody, refreshBaseUrl)
+                    val newSegments = newSegList.filter { seenSegments.add(it) }
+                    if (newSegments.isEmpty()) continue
+
+                    for (segUrl in newSegments) {
+                        if (isCancelled || isPauseRequested()) break
+                        try {
+                            appendSegment(segUrl, outputStream)
+                            totalSegments++
+                        } catch (e: Exception) {
+                            Log.w(TAG, "LIVE segment failed: ${e.message}")
+                        }
+                    }
+
+                    val elapsedSec = (System.currentTimeMillis() - recordingStart) / 1000
+                    dao.updateProgress(
+                        download.id, DownloadEntity.Status.DOWNLOADING,
+                        totalSegments.toLong(), -1L  // -1 = unknown total (live)
+                    )
+                    val mins = elapsedSec / 60; val secs = elapsedSec % 60
+                    updateNotification(
+                        "Enregistrement live : ${download.title} — ${mins}m${secs}s",
+                        -1  // indeterminate progress
+                    )
+                }
+                Log.d(TAG, "LIVE recording stopped: $totalSegments segments captured")
             }
         } finally {
             outputStream.close()
+        }
+    }
+
+    /** Helper: download one HLS segment and append its bytes to outputStream. */
+    private fun appendSegment(segmentUrl: String, outputStream: FileOutputStream) {
+        Extractor.sharedClient.newCall(
+            Request.Builder().url(segmentUrl)
+                .header("User-Agent", Extractor.DEFAULT_USER_AGENT).build()
+        ).execute().use { resp ->
+            resp.body?.byteStream()?.use { input ->
+                val buffer = ByteArray(BUFFER_SIZE)
+                var bytesRead: Int
+                while (input.read(buffer).also { bytesRead = it } != -1) {
+                    if (isCancelled || isPauseRequested()) return
+                    outputStream.write(buffer, 0, bytesRead)
+                }
+            }
         }
     }
 

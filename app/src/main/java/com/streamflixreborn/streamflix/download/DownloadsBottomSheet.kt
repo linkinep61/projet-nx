@@ -80,10 +80,19 @@ class DownloadsBottomSheet : BottomSheetDialogFragment() {
 
     private fun deleteDownload(download: DownloadEntity) {
         viewLifecycleOwner.lifecycleScope.launch {
-            if (download.isCompleted) {
-                DownloadManager.deleteCompleted(download.id)
-            } else {
-                DownloadManager.cancel(download.id)
+            // Unified delete: works for COMPLETED, FAILED, PAUSED, DOWNLOADING, PENDING.
+            // Previously FAILED rows could appear stuck because cancel() expected an
+            // active download loop to react to the pause flag.
+            try {
+                when {
+                    download.isCompleted -> DownloadManager.deleteCompleted(download.id)
+                    download.isFailed -> DownloadManager.deleteCompleted(download.id) // same physical-cleanup + row removal
+                    else -> DownloadManager.cancel(download.id)
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("DownloadsBottomSheet", "Delete failed for ${download.id}: ${e.message}")
+                // Force-remove the DB row even if cleanup failed
+                try { DownloadManager.forceDelete(download.id) } catch (_: Exception) {}
             }
         }
     }

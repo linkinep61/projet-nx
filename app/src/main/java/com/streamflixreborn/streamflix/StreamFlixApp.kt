@@ -94,6 +94,14 @@ class StreamFlixApp : Application() {
         UserPreferences.setup(this)
         DnsResolver.setDnsUrl(UserPreferences.dohProviderUrl)
 
+        // 2.5 Cold start = no active provider. Wipe BEFORE any background work
+        // (URL refresh, ArtworkRepair, etc.) so nothing touches the previous
+        // provider's network or RAM. The user's pick on the providers screen
+        // re-sets currentProvider and triggers loading explicitly. This avoids
+        // OOM crashes on low-RAM devices when a memory-heavy provider (e.g.
+        // VegetaTV registry ~130MB) auto-loads at launch.
+        UserPreferences.currentProvider = null
+
         // 3. Download manager
         com.streamflixreborn.streamflix.download.DownloadManager.init(this)
 
@@ -140,8 +148,25 @@ class StreamFlixApp : Application() {
      * This saves 10+ seconds of sequential HTTP requests on startup.
      */
     private suspend fun refreshActiveProviderUrl() {
-        val current = UserPreferences.currentProvider
-        if (current == null || current !is ProviderConfigUrl) {
+        refreshProviderUrl(UserPreferences.currentProvider)
+    }
+
+    /**
+     * Public entry point so the providers screen can trigger a URL refresh
+     * for the provider the user just picked. Cold start clears
+     * currentProvider in onCreate, so refreshActiveProviderUrl() at startup
+     * never has anyone to refresh — every provider has to refresh on click.
+     */
+    fun refreshProviderUrlAsync(provider: com.streamflixreborn.streamflix.providers.Provider?) {
+        if (provider == null || provider !is com.streamflixreborn.streamflix.providers.ProviderConfigUrl) return
+        applicationScope.launch(Dispatchers.IO) {
+            refreshProviderUrl(provider)
+        }
+    }
+
+    private suspend fun refreshProviderUrl(provider: com.streamflixreborn.streamflix.providers.Provider?) {
+        val current = provider
+        if (current == null || current !is com.streamflixreborn.streamflix.providers.ProviderConfigUrl) {
             Log.d("StreamFlixApp", "Active provider doesn't need URL refresh")
             return
         }
@@ -154,7 +179,7 @@ class StreamFlixApp : Application() {
                 Log.d("StreamFlixApp", "  ${current.name}: auto-update disabled, skipping")
                 return
             }
-            (current as ProviderConfigUrl).onChangeUrl()
+            (current as com.streamflixreborn.streamflix.providers.ProviderConfigUrl).onChangeUrl()
             Log.d("StreamFlixApp", "  ${current.name}: URL refreshed → ${current.baseUrl}")
         } catch (e: Exception) {
             Log.w("StreamFlixApp", "  ${current.name}: URL refresh failed: ${e.message}")

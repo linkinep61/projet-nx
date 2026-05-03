@@ -126,6 +126,20 @@
     androidx.recyclerview.widget.RecyclerView mRecyclerView;
 }
 
+# ---- Strip Log.d / Log.v / Log.i in release ----
+# Tells R8 these calls have no side effects → R8 removes both the call
+# AND the argument expressions that build their strings (so the Kotlin
+# `"foo: $bar"` interpolations don't run anymore in release either).
+# Log.w and Log.e are kept on purpose: if you ever connect a device
+# with adb logcat to debug a user crash, you still get the warnings/errors.
+# Debug builds are unaffected (minifyEnabled = false in build.gradle).
+-assumenosideeffects class android.util.Log {
+    public static *** d(...);
+    public static *** v(...);
+    public static *** i(...);
+    public static *** isLoggable(...);
+}
+
 # ---- Suppress common harmless warnings ----
 -dontwarn javax.annotation.**
 -dontwarn org.codehaus.mojo.animal_sniffer.**

@@ -33,6 +33,11 @@ class ProvidersTvFragment : Fragment() {
 
     private val appAdapter = AppAdapter()
 
+    /** Last list received from the ViewModel — re-filtered when the user switches tab. */
+    private var lastProviders: List<ModelProvider> = emptyList()
+    /** Currently selected tab: 0 = Films/Séries, 1 = Animés, 2 = TV/IPTV */
+    private var selectedTabIndex: Int = 0
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -159,13 +164,47 @@ class ProvidersTvFragment : Fragment() {
                 )
             )
         }
+
+        // Restore last selected tab + wire tab change
+        selectedTabIndex = UserPreferences.providerTabIndex.coerceIn(0, 2)
+        binding.tlProviderGroups.apply {
+            getTabAt(selectedTabIndex)?.select()
+            addOnTabSelectedListener(object : com.google.android.material.tabs.TabLayout.OnTabSelectedListener {
+                override fun onTabSelected(tab: com.google.android.material.tabs.TabLayout.Tab?) {
+                    selectedTabIndex = tab?.position ?: 0
+                    UserPreferences.providerTabIndex = selectedTabIndex
+                    refilterProviders()
+                }
+                override fun onTabUnselected(tab: com.google.android.material.tabs.TabLayout.Tab?) {}
+                override fun onTabReselected(tab: com.google.android.material.tabs.TabLayout.Tab?) {}
+            })
+        }
     }
 
     private fun displayProviders(providers: List<ModelProvider>) {
-        appAdapter.submitList(providers.onEach {
+        lastProviders = providers
+        refilterProviders()
+    }
+
+    /** Filter [lastProviders] by the currently selected tab and feed the adapter. */
+    private fun refilterProviders() {
+        val targetGroup = when (selectedTabIndex) {
+            0 -> Provider.Companion.ProviderGroup.FILMS_SERIES
+            1 -> Provider.Companion.ProviderGroup.ANIME
+            2 -> Provider.Companion.ProviderGroup.IPTV
+            else -> Provider.Companion.ProviderGroup.FILMS_SERIES
+        }
+        val filtered = lastProviders.filter { mp ->
+            if (mp.name.startsWith("TMDb")) {
+                return@filter targetGroup == Provider.Companion.ProviderGroup.FILMS_SERIES
+            }
+            val provider = Provider.providers.keys.find { it.name == mp.name }
+            val group = if (provider != null) Provider.providers[provider]?.group else null
+            group == targetGroup
+        }
+        appAdapter.submitList(filtered.onEach {
             it.itemType = AppAdapter.Type.PROVIDER_TV_ITEM
         })
-
         binding.rvProviders.requestFocus()
     }
 }

@@ -493,15 +493,20 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                     val movieChunks = uniqueMovies.chunked(20)
                     val maxChunks = maxOf(tvChunks.size, movieChunks.size)
 
-                    // Interleave: recent series, recent films, popular series, popular films, etc.
+                    // Interleave: Films first, then Séries, alternating chunks.
+                    // Per user request: keep Films above Séries everywhere — this
+                    // matches what FrenchStream typically shows on its home page,
+                    // so the section order doesn't change between the cached
+                    // initial view and the enriched view (which used to flip
+                    // "Derniers Films" ↔ "Séries Récentes" at the same position).
                     for (i in 0 until maxChunks) {
-                        if (i < tvChunks.size) {
-                            val name = seriesNames.getOrElse(i) { "Séries #${i + 1}" }
-                            enrichedCategories.add(Category(name = name, list = tvChunks[i]))
-                        }
                         if (i < movieChunks.size) {
                             val name = filmNames.getOrElse(i) { "Films #${i + 1}" }
                             enrichedCategories.add(Category(name = name, list = movieChunks[i]))
+                        }
+                        if (i < tvChunks.size) {
+                            val name = seriesNames.getOrElse(i) { "Séries #${i + 1}" }
+                            enrichedCategories.add(Category(name = name, list = tvChunks[i]))
                         }
                     }
 
@@ -512,6 +517,14 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
             } catch (e: Exception) {
                 Log.e("HomeViewModel", "Enrich failed for ${provider.name}: ${e.message}")
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // Coroutine was cancelled because a newer getHome() call took
+            // over (typical when ProviderChangeNotifier fires twice at
+            // startup, or when the user re-clicks the same provider). NOT
+            // a real failure — don't flash "Une erreur est survenue" on
+            // screen for what's just a normal cancellation. Re-throw so
+            // structured concurrency stays correct.
+            throw e
         } catch (e: Exception) {
             Log.e("HomeViewModel", "getHome: ", e)
             if (cachedCategories.isNullOrEmpty()) {

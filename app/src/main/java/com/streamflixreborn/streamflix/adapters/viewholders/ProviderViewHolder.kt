@@ -39,6 +39,13 @@ class ProviderViewHolder(
                 // Stop & release mini player before switching provider
                 MiniPlayerController.stop()
                 UserPreferences.currentProvider = provider.provider
+                // Trigger URL refresh for the just-picked provider on the
+                // application scope so it survives the activity restart.
+                // Without this, providers like Wiflix never get their URL
+                // refreshed (cold-start wipes currentProvider before the
+                // app-level refresh runs, so the app-level refresh skips).
+                com.streamflixreborn.streamflix.StreamFlixApp.instance
+                    .refreshProviderUrlAsync(provider.provider)
                 context.toActivity()?.apply {
                     startActivity(
                         Intent(this, this::class.java).apply {
@@ -71,6 +78,13 @@ class ProviderViewHolder(
                 // Stop & release mini player before switching provider
                 MiniPlayerController.stop()
                 UserPreferences.currentProvider = provider.provider
+                // Trigger URL refresh for the just-picked provider on the
+                // application scope so it survives the activity restart.
+                // Without this, providers like Wiflix never get their URL
+                // refreshed (cold-start wipes currentProvider before the
+                // app-level refresh runs, so the app-level refresh skips).
+                com.streamflixreborn.streamflix.StreamFlixApp.instance
+                    .refreshProviderUrlAsync(provider.provider)
                 context.toActivity()?.apply {
                     startActivity(
                         Intent(this, this::class.java).apply {

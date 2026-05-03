@@ -356,8 +356,11 @@ class EpisodeViewHolder(
             }
         }
 
-        val isIptv = episode.tvShow?.id?.startsWith("ch::") == true
-                || episode.tvShow?.id?.startsWith("sport::") == true
+        val isIptv = episode.tvShow?.id?.let { tvShowId ->
+            tvShowId.startsWith("ch::") || tvShowId.startsWith("sport::")
+                || tvShowId.startsWith("ola::") || tvShowId.startsWith("ola_ep::")
+                || tvShowId.startsWith("vegeta::") || tvShowId.startsWith("vegeta_ep::")
+        } ?: false
 
         binding.ivEpisodeTvShowPoster.apply {
             clipToOutline = true
@@ -509,8 +512,11 @@ class EpisodeViewHolder(
             }
         }
 
-        val isIptvTv = episode.tvShow?.id?.startsWith("ch::") == true
-                || episode.tvShow?.id?.startsWith("sport::") == true
+        val isIptvTv = episode.tvShow?.id?.let { tvShowId ->
+            tvShowId.startsWith("ch::") || tvShowId.startsWith("sport::")
+                || tvShowId.startsWith("ola::") || tvShowId.startsWith("ola_ep::")
+                || tvShowId.startsWith("vegeta::") || tvShowId.startsWith("vegeta_ep::")
+        } ?: false
 
         binding.ivEpisodeTvShowPoster.apply {
             clipToOutline = true

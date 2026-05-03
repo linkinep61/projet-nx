@@ -438,16 +438,20 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
 
             /** ChannelVariant only makes sense on IPTV providers (WiTv / OlaTv) — they
              *  emit progressive stream variants for live channels. Hide it everywhere
-             *  else so non-IPTV users don't see an empty "Chaîne" entry. */
+             *  else so non-IPTV users don't see an empty "Chaîne" entry.
+             *  Vegeta is also IPTV but exposes its variants directly under "Serveurs"
+             *  (each m3u variant is its own Server entry), so "Chaîne" is redundant. */
+            private fun shouldShowChannelVariant(): Boolean {
+                val provider = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+                if (provider !is com.streamflixreborn.streamflix.providers.IptvProvider) return false
+                if (provider is com.streamflixreborn.streamflix.providers.VegetaTvProvider) return false
+                return true
+            }
             fun listMobileForCurrentProvider(): List<Item> {
-                val isIptv = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider is
-                    com.streamflixreborn.streamflix.providers.IptvProvider
-                return if (isIptv) listMobile else listMobile.filter { it != ChannelVariant }
+                return if (shouldShowChannelVariant()) listMobile else listMobile.filter { it != ChannelVariant }
             }
             fun listTvForCurrentProvider(): List<Item> {
-                val isIptv = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider is
-                    com.streamflixreborn.streamflix.providers.IptvProvider
-                return if (isIptv) listTv else listTv.filter { it != ChannelVariant }
+                return if (shouldShowChannelVariant()) listTv else listTv.filter { it != ChannelVariant }
             }
         }
 

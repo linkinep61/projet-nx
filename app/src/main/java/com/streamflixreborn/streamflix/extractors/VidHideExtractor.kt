@@ -24,7 +24,12 @@ class VidHideExtractor: Extractor() {
         "https://minochinos.com",
         "https://minochinoos.com",
         "https://moflix-stream.click",
-        "https://filelions.to"
+        "https://filelions.to",
+        // streamhide.to is a VidHide-family CDN — same /e/{id} embed format.
+        // VoirAnime / VoirDrama serve "LECTEUR SB" (stream*B*lasher) URLs
+        // pointing here, used to be unrecognised → "No extractors found".
+        "https://streamhide.to",
+        "https://streamhide.com"
     )
 
     companion object {

@@ -70,7 +70,8 @@ interface Provider {
     companion object {
         enum class ProviderGroup {
             ANIME,
-            FILMS_SERIES
+            FILMS_SERIES,
+            IPTV  // Live TV channels (WiTv, OlaTv, Vegeta…)
         }
 
         data class ProviderSupport(
@@ -82,7 +83,12 @@ interface Provider {
 
         val providers: Map<Provider, ProviderSupport> = linkedMapOf(
             // French providers — custom display order
-            FrenchStreamProvider to ProviderSupport(movies = true, tvShows = true),
+            // FrenchStream: enrichment disabled — the site's natural home
+            // already has "Nouveautés Films" + "Nouveautés Séries" sections,
+            // and enrichment caused the rows to flip ("Films Récents" ↔
+            // "Séries Récentes" on the same position) when the second emit
+            // arrived ~1.5s after the base.
+            FrenchStreamProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             MovixProvider to ProviderSupport(movies = true, tvShows = true),
             UnJourUnFilmProvider to ProviderSupport(movies = true, tvShows = true),
             AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
@@ -94,8 +100,9 @@ interface Provider {
             WiflixProvider to ProviderSupport(movies = true, tvShows = true),
             VoirDramaProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             VoirAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
-            WiTvProvider to ProviderSupport(movies = false, tvShows = true, enrichHome = false),
-            OlaTvProvider to ProviderSupport(movies = false, tvShows = true, enrichHome = false),
+            WiTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
+            OlaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
+            VegetaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
         )
 
         // Helper functions to check support
