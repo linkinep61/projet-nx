@@ -103,8 +103,11 @@ object VegetaTvProvider : Provider, IptvProvider {
         "https://yacdn.org/proxy/{url_raw}",
     )
     @Volatile private var vegetaServers: List<StalkerServer> = emptyList()
-    /** Position range that is guaranteed to be 🇫🇷 (per user). 1-indexed. */
-    private val FR_POSITION_RANGE = 39..47
+    // 2026-05-03: hardcode position-range supprimé. Le backend reordering les
+    // serveurs régulièrement — vérifié ce jour les FR sont en pos 37..45 alors
+    // que le hardcode 39..47 incluait à tort 2 US (pos 46-47) et ratait pos 37-38.
+    // On se fie uniquement au flag 🇫🇷 dans la string (plus robuste).
+    // Si jamais le backend oublie un flag, ouvrir un bug et signaler la pos.
 
     // ───────── Phase 3: multi-server background scan ─────────
     private val frServerIndices = java.util.concurrent.CopyOnWriteArrayList<Int>()
@@ -474,9 +477,8 @@ object VegetaTvProvider : Provider, IptvProvider {
                 val flags = parts.drop(1).joinToString("")
 
                 val flagFr = flags.contains("🇫🇷") || flags.contains(" FR") || flags.endsWith("FR")
-                val positionFr = pos in FR_POSITION_RANGE
                 val hasGlobal = flags.contains("🌐")
-                val isFr = flagFr || positionFr
+                val isFr = flagFr
 
                 if (!isFr && !hasGlobal) continue
 
