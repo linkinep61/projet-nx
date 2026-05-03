@@ -85,8 +85,15 @@ open class RabbitstreamExtractor : Extractor() {
     class MegacloudExtractor : RabbitstreamExtractor() {
 
         override val name = "Megacloud"
-        override val mainUrl = "https://megacloud.blog"
-        override val aliasUrls = listOf("https://videostr.net")
+        // 2026-05-03: .blog est passé 521 (origin offline). Le vrai Megacloud
+        // sert e1-player.min.js sur .app (200 OK, 85 KB confirmé). On garde
+        // .blog et videostr.net en alias pour matcher les anciennes URLs.
+        override val mainUrl = "https://megacloud.app"
+        override val aliasUrls = listOf(
+            "https://videostr.net",
+            "https://megacloud.blog",
+            "https://megacloud.online"
+        )
         private val scriptUrl = "$mainUrl/js/player/a/prod/e1-player.min.js"
 
         override suspend fun extract(link: String): Video {
