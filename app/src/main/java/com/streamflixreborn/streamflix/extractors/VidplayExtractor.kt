@@ -23,8 +23,12 @@ import kotlin.experimental.xor
 open class VidplayExtractor : Extractor() {
 
     override val name = "Vidplay"
-    override val mainUrl = "https://vidplay.site"
-    override val aliasUrls = listOf("https://vidplay-org.lol", "https://vidplay.lol")
+    // 2026-05-03: vidplay.site KO (SSL error), vidplay.lol KO (NXDOMAIN).
+    // vidplay-org.lol répond 403 (anti-bot mais joignable avec un vrai UA).
+    // vidplay.online est UP (200) — utilisé via la sous-classe VidplayOnline.
+    // On bascule le parent sur vidplay-org.lol par défaut.
+    override val mainUrl = "https://vidplay-org.lol"
+    override val aliasUrls = listOf("https://vidplay.site", "https://vidplay.online")
     open val key = "https://raw.githubusercontent.com/Ciarands/vidsrc-keys/main/keys.json"
 
     override suspend fun extract(link: String): Video {
