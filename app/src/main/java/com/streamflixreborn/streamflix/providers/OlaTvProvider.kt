@@ -125,6 +125,10 @@ object OlaTvProvider : Provider, IptvProvider {
     // the RecyclerView feed reasonable; the framework requests page+1 when the
     // user scrolls near the bottom.
     private const val TV_SHOWS_PAGE_SIZE = 50
+
+    // Cap on search results — TV RecyclerView ANRs if a generic query ("tf",
+    // "canal") returns 80+ items all loading logos at the same time.
+    private const val SEARCH_RESULT_LIMIT = 30
     private const val FR_CIDS_CACHE_TTL_MS = 24L * 60 * 60 * 1000L
 
     // Disk cache for the full channel registry — boot fast on subsequent launches
@@ -1771,36 +1775,43 @@ object OlaTvProvider : Provider, IptvProvider {
         emptyList()
     }
 
-    override suspend fun search(query: String, page: Int): List<AppAdapter.Item> = try {
-        if (page > 1) emptyList<AppAdapter.Item>()
-        // Curated list first (instantaneous), then any registry channel that matches
-        // but isn't already in the curated set — covers chaînes "Autres".
-        val curatedKeys = curatedChannels.map { it.key }.toSet()
-        val curatedHits = curatedChannels
-            .filter { it.displayName.contains(query, ignoreCase = true) }
-            .map { c ->
-                TvShow(
-                    id = "ola::${c.key}",
-                    title = c.displayName,
-                    poster = logoUrlFor(c.displayName),
-                    providerName = name,
-                )
-            }
-        val registryHits = synchronized(registryLock) {
-            channelRegistry.entries
-                .filter { (key, info) -> key !in curatedKeys && info.displayName.contains(query, ignoreCase = true) }
-                .map { (key, info) ->
+    override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
+        if (page > 1) return emptyList()
+        return try {
+            // Curated list first (instantaneous), then any registry channel that matches
+            // but isn't already in the curated set — covers chaînes "Autres". Capped at
+            // SEARCH_RESULT_LIMIT so a generic query like "tf" doesn't return 80+ items
+            // and ANR the TV RecyclerView on logo loads.
+            val curatedKeys = curatedChannels.map { it.key }.toSet()
+            val curatedHits = curatedChannels
+                .filter { it.displayName.contains(query, ignoreCase = true) }
+                .map { c ->
                     TvShow(
-                        id = "ola::$key",
-                        title = info.displayName,
-                        poster = info.logo.ifEmpty { logoUrlFor(info.displayName) },
+                        id = "ola::${c.key}",
+                        title = c.displayName,
+                        poster = logoUrlFor(c.displayName),
                         providerName = name,
                     )
                 }
-                .sortedBy { it.title.lowercase() }
-        }
-        curatedHits + registryHits
-    } catch (_: Exception) { emptyList() }
+            // Snapshot under lock, allocate outside to keep the lock short.
+            val registrySnapshot = synchronized(registryLock) {
+                channelRegistry.entries
+                    .filter { (key, info) -> key !in curatedKeys && info.displayName.contains(query, ignoreCase = true) }
+                    .map { (key, info) -> Triple(key, info.displayName, info.logo) }
+            }
+            val registryHits = registrySnapshot
+                .sortedBy { it.second.lowercase() }
+                .map { (key, displayName, logo) ->
+                    TvShow(
+                        id = "ola::$key",
+                        title = displayName,
+                        poster = logo.ifEmpty { logoUrlFor(displayName) },
+                        providerName = name,
+                    )
+                }
+            (curatedHits + registryHits).take(SEARCH_RESULT_LIMIT)
+        } catch (_: Exception) { emptyList() }
+    }
 
     override suspend fun getMovies(page: Int): List<Movie> = emptyList()
 
