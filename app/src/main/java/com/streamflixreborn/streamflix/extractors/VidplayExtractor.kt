@@ -121,6 +121,12 @@ open class VidplayExtractor : Extractor() {
     class MyCloud : VidplayExtractor() {
         override val name = "MyCloud"
         override val mainUrl = "https://mcloud.bz"
+
+        override suspend fun extract(link: String): Video {
+            // 2026-05-03: mcloud.bz NXDOMAIN, .to SSL error, .live = parking page,
+            // .app = "domain for sale". Aucun service Vidplay/MyCloud actif.
+            throw Exception("[MyCloud] is offline (mcloud.* parked or NXDOMAIN, last checked 2026-05-03)")
+        }
     }
 
     class VidplayOnline : VidplayExtractor() {
