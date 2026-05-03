@@ -200,12 +200,13 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             }
 
             if (sectionTitle.isBlank()) continue
-            // Skip scans section
-            if (sectionTitle.contains("Scans", ignoreCase = true)) continue
+            // Skip sections de scans/mangas/webtoons — pas de contenu video lisible
+            val sectionLowerCheck = sectionTitle.lowercase()
+            if (listOf("scan", "manga", "manhwa", "manhua", "webtoon", "light novel", "ln ").any { sectionLowerCheck.contains(it) }) continue
             // Skip "Reprenez votre visionnage" — requires user cookies (not available server-side)
             if (sectionTitle.contains("Reprenez", ignoreCase = true)) continue
             // Skip unreliable film sections — AnimeSama mixes series into "Films Populaires"/"Films Récents"
-            if (sectionTitle.lowercase().contains("film")) continue
+            if (sectionLowerCheck.contains("film")) continue
 
             val cards = container.select("a[href*=/catalogue/]")
             if (cards.isEmpty()) continue
@@ -231,9 +232,19 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                         ?: el.attr("data-src")?.takeIf { it.isNotBlank() }
                 } ?: "${IMG_BASE}${slug}.jpg"
 
-                // Skip scans (no video content)
-                val badgeText = card.selectFirst(".badge-text")?.text()?.trim() ?: ""
-                if (badgeText.equals("Scan", ignoreCase = true)) return@mapNotNull null
+                // Skip scans/mangas/etc (pas de contenu video lisible).
+                // Plusieurs heuristiques car AnimeSama mélange anime + scan dans
+                // les sections "Derniers contenus sortis" et "Sorties dimanche/
+                // lundi/etc" : badge text peut etre Scan/Scans/SCAN/Manga/...
+                val badgeText = card.selectFirst(".badge-text")?.text()?.trim()?.lowercase() ?: ""
+                val nonVideoBadges = listOf("scan", "manga", "manhwa", "manhua", "webtoon", "light novel")
+                if (nonVideoBadges.any { badgeText.contains(it) }) return@mapNotNull null
+                // Aussi : si le href contient /scan/ ou /manga/ ou /scans/, c'est pas video
+                val hrefLower = href.lowercase()
+                if (listOf("/scan/", "/scans/", "/manga/", "/webtoon/").any { hrefLower.contains(it) }) return@mapNotNull null
+                // Si le slug se termine par -scan, -manga, etc.
+                val slugLower = slug.lowercase()
+                if (listOf("-scan", "-scans", "-manga", "-webtoon").any { slugLower.endsWith(it) }) return@mapNotNull null
                 // Use SECTION title to classify (more reliable than per-item badge)
                 val sectionLower = sectionTitle.lowercase()
                 val isFilmSection = sectionLower.contains("film")
