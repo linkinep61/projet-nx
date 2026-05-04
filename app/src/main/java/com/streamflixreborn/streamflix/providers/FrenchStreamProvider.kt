@@ -15,6 +15,7 @@ import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.TMDb3.original
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -68,6 +69,212 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private var serviceInitialized = false
     private val initializationMutex = Mutex()
 
+    // ── 2026-05-04 : Résilience style Movix ──────────────────────────────
+    // Centralisation des paths AJAX, timeouts stricts, circuit breaker par
+    // endpoint et cache mémoire de l'agrégat getServers. Objectif : que
+    // FrenchStream se comporte aussi bien que Movix quand un endpoint tombe
+    // ou que le serveur traîne — l'app doit jamais bloquer plus de 8s sur
+    // un appel et l'utilisateur doit pas refaire les mêmes appels en boucle.
+
+    /** Centralisation des endpoints AJAX. Si FrenchStream change ses chemins
+     *  (déjà arrivé entre VFV1 et VFR1), on patche ici une seule fois.
+     *  Ces valeurs servent de défaut — le provider tente une auto-découverte
+     *  quand un endpoint disable, cf [filmAjaxPath]/[serieAjaxPath]. */
+    private object Endpoints {
+        const val FILM_AJAX_JSON = "engine/ajax/film_api.php"
+        const val SERIE_AJAX_JSON = "engine/ajax/sx.php"
+        const val DEFAULT_REFERER = "https://fs03.lol/"
+        const val DLE_SKIN_COOKIE = "dle_skin=VFV1"
+    }
+
+    // 2026-05-04 : Auto-découverte des paths AJAX. Quand l'endpoint hardcodé
+    // tombe (FS renomme le fichier PHP, déjà arrivé entre VFV1/VFR1), on scanne
+    // les <script src="/js/..."> de la page detail qu'on charge en fallback,
+    // on récupère leur contenu, et on grep `engine/ajax/X.php`. Si on trouve
+    // un nouveau path différent du défaut, on le stocke ici et le prochain
+    // appel l'utilisera automatiquement.
+    private val filmAjaxPath = java.util.concurrent.atomic.AtomicReference(Endpoints.FILM_AJAX_JSON)
+    private val serieAjaxPath = java.util.concurrent.atomic.AtomicReference(Endpoints.SERIE_AJAX_JSON)
+    private val lastDiscoveryAttemptMs = java.util.concurrent.atomic.AtomicLong(0L)
+    private const val DISCOVERY_COOLDOWN_MS = 5L * 60L * 1000L // 5 min mini entre 2 scans
+
+    private const val ENDPOINT_TIMEOUT_MS = 8_000L
+    private const val ENDPOINT_FAILURE_THRESHOLD = 5
+    private const val ENDPOINT_DISABLED_MS = 30L * 60L * 1000L // 30 min
+
+    private data class EndpointHealth(
+        var consecutiveFailures: Int = 0,
+        var disabledUntilMs: Long = 0L,
+    )
+    private val endpointHealth = ConcurrentHashMap<String, EndpointHealth>()
+
+    /** Wrap d'appel endpoint FrenchStream : timeout 8s + circuit breaker.
+     *  Si ça timeout ou throw, on retourne emptyList(). 5 fails consécutifs
+     *  → endpoint désactivé 30 min (skip immédiat). 1 succès → reset. */
+    private suspend inline fun runEndpoint(
+        endpointName: String,
+        crossinline block: suspend () -> List<Video.Server>,
+    ): List<Video.Server> {
+        val health = endpointHealth.getOrPut(endpointName) { EndpointHealth() }
+        val now = System.currentTimeMillis()
+        if (now < health.disabledUntilMs) {
+            Log.d("FrenchStream", "Endpoint '$endpointName' SKIP (disabled until ${health.disabledUntilMs})")
+            return emptyList()
+        }
+        val result = try {
+            withTimeoutOrNull(ENDPOINT_TIMEOUT_MS) { block() }
+        } catch (e: Exception) {
+            Log.w("FrenchStream", "Endpoint '$endpointName' threw: ${e.message}")
+            null
+        }
+        synchronized(health) {
+            if (result.isNullOrEmpty()) {
+                health.consecutiveFailures++
+                if (health.consecutiveFailures >= ENDPOINT_FAILURE_THRESHOLD) {
+                    health.disabledUntilMs = System.currentTimeMillis() + ENDPOINT_DISABLED_MS
+                    Log.w("FrenchStream", "Endpoint '$endpointName' disabled for 30min after ${health.consecutiveFailures} consecutive failures")
+                    health.consecutiveFailures = 0
+                }
+            } else {
+                health.consecutiveFailures = 0
+            }
+        }
+        return result ?: emptyList()
+    }
+
+    /** Cache mémoire de l'agrégat getServers (TTL 5 min).
+     *  L'utilisateur ferme le player et y revient → on refaisait AJAX +
+     *  fallback HTML à chaque fois. Maintenant on cache par clé (id, season,
+     *  episode) — bien plus snappy au retour. */
+    private const val SERVERS_CACHE_TTL_MS = 5L * 60L * 1000L
+    private data class CachedServers(val servers: List<Video.Server>, val expiresAtMs: Long)
+    private val serversCache = ConcurrentHashMap<String, CachedServers>()
+
+    private fun serversCacheKey(id: String, videoType: Video.Type): String = when (videoType) {
+        is Video.Type.Movie -> "movie:$id"
+        is Video.Type.Episode -> "tv:$id:e${videoType.number}"
+    }
+
+    /** Construit l'URL absolue d'un endpoint AJAX en utilisant le path
+     *  potentiellement (re)découvert dynamiquement. */
+    private fun buildAjaxUrl(path: String, query: String): String =
+        baseUrl.trimEnd('/') + "/" + path.trimStart('/') + "?" + query
+
+    /** Récupère le body d'un endpoint AJAX et le valide comme JSON.
+     *  Retourne le JSONObject parsé OU null avec un log explicite si :
+     *    - body vide
+     *    - body HTML (Cloudflare challenge, captcha, page d'erreur)
+     *    - body pas du JSON valide
+     *    - JSON top-level mais pas un objet (ex : `[]`, `null`, `42`)
+     *  Le caller peut ensuite vérifier les clés attendues et logger si manquantes. */
+    private fun parseJsonOrNull(body: String, source: String): org.json.JSONObject? {
+        if (body.isBlank()) {
+            Log.w("FrenchStream", "[$source] empty body — endpoint may be down")
+            return null
+        }
+        val trimmed = body.trimStart()
+        if (trimmed.startsWith("<")) {
+            // Cloudflare/captcha/HTML error page returned instead of JSON
+            val preview = trimmed.take(120).replace('\n', ' ')
+            Log.w("FrenchStream", "[$source] got HTML instead of JSON — likely WAF/captcha. Preview: $preview")
+            return null
+        }
+        return try {
+            val parsed = org.json.JSONObject(trimmed)
+            if (parsed.optBoolean("error", false)) {
+                Log.w("FrenchStream", "[$source] server returned {error:true} — content unavailable")
+                return null
+            }
+            parsed
+        } catch (e: org.json.JSONException) {
+            val preview = trimmed.take(120).replace('\n', ' ')
+            Log.w("FrenchStream", "[$source] JSON parse failed: ${e.message}. Preview: $preview")
+            null
+        }
+    }
+
+    /** Log les clés top-level d'un JSON quand on s'attendait à trouver une
+     *  clé spécifique. Permet de détecter rapidement un changement de contrat. */
+    private fun logUnexpectedShape(source: String, json: org.json.JSONObject, expectedKey: String) {
+        val keys = json.keys().asSequence().toList().take(10)
+        Log.w("FrenchStream", "[$source] missing expected key '$expectedKey'. Got top-level keys: $keys")
+    }
+
+    /** 2026-05-04 : Auto-découverte des paths AJAX en scannant les bundles
+     *  JS référencés par une page detail. Si FrenchStream renomme `sx.php` →
+     *  `episodes.php` ou `film_api.php` → `movie_api.php`, on l'apprend
+     *  automatiquement la prochaine fois qu'on tombe sur une page detail.
+     *
+     *  Comment ça marche : on parse les `<script src="/js/...">` du document,
+     *  on fetch chaque bundle JS, on grep `engine/ajax/X.php` dedans, et on
+     *  classe ce qu'on trouve par heuristique :
+     *    - paths qui contiennent "film"/"movie"  → filmAjaxPath
+     *    - paths "sx"/"serie"/"tv"/"episode"     → serieAjaxPath
+     *
+     *  Cooldown 5min entre 2 scans pour pas hammer le serveur quand on a
+     *  plusieurs échecs en rafale. */
+    private suspend fun rediscoverEndpointsFromDocument(document: Document) {
+        val now = System.currentTimeMillis()
+        val last = lastDiscoveryAttemptMs.get()
+        if (now - last < DISCOVERY_COOLDOWN_MS) return
+        if (!lastDiscoveryAttemptMs.compareAndSet(last, now)) return // CAS pour éviter discovery concurrente
+
+        val scriptSrcs = document.select("script[src]")
+            .map { it.attr("src") }
+            .filter { it.contains("/js/") && it.endsWith(".js") || it.contains(".js?v=") }
+            .distinct()
+            .take(8) // garde-fou, pas plus de 8 fetch JS
+
+        if (scriptSrcs.isEmpty()) return
+        Log.d("FrenchStream", "Endpoint rediscovery: scanning ${scriptSrcs.size} JS bundles")
+
+        val ajaxRegex = Regex("""engine/ajax/([a-z0-9_]+)\.php""", RegexOption.IGNORE_CASE)
+        val foundPaths = mutableSetOf<String>()
+
+        for (src in scriptSrcs) {
+            val fullUrl = when {
+                src.startsWith("http") -> src
+                src.startsWith("/") -> baseUrl.trimEnd('/') + src
+                else -> baseUrl.trimEnd('/') + "/" + src
+            }
+            try {
+                val js = withTimeoutOrNull(5_000L) { service.getRawText(fullUrl).string() }.orEmpty()
+                if (js.isBlank()) continue
+                ajaxRegex.findAll(js).forEach { match -> foundPaths.add(match.value) }
+            } catch (_: Exception) {
+                // skip ce bundle
+            }
+        }
+
+        if (foundPaths.isEmpty()) {
+            Log.d("FrenchStream", "Endpoint rediscovery: no AJAX paths found in JS bundles")
+            return
+        }
+        Log.i("FrenchStream", "Endpoint rediscovery found: $foundPaths")
+
+        // Heuristique de classification — on garde la plus spécifique d'abord
+        foundPaths.forEach { path ->
+            val lower = path.lowercase()
+            when {
+                lower.contains("film") || lower.contains("movie") -> {
+                    if (filmAjaxPath.get() != path) {
+                        Log.i("FrenchStream", "filmAjaxPath: ${filmAjaxPath.get()} → $path")
+                        filmAjaxPath.set(path)
+                        // Reset le circuit breaker pour ce endpoint, on retente avec le nouveau path
+                        endpointHealth["film_api"]?.let { it.consecutiveFailures = 0; it.disabledUntilMs = 0L }
+                    }
+                }
+                lower.contains("sx") || lower.contains("serie") || lower.contains("tv") || lower.contains("episode") -> {
+                    if (serieAjaxPath.get() != path) {
+                        Log.i("FrenchStream", "serieAjaxPath: ${serieAjaxPath.get()} → $path")
+                        serieAjaxPath.set(path)
+                        endpointHealth["sx_php"]?.let { it.consecutiveFailures = 0; it.disabledUntilMs = 0L }
+                    }
+                }
+            }
+        }
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────
 
     /** Extract newsid from href like /index.php?newsid=15126799.
@@ -92,6 +299,18 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 catch (_: Exception) { service.getItem(id) }
             }
         }
+    }
+
+    /** Extrait l'URL d'une img en gérant le lazy-loading. Sur les pages
+     *  search FS, les images ont `class="lazy" data-src="..."` et `src=""`
+     *  (chargement différé via JS côté browser). On essaie data-src d'abord,
+     *  puis les attributs alternatifs courants, puis src en dernier recours.
+     *  On filtre les data:image (placeholder GIF transparent). */
+    private fun extractImgUrl(item: Element): String? {
+        val img = item.selectFirst("img") ?: return null
+        return sequenceOf("data-src", "data-original", "data-lazy-src", "src")
+            .map { img.attr(it).trim() }
+            .firstOrNull { it.isNotBlank() && !it.startsWith("data:") }
     }
 
     fun ignoreSource(source: String, href: String): Boolean {
@@ -378,7 +597,8 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     .removeSuffix(" en streaming")
                     .trim())
                 .replace("\\'", "'")
-            val poster = item.selectFirst("img")?.attr("src") ?: ""
+            // 2026-05-04 : search FS lazy-load les jaquettes via data-src
+            val poster = extractImgUrl(item) ?: ""
             val isSeries = title.contains("Saison", ignoreCase = true)
                 || href.contains("/s-tv/") || href.contains("/serie/")
                 || id.contains("-saison-")
@@ -624,7 +844,9 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 val sNumber = seasonRegex.find(sTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
                     ?: return@mapNotNull null
                 Log.d("FrenchStream", "  matched season $sNumber id=$sId title='$sTitle'")
-                val sPoster = item.selectFirst("img")?.attr("src")
+                // 2026-05-04 : les pages search FS lazy-load les jaquettes via
+                // <img class="lazy" data-src="..."> — extractImgUrl gère ça.
+                val sPoster = extractImgUrl(item)
                 Season(
                     id = sId,
                     number = sNumber,
@@ -689,10 +911,14 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
      *  exister en VF mais pas en VOSTFR par exemple). */
     private suspend fun fetchEpisodesFromAjax(seasonId: String): List<Episode> {
         if (!seasonId.all { it.isDigit() }) return emptyList() // AJAX n'accepte que newsid numériques
-        val body = service.getSerieAjaxJson(seasonId).string()
-        if (body.isBlank()) return emptyList()
-        val json = org.json.JSONObject(body)
-        if (json.optBoolean("error", false)) return emptyList()
+        val url = buildAjaxUrl(serieAjaxPath.get(), "p=$seasonId")
+        val body = service.getAjaxJsonByUrl(url).string()
+        val json = parseJsonOrNull(body, "fetchEpisodesFromAjax($seasonId)") ?: return emptyList()
+        // Versions VF/VOSTFR/VO ; au moins l'une doit exister sinon shape inconnue
+        if (!json.has("vf") && !json.has("vostfr") && !json.has("vo")) {
+            logUnexpectedShape("fetchEpisodesFromAjax", json, "vf|vostfr|vo")
+            return emptyList()
+        }
         val numbers = sortedSetOf<Int>()
         listOf("vf", "vostfr", "vo").forEach { version ->
             val obj = json.optJSONObject(version) ?: return@forEach
@@ -700,11 +926,21 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 key.toIntOrNull()?.let { numbers.add(it) }
             }
         }
+        // 2026-05-04 : sx.php renvoie aussi un bloc {info:{"1":{title,synopsis,poster}, ...}}
+        // qu'on a longtemps ignoré. On l'utilise maintenant pour enrichir
+        // chaque Episode avec son vrai titre, synopsis et la still TMDb.
+        val infoBlock = json.optJSONObject("info")
         return numbers.map { num ->
+            val ep = infoBlock?.optJSONObject(num.toString())
+            val epTitle = ep?.optString("title")?.takeIf { it.isNotBlank() } ?: "Épisode $num"
+            val epPoster = ep?.optString("poster")?.takeIf { it.isNotBlank() && !it.startsWith("data:") }
+            val epSynopsis = ep?.optString("synopsis")?.takeIf { it.isNotBlank() }
             Episode(
                 id = "$seasonId/$num",
                 number = num,
-                title = "Épisode $num",
+                title = epTitle,
+                poster = epPoster,
+                overview = epSynopsis,
             )
         }
     }
@@ -718,10 +954,13 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
      *  version dispo). */
     private suspend fun fetchMoviePlayersFromAjax(filmId: String): List<Video.Server> {
         if (!filmId.all { it.isDigit() }) return emptyList()
-        val body = service.getFilmAjaxJson(filmId).string()
-        if (body.isBlank()) return emptyList()
-        val json = org.json.JSONObject(body)
-        val players = json.optJSONObject("players") ?: return emptyList()
+        val url = buildAjaxUrl(filmAjaxPath.get(), "id=$filmId")
+        val body = service.getAjaxJsonByUrl(url).string()
+        val json = parseJsonOrNull(body, "fetchMoviePlayersFromAjax($filmId)") ?: return emptyList()
+        val players = json.optJSONObject("players") ?: run {
+            logUnexpectedShape("fetchMoviePlayersFromAjax", json, "players")
+            return emptyList()
+        }
 
         val out = mutableListOf<Video.Server>()
         val seen = HashSet<String>()
@@ -756,10 +995,13 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
      *  un label "Player (Version)". */
     private suspend fun fetchPlayersFromAjax(seasonId: String, episodeNumber: Int): List<Video.Server> {
         if (!seasonId.all { it.isDigit() }) return emptyList()
-        val body = service.getSerieAjaxJson(seasonId).string()
-        if (body.isBlank()) return emptyList()
-        val json = org.json.JSONObject(body)
-        if (json.optBoolean("error", false)) return emptyList()
+        val url = buildAjaxUrl(serieAjaxPath.get(), "p=$seasonId")
+        val body = service.getAjaxJsonByUrl(url).string()
+        val json = parseJsonOrNull(body, "fetchPlayersFromAjax($seasonId/E$episodeNumber)") ?: return emptyList()
+        if (!json.has("vf") && !json.has("vostfr") && !json.has("vo")) {
+            logUnexpectedShape("fetchPlayersFromAjax", json, "vf|vostfr|vo")
+            return emptyList()
+        }
 
         val out = mutableListOf<Video.Server>()
         val seen = HashSet<String>()
@@ -980,53 +1222,34 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         initializeService()
 
+        // 2026-05-04 : cache mémoire de l'agrégat (TTL 5 min) — style Movix.
+        val cacheKey = serversCacheKey(id, videoType)
+        val now = System.currentTimeMillis()
+        serversCache[cacheKey]?.let { cached ->
+            if (now < cached.expiresAtMs) {
+                Log.d("FrenchStream", "getServers cache HIT for $cacheKey (${cached.servers.size} servers)")
+                return cached.servers
+            }
+            serversCache.remove(cacheKey)
+        }
+
+        // 2026-05-04 : strategy chain — chaque stratégie est isolée derrière
+        // runEndpoint (timeout 8s + circuit breaker). On essaie en cascade et
+        // on log laquelle a marché. Si toutes échouent → emptyList et le
+        // PlayerViewModel affiche le message friendly.
         val servers = when (videoType) {
             is Video.Type.Episode -> {
                 val parts = id.split("/")
                 val tvShowId = parts.getOrElse(0) { id }
                 val episodeNum = parts.getOrElse(1) { videoType.number.toString() }
                     .toIntOrNull() ?: videoType.number
-
-                // 2026-05-04 : tente d'abord l'API AJAX (nouvelle architecture
-                // FrenchStream). Si elle ne renvoie rien, fallback sur l'ancien
-                // parser HTML pour les vieilles entrées toujours sur l'ancien layout.
-                val ajaxServers = try { fetchPlayersFromAjax(tvShowId, episodeNum) }
-                    catch (e: Exception) {
-                        Log.w("FrenchStream", "AJAX players failed for $tvShowId/E$episodeNum: ${e.message}")
-                        emptyList()
-                    }
-                if (ajaxServers.isNotEmpty()) {
-                    Log.d("FrenchStream", "AJAX players: ${ajaxServers.size} for $tvShowId/E$episodeNum")
-                    ajaxServers
-                } else {
-                    val document = try { fetchDetailPage(tvShowId) }
-                        catch (_: Exception) { return emptyList() }
-                    parsePlayersFromPage(document, forEpisodeNumber = episodeNum)
-                }
+                resolveEpisodeServers(tvShowId, episodeNum)
             }
-            is Video.Type.Movie -> {
-                // 2026-05-04 : tente d'abord l'API AJAX `film_api.php?id=N`
-                // (nouveau template VFR1). Fallback sur l'ancien parser HTML
-                // pour les vieux films qui ont encore le `playerUrls = {...}`
-                // inline.
-                val ajaxServers = try { fetchMoviePlayersFromAjax(id) }
-                    catch (e: Exception) {
-                        Log.w("FrenchStream", "AJAX film_api failed for $id: ${e.message}")
-                        emptyList()
-                    }
-                if (ajaxServers.isNotEmpty()) {
-                    Log.d("FrenchStream", "AJAX film_api: ${ajaxServers.size} players for $id")
-                    ajaxServers
-                } else {
-                    val document = try { fetchDetailPage(id) }
-                        catch (_: Exception) { return emptyList() }
-                    parsePlayersFromPage(document, forEpisodeNumber = null)
-                }
-            }
+            is Video.Type.Movie -> resolveMovieServers(id)
         }
 
         // Sort: VF/TrueFrench first, then by service reliability, VOSTFR/VO last
-        return servers.sortedWith(compareBy<Video.Server> { server ->
+        val sorted = servers.sortedWith(compareBy<Video.Server> { server ->
             val name = server.name.uppercase()
             when {
                 name.contains("TRUEFRENCH") || name.contains("VFF") -> 0
@@ -1048,6 +1271,66 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 else -> 5
             }
         })
+
+        // Ne cache que les résultats non-vides : un échec passager ne doit
+        // pas bloquer un retry 5 min plus tard.
+        if (sorted.isNotEmpty()) {
+            serversCache[cacheKey] = CachedServers(
+                servers = sorted,
+                expiresAtMs = System.currentTimeMillis() + SERVERS_CACHE_TTL_MS,
+            )
+        }
+        return sorted
+    }
+
+    /** Strategy chain pour un FILM : AJAX `film_api.php` → fallback HTML
+     *  `playerUrls = {...}` (vieux films legacy). Quand AJAX échoue on profite
+     *  du fallback HTML pour scanner les JS bundles à la recherche du
+     *  nouveau path AJAX (auto-découverte). */
+    private suspend fun resolveMovieServers(filmId: String): List<Video.Server> {
+        // Strategy 1 : AJAX film_api.php (template VFR1, mai 2026)
+        val ajax = runEndpoint("film_api") { fetchMoviePlayersFromAjax(filmId) }
+        if (ajax.isNotEmpty()) {
+            Log.d("FrenchStream", "[strategy=film_api] ${ajax.size} players for $filmId")
+            return ajax
+        }
+        // Strategy 2 : HTML fallback + opportunistic endpoint rediscovery
+        val html = runEndpoint("html_movie_buttons") {
+            val document = fetchDetailPage(filmId)
+            // Tant qu'on a la page sous la main, on scanne ses <script> pour
+            // découvrir un éventuel nouveau path AJAX. Cooldown 5min interne.
+            try { rediscoverEndpointsFromDocument(document) } catch (_: Exception) {}
+            parsePlayersFromPage(document, forEpisodeNumber = null)
+        }
+        if (html.isNotEmpty()) {
+            Log.d("FrenchStream", "[strategy=html_movie_buttons] ${html.size} players for $filmId")
+        } else {
+            Log.w("FrenchStream", "All strategies failed for movie $filmId")
+        }
+        return html
+    }
+
+    /** Strategy chain pour un ÉPISODE : AJAX `sx.php` → fallback HTML
+     *  `<div id=episodeN>` (très vieilles séries). Auto-découverte sur fallback. */
+    private suspend fun resolveEpisodeServers(tvShowId: String, episodeNum: Int): List<Video.Server> {
+        // Strategy 1 : AJAX sx.php (nouveau template)
+        val ajax = runEndpoint("sx_php") { fetchPlayersFromAjax(tvShowId, episodeNum) }
+        if (ajax.isNotEmpty()) {
+            Log.d("FrenchStream", "[strategy=sx_php] ${ajax.size} players for $tvShowId/E$episodeNum")
+            return ajax
+        }
+        // Strategy 2 : HTML fallback + opportunistic endpoint rediscovery
+        val html = runEndpoint("html_episode_block") {
+            val document = fetchDetailPage(tvShowId)
+            try { rediscoverEndpointsFromDocument(document) } catch (_: Exception) {}
+            parsePlayersFromPage(document, forEpisodeNumber = episodeNum)
+        }
+        if (html.isNotEmpty()) {
+            Log.d("FrenchStream", "[strategy=html_episode_block] ${html.size} players for $tvShowId/E$episodeNum")
+        } else {
+            Log.w("FrenchStream", "All strategies failed for episode $tvShowId/E$episodeNum")
+        }
+        return html
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
@@ -1294,5 +1577,21 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         @GET
         suspend fun getRedirectLink(@Url url: String): Response<ResponseBody>
+
+        // 2026-05-04 : variantes URL-runtime pour quand on a (re)découvert
+        // dynamiquement le path d'un endpoint AJAX (cf rediscoverEndpoints).
+        // On ne peut pas faire varier @GET("...") au runtime, mais @Url oui.
+        @GET
+        suspend fun getAjaxJsonByUrl(
+            @Url url: String,
+            @Header("Cookie") cookie: String = "dle_skin=VFV1",
+            @Header("Referer") referer: String = "https://fs03.lol/"
+        ): okhttp3.ResponseBody
+
+        @GET
+        suspend fun getRawText(
+            @Url url: String,
+            @Header("Referer") referer: String = "https://fs03.lol/"
+        ): okhttp3.ResponseBody
     }
 }

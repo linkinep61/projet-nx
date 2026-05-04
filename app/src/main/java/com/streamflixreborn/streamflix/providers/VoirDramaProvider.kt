@@ -54,6 +54,237 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
     private var serviceInitialized = false
     private val initializationMutex = Mutex()
 
+    // ==================== DRAMACOOL FALLBACK SOURCE ====================
+    //
+    // 2026-05-04 : Dramacool9.com.ro est utilisé en SOURCE COMPLEMENTAIRE
+    // (pas un provider standalone). Il étend le catalogue avec du contenu
+    // asiatique sub anglais que VoirDrama n'a pas (K/C/J-dramas, K-shows,
+    // Asian movies). Les items Dramacool sont préfixés "dc::" pour que les
+    // méthodes du provider sachent à quelle source aller chercher.
+    //
+    // ID format pour les items Dramacool :
+    //   dc::{slug}           → show (ex: dc::pearl-in-red-2026)
+    //   dc::{slug}/{ep_num}  → épisode
+
+    private const val DC_PREFIX = "dc::"
+    // 2026-05-04 : URLs primaire + secours pour Dramacool. Si dramacool9.com.ro
+    // tombe (saisie domaine, panne CF), on tente .so en fallback. Le résolveur
+    // mémorise le premier qui répond pour la session.
+    private val DC_BASE_URLS = listOf(
+        "https://dramacool9.com.ro/",
+        "https://dramacool.so/",
+    )
+    @Volatile private var dcResolvedBaseUrl: String? = null
+    private val dcResolveMutex = Mutex()
+
+    /** Retourne la première URL Dramacool qui répond 200 avec contenu valide.
+     *  Mémorisé pour la session — si le primaire répond une fois, on garde. */
+    private suspend fun dcBaseUrl(): String {
+        dcResolvedBaseUrl?.let { return it }
+        return dcResolveMutex.withLock {
+            dcResolvedBaseUrl?.let { return@withLock it }
+            for (candidate in DC_BASE_URLS) {
+                try {
+                    val doc = service.getPage(candidate)
+                    // Heuristique : si la page contient au moins 1 a.mask
+                    // (notre selecteur de listing), c'est un vrai Dramacool
+                    if (doc.select("a.mask").isNotEmpty()) {
+                        Log.d("VoirDramaProvider", "Dramacool base URL resolved to: $candidate")
+                        dcResolvedBaseUrl = candidate
+                        return@withLock candidate
+                    }
+                } catch (e: Exception) {
+                    Log.w("VoirDramaProvider", "DC mirror $candidate unreachable: ${e.message}")
+                }
+            }
+            // Tous les mirrors KO — on retourne le primaire pour que les
+            // requêtes failent proprement (au lieu de boucler à l'infini)
+            Log.w("VoirDramaProvider", "All DC mirrors unreachable, using primary anyway")
+            DC_BASE_URLS.first()
+        }
+    }
+
+    private fun isDramacool(id: String) = id.startsWith(DC_PREFIX)
+    private fun dcStripPrefix(id: String) = id.removePrefix(DC_PREFIX)
+
+    /** Extrait l'URL d'une img en gérant le lazy-loading data-original (Dramacool). */
+    private fun dcExtractImgUrl(item: Element): String? {
+        val img = item.selectFirst("img") ?: return null
+        return sequenceOf("data-original", "data-src", "data-lazy-src", "src")
+            .map { img.attr(it).trim() }
+            .firstOrNull { it.isNotBlank() && !it.startsWith("data:") }
+    }
+
+    /** Extrait le slug-id Dramacool depuis une URL. */
+    private fun dcExtractSlug(href: String): String? {
+        val cleanHref = href.removeSuffix("/").substringAfterLast("/")
+        return when {
+            cleanHref.contains("-episode-") -> cleanHref.substringBefore("-episode-")
+            cleanHref.endsWith(".html") -> cleanHref.removeSuffix(".html")
+            else -> cleanHref.takeIf { it.isNotBlank() }
+        }
+    }
+
+    private fun dcExtractEpNumber(text: String): Int? {
+        val patterns = listOf(
+            Regex("""-episode-(\d+)\.html""", RegexOption.IGNORE_CASE),
+            Regex("""\bEpisode\s+(\d+)\b""", RegexOption.IGNORE_CASE),
+        )
+        return patterns.firstNotNullOfOrNull { it.find(text)?.groupValues?.getOrNull(1)?.toIntOrNull() }
+    }
+
+    /** Search Dramacool9 et retourne des TvShow avec ID préfixé dc::. */
+    private suspend fun searchOnDramacool(query: String): List<TvShow> {
+        if (query.isBlank()) return emptyList()
+        return try {
+            val url = "${dcBaseUrl()}?s=${query.replace(" ", "+")}"
+            val doc = service.getPage(url)
+            doc.select("a.mask").mapNotNull { link ->
+                val href = link.attr("href").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val slug = dcExtractSlug(href) ?: return@mapNotNull null
+                val parent = link.parent() ?: link
+                val title = link.attr("title").takeIf { it.isNotBlank() }
+                    ?: parent.selectFirst("h3")?.text()
+                    ?: return@mapNotNull null
+                val cleanTitle = title.replace(
+                    Regex("""\s+Episode\s+\d+\s*$""", RegexOption.IGNORE_CASE), ""
+                ).trim()
+                val poster = dcExtractImgUrl(parent)
+                TvShow(
+                    id = "$DC_PREFIX$slug",
+                    title = cleanTitle,
+                    poster = poster,
+                )
+            }
+        } catch (e: Exception) {
+            Log.w("VoirDramaProvider", "Dramacool search '$query' failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** Récupère le détail TvShow Dramacool depuis le slug. */
+    private suspend fun getTvShowFromDramacool(slug: String): TvShow {
+        val url = "${dcBaseUrl()}$slug"
+        val doc = try { service.getPage(url) } catch (_: Exception) {
+            return TvShow(id = "$DC_PREFIX$slug", title = slug.replace("-", " "))
+        }
+        val title = doc.selectFirst("h1")?.text()?.trim()
+            ?: slug.replace("-", " ").replaceFirstChar { it.uppercase() }
+        val poster = doc.selectFirst("article img, .single-info img, div.image img")
+            ?.let { dcExtractImgUrl(it.parent() ?: it) }
+        val overview = doc.selectFirst(".desc-content, .single-info p, .description p")?.text()?.trim()
+        val genres = doc.select("a[href*='/genre/']").map {
+            Genre(
+                id = it.attr("href").substringAfterLast("/genre/").removeSuffix("/"),
+                name = it.text().trim(),
+            )
+        }
+        return TvShow(
+            id = "$DC_PREFIX$slug",
+            title = title,
+            overview = overview,
+            poster = poster,
+            banner = poster,
+            genres = genres,
+            seasons = listOf(Season(id = "$DC_PREFIX$slug", number = 1, title = "Season 1")),
+        )
+    }
+
+    /** Liste des épisodes pour un show Dramacool depuis le bloc #all-episodes. */
+    private suspend fun getEpisodesFromDramacool(slug: String): List<Episode> {
+        val url = "${dcBaseUrl()}$slug"
+        val doc = try { service.getPage(url) } catch (_: Exception) {
+            return emptyList()
+        }
+        return doc.select("#all-episodes a, #episode-list a").mapNotNull { link ->
+            val href = link.attr("href")
+            val number = dcExtractEpNumber(href) ?: return@mapNotNull null
+            Episode(
+                id = "$DC_PREFIX$slug/$number",
+                number = number,
+                title = "Episode $number",
+            )
+        }.distinctBy { it.number }.sortedBy { it.number }
+    }
+
+    /** Récupère les Video.Server depuis une page épisode Dramacool. */
+    private suspend fun getServersFromDramacool(slug: String, ep: Int): List<Video.Server> {
+        val url = "${dcBaseUrl()}$slug-episode-$ep.html"
+        return try {
+            val doc = service.getPage(url)
+            val out = mutableListOf<Video.Server>()
+            val seen = HashSet<String>()
+            // 1) Boutons server-btn[data-src]
+            doc.select("button.server-btn[data-src]").forEach { btn ->
+                val src = btn.attr("data-src").takeIf { it.startsWith("http") } ?: return@forEach
+                if (!seen.add(src)) return@forEach
+                val name = btn.text().replace("▶", "").trim().ifBlank { dcHostShort(src) }
+                out.add(Video.Server(id = "dc_$src", name = "$name (DC)", src = src))
+            }
+            // 2) Iframe par défaut
+            doc.select("iframe#video-frame, iframe[src]").forEach { iframe ->
+                val src = iframe.attr("src").takeIf { it.startsWith("http") } ?: return@forEach
+                if (!seen.add(src)) return@forEach
+                out.add(Video.Server(id = "dc_$src", name = "${dcHostShort(src)} (DC)", src = src))
+            }
+            out
+        } catch (e: Exception) {
+            Log.w("VoirDramaProvider", "Dramacool servers $slug/E$ep failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    private fun dcHostShort(url: String): String =
+        try {
+            java.net.URL(url).host.split(".").first { it != "www" }
+                .replaceFirstChar { it.uppercase() }
+        } catch (_: Exception) { "Server" }
+
+    /** Cherche le show sur Dramacool par titre, et si trouvé fetch les
+     *  servers de l'épisode demandé. Utilisé pour ENRICHIR les servers
+     *  VoirDrama natifs (au cas où ceux-ci sont morts/lents).
+     *
+     *  Retourne une liste vide silencieusement si :
+     *   - le titre est trop court (< 3 chars) → trop générique
+     *   - aucun match titre sur Dramacool
+     *   - l'épisode demandé n'existe pas sur DC
+     *   - une erreur HTTP arrive (best-effort, on loggue puis ignore)
+     */
+    private suspend fun fetchDramacoolServersByTitle(
+        title: String,
+        episodeNumber: Int,
+    ): List<Video.Server> {
+        val cleanTitle = title.trim()
+        if (cleanTitle.length < 3) return emptyList()
+
+        return try {
+            // Search DC pour le titre — prendre le premier résultat dont le
+            // titre normalisé correspond au nôtre
+            fun normalize(s: String) = s.lowercase()
+                .replace(Regex("""\s*\(\d{4}\)\s*"""), " ")
+                .replace(Regex("""[^a-z0-9\s]"""), " ")
+                .replace(Regex("""\s+"""), " ")
+                .trim()
+            val targetNorm = normalize(cleanTitle)
+            val candidates = searchOnDramacool(cleanTitle)
+            val match = candidates.firstOrNull { dc ->
+                val dcNorm = normalize(dc.title)
+                dcNorm == targetNorm
+                    || dcNorm.contains(targetNorm)
+                    || targetNorm.contains(dcNorm)
+            } ?: run {
+                Log.d("VoirDramaProvider", "DC enrich: no title match for '$cleanTitle' (got ${candidates.size} candidates)")
+                return emptyList()
+            }
+            val slug = dcStripPrefix(match.id)
+            Log.d("VoirDramaProvider", "DC enrich: '$cleanTitle' → DC slug='$slug', fetching ep $episodeNumber")
+            getServersFromDramacool(slug, episodeNumber)
+        } catch (e: Exception) {
+            Log.w("VoirDramaProvider", "DC enrich for '$cleanTitle' E$episodeNumber failed: ${e.message}")
+            emptyList()
+        }
+    }
+
     // ==================== HOME ====================
 
     override suspend fun getHome(): List<Category> {
@@ -217,8 +448,43 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
 
         initializeService()
         return try {
-            val document = service.search(query, page)
-            parseSearchResults(document)
+            // 2026-05-04 : search croisé VoirDrama + Dramacool9 en parallèle.
+            // Les items Dramacool sont préfixés "dc::" pour le routing.
+            // Dédup par titre normalisé pour éviter les doublons quand la
+            // même série existe sur les deux sites.
+            coroutineScope {
+                val voirDramaDeferred = async {
+                    try { parseSearchResults(service.search(query, page)) }
+                    catch (e: Exception) {
+                        Log.w("VoirDramaProvider", "VoirDrama search failed: ${e.message}")
+                        emptyList()
+                    }
+                }
+                // Dramacool seulement sur page 1 (pas de pagination cross-site)
+                val dramacoolDeferred = async {
+                    if (page <= 1) searchOnDramacool(query) else emptyList()
+                }
+                val voirDramaResults = voirDramaDeferred.await()
+                val dramacoolResults = dramacoolDeferred.await()
+
+                // Normalise les titres pour dédup
+                fun normalize(s: String) = s.lowercase()
+                    .replace(Regex("""\s*\(\d{4}\)\s*"""), " ")
+                    .replace(Regex("""\s+"""), " ")
+                    .trim()
+                val seenTitles = voirDramaResults.mapNotNull {
+                    when (it) {
+                        is Movie -> normalize(it.title)
+                        is TvShow -> normalize(it.title)
+                        else -> null
+                    }
+                }.toMutableSet()
+                val mergedDc = dramacoolResults.filter { dc ->
+                    seenTitles.add(normalize(dc.title))
+                }
+                Log.d("VoirDramaProvider", "search '$query' p$page : VD=${voirDramaResults.size}, DC=${dramacoolResults.size}, merged=${mergedDc.size}")
+                voirDramaResults + mergedDc
+            }
         } catch (e: Exception) {
             Log.e("VoirDramaProvider", "search error: ", e)
             emptyList()
@@ -300,6 +566,20 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
 
     override suspend fun getMovie(id: String): Movie {
         initializeService()
+        // Item Dramacool : on traite comme un TvShow car Dramacool n'a pas de
+        // distinction movie/show propre. Les "movies" sont en fait des
+        // dramas single-episode chez eux. On retourne donc un Movie minimal.
+        if (isDramacool(id)) {
+            val show = getTvShowFromDramacool(dcStripPrefix(id))
+            return Movie(
+                id = id,
+                title = show.title,
+                overview = show.overview,
+                poster = show.poster,
+                banner = show.banner,
+                genres = show.genres,
+            )
+        }
         val url = if (id.startsWith("http")) id else "${baseUrl}drama/$id/"
         val document = service.getPage(url)
 
@@ -344,6 +624,7 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
 
     override suspend fun getTvShow(id: String): TvShow {
         initializeService()
+        if (isDramacool(id)) return getTvShowFromDramacool(dcStripPrefix(id))
         val url = if (id.startsWith("http")) id else "${baseUrl}drama/$id/"
         val document = service.getPage(url)
 
@@ -400,6 +681,7 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
         initializeService()
+        if (isDramacool(seasonId)) return getEpisodesFromDramacool(dcStripPrefix(seasonId))
         val url = if (seasonId.startsWith("http")) seasonId else "${baseUrl}drama/$seasonId/"
         val document = service.getPage(url)
 
@@ -465,13 +747,45 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         initializeService()
+        // 2026-05-04 : Dramacool routing — IDs préfixés "dc::" sont servis par
+        // les helpers Dramacool, pas par VoirDrama. Pour un movie DC on tape
+        // sur episode-1.html, pour un épisode DC on construit l'URL via slug + ep.
+        if (isDramacool(id)) {
+            val stripped = dcStripPrefix(id)
+            return when (videoType) {
+                is Video.Type.Episode -> {
+                    val parts = stripped.split("/")
+                    val slug = parts.getOrElse(0) { stripped }
+                    val ep = parts.getOrElse(1) { videoType.number.toString() }
+                        .toIntOrNull() ?: videoType.number
+                    getServersFromDramacool(slug, ep)
+                }
+                is Video.Type.Movie -> getServersFromDramacool(stripped, 1)
+            }
+        }
         return try {
+            coroutineScope {
             // L'ID d'un épisode est le chemin complet sous /drama/ ex: "climax/climax-2026-10-vostfr"
             val url = when (videoType) {
                 is Video.Type.Movie -> if (id.startsWith("http")) id else "${baseUrl}drama/$id/"
                 is Video.Type.Episode -> if (id.startsWith("http")) id else "${baseUrl}drama/$id/"
             }
             val document = service.getPage(url)
+
+            // 2026-05-04 : extraire le titre du show pour ENRICHIR avec les
+            // sources Dramacool en parallèle. Si DC a la même série, on
+            // ajoute ses players comme alternatives → l'utilisateur a plus
+            // de chances qu'au moins un fonctionne.
+            val showTitle = document.selectFirst("h1.entry-title")?.text()?.trim()
+                ?: document.title()
+                    .substringBefore(" - ")
+                    .substringBefore(" – ")
+                    .trim()
+                    .ifBlank { null }
+            val episodeNumber = (videoType as? Video.Type.Episode)?.number ?: 1
+            val dramacoolServersDeferred = if (!showTitle.isNullOrBlank()) {
+                async { fetchDramacoolServersByTitle(showTitle, episodeNumber) }
+            } else null
 
             val servers = mutableListOf<Video.Server>()
             val seenSrcs = mutableSetOf<String>()
@@ -527,14 +841,19 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
                 else -> "VOSTFR" // Par défaut pour les dramas coréens
             }
 
-            // Same reliability sort as VoirAnime.
+            // 2026-05-04 : reordered — mail.ru en premier car pas de
+            // Cloudflare challenge, extraction quasi-instantanée. vidmoly
+            // est descendu à priorité 5 car CF Turnstile prend ~10-20s.
+            // Filemoon / yourupload / voe en priorité moyenne car ont
+            // souvent leur propre captcha mais sont plus stables que vidmoly
+            // depuis que CF est en place.
             val priority = mapOf(
-                "vidmoly" to 0,
+                "mail.ru" to 0, "my.mail.ru" to 0,  // Pas de CF, rapide
                 "voe" to 1, "voe.sx" to 1,
-                "streamtape" to 2,
-                "filemoon" to 3, "weneverbeenfree" to 3,
-                "yourupload" to 4, "www.yourupload.com" to 4,
-                "mail.ru" to 5, "my.mail.ru" to 5,
+                "filemoon" to 2, "weneverbeenfree" to 2,
+                "yourupload" to 3, "www.yourupload.com" to 3,
+                "streamtape" to 4,
+                "vidmoly" to 5,  // CF challenge → lent, dernière option
                 "streamhide" to 6
             )
             val withLang = servers.map { server ->
@@ -542,10 +861,27 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
                     Video.Server(id = server.id, name = "${server.name} ($lang)", src = server.src)
                 } else server
             }.distinctBy { it.id }
-            withLang.sortedBy { server ->
+            val voirDramaSorted = withLang.sortedBy { server ->
                 val host = try { java.net.URL(server.src).host.lowercase() } catch (_: Exception) { "" }
                 priority.entries.firstOrNull { host.contains(it.key) }?.value ?: 50
             }
+
+            // 2026-05-04 : on attend le résultat de l'enrichissement DC et on
+            // l'ajoute en QUEUE de liste (servers VoirDrama d'abord, DC en
+            // backup). Timeout de 5s pour pas bloquer le player si DC traîne.
+            val dcServers = dramacoolServersDeferred?.let { deferred ->
+                try {
+                    kotlinx.coroutines.withTimeoutOrNull(5_000L) { deferred.await() } ?: emptyList()
+                } catch (_: Exception) { emptyList() }
+            } ?: emptyList()
+            // Dédup : si DC pointe vers une URL déjà dans VoirDrama, skip
+            val existingSrcs = voirDramaSorted.map { it.src }.toHashSet()
+            val dcUnique = dcServers.filter { it.src !in existingSrcs }
+            if (dcUnique.isNotEmpty()) {
+                Log.d("VoirDramaProvider", "DC enrich: added ${dcUnique.size} backup servers")
+            }
+            voirDramaSorted + dcUnique
+            } // close coroutineScope
         } catch (e: Exception) {
             Log.e("VoirDramaProvider", "getServers error: ", e)
             emptyList()
