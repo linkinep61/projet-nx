@@ -178,8 +178,13 @@ class TvShowTvFragment : Fragment() {
             tvShow.apply { itemType = AppAdapter.Type.TV_SHOW_TV },
 
             tvShow.takeIf {
-                    it.seasons.isNotEmpty() &&
-                    !(it.seasons.size == 1 && (it.seasons.first().episodes.size <= 1))
+                    // 2026-05-04 : on n'affiche la rangée saisons que s'il y
+                    // a au moins une saison. Pas d'autre filtrage : avant on
+                    // cachait "1 saison + 1 épisode" en supposant que c'était
+                    // un film mal classé, mais ça empêchait l'user de cliquer
+                    // sur des séries légitimes (épisodes pas encore chargés
+                    // en lazy). On laisse tout s'afficher.
+                    it.seasons.isNotEmpty()
                 }
                 ?.copy()
                 ?.apply { itemType = AppAdapter.Type.TV_SHOW_SEASONS_TV },

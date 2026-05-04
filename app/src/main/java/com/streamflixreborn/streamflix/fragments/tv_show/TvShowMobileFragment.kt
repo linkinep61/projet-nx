@@ -181,8 +181,10 @@ class TvShowMobileFragment : Fragment() {
             tvShow.apply { itemType = AppAdapter.Type.TV_SHOW_MOBILE },
 
             tvShow.takeIf {
-                    it.seasons.isNotEmpty() &&
-                    !(it.seasons.size == 1 && (it.seasons.first().episodes.size <= 1))
+                    // 2026-05-04 : voir TvShowTvFragment pour le détail. On
+                    // affiche dès qu'il y a au moins une saison, plus de
+                    // filtrage défensif qui cachait à tort des séries légitimes.
+                    it.seasons.isNotEmpty()
                 }
                 ?.copy()
                 ?.apply { itemType = AppAdapter.Type.TV_SHOW_SEASONS_MOBILE },

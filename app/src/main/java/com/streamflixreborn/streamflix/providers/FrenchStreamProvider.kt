@@ -20,6 +20,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import retrofit2.Retrofit
@@ -126,11 +127,47 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     // ── Home ─────────────────────────────────────────────────────────────
 
-    override suspend fun getHome(): List<Category> {
+    override suspend fun getHome(): List<Category> = coroutineScope {
         initializeService()
         val document = service.getHome()
         val categories = mutableListOf<Category>()
         val allItems = mutableListOf<AppAdapter.Item>()
+
+        // 2026-05-04 : catégories bonus chargées en parallèle (timeout 5s par
+        // catégorie). Échec silencieux pour ne pas bloquer le home.
+        // Genres films + plateformes séries pour donner plus de découverte.
+        val bonusCategories = listOf(
+            "Films Action" to "/films/actions/",
+            "Films Comédie" to "/films/comedies/",
+            "Films Drame" to "/films/drames/",
+            "Films Horreur" to "/films/epouvante-horreurs/",
+            "Séries Netflix" to "/s-tv/netflix-series-/",
+            "Séries Disney+" to "/s-tv/series-disney-plus/",
+            "Séries Amazon Prime" to "/s-tv/serie-amazon-prime-videos/",
+        )
+        val bonusDeferred = bonusCategories.map { (name, path) ->
+            async {
+                try {
+                    withTimeoutOrNull(5_000L) {
+                        val isSeriesCat = path.startsWith("/s-tv/") || path.startsWith("/serie/")
+                        val doc = service.getCategoryPage(path)
+                        val items = doc.select("div.short").mapNotNull { item ->
+                            val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
+                            val href = linkEl.attr("href")
+                            val id = extractNewsId(href) ?: return@mapNotNull null
+                            val title = item.selectFirst("div.short-title")?.text() ?: ""
+                            val poster = item.selectFirst("img")?.attr("src") ?: ""
+                            if (isSeriesCat) TvShow(id = id, title = title, poster = poster)
+                            else Movie(id = id, title = title, poster = poster)
+                        }.take(20)
+                        if (items.isNotEmpty()) Category(name = name, list = items) else null
+                    }
+                } catch (e: Exception) {
+                    Log.w("FrenchStream", "Bonus category '$name' failed: ${e.message}")
+                    null
+                }
+            }
+        }
 
         // 2026-05: site redesign — sections are now <div class="sect">
         // wrapping a header <div class="sect-t">. The clean title lives in
@@ -140,12 +177,61 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         // Each card is a div.short with a poster link, no .film class —
         // movie/series detection has to come from URL/title heuristics and
         // the parent section's "kind".
+        // 2026-05-04 : on remplace le scrape des sections "Nouveautés Films"
+        // et "Nouveautés Séries" qui sont lazy-loaded sur la home FS
+        // (seulement 5-6 cards rendues côté serveur). À la place, fetch direct
+        // /films et /series qui ont ~18 cards complètes par page.
+        // Garder le scrape pour les autres sections (ex: "Ajouts de la Commu").
+        val nouveautesFilmsDeferred = async {
+            try {
+                withTimeoutOrNull(6_000L) {
+                    service.getMovies("films").select("div.short").mapNotNull { item ->
+                        val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
+                        val href = linkEl.attr("href")
+                        val id = extractNewsId(href) ?: return@mapNotNull null
+                        val title = item.selectFirst("div.short-title")?.text() ?: ""
+                        val poster = item.selectFirst("img")?.attr("src") ?: ""
+                        Movie(id = id, title = title, poster = poster)
+                    }.take(20)
+                }
+            } catch (e: Exception) {
+                Log.w("FrenchStream", "Nouveautés Films failed: ${e.message}")
+                null
+            }
+        }
+        val nouveautesSeriesDeferred = async {
+            try {
+                withTimeoutOrNull(6_000L) {
+                    service.getTvShows("series").select("div.short").mapNotNull { item ->
+                        val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
+                        val href = linkEl.attr("href")
+                        val id = extractNewsId(href) ?: return@mapNotNull null
+                        val title = item.selectFirst("div.short-title")?.text() ?: ""
+                        val poster = item.selectFirst("img")?.attr("src") ?: ""
+                        TvShow(id = id, title = title, poster = poster)
+                    }.take(20)
+                }
+            } catch (e: Exception) {
+                Log.w("FrenchStream", "Nouveautés Séries failed: ${e.message}")
+                null
+            }
+        }
+
         document.select("div.sect").forEach { section ->
             val capt = section.selectFirst(".sect-t a.st-capt")
             val sectionTitle = capt?.ownText()?.trim()
                 ?: section.selectFirst(".sect-t .st-capt")?.ownText()?.trim()
                 ?: return@forEach
             val sectionHref = capt?.attr("href") ?: ""
+
+            // Skip "Nouveautés Films" et "Nouveautés Séries" — on les remplace
+            // par fetch direct des catalogs (plus de cards car pas lazy-loaded).
+            val isNouveautesFilms = sectionHref == "/films/" ||
+                (sectionTitle.contains("Nouveau", ignoreCase = true) && sectionTitle.contains("Film", ignoreCase = true))
+            val isNouveautesSeries = sectionHref == "/s-tv/" || sectionHref == "/serie/" ||
+                (sectionTitle.contains("Nouveau", ignoreCase = true) && sectionTitle.contains("Séri", ignoreCase = true))
+            if (isNouveautesFilms || isNouveautesSeries) return@forEach
+
             // A section is "series-only" when its capt link points to /s-tv/
             // or /serie/. Sections like /films/ or /film-commu/ are movies.
             val sectionIsSeries = sectionHref.contains("/s-tv/")
@@ -174,6 +260,18 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 categories.add(Category(name = sectionTitle, list = items))
                 allItems.addAll(items)
             }
+        }
+
+        // Insert "Nouveautés Films" + "Nouveautés Séries" en tête (avant "Ajouts de la Commu")
+        val nouveautesFilms = nouveautesFilmsDeferred.await()
+        val nouveautesSeries = nouveautesSeriesDeferred.await()
+        if (!nouveautesSeries.isNullOrEmpty()) {
+            categories.add(0, Category(name = "Nouveautés Séries", list = nouveautesSeries))
+            allItems.addAll(0, nouveautesSeries)
+        }
+        if (!nouveautesFilms.isNullOrEmpty()) {
+            categories.add(0, Category(name = "Nouveautés Films", list = nouveautesFilms))
+            allItems.addAll(0, nouveautesFilms)
         }
 
         // Featured carousel from the first items across all sections.
@@ -229,7 +327,17 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             categories.add(0, Category(name = Category.FEATURED, list = featured))
         }
 
-        return categories
+        // 2026-05-04 : on rajoute les catégories bonus chargées en parallèle.
+        // Elles arrivent APRÈS les sections natives de la home pour ne pas
+        // pousser les "Nouveautés" en bas. Items aussi versés dans allItems
+        // au cas où la home n'avait pas de sections (carousel fallback).
+        bonusDeferred.forEach { deferred ->
+            val bonus = deferred.await() ?: return@forEach
+            categories.add(bonus)
+            allItems.addAll(bonus.list)
+        }
+
+        return@coroutineScope categories
     }
 
     // ── Search ───────────────────────────────────────────────────────────
@@ -273,7 +381,10 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     // ── Catalog (Movies / TV Shows) ──────────────────────────────────────
 
     override suspend fun getMovies(page: Int): List<Movie> {
-        if (page > 1) return emptyList()
+        // 2026-05-04 : pagination réactivée. Avant on plafonnait à page 1
+        // (~18 films) car le fallback /home n'a pas de pagination, mais le
+        // endpoint /films?page=N marche bien côté serveur (testé : ~18 films
+        // par page, structure identique). User signalait "que 3 rangées de 7".
         initializeService()
         fun looksLikeSeries(href: String, title: String, id: String): Boolean {
             return href.contains("/serie/")
@@ -285,7 +396,8 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         // /films endpoint may return MySQL errors on the redesigned site.
         // Try it first, fall back to home page movies.
         return try {
-            val document = service.getMovies(page)
+            val url = if (page <= 1) "films" else "films/page/$page"
+            val document = service.getMovies(url)
             val items = document.select("div.short").mapNotNull { item ->
                 val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
                 val href = linkEl.attr("href")
@@ -324,7 +436,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     }
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
-        if (page > 1) return emptyList()
+        // 2026-05-04 : pagination réactivée (cf getMovies pour le détail).
         initializeService()
         // Helper: looks like an actual TV series (not a film mis-classified).
         // The redesigned site doesn't use .film class anymore, so we have to
@@ -338,15 +450,22 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 || title.matches(Regex(".*\\bS\\d{1,2}\\b.*", RegexOption.IGNORE_CASE))
         }
         return try {
-            val document = service.getTvShows(page)
-            // /series/ endpoint returns ONLY series — trust it (filtering would
-            // drop legitimate series whose title doesn't have "Saison" / "S1").
+            val url = if (page <= 1) "series" else "series/page/$page"
+            val document = service.getTvShows(url)
+            // 2026-05-04 : on filtre les films qui s'invitent dans /series
+            // (vu : "Sarah's Oil", "Le Diable s'habille en Prada 2", "F1 2026").
+            // On utilise l'alt du <a> (plus fiable, complet) puis fallback short-title.
+            // Si "Saison N" / "Season N" / "S1" / "-saison-" présent → c'est une série.
             val items = document.select("div.short").mapNotNull { item ->
                 val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
                 val href = linkEl.attr("href")
                 val id = extractNewsId(href) ?: return@mapNotNull null
-                val title = item.selectFirst("div.short-title")?.text() ?: ""
-                TvShow(id = id, title = title,
+                val alt = linkEl.attr("alt").orEmpty()
+                val shortTitle = item.selectFirst("div.short-title")?.text() ?: ""
+                val titleForCheck = if (alt.isNotBlank()) alt else shortTitle
+                if (!looksLikeSeries(href, titleForCheck, id)) return@mapNotNull null
+                val cleanTitle = (alt.takeIf { it.isNotBlank() } ?: shortTitle)
+                TvShow(id = id, title = cleanTitle,
                     poster = item.selectFirst("img")?.attr("src"))
             }
             items.ifEmpty { throw Exception("empty") }
@@ -440,6 +559,84 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         val votes = document.selectFirst("div.fr-votes")
         val rating = if (votes != null) getRating(votes) else null
 
+        // 2026-05-04 : récupère TOUTES les saisons via search GET.
+        // Sur FrenchStream chaque saison est un newsid distinct (S1=170941, S6=170938...).
+        // L'AJAX search retourne max ~5 items avec format différent — donc on
+        // utilise le search GET (`?do=search&subaction=search&story=...`) qui
+        // retourne ~10+ résultats avec les `a.short-poster` standard et
+        // alt="Title - Saison N".
+        Log.d("FrenchStream", "getTvShow id=$id title='$title' cleanTitle='$cleanTitle' seasonNumber=$seasonNumber")
+        val seasons = try {
+            // 2026-05-04 : itère sur les pages de search jusqu'à ce qu'il
+            // n'y ait plus de NOUVEAUX résultats (ou cap 10 pages pour
+            // sécurité — couvre les séries jusqu'à ~20 saisons).
+            // Critère d'arrêt :
+            //  - page sans aucun div.short (fin du catalog)
+            //  - page sans nouvelle URL inédite (= duplicates depuis la page précédente)
+            val seasonRegex = Regex("""\bSaison\s+(\d+)\b""", RegexOption.IGNORE_CASE)
+            val allShorts = mutableListOf<org.jsoup.nodes.Element>()
+            val seenHrefs = HashSet<String>()
+            for (searchPage in 1..10) {
+                val searchDoc = service.searchGet(query = cleanTitle, searchStart = searchPage)
+                val pageShorts = searchDoc.select("div.short")
+                Log.d("FrenchStream", "searchGet '$cleanTitle' page=$searchPage returned ${pageShorts.size} div.short")
+                if (pageShorts.isEmpty()) break
+                var newOnPage = 0
+                pageShorts.forEach { item ->
+                    val href = item.selectFirst("a.short-poster")?.attr("href").orEmpty()
+                    if (href.isNotBlank() && seenHrefs.add(href)) {
+                        allShorts.add(item)
+                        newOnPage++
+                    }
+                }
+                if (newOnPage == 0) break // page entière déjà vue
+            }
+            val foundSeasons = allShorts.mapNotNull { item ->
+                val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
+                val href = linkEl.attr("href")
+                val sId = extractNewsId(href) ?: return@mapNotNull null
+                // 2026-05-04 : sur les RÉSULTATS de recherche (vs catalog),
+                // l'alt est "Regarder X - Saison N en streaming complet" et
+                // pas juste "X - Saison N". On nettoie les deux côtés AVANT
+                // d'extraire le titre de base. Le short-title (ex: "FROM - Saison 4")
+                // reste plus simple à utiliser donc on le préfère quand dispo.
+                val rawAlt = linkEl.attr("alt").orEmpty()
+                val shortTitleEl = item.selectFirst("div.short-title")?.text().orEmpty()
+                val sTitle = if (shortTitleEl.isNotBlank()) shortTitleEl
+                    else rawAlt
+                        .removePrefix("Regarder ")
+                        .removeSuffix(" en streaming complet")
+                        .removeSuffix(" en streaming")
+                        .trim()
+                val sCleanTitle = sTitle.substringBeforeLast("- Saison").trim()
+                if (!sCleanTitle.equals(cleanTitle, ignoreCase = true)) return@mapNotNull null
+                val sNumber = seasonRegex.find(sTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    ?: return@mapNotNull null
+                Log.d("FrenchStream", "  matched season $sNumber id=$sId title='$sTitle'")
+                val sPoster = item.selectFirst("img")?.attr("src")
+                Season(
+                    id = sId,
+                    number = sNumber,
+                    title = "Saison $sNumber",
+                    poster = sPoster ?: poster,
+                )
+            }
+                .distinctBy { it.number }
+                .sortedBy { it.number }
+                .take(30)
+            Log.d("FrenchStream", "Total seasons found: ${foundSeasons.size} -> ${foundSeasons.map { it.number }}")
+            // Garantit que la saison courante est dans la liste (si search incomplet)
+            if (foundSeasons.none { it.number == seasonNumber && it.id == id }) {
+                (foundSeasons + Season(
+                    id = id, number = seasonNumber,
+                    title = "Saison $seasonNumber", poster = poster,
+                )).distinctBy { it.number }.sortedBy { it.number }
+            } else foundSeasons
+        } catch (e: Exception) {
+            Log.w("FrenchStream", "Multi-season search failed for '$cleanTitle': ${e.message}")
+            listOf(Season(id = id, number = seasonNumber, title = "Saison $seasonNumber", poster = poster))
+        }
+
         TvShow(
             id = id,
             title = cleanTitle,
@@ -448,14 +645,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             poster = poster,
             banner = poster,
             genres = genres,
-            seasons = listOf(
-                Season(
-                    id = id,
-                    number = seasonNumber,
-                    title = "Saison $seasonNumber",
-                    poster = poster,
-                )
-            ),
+            seasons = seasons,
             rating = rating,
         )
     }
@@ -464,12 +654,80 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
         initializeService()
+        // 2026-05-04 : nouvelle voie AJAX en priorité (la div#episodeN
+        // n'existe plus dans le HTML, populée en JS via /engine/ajax/sx.php).
+        // Fallback HTML legacy si l'API AJAX echoue (très vieilles entrées).
+        try {
+            val viaAjax = fetchEpisodesFromAjax(seasonId)
+            if (viaAjax.isNotEmpty()) return viaAjax
+        } catch (e: Exception) {
+            Log.w("FrenchStream", "AJAX episodes failed for $seasonId, falling back to HTML: ${e.message}")
+        }
         return try {
             val document = fetchDetailPage(seasonId)
             parseEpisodesFromPage(document, seasonId)
         } catch (_: Exception) {
             emptyList()
         }
+    }
+
+    /** 2026-05-04 : récupère la liste des numéros d'épisodes via l'endpoint
+     *  AJAX `/engine/ajax/sx.php?p={newsId}` qui retourne :
+     *    {"vf":{"1":{...players}, "2":{...}}, "vostfr":{...}, "vo":{...}}
+     *  On agrège les clés numériques de toutes les versions (un épisode peut
+     *  exister en VF mais pas en VOSTFR par exemple). */
+    private suspend fun fetchEpisodesFromAjax(seasonId: String): List<Episode> {
+        if (!seasonId.all { it.isDigit() }) return emptyList() // AJAX n'accepte que newsid numériques
+        val body = service.getSerieAjaxJson(seasonId).string()
+        if (body.isBlank()) return emptyList()
+        val json = org.json.JSONObject(body)
+        if (json.optBoolean("error", false)) return emptyList()
+        val numbers = sortedSetOf<Int>()
+        listOf("vf", "vostfr", "vo").forEach { version ->
+            val obj = json.optJSONObject(version) ?: return@forEach
+            obj.keys().forEach { key ->
+                key.toIntOrNull()?.let { numbers.add(it) }
+            }
+        }
+        return numbers.map { num ->
+            Episode(
+                id = "$seasonId/$num",
+                number = num,
+                title = "Épisode $num",
+            )
+        }
+    }
+
+    /** 2026-05-04 : récupère les Video.Server pour un épisode donné via l'API
+     *  AJAX. Itère sur les versions VF/VOSTFR/VO et expose chaque player avec
+     *  un label "Player (Version)". */
+    private suspend fun fetchPlayersFromAjax(seasonId: String, episodeNumber: Int): List<Video.Server> {
+        if (!seasonId.all { it.isDigit() }) return emptyList()
+        val body = service.getSerieAjaxJson(seasonId).string()
+        if (body.isBlank()) return emptyList()
+        val json = org.json.JSONObject(body)
+        if (json.optBoolean("error", false)) return emptyList()
+
+        val out = mutableListOf<Video.Server>()
+        val seen = HashSet<String>()
+        listOf("vf" to "VF", "vostfr" to "VOSTFR", "vo" to "VO").forEach { (key, label) ->
+            val versionObj = json.optJSONObject(key) ?: return@forEach
+            val episodeObj = versionObj.optJSONObject(episodeNumber.toString()) ?: return@forEach
+            episodeObj.keys().asSequence().forEach forEachPlayer@{ playerName ->
+                val url = episodeObj.optString(playerName).trim()
+                if (url.isBlank() || !url.startsWith("http")) return@forEachPlayer
+                if (url.contains("vid=&", ignoreCase = true)) return@forEachPlayer
+                if (ignoreSource(playerName, url)) return@forEachPlayer
+                if (!seen.add(url)) return@forEachPlayer
+                val displayName = "${playerName.replaceFirstChar { it.uppercase() }} ($label)"
+                out.add(Video.Server(
+                    id = "fs_ajax_${key}_${episodeNumber}_${playerName}",
+                    name = displayName,
+                    src = url,
+                ))
+            }
+        }
+        return out
     }
 
     /** Parse episodes from div#episodeN.fullsfeature blocks.
@@ -675,9 +933,23 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 val tvShowId = parts.getOrElse(0) { id }
                 val episodeNum = parts.getOrElse(1) { videoType.number.toString() }
                     .toIntOrNull() ?: videoType.number
-                val document = try { fetchDetailPage(tvShowId) }
-                    catch (_: Exception) { return emptyList() }
-                parsePlayersFromPage(document, forEpisodeNumber = episodeNum)
+
+                // 2026-05-04 : tente d'abord l'API AJAX (nouvelle architecture
+                // FrenchStream). Si elle ne renvoie rien, fallback sur l'ancien
+                // parser HTML pour les vieilles entrées toujours sur l'ancien layout.
+                val ajaxServers = try { fetchPlayersFromAjax(tvShowId, episodeNum) }
+                    catch (e: Exception) {
+                        Log.w("FrenchStream", "AJAX players failed for $tvShowId/E$episodeNum: ${e.message}")
+                        emptyList()
+                    }
+                if (ajaxServers.isNotEmpty()) {
+                    Log.d("FrenchStream", "AJAX players: ${ajaxServers.size} for $tvShowId/E$episodeNum")
+                    ajaxServers
+                } else {
+                    val document = try { fetchDetailPage(tvShowId) }
+                        catch (_: Exception) { return emptyList() }
+                    parsePlayersFromPage(document, forEpisodeNumber = episodeNum)
+                }
             }
             is Video.Type.Movie -> {
                 val document = try { fetchDetailPage(id) }
@@ -850,12 +1122,16 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             @Field("page") page: Int = 1
         ): Document
 
-        // Catalog pages — may return MySQL errors on redesigned site
-        @GET("films")
-        suspend fun getMovies(@Query("page") page: Int): Document
+        // Catalog pages — may return MySQL errors on redesigned site.
+        // 2026-05-04 : pagination via path-style /films/page/N (le `?page=N`
+        // est ignoré par fs03.lol et retourne toujours la même page 1, ce
+        // qui causait des doublons à scroll). Pour la page 1 on utilise
+        // l'URL sans suffixe via Url runtime.
+        @GET
+        suspend fun getMovies(@retrofit2.http.Url url: String): Document
 
-        @GET("series")
-        suspend fun getTvShows(@Query("page") page: Int): Document
+        @GET
+        suspend fun getTvShows(@retrofit2.http.Url url: String): Document
 
         // Detail page by newsid (new URL scheme: /index.php?newsid=XXXXX)
         @GET("index.php")
@@ -863,6 +1139,43 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             @Query("newsid") id: String,
             @Header("Cookie") cookie: String = "dle_skin=VFV1"
         ): Document
+
+        // 2026-05-04 : récupère une page de catégorie arbitraire (utilisé par
+        // getHome pour les catégories bonus genres/plateformes).
+        @GET
+        suspend fun getCategoryPage(
+            @retrofit2.http.Url path: String,
+            @Header("Cookie") cookie: String = "dle_skin=VFV1"
+        ): Document
+
+        // 2026-05-04 : recherche GET (résultats complets, pas l'AJAX limité).
+        // Format des hrefs : `<a class="short-poster" href="/index.php?newsid=NNN">`
+        // Avec alt="Title - Saison N" → utilisable pour récupérer toutes les
+        // saisons d'une série (search "Game of Thrones" → S1, S2, ..., S8).
+        // Pagination via `search_start=N` — sans ça on ne voit que les 4 premiers
+        // résultats (FROM S3, S4) et on rate les saisons plus anciennes (S1, S2).
+        @GET(".")
+        suspend fun searchGet(
+            @Query("do") doParam: String = "search",
+            @Query("subaction") subaction: String = "search",
+            @Query("story") query: String,
+            @Query("search_start") searchStart: Int = 1,
+            @Header("Cookie") cookie: String = "dle_skin=VFV1"
+        ): Document
+
+        // 2026-05-04 : nouveau endpoint AJAX qui retourne les épisodes d'une
+        // saison en JSON. Format : {vf:{"1":{premium:..., vidzy:..., ...}, "2":{...}}, vostfr:{...}, vo:{...}}
+        // Découvert en lisant /js/serie-player13.js?v=20260504s ligne ~30:
+        //   xhr.open('GET', '/engine/ajax/sx.php?p=' + newsId, true)
+        // Avant on parsait `<div class="fullsfeature" id="episodeN">` du HTML
+        // mais cette structure a disparu — la div `<div class="episodes-list">`
+        // est maintenant vide côté serveur, populée en JS via cet endpoint.
+        @GET("engine/ajax/sx.php")
+        suspend fun getSerieAjaxJson(
+            @Query("p") newsId: String,
+            @Header("Cookie") cookie: String = "dle_skin=VFV1",
+            @Header("Referer") referer: String = "https://fs03.lol/"
+        ): okhttp3.ResponseBody
 
         // Legacy detail pages (slug-based, kept for backwards compatibility)
         @GET("/{id}")
