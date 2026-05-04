@@ -358,15 +358,26 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
             return genres
         }
-        val document = service.search(query = query)
-        return document.select("div.search-item, div.short").mapNotNull { item ->
-            val linkEl = item.selectFirst("a.short-poster, a") ?: return@mapNotNull null
+        // 2026-05-04 : on utilise searchGet (GET /?do=search) au lieu de l'AJAX
+        // POST /engine/ajax/search.php. L'AJAX retourne `<div class='search-item'
+        // onclick="location.href=...">` (sans <a>), notre selecteur "a.short-poster,a"
+        // ne trouvait rien -> recherche app cassée. Le GET retourne les <div.short>
+        // standards avec <a class="short-poster" href="..." alt="..."> qu'on parse
+        // déjà correctement pour le multi-saisons.
+        val document = service.searchGet(query = query)
+        return document.select("div.short").mapNotNull { item ->
+            val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
             val href = linkEl.attr("href")
             val id = extractNewsId(href)
             if (id.isNullOrBlank()) return@mapNotNull null
+            // Préfère le short-title (court, propre) à l'alt (verbeux "Regarder X").
             val title = (item.selectFirst("div.short-title")?.text()
-                ?: item.selectFirst("div.search-title")?.text())
-                ?.replace("\\'", "'") ?: ""
+                ?: linkEl.attr("alt")
+                    .removePrefix("Regarder ")
+                    .removeSuffix(" en streaming complet")
+                    .removeSuffix(" en streaming")
+                    .trim())
+                .replace("\\'", "'")
             val poster = item.selectFirst("img")?.attr("src") ?: ""
             val isSeries = title.contains("Saison", ignoreCase = true)
                 || href.contains("/s-tv/") || href.contains("/serie/")
