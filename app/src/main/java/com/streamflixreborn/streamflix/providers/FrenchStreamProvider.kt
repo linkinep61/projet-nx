@@ -669,18 +669,6 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         initializeService()
 
-        // 2026-05-04 : FrenchStream a ajouté un mur de login obligatoire
-        // pour voir les players (`<h2>Connectez-vous</h2>`). Sans session, on
-        // récupère une page vide -> 0 serveur. On détecte le wall et retourne
-        // emptyList() silencieusement pour ne pas casser la recherche globale
-        // (les autres providers FR continuent de fonctionner).
-        fun isLoginWall(doc: Document): Boolean {
-            val text = doc.body()?.text() ?: ""
-            return text.contains("Connectez-vous", ignoreCase = true) &&
-                text.contains("Mot de passe", ignoreCase = true) &&
-                doc.selectFirst("button.player-option") == null
-        }
-
         val servers = when (videoType) {
             is Video.Type.Episode -> {
                 val parts = id.split("/")
@@ -689,19 +677,11 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     .toIntOrNull() ?: videoType.number
                 val document = try { fetchDetailPage(tvShowId) }
                     catch (_: Exception) { return emptyList() }
-                if (isLoginWall(document)) {
-                    Log.w("FrenchStream", "Login wall detected for episode $tvShowId/$episodeNum — skipping (FrenchStream now requires authentication)")
-                    return emptyList()
-                }
                 parsePlayersFromPage(document, forEpisodeNumber = episodeNum)
             }
             is Video.Type.Movie -> {
                 val document = try { fetchDetailPage(id) }
                     catch (_: Exception) { return emptyList() }
-                if (isLoginWall(document)) {
-                    Log.w("FrenchStream", "Login wall detected for movie $id — skipping (FrenchStream now requires authentication)")
-                    return emptyList()
-                }
                 parsePlayersFromPage(document, forEpisodeNumber = null)
             }
         }

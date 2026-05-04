@@ -830,9 +830,7 @@ class TmdbProvider(override val language: String) : Provider {
                 val frembedUrl = UserPreferences.getProviderCache(FrembedProvider, UserPreferences.PROVIDER_URL).ifEmpty { FrembedProvider.defaultBaseUrl }
 
                 coroutineScope {
-                    // 2026-05-04 : FrenchStreamProvider retiré (login wall + listing HTML cassé).
-                    // Voir Provider.kt pour le détail. Quand FS aura une solution, le remettre.
-                    val frProviders = listOf(UnJourUnFilmProvider, KidrazProvider)
+                    val frProviders = listOf(UnJourUnFilmProvider, FrenchStreamProvider, KidrazProvider)
                     val perProviderTimeout = 12_000L // 12s max par provider
 
                     // Providers de recherche (priorité par ordre) — timeout individuel
