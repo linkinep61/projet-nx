@@ -29,17 +29,22 @@ open class VidMoLyExtractor : Extractor() {
     private val context = StreamFlixApp.instance.applicationContext
 
     override suspend fun extract(link: String): Video {
-        // vidmoly.to is heavily rate-limited (429) — use .biz which works
-        val normalizedLink = if (link.contains("vidmoly"))
+        // 2026-05-04 : vidmoly.biz a Cloudflare Turnstile (challenge auto-solve
+        // ~8s). vidmoly.to redirige TOUS les nouveaux visiteurs vers une page
+        // de pub (survey-smiles.com) au premier hit (302) — donc on ne peut
+        // pas l'utiliser comme fast-path. Verdict : on force .biz et on gère
+        // le challenge CF dans extractByIntercepting (timeout 45s + poll 1s).
+        val target = if (link.contains("vidmoly"))
             link.replace(Regex("vidmoly\\.(to|me|net)"), "vidmoly.biz")
         else link
 
-        val hlsUrl = extractByIntercepting(normalizedLink)
-        if (hlsUrl != null) {
-            return buildVideo(hlsUrl, normalizedLink)
-        }
+        val hlsUrl = try { extractByIntercepting(target, timeoutMs = 45_000L) }
+            catch (e: Exception) {
+                throw Exception("VidMoLy: extraction failed for $link (${e.message})")
+            }
+        if (hlsUrl != null) return buildVideo(hlsUrl, target)
 
-        throw Exception("VidMoLy: Could not find HLS source in page: $link")
+        throw Exception("VidMoLy: Could not find HLS source in: $link")
     }
 
     private fun buildVideo(hlsUrl: String, pageUrl: String): Video {
@@ -60,12 +65,17 @@ open class VidMoLyExtractor : Extractor() {
      * Also runs JS extraction as backup after page load.
      */
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun extractByIntercepting(url: String): String? =
+    private suspend fun extractByIntercepting(url: String, timeoutMs: Long = 45_000L): String? =
         withContext(Dispatchers.Main) {
             val refererHost = Uri.parse(url).host ?: "vidmoly.to"
             val referer = "https://$refererHost/"
 
-            withTimeoutOrNull(25_000) {
+            // 2026-05-04 : vidmoly.biz a ajouté un challenge Cloudflare. Le
+            // challenge s'auto-solve en ~8s avec UA Chrome + JS puis redirige
+            // vers la même URL avec ?cfp=TOKEN. À ce moment onPageFinished
+            // refire et le m3u8 est dispo. timeoutMs configurable selon
+            // qu'on tente .to (rapide, 12s) ou .biz avec CF (lent, 45s).
+            withTimeoutOrNull(timeoutMs) {
                 suspendCancellableCoroutine { cont ->
                     var resolved = false
 
@@ -79,10 +89,16 @@ open class VidMoLyExtractor : Extractor() {
                     val webView = WebView(context).apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
-                        settings.userAgentString = Extractor.DEFAULT_USER_AGENT
+                        settings.databaseEnabled = true
+                        // 2026-05-04 : Android Chrome UA (matche le runtime
+                        // WebView) pour mieux passer Cloudflare Turnstile.
+                        settings.userAgentString = ANDROID_CHROME_UA
                         settings.mixedContentMode =
                             android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         settings.mediaPlaybackRequiresUserGesture = false
+                        settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
+                        @Suppress("DEPRECATION")
+                        settings.allowFileAccess = true
                     }
 
                     webView.webChromeClient = object : WebChromeClient() {
@@ -113,6 +129,7 @@ open class VidMoLyExtractor : Extractor() {
                             val reqUrl = request?.url?.toString() ?: return null
 
                             if (reqUrl.contains(".m3u8")) {
+                                android.util.Log.d("VidMoLyExtractor", "m3u8 INTERCEPTED via shouldInterceptRequest: $reqUrl")
                                 view?.post { resolve(reqUrl) }
                                 return WebResourceResponse("text/plain", "utf-8", null)
                             }
@@ -128,52 +145,62 @@ open class VidMoLyExtractor : Extractor() {
                         override fun onPageFinished(view: WebView?, finishedUrl: String?) {
                             if (view == null || resolved) return
 
-                            // Check if this is a JS challenge page (small HTML with window.location.replace)
-                            // If so, extract the redirect URL and manually navigate to it
+                            android.util.Log.d("VidMoLyExtractor", "onPageFinished: $finishedUrl")
+
+                            // 2026-05-04 : 3 cas possibles à la fin de chargement :
+                            //  1) Mini page JS-redirect ancienne (h<1000 + window.location.replace)
+                            //  2) Page Cloudflare Turnstile/challenge — auto-solve en ~8s, on attend
+                            //  3) Page player normale avec m3u8 dans le HTML
                             view.evaluateJavascript(
-                                "(function(){ var h = document.documentElement.outerHTML; if (h.length < 1000 && h.indexOf('window.location') > -1) { var m = h.match(/window\\.location\\.replace\\(['\"]([^'\"]+)['\"]/); if (m) return m[1]; } return null; })()"
+                                "(function(){\n" +
+                                "  var h = document.documentElement.outerHTML;\n" +
+                                "  // Cas 1 : JS-redirect mini page\n" +
+                                "  if (h.length < 1000 && h.indexOf('window.location') > -1) {\n" +
+                                "    var m = h.match(/window\\.location\\.replace\\(['\"]([^'\"]+)['\"]/);\n" +
+                                "    if (m) return 'REDIRECT:' + m[1];\n" +
+                                "  }\n" +
+                                "  // Cas 2 : challenge Cloudflare\n" +
+                                "  if (h.indexOf('challenges.cloudflare.com') > -1\n" +
+                                "      || h.indexOf('Verification de securite') > -1\n" +
+                                "      || h.indexOf('Vérification de sécurité') > -1\n" +
+                                "      || h.indexOf('Just a moment') > -1\n" +
+                                "      || h.indexOf('cf-turnstile') > -1) {\n" +
+                                "    return 'CF_CHALLENGE';\n" +
+                                "  }\n" +
+                                "  return null;\n" +
+                                "})()"
                             ) { result ->
-                                val redirectUrl = result?.trim()
-                                    ?.removeSurrounding("\"")
-                                    ?.takeIf { it != "null" && it.startsWith("http") }
-                                if (redirectUrl != null) {
-                                    view.loadUrl(redirectUrl, mapOf("Referer" to referer))
-                                    return@evaluateJavascript
-                                }
-
-                                // Not a challenge page — check for m3u8
-                                if (resolved) return@evaluateJavascript
-
-                                // Try immediate extraction
-                                view.evaluateJavascript(EXTRACT_M3U8_JS) { m3u8Result ->
-                                    val extracted = m3u8Result?.trim()
-                                        ?.removeSurrounding("\"")
-                                        ?.takeIf { it != "null" && it.contains(".m3u8") }
-                                    if (extracted != null) {
-                                        resolve(extracted)
-                                    } else {
-                                        // Retry after delay (JWPlayer may need time to init)
-                                        view.postDelayed({
-                                            if (resolved) return@postDelayed
-                                            view.evaluateJavascript(EXTRACT_M3U8_JS) { retryResult ->
-                                                val retryExtracted = retryResult?.trim()
-                                                    ?.removeSurrounding("\"")
-                                                    ?.takeIf { it != "null" && it.contains(".m3u8") }
-                                                if (retryExtracted != null) {
-                                                    resolve(retryExtracted)
-                                                }
-                                            }
-                                        }, 3000)
+                                val cleaned = result?.trim()?.removeSurrounding("\"")
+                                android.util.Log.d("VidMoLyExtractor", "page state: $cleaned")
+                                when {
+                                    cleaned?.startsWith("REDIRECT:") == true -> {
+                                        val redirectUrl = cleaned.removePrefix("REDIRECT:")
+                                        android.util.Log.d("VidMoLyExtractor", "REDIRECT detected → loading $redirectUrl")
+                                        if (redirectUrl.startsWith("http")) {
+                                            view.loadUrl(redirectUrl, mapOf("Referer" to referer))
+                                        }
+                                        return@evaluateJavascript
+                                    }
+                                    cleaned == "CF_CHALLENGE" -> {
+                                        android.util.Log.d("VidMoLyExtractor", "CF challenge detected → polling for m3u8")
+                                        scheduleCfPoll(view, attempt = 0, ::resolve)
+                                        return@evaluateJavascript
                                     }
                                 }
+
+                                // Cas 3 : page normale, on cherche le m3u8
+                                if (resolved) return@evaluateJavascript
+                                android.util.Log.d("VidMoLyExtractor", "normal page → tryExtractWithRetry")
+                                tryExtractWithRetry(view, ::resolve)
                             }
 
-                            // Final timeout — resolve null after 12s
+                            // Filet de sécurité : timeout après 30s sans m3u8 capturé.
+                            // Bumped de 12s à 30s pour laisser le temps au CF challenge.
                             view.postDelayed({
                                 if (!resolved) {
                                     resolve(null)
                                 }
-                            }, 12000)
+                            }, 30000)
                         }
 
                         override fun onReceivedError(
@@ -196,11 +223,66 @@ open class VidMoLyExtractor : Extractor() {
             }
         }
 
+    /** Tente une extraction immédiate puis un retry à 3s puis 6s.
+     *  Permet à JWPlayer d'avoir le temps d'init même sur connexion lente. */
+    private fun tryExtractWithRetry(view: WebView, resolve: (String?) -> Unit) {
+        view.evaluateJavascript(EXTRACT_M3U8_JS) { result ->
+            val extracted = result?.trim()
+                ?.removeSurrounding("\"")
+                ?.takeIf { it != "null" && it.contains(".m3u8") }
+            if (extracted != null) {
+                resolve(extracted)
+                return@evaluateJavascript
+            }
+            view.postDelayed({
+                view.evaluateJavascript(EXTRACT_M3U8_JS) { r2 ->
+                    val e2 = r2?.trim()?.removeSurrounding("\"")
+                        ?.takeIf { it != "null" && it.contains(".m3u8") }
+                    if (e2 != null) resolve(e2)
+                    else view.postDelayed({
+                        view.evaluateJavascript(EXTRACT_M3U8_JS) { r3 ->
+                            val e3 = r3?.trim()?.removeSurrounding("\"")
+                                ?.takeIf { it != "null" && it.contains(".m3u8") }
+                            if (e3 != null) resolve(e3)
+                        }
+                    }, 3000)
+                }
+            }, 3000)
+        }
+    }
+
+    /** Poll la page toutes les 1s pendant ~25s en attendant que le challenge
+     *  Cloudflare Turnstile se résolve (auto-solve typique : 5-15s) et que
+     *  le m3u8 apparaisse dans le HTML. Premier check immédiat (delay=0)
+     *  puis 1s entre chaque retry — minimise la latence quand le challenge
+     *  passe vite. */
+    private fun scheduleCfPoll(view: WebView, attempt: Int, resolve: (String?) -> Unit) {
+        if (attempt > 25) return // max 25 polls × 1s = 25s
+        val delay = if (attempt == 0) 0L else 1000L
+        view.postDelayed({
+            view.evaluateJavascript(EXTRACT_M3U8_JS) { r ->
+                val extracted = r?.trim()?.removeSurrounding("\"")
+                    ?.takeIf { it != "null" && it.contains(".m3u8") }
+                if (extracted != null) {
+                    resolve(extracted)
+                } else {
+                    scheduleCfPoll(view, attempt + 1, resolve)
+                }
+            }
+        }, delay)
+    }
+
     class ToDomain : VidMoLyExtractor() {
         override val mainUrl: String = "https://vidmoly.to/"
     }
 
     companion object {
+        // UA Android Chrome — matche le runtime de la WebView Android, donc
+        // moins de chance que Cloudflare le flag comme bot vs un UA Windows
+        // qui crée un mismatch suspect.
+        private const val ANDROID_CHROME_UA =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+
         private val BLOCKED_HOSTS = listOf(
             "ww1.vidmoly", "ww2.vidmoly", "ww3.vidmoly", "ww4.vidmoly", "ww5.vidmoly",
             "googlesyndication", "doubleclick", "adservice",

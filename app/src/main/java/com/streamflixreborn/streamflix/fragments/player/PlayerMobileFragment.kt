@@ -240,6 +240,14 @@ class PlayerMobileFragment : Fragment() {
     private var awaitTimeoutHandler: android.os.Handler? = null
     private var awaitTimeoutRunnable: Runnable? = null
 
+    // 2026-05-04 : message d'attente affiché pendant l'extraction quand
+    // ça traîne (typiquement Cloudflare challenge sur vidmoly). 3 paliers :
+    //  - 5s : "Chargement..."
+    //  - 12s : "Vérification CF en cours, peut prendre 30s..."
+    //  - 25s : "Toujours en cours, patience..."
+    private var patienceHandler: android.os.Handler? = null
+    private val patienceRunnables = mutableListOf<Runnable>()
+
     private var currentVideo: Video? = null
     private var currentServer: Video.Server? = null
     private var usingCronet = false
@@ -577,18 +585,21 @@ class PlayerMobileFragment : Fragment() {
                         // FileNotFoundException and puts the player in ERROR state
                         // before extraction finishes. displayVideo() will set the
                         // real MediaItem when SuccessLoadingVideo arrives.
+                        schedulePatienceMessages()
                     }
 
                     is PlayerViewModel.State.SuccessLoadingVideo -> {
                         // Channel works — unmark as failed if it was, cancel any pending wait
                         UserPreferences.unmarkChannelFailed(args.id)
                         cancelAwaitMoreServers()
+                        cancelPatienceMessages()
                         PlayerSettingsView.Settings.ExtraBuffering.init(state.video.extraBuffering)
                         PlayerSettingsView.Settings.SoftwareDecoder.init(false)
                         displayVideo(state.video, state.server)
                     }
 
                     is PlayerViewModel.State.FailedLoadingVideo -> {
+                        cancelPatienceMessages()
                         // Drop this broken variant from the visible Chaîne page so the user
                         // doesn't see piling up dead entries. Re-emitted next session.
                         pruneBrokenVariant(state.server)
@@ -933,6 +944,7 @@ class PlayerMobileFragment : Fragment() {
             progressHandler.removeCallbacks(progressRunnable)
         }
         cancelAwaitMoreServers()
+        cancelPatienceMessages()
 
         // Cleanup DaddyLive proxy WebView
         daddyLiveProxyWebView?.let {
@@ -1388,6 +1400,36 @@ class PlayerMobileFragment : Fragment() {
         awaitTimeoutRunnable?.let { awaitTimeoutHandler?.removeCallbacks(it) }
         awaitTimeoutHandler = null
         awaitTimeoutRunnable = null
+    }
+
+    /** Affiche un Toast à 5s, 12s et 25s après l'entrée en LoadingVideo
+     *  pour informer l'utilisateur que l'extraction est encore en cours
+     *  (typique sur vidmoly.biz avec challenge Cloudflare). */
+    private fun schedulePatienceMessages() {
+        cancelPatienceMessages()
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        patienceHandler = handler
+        val ctx = context ?: return
+        listOf(
+            5_000L  to R.string.player_patience_short,
+            12_000L to R.string.player_patience_long,
+            25_000L to R.string.player_patience_very_long,
+        ).forEach { (delay, resId) ->
+            val r = Runnable {
+                if (isAdded) {
+                    Toast.makeText(ctx, getString(resId), Toast.LENGTH_SHORT).show()
+                }
+            }
+            patienceRunnables.add(r)
+            handler.postDelayed(r, delay)
+        }
+    }
+
+    private fun cancelPatienceMessages() {
+        val h = patienceHandler ?: return
+        patienceRunnables.forEach { h.removeCallbacks(it) }
+        patienceRunnables.clear()
+        patienceHandler = null
     }
 
     /** Mark a server as tried and remove it from the Chaîne page so broken variants
