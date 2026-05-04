@@ -709,6 +709,48 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
     }
 
+    /** 2026-05-04 : récupère les Video.Server d'un FILM via l'API AJAX
+     *  `/engine/ajax/film_api.php?id={newsId}`. Le JSON retourne :
+     *    {"players":{"vidzy":{"default":"url","vostfr":"url","vfq":"url"},
+     *                "premium":{...}, "uqload":{...}, "dood":{...}, "voe":{...}, "filmoon":{...}}, ...}
+     *  On expose chaque player × chaque version, en dédoublonnant les URLs
+     *  identiques (default == vostfr arrive souvent quand le film n'a qu'une
+     *  version dispo). */
+    private suspend fun fetchMoviePlayersFromAjax(filmId: String): List<Video.Server> {
+        if (!filmId.all { it.isDigit() }) return emptyList()
+        val body = service.getFilmAjaxJson(filmId).string()
+        if (body.isBlank()) return emptyList()
+        val json = org.json.JSONObject(body)
+        val players = json.optJSONObject("players") ?: return emptyList()
+
+        val out = mutableListOf<Video.Server>()
+        val seen = HashSet<String>()
+        // Order: VF default first, then VFQ (Quebec), then VOSTFR (sub)
+        val versionLabels = listOf("default" to "VF", "vfq" to "VFQ", "vostfr" to "VOSTFR")
+        // Order players by reliability (most stable first)
+        val playerOrder = listOf("vidzy", "voe", "filmoon", "dood", "uqload", "premium")
+        val orderedPlayers = playerOrder.filter { players.has(it) } +
+            players.keys().asSequence().filter { it !in playerOrder }
+
+        orderedPlayers.forEach { playerName ->
+            val playerObj = players.optJSONObject(playerName) ?: return@forEach
+            versionLabels.forEach { (versionKey, versionLabel) ->
+                val url = playerObj.optString(versionKey).trim()
+                if (url.isBlank() || !url.startsWith("http")) return@forEach
+                if (url.contains("vid=&", ignoreCase = true)) return@forEach
+                if (ignoreSource(playerName, url)) return@forEach
+                if (!seen.add(url)) return@forEach
+                val displayName = "${playerName.replaceFirstChar { it.uppercase() }} ($versionLabel)"
+                out.add(Video.Server(
+                    id = "fs_film_${playerName}_$versionKey",
+                    name = displayName,
+                    src = url,
+                ))
+            }
+        }
+        return out
+    }
+
     /** 2026-05-04 : récupère les Video.Server pour un épisode donné via l'API
      *  AJAX. Itère sur les versions VF/VOSTFR/VO et expose chaque player avec
      *  un label "Player (Version)". */
@@ -963,9 +1005,23 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 }
             }
             is Video.Type.Movie -> {
-                val document = try { fetchDetailPage(id) }
-                    catch (_: Exception) { return emptyList() }
-                parsePlayersFromPage(document, forEpisodeNumber = null)
+                // 2026-05-04 : tente d'abord l'API AJAX `film_api.php?id=N`
+                // (nouveau template VFR1). Fallback sur l'ancien parser HTML
+                // pour les vieux films qui ont encore le `playerUrls = {...}`
+                // inline.
+                val ajaxServers = try { fetchMoviePlayersFromAjax(id) }
+                    catch (e: Exception) {
+                        Log.w("FrenchStream", "AJAX film_api failed for $id: ${e.message}")
+                        emptyList()
+                    }
+                if (ajaxServers.isNotEmpty()) {
+                    Log.d("FrenchStream", "AJAX film_api: ${ajaxServers.size} players for $id")
+                    ajaxServers
+                } else {
+                    val document = try { fetchDetailPage(id) }
+                        catch (_: Exception) { return emptyList() }
+                    parsePlayersFromPage(document, forEpisodeNumber = null)
+                }
             }
         }
 
@@ -1173,6 +1229,22 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             @Query("search_start") searchStart: Int = 1,
             @Header("Cookie") cookie: String = "dle_skin=VFV1"
         ): Document
+
+        // 2026-05-04 : endpoint AJAX qui retourne les players d'un film en JSON.
+        // Format : {"players":{"premium":{"default":"...","vostfr":"...","vfq":"..."},
+        //          "vidzy":{...}, "uqload":{...}, "dood":{...}, "voe":{...}, "filmoon":{...}},
+        //          "meta":{...}}
+        // Découvert en sniffant la network XHR sur /index.php?newsid=15126804.
+        // Avant on parsait `playerUrls = {...}` du HTML mais cette structure
+        // n'apparait QUE sur les vieux films — les nouveaux (template VFR1
+        // 2026) chargent les players via cet endpoint AJAX. Marche pour les
+        // 2 templates donc on l'utilise en priorité.
+        @GET("engine/ajax/film_api.php")
+        suspend fun getFilmAjaxJson(
+            @Query("id") newsId: String,
+            @Header("Cookie") cookie: String = "dle_skin=VFV1",
+            @Header("Referer") referer: String = "https://fs03.lol/"
+        ): okhttp3.ResponseBody
 
         // 2026-05-04 : nouveau endpoint AJAX qui retourne les épisodes d'une
         // saison en JSON. Format : {vf:{"1":{premium:..., vidzy:..., ...}, "2":{...}}, vostfr:{...}, vo:{...}}
