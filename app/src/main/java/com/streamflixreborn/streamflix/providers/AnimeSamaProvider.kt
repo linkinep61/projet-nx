@@ -200,8 +200,14 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             }
 
             if (sectionTitle.isBlank()) continue
-            // Skip sections de scans/mangas/webtoons — pas de contenu video lisible
+            // 2026-05-03 : sur anime-sama.to/, après "Derniers scans ajoutés"
+            // toutes les sections sont scans/mangas/webtoons. On BREAK la boucle
+            // dès qu'on rencontre cette section pour ne plus rien parser ensuite
+            // (info confirmée par le user : à partir de "Derniers épisodes
+            // ajoutés" après c'est que des scans).
             val sectionLowerCheck = sectionTitle.lowercase()
+            if (sectionLowerCheck.contains("derniers scans") || sectionLowerCheck.contains("derniers manga")) break
+            // Skip individuelles : sections scans/mangas/webtoons
             if (listOf("scan", "manga", "manhwa", "manhua", "webtoon", "light novel", "ln ").any { sectionLowerCheck.contains(it) }) continue
             // Skip "Reprenez votre visionnage" — requires user cookies (not available server-side)
             if (sectionTitle.contains("Reprenez", ignoreCase = true)) continue
@@ -232,23 +238,42 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                         ?: el.attr("data-src")?.takeIf { it.isNotBlank() }
                 } ?: "${IMG_BASE}${slug}.jpg"
 
-                // Skip scans/mangas/etc (pas de contenu video lisible).
-                // Plusieurs heuristiques car AnimeSama mélange anime + scan dans
-                // les sections "Derniers contenus sortis" et "Sorties dimanche/
-                // lundi/etc" : badge text peut etre Scan/Scans/SCAN/Manga/...
+                // 2026-05-03 : ALLOWLIST strict — on ne garde QUE les cards qui
+                // sont explicitement marquées vidéo (Anime / Film). Tout le reste
+                // (scans, mangas, manhwa, webtoons, light novels, ce qu'on n'a
+                // jamais vu) est SKIPPÉ. Plus robuste qu'un denylist qu'il faut
+                // maintenir au fil des nouveaux types ajoutés par AnimeSama.
+                //
+                // Marqueurs vidéo (au moins 1 doit matcher) :
+                //   1) badge-text contient "anime" ou "film"
+                //   2) parent class contient "anime-badge" ou "film-badge"
+                //   3) 2e segment du href est un type vidéo (saison*, film, kai,
+                //      oav, ova, special, episodes…) ou une langue (vostfr, vf…)
+                //
+                // Les scans ont href /catalogue/{slug}/scan/{lang} → segment 2
+                // = "scan" qui n'est PAS dans l'allowlist → SKIP automatique.
                 val badgeText = card.selectFirst(".badge-text")?.text()?.trim()?.lowercase() ?: ""
-                val nonVideoBadges = listOf("scan", "manga", "manhwa", "manhua", "webtoon", "light novel")
-                if (nonVideoBadges.any { badgeText.contains(it) }) return@mapNotNull null
-                // Aussi : si le href contient /scan/ ou /manga/ ou /scans/, c'est pas video
-                val hrefLower = href.lowercase()
-                if (listOf("/scan/", "/scans/", "/manga/", "/webtoon/").any { hrefLower.contains(it) }) return@mapNotNull null
-                // Si le slug se termine par -scan, -manga, etc.
-                val slugLower = slug.lowercase()
-                if (listOf("-scan", "-scans", "-manga", "-webtoon").any { slugLower.endsWith(it) }) return@mapNotNull null
-                // Use SECTION title to classify (more reliable than per-item badge)
+                val parentBadgeClasses = card.select(".badge").joinToString(" ") { it.className() }.lowercase()
+                val pathSegments = href.substringAfter("/catalogue/").split("/").filter { it.isNotBlank() }
+                val typeSegment = pathSegments.getOrNull(1)?.lowercase() ?: ""
+
+                val videoBadgeTokens = listOf("anime", "film", "movie", "série", "serie", "ova", "oav", "special", "épisode", "episode")
+                val videoTypeSegments = listOf("saison", "film", "movie", "kai", "oav", "ova", "special", "episodes", "vostfr", "vf", "va", "vo")
+
+                val isVideoByBadge = videoBadgeTokens.any { badgeText.contains(it) } ||
+                        listOf("anime-badge", "film-badge", "movie-badge").any { parentBadgeClasses.contains(it) }
+                val isVideoByPath = videoTypeSegments.any { token ->
+                    typeSegment == token || typeSegment.startsWith("${token}-") || typeSegment.startsWith(token) && typeSegment.length <= token.length + 2
+                }
+
+                if (!isVideoByBadge && !isVideoByPath) return@mapNotNull null
+                // 2026-05-03 : classification Movie vs TvShow basée sur le BADGE
+                // par card (plus fiable que le titre de section, car les sections
+                // "Sorties du Dimanche/Lundi/etc" mélangent Anime + Film).
+                // Fallback sur le titre de section si pas de badge clair.
                 val sectionLower = sectionTitle.lowercase()
-                val isFilmSection = sectionLower.contains("film")
-                if (isFilmSection) {
+                val isFilm = badgeText.contains("film") || (badgeText.isBlank() && sectionLower.contains("film"))
+                if (isFilm) {
                     Movie(id = slug, title = title, poster = img)
                 } else {
                     TvShow(id = slug, title = title, poster = img)
@@ -266,11 +291,16 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             }
         }
 
-        // FEATURED: Build hero slider from "Derniers contenus sortis"
-        // No per-item probing — trust the homepage cards (saves 60-120 HTTP requests)
+        // FEATURED: Build hero slider from "Derniers contenus sortis" en priorité,
+        // sinon fallback sur la première section vidéo disponible (Sorties du jour,
+        // animes populaires, etc.). Sans fallback, le carrousel disparait totalement
+        // quand AnimeSama renomme/supprime "Derniers contenus sortis" du home.
         val derniersContenus = categories.firstOrNull {
             it.name.lowercase().contains("derniers contenus")
-        }
+        } ?: categories.firstOrNull {
+            val n = it.name.lowercase()
+            n.contains("derniers épisodes") || n.contains("derniers episodes") || n.contains("sorties du") || n.contains("ajoutés") || n.contains("ajoutes")
+        } ?: categories.firstOrNull { it.list.isNotEmpty() }
         if (derniersContenus != null) {
             val featured = derniersContenus.list.take(10).map { item ->
                 when (item) {
