@@ -37,6 +37,7 @@ android {
         buildConfigField "String", "TMDB_API_KEY", "\"${properties.getProperty("TMDB_API_KEY")}\""
         buildConfigField "String", "SUBDL_API_KEY", "\"${properties.getProperty("SUBDL_API_KEY")}\""
         buildConfigField "String", "RABBITSTREAM_SOURCE_API", "\"${properties.getProperty("RABBITSTREAM_SOURCE_API")}\""
+        buildConfigField "String", "OPENSUBTITLES_API_KEY", "\"${properties.getProperty("OPENSUBTITLES_API_KEY") ?: ""}\""
     }
 
     sourceSets {
