@@ -110,7 +110,14 @@ class PlayerViewModel(
         try {
             val provider = UserPreferences.currentProvider ?: return@launch
             val rawServers = provider.getServers(id, videoType)
-            if (rawServers.isEmpty()) throw Exception("No servers found")
+            if (rawServers.isEmpty()) {
+                // Message clair pour l'utilisateur (vs "No servers found" en
+                // anglais). Souvent ça arrive sur des films/séries trop récents
+                // ou trop obscurs où le provider courant n'a pas indexé de
+                // source. Suggérer de changer de provider évite la confusion
+                // "ça marche pas, l'app est cassée".
+                throw Exception("Aucune source disponible pour ce contenu sur ${provider.name}. Essayez un autre provider ou réessayez plus tard.")
+            }
 
             // Deprioritize problematic servers — put them last
             val netuPatterns = listOf("netu", "waaw", "hqq", "hqcloud", "younetu")

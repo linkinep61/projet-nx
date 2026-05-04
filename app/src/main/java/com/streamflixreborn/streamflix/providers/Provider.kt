@@ -90,12 +90,13 @@ interface Provider {
             // nakios.online si jamais le TLD change. enrichHome = false car
             // NakiosProvider.getHome() construit déjà 6 catégories propres.
             NakiosProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
-            // FrenchStream: enrichment disabled — the site's natural home
-            // already has "Nouveautés Films" + "Nouveautés Séries" sections,
-            // and enrichment caused the rows to flip ("Films Récents" ↔
-            // "Séries Récentes" on the same position) when the second emit
-            // arrived ~1.5s after the base.
-            FrenchStreamProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
+            // 2026-05-04 : FrenchStream désactivé temporairement.
+            // Le site (fs03.lol) a ajouté un mur de login obligatoire pour
+            // les pages détail (`<h2>Connectez-vous</h2>`) ET refondu son
+            // listing HTML (les `a.short-poster` ont disparu, parser ne match
+            // plus rien -> séries 0 dans la liste). Réactiver quand on aura
+            // une solution (mirror sans login OU reverse de leur API XHR).
+            // FrenchStreamProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             MovixProvider to ProviderSupport(movies = true, tvShows = true),
             UnJourUnFilmProvider to ProviderSupport(movies = true, tvShows = true),
             AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
