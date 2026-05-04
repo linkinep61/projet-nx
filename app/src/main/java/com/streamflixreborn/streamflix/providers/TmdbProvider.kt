@@ -29,6 +29,8 @@ import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.TMDb3.original
 import com.streamflixreborn.streamflix.utils.TMDb3.w500
+import com.streamflixreborn.streamflix.utils.TMDb3.w780
+import com.streamflixreborn.streamflix.utils.TMDb3.w1280
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.safeSubList
 import android.util.Base64
@@ -50,7 +52,37 @@ class TmdbProvider(override val language: String) : Provider {
     override val logo =
         "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_tmdb"
 
+    companion object {
+        // 2026-05-04 : cache mémoire de getHome() — partagé par langue (la
+        // classe est instanciée plusieurs fois). Le home fait ~22 calls
+        // réseau (3 pages × 7 sections), recharger à chaque pull-to-refresh
+        // ou retour Home/Search est wasteful. TTL 30 min : assez court pour
+        // que les sections "Trending" reflètent le quotidien, assez long
+        // pour rendre l'UX instantanée. L'utilisateur peut forcer en faisant
+        // pull-to-refresh manuel après expiration.
+        private const val HOME_CACHE_TTL_MS = 30L * 60L * 1000L
+        private data class CachedHome(val categories: List<com.streamflixreborn.streamflix.models.Category>, val expiresAtMs: Long)
+        private val homeCache = java.util.concurrent.ConcurrentHashMap<String, CachedHome>()
+
+        // Cache search() — TTL court (5 min). Les utilisateurs retapent
+        // souvent la même requête à la suite (typo, retour arrière).
+        private const val SEARCH_CACHE_TTL_MS = 5L * 60L * 1000L
+        private data class CachedSearch(val results: List<AppAdapter.Item>, val expiresAtMs: Long)
+        private val searchCache = java.util.concurrent.ConcurrentHashMap<String, CachedSearch>()
+    }
+
     override suspend fun getHome(): List<Category> = coroutineScope {
+        // 2026-05-04 : cache hit ?
+        val cacheKey = "home:$language"
+        val now = System.currentTimeMillis()
+        homeCache[cacheKey]?.let { cached ->
+            if (now < cached.expiresAtMs) {
+                Log.d("TmdbProvider", "getHome cache HIT for $cacheKey (${cached.categories.size} cats, age=${(now - (cached.expiresAtMs - HOME_CACHE_TTL_MS)) / 1000}s)")
+                return@coroutineScope cached.categories
+            }
+            homeCache.remove(cacheKey)
+        }
+
         val categories = mutableListOf<Category>()
         val watchRegion = if (language == "en") "US" else language.uppercase()
 
@@ -63,7 +95,7 @@ class TmdbProvider(override val language: String) : Provider {
                     released = multi.releaseDate,
                     rating = multi.voteAverage.toDouble(),
                     poster = multi.posterPath?.w500,
-                    banner = multi.backdropPath?.original,
+                    banner = multi.backdropPath?.w1280,
                 )
 
                 is TMDb3.Tv -> TvShow(
@@ -73,7 +105,7 @@ class TmdbProvider(override val language: String) : Provider {
                     released = multi.firstAirDate,
                     rating = multi.voteAverage.toDouble(),
                     poster = multi.posterPath?.w500,
-                    banner = multi.backdropPath?.original,
+                    banner = multi.backdropPath?.w1280,
                 )
 
                 else -> null
@@ -358,6 +390,16 @@ class TmdbProvider(override val language: String) : Provider {
             )
         )
 
+        // 2026-05-04 : cache write (TTL 30 min). On ne cache que les "vrais"
+        // home (>3 catégories) pour éviter de mémoriser un état d'erreur partiel
+        // si plusieurs sections ont timeout.
+        if (categories.size >= 3) {
+            homeCache[cacheKey] = CachedHome(
+                categories = categories.toList(),
+                expiresAtMs = System.currentTimeMillis() + HOME_CACHE_TTL_MS,
+            )
+        }
+
         categories
     }
 
@@ -379,6 +421,18 @@ class TmdbProvider(override val language: String) : Provider {
             return genres
         }
 
+        // 2026-05-04 : cache search (TTL 5 min). User retape vite la même
+        // recherche après un retour arrière, ou cycle entre 2-3 termes.
+        val searchKey = "search:$language:${query.trim().lowercase()}:p$page"
+        val now = System.currentTimeMillis()
+        searchCache[searchKey]?.let { cached ->
+            if (now < cached.expiresAtMs) {
+                Log.d("TmdbProvider", "search cache HIT for '$query' p$page")
+                return cached.results
+            }
+            searchCache.remove(searchKey)
+        }
+
         val results = TMDb3.Search.multi(query, page = page, language = language).results.mapNotNull { multi ->
             when (multi) {
                 is TMDb3.Movie -> Movie(
@@ -388,7 +442,7 @@ class TmdbProvider(override val language: String) : Provider {
                     released = multi.releaseDate,
                     rating = multi.voteAverage.toDouble(),
                     poster = multi.posterPath?.w500,
-                    banner = multi.backdropPath?.original,
+                    banner = multi.backdropPath?.w1280,
                 )
 
                 is TMDb3.Tv -> TvShow(
@@ -398,11 +452,19 @@ class TmdbProvider(override val language: String) : Provider {
                     released = multi.firstAirDate,
                     rating = multi.voteAverage.toDouble(),
                     poster = multi.posterPath?.w500,
-                    banner = multi.backdropPath?.original,
+                    banner = multi.backdropPath?.w1280,
                 )
 
                 else -> null
             }
+        }
+
+        // Cache write (sauf si vide → laisser le user retry rapidement)
+        if (results.isNotEmpty()) {
+            searchCache[searchKey] = CachedSearch(
+                results = results,
+                expiresAtMs = System.currentTimeMillis() + SEARCH_CACHE_TTL_MS,
+            )
         }
 
         return results
@@ -417,7 +479,7 @@ class TmdbProvider(override val language: String) : Provider {
                 released = movie.releaseDate,
                 rating = movie.voteAverage.toDouble(),
                 poster = movie.posterPath?.w500,
-                banner = movie.backdropPath?.original,
+                banner = movie.backdropPath?.w1280,
             )
         }
 
@@ -433,7 +495,7 @@ class TmdbProvider(override val language: String) : Provider {
                 released = tv.firstAirDate,
                 rating = tv.voteAverage.toDouble(),
                 poster = tv.posterPath?.w500,
-                banner = tv.backdropPath?.original,
+                banner = tv.backdropPath?.w1280,
             )
         }
 
@@ -462,8 +524,8 @@ class TmdbProvider(override val language: String) : Provider {
                     ?.firstOrNull { it.site == TMDb3.Video.VideoSite.YOUTUBE }
                     ?.let { "https://www.youtube.com/watch?v=${it.key}" },
                 rating = movie.voteAverage.toDouble(),
-                poster = movie.posterPath?.original,
-                banner = movie.backdropPath?.original,
+                poster = movie.posterPath?.w780,
+                banner = movie.backdropPath?.w1280,
                 imdbId = movie.externalIds?.imdbId,
 
                 genres = movie.genres.map { genre ->
@@ -488,7 +550,7 @@ class TmdbProvider(override val language: String) : Provider {
                             released = multi.releaseDate,
                             rating = multi.voteAverage.toDouble(),
                             poster = multi.posterPath?.w500,
-                            banner = multi.backdropPath?.original,
+                            banner = multi.backdropPath?.w1280,
                         )
 
                         is TMDb3.Tv -> TvShow(
@@ -498,7 +560,7 @@ class TmdbProvider(override val language: String) : Provider {
                             released = multi.firstAirDate,
                             rating = multi.voteAverage.toDouble(),
                             poster = multi.posterPath?.w500,
-                            banner = multi.backdropPath?.original,
+                            banner = multi.backdropPath?.w1280,
                         )
 
                         else -> null
@@ -531,8 +593,8 @@ class TmdbProvider(override val language: String) : Provider {
                     ?.firstOrNull { it.site == TMDb3.Video.VideoSite.YOUTUBE }
                     ?.let { "https://www.youtube.com/watch?v=${it.key}" },
                 rating = tv.voteAverage.toDouble(),
-                poster = tv.posterPath?.original,
-                banner = tv.backdropPath?.original,
+                poster = tv.posterPath?.w780,
+                banner = tv.backdropPath?.w1280,
                 imdbId = tv.externalIds?.imdbId,
 
                 seasons = tv.seasons.map { season ->
@@ -565,7 +627,7 @@ class TmdbProvider(override val language: String) : Provider {
                             released = multi.releaseDate,
                             rating = multi.voteAverage.toDouble(),
                             poster = multi.posterPath?.w500,
-                            banner = multi.backdropPath?.original,
+                            banner = multi.backdropPath?.w1280,
                         )
 
                         is TMDb3.Tv -> TvShow(
@@ -575,7 +637,7 @@ class TmdbProvider(override val language: String) : Provider {
                             released = multi.firstAirDate,
                             rating = multi.voteAverage.toDouble(),
                             poster = multi.posterPath?.w500,
-                            banner = multi.backdropPath?.original,
+                            banner = multi.backdropPath?.w1280,
                         )
 
                         else -> null
@@ -638,7 +700,7 @@ class TmdbProvider(override val language: String) : Provider {
                     released = movie.releaseDate,
                     rating = movie.voteAverage.toDouble(),
                     poster = movie.posterPath?.w500,
-                    banner = movie.backdropPath?.original,
+                    banner = movie.backdropPath?.w1280,
                 )
             }.mix(TMDb3.Discover.tv(
                 page = page,
@@ -652,7 +714,7 @@ class TmdbProvider(override val language: String) : Provider {
                     released = tv.firstAirDate,
                     rating = tv.voteAverage.toDouble(),
                     poster = tv.posterPath?.w500,
-                    banner = tv.backdropPath?.original,
+                    banner = tv.backdropPath?.w1280,
                 )
             })
         )
@@ -687,7 +749,7 @@ class TmdbProvider(override val language: String) : Provider {
                                 released = multi.releaseDate,
                                 rating = multi.voteAverage.toDouble(),
                                 poster = multi.posterPath?.w500,
-                                banner = multi.backdropPath?.original,
+                                banner = multi.backdropPath?.w1280,
                             )
 
                             is TMDb3.Tv -> TvShow(
@@ -697,7 +759,7 @@ class TmdbProvider(override val language: String) : Provider {
                                 released = multi.firstAirDate,
                                 rating = multi.voteAverage.toDouble(),
                                 poster = multi.posterPath?.w500,
-                                banner = multi.backdropPath?.original,
+                                banner = multi.backdropPath?.w1280,
                             )
 
                         else -> null
@@ -817,14 +879,60 @@ class TmdbProvider(override val language: String) : Provider {
                     }
                     // AfterDark retiré
 
+                    // 2026-05-04 : MazQuest (allostreaming.one / waaatch.art via
+                    // embed.maz.quest -> Yandex Disk MP4 direct). Gros catalogue
+                    // VF de vieilles séries (NY911, Friends, etc.) que les autres
+                    // providers FR ne couvrent plus. TV uniquement (l'endpoint
+                    // film côté maz.quest passe par un pipeline avec login wall).
+                    val mazQuestDeferred = async {
+                        try {
+                            withTimeoutOrNull(perProviderTimeout) {
+                                val ep = videoType as? Video.Type.Episode
+                                    ?: return@withTimeoutOrNull emptyList()
+                                val tmdbId = ep.tvShow.id
+                                val ssPad = "%02d".format(ep.season.number)
+                                val epPad = "%02d".format(ep.number)
+                                val url = "https://embed.maz.quest/tv/api/$tmdbId/$ssPad/$epPad"
+                                val req = okhttp3.Request.Builder()
+                                    .url(url)
+                                    .header("Accept", "application/json")
+                                    .build()
+                                val resp = com.streamflixreborn.streamflix.utils.NetworkClient.default
+                                    .newCall(req).execute()
+                                val body = resp.body?.string()
+                                if (body.isNullOrBlank()) return@withTimeoutOrNull emptyList()
+                                val json = org.json.JSONObject(body)
+                                val hasSource = !json.optBoolean("error", true)
+                                    && (json.optJSONArray("links")?.length() ?: 0) > 0
+                                if (!hasSource) {
+                                    Log.d("StreamFlixFR", "[MAZQUEST] no source for $tmdbId S${ssPad}E$epPad")
+                                    return@withTimeoutOrNull emptyList()
+                                }
+                                Log.i("StreamFlixFR", "[MAZQUEST] +1 server (Yandex VF) for $tmdbId S${ssPad}E$epPad")
+                                listOf(
+                                    Video.Server(
+                                        id = "mazquest-tv-$tmdbId-$ssPad-$epPad",
+                                        name = "Yandex VF (Maz)",
+                                        src = url,
+                                    )
+                                )
+                            } ?: emptyList()
+                        } catch (e: Exception) {
+                            Log.e("StreamFlixFR", "[MAZQUEST] error: ${e.message}")
+                            emptyList()
+                        }
+                    }
+
                     // Collecter tous les résultats
                     val providerResults = providerDeferred.awaitAll()
                     val frembedServers = frembedDeferred.await()
+                    val mazQuestServers = mazQuestDeferred.await()
 
                     // Assembler : providers par priorité, puis extracteurs
                     val allFrServers = mutableListOf<Video.Server>()
                     providerResults.sortedBy { it.first }.forEach { allFrServers.addAll(it.second) }
                     allFrServers.addAll(frembedServers)
+                    allFrServers.addAll(mazQuestServers)
 
                     // Trier : VF/French/TrueFrench en premier, VOSTFR à la fin
                     // + priorité aux serveurs fiables (Vidzy, Uqload, Filemoon, Voe, Netu...)

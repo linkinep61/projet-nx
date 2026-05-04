@@ -21,6 +21,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import retrofit2.Retrofit
@@ -28,6 +29,7 @@ import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Path
 import retrofit2.http.Query
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
@@ -74,6 +76,69 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             l == "multi" -> "Multi"
             else -> lang.uppercase()
         }
+    }
+
+    // ── 2026-05-04 : Circuit breaker par endpoint ────────────────────────
+    // Movix expose 6+ sub-APIs (fstream, links, wiflix, cpasmal, tmdb, drama,
+    // purstream...). Plusieurs renvoient 404 systématiquement sur les vieux
+    // contenus (cpasmal sur séries pré-2010 par ex.) et nous font perdre des
+    // secondes à chaque chargement. On garde l'appel "au cas où" mais avec un
+    // timeout strict + désactivation temporaire après N timeouts/erreurs.
+    private const val ENDPOINT_TIMEOUT_MS = 4_000L
+    private const val ENDPOINT_FAILURE_THRESHOLD = 5
+    private const val ENDPOINT_DISABLED_MS = 30L * 60L * 1000L // 30 min
+    private data class EndpointHealth(
+        var consecutiveFailures: Int = 0,
+        var disabledUntilMs: Long = 0L,
+    )
+    private val endpointHealth = ConcurrentHashMap<String, EndpointHealth>()
+
+    /** Wrap d'appel endpoint Movix : timeout 4s + circuit breaker.
+     *  Si ça timeout ou throw, on retourne emptyList(). 5 fails consécutifs
+     *  → endpoint désactivé 30 min (skip immédiat). 1 succès → reset le compteur. */
+    private suspend inline fun <T : List<Video.Server>> runEndpoint(
+        endpointName: String,
+        crossinline block: suspend () -> T,
+    ): List<Video.Server> {
+        val health = endpointHealth.getOrPut(endpointName) { EndpointHealth() }
+        val now = System.currentTimeMillis()
+        if (now < health.disabledUntilMs) {
+            return emptyList()
+        }
+        val result = try {
+            withTimeoutOrNull(ENDPOINT_TIMEOUT_MS) { block() }
+        } catch (e: Exception) {
+            Log.w("MovixProvider", "Endpoint '$endpointName' threw: ${e.message}")
+            null
+        }
+        synchronized(health) {
+            if (result.isNullOrEmpty()) {
+                health.consecutiveFailures++
+                if (health.consecutiveFailures >= ENDPOINT_FAILURE_THRESHOLD) {
+                    health.disabledUntilMs = System.currentTimeMillis() + ENDPOINT_DISABLED_MS
+                    Log.w("MovixProvider", "Endpoint '$endpointName' disabled for 30min after ${health.consecutiveFailures} consecutive failures")
+                    health.consecutiveFailures = 0
+                }
+            } else {
+                health.consecutiveFailures = 0
+            }
+        }
+        return result ?: emptyList()
+    }
+
+    // ── 2026-05-04 : Cache du résultat agrégé getServers ──────────────────
+    // L'utilisateur ferme le player et y revient -> on refaisait 6 appels API
+    // + l'assemblage à chaque fois (1-3s). Maintenant on cache le résultat
+    // par clé (tmdbId, season, episode) pendant 5 min.
+    // (Le cache d'EXTRACTION m3u8 est séparé, géré dans Extractor.kt avec
+    // sa propre TTL — plus court car les m3u8 expirent vite.)
+    private const val SERVERS_CACHE_TTL_MS = 5L * 60L * 1000L
+    private data class CachedServers(val servers: List<Video.Server>, val expiresAtMs: Long)
+    private val serversCache = ConcurrentHashMap<String, CachedServers>()
+
+    private fun serversCacheKey(videoType: Video.Type): String = when (videoType) {
+        is Video.Type.Movie -> "movie:${videoType.id}"
+        is Video.Type.Episode -> "tv:${videoType.tvShow.id}:s${videoType.season.number}:e${videoType.number}"
     }
 
     private val tmdbService: TmdbService by lazy { buildTmdbService() }
@@ -905,6 +970,18 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         initializeService()
+
+        // 2026-05-04 : cache mémoire de l'agrégat (TTL 5 min)
+        val cacheKey = serversCacheKey(videoType)
+        val now = System.currentTimeMillis()
+        serversCache[cacheKey]?.let { cached ->
+            if (now < cached.expiresAtMs) {
+                Log.d("MovixProvider", "getServers cache HIT for $cacheKey (${cached.servers.size} servers)")
+                return cached.servers
+            }
+            serversCache.remove(cacheKey)
+        }
+
         val servers = mutableListOf<Video.Server>()
 
         when (videoType) {
@@ -912,10 +989,10 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                 val tmdbId = id
                 Log.d("MovixProvider", "getServers Movie tmdbId=$tmdbId")
 
-                // Parallel fetch all 5 API sources
+                // Parallel fetch all 5 API sources (timeout 4s + circuit breaker)
                 val allResults = coroutineScope {
                     val fstreamDeferred = async {
-                        try {
+                        runEndpoint("fstream-movie") {
                             val fstream = movixServiceInstance.getFstreamMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
                             if (fstream.success == true) {
@@ -931,16 +1008,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                                     }
                                 }
                             }
-                            Log.d("MovixProvider", "Fstream: ${list.size} servers found")
                             list
-                        } catch (e: Exception) {
-                            Log.e("MovixProvider", "Fstream movie error: ${e.message}")
-                            emptyList()
                         }
                     }
 
                     val linksDeferred = async {
-                        try {
+                        runEndpoint("links-movie") {
                             val links = movixServiceInstance.getLinksMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
                             if (links.success == true) {
@@ -951,16 +1024,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                                     }
                                 }
                             }
-                            Log.d("MovixProvider", "Links: ${list.size} servers found")
                             list
-                        } catch (e: Exception) {
-                            Log.e("MovixProvider", "Links movie error: ${e.message}")
-                            emptyList()
                         }
                     }
 
                     val wiflixDeferred = async {
-                        try {
+                        runEndpoint("wiflix-movie") {
                             val wiflix = movixServiceInstance.getWiflixMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
                             if (wiflix.success == true) {
@@ -974,16 +1043,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                                     }
                                 }
                             }
-                            Log.d("MovixProvider", "Wiflix: ${list.size} servers found")
                             list
-                        } catch (e: Exception) {
-                            Log.e("MovixProvider", "Wiflix movie error: ${e.message}")
-                            emptyList()
                         }
                     }
 
                     val cpasmalDeferred = async {
-                        try {
+                        runEndpoint("cpasmal-movie") {
                             val cpasmal = movixServiceInstance.getCpasmalMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
                             cpasmal.links?.forEach { (lang, links) ->
@@ -995,16 +1060,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                                     list.add(Video.Server(id = "cpasmal-$lang-${list.size}", name = "$playerName ($displayLang)", src = url))
                                 }
                             }
-                            Log.d("MovixProvider", "Cpasmal movie: ${list.size} servers found")
                             list
-                        } catch (e: Exception) {
-                            Log.e("MovixProvider", "Cpasmal movie error: ${e.message}")
-                            emptyList()
                         }
                     }
 
                     val tmdbMovixDeferred = async {
-                        try {
+                        runEndpoint("tmdb-movie") {
                             val tmdbMovix = movixServiceInstance.getTmdbMovixMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
                             tmdbMovix.player_links?.forEach { link ->
@@ -1016,11 +1077,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                                 val playerName = guessPlayerName(url)
                                 list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "$playerName - $qualityLabel ($lang)", src = url))
                             }
-                            Log.d("MovixProvider", "TmdbMovix movie: ${list.size} servers found")
                             list
-                        } catch (e: Exception) {
-                            Log.e("MovixProvider", "TmdbMovix movie error: ${e.message}")
-                            emptyList()
                         }
                     }
 
@@ -1028,9 +1085,14 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                         try {
                             val videasy = com.streamflixreborn.streamflix.extractors.VideasyExtractor()
                             val frServers = videasy.servers(videoType, "fr")
+                            // 2026-05-03 : Neon (myflixerzupcloud) renvoie souvent
+                            // des sources Netflix random (player de fallback) sur
+                            // les contenus mal indexés -> on l'exclut côté Movix
+                            // pour eviter les "sources fantômes" pénibles à filtrer.
                             val enServers = videasy.servers(videoType, "en")
+                                .filterNot { it.id.startsWith("Neon ") }
                             (frServers + enServers).also {
-                                Log.d("MovixProvider", "Videasy movie: ${it.size} servers")
+                                Log.d("MovixProvider", "Videasy movie: ${it.size} servers (Neon filtered)")
                             }
                         } catch (e: Exception) {
                             Log.e("MovixProvider", "Videasy movie error: ${e.message}")
@@ -1050,10 +1112,10 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                 val seasonNum = videoType.season.number
                 val episodeNum = videoType.number
 
-                // Parallel fetch all 6 API sources
+                // Parallel fetch all 6 API sources (timeout 4s + circuit breaker)
                 val allResults = coroutineScope {
                     val fstreamDeferred = async {
-                        try {
+                        runEndpoint("fstream-tv") {
                             val fstream = movixServiceInstance.getFstreamTv(tmdbId, seasonNum)
                             val list = mutableListOf<Video.Server>()
                             fstream.episodes?.get(episodeNum.toString())?.languages?.forEach { (lang, players) ->
@@ -1067,14 +1129,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                                 }
                             }
                             list
-                        } catch (e: Exception) {
-                            Log.e("MovixProvider", "Fstream tv error: ${e.message}")
-                            emptyList()
                         }
                     }
 
                     val linksDeferred = async {
-                        try {
+                        runEndpoint("links-tv") {
                             val links = movixServiceInstance.getLinksTv(tmdbId, seasonNum, episodeNum)
                             val list = mutableListOf<Video.Server>()
                             links.data?.forEach { item ->
@@ -1086,14 +1145,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                                 }
                             }
                             list
-                        } catch (e: Exception) {
-                            Log.e("MovixProvider", "Links tv error: ${e.message}")
-                            emptyList()
                         }
                     }
 
                     val wiflixDeferred = async {
-                        try {
+                        runEndpoint("wiflix-tv") {
                             val wiflix = movixServiceInstance.getWiflixTv(tmdbId, seasonNum)
                             val list = mutableListOf<Video.Server>()
                             wiflix.episodes?.get(episodeNum.toString())?.forEach { (lang, sources) ->
@@ -1106,14 +1162,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                                 }
                             }
                             list
-                        } catch (e: Exception) {
-                            Log.e("MovixProvider", "Wiflix tv error: ${e.message}")
-                            emptyList()
                         }
                     }
 
                     val cpasmalDeferred = async {
-                        try {
+                        runEndpoint("cpasmal-tv") {
                             val cpasmal = movixServiceInstance.getCpasmalTv(tmdbId, seasonNum, episodeNum)
                             val list = mutableListOf<Video.Server>()
                             cpasmal.links?.forEach { (lang, links) ->
@@ -1126,14 +1179,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                                 }
                             }
                             list
-                        } catch (e: Exception) {
-                            Log.e("MovixProvider", "Cpasmal tv error: ${e.message}")
-                            emptyList()
                         }
                     }
 
                     val tmdbMovixDeferred = async {
-                        try {
+                        runEndpoint("tmdb-tv") {
                             val tmdbMovix = movixServiceInstance.getTmdbMovixTv(tmdbId, seasonNum, episodeNum)
                             val list = mutableListOf<Video.Server>()
                             tmdbMovix.current_episode?.player_links?.forEach { link ->
@@ -1146,14 +1196,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                                 list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "$playerName - $qualityLabel ($lang)", src = url))
                             }
                             list
-                        } catch (e: Exception) {
-                            Log.e("MovixProvider", "TmdbMovix tv error: ${e.message}")
-                            emptyList()
                         }
                     }
 
                     val seriesDlDeferred = async {
-                        try {
+                        runEndpoint("seriesdl-tv") {
                             val showTitle = videoType.tvShow.title
                             val searchResults = movixServiceInstance.searchMovix(showTitle)
                             // 2026-05-03 : Movix renvoie type="series" pour les TV (pas
@@ -1179,9 +1226,6 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                                 }
                             }
                             list
-                        } catch (e: Exception) {
-                            Log.e("MovixProvider", "SeriesDownload tv error: ${e.message}")
-                            emptyList()
                         }
                     }
 
@@ -1193,9 +1237,14 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                         try {
                             val videasy = com.streamflixreborn.streamflix.extractors.VideasyExtractor()
                             val frServers = videasy.servers(videoType, "fr")
+                            // 2026-05-03 : Neon (myflixerzupcloud) renvoie souvent
+                            // des sources Netflix random (player de fallback) sur
+                            // les vieilles séries non indexées -> on l'exclut côté
+                            // Movix.
                             val enServers = videasy.servers(videoType, "en")
+                                .filterNot { it.id.startsWith("Neon ") }
                             (frServers + enServers).also {
-                                Log.d("MovixProvider", "Videasy tv: ${it.size} servers (${frServers.size} FR + ${enServers.size} EN)")
+                                Log.d("MovixProvider", "Videasy tv: ${it.size} servers (${frServers.size} FR + ${enServers.size} EN, Neon filtered)")
                             }
                         } catch (e: Exception) {
                             Log.e("MovixProvider", "Videasy tv error: ${e.message}")
@@ -1203,7 +1252,47 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                         }
                     }
 
-                    awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, seriesDlDeferred, videasyDeferred)
+                    // 2026-05-04 : MazQuest = backend allostreaming.one + waaatch.art.
+                    // Sert des yadi.sk (Yandex Disk) avec gros catalogue VF de
+                    // vieilles séries (NY911, Friends, etc.) que Movix ne couvre
+                    // plus. Pré-check de l'API ici pour ne pas afficher de
+                    // serveur fantôme sur les épisodes qui n'ont pas de source.
+                    val mazQuestDeferred = async {
+                        runEndpoint("mazquest-tv") {
+                            val ssPad = "%02d".format(seasonNum)
+                            val epPad = "%02d".format(episodeNum)
+                            val url = "https://embed.maz.quest/tv/api/$tmdbId/$ssPad/$epPad"
+                            // Pré-check : on hit l'API tout de suite. Si `error=true`
+                            // ou `links` vide -> on n'expose pas le serveur. Sinon
+                            // on l'ajoute, l'extracteur retapera l'API au play
+                            // (plus fiable car le yadi.sk peut périmer entre temps).
+                            val req = okhttp3.Request.Builder()
+                                .url(url)
+                                .header("Accept", "application/json")
+                                .build()
+                            val resp = com.streamflixreborn.streamflix.utils.NetworkClient.default
+                                .newCall(req).execute()
+                            val body = resp.body?.string()
+                            if (body.isNullOrBlank()) return@runEndpoint emptyList<Video.Server>()
+                            val json = org.json.JSONObject(body)
+                            val hasSource = !json.optBoolean("error", true)
+                                && (json.optJSONArray("links")?.length() ?: 0) > 0
+                            if (!hasSource) {
+                                Log.d("MovixProvider", "MazQuest tv: no source for $tmdbId S${ssPad}E$epPad")
+                                return@runEndpoint emptyList<Video.Server>()
+                            }
+                            Log.d("MovixProvider", "MazQuest tv: source found for $tmdbId S${ssPad}E$epPad")
+                            listOf(
+                                Video.Server(
+                                    id = "mazquest-tv-$tmdbId-$ssPad-$epPad",
+                                    name = "Yandex VF (Maz)",
+                                    src = url,
+                                )
+                            )
+                        }
+                    }
+
+                    awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, seriesDlDeferred, videasyDeferred, mazQuestDeferred)
                 }
 
                 allResults.forEach { servers.addAll(it) }
@@ -1211,7 +1300,19 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
         }
 
         // Trier les serveurs : VF en premier, puis VO, puis VOSTFR en dernier
-        return sortServersByLanguage(servers)
+        val sorted = sortServersByLanguage(servers)
+
+        // 2026-05-04 : on cache l'agrégat (TTL 5 min). Les m3u8 individuels
+        // sont re-extracted à la demande (cache séparé Extractor.cacheTtlMs)
+        // donc pas de risque de servir un m3u8 périmé depuis ce cache.
+        if (sorted.isNotEmpty()) {
+            serversCache[cacheKey] = CachedServers(
+                servers = sorted,
+                expiresAtMs = System.currentTimeMillis() + SERVERS_CACHE_TTL_MS,
+            )
+        }
+
+        return sorted
     }
 
     /**

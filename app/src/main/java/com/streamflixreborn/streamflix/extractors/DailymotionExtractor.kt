@@ -16,6 +16,12 @@ class DailymotionExtractor : Extractor() {
     override val mainUrl = "https://www.dailymotion.com"
     override val aliasUrls = listOf("https://geo.dailymotion.com")
 
+    // Token `sec=` dans l'URL m3u8 expire vite (~quelques secondes !) et
+    // est signé sur la route IP/DNS de l'appel JSON. Comme l'utilisateur
+    // reclique souvent < 30s après un fail, même TTL=30s servait du périmé.
+    // TTL=0 = re-extraction systématique (~500ms surcoût mais fiable).
+    override val cacheTtlMs: Long = 0L
+
     override suspend fun extract(link: String): Video {
         val id = link.substringAfterLast("/").substringAfter("video=")
 
