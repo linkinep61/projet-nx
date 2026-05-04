@@ -46,19 +46,30 @@ class VideasyExtractor : Extractor() {
                         }
                     }
                     
+                    // 2026-05-03 : ces servers sont les players "english"
+                    // de Videasy. Audio anglais original = "VO". Le label
+                    // est explicite pour que l'utilisateur voit clairement
+                    // ce qu'il choisit (avant tout marqué juste "Videasy").
                     Video.Server(
-                        id = "${config.name} (Videasy)",
-                        name = "${config.name} (Videasy)",
+                        id = "${config.name} (Videasy VO)",
+                        name = "${config.name} (Videasy VO)",
                         src = url
                     )
                 }
             }
             else -> {
+                // 2026-05-03 : FR+TV activé (avant : return emptyList()).
+                // Movix sert les épisodes VOSTFR via Videasy (player.videasy.net),
+                // sans cet appel on perdait toutes ces sources sur les vieilles
+                // séries TV (ex: New York 911 S1E1).
+                // Label langue explicite : Videasy "meine"/"cuevana-spanish"
+                // sert généralement les pistes audio/sous-titres dans la
+                // langue cible donc on tag comme tel.
                 val serverName = when (language) {
-                    "de" -> "Killjoy (Videasy)"
-                    "it" -> "Harbor (Videasy)"
-                    "fr" -> if (videoType is Video.Type.Movie) "Chamber (Videasy)" else return emptyList()
-                    "es" -> "Kayo (Videasy)"
+                    "de" -> "Killjoy (Videasy DE)"
+                    "it" -> "Harbor (Videasy IT)"
+                    "fr" -> "Chamber (Videasy VOSTFR)"
+                    "es" -> "Kayo (Videasy ES)"
                     else -> return emptyList()
                 }
                 

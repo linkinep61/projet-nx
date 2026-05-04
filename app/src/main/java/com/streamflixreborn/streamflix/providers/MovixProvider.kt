@@ -91,6 +91,17 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
 
     // --- Movix API responses ---
 
+    /**
+     * 2026-05-03 : l'API Movix /api/search retourne {"results":[...], ...} pas
+     * une liste directe. Le retour Retrofit était typé List<MovixSearchItem>
+     * → "Expected BEGIN_ARRAY but was BEGIN_OBJECT" au root → searchMovix
+     * throw → seriesDlDeferred toujours vide → on perd les m3u8 Darkibox HLS
+     * que Movix sert via api/series/download/{movixId}/season/X/episode/Y.
+     */
+    data class MovixSearchResponse(
+        val results: List<MovixSearchItem>?
+    )
+
     data class MovixSearchItem(
         val id: Int?,
         val name: String?,
@@ -1013,7 +1024,21 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                         }
                     }
 
-                    awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred)
+                    val videasyDeferred = async {
+                        try {
+                            val videasy = com.streamflixreborn.streamflix.extractors.VideasyExtractor()
+                            val frServers = videasy.servers(videoType, "fr")
+                            val enServers = videasy.servers(videoType, "en")
+                            (frServers + enServers).also {
+                                Log.d("MovixProvider", "Videasy movie: ${it.size} servers")
+                            }
+                        } catch (e: Exception) {
+                            Log.e("MovixProvider", "Videasy movie error: ${e.message}")
+                            emptyList()
+                        }
+                    }
+
+                    awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, videasyDeferred)
                 }
 
                 allResults.forEach { servers.addAll(it) }
@@ -1131,7 +1156,13 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                         try {
                             val showTitle = videoType.tvShow.title
                             val searchResults = movixServiceInstance.searchMovix(showTitle)
-                            val movixShow = searchResults.firstOrNull { it.type == "tv" && it.tmdb_id?.toString() == tmdbId }
+                            // 2026-05-03 : Movix renvoie type="series" pour les TV (pas
+                            // "tv"). Le filtre précédent excluait TOUS les résultats
+                            // série -> seriesDl ne récupérait jamais rien -> on ratait
+                            // les sources Darkibox HLS sur des séries comme New York 911.
+                            val movixShow = searchResults.results?.firstOrNull {
+                                (it.type == "tv" || it.type == "series") && it.tmdb_id?.toString() == tmdbId
+                            }
                             val movixId = movixShow?.id?.toString()
                             val list = mutableListOf<Video.Server>()
                             if (movixId != null) {
@@ -1154,7 +1185,25 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                         }
                     }
 
-                    awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, seriesDlDeferred)
+                    // 2026-05-03 : Videasy direct (FR + EN). Movix UI utilise
+                    // player.videasy.net pour les sources VO/VOSTFR sur les vieilles
+                    // séries, sans cet appel on perdait jusqu'à 4-8 sources par
+                    // épisode (Chamber + 8 servers EN type Neon/Yoru/Cypher…).
+                    val videasyDeferred = async {
+                        try {
+                            val videasy = com.streamflixreborn.streamflix.extractors.VideasyExtractor()
+                            val frServers = videasy.servers(videoType, "fr")
+                            val enServers = videasy.servers(videoType, "en")
+                            (frServers + enServers).also {
+                                Log.d("MovixProvider", "Videasy tv: ${it.size} servers (${frServers.size} FR + ${enServers.size} EN)")
+                            }
+                        } catch (e: Exception) {
+                            Log.e("MovixProvider", "Videasy tv error: ${e.message}")
+                            emptyList()
+                        }
+                    }
+
+                    awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, seriesDlDeferred, videasyDeferred)
                 }
 
                 allResults.forEach { servers.addAll(it) }
@@ -1199,6 +1248,8 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
      */
     private fun sortServersByLanguage(servers: List<Video.Server>): List<Video.Server> {
         // Dédup par src URL (case-insensitive) — garde le 1er rencontré.
+        // (Les hosts morts/adwall sont filtrés au niveau central par
+        // DeadHostsFilter dans PlayerViewModel.getServers()).
         val seen = HashSet<String>()
         val unique = servers.filter { server ->
             val key = server.src.lowercase().trim()
@@ -1439,7 +1490,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
         @GET("api/search")
         suspend fun searchMovix(
             @Query("title") title: String
-        ): List<MovixSearchItem>
+        ): MovixSearchResponse
     }
 
     private interface TmdbService {
