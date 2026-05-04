@@ -1832,7 +1832,24 @@ class PlayerTvFragment : Fragment() {
                 usingWebView = false
                 Log.d("PlayerNetwork", "DataSource hot-swap: explicit MediaSource (no player rebuild)")
             } else {
-                player.setMediaItem(mediaItem)
+                // 2026-05-04 : auto-detect HLS comme PlayerMobileFragment.
+                // Sans ça, les URLs proxy (api.nakios.fit/api/sources/proxy?url=...m3u8)
+                // tombent sur ProgressiveMediaSource avec extractors progressifs
+                // (Mp4Extractor, etc.) -> UnrecognizedInputFormatException sur TV.
+                // Le mobile a le même check qui sauvait. Heuristique simple :
+                // .m3u8 dans l'URL OU dans une query param OU MimeType déclaré HLS.
+                val isHls = video.source.contains(".m3u8") ||
+                    video.source.contains("/live/") ||
+                    video.type == androidx.media3.common.MimeTypes.APPLICATION_M3U8
+                if (isHls) {
+                    val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(dataSourceFactory)
+                        .createMediaSource(mediaItem)
+                    player.setMediaSource(hlsSource)
+                    Log.d("PlayerDebug", "TV: HLS MediaSource (auto-detected from URL/MimeType)")
+                } else {
+                    player.setMediaItem(mediaItem)
+                    Log.d("PlayerDebug", "TV: setMediaItem (auto-detect Progressive)")
+                }
                 usingWebView = false
             }
 

@@ -530,8 +530,30 @@ object NakiosProvider : Provider, ProviderConfigUrl {
         val isDirect = src.matches(Regex(".*\\.(mp4|m3u8|mpd|webm|mkv)(\\?.*)?$", RegexOption.IGNORE_CASE)) ||
                 src.startsWith("$baseUrl/api/")
         return if (isDirect) {
+            // 2026-05-04 : déclare explicitement le MimeType. Sans ça, sur la TV
+            // (PlayerTvFragment) ExoPlayer fait un auto-detect basé sur l'extension
+            // de l'URL — qui rate les URLs proxy `api.nakios.fit/api/sources/proxy?url=...`
+            // (pas de .m3u8 dans le path) → tombe sur Mp4Extractor → crash avec
+            // UnrecognizedInputFormatException. Le mobile a un fallback HLS-detect
+            // (TeeDataSource) qui rattrapait ; pas la TV.
+            // On regarde l'URL upstream encodée (param `url=` du proxy) pour deviner.
+            val upstreamUrl = if (src.contains("/api/sources/proxy?url=")) {
+                java.net.URLDecoder.decode(src.substringAfter("url=").substringBefore("&"), "UTF-8")
+            } else src
+            val mimeType = when {
+                upstreamUrl.contains(".m3u8") -> androidx.media3.common.MimeTypes.APPLICATION_M3U8
+                upstreamUrl.contains(".mpd") -> androidx.media3.common.MimeTypes.APPLICATION_MPD
+                upstreamUrl.contains(".mp4") -> androidx.media3.common.MimeTypes.VIDEO_MP4
+                upstreamUrl.contains(".webm") -> androidx.media3.common.MimeTypes.VIDEO_WEBM
+                upstreamUrl.contains(".mkv") -> androidx.media3.common.MimeTypes.VIDEO_MATROSKA
+                // Par défaut, les sources Nakios via /api/sources/proxy?url= sont
+                // 99% HLS (Darkibox/Xalaflix servent du HLS via leur proxy).
+                src.startsWith("$baseUrl/api/") -> androidx.media3.common.MimeTypes.APPLICATION_M3U8
+                else -> null
+            }
             Video(
                 source = src,
+                type = mimeType,
                 headers = mapOf(
                     "Origin" to currentFrontUrl,
                     "Referer" to "$currentFrontUrl/",
