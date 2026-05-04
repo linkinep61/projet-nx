@@ -2602,9 +2602,16 @@ class PlayerTvFragment : Fragment() {
             // ~4s with "UnknownHostException (no network)" mid-stream because the
             // HttpURLConnection keepalive drops; OkHttp + DoH keeps the connection
             // alive and retries cleanly.
+            // cdndirector.dailymotion.com / dmcdn.net : token `sec=` est signé
+            // sur la route IP/DNS qui a fait l'appel JSON. Sans DoH ici, le
+            // DefaultHttpDataSource résout sur un edge différent de celui qu'a
+            // utilisé l'extracteur (OkHttp+DoH) -> 403. Vu sur OPPO + NordVPN,
+            // s'applique aussi en TV (ChromeCast/AndroidTV).
             return url.contains("sprintcdn", ignoreCase = true)
                 || url.contains("r66nv9ed.com", ignoreCase = true)
                 || url.contains("cloudatacdn.com", ignoreCase = true)
+                || url.contains("cdndirector.dailymotion.com", ignoreCase = true)
+                || url.contains("dmcdn.net", ignoreCase = true)
         }
 
         /**

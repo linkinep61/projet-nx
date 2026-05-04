@@ -185,10 +185,17 @@ class PlayerViewModel(
                 Log.d("PlayerViewModel", "Inizio ricerca OpenSubtitles")
                 // App-wide policy: French subtitles only. ISO 639-2/B code "fre".
                 val frenchOnly = "fre"
+                // 2026-05-04 : on PASSE TOUJOURS imdb_id quand le provider le
+                // fournit. Sans ça la recherche tombait en mode "query texte"
+                // et matchait "Fear City: New York Vs The Mafia S01E03" pour
+                // "New York 911 S01E03" (tous deux contiennent "New York")
+                // -> sous-titre dingue d'une autre série, donc "désynchronisé".
+                // Tri : downloads DESC (le plus téléchargé = le mieux synchro).
                 val subtitles = when (videoType) {
                     is Video.Type.Episode -> {
                         OpenSubtitles.search(
-                            query = videoType.tvShow.title,
+                            imdbId = videoType.tvShow.imdbId,
+                            query = if (videoType.tvShow.imdbId.isNullOrBlank()) videoType.tvShow.title else null,
                             season = videoType.season.number,
                             episode = videoType.number,
                             subLanguageId = frenchOnly,
@@ -196,11 +203,12 @@ class PlayerViewModel(
                     }
                     is Video.Type.Movie -> {
                         OpenSubtitles.search(
-                            query = videoType.title,
+                            imdbId = videoType.imdbId,
+                            query = if (videoType.imdbId.isNullOrBlank()) videoType.title else null,
                             subLanguageId = frenchOnly,
                         )
                     }
-                }.sortedWith(compareBy({ it.languageName }, { it.subDownloadsCnt }))
+                }.sortedByDescending { it.subDownloadsCnt }
                 
                 Log.d("PlayerViewModel", "Ricerca OpenSubtitles completata: ${subtitles.size} risultati")
                 _subtitleState.emit(SubtitleState.SuccessOpenSubtitles(subtitles))

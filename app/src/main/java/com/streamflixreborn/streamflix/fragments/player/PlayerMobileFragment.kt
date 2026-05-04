@@ -2668,9 +2668,16 @@ class PlayerMobileFragment : Fragment() {
         // ~4s with "UnknownHostException (no network)" mid-stream because the
         // HttpURLConnection keepalive drops; OkHttp + DoH keeps the connection
         // alive and retries cleanly.
+        // cdndirector.dailymotion.com: Dailymotion HLS — token `sec=` est signé
+        // sur la route IP/DNS qui a fait l'appel JSON. Notre extracteur passe
+        // par OkHttp+DoH mais le DefaultHttpDataSource (HttpURLConnection +
+        // DNS système) résout sur un autre edge -> token rejeté avec 403
+        // (vu sur OPPO + NordVPN actif, 4 mai 2026).
         return url.contains("sprintcdn", ignoreCase = true)
             || url.contains("r66nv9ed.com", ignoreCase = true)
             || url.contains("cloudatacdn.com", ignoreCase = true)
+            || url.contains("cdndirector.dailymotion.com", ignoreCase = true)
+            || url.contains("dmcdn.net", ignoreCase = true)
     }
 
     private fun needsBrowserOkHttp(url: String): Boolean {

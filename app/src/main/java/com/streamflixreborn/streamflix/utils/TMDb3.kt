@@ -939,6 +939,25 @@ object TMDb3 {
             true -> "https://image.tmdb.org/t/p/original/$this"
             else -> this
         }
+    // 2026-05-04 : tailles intermédiaires pour économiser la bande passante.
+    // `original` (banner = 174 KB) -> `w1280` (88 KB) -> -50%.
+    // `original` (poster = 195 KB) -> `w780` (155 KB) -> -20% sans perte
+    // visuelle sur smartphones. `w185` pour les profils acteurs (75% vs w500).
+    val String.w185: String
+        get() = when (this.startsWith("/")) {
+            true -> "https://image.tmdb.org/t/p/w185/$this"
+            else -> this
+        }
+    val String.w780: String
+        get() = when (this.startsWith("/")) {
+            true -> "https://image.tmdb.org/t/p/w780/$this"
+            else -> this
+        }
+    val String.w1280: String
+        get() = when (this.startsWith("/")) {
+            true -> "https://image.tmdb.org/t/p/w1280/$this"
+            else -> this
+        }
 
 
     private interface ApiService {
@@ -947,18 +966,28 @@ object TMDb3 {
             fun build(): ApiService {
                 val apiKey = UserPreferences.tmdbApiKey.ifEmpty { BuildConfig.TMDB_API_KEY }
 
-                val client = OkHttpClient.Builder().addInterceptor { chain ->
-                    val original = chain.request()
-
-                    val requestBuilder = original.newBuilder()
-                        .url(
-                            original.url.newBuilder()
-                                .addQueryParameter("api_key", apiKey)
-                                .build()
-                        )
-
-                    chain.proceed(requestBuilder.build())
-                }.build()
+                // 2026-05-03 : on repique le client global (DoH Cloudflare,
+                // TLS legacy, ISRG Root X1 pour Android < 9, timeouts 30s)
+                // au lieu d'un OkHttpClient brut. Sur OPPO la résolution DNS
+                // de api.themoviedb.org via le DNS opérateur tombait souvent
+                // dans le vide -> recherche TMDB cassée sans erreur visible.
+                val client = NetworkClient.default.newBuilder()
+                    .addInterceptor { chain ->
+                        val original = chain.request()
+                        val requestBuilder = original.newBuilder()
+                            // TMDB renvoie tjs du JSON ; on neutralise le
+                            // "Accept: text/html..." par défaut du NetworkClient
+                            // pour qu'aucun proxy / CDN ne s'amuse a négocier
+                            // un autre type de contenu.
+                            .header("Accept", "application/json")
+                            .url(
+                                original.url.newBuilder()
+                                    .addQueryParameter("api_key", apiKey)
+                                    .build()
+                            )
+                        chain.proceed(requestBuilder.build())
+                    }
+                    .build()
 
                 val retrofit = Retrofit.Builder()
                     .baseUrl(URL)

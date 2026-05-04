@@ -21,6 +21,13 @@ abstract class Extractor {
     open val aliasUrls: List<String> = emptyList()
     open val rotatingDomain: List<Regex> = emptyList()
 
+    // 2026-05-04 : TTL du cache d'extraction par extracteur. Par défaut 10 min
+    // (cf EXTRACTION_TTL_MS) mais Dailymotion utilise des tokens `sec=` court
+    // terme et lies à l'IP/session — on les remet à 30s pour éviter l'erreur
+    // ExoPlayer "Source error" lors du replay sur un cache HIT périmé.
+    // Mettre 0 pour désactiver complètement la mise en cache.
+    open val cacheTtlMs: Long = 10L * 60L * 1000L
+
     // THIS is the main method all subclasses must implement
     abstract suspend fun extract(link: String): Video
 
@@ -213,7 +220,12 @@ abstract class Extractor {
             SeekPlaysExtractor(),
             XshotcokExtractor(),
             DarkiboxExtractor(),
-            Up4StreamExtractor()
+            Up4StreamExtractor(),
+            // 2026-05-04 : nouveaux extracteurs pour les vieilles séries FR
+            // (NY911, Friends, etc.) — backend allostreaming.one / waaatch.art
+            // qui sert via embed.maz.quest -> Yandex Disk public API.
+            MazQuestExtractor(),
+            YandexDiskExtractor(),
         )
 
         // ── A: Extraction cache ─────────────────────────────────────────────
@@ -403,10 +415,13 @@ abstract class Extractor {
                 // A: stash the resolved video so the next click on the same server is instant.
                 // Cached against the original link (pre-bridge resolution) so the lookup at the
                 // top of extract() actually hits.
-                extractionCache[link] = CachedExtraction(
-                    video = filtered,
-                    expiresAtMillis = System.currentTimeMillis() + EXTRACTION_TTL_MS,
-                )
+                // TTL spécifique à l'extracteur (Dailymotion = 30s, défaut = 10 min).
+                if (foundExtractor.cacheTtlMs > 0L) {
+                    extractionCache[link] = CachedExtraction(
+                        video = filtered,
+                        expiresAtMillis = System.currentTimeMillis() + foundExtractor.cacheTtlMs,
+                    )
+                }
                 return filtered
             }
 

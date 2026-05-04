@@ -18,15 +18,19 @@ class VideasyExtractor : Extractor() {
         val movieOnly: Boolean = false
     )
 
+    // 2026-05-04 : grand ménage — sur 8 endpoints "english" historiques de
+    // api.videasy.net, 6 sont morts (404 / fetch failed / TypeError) :
+    //   moviebox (Cypher), 1movies (Sage), primesrcme (Jett),
+    //   primewire (Reyna), m4uhd (Breach), hdmovie (Vyse)
+    // Restent vivants :
+    //   - mb-flix       -> Phoenix (nouveau, ce que player.videasy.net utilise)
+    //   - myflixerzupcloud -> Neon (filtré côté Movix car sources Netflix random)
+    //   - cdn           -> Yoru (movies only)
+    // Vérifié manuellement le 4 mai 2026.
     private val englishServers = listOf(
+        ServerConfig("Phoenix", "mb-flix"),
         ServerConfig("Neon", "myflixerzupcloud"),
-        ServerConfig("Yoru", "cdn", movieOnly = true),
-        ServerConfig("Cypher", "moviebox"),
-        ServerConfig("Sage", "1movies"),
-        ServerConfig("Jett", "primesrcme"),
-        ServerConfig("Reyna", "primewire"),
-        ServerConfig("Breach", "m4uhd"),
-        ServerConfig("Vyse", "hdmovie")
+        ServerConfig("Yoru", "cdn", movieOnly = true)
     )
 
     fun servers(videoType: Video.Type, language: String): List<Video.Server> {
@@ -118,9 +122,15 @@ class VideasyExtractor : Extractor() {
             .url(link)
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36")
             .build()
-        
+
         val response = client.newCall(request).execute()
-        val encData = response.body?.string() ?: throw Exception("Failed to get encrypted data")
+        val encData = response.body?.string() ?: throw Exception("Videasy: empty body from api.videasy.net")
+        // 2026-05-03 : sur les contenus mal indexés (vieilles séries type
+        // NY911 1999) api.videasy.net répond 200 avec body vide. Sans ce
+        // check on partait tete baissée vers enc-dec.app qui renvoyait
+        // result="" -> JSONObject("") -> JSONException pénible (8 stack
+        // traces dans logcat avant qu'ExoPlayer abandonne).
+        if (encData.isBlank()) throw Exception("Videasy: no encrypted data (source not indexed)")
 
         // 2. Extract tmdbId from link to use it for decryption
         val tmdbId = link.split("tmdbId=").getOrNull(1)?.split("&")?.getOrNull(0) ?: ""
@@ -135,14 +145,19 @@ class VideasyExtractor : Extractor() {
             .url("https://enc-dec.app/api/dec-videasy")
             .post(body)
             .build()
-        
+
         val decResponse = client.newCall(decRequest).execute()
         val decBody = decResponse.body?.string() ?: "{}"
         val decJson = JSONObject(decBody)
-        val result = decJson.optString("result")
 
-        // 4. Parse result (JSON string containing sources)
-        val resultJson = JSONObject(result)
+        // 2026-05-04 : enc-dec.app retourne maintenant `result` en OBJET
+        // (`{status:200, result:{sources:[...], subtitles:[...]}}`),
+        // plus en string. L'ancien `optString("result")` -> `JSONObject(result)`
+        // crashait silencieusement avec "End of input at character 0".
+        // On supporte les deux formats au cas où l'API change encore.
+        val resultJson = decJson.optJSONObject("result")
+            ?: decJson.optString("result").takeIf { it.isNotBlank() }?.let { JSONObject(it) }
+            ?: throw Exception("Videasy: enc-dec returned no result (source unavailable)")
         val sources = resultJson.optJSONArray("sources")
         val subtitles = mutableListOf<Video.Subtitle>()
         
@@ -163,16 +178,17 @@ class VideasyExtractor : Extractor() {
 
         if (sources != null && sources.length() > 0) {
             val source = sources.getJSONObject(0)
-            
-            // Find ServerConfig based on endpoint in URL
-            val config = englishServers.find { link.contains(it.endpoint) }
-            
-            // Reyna and Cypher use MP4 instead of HLS
-            val isMp4Server = config?.name == "Reyna" || config?.name == "Cypher"
-            val mimeType = if (isMp4Server) MimeTypes.VIDEO_MP4 else MimeTypes.APPLICATION_M3U8
+            val srcUrl = source.optString("url")
+
+            // 2026-05-04 : Reyna/Cypher (MP4) sont morts upstream, on a viré
+            // les ServerConfig. Tous les endpoints restants (Phoenix/Neon/Yoru/
+            // Chamber FR…) servent du HLS. On laisse une détection .mp4
+            // dans l'URL au cas où l'API renverrait du MP4 inattendu.
+            val mimeType = if (srcUrl.contains(".mp4")) MimeTypes.VIDEO_MP4
+                            else MimeTypes.APPLICATION_M3U8
 
             return Video(
-                source = source.optString("url"),
+                source = srcUrl,
                 type = mimeType,
                 subtitles = subtitles,
                 headers = mapOf("Referer" to "https://player.videasy.net/")
