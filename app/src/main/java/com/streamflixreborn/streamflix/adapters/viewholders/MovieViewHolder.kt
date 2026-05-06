@@ -692,6 +692,29 @@ class MovieViewHolder(
             }
         }
 
+        // 2026-05-05 : appui long sur la carte du carousel featured —
+        // ouvre le dialog d'options (Téléchargement, Favori, Marquer vu, etc.)
+        // comme sur les autres ViewHolders. Le binding du swiper est partagé
+        // entre Mobile et TV (cf TvShowViewHolder ligne ~101), donc on choisit
+        // le bon dialog selon l'activité hôte.
+        binding.root.setOnLongClickListener {
+            val isTv = context.toActivity() is com.streamflixreborn.streamflix.activities.main.MainTvActivity
+            val item: AppAdapter.Item = if (isDramaOrAnimeProvider()) {
+                com.streamflixreborn.streamflix.models.TvShow(
+                    id = movie.id,
+                    title = movie.title,
+                    poster = movie.poster,
+                    banner = movie.banner,
+                )
+            } else movie
+            if (isTv) {
+                com.streamflixreborn.streamflix.ui.ShowOptionsTvDialog(context, item).show()
+            } else {
+                ShowOptionsMobileDialog(context, item).show()
+            }
+            true
+        }
+
         binding.pbSwiperProgress.apply {
             val watchHistory = movie.watchHistory
 

@@ -192,7 +192,9 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                         is TvShow -> item.title
                         else -> null
                     } ?: return@forEach
-                    val results = TMDb3.Search.multi(title)
+                    // 2026-05-05 : normalise (apostrophe typo, annotations VF/saison) avant TMDB
+                    val normalized = com.streamflixreborn.streamflix.utils.TitleNormalizer.cleanForTmdbSearch(title)
+                    val results = TMDb3.Search.multi(normalized.ifBlank { title })
                     val match = results.results.firstOrNull { result ->
                         when (result) {
                             is TMDb3.Movie -> result.originalLanguage in animeLanguages && result.backdropPath != null
@@ -608,7 +610,7 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
 
         // Compound sort: language priority (VF > VOSTFR > VO), then reliability
-        return servers.sortedWith(compareBy<Video.Server> { server ->
+        val sorted = servers.sortedWith(compareBy<Video.Server> { server ->
             val name = server.name.uppercase()
             when {
                 name.contains("VF") && !name.contains("VOSTFR") -> 0
@@ -620,6 +622,21 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             val serviceName = Extractor.identifyServiceName(server.src)
             reliabilityOrder[serviceName] ?: defaultReliability
         })
+
+        // 2026-05-05 : Moviebox backup pour les animes/mangas FR.
+        val title = id.substringBefore("/").substringBefore("@").replace("-", " ").trim()
+        val movieboxBackup = if (title.isNotBlank()) {
+            try {
+                val type = if (videoType is Video.Type.Movie) 1 else 2
+                MovieboxProvider.getMovieboxSourcesByTitle(
+                    title, null, type,
+                    seasonNumber = if (videoType is Video.Type.Episode) videoType.season.number else null,
+                    episodeNumber = if (videoType is Video.Type.Episode) videoType.number else null,
+                )
+            } catch (_: Exception) { emptyList() }
+        } else emptyList()
+
+        return sorted + movieboxBackup
     }
 
     override suspend fun getVideo(server: Video.Server): Video {

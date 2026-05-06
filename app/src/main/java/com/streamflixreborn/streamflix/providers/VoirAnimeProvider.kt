@@ -111,7 +111,9 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
                                             is TvShow -> item.title
                                             else -> null
                                         } ?: return@async
-                                        val results = TMDb3.Search.multi(title)
+                                        // 2026-05-05 : normalise (apostrophe typo, annotations VF/saison) avant TMDB
+                                        val normalized = com.streamflixreborn.streamflix.utils.TitleNormalizer.cleanForTmdbSearch(title)
+                                        val results = TMDb3.Search.multi(normalized.ifBlank { title })
                                         val animeMatch = results.results.firstOrNull { result ->
                                             when (result) {
                                                 is TMDb3.Movie -> result.originalLanguage in animeLanguages && result.backdropPath != null
@@ -565,10 +567,29 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
                     Video.Server(id = server.id, name = "${server.name} ($lang)", src = server.src)
                 } else server
             }.distinctBy { it.id }
-            withLang.sortedBy { server ->
+            val sorted = withLang.sortedBy { server ->
                 val host = try { java.net.URL(server.src).host.lowercase() } catch (_: Exception) { "" }
                 priority.entries.firstOrNull { host.contains(it.key) }?.value ?: 50
             }
+
+            // 2026-05-05 : Moviebox backup pour les animes (gros catalogue d'anime
+            // VOSTFR/VF dispo sur Moviebox).
+            val showTitle = document.selectFirst("h1.entry-title")?.text()?.trim()
+                ?.replace(Regex("""\s*VOSTFR|\s*VF$|\s*\(\d{4}\)""", RegexOption.IGNORE_CASE), "")
+                ?.trim()
+            val movieboxBackup = if (!showTitle.isNullOrBlank()) {
+                try {
+                    val type = if (videoType is Video.Type.Movie) 1 else 2
+                    MovieboxProvider.getMovieboxSourcesByTitle(
+                        showTitle, null, type,
+                        seasonNumber = if (videoType is Video.Type.Episode) videoType.season.number else null,
+                        episodeNumber = if (videoType is Video.Type.Episode) videoType.number else null,
+                    )
+                        .also { if (it.isNotEmpty()) Log.d("VoirAnimeProvider", "+ Moviebox: ${it.size}") }
+                } catch (_: Exception) { emptyList() }
+            } else emptyList()
+
+            sorted + movieboxBackup
         } catch (e: Exception) {
             Log.e("VoirAnimeProvider", "getServers error: ", e)
             emptyList()

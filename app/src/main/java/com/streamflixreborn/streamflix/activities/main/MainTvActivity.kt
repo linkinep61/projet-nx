@@ -256,9 +256,9 @@ class MainTvActivity : FragmentActivity() {
                     setIcon(R.drawable.ic_menu_tv)
                 }
             }
+            val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
             binding.navMain.menu.findItem(R.id.tv_shows)?.apply {
                 isVisible = Provider.supportsTvShows(provider)
-                val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
                 title = when {
                     isIptv || provider.name in setOf("CableVisionHD", "TvporinternetHD") ->
                         getString(R.string.main_menu_all_channels)
@@ -267,6 +267,8 @@ class MainTvActivity : FragmentActivity() {
                     else -> getString(R.string.main_menu_tv_shows)
                 }
             }
+            // Favoris tab — IPTV providers only.
+            binding.navMain.menu.findItem(R.id.iptv_favorites)?.isVisible = isIptv
         }
     }
 

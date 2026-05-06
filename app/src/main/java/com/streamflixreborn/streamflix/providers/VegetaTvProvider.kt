@@ -1296,6 +1296,45 @@ object VegetaTvProvider : Provider, IptvProvider {
         if (extraItems.isNotEmpty()) {
             sections.add(Category(name = "Autres chaînes", list = extraItems))
         }
+
+        // ─── "Favoris" — user-favorited channels (long-press a channel to add).
+        // Always last so it sits just before the bottom Paramètres tab.
+        val favoriteIds = com.streamflixreborn.streamflix.utils.IptvFavoritesStore.getFavorites(name)
+        if (favoriteIds.isNotEmpty()) {
+            val curatedByKey = curatedChannels.associateBy { "vegeta::${it.key}" }
+            val registryByKey = synchronized(registryLock) {
+                channelRegistry.entries.associate { (k, info) -> "vegeta::$k" to Triple(k, info.displayName, info.logo) }
+            }
+            val favItems = mutableListOf<TvShow>()
+            for (favId in favoriteIds) {
+                val curated = curatedByKey[favId]
+                if (curated != null) {
+                    favItems += TvShow(
+                        id = favId,
+                        title = curated.displayName,
+                        poster = logoUrlFor(curated.displayName),
+                        banner = logoUrlFor(curated.displayName),
+                        providerName = name,
+                    )
+                    continue
+                }
+                val reg = registryByKey[favId]
+                if (reg != null) {
+                    val (_, displayName, logo) = reg
+                    favItems += TvShow(
+                        id = favId,
+                        title = displayName,
+                        poster = logo.ifEmpty { logoUrlFor(displayName) },
+                        banner = logo.ifEmpty { logoUrlFor(displayName) },
+                        providerName = name,
+                    )
+                }
+            }
+            if (favItems.isNotEmpty()) {
+                sections.add(Category(name = "Favoris", list = favItems))
+            }
+        }
+
         sections
     } catch (e: Exception) {
         Log.e(TAG, "getHome error", e)

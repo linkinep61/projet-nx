@@ -33,27 +33,46 @@ class ProviderViewHolder(
     }
 
 
+    /** Switch effectif vers le provider — extrait pour être appelable après
+     *  validation du PIN parental. */
+    private fun performSwitch() {
+        // Stop & release mini player before switching provider
+        MiniPlayerController.stop()
+        UserPreferences.currentProvider = provider.provider
+        com.streamflixreborn.streamflix.StreamFlixApp.instance
+            .refreshProviderUrlAsync(provider.provider)
+        context.toActivity()?.apply {
+            startActivity(
+                Intent(this, this::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                }
+            )
+            finish()
+        }
+    }
+
     private fun displayMobileItem(binding: ItemProviderMobileBinding) {
         binding.root.apply {
             setOnClickListener {
-                // Stop & release mini player before switching provider
-                MiniPlayerController.stop()
-                UserPreferences.currentProvider = provider.provider
-                // Trigger URL refresh for the just-picked provider on the
-                // application scope so it survives the activity restart.
-                // Without this, providers like Wiflix never get their URL
-                // refreshed (cold-start wipes currentProvider before the
-                // app-level refresh runs, so the app-level refresh skips).
-                com.streamflixreborn.streamflix.StreamFlixApp.instance
-                    .refreshProviderUrlAsync(provider.provider)
-                context.toActivity()?.apply {
-                    startActivity(
-                        Intent(this, this::class.java).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                // 2026-05-05 : si provider verrouillé par le contrôle parental,
+                // demande le PIN avant de switcher.
+                if (com.streamflixreborn.streamflix.utils.ProviderLockStore
+                        .isLocked(context, provider.name) &&
+                    !com.streamflixreborn.streamflix.utils.ProviderLockStore
+                        .isAccessible(context, provider.name)
+                ) {
+                    com.streamflixreborn.streamflix.ui.PinDialog.showAuth(
+                        context = context,
+                        title = "${provider.name} est verrouillé",
+                        onSuccess = {
+                            com.streamflixreborn.streamflix.utils.ProviderLockStore
+                                .unlockForSession(provider.name)
+                            performSwitch()
                         }
                     )
-                    finish()
+                    return@setOnClickListener
                 }
+                performSwitch()
             }
         }
 
@@ -65,7 +84,10 @@ class ProviderViewHolder(
             .transition(DrawableTransitionOptions.withCrossFade())
             .into(binding.ivProviderLogo)
 
-        binding.tvProviderName.text = provider.name
+        // 2026-05-05 : préfixe le nom avec 🔒 si verrouillé
+        val isLocked = com.streamflixreborn.streamflix.utils.ProviderLockStore
+            .isLocked(context, provider.name)
+        binding.tvProviderName.text = if (isLocked) "🔒 ${provider.name}" else provider.name
 
         binding.tvProviderLanguage.text = Locale.forLanguageTag(provider.language)
             .let { it.getDisplayLanguage(it) }
@@ -75,24 +97,25 @@ class ProviderViewHolder(
     private fun displayTvItem(binding: ItemProviderTvBinding) {
         binding.root.apply {
             setOnClickListener {
-                // Stop & release mini player before switching provider
-                MiniPlayerController.stop()
-                UserPreferences.currentProvider = provider.provider
-                // Trigger URL refresh for the just-picked provider on the
-                // application scope so it survives the activity restart.
-                // Without this, providers like Wiflix never get their URL
-                // refreshed (cold-start wipes currentProvider before the
-                // app-level refresh runs, so the app-level refresh skips).
-                com.streamflixreborn.streamflix.StreamFlixApp.instance
-                    .refreshProviderUrlAsync(provider.provider)
-                context.toActivity()?.apply {
-                    startActivity(
-                        Intent(this, this::class.java).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                // 2026-05-05 : si provider verrouillé par le contrôle parental,
+                // demande le PIN avant de switcher.
+                if (com.streamflixreborn.streamflix.utils.ProviderLockStore
+                        .isLocked(context, provider.name) &&
+                    !com.streamflixreborn.streamflix.utils.ProviderLockStore
+                        .isAccessible(context, provider.name)
+                ) {
+                    com.streamflixreborn.streamflix.ui.PinDialog.showAuth(
+                        context = context,
+                        title = "${provider.name} est verrouillé",
+                        onSuccess = {
+                            com.streamflixreborn.streamflix.utils.ProviderLockStore
+                                .unlockForSession(provider.name)
+                            performSwitch()
                         }
                     )
-                    finish()
+                    return@setOnClickListener
                 }
+                performSwitch()
             }
         }
 
@@ -103,7 +126,9 @@ class ProviderViewHolder(
             .transition(DrawableTransitionOptions.withCrossFade())
             .into(binding.ivProviderLogo)
 
-        binding.tvProviderName.text = provider.name
+        val isLocked = com.streamflixreborn.streamflix.utils.ProviderLockStore
+            .isLocked(context, provider.name)
+        binding.tvProviderName.text = if (isLocked) "🔒 ${provider.name}" else provider.name
 
         binding.tvProviderLanguage.text = Locale.forLanguageTag(provider.language)
             .let { it.getDisplayLanguage(it) }

@@ -254,6 +254,14 @@ class PlayerTvFragment : Fragment() {
 
     private var currentVideo: Video? = null
     private var currentServer: Video.Server? = null
+    // 2026-05-05 : watchdog buffering — déclenche le fallback au serveur suivant
+    // si le player reste bloqué en STATE_BUFFERING > N secondes sans atteindre
+    // STATE_READY. Indispensable pour les hosters genre Darkibox qui renvoient
+    // une URL HTTP valide mais ne délivrent jamais de données vidéo (Cloudflare
+    // block silencieux). Sans ce watchdog onPlayerError n'est jamais déclenché
+    // et le player reste bloqué indéfiniment.
+    private var bufferingWatchdog: kotlinx.coroutines.Job? = null
+    private val BUFFERING_TIMEOUT_MS = 10_000L
     private var usingCronet = false
     /** Shared bounded executor for Cronet — avoids unbounded newCachedThreadPool */
     private val cronetExecutor = java.util.concurrent.Executors.newFixedThreadPool(4)
@@ -1863,6 +1871,40 @@ class PlayerTvFragment : Fragment() {
             val newListener = object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     super.onPlaybackStateChanged(playbackState)
+
+                    // 2026-05-05 : watchdog buffering. Annule le timer dès qu'on
+                    // sort de BUFFERING (READY, ENDED, IDLE).
+                    if (playbackState != Player.STATE_BUFFERING) {
+                        bufferingWatchdog?.cancel()
+                        bufferingWatchdog = null
+                    } else {
+                        // Démarre le watchdog seulement pour VOD (pas IPTV qui a
+                        // sa propre logique sticky).
+                        val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                        if (!isLiveIptv && bufferingWatchdog == null) {
+                            val startedAt = System.currentTimeMillis()
+                            val initialPosition = player.currentPosition
+                            bufferingWatchdog = viewLifecycleOwner.lifecycleScope.launch {
+                                kotlinx.coroutines.delay(BUFFERING_TIMEOUT_MS)
+                                // Si toujours en BUFFERING avec position inchangée → fallback
+                                if (player.playbackState == Player.STATE_BUFFERING &&
+                                    player.currentPosition == initialPosition) {
+                                    val server = currentServer
+                                    val nextServer = server?.let { servers.getOrNull(servers.indexOf(it) + 1) }
+                                    Log.w("PlayerNetwork",
+                                        "BUFFERING timeout (${BUFFERING_TIMEOUT_MS}ms) on ${server?.name} " +
+                                        "→ ${if (nextServer != null) "switching to ${nextServer.name}" else "no more servers"}")
+                                    if (server != null) pruneBrokenVariant(server)
+                                    if (nextServer != null) {
+                                        viewModel.getVideo(nextServer)
+                                    }
+                                }
+                                bufferingWatchdog = null
+                            }
+                        }
+                    }
 
                     if (playbackState == Player.STATE_READY) {
                         // Stream playing successfully → reset IPTV retry counter

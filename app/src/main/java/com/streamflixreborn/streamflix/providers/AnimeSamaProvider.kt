@@ -332,7 +332,10 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                                         is TvShow -> item.title
                                         else -> return@async
                                     }
-                                    val results = TMDb3.Search.multi(title)
+                                    // 2026-05-05 : normalise le titre avant TMDB (apostrophes
+                                    // typographiques, annotations VF/saison/etc. cassent les matchs)
+                                    val normalized = com.streamflixreborn.streamflix.utils.TitleNormalizer.cleanForTmdbSearch(title)
+                                    val results = TMDb3.Search.multi(normalized.ifBlank { title })
                                     val match = results.results.firstOrNull { result ->
                                         when (result) {
                                             is TMDb3.Movie -> result.originalLanguage in animeLanguages && result.backdropPath != null
@@ -1097,7 +1100,23 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             }
         })
 
-        return servers
+        // 2026-05-05 : Moviebox backup pour les animes — gros catalogue d'anime
+        // VOSTFR/VF dispo. On déduit le titre du slug (premier segment).
+        val slug = id.substringBefore("@").substringBefore("/")
+        val title = slug.replace("-", " ").trim()
+        val movieboxBackup = if (title.isNotBlank()) {
+            try {
+                val type = if (videoType is Video.Type.Movie) 1 else 2
+                MovieboxProvider.getMovieboxSourcesByTitle(
+                    title, null, type,
+                    seasonNumber = if (videoType is Video.Type.Episode) videoType.season.number else null,
+                    episodeNumber = if (videoType is Video.Type.Episode) videoType.number else null,
+                )
+                    .also { if (it.isNotEmpty()) Log.d(TAG, "+ Moviebox: ${it.size}") }
+            } catch (_: Exception) { emptyList() }
+        } else emptyList()
+
+        return servers + movieboxBackup
     }
 
     // ========== HELPERS ==========

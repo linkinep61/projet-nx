@@ -59,6 +59,15 @@ class ProvidersMobileFragment : Fragment() {
             findNavController().navigate(R.id.downloads)
         }
 
+        // 2026-05-05 : contrôle parental — bouton cadenas
+        binding.ivParentalLock.setOnClickListener {
+            com.streamflixreborn.streamflix.ui.PinDialog.showAuth(
+                context = requireContext(),
+                title = "Contrôle parental",
+                onSuccess = { showLockManagementDialog() }
+            )
+        }
+
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
                 when (state) {
@@ -111,6 +120,69 @@ class ProvidersMobileFragment : Fragment() {
         _binding = null
     }
 
+    /** Dialog multi-choix pour gérer les providers verrouillés (PIN déjà validé). */
+    private fun showLockManagementDialog() {
+        val ctx = requireContext()
+        val allProviders = lastProviders.map { it.name }.distinct().sorted()
+        if (allProviders.isEmpty()) return
+        val locked = com.streamflixreborn.streamflix.utils.ProviderLockStore.getLockedProviders(ctx)
+        val checkedItems = allProviders.map { it in locked }.toBooleanArray()
+        val workingState = checkedItems.copyOf()
+        android.app.AlertDialog.Builder(ctx)
+            .setTitle("Verrouiller des providers")
+            .setMultiChoiceItems(allProviders.toTypedArray(), workingState) { _, which, isChecked ->
+                workingState[which] = isChecked
+            }
+            .setPositiveButton("Valider") { d, _ ->
+                allProviders.forEachIndexed { i, name ->
+                    if (workingState[i]) com.streamflixreborn.streamflix.utils.ProviderLockStore
+                        .lockProvider(ctx, name)
+                    else com.streamflixreborn.streamflix.utils.ProviderLockStore
+                        .unlockProvider(ctx, name)
+                }
+                Toast.makeText(ctx, "Configuration enregistrée", Toast.LENGTH_SHORT).show()
+                refilterProviders()
+                d.dismiss()
+            }
+            .setNegativeButton("Annuler", null)
+            .setNeutralButton("Changer le code") { _, _ ->
+                showChangePinDialog()
+            }
+            .show()
+    }
+
+    private fun showChangePinDialog() {
+        val ctx = requireContext()
+        val oldInput = android.widget.EditText(ctx).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or
+                android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
+            hint = "Ancien code"
+        }
+        val newInput = android.widget.EditText(ctx).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or
+                android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
+            hint = "Nouveau code (4-8 chiffres)"
+        }
+        val container = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 24)
+            addView(oldInput); addView(newInput)
+        }
+        android.app.AlertDialog.Builder(ctx)
+            .setTitle("Changer le code parental")
+            .setView(container)
+            .setPositiveButton("Valider") { d, _ ->
+                val ok = com.streamflixreborn.streamflix.utils.ProviderLockStore
+                    .changePin(ctx, oldInput.text.toString().trim(), newInput.text.toString().trim())
+                if (ok) Toast.makeText(ctx, "Code mis à jour ✓", Toast.LENGTH_SHORT).show()
+                else Toast.makeText(ctx, "Échec — ancien code incorrect ?", Toast.LENGTH_SHORT).show()
+                d.dismiss()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
 
     private fun initializeProviders() {
         // Hide language selector (all providers are French)

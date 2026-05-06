@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#000000">
+
+    <!-- Header sobre — juste titre + Annuler -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
+        android:background="#1A1A1A"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/pds_captcha_title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Vérification…"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/pds_captcha_cancel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Annuler"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"
+            android:background="#333333"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp" />
+    </LinearLayout>
+
+    <!-- Status text (caché par défaut, affiché si erreur) -->
+    <TextView
+        android:id="@+id/pds_captcha_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="6dp"
+        android:text=""
+        android:textColor="#CCCCCC"
+        android:textSize="11sp"
+        android:gravity="center"
+        android:background="#0F0F0F"
+        android:visibility="gone" />
+
+    <!-- Progress bar fine en haut -->
+    <ProgressBar
+        android:id="@+id/pds_captcha_progress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="2dp"
+        android:indeterminate="true"
+        android:indeterminateTint="#FF6600" />
+
+    <!-- WebView : occupe le reste de l'écran. La page de Papadustream
+         s'affiche normalement, le widget Cloudflare se résout tout seul.
+         focusable + focusableInTouchMode pour la navigation D-pad sur TV. -->
+    <WebView
+        android:id="@+id/pds_captcha_webview"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:nextFocusRight="@id/pds_captcha_cancel"
+        android:nextFocusUp="@id/pds_captcha_cancel" />
+
+</LinearLayout>

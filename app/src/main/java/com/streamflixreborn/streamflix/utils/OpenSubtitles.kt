@@ -39,7 +39,7 @@ import java.net.URL
 object OpenSubtitles {
 
     private const val BASE_URL = "https://api.opensubtitles.com/api/v1/"
-    private const val USER_AGENT = "Streamflix v1.7"
+    private const val USER_AGENT = "StreamFR v1.7"
 
     /**
      * Pool de keys API. local.properties peut contenir plusieurs keys séparées

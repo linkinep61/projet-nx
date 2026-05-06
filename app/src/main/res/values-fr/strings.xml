@@ -36,6 +36,7 @@
     <string name="main_menu_all_channels">Toutes les chaînes</string>
     <string name="main_menu_series">VOSTFR</string>
     <string name="main_menu_series_fr">FR</string>
+    <string name="main_menu_favorites">Favoris</string>
     <string name="main_menu_settings">Paramètres</string>
     <string name="main_menu_theme_change">Changer de thème</string>
     <string name="theme_default">Par défaut</string>
@@ -275,7 +276,7 @@
     <string name="clear_cache_done">Cache vidé</string>
     <string name="clear_cache_done_409">Cache vidé automatiquement (Erreur HTTP 409)</string>
     <string name="player_patience_short">Chargement de la vidéo en cours…</string>
-    <string name="player_patience_long">Vérification de sécurité Cloudflare en cours, ça peut prendre 10–30s…</string>
+    <string name="player_patience_long">Extraction en cours, ça peut prendre 10–30s…</string>
     <string name="player_patience_very_long">Toujours en cours, le serveur traîne. Encore un peu de patience…</string>
     <string name="voice_search">Recherche vocale</string>
     <string name="voice_error_no_match">Aucun résultat reconnu</string>

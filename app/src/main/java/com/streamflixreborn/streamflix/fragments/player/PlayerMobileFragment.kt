@@ -250,6 +250,11 @@ class PlayerMobileFragment : Fragment() {
 
     private var currentVideo: Video? = null
     private var currentServer: Video.Server? = null
+    // 2026-05-05 : watchdog buffering — fallback automatique au serveur suivant
+    // si le player reste bloqué en STATE_BUFFERING > N secondes (Darkibox & co
+    // qui renvoient une URL valide mais ne délivrent pas de données).
+    private var bufferingWatchdog: kotlinx.coroutines.Job? = null
+    private val BUFFERING_TIMEOUT_MS = 10_000L
     private var usingCronet = false
     private var usingDoH = false
     private var usingBrowserOkHttp = false
@@ -1402,27 +1407,13 @@ class PlayerMobileFragment : Fragment() {
         awaitTimeoutRunnable = null
     }
 
-    /** Affiche un Toast à 5s, 12s et 25s après l'entrée en LoadingVideo
-     *  pour informer l'utilisateur que l'extraction est encore en cours
-     *  (typique sur vidmoly.biz avec challenge Cloudflare). */
+    /** 2026-05-04 : messages "patience" désactivés à la demande de l'utilisateur.
+     *  Ils apparaissaient pour tous les extracteurs et étaient trompeurs (mention
+     *  Cloudflare hardcodée + apparition aléatoire). La fonction est conservée
+     *  mais ne fait rien — pour pouvoir les réactiver facilement plus tard. */
     private fun schedulePatienceMessages() {
         cancelPatienceMessages()
-        val handler = android.os.Handler(android.os.Looper.getMainLooper())
-        patienceHandler = handler
-        val ctx = context ?: return
-        listOf(
-            5_000L  to R.string.player_patience_short,
-            12_000L to R.string.player_patience_long,
-            25_000L to R.string.player_patience_very_long,
-        ).forEach { (delay, resId) ->
-            val r = Runnable {
-                if (isAdded) {
-                    Toast.makeText(ctx, getString(resId), Toast.LENGTH_SHORT).show()
-                }
-            }
-            patienceRunnables.add(r)
-            handler.postDelayed(r, delay)
-        }
+        // no-op : tous les toasts désactivés
     }
 
     private fun cancelPatienceMessages() {
@@ -1907,7 +1898,13 @@ class PlayerMobileFragment : Fragment() {
             // LiveRecorder can capture played segments on demand. This lets the
             // user tap REC during ANY HLS playback to capture a portion. For
             // non-HLS sources (mp4, etc.) the TeeDataSource still wraps fine.
-            val isHls = video.source.contains(".m3u8") || video.source.contains("/live/")
+            // 2026-05-04 : MoiflixExtractor sert un master HLS via xs1.php?data=XXX
+            // (sans extension .m3u8 dans l'URL) avec type=APPLICATION_M3U8. On
+            // teste donc le `type` en plus de la source URL pour router vers
+            // HlsMediaSource au lieu de ProgressiveMediaSource.
+            val isHls = video.source.contains(".m3u8")
+                || video.source.contains("/live/")
+                || video.type == androidx.media3.common.MimeTypes.APPLICATION_M3U8
             val teeFactory = com.streamflixreborn.streamflix.download.TeeDataSourceFactory(dataSourceFactory)
             if (isHls) {
                 val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(teeFactory)
@@ -2016,6 +2013,35 @@ class PlayerMobileFragment : Fragment() {
                     else -> "UNKNOWN($playbackState)"
                 }
                 Log.d("PlayerDebug", "onPlaybackStateChanged: $stateName, uri=${player.currentMediaItem?.localConfiguration?.uri?.toString()?.take(80)}")
+
+                // 2026-05-05 : watchdog buffering — fallback auto si bloqué > 10s
+                if (playbackState != Player.STATE_BUFFERING) {
+                    bufferingWatchdog?.cancel()
+                    bufferingWatchdog = null
+                } else {
+                    val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                        args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                        args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                    if (!isLiveIptv && bufferingWatchdog == null) {
+                        val initialPosition = player.currentPosition
+                        bufferingWatchdog = viewLifecycleOwner.lifecycleScope.launch {
+                            kotlinx.coroutines.delay(BUFFERING_TIMEOUT_MS)
+                            if (player.playbackState == Player.STATE_BUFFERING &&
+                                player.currentPosition == initialPosition) {
+                                val server = currentServer
+                                val nextServer = server?.let { servers.getOrNull(servers.indexOf(it) + 1) }
+                                Log.w("PlayerNetwork",
+                                    "BUFFERING timeout (${BUFFERING_TIMEOUT_MS}ms) on ${server?.name} " +
+                                    "→ ${if (nextServer != null) "switching to ${nextServer.name}" else "no more servers"}")
+                                if (server != null) pruneBrokenVariant(server)
+                                if (nextServer != null) {
+                                    viewModel.getVideo(nextServer)
+                                }
+                            }
+                            bufferingWatchdog = null
+                        }
+                    }
+                }
 
                 // Once we actually reach READY, restore the normal 2s auto-hide
                 // (we forced it to 0 during IPTV extraction so the controls

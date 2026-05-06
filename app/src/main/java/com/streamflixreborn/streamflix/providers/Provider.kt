@@ -83,13 +83,16 @@ interface Provider {
 
         val providers: Map<Provider, ProviderSupport> = linkedMapOf(
             // French providers — custom display order
-            // 2026-05-03: Nakios mis en tête (request user) — API TMDB-shape sur
-            // api.nakios.fit, catalogue accessible sans compte (juste header
-            // Origin requis), sources VOD via /api/sources/movie/{tmdbId} et
-            // /api/sources/tv/{id}/{s}/{e}. Auto-rediscovery domaine via
-            // nakios.online si jamais le TLD change. enrichHome = false car
-            // NakiosProvider.getHome() construit déjà 6 catégories propres.
-            NakiosProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
+            // 2026-05-04: Nakios DÉSACTIVÉ TEMPORAIREMENT (request user, en attente
+            // de l'intégration Papadustream comme source pour Movix). Pour
+            // réactiver, décommenter la ligne ci-dessous.
+            // NakiosProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
+            // 2026-05-04: Papadustream — provider standalone séries-only (DLE CMS).
+            // Sources résolues via PapadustreamExtractor (WebView + getxfield AJAX).
+            // 12 sources par épisode (VOE/Filemoon/Doodstream/Netu/Uqload/Vidoza × VF/VOSTFR).
+            // 2026-05-05: Réactivé — utilise PapadustreamCaptchaActivity (user-visible)
+            // pour résoudre Cloudflare Turnstile manuellement quand le headless échoue.
+            PapadustreamProvider to ProviderSupport(movies = false, tvShows = true),
             // FrenchStream: enrichment disabled — natural home a déjà
             // "Nouveautés Films" + "Nouveautés Séries".
             FrenchStreamProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
@@ -104,6 +107,9 @@ interface Provider {
             WiflixProvider to ProviderSupport(movies = true, tvShows = true),
             VoirDramaProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             VoirAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
+            // 2026-05-05: Moviebox (themoviebox.org/aoneroom) — niche K-Dramas + animes + films Hollywood VF.
+            // v1: catalogue uniquement (search/browse). Extraction streams TODO v2.
+            MovieboxProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             WiTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             OlaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             VegetaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),

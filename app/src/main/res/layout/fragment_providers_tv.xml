@@ -72,6 +72,26 @@
         app:layout_constraintTop_toTopOf="@id/tv_providers_label"
         tools:ignore="ContentDescription,UseAppTint" />
 
+    <!-- 2026-05-05 : Bouton cadenas pour le contrôle parental.
+         Au clic → demande PIN (setup le 1er fois, vérification ensuite) → ouvre
+         dialog de gestion des providers verrouillés. -->
+    <ImageView
+        android:id="@+id/btn_providers_lock"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_marginEnd="32dp"
+        android:padding="10dp"
+        android:src="@drawable/ic_lock"
+        android:tint="#FFFFFF"
+        android:focusable="true"
+        android:focusableInTouchMode="false"
+        android:contentDescription="Contrôle parental"
+        android:background="@drawable/bg_tv_button_focus"
+        app:layout_constraintBottom_toBottomOf="@id/tv_providers_label"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="@id/tv_providers_label"
+        tools:ignore="UseAppTint" />
+
     <!--
         TV uses a Leanback theme that does NOT extend Theme.AppCompat.
         Material's TabLayout requires AppCompat theme and crashes the

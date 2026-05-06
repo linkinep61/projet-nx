@@ -133,11 +133,31 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
         return patterns.firstNotNullOfOrNull { it.find(text)?.groupValues?.getOrNull(1)?.toIntOrNull() }
     }
 
+    /**
+     * Normalise les caractères Unicode "typographiques" en ASCII équivalent.
+     *
+     * 2026-05-05 : bug repro — VoirDrama retourne `Yumi's Cells 3` avec
+     * une apostrophe `'` (U+2019) au lieu de `'` ASCII. Quand on URL-encode
+     * pour la search Dramacool, ça devient `Yumi%E2%80%99s+Cells+3` qui
+     * matche 0 résultat alors que `Yumi's+Cells+3` retourne le show.
+     */
+    private fun normalizeUnicodeChars(s: String): String {
+        return s
+            .replace('’', '\'')   // ' → '
+            .replace('‘', '\'')   // ' → '
+            .replace('“', '"')    // " → "
+            .replace('”', '"')    // " → "
+            .replace('–', '-')    // – → -
+            .replace('—', '-')    // — → -
+            .replace('…', ' ')    // … → space (pour search)
+    }
+
     /** Search Dramacool9 et retourne des TvShow avec ID préfixé dc::. */
     private suspend fun searchOnDramacool(query: String): List<TvShow> {
         if (query.isBlank()) return emptyList()
         return try {
-            val url = "${dcBaseUrl()}?s=${query.replace(" ", "+")}"
+            val cleanQuery = normalizeUnicodeChars(query)
+            val url = "${dcBaseUrl()}?s=${cleanQuery.replace(" ", "+")}"
             val doc = service.getPage(url)
             doc.select("a.mask").mapNotNull { link ->
                 val href = link.attr("href").takeIf { it.isNotBlank() } ?: return@mapNotNull null
@@ -208,30 +228,69 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
     }
 
     /** Récupère les Video.Server depuis une page épisode Dramacool. */
+    /**
+     * 2026-05-05 : Cascade d'URL patterns pour gérer 4 cas réels de Dramacool :
+     *   1. Série classique multi-épisodes : `{slug}-episode-{ep}.html`
+     *   2. Film unique (pas de "-episode-X" sur le site) : `{slug}.html`
+     *   3. Film avec slug nu : `{slug}` (pas de suffixe)
+     *   4. Drama avec encoding différent : `{slug}-episode-1.html` retourne
+     *      un silent-200 (page homepage) — détectable via title qui ne contient
+     *      pas le slug normalisé.
+     *
+     * On tente le pattern "épisode" en premier, mais si la page retournée
+     * est la homepage (silent 404), on fallback sur le slug nu (cas film).
+     * Le check est fait via title : page valide a "Episode N" ou le titre
+     * du show, page d'accueil a juste "Dramacool | Kdrama...".
+     */
     private suspend fun getServersFromDramacool(slug: String, ep: Int): List<Video.Server> {
-        val url = "${dcBaseUrl()}$slug-episode-$ep.html"
-        return try {
-            val doc = service.getPage(url)
-            val out = mutableListOf<Video.Server>()
-            val seen = HashSet<String>()
-            // 1) Boutons server-btn[data-src]
-            doc.select("button.server-btn[data-src]").forEach { btn ->
-                val src = btn.attr("data-src").takeIf { it.startsWith("http") } ?: return@forEach
-                if (!seen.add(src)) return@forEach
-                val name = btn.text().replace("▶", "").trim().ifBlank { dcHostShort(src) }
-                out.add(Video.Server(id = "dc_$src", name = "$name (DC)", src = src))
+        val candidates = listOf(
+            "${dcBaseUrl()}$slug-episode-$ep.html",  // Série
+            "${dcBaseUrl()}$slug.html",                // Film .html
+            "${dcBaseUrl()}$slug",                     // Film slug nu
+        )
+
+        for (url in candidates) {
+            val out = try {
+                val doc = service.getPage(url)
+                // Détection silent-404 : le title de la homepage Dramacool est
+                // "Dramacool | Kdrama, Movies & Shows ..." (sans le slug ou
+                // "Episode N"). Si title ressemble à la homepage, on skip ce
+                // candidat et on essaie le suivant.
+                val title = doc.title()
+                val titleLooksValid = title.contains("Episode", ignoreCase = true) ||
+                    title.contains(slug.replace("-", " "), ignoreCase = true) ||
+                    !title.startsWith("Dramacool |")
+                if (!titleLooksValid) {
+                    Log.d("VoirDramaProvider", "DC URL silent-404: $url (title='$title')")
+                    continue
+                }
+
+                val list = mutableListOf<Video.Server>()
+                val seen = HashSet<String>()
+                doc.select("button.server-btn[data-src]").forEach { btn ->
+                    val src = btn.attr("data-src").takeIf { it.startsWith("http") } ?: return@forEach
+                    if (!seen.add(src)) return@forEach
+                    val name = btn.text().replace("▶", "").trim().ifBlank { dcHostShort(src) }
+                    list.add(Video.Server(id = "dc_$src", name = "$name (DC)", src = src))
+                }
+                doc.select("iframe#video-frame, iframe[src]").forEach { iframe ->
+                    val src = iframe.attr("src").takeIf { it.startsWith("http") } ?: return@forEach
+                    if (!seen.add(src)) return@forEach
+                    list.add(Video.Server(id = "dc_$src", name = "${dcHostShort(src)} (DC)", src = src))
+                }
+                list
+            } catch (e: Exception) {
+                Log.w("VoirDramaProvider", "Dramacool $url failed: ${e.message}")
+                emptyList()
             }
-            // 2) Iframe par défaut
-            doc.select("iframe#video-frame, iframe[src]").forEach { iframe ->
-                val src = iframe.attr("src").takeIf { it.startsWith("http") } ?: return@forEach
-                if (!seen.add(src)) return@forEach
-                out.add(Video.Server(id = "dc_$src", name = "${dcHostShort(src)} (DC)", src = src))
+            if (out.isNotEmpty()) {
+                Log.d("VoirDramaProvider", "DC servers via $url : ${out.size}")
+                return out
             }
-            out
-        } catch (e: Exception) {
-            Log.w("VoirDramaProvider", "Dramacool servers $slug/E$ep failed: ${e.message}")
-            emptyList()
         }
+
+        Log.w("VoirDramaProvider", "DC: no servers for slug='$slug' ep=$ep (tried ${candidates.size} URLs)")
+        return emptyList()
     }
 
     private fun dcHostShort(url: String): String =
@@ -253,32 +312,65 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
     private suspend fun fetchDramacoolServersByTitle(
         title: String,
         episodeNumber: Int,
+        year: Int? = null,
+        seasonNumber: Int? = null,
     ): List<Video.Server> {
-        val cleanTitle = title.trim()
+        val cleanTitle = normalizeUnicodeChars(title.trim())
         if (cleanTitle.length < 3) return emptyList()
 
         return try {
-            // Search DC pour le titre — prendre le premier résultat dont le
-            // titre normalisé correspond au nôtre
-            fun normalize(s: String) = s.lowercase()
+            fun normalize(s: String) = normalizeUnicodeChars(s).lowercase()
                 .replace(Regex("""\s*\(\d{4}\)\s*"""), " ")
                 .replace(Regex("""[^a-z0-9\s]"""), " ")
                 .replace(Regex("""\s+"""), " ")
                 .trim()
+            val targetWords = normalize(cleanTitle).split(" ").filter { it.length >= 3 }.toSet()
             val targetNorm = normalize(cleanTitle)
             val candidates = searchOnDramacool(cleanTitle)
-            val match = candidates.firstOrNull { dc ->
-                val dcNorm = normalize(dc.title)
-                dcNorm == targetNorm
-                    || dcNorm.contains(targetNorm)
-                    || targetNorm.contains(dcNorm)
-            } ?: run {
-                Log.d("VoirDramaProvider", "DC enrich: no title match for '$cleanTitle' (got ${candidates.size} candidates)")
+
+            if (candidates.isEmpty()) {
+                Log.d("VoirDramaProvider", "DC enrich: 0 search results for '$cleanTitle'")
                 return emptyList()
             }
-            val slug = dcStripPrefix(match.id)
-            Log.d("VoirDramaProvider", "DC enrich: '$cleanTitle' → DC slug='$slug', fetching ep $episodeNumber")
-            getServersFromDramacool(slug, episodeNumber)
+
+            // Score chaque candidat sur 4 critères :
+            //   - Match exact normalisé : +100
+            //   - DC title contient TOUS les mots cibles : +50
+            //   - Année correspondante (si fournie) : +30
+            //   - Saison correspondante (si fournie) : +30
+            data class Scored(val show: TvShow, val score: Int)
+            val scored = candidates.map { dc ->
+                val dcNorm = normalize(dc.title)
+                val dcWords = dcNorm.split(" ").filter { it.length >= 3 }.toSet()
+                var score = 0
+                if (dcNorm == targetNorm) score += 100
+                if (dcWords.containsAll(targetWords)) score += 50
+                if (year != null && dc.title.contains("($year)")) score += 30
+                if (seasonNumber != null && dcNorm.contains("season $seasonNumber")) score += 30
+                Scored(dc, score)
+            }.filter { it.score > 0 }
+                .sortedByDescending { it.score }
+
+            if (scored.isEmpty()) {
+                Log.d("VoirDramaProvider", "DC enrich: no scored match for '$cleanTitle' " +
+                    "(${candidates.size} candidates: ${candidates.take(3).map { it.title }})")
+                return emptyList()
+            }
+
+            // Essaie chaque candidat dans l'ordre du score, retourne le premier
+            // qui yield des servers réels. Évite de tomber sur "Squid Game The
+            // Challenge" quand l'utilisateur regarde "Squid Game Season 3".
+            for (sc in scored.take(5)) {
+                val slug = dcStripPrefix(sc.show.id)
+                Log.d("VoirDramaProvider", "DC enrich: trying '${sc.show.title}' (score=${sc.score}, slug='$slug') ep=$episodeNumber")
+                val servers = getServersFromDramacool(slug, episodeNumber)
+                if (servers.isNotEmpty()) {
+                    Log.d("VoirDramaProvider", "DC enrich: matched '${sc.show.title}' → ${servers.size} servers")
+                    return servers
+                }
+            }
+            Log.d("VoirDramaProvider", "DC enrich: ${scored.size} candidates scored but none returned servers for ep=$episodeNumber")
+            emptyList()
         } catch (e: Exception) {
             Log.w("VoirDramaProvider", "DC enrich for '$cleanTitle' E$episodeNumber failed: ${e.message}")
             emptyList()
@@ -332,7 +424,10 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
                                     is TvShow -> item.title
                                     else -> null
                                 } ?: continue
-                                val results = TMDb3.Search.multi(title)
+                                // 2026-05-05 : normalise titres scrappés HTML (apostrophes typographiques etc.)
+                                val cleanTitle = com.streamflixreborn.streamflix.utils.TitleNormalizer
+                                    .cleanForTmdbSearch(title).ifBlank { title }
+                                val results = TMDb3.Search.multi(cleanTitle)
                                 val match = results.results.firstOrNull { result ->
                                     when (result) {
                                         is TMDb3.Movie -> result.originalLanguage in asianLanguages && result.backdropPath != null
@@ -776,15 +871,35 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
             // sources Dramacool en parallèle. Si DC a la même série, on
             // ajoute ses players comme alternatives → l'utilisateur a plus
             // de chances qu'au moins un fonctionne.
-            val showTitle = document.selectFirst("h1.entry-title")?.text()?.trim()
+            //
+            // 2026-05-05 : on NETTOIE agressivement le titre (vire "Saison X",
+            // "Épisode Y", "VOSTFR/VF/VO", année) — sinon DC search retourne 0
+            // résultats car cherche le full title type "Climax Saison 1 Épisode 5".
+            val rawTitle = document.selectFirst("h1.entry-title")?.text()?.trim()
                 ?: document.title()
                     .substringBefore(" - ")
                     .substringBefore(" – ")
                     .trim()
                     .ifBlank { null }
+            val showTitle = rawTitle?.let { t ->
+                t.replace(Regex("""\s*[-–]?\s*Saison\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
+                    .replace(Regex("""\s*[-–]?\s*[Ss]\d+\s*[Ee]\d+.*$"""), "")
+                    .replace(Regex("""\s*[-–]?\s*[ÉéEe]pisode\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
+                    .replace(Regex("""\s+(VOSTFR|VOST|VF|VO|FR)\b.*$""", RegexOption.IGNORE_CASE), "")
+                    .replace(Regex("""\s*\(\d{4}\)\s*$"""), "")
+                    .trim()
+                    .ifBlank { null }
+            }
             val episodeNumber = (videoType as? Video.Type.Episode)?.number ?: 1
+            val seasonNumber = (videoType as? Video.Type.Episode)?.season?.number
+            // Extrait l'année du rawTitle si présent (cas "Show Name (2024)")
+            val year = rawTitle?.let {
+                Regex("""\((\d{4})\)""").find(it)?.groupValues?.get(1)?.toIntOrNull()
+            }
             val dramacoolServersDeferred = if (!showTitle.isNullOrBlank()) {
-                async { fetchDramacoolServersByTitle(showTitle, episodeNumber) }
+                Log.d("VoirDramaProvider", "DC enrich: rawTitle='$rawTitle' → cleaned='$showTitle' " +
+                    "year=$year season=$seasonNumber E$episodeNumber")
+                async { fetchDramacoolServersByTitle(showTitle, episodeNumber, year, seasonNumber) }
             } else null
 
             val servers = mutableListOf<Video.Server>()
@@ -880,7 +995,30 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
             if (dcUnique.isNotEmpty()) {
                 Log.d("VoirDramaProvider", "DC enrich: added ${dcUnique.size} backup servers")
             }
-            voirDramaSorted + dcUnique
+
+            // 2026-05-05 : Moviebox backup pour les K-Dramas (Moviebox a un gros
+            // catalogue de dramas asiatiques avec sous-titres FR, parfait fallback
+            // quand VoirDrama et Dramacool foirent).
+            val movieboxBackup = if (!showTitle.isNullOrBlank()) {
+                try {
+                    val year = document.selectFirst("h1.entry-title")?.text()?.let {
+                        Regex("""\((\d{4})\)""").find(it)?.groupValues?.get(1)?.toIntOrNull()
+                    }
+                    val type = if (videoType is Video.Type.Movie) 1 else 2
+                    val (sNum, eNum) = if (videoType is Video.Type.Episode)
+                        videoType.season.number to videoType.number else null to null
+                    MovieboxProvider.getMovieboxSourcesByTitle(showTitle, year, type, sNum, eNum)
+                        .also {
+                            if (it.isNotEmpty()) Log.d("VoirDramaProvider",
+                                "+ Moviebox backup pour '$showTitle' : ${it.size} sources")
+                        }
+                } catch (e: Exception) {
+                    Log.d("VoirDramaProvider", "Moviebox backup failed: ${e.message}")
+                    emptyList()
+                }
+            } else emptyList()
+
+            voirDramaSorted + dcUnique + movieboxBackup
             } // close coroutineScope
         } catch (e: Exception) {
             Log.e("VoirDramaProvider", "getServers error: ", e)

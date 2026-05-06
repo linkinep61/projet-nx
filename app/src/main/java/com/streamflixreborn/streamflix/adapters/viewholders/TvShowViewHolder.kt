@@ -113,6 +113,33 @@ class TvShowViewHolder(
         }
     }
 
+    /**
+     * Handle long-press for an IPTV channel: toggle favorite + Toast.
+     * For non-IPTV items the regular ShowOptionsXxxDialog is shown instead.
+     *
+     * Returns `true` if the long-press was handled here (i.e. it WAS an IPTV
+     * channel), `false` otherwise so the caller falls back to the dialog.
+     *
+     * Side effect on toggle: re-navigates to home so the Favoris section is
+     * refreshed immediately. Without this the user would have to leave/re-enter
+     * the home page to see their newly-favorited channel.
+     */
+    private fun handleIptvFavoriteLongPress(): Boolean {
+        if (!isIptvProvider()) return false
+        val providerName = tvShow.providerName ?: UserPreferences.currentProvider?.name ?: return false
+        val nowFavorite = com.streamflixreborn.streamflix.utils.IptvFavoritesStore.toggle(providerName, tvShow.id)
+        val msg = if (nowFavorite) "Ajouté aux favoris" else "Retiré des favoris"
+        Toast.makeText(context, "${tvShow.title} — $msg", Toast.LENGTH_SHORT).show()
+        // Trigger refresh of home so the Favoris row updates. We do this by
+        // bouncing the current provider through UserPreferences — the home
+        // observers re-render on this signal across the app.
+        try {
+            val current = UserPreferences.currentProvider
+            if (current != null) UserPreferences.currentProvider = current
+        } catch (_: Throwable) { /* best-effort refresh */ }
+        return true
+    }
+
     private fun isIptvProvider(): Boolean {
         // Match WiTv (ch::, sport::), OlaTv (ola::, ola_ep::), Vegeta TV (vegeta::,
         // vegeta_ep::) IDs, plus the provider names. Keeping the prefix checks too
@@ -282,7 +309,10 @@ class TvShowViewHolder(
             }
         }
         binding.root.setOnLongClickListener {
-            ShowOptionsMobileDialog(context, tvShow).show()
+            // IPTV channels: long-press toggles favorite. Other content: options dialog.
+            if (!handleIptvFavoriteLongPress()) {
+                ShowOptionsMobileDialog(context, tvShow).show()
+            }
             true
         }
         setPoster(binding.ivTvShowPoster)
@@ -315,7 +345,9 @@ class TvShowViewHolder(
                 }
             }
             setOnLongClickListener {
-                ShowOptionsTvDialog(context, tvShow).show()
+                if (!handleIptvFavoriteLongPress()) {
+                    ShowOptionsTvDialog(context, tvShow).show()
+                }
                 true
             }
             setOnFocusChangeListener { _, hasFocus ->
@@ -360,7 +392,9 @@ class TvShowViewHolder(
             }
         }
         binding.root.setOnLongClickListener {
-            ShowOptionsMobileDialog(context, tvShow).show()
+            if (!handleIptvFavoriteLongPress()) {
+                ShowOptionsMobileDialog(context, tvShow).show()
+            }
             true
         }
         setPoster(binding.ivTvShowPoster)
@@ -393,7 +427,9 @@ class TvShowViewHolder(
                 }
             }
             setOnLongClickListener {
-                ShowOptionsTvDialog(context, tvShow).show()
+                if (!handleIptvFavoriteLongPress()) {
+                    ShowOptionsTvDialog(context, tvShow).show()
+                }
                 true
             }
             setOnFocusChangeListener { _, hasFocus ->
@@ -566,6 +602,21 @@ class TvShowViewHolder(
             } else {
                 binding.root.findNavController().navigate(R.id.tv_show, tvShowArgs())
             }
+        }
+        // Long-press on the swiper card (featured carousel) — toggle favori for IPTV,
+        // ouvre le dialog d'options (Téléchargement/Favori/Marquer vu/etc.) pour les
+        // autres providers. Le binding du swiper est partagé Mobile/TV donc on
+        // choisit le bon dialog selon l'activité hôte.
+        binding.root.setOnLongClickListener {
+            if (!handleIptvFavoriteLongPress()) {
+                val isTv = context.toActivity() is com.streamflixreborn.streamflix.activities.main.MainTvActivity
+                if (isTv) {
+                    com.streamflixreborn.streamflix.ui.ShowOptionsTvDialog(context, tvShow).show()
+                } else {
+                    ShowOptionsMobileDialog(context, tvShow).show()
+                }
+            }
+            true
         }
     }
 

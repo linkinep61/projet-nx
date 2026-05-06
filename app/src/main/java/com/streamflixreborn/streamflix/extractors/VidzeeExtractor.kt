@@ -11,15 +11,15 @@ import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.withContext
 
 class VidzeeExtractor : Extractor() {
     override val name = "Vidzee"
     override val mainUrl = "https://player.vidzee.wtf"
     private val coreApi = "https://core.vidzee.wtf"
-    private val staticPass = "b3f2a9d4c6e1f8a7b"
+    private val staticPass = "4f2a9c7d1e8b3a6f0d5c2e9a7b1f4d8c"
 
     private val client = OkHttpClient.Builder().build()
 
@@ -64,9 +64,9 @@ class VidzeeExtractor : Extractor() {
         return servers(videoType).first()
     }
 
-    override suspend fun extract(link: String): Video = withContext(Dispatchers.IO) {
+    override suspend fun extract(link: String): Video = coroutineScope {
         val masterKey = getMasterKey() ?: throw Exception("Failed to get Vidzee master key")
-
+        
         try {
             val request = Request.Builder()
                 .url(link)
@@ -76,7 +76,7 @@ class VidzeeExtractor : Extractor() {
                 .build()
 
             val response = client.newCall(request).execute()
-            if (!response.isSuccessful) throw Exception("Network error (${response.code})")
+            if (!response.isSuccessful) throw Exception("Network error")
 
             val body = response.body?.string() ?: throw Exception("Empty body")
             val json = JSONObject(body)
@@ -108,7 +108,7 @@ class VidzeeExtractor : Extractor() {
             val isDukeServer = link.contains("sr=1")
             val mimeType = if (isDukeServer) MimeTypes.VIDEO_MP4 else MimeTypes.APPLICATION_M3U8
 
-            return@withContext Video(
+            return@coroutineScope Video(
                 source = decryptedUrl,
                 subtitles = subtitles,
                 headers = mapOf(

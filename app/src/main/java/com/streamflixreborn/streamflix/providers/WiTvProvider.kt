@@ -1289,6 +1289,27 @@ object WiTvProvider : Provider, IptvProvider {
             }
         }
 
+        // ─── "Favoris" — user-favorited channels (long-press a channel to add).
+        // Last section so it sits right before the bottom Paramètres tab. Only
+        // shown if the user has actually marked any channel as favorite.
+        val favoriteIds = com.streamflixreborn.streamflix.utils.IptvFavoritesStore.getFavorites(name)
+        if (favoriteIds.isNotEmpty()) {
+            val favItems = mutableListOf<TvShow>()
+            for (favId in favoriteIds) {
+                // ID format is "ch::<key>" or "sport::<url>" — sport events are
+                // ephemeral so we skip them (they expire daily).
+                if (favId.startsWith("ch::")) {
+                    val key = favId.removePrefix("ch::")
+                    val info = snapshot[key] ?: continue
+                    if (!info.hasServer()) continue
+                    favItems += toTvShow(key, info)
+                }
+            }
+            if (favItems.isNotEmpty()) {
+                sections.add(Category(name = "Favoris", list = sortByTnt(favItems)))
+            }
+        }
+
         sections
     } catch (e: Exception) {
         Log.e(TAG, "getHome error", e)

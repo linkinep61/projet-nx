@@ -94,3 +94,9 @@ logcat*.txt
 # Memoire perso Claude (jamais commit)
 CLAUDE.md
 TODO.md
+
+# Sandbox / Claude session leftovers (jamais commit)
+outputs/
+memory/
+.claude/
+.kotlin/

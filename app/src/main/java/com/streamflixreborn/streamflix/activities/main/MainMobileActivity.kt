@@ -333,11 +333,11 @@ class MainMobileActivity : FragmentActivity() {
                 setIcon(R.drawable.ic_menu_tv)
             }
         }
+        val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
         binding.bnvMain.menu.findItem(R.id.tv_shows)?.apply {
             isVisible = supportsTvShows
             // IPTV providers (WiTv, OlaTv, …) show "Toutes les chaînes" instead of "Séries TV"
             // — covers any provider implementing IptvProvider, no need to maintain a list.
-            val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
             title = when {
                 isIptv || provider.name in setOf("CableVisionHD", "TvporinternetHD") ->
                     getString(R.string.main_menu_all_channels)
@@ -346,6 +346,8 @@ class MainMobileActivity : FragmentActivity() {
                 else -> getString(R.string.main_menu_tv_shows)
             }
         }
+        // Favoris tab — IPTV providers only. Sits between "Toutes les chaînes" and "Paramètres".
+        binding.bnvMain.menu.findItem(R.id.iptv_favorites)?.isVisible = isIptv
 
         val navHost =
             supportFragmentManager.findFragmentById(R.id.nav_main_fragment) as? NavHostFragment
@@ -367,6 +369,7 @@ class MainMobileActivity : FragmentActivity() {
             R.id.home,
             R.id.movies,
             R.id.tv_shows,
+            R.id.iptv_favorites,
             R.id.settings,
         )
     }

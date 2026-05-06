@@ -78,6 +78,11 @@
             app:destination="@id/tv_show" />
     </fragment>
     <fragment
+        android:id="@+id/iptv_favorites"
+        android:name="com.streamflixreborn.streamflix.fragments.iptv_favorites.IptvFavoritesTvFragment"
+        android:label="fragment_iptv_favorites_tv"
+        tools:layout="@layout/fragment_tv_shows_tv" />
+    <fragment
         android:id="@+id/movie"
         android:name="com.streamflixreborn.streamflix.fragments.movie.MovieTvFragment"
         android:label="fragment_movie_tv"

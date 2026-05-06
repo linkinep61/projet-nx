@@ -58,6 +58,15 @@
             android:theme="@style/AppTheme.Tv" />
 
         <activity
+            android:name=".activities.tools.PapadustreamCaptchaActivity"
+            android:exported="false"
+            android:hardwareAccelerated="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:theme="@style/AppTheme.Tv" />
+
+        <activity
             android:name=".activities.tools.WebViewPlayerActivity"
             android:exported="false"
             android:hardwareAccelerated="true"

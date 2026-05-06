@@ -421,19 +421,26 @@ class TmdbProvider(override val language: String) : Provider {
             return genres
         }
 
+        // 2026-05-05 : normalise la query AVANT cache + AVANT TMDB. Ça couvre :
+        // - utilisateurs iOS/macOS où le clavier auto-convertit ' en ' (U+2019)
+        // - copier/coller depuis sites streaming qui utilisent les apostrophes typo
+        // - annotations parasites collées par mégarde (« (2024) », « VF », etc.)
+        val cleanQuery = com.streamflixreborn.streamflix.utils.TitleNormalizer
+            .cleanForTmdbSearch(query).ifBlank { query }
+
         // 2026-05-04 : cache search (TTL 5 min). User retape vite la même
         // recherche après un retour arrière, ou cycle entre 2-3 termes.
-        val searchKey = "search:$language:${query.trim().lowercase()}:p$page"
+        val searchKey = "search:$language:${cleanQuery.trim().lowercase()}:p$page"
         val now = System.currentTimeMillis()
         searchCache[searchKey]?.let { cached ->
             if (now < cached.expiresAtMs) {
-                Log.d("TmdbProvider", "search cache HIT for '$query' p$page")
+                Log.d("TmdbProvider", "search cache HIT for '$cleanQuery' p$page")
                 return cached.results
             }
             searchCache.remove(searchKey)
         }
 
-        val results = TMDb3.Search.multi(query, page = page, language = language).results.mapNotNull { multi ->
+        val results = TMDb3.Search.multi(cleanQuery, page = page, language = language).results.mapNotNull { multi ->
             when (multi) {
                 is TMDb3.Movie -> Movie(
                     id = multi.id.toString(),
@@ -1004,6 +1011,33 @@ class TmdbProvider(override val language: String) : Provider {
                 if (language == "en") {
                     servers.addAll(1, VideasyExtractor().servers(videoType, language))
                 }
+            }
+        }
+
+        // 2026-05-05 : Coflix backup pour le français — site multi-hosters
+        // (Lulustream, VOE, Vidoza, Darkibox, Veev, Goodstream...). Recherche
+        // par titre, donc complète le catalogue indépendamment des autres
+        // providers FR.
+        if (lang == "fr") {
+            try {
+                val coflixServers = when (videoType) {
+                    is Video.Type.Movie -> CoflixSourceProvider.getMovieSources(
+                        videoType.title,
+                        videoType.releaseDate.takeIf { it.isNotBlank() }?.take(4)?.toIntOrNull(),
+                    )
+                    is Video.Type.Episode -> CoflixSourceProvider.getEpisodeSources(
+                        showTitle = videoType.tvShow.title,
+                        year = videoType.tvShow.releaseDate?.take(4)?.toIntOrNull(),
+                        seasonNumber = videoType.season.number,
+                        episodeNumber = videoType.number,
+                    )
+                }
+                if (coflixServers.isNotEmpty()) {
+                    Log.i("StreamFlixFR", "[SERVERS] Coflix -> ${coflixServers.size} serveurs")
+                    servers.addAll(coflixServers)
+                }
+            } catch (e: Exception) {
+                Log.w("StreamFlixFR", "[ERROR] Coflix: ${e.message}")
             }
         }
 

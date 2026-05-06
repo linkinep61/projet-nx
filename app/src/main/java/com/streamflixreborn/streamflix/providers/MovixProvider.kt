@@ -16,11 +16,13 @@ import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -142,6 +144,320 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
     }
 
     private val tmdbService: TmdbService by lazy { buildTmdbService() }
+
+    // ── 2026-05-04 : TMDB-iframe backups en QUEUE de liste ───────────────
+    // Movix a déjà beaucoup de sources natives FR (fstream, wiflix, cpasmal,
+    // etc.) qui marchent très bien. On ajoute ces 5 backups TMDB-iframe à la
+    // FIN du sélecteur de servers — ils sont là "au cas où" un film/série
+    // n'a aucune source native FR. Ordre = sources clean d'abord, vidsrc.to
+    // (CF-prone) en dernier.
+    private data class TmdbBackupSource(
+        val key: String,
+        val displayName: String,
+        val movieUrl: (tmdbId: String) -> String,
+        val tvUrl: (tmdbId: String, season: Int, episode: Int) -> String,
+    )
+
+    private val tmdbBackupSources: List<TmdbBackupSource> = listOf(
+        TmdbBackupSource(
+            key = "vidsrc-icu",
+            displayName = "Vidsrc.icu",
+            movieUrl = { id -> "https://vidsrc.icu/embed/movie/$id" },
+            tvUrl = { id, s, e -> "https://vidsrc.icu/embed/tv/$id/$s/$e" },
+        ),
+        TmdbBackupSource(
+            key = "2embed-skin",
+            displayName = "2Embed",
+            movieUrl = { id -> "https://2embed.skin/embed/tmdb-movie-$id" },
+            tvUrl = { id, s, e -> "https://2embed.skin/embed/tmdb-tv-$id&s=$s&e=$e" },
+        ),
+        TmdbBackupSource(
+            key = "nontongo",
+            displayName = "Nontongo",
+            movieUrl = { id -> "https://nontongo.win/embed/movie/$id" },
+            tvUrl = { id, s, e -> "https://nontongo.win/embed/tv/$id/$s/$e" },
+        ),
+        TmdbBackupSource(
+            key = "111movies",
+            displayName = "111Movies",
+            movieUrl = { id -> "https://111movies.net/movie/$id" },
+            tvUrl = { id, s, e -> "https://111movies.net/tv/$id/$s/$e" },
+        ),
+        TmdbBackupSource(
+            key = "vidsrc-to",
+            displayName = "Vidsrc.to",
+            movieUrl = { id -> "https://vidsrc.to/embed/movie/$id" },
+            tvUrl = { id, s, e -> "https://vidsrc.to/embed/tv/$id/$s/$e" },
+        ),
+    )
+
+    /** Construit la liste des Video.Server backups TMDB-iframe pour Movix.
+     *  Identique à NakiosProvider mais avec son propre wiring local
+     *  (paramètres season/episode en Int car Movix Episode VideoType les a
+     *  déjà parsés). */
+    private fun buildTmdbBackupServersForMovix(
+        tmdbId: String,
+        videoType: Video.Type,
+    ): List<Video.Server> {
+        if (!tmdbId.all { it.isDigit() }) return emptyList()
+        return when (videoType) {
+            is Video.Type.Movie -> tmdbBackupSources.map { source ->
+                Video.Server(
+                    id = "${source.key}_movix_movie_$tmdbId",
+                    name = source.displayName,
+                    src = source.movieUrl(tmdbId),
+                )
+            }
+            is Video.Type.Episode -> {
+                val s = videoType.season.number
+                val e = videoType.number
+                tmdbBackupSources.map { source ->
+                    Video.Server(
+                        id = "${source.key}_movix_tv_${tmdbId}_${s}_$e",
+                        name = source.displayName,
+                        src = source.tvUrl(tmdbId, s, e),
+                    )
+                }
+            }
+        }
+    }
+
+    // ── 2026-05-04 : Yflix.to backup source ──────────────────────────────
+    // yflix.to est un aggregator FR (UI traduite via Google Translate côté
+    // browser, pas de Cloudflare challenge bloquant). On l'utilise en
+    // SOURCE COMPLEMENTAIRE quand Movix natif n'a rien — ou en plus pour
+    // augmenter le nombre de servers dispos.
+    //
+    // Workflow :
+    //   1. TMDB id → title+year (déjà fait par tmdbService pour le home)
+    //   2. /ajax/film/search?keyword={title} → JSON avec HTML <a class="item">
+    //   3. Match best result par (title, year, type)
+    //   4. Build Video.Server avec src = yflix.to/watch/{slug}.{id}#ep=S,E
+    //   5. YflixExtractor (WebView) intercepte le m3u8 final
+    private const val YFLIX_BASE = "https://yflix.to/"
+
+    /** Cherche un titre sur yflix.to via l'AJAX search public.
+     *  Retourne le path /watch/{slug}.{id} du meilleur match, ou null si rien.
+     *  Match heuristique : titre (case-insensitive contains) + année (±1) si fournie.
+     *  Type filter : "Movie" ou "TV" pour préférer le bon kind. */
+    private suspend fun searchYflix(
+        title: String,
+        year: Int? = null,
+        preferType: String = "Movie",
+    ): String? {
+        if (title.isBlank()) return null
+        // 2026-05-05 : normalise les apostrophes typographiques (U+2019 → ') avant URL-encoding
+        // sinon le keyword devient %E2%80%99 et Yflix renvoie 0 résultats.
+        val cleanTitle = com.streamflixreborn.streamflix.utils.TitleNormalizer.stripUnicodeArtifacts(title)
+        return try {
+            val url = "${YFLIX_BASE}ajax/film/search?keyword=" +
+                java.net.URLEncoder.encode(cleanTitle, "UTF-8")
+            val request = okhttp3.Request.Builder()
+                .url(url)
+                .header("Accept", "application/json")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .header("Referer", YFLIX_BASE)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+                .build()
+            val client = Extractor.sharedClient.newBuilder()
+                .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
+            val body = withContext(Dispatchers.IO) {
+                client.newCall(request).execute().use { it.body?.string() }
+            } ?: return null
+            val json = com.google.gson.JsonParser.parseString(body).asJsonObject
+            val resultObj = json.getAsJsonObject("result") ?: return null
+            val html = resultObj.get("html")?.asString ?: return null
+            // Parse les <a class="item" href="/watch/{slug}.{id}"> avec leurs metadata
+            val doc = org.jsoup.Jsoup.parse(html)
+            val items = doc.select("a.item").mapNotNull { item ->
+                val href = item.attr("href").takeIf { it.startsWith("/watch/") } ?: return@mapNotNull null
+                val itemTitle = item.selectFirst("div.title")?.text()?.trim() ?: return@mapNotNull null
+                val metadata = item.select("div.metadata span").map { it.text().trim() }
+                val itemType = metadata.getOrNull(0) ?: "" // "Movie" ou "TV"
+                val itemYear = metadata.getOrNull(1)?.takeIf { it.matches(Regex("\\d{4}")) }?.toIntOrNull()
+                Triple(href, itemTitle, Pair(itemType, itemYear))
+            }
+            if (items.isEmpty()) {
+                Log.d("MovixProvider", "Yflix search '$title' : no results")
+                return null
+            }
+            // 2026-05-05 v2 : matching strict (cf searchMoiflix) — pas de
+            // substring lâche. Exige match exact OU word-for-word + longueur
+            // similaire pour éviter "The Boys" → "The Boyfriend".
+            val targetTitleNorm = title.lowercase()
+                .replace(Regex("[^a-z0-9 ]"), " ")
+                .replace(Regex("\\s+"), " ").trim()
+            val targetWords = targetTitleNorm.split(" ").filter { it.length > 1 }.toSet()
+            val scored = items.map { (href, t, meta) ->
+                val (itype, iyear) = meta
+                val tNorm = t.lowercase()
+                    .replace(Regex("[^a-z0-9 ]"), " ")
+                    .replace(Regex("\\s+"), " ").trim()
+                val candidateWords = tNorm.split(" ").filter { it.length > 1 }.toSet()
+                val lenDiffPct = if (kotlin.math.max(tNorm.length, targetTitleNorm.length) > 0)
+                    kotlin.math.abs(tNorm.length - targetTitleNorm.length).toDouble() /
+                        kotlin.math.max(tNorm.length, targetTitleNorm.length)
+                else 0.0
+                var score = when {
+                    tNorm == targetTitleNorm -> 100
+                    targetWords.isNotEmpty() && candidateWords.containsAll(targetWords) && lenDiffPct <= 0.30 -> 90
+                    candidateWords.isNotEmpty() && targetWords.containsAll(candidateWords) && lenDiffPct <= 0.30 -> 80
+                    else -> 0
+                }
+                if (year != null && iyear != null && Math.abs(iyear - year) <= 1) score += 30
+                if (itype == preferType) score += 10
+                Triple(href, score, "$t ($itype, ${iyear ?: "?"})")
+            }
+            val best = scored.maxByOrNull { it.second }
+            // Seuil 90 (était 50) — match strict requis.
+            if (best == null || best.second < 90) {
+                Log.d("MovixProvider", "Yflix '$title' : pas de match fiable (best=${best?.third} score=${best?.second}), skip")
+                return null
+            }
+            Log.d("MovixProvider", "Yflix '$title' → ${best.third} score=${best.second}")
+            best.first // /watch/{slug}.{id}
+        } catch (e: Exception) {
+            Log.w("MovixProvider", "Yflix search '$title' failed: ${e.message}")
+            null
+        }
+    }
+
+    /** Construit un Video.Server pour yflix avec l'URL /watch/...
+     *  Pour un épisode, on ajoute le hash #ep=S,E que yflix attend. */
+    private fun buildYflixServer(watchPath: String, season: Int? = null, episode: Int? = null): Video.Server {
+        val baseUrl = if (watchPath.startsWith("http")) watchPath
+            else YFLIX_BASE.trimEnd('/') + watchPath
+        val finalUrl = if (season != null && episode != null) {
+            "$baseUrl#ep=$season,${episode.toString().padStart(2, '0')}"
+        } else baseUrl
+        return Video.Server(
+            id = "yflix_${watchPath.substringAfterLast("/")}",
+            name = "Yflix [VF/Multi]",
+            src = finalUrl,
+        )
+    }
+
+    // ── 2026-05-04 : Moiflix.com backup source ───────────────────────────
+    // Aggregator FR avec catalog complet (films + shows). Architecture :
+    //   1. Search via JSON public : /ajax/posts?q={title}
+    //   2. Match best result par titre + type (Film / Show)
+    //   3. URL : /movie/{slug} ou /show/{slug}
+    //   4. Episode : /episode/{slug}/season-N-episode-N
+    //   5. Player iframe → lecteur1.xtremestream.xyz/player/index.php?...
+    //   6. MoiflixExtractor (WebView) intercepte le m3u8
+    //
+    // Avantages : audio FR garanti (testé), pas de CF challenge, pas de
+    // login, search JSON propre. Le bouton "Continuer" sur la page episode
+    // est auto-cliqué par MoiflixExtractor.
+    private const val MOIFLIX_BASE = "https://moiflix.com/"
+
+    /** Cherche un titre sur moiflix via l'AJAX search public.
+     *  Retourne le path /movie/{slug} ou /show/{slug} du meilleur match, ou null. */
+    private suspend fun searchMoiflix(
+        title: String,
+        year: Int? = null,
+        preferType: String = "Film",
+    ): String? {
+        if (title.isBlank()) return null
+        // 2026-05-05 : pareil que Yflix : Moiflix foire sur les apostrophes typographiques.
+        val cleanTitle = com.streamflixreborn.streamflix.utils.TitleNormalizer.stripUnicodeArtifacts(title)
+        return try {
+            val url = "${MOIFLIX_BASE}ajax/posts?q=" +
+                java.net.URLEncoder.encode(cleanTitle, "UTF-8")
+            val request = okhttp3.Request.Builder()
+                .url(url)
+                .header("Accept", "application/json")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .header("Referer", MOIFLIX_BASE)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+                .build()
+            val client = Extractor.sharedClient.newBuilder()
+                .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
+            val body = withContext(Dispatchers.IO) {
+                client.newCall(request).execute().use { it.body?.string() }
+            } ?: return null
+            val json = com.google.gson.JsonParser.parseString(body).asJsonObject
+            val items = json.getAsJsonArray("data") ?: return null
+            if (items.size() == 0) {
+                Log.d("MovixProvider", "Moiflix search '$title' : no results")
+                return null
+            }
+            // 2026-05-05 v2 : matching strict pour éviter les faux positifs.
+            // Avant : "The Boys" pouvait matcher "The Boyfriend" via substring
+            // (score 50). Maintenant on exige soit un match exact, soit un
+            // match WORD-FOR-WORD (tous les mots du target présents dans le
+            // candidat + différence de longueur ≤ 30%).
+            val targetTitleNorm = title.lowercase()
+                .replace(Regex("[^a-z0-9 ]"), " ")
+                .replace(Regex("\\s+"), " ").trim()
+            val targetWords = targetTitleNorm.split(" ").filter { it.length > 1 }.toSet()
+            var bestUrl: String? = null
+            var bestScore = -1
+            var bestName: String? = null
+            for (i in 0 until items.size()) {
+                val item = items[i].asJsonObject
+                val itemName = item.get("name")?.asString ?: continue
+                val itemUrl = item.get("url")?.asString ?: continue
+                val itemType = item.get("type")?.asString ?: ""
+                val nNorm = itemName.lowercase()
+                    .replace(Regex("[^a-z0-9 ]"), " ")
+                    .replace(Regex("\\s+"), " ").trim()
+                val candidateWords = nNorm.split(" ").filter { it.length > 1 }.toSet()
+                var score = 0
+                when {
+                    // 1. Match exact (insensible à la casse/ponctuation)
+                    nNorm == targetTitleNorm -> score = 100
+                    // 2. Tous les mots du target sont dans le candidat ET
+                    //    longueur similaire (≤ 30% de différence) → fort match
+                    targetWords.isNotEmpty() && candidateWords.containsAll(targetWords) &&
+                        kotlin.math.abs(nNorm.length - targetTitleNorm.length).toDouble() /
+                        kotlin.math.max(nNorm.length, targetTitleNorm.length) <= 0.30 -> score = 90
+                    // 3. Tous les mots du candidat dans target ET longueur similaire
+                    candidateWords.isNotEmpty() && targetWords.containsAll(candidateWords) &&
+                        kotlin.math.abs(nNorm.length - targetTitleNorm.length).toDouble() /
+                        kotlin.math.max(nNorm.length, targetTitleNorm.length) <= 0.30 -> score = 80
+                    // Sinon : pas un match valide. Pas de fallback substring.
+                    else -> score = 0
+                }
+                if (itemType == preferType) score += 20
+                if (score > bestScore) {
+                    bestScore = score
+                    bestUrl = itemUrl
+                    bestName = itemName
+                }
+            }
+            // Seuil 90 (au lieu de 50) — on exige un VRAI match.
+            if (bestUrl == null || bestScore < 90) {
+                Log.d("MovixProvider", "Moiflix '$title' : pas de match fiable (best='$bestName' score=$bestScore), skip")
+                return null
+            }
+            Log.d("MovixProvider", "Moiflix '$title' → '$bestName' $bestUrl (score=$bestScore)")
+            bestUrl
+        } catch (e: Exception) {
+            Log.w("MovixProvider", "Moiflix search '$title' failed: ${e.message}")
+            null
+        }
+    }
+
+    /** Construit l'URL complète moiflix pour un movie ou episode.
+     *  movie : /movie/{slug}
+     *  episode : /episode/{slug}/season-N-episode-N (slug récupéré depuis /show/{slug}) */
+    private fun buildMoiflixServer(matchUrl: String, season: Int? = null, episode: Int? = null): Video.Server {
+        val finalUrl = if (season != null && episode != null) {
+            // matchUrl = "/show/{slug}" → on transforme en "/episode/{slug}/season-N-episode-N"
+            val slug = matchUrl.substringAfterLast("/")
+            "${MOIFLIX_BASE.trimEnd('/')}/episode/$slug/season-$season-episode-$episode"
+        } else {
+            "${MOIFLIX_BASE.trimEnd('/')}$matchUrl"
+        }
+        return Video.Server(
+            id = "moiflix_${matchUrl.substringAfterLast("/")}",
+            name = "Moiflix [VF]",
+            src = finalUrl,
+        )
+    }
 
     private val genreNames = mapOf(
         "28" to "Action", "12" to "Aventure", "16" to "Animation",
@@ -663,7 +979,10 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
         }
 
         return try {
-            val tmdbResults = TMDb3.Search.multi(query, language = "fr-FR", page = page)
+            // 2026-05-05 : normalise la query (apostrophes typo, annotations parasites)
+            val cleanQuery = com.streamflixreborn.streamflix.utils.TitleNormalizer
+                .cleanForTmdbSearch(query).ifBlank { query }
+            val tmdbResults = TMDb3.Search.multi(cleanQuery, language = "fr-FR", page = page)
             tmdbResults.results.mapNotNull { item ->
                 when (item) {
                     is TMDb3.Movie -> Movie(
@@ -1100,7 +1419,33 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                         }
                     }
 
-                    awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, videasyDeferred)
+                    // 2026-05-04 : Yflix.to backup (TMDB id → title+year → search → /watch URL)
+                    val yflixDeferred = async {
+                        runEndpoint("yflix-movie") {
+                            val tmdbIdInt = tmdbId.toIntOrNull() ?: return@runEndpoint emptyList()
+                            val movie = try {
+                                tmdbService.getMovieDetails(tmdbIdInt, TMDB_API_KEY)
+                            } catch (_: Exception) { null }
+                            val title = movie?.title ?: return@runEndpoint emptyList()
+                            val year = movie.release_date?.take(4)?.toIntOrNull()
+                            val watchPath = searchYflix(title, year, "Movie") ?: return@runEndpoint emptyList()
+                            listOf(buildYflixServer(watchPath))
+                        }
+                    }
+                    // 2026-05-04 : Moiflix backup (TMDB id → title → search → /movie/{slug})
+                    val moiflixDeferred = async {
+                        runEndpoint("moiflix-movie") {
+                            val tmdbIdInt = tmdbId.toIntOrNull() ?: return@runEndpoint emptyList()
+                            val movie = try {
+                                tmdbService.getMovieDetails(tmdbIdInt, TMDB_API_KEY)
+                            } catch (_: Exception) { null }
+                            val title = movie?.title ?: return@runEndpoint emptyList()
+                            val year = movie.release_date?.take(4)?.toIntOrNull()
+                            val matchUrl = searchMoiflix(title, year, "Film") ?: return@runEndpoint emptyList()
+                            listOf(buildMoiflixServer(matchUrl))
+                        }
+                    }
+                    awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, videasyDeferred, yflixDeferred, moiflixDeferred)
                 }
 
                 allResults.forEach { servers.addAll(it) }
@@ -1292,27 +1637,127 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                         }
                     }
 
-                    awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, seriesDlDeferred, videasyDeferred, mazQuestDeferred)
+                    // 2026-05-04 : Yflix.to backup pour TV episode
+                    val yflixDeferred = async {
+                        runEndpoint("yflix-tv") {
+                            val tmdbIdInt = tmdbId.toIntOrNull() ?: return@runEndpoint emptyList()
+                            val tv = try {
+                                tmdbService.getTvDetails(tmdbIdInt, TMDB_API_KEY)
+                            } catch (_: Exception) { null }
+                            val title = tv?.name ?: return@runEndpoint emptyList()
+                            val year = tv.first_air_date?.take(4)?.toIntOrNull()
+                            val watchPath = searchYflix(title, year, "TV") ?: return@runEndpoint emptyList()
+                            listOf(buildYflixServer(watchPath, season = seasonNum, episode = episodeNum))
+                        }
+                    }
+                    // 2026-05-04 : Moiflix backup pour TV episode
+                    val moiflixDeferred = async {
+                        runEndpoint("moiflix-tv") {
+                            val tmdbIdInt = tmdbId.toIntOrNull() ?: return@runEndpoint emptyList()
+                            val tv = try {
+                                tmdbService.getTvDetails(tmdbIdInt, TMDB_API_KEY)
+                            } catch (_: Exception) { null }
+                            val title = tv?.name ?: return@runEndpoint emptyList()
+                            val year = tv.first_air_date?.take(4)?.toIntOrNull()
+                            val matchUrl = searchMoiflix(title, year, "Show") ?: return@runEndpoint emptyList()
+                            listOf(buildMoiflixServer(matchUrl, season = seasonNum, episode = episodeNum))
+                        }
+                    }
+                    awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, seriesDlDeferred, videasyDeferred, mazQuestDeferred, yflixDeferred, moiflixDeferred)
                 }
 
                 allResults.forEach { servers.addAll(it) }
             }
         }
 
-        // Trier les serveurs : VF en premier, puis VO, puis VOSTFR en dernier
-        val sorted = sortServersByLanguage(servers)
+        // 2026-05-05 : Papadustream backup ajouté AVANT le tri pour que toutes
+        // les sources (Movix + Papa) soient triées ensemble par langue (VF →
+        // VOSTFR → VO) au lieu d'avoir Papa appendées sans tri à la fin.
+        val papaBackup = try {
+            PapadustreamProvider.getPapaSourcesByTmdbId(id, videoType)
+        } catch (e: Exception) {
+            Log.d("MovixProvider", "Papadustream backup failed for $id: ${e.message}")
+            emptyList()
+        }
+        if (papaBackup.isNotEmpty()) {
+            Log.d("MovixProvider", "+ Papadustream backup : ${papaBackup.size} sources (mergées avant tri)")
+            servers.addAll(papaBackup)
+        }
+
+        // 2026-05-05 : Moviebox backup — recherche par titre TMDB + filtrage FR
+        // strict côté Moviebox (subtitles ou dubs FR uniquement). Renvoie 0-1
+        // sources selon que Moviebox a le titre ou pas.
+        val movieboxBackup = try {
+            val tmdbIdInt = when (videoType) {
+                is Video.Type.Movie -> id.toIntOrNull()
+                is Video.Type.Episode -> id.substringBefore("-").toIntOrNull()
+            }
+            if (tmdbIdInt != null) MovieboxProvider.getMovieboxSourcesByTmdbId(tmdbIdInt, videoType)
+            else emptyList()
+        } catch (e: Exception) {
+            Log.d("MovixProvider", "Moviebox backup failed for $id: ${e.message}")
+            emptyList()
+        }
+        if (movieboxBackup.isNotEmpty()) {
+            Log.d("MovixProvider", "+ Moviebox backup : ${movieboxBackup.size} sources")
+            servers.addAll(movieboxBackup)
+        }
+
+        // 2026-05-05 : Coflix backup — site français multi-hosters (Lulustream,
+        // VOE, Vidoza, Darkibox, Veev, Goodstream...). Recherche par titre via
+        // /suggest.php (pas besoin d'ID, ça marche pour tout le catalogue).
+        val coflixBackup = try {
+            // On a l'ID TMDB ; on récupère le titre/year depuis TMDB pour la recherche
+            val tmdbIdInt = when (videoType) {
+                is Video.Type.Movie -> id.toIntOrNull()
+                is Video.Type.Episode -> id.substringBefore("-").toIntOrNull()
+            }
+            if (tmdbIdInt != null) {
+                val (title, year) = when (videoType) {
+                    is Video.Type.Movie -> {
+                        val det = TMDb3.Movies.details(movieId = tmdbIdInt, language = "fr-FR")
+                        (det.title.takeIf { it.isNotBlank() } ?: det.originalTitle) to
+                            det.releaseDate?.take(4)?.toIntOrNull()
+                    }
+                    is Video.Type.Episode -> {
+                        val det = TMDb3.TvSeries.details(seriesId = tmdbIdInt, language = "fr-FR")
+                        (det.name.takeIf { it.isNotBlank() } ?: det.originalName) to
+                            det.firstAirDate?.take(4)?.toIntOrNull()
+                    }
+                }
+                when (videoType) {
+                    is Video.Type.Movie -> CoflixSourceProvider.getMovieSources(title, year)
+                    is Video.Type.Episode -> CoflixSourceProvider.getEpisodeSources(
+                        showTitle = title,
+                        year = year,
+                        seasonNumber = videoType.season.number,
+                        episodeNumber = videoType.number,
+                    )
+                }
+            } else emptyList()
+        } catch (e: Exception) {
+            Log.d("MovixProvider", "Coflix backup failed for $id: ${e.message}")
+            emptyList()
+        }
+        if (coflixBackup.isNotEmpty()) {
+            Log.d("MovixProvider", "+ Coflix backup : ${coflixBackup.size} sources")
+            servers.addAll(coflixBackup)
+        }
+
+        // Tri global : VF d'abord, VOSTFR ensuite, VO en dernier (toutes sources confondues)
+        val finalList = sortServersByLanguage(servers)
 
         // 2026-05-04 : on cache l'agrégat (TTL 5 min). Les m3u8 individuels
         // sont re-extracted à la demande (cache séparé Extractor.cacheTtlMs)
         // donc pas de risque de servir un m3u8 périmé depuis ce cache.
-        if (sorted.isNotEmpty()) {
+        if (finalList.isNotEmpty()) {
             serversCache[cacheKey] = CachedServers(
-                servers = sorted,
+                servers = finalList,
                 expiresAtMs = System.currentTimeMillis() + SERVERS_CACHE_TTL_MS,
             )
         }
 
-        return sorted
+        return finalList
     }
 
     /**
@@ -1336,21 +1781,20 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
     }
 
     /**
-     * Trie les serveurs par priorité de langue :
-     * 1. VF (Version Française) en premier — sous-trié par fiabilité extracteur
-     * 2. VO / Multi / sans langue spécifiée au milieu
-     * 3. VOSTFR (Version Originale Sous-Titrée FR) en dernier — tous gardés, sous-triés
-     *    par fiabilité d'extracteur. (Avant : capé à 2 — décision arbitraire qui virait
-     *    jusqu'à 4-6 sources sur les épisodes anime où cpasmal renvoie une grosse liste
-     *    VOSTFR. L'utilisateur veut TOUTES les sources françaises, sous-titres inclus.)
+     * Trie les serveurs par priorité de langue (request user 2026-05-05) :
+     * 1. **VF** (Version Française) en premier — sous-trié par fiabilité extracteur
+     * 2. **VOSTFR** (Version Originale Sous-Titrée FR) en deuxième
+     * 3. **VO** (Version Originale) en dernier
      *
-     * Dédup par URL en bonus pour éviter qu'une même source remonte deux fois si plusieurs
-     * APIs amont la signalent.
+     * Détection :
+     * - VOSTFR : contient "vostfr" ou "sous-titr"
+     * - VF : contient "[vf]", "vf]", " vf ", " vf$", "french", "français", "francais"
+     *        OU n'a pas de tag explicite (default → traité comme VF)
+     * - VO : contient "[vo]", " vo ", " vo$", "(vo)" SANS être déjà classé VF/VOSTFR
+     *
+     * Dédup par URL en bonus pour éviter qu'une même source remonte deux fois.
      */
     private fun sortServersByLanguage(servers: List<Video.Server>): List<Video.Server> {
-        // Dédup par src URL (case-insensitive) — garde le 1er rencontré.
-        // (Les hosts morts/adwall sont filtrés au niveau central par
-        // DeadHostsFilter dans PlayerViewModel.getServers()).
         val seen = HashSet<String>()
         val unique = servers.filter { server ->
             val key = server.src.lowercase().trim()
@@ -1359,76 +1803,144 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
 
         val vfServers = mutableListOf<Video.Server>()
         val vostfrServers = mutableListOf<Video.Server>()
-        val defaultServers = mutableListOf<Video.Server>()
+        val voServers = mutableListOf<Video.Server>()
 
+        // Detection VO robuste : "vo" comme MOT entouré de non-lettres
+        // → catche "Phoenix (Videasy VO)" mais pas "vodplay"/"video"
+        val voRegex = Regex("""(^|[^a-z])vo([^a-z]|$)""")
         unique.forEach { server ->
             val name = server.name.lowercase()
             when {
-                name.contains("vostfr") || name.contains("sous-titr") -> vostfrServers.add(server)
-                name.contains("vf") || name.contains("french") || name.contains("français")
-                    || name.contains("francais") -> vfServers.add(server)
-                else -> defaultServers.add(server) // DEFAULT = VF par défaut
+                name.contains("vostfr") || name.contains("sous-titr") ->
+                    vostfrServers.add(server)
+                voRegex.containsMatchIn(name) ->
+                    voServers.add(server)
+                // Tout le reste → VF (par défaut)
+                else -> vfServers.add(server)
             }
         }
 
-        // Sous-trier chaque groupe par fiabilité des extracteurs
-        val sortedVf = vfServers.sortedBy { serverReliabilityScore(it) }
-        val sortedDefault = defaultServers.sortedBy { serverReliabilityScore(it) }
-        val sortedVostfr = vostfrServers.sortedBy { serverReliabilityScore(it) }
+        // 2026-05-05 v2 : Natives Movix en premier, BACKUPS en dernier.
+        //   (0) Movix natif (fstream, links, wiflix, cpasmal, tmdb, drama,
+        //       purstream, seriesDl, videasy, mazQuest, yflix, moiflix)
+        //   (1) Backups Papa / Moviebox (catalogue cross-provider sain)
+        //   (2) Coflix EN DERNIER (link rot fréquent depuis lecteurvideo.com)
+        //   Au sein d'un même bucket, par fiabilité d'extracteur.
+        fun isPapa(s: Video.Server) = s.name.contains("Papadustream — ", ignoreCase = false) ||
+            s.id.startsWith("papadustream_")
+        fun isMoviebox(s: Video.Server) = s.name.startsWith("Moviebox", ignoreCase = false) ||
+            s.id.startsWith("moviebox_")
+        fun isCoflix(s: Video.Server) = s.name.startsWith("Coflix", ignoreCase = false) ||
+            s.id.startsWith("coflix_")
+        // 2026-05-05 v3 : bonus qualité — bumps les sources HD/4K/1080p en
+        // tête de leur tier respectif. -2 = passe avant les SD, -3 = passe
+        // avant tout dans le même score. Permet à "VOE HD" de battre un
+        // "VOE SD" du même tier sans casser la hiérarchie inter-tiers.
+        fun qualityBonus(s: Video.Server): Int {
+            val n = s.name.lowercase()
+            return when {
+                n.contains("4k") || n.contains("2160") || n.contains("uhd") -> -3
+                n.contains("1080") || n.contains("fhd") || n.contains("full hd") -> -2
+                n.contains(" hd") || n.endsWith("hd") || n.contains("[hd]") || n.contains("(hd)") -> -1
+                n.contains("720") -> 0
+                n.contains("480") || n.contains(" sd") -> 1
+                else -> 0
+            }
+        }
+        val cmp = compareBy<Video.Server>(
+            {
+                when {
+                    isCoflix(it) -> 2
+                    isPapa(it) || isMoviebox(it) -> 1
+                    else -> 0
+                }
+            },
+            { serverReliabilityScore(it) },
+            { qualityBonus(it) },
+        )
+        val sortedVf = vfServers.sortedWith(cmp)
+        val sortedVostfr = vostfrServers.sortedWith(cmp)
+        val sortedVo = voServers.sortedWith(cmp)
 
+        // Order final : VF → VOSTFR → VO (request user)
         val result = mutableListOf<Video.Server>()
         result.addAll(sortedVf)
-        result.addAll(sortedDefault)
         result.addAll(sortedVostfr)
+        result.addAll(sortedVo)
 
-        Log.d("MovixProvider", "Servers (after dedup ${servers.size}→${unique.size}): ${vfServers.size} VF, ${defaultServers.size} DEFAULT, ${vostfrServers.size} VOSTFR — all kept")
+        Log.d("MovixProvider", "Servers triés (dedup ${servers.size}→${unique.size}) : ${vfServers.size} VF • ${vostfrServers.size} VOSTFR • ${voServers.size} VO")
         return result
     }
 
     /**
-     * Score de fiabilité des extracteurs (plus bas = meilleur, affiché en premier).
-     * Basé sur les tests réels de disponibilité des serveurs.
+     * 2026-05-05 v2 : score de fiabilité refait en fonction des observations
+     * réelles sur la Chromecast (Darkibox hang silencieux, VidMoLy lent via
+     * WebView, etc.). Plus bas = mieux = essayé en premier dans le cascade.
      */
     private fun serverReliabilityScore(server: Video.Server): Int {
         val name = server.name.lowercase()
         val src = server.src.lowercase()
+        val id = server.id.lowercase()
         return when {
-            // === Tier 1 : Les meilleurs (fiables, rapides) ===
-            src.contains("darkibox") || name.contains("darkibox") || name.contains("darki") -> 0
-            src.contains("vixsrc") -> 1
-            src.contains("flemmix") || name.contains("flemmix") -> 2
-            // Netu/Waaw : CronetDataSource + TLS Chromium, très fiable
+            // === Tier 1 : Direct & rapide (priorité absolue) ===
+            // Moviebox VF natif (URL directe themoviebox.org, extracteur WebView rapide)
+            id.startsWith("moviebox_") || src.contains("themoviebox") -> 0
+            // Filemoon : extracteur API, link rot rare sur contenu frais
+            src.contains("filemoon") || name.contains("filemoon") -> 1
+            // VOE : streaming rapide, anti-bot OK
+            src.contains("voe.sx") || src.contains("voe-")
+                || (name.contains("voe") && !name.contains("vovo")) -> 2
+            // Uqload, Vidoza, Doodstream, Streamtape : hosters classiques fiables
+            src.contains("uqload") || name.contains("uqload") -> 3
+            src.contains("vidoza") || name.contains("vidoza") -> 4
+            src.contains("dood") || name.contains("doodstream") -> 5
+            src.contains("streamtape") || name.contains("streamtape") -> 6
+
+            // === Tier 2 : Fiable mais init plus lente ===
+            // Netu/Waaw : Cronet + TLS Chromium, init 1-2s puis stable
             src.contains("netu") || name.contains("netu")
-                || src.contains("frembed") || name.contains("frembed")
-                || src.contains("waaw") || name.contains("waaw") -> 3
-            // VidHide/Minochinos : fonctionne bien (hls2 CDN)
-            src.contains("minochinos") || name.contains("minochinos")
-                || src.contains("vidhide") || name.contains("vidhide")
-                || src.contains("filelions") || name.contains("filelions") -> 4
+                || src.contains("waaw") || name.contains("waaw") -> 10
+            src.contains("frembed") || name.contains("frembed") -> 11
+            src.contains("mixdrop") || name.contains("mixdrop") -> 12
+            src.contains("mp4upload") || name.contains("mp4upload") -> 13
+            src.contains("savefiles") || name.contains("savefiles") -> 14
+            src.contains("playmogo") || name.contains("playmogo") -> 15
 
-            // === Tier 2 : Fonctionnels ===
-            name.contains("vidzy") || src.contains("vidzy") -> 5
-            src.contains("uqload") || name.contains("uqload") -> 22
-            src.contains("filemoon") || name.contains("filemoon") -> 7
-            src.contains("streamwish") || name.contains("streamwish") -> 8
-            src.contains("savefiles") || name.contains("savefiles") -> 9
-            src.contains("playmogo") || name.contains("playmogo") -> 10
-            src.contains("vidguard") || name.contains("vidguard") -> 11
+            // === Tier 3 : WebView ou anti-bot lourd (slow init) ===
+            // VidMoLy : WebView extraction 5-10s
+            src.contains("vidmoly") || name.contains("vidmoly") || name.contains("vidmoly") -> 20
+            // Streamwish/Wishonly : extraction de script JS, parfois échoue
+            src.contains("streamwish") || src.contains("wishonly")
+                || name.contains("streamwish") -> 21
+            src.contains("lulustream") || src.contains("luluvdo")
+                || name.contains("lulustream") || name.contains("luluvdo") -> 22
+            src.contains("vidsrc") || name.contains("vidsrc") -> 23
+            src.contains("vixsrc") -> 24
+            src.contains("flemmix") || name.contains("flemmix") -> 25
+            src.contains("vidhide") || name.contains("vidhide")
+                || src.contains("filelions") -> 26
+            src.contains("vidguard") || name.contains("vidguard") -> 27
+            src.contains("vidzy") || name.contains("vidzy") -> 28
+            src.contains("vidsonic") || name.contains("vidsonic") -> 29
+            src.contains("vidara") || name.contains("vidara") -> 30
+            src.contains("minochinos") || name.contains("minochinos") -> 31
 
-            // === Tier 3 : Lents ou instables ===
-            src.contains("dood") || name.contains("dood") -> 15
-            src.contains("vidsonic") || name.contains("vidsonic") -> 20
-            src.contains("vidara") || name.contains("vidara") -> 21
-            src.contains("voe.sx") || name.contains("voe") -> 6
-            src.contains("luluvdo") || name.contains("luluvdo") -> 23
+            // === Tier 4 : Problématiques (Cloudflare hang, link rot) ===
+            // 2026-05-05 : DARKIBOX déclasse — observé : répond HTTP 200 mais le
+            // stream stalle indéfiniment (Cloudflare drop silencieux). Avec
+            // notre watchdog buffering 10s c'est récupérable mais on les met
+            // en bas pour ne pas perdre de temps.
+            src.contains("darkibox") || name.contains("darkibox") || name.contains("darki") -> 50
+            src.contains("veev") || name.contains("veev") -> 51
+            src.contains("goodstream") || name.contains("goodstream") -> 52
+            src.contains("megaup") || name.contains("megaup") -> 53
 
-            // === Tier 4 : Cassés ou mauvaise qualité ===
-            src.contains("hgcloud") || name.contains("hgcloud") -> 25
-            // xshotcok : HS - embeds désactivés (hxfile.co/embed_disabled)
+            // === Tier 5 : Cassés ===
+            src.contains("hgcloud") || name.contains("hgcloud") -> 90
             src.contains("xshotcok") || name.contains("xshotcok") -> 99
 
-            // Défaut
-            else -> 12
+            // Défaut (extracteurs inconnus / nouveaux) — milieu de tier 3
+            else -> 19
         }
     }
 

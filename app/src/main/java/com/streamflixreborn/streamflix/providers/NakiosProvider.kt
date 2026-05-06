@@ -21,8 +21,11 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.jsoup.Jsoup
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
@@ -365,7 +368,9 @@ object NakiosProvider : Provider, ProviderConfigUrl {
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
         if (query.isBlank()) return emptyList()
-        val body = apiGet("/api/search/multi?query=${java.net.URLEncoder.encode(query, "UTF-8")}&page=$page")
+        // 2026-05-05 : strip apostrophes typographiques avant URL-encoding
+        val cleanQuery = com.streamflixreborn.streamflix.utils.TitleNormalizer.stripUnicodeArtifacts(query)
+        val body = apiGet("/api/search/multi?query=${java.net.URLEncoder.encode(cleanQuery, "UTF-8")}&page=$page")
             ?: return emptyList()
         val list = try {
             gson.fromJson(body, ListResponse::class.java)?.results ?: emptyList()
@@ -485,41 +490,501 @@ object NakiosProvider : Provider, ProviderConfigUrl {
         return People(id = id, name = name, filmography = emptyList())
     }
 
-    override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+    override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> = coroutineScope {
         val path = when (videoType) {
             is Video.Type.Movie -> "/api/sources/movie/$id"
             is Video.Type.Episode -> {
                 // id Episode = "tvId|season|episode" (cf getEpisodesBySeason)
                 val parts = id.split("|")
-                if (parts.size != 3) return emptyList()
+                if (parts.size != 3) return@coroutineScope emptyList()
                 val tvId = parts[0]
                 val seasonN = parts[1]
                 val epN = parts[2]
                 "/api/sources/tv/$tvId/$seasonN/$epN"
             }
         }
-        val body = apiGet(path) ?: return emptyList()
-        val resp = try {
-            gson.fromJson(body, SourcesResponse::class.java)
-        } catch (e: Exception) {
-            Log.e(TAG, "getServers parse failed: ${e.message}")
-            return emptyList()
-        }
-        val sources = resp?.sources ?: return emptyList()
-        return sources.mapNotNull { src ->
-            val srcUrl = src.url ?: return@mapNotNull null
-            // URLs relatives → on les préfixe avec baseUrl
-            val absoluteUrl = if (srcUrl.startsWith("http")) srcUrl else "$baseUrl$srcUrl"
-            val label = buildString {
-                append(src.name ?: src.provider ?: "Nakios")
-                src.quality?.takeIf { it.isNotBlank() }?.let { append(" — $it") }
-                src.lang?.takeIf { it.isNotBlank() }?.let { append(" [$it]") }
+
+        // 2026-05-04 : Backups TMDB-iframe RETIRÉS (audio non-FR garanti).
+        // Voir tmdbBackupSources plus bas — liste vide pour l'instant.
+        // Backup actif : Moiflix (audio FR garanti, search par titre + extraction
+        // m3u8 via WebView). Lancé en parallèle de la fetch des sources Nakios.
+
+        val nakiosDeferred = async {
+            val body = apiGet(path) ?: return@async emptyList<Video.Server>()
+            val resp = try {
+                gson.fromJson(body, SourcesResponse::class.java)
+            } catch (e: Exception) {
+                Log.e(TAG, "getServers parse failed: ${e.message}")
+                return@async emptyList<Video.Server>()
             }
-            Video.Server(
-                id = src.id ?: srcUrl,
-                name = label,
-                src = absoluteUrl,
-            )
+            val sources = resp?.sources ?: emptyList()
+            sources.mapNotNull { src ->
+                val srcUrl = src.url ?: return@mapNotNull null
+                // URLs relatives → on les préfixe avec baseUrl
+                val absoluteUrl = if (srcUrl.startsWith("http")) srcUrl else "$baseUrl$srcUrl"
+                val label = buildString {
+                    append(src.name ?: src.provider ?: "Nakios")
+                    src.quality?.takeIf { it.isNotBlank() }?.let { append(" — $it") }
+                    src.lang?.takeIf { it.isNotBlank() }?.let { append(" [$it]") }
+                }
+                Video.Server(
+                    id = src.id ?: srcUrl,
+                    name = label,
+                    src = absoluteUrl,
+                )
+            }
+        }
+
+        val moiflixDeferred = async {
+            try {
+                when (videoType) {
+                    is Video.Type.Movie -> {
+                        val (title, year) = fetchMovieTitleForMoiflix(id)
+                            ?: return@async emptyList<Video.Server>()
+                        val matchUrl = searchMoiflix(title, year, "Film")
+                            ?: return@async emptyList()
+                        listOf(buildMoiflixServer(matchUrl))
+                    }
+                    is Video.Type.Episode -> {
+                        val parts = id.split("|")
+                        if (parts.size != 3) return@async emptyList()
+                        val tvId = parts[0]
+                        val seasonNum = parts[1].toIntOrNull()
+                            ?: return@async emptyList()
+                        val episodeNum = parts[2].toIntOrNull()
+                            ?: return@async emptyList()
+                        val (title, year) = fetchTvShowTitleForMoiflix(tvId)
+                            ?: return@async emptyList()
+                        val matchUrl = searchMoiflix(title, year, "Show")
+                            ?: return@async emptyList()
+                        listOf(buildMoiflixServer(matchUrl, season = seasonNum, episode = episodeNum))
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Moiflix lookup failed: ${e.message}")
+                emptyList()
+            }
+        }
+
+        // 2026-05-04 : Backup tertiaire — Papadustream (DLE FR, multi-hosters).
+        // Search par titre POST `/?do=search` + parse iframes des pages détail.
+        // Lancé en parallèle. Les iframes (uqload/doodstream/vidoza/...) sont
+        // résolus par les extracteurs existants via Extractor.extract() dans
+        // getVideo. Si Cloudflare bloque ou que les iframes sont JS-rendered,
+        // ce backup retourne emptyList silencieusement (timeout 10s).
+        val papadustreamDeferred = async {
+            try {
+                when (videoType) {
+                    is Video.Type.Movie -> {
+                        val (title, year) = fetchMovieTitleForMoiflix(id)
+                            ?: return@async emptyList<Video.Server>()
+                        val detailUrl = withTimeoutOrNull(8_000) {
+                            searchPapadustream(title, year, isSeries = false)
+                        } ?: return@async emptyList()
+                        withTimeoutOrNull(10_000) {
+                            fetchPapadustreamSources(detailUrl)
+                        } ?: emptyList()
+                    }
+                    is Video.Type.Episode -> {
+                        val parts = id.split("|")
+                        if (parts.size != 3) return@async emptyList()
+                        val tvId = parts[0]
+                        val seasonNum = parts[1].toIntOrNull()
+                            ?: return@async emptyList()
+                        val episodeNum = parts[2].toIntOrNull()
+                            ?: return@async emptyList()
+                        val (title, year) = fetchTvShowTitleForMoiflix(tvId)
+                            ?: return@async emptyList()
+                        val showUrl = withTimeoutOrNull(8_000) {
+                            searchPapadustream(title, year, isSeries = true)
+                        } ?: return@async emptyList()
+                        val episodeUrl = buildPapadustreamEpisodeUrl(showUrl, seasonNum, episodeNum)
+                            ?: return@async emptyList()
+                        withTimeoutOrNull(10_000) {
+                            fetchPapadustreamSources(episodeUrl)
+                        } ?: emptyList()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Papadustream lookup failed: ${e.message}")
+                emptyList()
+            }
+        }
+
+        // 2026-05-04 : Papadustream en 1ère position (préférence user). Si le
+        // backup retourne emptyList (CF block / no match / timeout), aucun
+        // impact sur la liste finale ; sinon ses serveurs apparaissent en tête
+        // du sélecteur, devant ceux de Nakios et le fallback Moiflix.
+        val results = awaitAll(papadustreamDeferred, nakiosDeferred, moiflixDeferred)
+        results.flatten()
+    }
+
+    // ───────── Moiflix backup (audio FR garanti) ─────────
+    //
+    // Moiflix est un aggregator FR avec search JSON propre + iframe player
+    // xtremestream.xyz. Le m3u8 final est extrait par MoiflixExtractor (WebView
+    // qui auto-clique le bouton "Continuer" et intercepte la requête m3u8).
+    // On résout d'abord le titre via l'API Nakios (qui renvoie déjà des données
+    // shape TMDB), puis on cherche sur moiflix par titre.
+
+    private const val MOIFLIX_BASE = "https://moiflix.com/"
+
+    private suspend fun fetchMovieTitleForMoiflix(tmdbId: String): Pair<String, Int?>? {
+        return try {
+            val body = apiGet("/api/movies/$tmdbId") ?: return null
+            val detail = gson.fromJson(body, MovieDetail::class.java) ?: return null
+            val title = detail.title?.takeIf { it.isNotBlank() } ?: return null
+            val year = detail.releaseDate?.take(4)?.toIntOrNull()
+            title to year
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun fetchTvShowTitleForMoiflix(tmdbId: String): Pair<String, Int?>? {
+        return try {
+            val body = apiGet("/api/series/$tmdbId") ?: return null
+            val detail = gson.fromJson(body, TvDetail::class.java) ?: return null
+            val title = detail.name?.takeIf { it.isNotBlank() } ?: return null
+            val year = detail.firstAirDate?.take(4)?.toIntOrNull()
+            title to year
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Cherche un titre sur moiflix via l'AJAX search public.
+     *  Retourne le path /movie/{slug} ou /show/{slug} du meilleur match, ou null. */
+    private suspend fun searchMoiflix(
+        title: String,
+        year: Int? = null,
+        preferType: String = "Film",
+    ): String? {
+        if (title.isBlank()) return null
+        // 2026-05-05 : strip apostrophes typographiques avant URL-encoding
+        val cleanTitle = com.streamflixreborn.streamflix.utils.TitleNormalizer.stripUnicodeArtifacts(title)
+        return try {
+            val url = "${MOIFLIX_BASE}ajax/posts?q=" +
+                java.net.URLEncoder.encode(cleanTitle, "UTF-8")
+            val request = okhttp3.Request.Builder()
+                .url(url)
+                .header("Accept", "application/json")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .header("Referer", MOIFLIX_BASE)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+                .build()
+            val mClient = com.streamflixreborn.streamflix.extractors.Extractor.sharedClient.newBuilder()
+                .readTimeout(8, TimeUnit.SECONDS)
+                .build()
+            val body = withContext(Dispatchers.IO) {
+                mClient.newCall(request).execute().use { it.body?.string() }
+            } ?: return null
+            val json = com.google.gson.JsonParser.parseString(body).asJsonObject
+            val items = json.getAsJsonArray("data") ?: return null
+            if (items.size() == 0) {
+                Log.d(TAG, "Moiflix search '$title' : no results")
+                return null
+            }
+            val targetTitleNorm = title.lowercase()
+                .replace(Regex("[^a-z0-9 ]"), " ")
+                .replace(Regex("\\s+"), " ").trim()
+            var bestUrl: String? = null
+            var bestScore = -1
+            for (i in 0 until items.size()) {
+                val item = items[i].asJsonObject
+                val itemName = item.get("name")?.asString ?: continue
+                val itemUrl = item.get("url")?.asString ?: continue
+                val itemType = item.get("type")?.asString ?: ""
+                val nNorm = itemName.lowercase()
+                    .replace(Regex("[^a-z0-9 ]"), " ")
+                    .replace(Regex("\\s+"), " ").trim()
+                var score = 0
+                if (nNorm == targetTitleNorm) score += 100
+                else if (nNorm.contains(targetTitleNorm) || targetTitleNorm.contains(nNorm)) score += 50
+                if (itemType == preferType) score += 20
+                if (score > bestScore) {
+                    bestScore = score
+                    bestUrl = itemUrl
+                }
+            }
+            if (bestUrl == null || bestScore < 50) {
+                Log.d(TAG, "Moiflix search '$title' : best score=$bestScore, skipping")
+                return null
+            }
+            Log.d(TAG, "Moiflix search '$title' → $bestUrl (score=$bestScore)")
+            bestUrl
+        } catch (e: Exception) {
+            Log.w(TAG, "Moiflix search '$title' failed: ${e.message}")
+            null
+        }
+    }
+
+    /** Construit l'URL complète moiflix pour un movie ou episode.
+     *  movie : /movie/{slug}
+     *  episode : /episode/{slug}/season-N-episode-N (slug récupéré depuis /show/{slug}) */
+    private fun buildMoiflixServer(matchUrl: String, season: Int? = null, episode: Int? = null): Video.Server {
+        val finalUrl = if (season != null && episode != null) {
+            val slug = matchUrl.substringAfterLast("/")
+            "${MOIFLIX_BASE.trimEnd('/')}/episode/$slug/season-$season-episode-$episode"
+        } else {
+            "${MOIFLIX_BASE.trimEnd('/')}$matchUrl"
+        }
+        return Video.Server(
+            id = "moiflix_${matchUrl.substringAfterLast("/")}",
+            name = "Moiflix [VF]",
+            src = finalUrl,
+        )
+    }
+
+    // ───────── Papadustream backup (DLE FR multi-hosters) ─────────
+    //
+    // 2026-05-04 : Papadustream est un aggregator FR (CMS DLE — même que
+    // FrenchStream). Multiples players par film/épisode (uqload, doodstream,
+    // vidoza, filemoon, etc.) déjà gérés par les Extractor existants.
+    //
+    // Pipeline :
+    //  1) POST /?do=search&subaction=search avec form-data story=<title>
+    //     → réponse HTML avec div.short / div.short_in pointant vers la fiche
+    //  2) Heuristique de scoring titre exact > inclusion > préférence type
+    //     (movie URL ne contient PAS /cat-series/, episode URL OUI)
+    //  3) GET de la page détail → parse iframes/data-iframe-src/data-link
+    //     → mappe en Video.Server (l'extracteur dans getVideo résout l'URL)
+    //
+    // Si Cloudflare bloque (challenge JS) ou si les iframes sont 100%
+    // JS-rendered, fetchPapadustreamSources retourne emptyList silencieusement.
+    // V2 si nécessaire : créer un PapadustreamExtractor WebView style Moiflix.
+
+    private const val PAPADUSTREAM_BASE = "https://papadustream.motorcycles"
+
+    /** Cherche un titre sur Papadustream via le search DLE.
+     *  Retourne l'URL absolue de la fiche (movie ou show), ou null. */
+    private suspend fun searchPapadustream(
+        title: String,
+        year: Int? = null,
+        isSeries: Boolean = false,
+    ): String? {
+        if (title.isBlank()) return null
+        return try {
+            val formBody = FormBody.Builder()
+                .add("do", "search")
+                .add("subaction", "search")
+                .add("story", title)
+                .build()
+            val request = Request.Builder()
+                .url("$PAPADUSTREAM_BASE/?do=search&subaction=search")
+                .post(formBody)
+                .header("User-Agent", USER_AGENT)
+                .header("Referer", "$PAPADUSTREAM_BASE/")
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .header("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
+                .build()
+            val body = withContext(Dispatchers.IO) {
+                client.newCall(request).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        Log.w(TAG, "Papadustream search HTTP ${resp.code}")
+                        return@withContext null
+                    }
+                    resp.body?.string()
+                }
+            } ?: return null
+            val doc = Jsoup.parse(body, PAPADUSTREAM_BASE)
+            // DLE markup : div.short ou div.short_in. Title dans .short_title,
+            // lien vers la fiche dans <a class="short-poster" / .short_img / titre lien.
+            val items = doc.select("div.short, div.short_in, article.short")
+            if (items.isEmpty()) {
+                Log.d(TAG, "Papadustream search '$title' : no .short results")
+                return null
+            }
+            val targetTitleNorm = title.lowercase()
+                .replace(Regex("[^a-z0-9 ]"), " ")
+                .replace(Regex("\\s+"), " ").trim()
+            var bestUrl: String? = null
+            var bestScore = -1
+            for (item in items) {
+                val titleEl = item.selectFirst(".short_title, .short-title, h3, h2")
+                val linkEl = titleEl?.selectFirst("a")
+                    ?: item.selectFirst("a.short_img, a.short-poster, a[href*='/cat-']")
+                    ?: continue
+                val itemUrl = linkEl.absUrl("href").ifBlank { linkEl.attr("href") }
+                if (itemUrl.isBlank() || !itemUrl.startsWith("http")) continue
+                val itemTitle = titleEl?.text()?.ifBlank { linkEl.attr("title") }
+                    ?: linkEl.attr("title")
+                    ?: continue
+                val nNorm = itemTitle.lowercase()
+                    .replace(Regex("[^a-z0-9 ]"), " ")
+                    .replace(Regex("\\s+"), " ").trim()
+                var score = 0
+                if (nNorm == targetTitleNorm) score += 100
+                else if (nNorm.contains(targetTitleNorm) || targetTitleNorm.contains(nNorm)) score += 50
+                // URL pattern heuristique : /cat-series/ pour les séries
+                val urlLooksSeries = itemUrl.contains("/cat-series/")
+                if (isSeries == urlLooksSeries) score += 20
+                if (year != null && itemTitle.contains(year.toString())) score += 10
+                if (score > bestScore) {
+                    bestScore = score
+                    bestUrl = itemUrl
+                }
+            }
+            if (bestUrl == null || bestScore < 50) {
+                Log.d(TAG, "Papadustream search '$title' : best score=$bestScore, skipping")
+                return null
+            }
+            Log.d(TAG, "Papadustream search '$title' → $bestUrl (score=$bestScore)")
+            bestUrl
+        } catch (e: Exception) {
+            Log.w(TAG, "Papadustream search '$title' failed: ${e.message}")
+            null
+        }
+    }
+
+    /** Fetch la page détail et extrait toutes les URLs d'iframe/embed.
+     *  Renvoie une liste de Video.Server prêts pour Extractor.extract(). */
+    private suspend fun fetchPapadustreamSources(detailUrl: String): List<Video.Server> {
+        return try {
+            val request = Request.Builder()
+                .url(detailUrl)
+                .header("User-Agent", USER_AGENT)
+                .header("Referer", "$PAPADUSTREAM_BASE/")
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .header("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
+                .build()
+            val body = withContext(Dispatchers.IO) {
+                client.newCall(request).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        Log.w(TAG, "Papadustream detail HTTP ${resp.code} for $detailUrl")
+                        return@withContext null
+                    }
+                    resp.body?.string()
+                }
+            } ?: return emptyList()
+            val doc = Jsoup.parse(body, detailUrl)
+            // 1) iframes directs avec src=
+            val iframes = doc.select("iframe[src]")
+                .mapNotNull { el ->
+                    val src = el.absUrl("src").ifBlank { el.attr("src") }
+                    src.takeIf { it.startsWith("http") }
+                }
+            // 2) data-iframe-src / data-src / data-link (lazy-load courant DLE)
+            val dataAttrs = listOf("data-iframe-src", "data-src", "data-link", "data-litespeed-src")
+            val dataSrcs = doc.select("[${dataAttrs.joinToString("], [")}]")
+                .mapNotNull { el ->
+                    dataAttrs.firstNotNullOfOrNull { attr ->
+                        el.attr(attr).takeIf { v -> v.startsWith("http") && looksLikeEmbedUrl(v) }
+                    }
+                }
+            // 3) Liens "voir le film" / option-server type DLE (data-vs / onclick)
+            val onclickUrls = doc.select("[onclick*='http']")
+                .mapNotNull { el ->
+                    Regex("""https?://[^\s'"]+""")
+                        .find(el.attr("onclick"))
+                        ?.value
+                        ?.takeIf { looksLikeEmbedUrl(it) }
+                }
+            val allUrls = (iframes + dataSrcs + onclickUrls)
+                .distinct()
+                .filter { looksLikeEmbedUrl(it) }
+            if (allUrls.isEmpty()) {
+                Log.d(TAG, "Papadustream detail $detailUrl : no embed URLs found")
+                return emptyList()
+            }
+            allUrls.mapIndexed { idx, url ->
+                val host = try {
+                    java.net.URI(url).host?.removePrefix("www.") ?: "papadustream"
+                } catch (_: Exception) { "papadustream" }
+                Video.Server(
+                    id = "papadustream_${idx}_${url.hashCode()}",
+                    name = "Papadustream [$host]",
+                    src = url,
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Papadustream sources fetch failed for $detailUrl: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** Heuristique : l'URL ressemble-t-elle à un embed de hoster vidéo ?
+     *  On exclut explicitement les assets statiques (images, css, js, fonts). */
+    private fun looksLikeEmbedUrl(url: String): Boolean {
+        if (!url.startsWith("http")) return false
+        val low = url.lowercase()
+        // Filtre assets papadustream lui-même
+        if (low.contains("papadustream.")) return false
+        // Filtre extensions statiques
+        val staticExts = listOf(".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
+            ".css", ".js", ".woff", ".woff2", ".ttf", ".ico", ".xml", ".rss")
+        if (staticExts.any { low.contains(it) }) return false
+        // Filtre analytics / pubs courantes
+        val blocked = listOf("google-analytics", "googletagmanager", "doubleclick",
+            "facebook.com", "twitter.com", "disqus.com", "addthis.com",
+            "googlesyndication", "adsystem", "cloudflareinsights")
+        if (blocked.any { low.contains(it) }) return false
+        return true
+    }
+
+    /** Construit l'URL d'un épisode Papadustream à partir de l'URL de la fiche série.
+     *  showUrl: https://papadustream.motorcycles/cat-series/<genre>/<id>-<slug>.html
+     *  → https://papadustream.motorcycles/cat-series/<genre>/<id>-<slug>/<season>-saison/<episode>-episode.html */
+    private fun buildPapadustreamEpisodeUrl(showUrl: String, season: Int, episode: Int): String? {
+        return try {
+            val base = showUrl.removeSuffix(".html").removeSuffix("/")
+            "$base/$season-saison/$episode-episode.html"
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // 2026-05-04 : Liste de TMDB-iframe backups pour Nakios. Tous acceptent
+    // un TMDB id directement (pas de search par titre), ne demandent pas de
+    // CF challenge bloquant en HTTP simple, et retournent un player
+    // standard. L'utilisateur peut switcher manuellement entre eux dans le
+    // sélecteur de servers — quand l'un est dead pour un film, un autre
+    // a souvent la source.
+    //
+    // Ordre = priorité (vidsrc.to en 1er car le plus stable historiquement).
+    private data class TmdbBackupSource(
+        val key: String,
+        val displayName: String,
+        val movieUrl: (tmdbId: String) -> String,
+        val tvUrl: (tmdbId: String, season: String, episode: String) -> String,
+    )
+
+    // 2026-05-04 : LISTE VIDE — tous les TMDB-iframe testés (vidsrc.icu/to,
+    // 2embed.skin, nontongo, 111movies, multiembed, videasy.net) servent
+    // l'audio ORIGINAL (= EN pour Hollywood). Inadaptés pour app FR.
+    // Les helpers sont conservés au cas où un jour un aggregator TMDB-iframe
+    // FR-natif émerge.
+    private val tmdbBackupSources: List<TmdbBackupSource> = emptyList()
+
+    /** Construit la liste complète de Video.Server backups TMDB-iframe pour
+     *  un id donné. Retourne empty list si l'id n'est pas un TMDB id valide. */
+    private fun buildTmdbBackupServers(id: String, videoType: Video.Type): List<Video.Server> {
+        return when (videoType) {
+            is Video.Type.Movie -> {
+                if (!id.all { it.isDigit() }) return emptyList()
+                tmdbBackupSources.map { source ->
+                    Video.Server(
+                        id = "${source.key}_movie_$id",
+                        name = source.displayName,
+                        src = source.movieUrl(id),
+                    )
+                }
+            }
+            is Video.Type.Episode -> {
+                val parts = id.split("|")
+                if (parts.size != 3) return emptyList()
+                val tvId = parts[0]
+                if (!tvId.all { it.isDigit() }) return emptyList()
+                val seasonN = parts[1]
+                val epN = parts[2]
+                tmdbBackupSources.map { source ->
+                    Video.Server(
+                        id = "${source.key}_tv_${tvId}_${seasonN}_$epN",
+                        name = source.displayName,
+                        src = source.tvUrl(tvId, seasonN, epN),
+                    )
+                }
+            }
         }
     }
 

@@ -40,6 +40,7 @@
     <string name="main_menu_series_fr">VF</string>
     <string name="main_menu_films">Film</string>
     <string name="main_menu_series_tab">Série</string>
+    <string name="main_menu_favorites">Favorites</string>
     <string name="main_menu_settings">Settings</string>
     <string name="main_menu_theme_change">Change Theme</string>
     <string name="theme_default">Default</string>
@@ -313,7 +314,7 @@
     <string name="clear_cache_done">Cache cleared</string>
     <string name="clear_cache_done_409">Cache cleared automatically due to HTTP 409</string>
     <string name="player_patience_short">Loading video…</string>
-    <string name="player_patience_long">Cloudflare security check in progress, may take 10–30s…</string>
+    <string name="player_patience_long">Extraction in progress, may take 10–30s…</string>
     <string name="player_patience_very_long">Still working on it, server is slow. Hang on a bit longer…</string>
     <string name="player_skip_intro">Skip intro</string>
     <string name="voice_search">Voice search</string>

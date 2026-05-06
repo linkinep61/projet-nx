@@ -522,7 +522,9 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                                         is TvShow -> item.title.substringBefore(" - ")
                                         else -> return@async
                                     }
-                                    val results = TMDb3.Search.multi(title, language = "fr-FR")
+                                    // 2026-05-05 : normalise (apostrophe typo, annotations VF/saison) avant TMDB
+                                    val normalized = com.streamflixreborn.streamflix.utils.TitleNormalizer.cleanForTmdbSearch(title)
+                                    val results = TMDb3.Search.multi(normalized.ifBlank { title }, language = "fr-FR")
                                     val tmdbBanner = results.results
                                         .firstNotNullOfOrNull { r ->
                                             when (r) {
@@ -857,14 +859,38 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 .distinctBy { it.number }
                 .sortedBy { it.number }
                 .take(30)
-            Log.d("FrenchStream", "Total seasons found: ${foundSeasons.size} -> ${foundSeasons.map { it.number }}")
+            Log.d("FrenchStream", "FS seasons natives: ${foundSeasons.size} -> ${foundSeasons.map { it.number }}")
+            // 2026-05-05 v3 : on n'ajoute PAS de saisons fantômes TMDB —
+            // l'utilisateur préfère voir moins de saisons mais qui ont
+            // toutes des sources, plutôt que d'avoir des saisons cliquables
+            // qui ne donnent rien. Pour les saisons que FS n'a pas, le user
+            // peut switcher de provider (Movix, Moviebox, Papa) qui auront
+            // potentiellement le show complet.
             // Garantit que la saison courante est dans la liste (si search incomplet)
-            if (foundSeasons.none { it.number == seasonNumber && it.id == id }) {
+            val withCurrent = if (foundSeasons.none { it.number == seasonNumber && it.id == id }) {
                 (foundSeasons + Season(
                     id = id, number = seasonNumber,
                     title = "Saison $seasonNumber", poster = poster,
                 )).distinctBy { it.number }.sortedBy { it.number }
             } else foundSeasons
+
+            // Enrichit juste les posters depuis TMDB (sans ajouter de saisons inexistantes)
+            val tmdbShow = runCatching {
+                val cleanQuery = com.streamflixreborn.streamflix.utils.TitleNormalizer
+                    .cleanForTmdbSearch(cleanTitle).ifBlank { cleanTitle }
+                com.streamflixreborn.streamflix.utils.TmdbUtils.getTvShow(
+                    title = cleanQuery,
+                    year = releaseYear?.toIntOrNull(),
+                    language = "fr-FR",
+                )
+            }.getOrNull()
+            if (tmdbShow != null) {
+                val tmdbSeasonsByNumber = tmdbShow.seasons.associateBy { it.number }
+                withCurrent.map { fsSeason ->
+                    val tmdbS = tmdbSeasonsByNumber[fsSeason.number]
+                    if (tmdbS?.poster != null) fsSeason.copy(poster = tmdbS.poster) else fsSeason
+                }
+            } else withCurrent
         } catch (e: Exception) {
             Log.w("FrenchStream", "Multi-season search failed for '$cleanTitle': ${e.message}")
             listOf(Season(id = id, number = seasonNumber, title = "Saison $seasonNumber", poster = poster))
@@ -1237,7 +1263,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         // runEndpoint (timeout 8s + circuit breaker). On essaie en cascade et
         // on log laquelle a marché. Si toutes échouent → emptyList et le
         // PlayerViewModel affiche le message friendly.
-        val servers = when (videoType) {
+        val nativeServers = when (videoType) {
             is Video.Type.Episode -> {
                 val parts = id.split("/")
                 val tvShowId = parts.getOrElse(0) { id }
@@ -1247,6 +1273,54 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
             is Video.Type.Movie -> resolveMovieServers(id)
         }
+
+        // 2026-05-05 : Movix + Moviebox backup. FrenchStream a souvent peu de
+        // sources (4-8 hosters) ; Movix en agrège 10-18 et Moviebox a sa
+        // version VF directe. On résout le titre via TMDB pour faire la
+        // jonction (FS ne stocke pas le tmdbId par show).
+        val (tmdbIdResolved, tmdbYear) = runCatching {
+            val title = when (videoType) {
+                is Video.Type.Movie -> videoType.title
+                is Video.Type.Episode -> videoType.tvShow.title
+            }
+            val cleanTitle = com.streamflixreborn.streamflix.utils.TitleNormalizer
+                .cleanForTmdbSearch(title).ifBlank { title }
+            val year = when (videoType) {
+                is Video.Type.Movie -> videoType.releaseDate.takeIf { it.isNotBlank() }?.take(4)?.toIntOrNull()
+                is Video.Type.Episode -> videoType.tvShow.releaseDate?.take(4)?.toIntOrNull()
+            }
+            val tmdbItem: Any? = when (videoType) {
+                is Video.Type.Movie -> com.streamflixreborn.streamflix.utils.TmdbUtils.getMovie(cleanTitle, year, "fr-FR")
+                is Video.Type.Episode -> com.streamflixreborn.streamflix.utils.TmdbUtils.getTvShow(cleanTitle, year, "fr-FR")
+            }
+            val tid = when (tmdbItem) {
+                is com.streamflixreborn.streamflix.models.Movie -> tmdbItem.id.toIntOrNull()
+                is com.streamflixreborn.streamflix.models.TvShow -> tmdbItem.id.toIntOrNull()
+                else -> null
+            }
+            tid to year
+        }.getOrNull() ?: (null to null)
+
+        val movixBackup = if (tmdbIdResolved != null) runCatching {
+            val movixVideoType = if (videoType is Video.Type.Episode)
+                videoType.copy(tvShow = videoType.tvShow.copy(id = "$tmdbIdResolved"))
+            else videoType
+            val movixId = when (videoType) {
+                is Video.Type.Movie -> "$tmdbIdResolved"
+                is Video.Type.Episode -> "$tmdbIdResolved-s${videoType.season.number}e${videoType.number}"
+            }
+            MovixProvider.getServers(movixId, movixVideoType)
+        }.getOrNull().orEmpty() else emptyList()
+
+        val movieboxBackup = if (tmdbIdResolved != null) runCatching {
+            MovieboxProvider.getMovieboxSourcesByTmdbId(tmdbIdResolved, videoType)
+        }.getOrNull().orEmpty() else emptyList()
+
+        Log.d("FrenchStream", "Servers: native=${nativeServers.size} + movix=${movixBackup.size} + moviebox=${movieboxBackup.size} (tmdbId=$tmdbIdResolved)")
+        // Dédup par src URL — Movix peut déjà avoir Moviebox dans son cache
+        val seenSrc = mutableSetOf<String>()
+        val servers = (nativeServers + movixBackup + movieboxBackup)
+            .filter { it.src.isBlank() || seenSrc.add(it.src.lowercase().trim()) }
 
         // Sort: VF/TrueFrench first, then by service reliability, VOSTFR/VO last
         val sorted = servers.sortedWith(compareBy<Video.Server> { server ->
