@@ -110,10 +110,10 @@ interface Provider {
             // 2026-05-05: Moviebox (themoviebox.org/aoneroom) — niche K-Dramas + animes + films Hollywood VF.
             // v1: catalogue uniquement (search/browse). Extraction streams TODO v2.
             MovieboxProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
-            // 2026-05-05: Moviebox 2 — utilise l'API mobile (api6/api3.aoneroom.com/wefeed-mobile-bff)
-            // au lieu de l'API web h5api. Catalogue plus complet (vraies sections home,
-            // search v2, MPD streams adaptive bitrate). Test en parallèle pour comparer.
-            Moviebox2Provider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
+            // 2026-05-06: Cloudstream — re-branding du provider mobile-bff (api*.aoneroom.com).
+            // Source : MovieBox+ (même backend, route mobile au lieu de h5api).
+            // Catalogue plus complet (vraies sections home, search v2, MPD adaptive bitrate).
+            CloudstreamProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             WiTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             OlaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             VegetaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),

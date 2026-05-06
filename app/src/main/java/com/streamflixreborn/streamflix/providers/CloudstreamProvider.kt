@@ -14,6 +14,9 @@ import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.TitleNormalizer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -27,13 +30,17 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * 2026-05-05 : Second Moviebox provider qui consomme l'API MOBILE
- * (api6.aoneroom.com / api3 / api4 / api5 / api.inmoviebox.com — pool rotatif)
- * via le segment `/wefeed-mobile-bff/...` au lieu du `/wefeed-h5api-bff/...`
- * que MovieboxProvider utilise déjà.
+ * 2026-05-06 : Cloudstream — provider qui scrape la source MovieBox+ via son
+ * API MOBILE officielle (api6.aoneroom.com / api3 / api4 / api5 /
+ * api.inmoviebox.com — pool rotatif) en passant par `/wefeed-mobile-bff/...`
+ * (par opposition au `/wefeed-h5api-bff/...` du provider Moviebox v1).
+ *
+ * Branding affiché : "Cloudstream" — logo dédié, mais derrière la techno
+ * c'est la même API MovieBox+ que la version H5 (catalogue plus complet :
+ * carousels par tab, vrais saisons via /season-info, MPD adaptive bitrate).
  *
  * Endpoints :
- *   - /tab-operating?page=1&tabId=All       — feed home (vrais carousels)
+ *   - /tab-operating?page=1&tabId=N         — feed home (vrais carousels)
  *   - /subject-api/search                   — recherche v1
  *   - /subject-api/search/v2                — recherche v2
  *   - /subject-api/get?subjectId=X          — détail
@@ -44,21 +51,16 @@ import javax.crypto.spec.SecretKeySpec
  * Auth : signature HMAC-MD5 par requête (header `x-tr-signature`) + token
  * temps-vivant (`X-Client-Token`) + identité device (`X-Client-Info`).
  * Reverse-engineering basé sur https://github.com/Simatwa/moviebox-api (v3).
- *
- * Le but est d'avoir un catalogue plus complet que la version H5 (qui se
- * limite au trending). L'API mobile expose en plus de vrais carousels par
- * tab (Movie/TV/Music/People/Education/Sports), des MPD streams pour
- * adaptive bitrate, et des sous-titres externes.
  */
-object Moviebox2Provider : Provider {
+object CloudstreamProvider : Provider {
 
-    override val name = "Moviebox 2"
+    override val name = "Cloudstream"
     override val baseUrl = "https://api6.aoneroom.com"
     override val language = "fr"
     override val logo: String
-        get() = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_moviebox"
+        get() = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_cloudstream"
 
-    private const val TAG = "Moviebox2Provider"
+    private const val TAG = "CloudstreamProvider"
 
     /** Pool de hosts à essayer en cascade (fallback en cas de 403/429/500). */
     private val HOST_POOL = listOf(
@@ -251,7 +253,7 @@ object Moviebox2Provider : Provider {
     private fun parseMovie(o: JSONObject): Movie {
         val subjectId = o.optString("subjectId").ifEmpty { o.optString("id") }
         return Movie(
-            id = "mvbx2::m::$subjectId",
+            id = "cs::m::$subjectId",
             title = o.optString("title").ifEmpty { o.optString("name") },
             overview = o.optString("description").takeIf { it.isNotBlank() },
             released = o.optString("releaseDate").takeIf { it.isNotBlank() }
@@ -270,7 +272,7 @@ object Moviebox2Provider : Provider {
     private fun parseTvShow(o: JSONObject): TvShow {
         val subjectId = o.optString("subjectId").ifEmpty { o.optString("id") }
         return TvShow(
-            id = "mvbx2::s::$subjectId",
+            id = "cs::s::$subjectId",
             title = o.optString("title").ifEmpty { o.optString("name") },
             overview = o.optString("description").takeIf { it.isNotBlank() },
             released = o.optString("releaseDate").takeIf { it.isNotBlank() }
@@ -289,7 +291,7 @@ object Moviebox2Provider : Provider {
     private fun parseGenres(raw: String?): List<Genre> {
         if (raw.isNullOrBlank()) return emptyList()
         return raw.split(",").map { it.trim() }.filter { it.isNotBlank() }
-            .map { Genre(id = "mvbx2::g::$it", name = it) }
+            .map { Genre(id = "cs::g::$it", name = it) }
     }
 
     /** subjectType : 1=Movie, 2=TvShow. */
@@ -298,72 +300,115 @@ object Moviebox2Provider : Provider {
         return if (type == 1) parseMovie(o) else parseTvShow(o)
     }
 
+    // 2026-05-06 : filtre FR — l'API mobile-bff retourne plein de contenus
+    // dub. dans des langues régionales (Inde/Asie). On rejette tout titre
+    // dont le suffixe entre [...] correspond à une langue qu'on ne supporte
+    // pas. Les titres SANS suffixe sont gardés (typiquement Hollywood VO/VF).
+    private val NON_FR_LANG_REGEX = Regex(
+        """\[(Hindi|Tamil|Telugu|Korean|Japanese|Indonesian|Thai|Vietnamese|""" +
+        """Arabic|Spanish|Portuguese|Mandarin|Cantonese|Russian|Turkish|""" +
+        """Bengali|Punjabi|Urdu|Gujarati|Marathi|Malayalam|Kannada|Sinhala|""" +
+        """Burmese|Filipino|Tagalog|Khmer|Lao|Nepali|Polish|Italian|German|""" +
+        """Greek|Hebrew|Persian|Farsi|Swahili|Romanian|Hungarian|Czech|""" +
+        """Dutch|Swedish|Norwegian|Danish|Finnish|Ukrainian)\]""",
+        RegexOption.IGNORE_CASE
+    )
+    private val FR_LANG_REGEX = Regex(
+        """\[(French|VF|Fran[çc]ais|VOSTFR)\]""",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** Garde les titres FR-compatibles : ceux marqués FR explicitement, ou
+     *  ceux sans suffixe de langue (souvent Hollywood VO trouvable en FR). */
+    private fun isFrenchFriendly(title: String): Boolean {
+        if (title.isBlank()) return false
+        if (FR_LANG_REGEX.containsMatchIn(title)) return true
+        if (NON_FR_LANG_REGEX.containsMatchIn(title)) return false
+        return true  // pas de suffixe de langue → on garde
+    }
+
+    private fun isFrenchFriendly(item: AppAdapter.Item): Boolean = when (item) {
+        is Movie -> isFrenchFriendly(item.title)
+        is TvShow -> isFrenchFriendly(item.title)
+        else -> true
+    }
+
     // ─── Provider impl ────────────────────────────────────────────────────
 
-    /** Page d'accueil : un appel GET à `/tab-operating?tabId=0` retourne une
-     *  liste d'`items` (= rangées). Chaque item a un `type` :
-     *    - BANNER : promo carousel (data.banners[].subject)
-     *    - SUBJECT_GROUP : rangée de subjects (subjects[])
-     *    - VERTICAL_RANK : top X (subjects[])
-     *  Il faut `tabId=0` (int) — `tabId=All` (str) renvoie 400. */
-    override suspend fun getHome(): List<Category> {
-        val resp = apiGet(MAIN_PAGE_PATH, mapOf("page" to "1", "tabId" to "0", "version" to ""))
-            ?: return emptyList()
-        val data = resp.optJSONObject("data") ?: return emptyList()
-        val items = data.optJSONArray("items") ?: data.optJSONArray("topics") ?: return emptyList()
+    /** Page d'accueil : agrège les tabs 0..6 (= 7 catégories) en parallèle
+     *  pour avoir un catalogue aussi complet que l'app MovieBox+ originale.
+     *  Filtre les subjects dont le suffixe de langue n'est pas FR-compatible.
+     *  Item types : BANNER (carousels promo), SUBJECT_GROUP (rangée), VERTICAL_RANK (top X). */
+    override suspend fun getHome(): List<Category> = coroutineScope {
+        // Fetch les 7 tabs en parallèle (tabId 0..6). On dédoublonne ensuite par subjectId.
+        val tabResponses = (0..6).map { tabId ->
+            async { tabId to apiGet(MAIN_PAGE_PATH, mapOf("page" to "1", "tabId" to "$tabId", "version" to "")) }
+        }.awaitAll()
+
         val sections = mutableListOf<Category>()
         var featuredAdded = false
+        val seenIds = mutableSetOf<String>()  // dédoublonnage cross-tab
 
-        for (i in 0 until items.length()) {
-            val item = items.optJSONObject(i) ?: continue
-            val type = item.optString("type")
-            val name = item.optString("title", "Section ${i + 1}")
-            val sectionItems = mutableListOf<AppAdapter.Item>()
+        for ((tabId, resp) in tabResponses) {
+            if (resp == null) continue
+            val data = resp.optJSONObject("data") ?: continue
+            val items = data.optJSONArray("items") ?: data.optJSONArray("topics") ?: continue
 
-            when (type) {
-                "BANNER" -> {
-                    // banner.banners[].subject — typiquement les 5-10 promos
-                    val banners = item.optJSONObject("banner")?.optJSONArray("banners")
-                    if (banners != null) {
+            for (i in 0 until items.length()) {
+                val item = items.optJSONObject(i) ?: continue
+                val type = item.optString("type")
+                val rawName = item.optString("title", "Section")
+                val sectionName = if (tabId == 0) rawName else "$rawName"  // tab name déjà dans le titre éditorial
+                val sectionItems = mutableListOf<AppAdapter.Item>()
+
+                when (type) {
+                    "BANNER" -> {
+                        // Featured carousel — un seul, depuis le tab 0
+                        if (featuredAdded) continue
+                        val banners = item.optJSONObject("banner")?.optJSONArray("banners") ?: continue
                         for (j in 0 until banners.length()) {
                             val b = banners.optJSONObject(j) ?: continue
                             val subject = b.optJSONObject("subject") ?: continue
                             val landscape = b.optJSONObject("image")?.optString("url")
                             val parsed = jsonToItem(subject)
-                            // Override banner with the landscape image
+                            if (!isFrenchFriendly(parsed)) continue
+                            val id = when (parsed) { is Movie -> parsed.id; is TvShow -> parsed.id; else -> "" }
+                            if (id.isNotEmpty() && !seenIds.add(id)) continue
                             sectionItems.add(when (parsed) {
                                 is Movie -> parsed.apply { banner = landscape ?: this.banner }
                                 is TvShow -> parsed.apply { banner = landscape ?: this.banner }
                                 else -> parsed
                             })
                         }
+                        if (sectionItems.isNotEmpty()) {
+                            sections.add(Category(name = Category.FEATURED, list = sectionItems.take(10)))
+                            featuredAdded = true
+                        }
                     }
-                    if (sectionItems.isNotEmpty() && !featuredAdded) {
-                        sections.add(Category(name = Category.FEATURED, list = sectionItems.take(10)))
-                        featuredAdded = true
+                    else -> {
+                        val subjects = item.optJSONArray("subjects")
+                            ?: item.optJSONObject("group")?.optJSONArray("subjects")
+                            ?: continue
+                        for (j in 0 until subjects.length()) {
+                            val s = subjects.optJSONObject(j) ?: continue
+                            val subj = s.optJSONObject("subject") ?: s
+                            val parsed = jsonToItem(subj)
+                            if (!isFrenchFriendly(parsed)) continue
+                            val id = when (parsed) { is Movie -> parsed.id; is TvShow -> parsed.id; else -> "" }
+                            if (id.isNotEmpty() && !seenIds.add(id)) continue
+                            sectionItems.add(parsed)
+                            if (sectionItems.size >= 20) break
+                        }
+                        // Skip sections trop courtes après filtrage (< 3 items)
+                        if (sectionItems.size >= 3) {
+                            sections.add(Category(name = sectionName, list = sectionItems))
+                        }
                     }
-                    continue  // skip — already added as featured
                 }
-                else -> {
-                    // SUBJECT_GROUP, VERTICAL_RANK, etc. → subjects[]
-                    val subjects = item.optJSONArray("subjects")
-                        ?: item.optJSONObject("group")?.optJSONArray("subjects")
-                        ?: continue
-                    for (j in 0 until subjects.length()) {
-                        val s = subjects.optJSONObject(j) ?: continue
-                        // Si l'item a un wrapper `subject`, prend l'enfant
-                        val subj = s.optJSONObject("subject") ?: s
-                        sectionItems.add(jsonToItem(subj))
-                        if (sectionItems.size >= 20) break
-                    }
-                }
-            }
-            if (sectionItems.isNotEmpty()) {
-                sections.add(Category(name = name, list = sectionItems))
             }
         }
-        Log.d(TAG, "getHome: ${sections.size} sections (featured=$featuredAdded)")
-        return sections
+        Log.d(TAG, "getHome: ${sections.size} sections agrégées sur 7 tabs (featured=$featuredAdded)")
+        sections
     }
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
@@ -379,53 +424,67 @@ object Moviebox2Provider : Provider {
         val results = mutableListOf<AppAdapter.Item>()
         for (i in 0 until items.length()) {
             val s = items.optJSONObject(i) ?: continue
-            results.add(jsonToItem(s))
+            val parsed = jsonToItem(s)
+            if (isFrenchFriendly(parsed)) results.add(parsed)
         }
-        Log.d(TAG, "search('$cleanQuery' p=$page): ${results.size} hits")
+        Log.d(TAG, "search('$cleanQuery' p=$page): ${results.size} hits FR-compat")
         return results
     }
 
-    /** Pour les films/séries on récupère le tab All puis on filtre par
-     *  subjectType (1=Movie, 2=TV). Les tabId int spécifiques (1=Music,
-     *  2=People...) ne sont pas tous mappables à Movie/TV directement. */
-    override suspend fun getMovies(page: Int): List<Movie> {
-        if (page > 5) return emptyList()
-        val resp = apiGet(MAIN_PAGE_PATH, mapOf("page" to "$page", "tabId" to "0", "version" to ""))
-            ?: return emptyList()
-        val items = resp.optJSONObject("data")?.optJSONArray("items") ?: return emptyList()
+    /** Films / séries : on agrège tous les tabs 0..6, filtre par subjectType
+     *  et FR-compat, dédoublonne. La pagination 1..5 fait varier `page` côté API. */
+    override suspend fun getMovies(page: Int): List<Movie> = coroutineScope {
+        if (page > 5) return@coroutineScope emptyList()
+        val responses = (0..6).map { tabId ->
+            async { apiGet(MAIN_PAGE_PATH, mapOf("page" to "$page", "tabId" to "$tabId", "version" to "")) }
+        }.awaitAll()
         val movies = mutableListOf<Movie>()
-        for (i in 0 until items.length()) {
-            val it = items.optJSONObject(i) ?: continue
-            val subjects = it.optJSONArray("subjects") ?: continue
-            for (j in 0 until subjects.length()) {
-                val raw = subjects.optJSONObject(j) ?: continue
-                val s = raw.optJSONObject("subject") ?: raw
-                if (s.optInt("subjectType", 1) == 1) movies.add(parseMovie(s))
+        for (resp in responses) {
+            val items = resp?.optJSONObject("data")?.optJSONArray("items") ?: continue
+            for (i in 0 until items.length()) {
+                val it = items.optJSONObject(i) ?: continue
+                val subjects = it.optJSONArray("subjects")
+                    ?: it.optJSONObject("group")?.optJSONArray("subjects")
+                    ?: continue
+                for (j in 0 until subjects.length()) {
+                    val raw = subjects.optJSONObject(j) ?: continue
+                    val s = raw.optJSONObject("subject") ?: raw
+                    if (s.optInt("subjectType", 1) != 1) continue
+                    val m = parseMovie(s)
+                    if (isFrenchFriendly(m.title)) movies.add(m)
+                }
             }
         }
-        return movies.distinctBy { it.id }
+        movies.distinctBy { it.id }
     }
 
-    override suspend fun getTvShows(page: Int): List<TvShow> {
-        if (page > 5) return emptyList()
-        val resp = apiGet(MAIN_PAGE_PATH, mapOf("page" to "$page", "tabId" to "0", "version" to ""))
-            ?: return emptyList()
-        val items = resp.optJSONObject("data")?.optJSONArray("items") ?: return emptyList()
+    override suspend fun getTvShows(page: Int): List<TvShow> = coroutineScope {
+        if (page > 5) return@coroutineScope emptyList()
+        val responses = (0..6).map { tabId ->
+            async { apiGet(MAIN_PAGE_PATH, mapOf("page" to "$page", "tabId" to "$tabId", "version" to "")) }
+        }.awaitAll()
         val shows = mutableListOf<TvShow>()
-        for (i in 0 until items.length()) {
-            val it = items.optJSONObject(i) ?: continue
-            val subjects = it.optJSONArray("subjects") ?: continue
-            for (j in 0 until subjects.length()) {
-                val raw = subjects.optJSONObject(j) ?: continue
-                val s = raw.optJSONObject("subject") ?: raw
-                if (s.optInt("subjectType", 1) == 2) shows.add(parseTvShow(s))
+        for (resp in responses) {
+            val items = resp?.optJSONObject("data")?.optJSONArray("items") ?: continue
+            for (i in 0 until items.length()) {
+                val it = items.optJSONObject(i) ?: continue
+                val subjects = it.optJSONArray("subjects")
+                    ?: it.optJSONObject("group")?.optJSONArray("subjects")
+                    ?: continue
+                for (j in 0 until subjects.length()) {
+                    val raw = subjects.optJSONObject(j) ?: continue
+                    val s = raw.optJSONObject("subject") ?: raw
+                    if (s.optInt("subjectType", 1) != 2) continue
+                    val t = parseTvShow(s)
+                    if (isFrenchFriendly(t.title)) shows.add(t)
+                }
             }
         }
-        return shows.distinctBy { it.id }
+        shows.distinctBy { it.id }
     }
 
     override suspend fun getMovie(id: String): Movie {
-        val subjectId = id.removePrefix("mvbx2::m::")
+        val subjectId = id.removePrefix("cs::m::")
         val resp = apiGet(SUBJECT_GET_PATH, mapOf("subjectId" to subjectId))
             ?: return Movie(id = id, title = "", providerName = name)
         // 2026-05-05 v2 : la réponse a les champs DIRECTEMENT dans `data`,
@@ -452,7 +511,7 @@ object Moviebox2Provider : Provider {
     }
 
     override suspend fun getTvShow(id: String): TvShow {
-        val subjectId = id.removePrefix("mvbx2::s::")
+        val subjectId = id.removePrefix("cs::s::")
         val resp = apiGet(SUBJECT_GET_PATH, mapOf("subjectId" to subjectId))
             ?: return TvShow(id = id, title = "", providerName = name)
         val data = resp.optJSONObject("data")
@@ -470,7 +529,7 @@ object Moviebox2Provider : Provider {
                 val seNum = s.optInt("se", i + 1)
                 seasons.add(
                     Season(
-                        id = "mvbx2::season::$frSubjectId::$seNum",
+                        id = "cs::season::$frSubjectId::$seNum",
                         number = seNum,
                         title = s.optString("title").ifEmpty { "Saison $seNum" },
                         poster = s.optJSONObject("cover")?.optString("url"),
@@ -484,7 +543,7 @@ object Moviebox2Provider : Provider {
             for (i in 1..seNum) {
                 seasons.add(
                     Season(
-                        id = "mvbx2::season::$frSubjectId::$i",
+                        id = "cs::season::$frSubjectId::$i",
                         number = i,
                         title = "Saison $i",
                         poster = data.optJSONObject("cover")?.optString("url"),
@@ -497,40 +556,75 @@ object Moviebox2Provider : Provider {
     }
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
-        // Parse "mvbx2::season::<subjectId>::<seasonNumber>"
-        val parts = seasonId.removePrefix("mvbx2::season::").split("::")
+        // Parse "cs::season::<subjectId>::<seasonNumber>"
+        val parts = seasonId.removePrefix("cs::season::").split("::")
         if (parts.size != 2) return emptyList()
         val subjectId = parts[0]
         val seasonNum = parts[1].toIntOrNull() ?: return emptyList()
 
-        // L'API mobile retourne le nombre d'épisodes via /resource. Sans ça,
-        // on tente /season-info pour la liste d'épisodes connus.
-        val seasonsResp = apiGet(SEASON_INFO_PATH, mapOf("subjectId" to subjectId))
-        val seasonsArr = seasonsResp?.optJSONObject("data")?.optJSONArray("seasons")
-        var maxEp = 0
-        if (seasonsArr != null) {
-            for (i in 0 until seasonsArr.length()) {
-                val s = seasonsArr.optJSONObject(i) ?: continue
-                if (s.optInt("se", -1) == seasonNum) {
-                    maxEp = s.optInt("maxEp", s.optInt("epNum", 0))
-                    break
+        // 2026-05-06 : on utilise /resource (paginé 10/page) qui retourne les
+        // *vrais* titres d'épisodes ("Wednesday's Child Is Full of Woe") au
+        // lieu du générique "Épisode N". Le champ `episode` est encodé
+        // S*100+EP donc 105 = S1E5, 203 = S2E3, etc. On filtre par se==seasonNum.
+        val episodes = mutableMapOf<Int, Episode>()  // ep number → Episode (dedup)
+        var page = 1
+        var safetyMaxPage = 20
+        while (page <= safetyMaxPage) {
+            val resp = apiGet(RESOURCE_PATH, mapOf(
+                "subjectId" to subjectId,
+                "se" to "$seasonNum",
+                "ep" to "1",
+                "page" to "$page",
+            )) ?: break
+            val data = resp.optJSONObject("data") ?: break
+            val list = data.optJSONArray("list") ?: break
+            for (i in 0 until list.length()) {
+                val it = list.optJSONObject(i) ?: continue
+                if (it.optInt("se") != seasonNum) continue
+                val ep = it.optInt("ep")
+                if (ep <= 0 || episodes.containsKey(ep)) continue
+                val title = it.optString("title").ifBlank { "Épisode $ep" }
+                episodes[ep] = Episode(
+                    id = "cs::ep::$subjectId::$seasonNum::$ep",
+                    number = ep,
+                    title = title,
+                )
+            }
+            val pager = data.optJSONObject("pager")
+            val hasMore = pager?.optBoolean("hasMore", false) == true
+            if (!hasMore) break
+            page++
+        }
+        if (episodes.isEmpty()) {
+            // Fallback : /season-info pour récupérer maxEp et générer des stubs
+            val seasonsResp = apiGet(SEASON_INFO_PATH, mapOf("subjectId" to subjectId))
+            val seasonsArr = seasonsResp?.optJSONObject("data")?.optJSONArray("seasons")
+            var maxEp = 0
+            if (seasonsArr != null) {
+                for (i in 0 until seasonsArr.length()) {
+                    val s = seasonsArr.optJSONObject(i) ?: continue
+                    if (s.optInt("se", -1) == seasonNum) {
+                        maxEp = s.optInt("maxEp", s.optInt("epNum", 0))
+                        break
+                    }
                 }
             }
+            if (maxEp <= 0) return emptyList()
+            return (1..maxEp).map { ep ->
+                Episode(
+                    id = "cs::ep::$subjectId::$seasonNum::$ep",
+                    number = ep,
+                    title = "Épisode $ep",
+                )
+            }
         }
-        if (maxEp <= 0) return emptyList()
-        return (1..maxEp).map { ep ->
-            Episode(
-                id = "mvbx2::ep::$subjectId::$seasonNum::$ep",
-                number = ep,
-                title = "Épisode $ep",
-            )
-        }
+        return episodes.values.sortedBy { it.number }
     }
 
     override suspend fun getGenre(id: String, page: Int): Genre {
         // L'API mobile ne semble pas exposer un endpoint genre direct ;
         // on fallback sur le tab "Movie" (puis filtre par genre).
-        val genreName = id.removePrefix("mvbx2::g::")
+        val genreName = id.removePrefix("cs::g::")
         val movies = getMovies(page).filter { m ->
             m.genres.any { it.name.contains(genreName, ignoreCase = true) }
         }
@@ -542,23 +636,85 @@ object Moviebox2Provider : Provider {
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         val (subjectId, se, ep) = when {
-            id.startsWith("mvbx2::ep::") -> {
-                val parts = id.removePrefix("mvbx2::ep::").split("::")
+            id.startsWith("cs::ep::") -> {
+                val parts = id.removePrefix("cs::ep::").split("::")
                 Triple(parts.getOrNull(0).orEmpty(), parts.getOrNull(1)?.toIntOrNull() ?: 0, parts.getOrNull(2)?.toIntOrNull() ?: 0)
             }
-            id.startsWith("mvbx2::m::") -> Triple(id.removePrefix("mvbx2::m::"), 0, 0)
-            id.startsWith("mvbx2::s::") -> Triple(id.removePrefix("mvbx2::s::"), 0, 0)
+            id.startsWith("cs::m::") -> Triple(id.removePrefix("cs::m::"), 0, 0)
+            id.startsWith("cs::s::") -> Triple(id.removePrefix("cs::s::"), 0, 0)
             else -> return emptyList()
         }
         if (subjectId.isBlank()) return emptyList()
 
         val servers = mutableListOf<Video.Server>()
 
-        // 2026-05-05 v3 : essai #1 — l'API h5api (h5-api.aoneroom.com) qui
-        // renvoie des URLs MP4 signées (?sign=X&t=Y). Plus fiable que les
-        // DASH manifests du mobile-bff qui sortent en 403 silencieux.
-        // L'API h5api ne nécessite pas de signing HMAC, juste les headers
-        // simples Origin/Referer/x-client-info/x-project-name.
+        // 2026-05-06 v4 : essai #1 — /resource (mobile-bff) en parallèle
+        // pour les 4 résolutions (360/480/720/1080). Les URLs `bcdn.hakunaymatata`
+        // de cet endpoint sont les fichiers source uploadés par les contributeurs
+        // (sans pre-roll publicitaire), au contraire de `hcdn3.hakunaymatata`
+        // que retourne /play-info qui peut injecter des pubs en début de stream.
+        // /resource liste les épisodes paginés ; on cherche la page contenant
+        // notre épisode (se*100+ep == episode field) puis on prend resourceLink.
+        runCatching {
+            val resolutions = listOf(360, 480, 720, 1080)
+            val resoStreams = coroutineScope {
+                resolutions.map { resoltn ->
+                    async {
+                        // Cherche l'épisode demandé dans les pages /resource
+                        // (se est passé pour réduire l'empan, mais l'API ignore
+                        // partiellement ; on parcourt jusqu'à trouver le match).
+                        val targetEpCode = if (se > 0 && ep > 0) se * 100 + ep else 0
+                        var page = 1
+                        var found: Pair<String, Long>? = null  // url, sizeBytes
+                        while (page <= 8) {
+                            val r = apiGet(RESOURCE_PATH, mapOf(
+                                "subjectId" to subjectId,
+                                "se" to "${if (se > 0) se else 1}",
+                                "ep" to "${if (ep > 0) ep else 1}",
+                                "page" to "$page",
+                                "resolution" to "$resoltn",
+                            )) ?: break
+                            val data = r.optJSONObject("data") ?: break
+                            val list = data.optJSONArray("list") ?: break
+                            for (i in 0 until list.length()) {
+                                val item = list.optJSONObject(i) ?: continue
+                                val epCode = item.optInt("episode", -1)
+                                // Pour un film: targetEpCode=0, on prend le 1er item
+                                // Pour une série: on cherche l'épisode exact
+                                if (targetEpCode == 0 || epCode == targetEpCode) {
+                                    val u = item.optString("resourceLink").takeIf { it.isNotBlank() }
+                                    if (u != null) {
+                                        val sz = item.optString("size").toLongOrNull() ?: 0L
+                                        found = u to sz
+                                    }
+                                    break
+                                }
+                            }
+                            if (found != null) break
+                            val pager = data.optJSONObject("pager")
+                            if (pager?.optBoolean("hasMore", false) != true) break
+                            page++
+                        }
+                        if (found != null) Triple(resoltn, found!!.first, found!!.second) else null
+                    }
+                }.awaitAll()
+            }.filterNotNull().sortedByDescending { it.first }
+
+            for ((idx, t) in resoStreams.withIndex()) {
+                servers.add(
+                    Video.Server(
+                        id = "cloudstream_resource_${subjectId}_${se}_${ep}_${t.first}_${idx}",
+                        name = "Cloudstream [${t.first}p MP4]",
+                        src = t.second,
+                    )
+                )
+            }
+            if (servers.isNotEmpty()) Log.d(TAG, "getServers /resource $id → ${servers.size} streams (bcdn, no pre-roll)")
+        }.onFailure { Log.d(TAG, "/resource fallback failed: ${it.message}") }
+
+        if (servers.isNotEmpty()) return servers
+
+        // Essai #2 : h5api (h5-api.aoneroom.com) — URLs MP4 signées via le frontend web.
         runCatching {
             val h5Headers = mapOf(
                 "Origin" to "https://themoviebox.org",
@@ -593,8 +749,8 @@ object Moviebox2Provider : Provider {
                         for ((idx, t) in sorted.withIndex()) {
                             servers.add(
                                 Video.Server(
-                                    id = "moviebox2_h5_${subjectId}_${se}_${ep}_${t.third}_${idx}",
-                                    name = "Moviebox 2 [${t.second.first}p ${t.second.second}]",
+                                    id = "cloudstream_h5_${subjectId}_${se}_${ep}_${t.third}_${idx}",
+                                    name = "Cloudstream [${t.second.first}p ${t.second.second}]",
                                     src = t.first,
                                 )
                             )
@@ -609,8 +765,8 @@ object Moviebox2Provider : Provider {
 
         if (servers.isNotEmpty()) return servers
 
-        // Essai #2 : mobile-bff play-info (fallback). Souvent retourne des
-        // DASH manifests qui peuvent foirer en 403, mais on tente quand même.
+        // Essai #3 : mobile-bff play-info (last resort). Peut retourner des
+        // DASH manifests qui foirent en 403, ou des streams hcdn3 avec pre-roll.
         val params = mutableMapOf("subjectId" to subjectId)
         if (se > 0) params["se"] = "$se"
         if (ep > 0) params["ep"] = "$ep"
@@ -627,8 +783,8 @@ object Moviebox2Provider : Provider {
         for ((idx, t) in streamList.withIndex()) {
             servers.add(
                 Video.Server(
-                    id = "moviebox2_mobile_${subjectId}_${se}_${ep}_${t.third}_${idx}",
-                    name = "Moviebox 2 [${t.second.first}p ${t.second.second}]",
+                    id = "cloudstream_mobile_${subjectId}_${se}_${ep}_${t.third}_${idx}",
+                    name = "Cloudstream [${t.second.first}p ${t.second.second}]",
                     src = t.first,
                 )
             )
