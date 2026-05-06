@@ -139,7 +139,12 @@ object VegetaTvProvider : Provider, IptvProvider {
     private const val PHASE3_MAX_FR_SERVERS = 8
     private const val PHASE3_PARALLELISM = 2
 
-    private const val MAX_VARIANTS_PER_CHANNEL = 5
+    // 2026-05-05 : raisons d'avoir augmenté de 5 → 20 :
+    // l'utilisateur a 71 serveurs Vegeta dispo et voulait voir tous les
+    // variants pour pouvoir switcher manuellement. 20 = suffisamment
+    // pour couvrir les serveurs FR + quelques internationaux sans
+    // surcharger le menu.
+    private const val MAX_VARIANTS_PER_CHANNEL = 20
     private const val RENEWAL_BATCH_SIZE = 20
 
     private const val FR_SERVERS_CACHE_FILE = "vegeta_fr_servers.json"
@@ -1503,12 +1508,15 @@ object VegetaTvProvider : Provider, IptvProvider {
 
             Log.d(TAG, "getServers '$key': ${servers.size} servers (total in registry: ${info.streams.size})")
 
-            // If the channel has very few streams AND Phase 3 hasn't run yet,
-            // trigger on-demand backfill. Once we have ≥2 streams or Phase 3 is
-            // done, skip — the user is about to start playing, no point loading more
-            // (creates GC pressure that can stutter playback).
-            if (servers.size < 2 && !phase3Done) {
-                triggerOnDemandBackfill("low-streams $key (${servers.size})")
+            // 2026-05-05 v2 : seuil élevé de 2 → 10 et on retire la condition
+            // `!phase3Done` — l'utilisateur voulait voir plus de variants
+            // (server #39, #43 → seulement 2 alors que Vegeta a 71 serveurs).
+            // Ça scanne 2 nouveaux serveurs à chaque getServers tant qu'on
+            // n'a pas atteint 10 variants. Le job s'auto-rate-limit via le
+            // check `ondemandJob?.isActive == true` au début de
+            // triggerOnDemandBackfill, donc pas de spam.
+            if (servers.size < 10) {
+                triggerOnDemandBackfill("backfill $key (${servers.size}/10)")
             }
 
             currentEmitJob?.cancel()
