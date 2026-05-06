@@ -333,15 +333,97 @@ object CloudstreamProvider : Provider {
         else -> true
     }
 
+    /** 2026-05-06 : détection du contenu DramaBox / shorts vertical (1-2 min
+     *  par épisode). L'utilisateur les perçoit comme des pubs car ils sont
+     *  formatés comme du TikTok/Reels. Signaux :
+     *    - `shortsEpisode > 0` : nombre d'épisodes shorts (50, 64, etc.)
+     *    - `genre == "Drame moderne"` : marqueur de catalogue DramaBox
+     *    - countryName "Chine" + drame court : indicateur partiel
+     *  On rejette agressivement pour la home/listes — les utilisateurs de
+     *  Streamflix attendent du long-form (films/séries TV classiques). */
+    private fun isShortDrama(o: JSONObject): Boolean {
+        if (o.optInt("shortsEpisode", 0) > 0) return true
+        val genre = o.optString("genre").orEmpty()
+        if (genre.equals("Drame moderne", ignoreCase = true)) return true
+        // Drama box content has very short `seconds` per episode (< 600s) when set
+        val seconds = o.optInt("seconds", 0)
+        if (seconds in 1..599) return true
+        return false
+    }
+
+    // 2026-05-06 : cache audio/sub FR par subjectId pour éviter les détail-fetches
+    // répétés à chaque chargement de home. Lifetime = process. Map<subjectId, true=FR ok>.
+    private val frAvailabilityCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /** Fetch /subject-api/get pour `subjectId` et déterminer si du FR est dispo :
+     *    1) Audio FR via dubs[] (lanCode=fr, type=0=dub) → accepté
+     *    2) Sous-titres FR via le champ `subtitles` (contient "Français"/"French") → accepté (VOSTFR)
+     *    3) Aucun des deux → rejeté (VO seule = inutile selon user). */
+    private suspend fun hasFrenchAudioOrSub(subjectId: String): Boolean {
+        if (subjectId.isBlank()) return false
+        frAvailabilityCache[subjectId]?.let { return it }
+        val resp = apiGet(SUBJECT_GET_PATH, mapOf("subjectId" to subjectId)) ?: return false
+        val data = resp.optJSONObject("data") ?: return false
+
+        // #1 : audio FR via dubs[] (lanCode=fr, type=0=dub)
+        val dubs = data.optJSONArray("dubs")
+        if (dubs != null) {
+            for (i in 0 until dubs.length()) {
+                val d = dubs.optJSONObject(i) ?: continue
+                val lan = d.optString("lanCode")
+                val type = d.optInt("type", -1)
+                if (lan.equals("fr", ignoreCase = true) && type == 0) {
+                    frAvailabilityCache[subjectId] = true
+                    return true
+                }
+            }
+        }
+
+        // #2 : VOSTFR via `subtitles` (CSV des langues sub disponibles)
+        val subtitles = data.optString("subtitles").orEmpty()
+        if (Regex("""(?i)\bfran[çc]ais\b|\bfrench\b""").containsMatchIn(subtitles)) {
+            frAvailabilityCache[subjectId] = true
+            return true
+        }
+
+        // Aussi : FR sub via dubs[] (lanCode=fr, type=1=sub)
+        if (dubs != null) {
+            for (i in 0 until dubs.length()) {
+                val d = dubs.optJSONObject(i) ?: continue
+                val lan = d.optString("lanCode")
+                if (lan.equals("fr", ignoreCase = true)) {
+                    frAvailabilityCache[subjectId] = true
+                    return true
+                }
+            }
+        }
+
+        frAvailabilityCache[subjectId] = false
+        return false
+    }
+
+    /** Filtre une liste de subjectIds en parallèle (concurrency limitée à 10) :
+     *  retourne ceux qui ont audio FR ou VOSTFR. */
+    private suspend fun filterFrenchAvailable(ids: List<String>): Set<String> = coroutineScope {
+        val results = ids.map { sid ->
+            async { sid to hasFrenchAudioOrSub(sid) }
+        }.awaitAll()
+        results.filter { it.second }.map { it.first }.toSet()
+    }
+
     // ─── Provider impl ────────────────────────────────────────────────────
 
-    /** Page d'accueil : agrège les tabs 0..6 (= 7 catégories) en parallèle
-     *  pour avoir un catalogue aussi complet que l'app MovieBox+ originale.
-     *  Filtre les subjects dont le suffixe de langue n'est pas FR-compatible.
+    /** Page d'accueil : agrège les tabs 0..5 (long-form catalogue) en parallèle.
+     *  Tab 6 est SKIP car il contient majoritairement des DramaBox shorts
+     *  (mini-drama vertical 1-2 min/ép) que l'utilisateur perçoit comme des pubs.
+     *  Filtre :
+     *    1) shorts (shortsEpisode>0, genre="Drame moderne", seconds<600) → reject
+     *    2) suffixe langue non-FR → reject
+     *    3) **audio FR ou sous-titres FR confirmés** via /subject-api/get (cached)
      *  Item types : BANNER (carousels promo), SUBJECT_GROUP (rangée), VERTICAL_RANK (top X). */
     override suspend fun getHome(): List<Category> = coroutineScope {
-        // Fetch les 7 tabs en parallèle (tabId 0..6). On dédoublonne ensuite par subjectId.
-        val tabResponses = (0..6).map { tabId ->
+        // Fetch les 6 tabs en parallèle (tabId 0..5). Tab 6 (shorts) skip.
+        val tabResponses = (0..5).map { tabId ->
             async { tabId to apiGet(MAIN_PAGE_PATH, mapOf("page" to "1", "tabId" to "$tabId", "version" to "")) }
         }.awaitAll()
 
@@ -349,65 +431,105 @@ object CloudstreamProvider : Provider {
         var featuredAdded = false
         val seenIds = mutableSetOf<String>()  // dédoublonnage cross-tab
 
-        for ((tabId, resp) in tabResponses) {
+        // Pre-pass : collecte tous les subjectIds candidats pour batch-fetch des détails.
+        // On filtre déjà à ce stade : DramaBox shorts + suffixe non-FR dans le titre
+        // (évite des centaines de détail-fetches pour des Hindi/Tamil/etc.)
+        val candidateIds = mutableSetOf<String>()
+        for ((_, resp) in tabResponses) {
             if (resp == null) continue
-            val data = resp.optJSONObject("data") ?: continue
-            val items = data.optJSONArray("items") ?: data.optJSONArray("topics") ?: continue
-
+            val items = resp.optJSONObject("data")?.optJSONArray("items") ?: continue
             for (i in 0 until items.length()) {
                 val item = items.optJSONObject(i) ?: continue
-                val type = item.optString("type")
-                val rawName = item.optString("title", "Section")
-                val sectionName = if (tabId == 0) rawName else "$rawName"  // tab name déjà dans le titre éditorial
-                val sectionItems = mutableListOf<AppAdapter.Item>()
-
-                when (type) {
-                    "BANNER" -> {
-                        // Featured carousel — un seul, depuis le tab 0
-                        if (featuredAdded) continue
-                        val banners = item.optJSONObject("banner")?.optJSONArray("banners") ?: continue
-                        for (j in 0 until banners.length()) {
-                            val b = banners.optJSONObject(j) ?: continue
-                            val subject = b.optJSONObject("subject") ?: continue
-                            val landscape = b.optJSONObject("image")?.optString("url")
-                            val parsed = jsonToItem(subject)
-                            if (!isFrenchFriendly(parsed)) continue
-                            val id = when (parsed) { is Movie -> parsed.id; is TvShow -> parsed.id; else -> "" }
-                            if (id.isNotEmpty() && !seenIds.add(id)) continue
-                            sectionItems.add(when (parsed) {
-                                is Movie -> parsed.apply { banner = landscape ?: this.banner }
-                                is TvShow -> parsed.apply { banner = landscape ?: this.banner }
-                                else -> parsed
-                            })
-                        }
-                        if (sectionItems.isNotEmpty()) {
-                            sections.add(Category(name = Category.FEATURED, list = sectionItems.take(10)))
-                            featuredAdded = true
-                        }
+                if (item.optString("type") == "BANNER") {
+                    val banners = item.optJSONObject("banner")?.optJSONArray("banners") ?: continue
+                    for (j in 0 until banners.length()) {
+                        val s = banners.optJSONObject(j)?.optJSONObject("subject") ?: continue
+                        if (isShortDrama(s)) continue
+                        if (NON_FR_LANG_REGEX.containsMatchIn(s.optString("title"))) continue
+                        s.optString("subjectId").takeIf { it.isNotBlank() }?.let { candidateIds.add(it) }
                     }
-                    else -> {
-                        val subjects = item.optJSONArray("subjects")
-                            ?: item.optJSONObject("group")?.optJSONArray("subjects")
-                            ?: continue
-                        for (j in 0 until subjects.length()) {
-                            val s = subjects.optJSONObject(j) ?: continue
-                            val subj = s.optJSONObject("subject") ?: s
-                            val parsed = jsonToItem(subj)
-                            if (!isFrenchFriendly(parsed)) continue
-                            val id = when (parsed) { is Movie -> parsed.id; is TvShow -> parsed.id; else -> "" }
-                            if (id.isNotEmpty() && !seenIds.add(id)) continue
-                            sectionItems.add(parsed)
-                            if (sectionItems.size >= 20) break
-                        }
-                        // Skip sections trop courtes après filtrage (< 3 items)
-                        if (sectionItems.size >= 3) {
-                            sections.add(Category(name = sectionName, list = sectionItems))
+                } else {
+                    val subjects = item.optJSONArray("subjects")
+                        ?: item.optJSONObject("group")?.optJSONArray("subjects")
+                        ?: continue
+                    for (j in 0 until subjects.length()) {
+                        val raw = subjects.optJSONObject(j) ?: continue
+                        val s = raw.optJSONObject("subject") ?: raw
+                        if (isShortDrama(s)) continue
+                        if (NON_FR_LANG_REGEX.containsMatchIn(s.optString("title"))) continue
+                        s.optString("subjectId").takeIf { it.isNotBlank() }?.let { candidateIds.add(it) }
+                    }
+                }
+            }
+        }
+        Log.d(TAG, "getHome: ${candidateIds.size} candidates avant filtrage FR audio/sub")
+        val frAllowed = filterFrenchAvailable(candidateIds.toList())
+        Log.d(TAG, "getHome: ${frAllowed.size} candidates avec audio/sub FR (sur ${candidateIds.size})")
+
+        // 2026-05-06 : on récupère 1 seule section featured + 2 grosses sections
+        // (Films / Séries FR) au lieu d'éclater sur 6+ sections vides après filtrage.
+        // Le user a explicitement demandé "spécifiquement du contenu français".
+        val frMovies = mutableListOf<Movie>()
+        val frTvShows = mutableListOf<TvShow>()
+        val featured = mutableListOf<AppAdapter.Item>()
+        val seenForLists = mutableSetOf<String>()
+        for ((_, resp) in tabResponses) {
+            if (resp == null) continue
+            val items = resp.optJSONObject("data")?.optJSONArray("items") ?: continue
+            for (i in 0 until items.length()) {
+                val item = items.optJSONObject(i) ?: continue
+                if (item.optString("type") == "BANNER" && featured.size < 10) {
+                    val banners = item.optJSONObject("banner")?.optJSONArray("banners") ?: continue
+                    for (j in 0 until banners.length()) {
+                        if (featured.size >= 10) break
+                        val b = banners.optJSONObject(j) ?: continue
+                        val subject = b.optJSONObject("subject") ?: continue
+                        val sid = subject.optString("subjectId")
+                        val title = subject.optString("title")
+                        if (isShortDrama(subject)) continue
+                        if (NON_FR_LANG_REGEX.containsMatchIn(title)) continue  // [Hindi]/etc.
+                        if (sid !in frAllowed) continue
+                        if (!seenForLists.add(sid)) continue
+                        val landscape = b.optJSONObject("image")?.optString("url")
+                        val parsed = jsonToItem(subject)
+                        featured.add(when (parsed) {
+                            is Movie -> parsed.apply { banner = landscape ?: this.banner }
+                            is TvShow -> parsed.apply { banner = landscape ?: this.banner }
+                            else -> parsed
+                        })
+                    }
+                } else {
+                    val subjects = item.optJSONArray("subjects")
+                        ?: item.optJSONObject("group")?.optJSONArray("subjects")
+                        ?: continue
+                    for (j in 0 until subjects.length()) {
+                        val s = subjects.optJSONObject(j) ?: continue
+                        val subj = s.optJSONObject("subject") ?: s
+                        val sid = subj.optString("subjectId")
+                        val title = subj.optString("title")
+                        if (isShortDrama(subj)) continue
+                        if (NON_FR_LANG_REGEX.containsMatchIn(title)) continue  // [Hindi]/etc.
+                        if (sid !in frAllowed) continue
+                        if (!seenForLists.add(sid)) continue
+                        when (subj.optInt("subjectType", 1)) {
+                            1 -> frMovies.add(parseMovie(subj))
+                            2 -> frTvShows.add(parseTvShow(subj))
                         }
                     }
                 }
             }
         }
-        Log.d(TAG, "getHome: ${sections.size} sections agrégées sur 7 tabs (featured=$featuredAdded)")
+        if (featured.isNotEmpty()) {
+            sections.add(Category(name = Category.FEATURED, list = featured))
+            featuredAdded = true
+        }
+        if (frMovies.isNotEmpty()) {
+            sections.add(Category(name = "Films", list = frMovies.distinctBy { it.id }))
+        }
+        if (frTvShows.isNotEmpty()) {
+            sections.add(Category(name = "Séries", list = frTvShows.distinctBy { it.id }))
+        }
+        Log.d(TAG, "getHome FR : ${featured.size} featured, ${frMovies.size} films, ${frTvShows.size} séries (featuredAdded=$featuredAdded, seenIds=${seenIds.size})")
         sections
     }
 
@@ -424,18 +546,19 @@ object CloudstreamProvider : Provider {
         val results = mutableListOf<AppAdapter.Item>()
         for (i in 0 until items.length()) {
             val s = items.optJSONObject(i) ?: continue
+            if (isShortDrama(s)) continue  // skip DramaBox shorts
             val parsed = jsonToItem(s)
             if (isFrenchFriendly(parsed)) results.add(parsed)
         }
-        Log.d(TAG, "search('$cleanQuery' p=$page): ${results.size} hits FR-compat")
+        Log.d(TAG, "search('$cleanQuery' p=$page): ${results.size} hits FR long-form")
         return results
     }
 
-    /** Films / séries : on agrège tous les tabs 0..6, filtre par subjectType
-     *  et FR-compat, dédoublonne. La pagination 1..5 fait varier `page` côté API. */
+    /** Films / séries : on agrège les tabs 0..5 (skip tab 6 shorts), filtre
+     *  par subjectType + FR-compat + reject DramaBox shorts, dédoublonne. */
     override suspend fun getMovies(page: Int): List<Movie> = coroutineScope {
         if (page > 5) return@coroutineScope emptyList()
-        val responses = (0..6).map { tabId ->
+        val responses = (0..5).map { tabId ->
             async { apiGet(MAIN_PAGE_PATH, mapOf("page" to "$page", "tabId" to "$tabId", "version" to "")) }
         }.awaitAll()
         val movies = mutableListOf<Movie>()
@@ -450,6 +573,7 @@ object CloudstreamProvider : Provider {
                     val raw = subjects.optJSONObject(j) ?: continue
                     val s = raw.optJSONObject("subject") ?: raw
                     if (s.optInt("subjectType", 1) != 1) continue
+                    if (isShortDrama(s)) continue
                     val m = parseMovie(s)
                     if (isFrenchFriendly(m.title)) movies.add(m)
                 }
@@ -460,7 +584,7 @@ object CloudstreamProvider : Provider {
 
     override suspend fun getTvShows(page: Int): List<TvShow> = coroutineScope {
         if (page > 5) return@coroutineScope emptyList()
-        val responses = (0..6).map { tabId ->
+        val responses = (0..5).map { tabId ->
             async { apiGet(MAIN_PAGE_PATH, mapOf("page" to "$page", "tabId" to "$tabId", "version" to "")) }
         }.awaitAll()
         val shows = mutableListOf<TvShow>()
@@ -475,6 +599,7 @@ object CloudstreamProvider : Provider {
                     val raw = subjects.optJSONObject(j) ?: continue
                     val s = raw.optJSONObject("subject") ?: raw
                     if (s.optInt("subjectType", 1) != 2) continue
+                    if (isShortDrama(s)) continue
                     val t = parseTvShow(s)
                     if (isFrenchFriendly(t.title)) shows.add(t)
                 }
