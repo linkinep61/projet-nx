@@ -26,12 +26,23 @@ android {
     def properties = new Properties()
     properties.load(project.rootProject.file('local.properties').newDataInputStream())
 
+    // 2026-05-05 : alignement 16 KB pour les libs natives (Pixel 10 Pro,
+    // Android 16+ utilise des pages 16 KB). Sans ça, le système affiche un
+    // popup "Android App Compatibility" au démarrage (libconscrypt_jni.so).
+    // useLegacyPackaging=false force AGP à compresser les .so avec
+    // l'alignement requis par les nouvelles versions d'Android.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+
     defaultConfig {
         applicationId "com.streamfr.app"
         minSdk 21
         targetSdk 35
-        versionCode 10861
-        versionName "1.7.161"
+        versionCode 10862
+        versionName "1.7.162"
 
         buildConfigField "String", "APP_LAYOUT", "\"${properties.getProperty("APP_LAYOUT")}\""
         buildConfigField "String", "TMDB_API_KEY", "\"${properties.getProperty("TMDB_API_KEY")}\""
