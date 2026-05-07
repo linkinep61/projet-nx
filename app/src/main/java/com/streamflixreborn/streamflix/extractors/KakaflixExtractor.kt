@@ -13,11 +13,16 @@ class KakaflixExtractor : Extractor() {
     override val mainUrl = "https://kakaflix.lol"
 
     override suspend fun extract(link: String): Video {
-        // Kakaflix is a redirect proxy - follow the redirect to get the actual embed URL
+        // Kakaflix is a redirect proxy - follow the redirect to get the actual embed URL.
+        // 2026-05-07 : timeouts courts (3s connect, 4s read) car kakaflix.lol est
+        // souvent down → on échoue vite pour passer au serveur suivant.
         val client = OkHttpClient.Builder()
             .dns(DnsResolver.doh)
             .followRedirects(true)
             .followSslRedirects(true)
+            .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
             .build()
 
         val resolvedUrl = withContext(Dispatchers.IO) {
