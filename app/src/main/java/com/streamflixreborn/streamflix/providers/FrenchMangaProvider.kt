@@ -623,8 +623,27 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             reliabilityOrder[serviceName] ?: defaultReliability
         })
 
-        // 2026-05-05 : Moviebox backup pour les animes/mangas FR.
+        // 2026-05-05/06 : Cloudstream + Moviebox backups pour les animes/mangas FR.
         val title = id.substringBefore("/").substringBefore("@").replace("-", " ").trim()
+
+        val cloudstreamBackup = if (title.isNotBlank()) {
+            try {
+                val csVideoType: Video.Type = when (videoType) {
+                    is Video.Type.Movie -> Video.Type.Movie(
+                        id = "0", title = title, releaseDate = videoType.releaseDate,
+                        poster = videoType.poster, imdbId = videoType.imdbId,
+                    )
+                    is Video.Type.Episode -> Video.Type.Episode(
+                        id = "0", number = videoType.number, title = videoType.title,
+                        poster = videoType.poster, overview = videoType.overview,
+                        tvShow = videoType.tvShow.copy(id = "0", title = title),
+                        season = videoType.season,
+                    )
+                }
+                CloudstreamProvider.getServers("0", csVideoType)
+            } catch (_: Exception) { emptyList() }
+        } else emptyList()
+
         val movieboxBackup = if (title.isNotBlank()) {
             try {
                 val type = if (videoType is Video.Type.Movie) 1 else 2
@@ -636,7 +655,18 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             } catch (_: Exception) { emptyList() }
         } else emptyList()
 
-        return sorted + movieboxBackup
+        // Papadustream backup en dernier (captcha CF)
+        val papaBackup = if (title.isNotBlank() && videoType is Video.Type.Episode) {
+            try {
+                PapadustreamProvider.getPapaSourcesByTitle(
+                    title = title,
+                    seasonNum = videoType.season.number,
+                    episodeNum = videoType.number,
+                )
+            } catch (_: Exception) { emptyList() }
+        } else emptyList()
+
+        return sorted + cloudstreamBackup + movieboxBackup + papaBackup
     }
 
     override suspend fun getVideo(server: Video.Server): Video {

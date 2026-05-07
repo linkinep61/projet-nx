@@ -83,15 +83,20 @@ interface Provider {
 
         val providers: Map<Provider, ProviderSupport> = linkedMapOf(
             // French providers — custom display order
-            // 2026-05-04: Nakios DÉSACTIVÉ TEMPORAIREMENT (request user, en attente
-            // de l'intégration Papadustream comme source pour Movix). Pour
-            // réactiver, décommenter la ligne ci-dessous.
+            // 2026-05-04: Nakios DÉSACTIVÉ comme provider standalone, mais le code
+            // (NakiosProvider.kt + fetchNakiosBackupServers) reste actif. Il sert
+            // UNIQUEMENT de source secondaire/backup d'extraction pour Cloudstream
+            // (cf CloudstreamProvider.getServers ligne ~1680). Pas dans la liste
+            // de providers visibles par le user.
             // NakiosProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
+
+            // 2026-05-06: Cloudstream EN TÊTE — démarre vite, FR/VOSTFR strict,
+            // catalogue TMDB-style avec carrousels riches + Nouveautés MovieBox+.
+            // Backup #2 d'extraction = Nakios (TMDB-id-based, parallèle à MovieBox+).
+            CloudstreamProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             // 2026-05-04: Papadustream — provider standalone séries-only (DLE CMS).
             // Sources résolues via PapadustreamExtractor (WebView + getxfield AJAX).
             // 12 sources par épisode (VOE/Filemoon/Doodstream/Netu/Uqload/Vidoza × VF/VOSTFR).
-            // 2026-05-05: Réactivé — utilise PapadustreamCaptchaActivity (user-visible)
-            // pour résoudre Cloudflare Turnstile manuellement quand le headless échoue.
             PapadustreamProvider to ProviderSupport(movies = false, tvShows = true),
             // FrenchStream: enrichment disabled — natural home a déjà
             // "Nouveautés Films" + "Nouveautés Séries".
@@ -110,10 +115,6 @@ interface Provider {
             // 2026-05-05: Moviebox (themoviebox.org/aoneroom) — niche K-Dramas + animes + films Hollywood VF.
             // v1: catalogue uniquement (search/browse). Extraction streams TODO v2.
             MovieboxProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
-            // 2026-05-06: Cloudstream — re-branding du provider mobile-bff (api*.aoneroom.com).
-            // Source : MovieBox+ (même backend, route mobile au lieu de h5api).
-            // Catalogue plus complet (vraies sections home, search v2, MPD adaptive bitrate).
-            CloudstreamProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             WiTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             OlaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             VegetaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),

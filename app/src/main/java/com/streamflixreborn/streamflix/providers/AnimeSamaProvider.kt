@@ -1100,10 +1100,31 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             }
         })
 
-        // 2026-05-05 : Moviebox backup pour les animes — gros catalogue d'anime
-        // VOSTFR/VF dispo. On déduit le titre du slug (premier segment).
+        // 2026-05-05 : Moviebox + Cloudstream backups pour les animes.
         val slug = id.substringBefore("@").substringBefore("/")
         val title = slug.replace("-", " ").trim()
+
+        // 2026-05-06 : Cloudstream backup #2 — MovieBox+ via /resource (FR strict).
+        val cloudstreamBackup = if (title.isNotBlank()) {
+            try {
+                val csVideoType: Video.Type = when (videoType) {
+                    is Video.Type.Movie -> Video.Type.Movie(
+                        id = "0", title = title,
+                        releaseDate = videoType.releaseDate, poster = videoType.poster,
+                        imdbId = videoType.imdbId,
+                    )
+                    is Video.Type.Episode -> Video.Type.Episode(
+                        id = "0", number = videoType.number, title = videoType.title,
+                        poster = videoType.poster, overview = videoType.overview,
+                        tvShow = videoType.tvShow.copy(id = "0", title = title),
+                        season = videoType.season,
+                    )
+                }
+                CloudstreamProvider.getServers("0", csVideoType)
+                    .also { if (it.isNotEmpty()) Log.d(TAG, "+ Cloudstream: ${it.size}") }
+            } catch (_: Exception) { emptyList() }
+        } else emptyList()
+
         val movieboxBackup = if (title.isNotBlank()) {
             try {
                 val type = if (videoType is Video.Type.Movie) 1 else 2
@@ -1116,7 +1137,19 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             } catch (_: Exception) { emptyList() }
         } else emptyList()
 
-        return servers + movieboxBackup
+        // 2026-05-06 : Papadustream backup EN DERNIER (captcha CF). Anime providers
+        // qui ont aussi du contenu sur Papadustream (séries TV-only) bénéficient.
+        val papaBackup = if (title.isNotBlank() && videoType is Video.Type.Episode) {
+            try {
+                PapadustreamProvider.getPapaSourcesByTitle(
+                    title = title,
+                    seasonNum = videoType.season.number,
+                    episodeNum = videoType.number,
+                ).also { if (it.isNotEmpty()) Log.d(TAG, "+ Papa: ${it.size}") }
+            } catch (_: Exception) { emptyList() }
+        } else emptyList()
+
+        return servers + cloudstreamBackup + movieboxBackup + papaBackup
     }
 
     // ========== HELPERS ==========

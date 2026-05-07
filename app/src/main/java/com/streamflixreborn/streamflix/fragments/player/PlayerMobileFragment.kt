@@ -203,6 +203,9 @@ class PlayerMobileFragment : Fragment() {
         """
     }
 
+    /** Flag : a-t-on déjà auto-sélectionné un sous-titre OpenSubtitles ?
+     *  Évite de re-déclencher le download à chaque emit du subtitleState. */
+    private var autoSubtitleApplied = false
     private var _binding: FragmentPlayerMobileBinding? = null
     private val binding get() = _binding!!
     private var isSetupDone = false
@@ -804,6 +807,10 @@ class PlayerMobileFragment : Fragment() {
                 when (state) {
                     PlayerViewModel.SubtitleState.Loading -> {}
                     is PlayerViewModel.SubtitleState.SuccessOpenSubtitles -> {
+                        // 2026-05-07 : auto-download désactivé. Trop de cas où l'audio
+                        // est déjà FR et le sub forçait une duplication, ou où les subs
+                        // OpenSubtitles ne matchaient pas la version du film.
+                        // Le user choisit maintenant manuellement dans le menu Sous-titres.
                         binding.settings.openSubtitles = state.subtitles
                     }
                     is PlayerViewModel.SubtitleState.FailedOpenSubtitles -> {}
