@@ -50,8 +50,14 @@ class GlideCustomModule : AppGlideModule() {
     }
 
     private fun getOkHttpClient(context: Context): OkHttpClient {
-        val appCache = Cache(File(context.cacheDir, "okhttpcache"), 10 * 1024 * 1024)
-
+        // 2026-05-07 : SUPPRIMÉ le Cache OkHttp ici. Glide a déjà son propre
+        // InternalCacheDiskCacheFactory (150 MB) qui cache les bitmaps décodés.
+        // Le cache OkHttp dupliquait les images encodées et déclenchait un
+        // SIGABRT natif dans conscrypt-android 2.5.3 (X509_NAME_print) lors
+        // de Cache$Entry.writeTo → Handshake.peerCertificates →
+        // OpenSSLX509Certificate.toString. Crash visible dans tombstone_00
+        // sur thread image.tmdb.org. Sans .cache(...), CacheInterceptor n'écrit
+        // plus, donc plus de sérialisation de cert, donc plus de crash.
         val logging = HttpLoggingInterceptor().setLevel(HttpLoggingInterceptor.Level.BASIC)
 
         // Always trust-all for image loading AND use DoH for resolution
@@ -68,7 +74,6 @@ class GlideCustomModule : AppGlideModule() {
         // Build a base client (trust-all) to bootstrap DoH
         // Includes User-Agent, Referer, and shared CookieJar for Cloudflare compatibility
         return Builder()
-            .cache(appCache)
             .readTimeout(30, TimeUnit.SECONDS)
             .connectTimeout(30, TimeUnit.SECONDS)
             // Force HTTP/1.1 — LiteSpeed servers (witv.team) reject OkHttp's HTTP/2 ALPN

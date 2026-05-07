@@ -41,8 +41,8 @@ android {
         applicationId "com.streamfr.app"
         minSdk 21
         targetSdk 35
-        versionCode 10866
-        versionName "1.7.166"
+        versionCode 10867
+        versionName "1.7.167"
 
         buildConfigField "String", "APP_LAYOUT", "\"${properties.getProperty("APP_LAYOUT")}\""
         buildConfigField "String", "TMDB_API_KEY", "\"${properties.getProperty("TMDB_API_KEY")}\""
@@ -157,7 +157,9 @@ dependencies {
 
     implementation("org.mozilla:rhino:1.8.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
-    implementation 'org.conscrypt:conscrypt-android:2.5.2'
+    // 2026-05-07 : conscrypt 2.5.3 — libs natives 16 KB-aligned (fix popup
+    // "Android App Compatibility" sur Android 16+ avec page size 16 KB).
+    implementation 'org.conscrypt:conscrypt-android:2.5.3'
     implementation "androidx.browser:browser:1.7.0"
     implementation "org.nanohttpd:nanohttpd:2.3.1"
     implementation "com.google.zxing:core:3.5.1"

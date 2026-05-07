@@ -36,6 +36,13 @@ import java.util.concurrent.TimeUnit
 
 object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
 
+    /** 2026-05-07 : Flag anti-récursion. Quand Cloudstream appelle Movix en backup,
+     *  il met ce flag à true pour que Movix skippe ses propres backups (Cloudstream,
+     *  Moviebox, Papa, Coflix) — sinon Cloudstream→Movix→Cloudstream→… infinite loop.
+     *  Restauré à false dans le finally côté Cloudstream. Race conditions possibles
+     *  avec appels parallèles mais en pratique le user clique 1 film à la fois. */
+    @Volatile var skipBackupsForBackupCall: Boolean = false
+
     override val name = "Movix"
     override val defaultBaseUrl: String = "https://api.movix.cash/"
     override val baseUrl: String = defaultBaseUrl
@@ -1670,6 +1677,10 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             }
         }
 
+        // 2026-05-07 : tous les backups (Cloudstream, Moviebox, Papa, Coflix) sont
+        // skippés quand on est appelé DEPUIS Cloudstream (anti-récursion infinie).
+        if (!skipBackupsForBackupCall) {
+
         // 2026-05-06 : Cloudstream backup #2 — démarre vite, MovieBox+ via /resource
         // bcdn (sans pre-roll). Insertion juste après les sources Movix natives.
         val cloudstreamBackup = try {
@@ -1761,6 +1772,8 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             Log.d("MovixProvider", "+ Coflix backup : ${coflixBackup.size} sources")
             servers.addAll(coflixBackup)
         }
+
+        } // fin if (!skipBackupsForBackupCall)
 
         // Tri global : VF d'abord, VOSTFR ensuite, VO en dernier (toutes sources confondues)
         val finalList = sortServersByLanguage(servers)

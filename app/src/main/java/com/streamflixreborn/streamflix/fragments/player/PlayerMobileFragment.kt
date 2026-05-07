@@ -807,10 +807,9 @@ class PlayerMobileFragment : Fragment() {
                 when (state) {
                     PlayerViewModel.SubtitleState.Loading -> {}
                     is PlayerViewModel.SubtitleState.SuccessOpenSubtitles -> {
-                        // 2026-05-07 : auto-download désactivé. Trop de cas où l'audio
-                        // est déjà FR et le sub forçait une duplication, ou où les subs
-                        // OpenSubtitles ne matchaient pas la version du film.
-                        // Le user choisit maintenant manuellement dans le menu Sous-titres.
+                        // 2026-05-07 : auto-download OpenSubtitles DÉSACTIVÉ.
+                        // Le user active manuellement dans le menu Sous-titres s'il en
+                        // veut un. Trop de cas où ça forçait un sub sur de l'audio FR.
                         binding.settings.openSubtitles = state.subtitles
                     }
                     is PlayerViewModel.SubtitleState.FailedOpenSubtitles -> {}

@@ -784,8 +784,8 @@ class PlayerTvFragment : Fragment() {
                         when (state) {
                             PlayerViewModel.SubtitleState.Loading -> {}
                             is PlayerViewModel.SubtitleState.SuccessOpenSubtitles -> {
-                                // 2026-05-07 : auto-download désactivé. Le user choisit
-                                // manuellement dans le menu Sous-titres.
+                                // 2026-05-07 : auto-download OpenSubtitles DÉSACTIVÉ.
+                                // Le user active manuellement dans le menu Sous-titres.
                                 binding.settings.openSubtitles = state.subtitles
                             }
 

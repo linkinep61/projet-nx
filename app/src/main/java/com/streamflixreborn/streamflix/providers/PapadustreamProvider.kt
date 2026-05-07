@@ -633,7 +633,19 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             val moviebox = movieboxServersD.await()
             Log.d(TAG, "Hybrid getServers (Movix-id $id) : cloudstream=${cloudstream.size} + movix=${movix.size} + moviebox=${moviebox.size} + papa=${papa.size} (papa last)")
             // Papa en dernier (captcha CF friction). Cloudstream / Movix / Moviebox d'abord.
-            return@coroutineScope sortByLanguagePref(cloudstream + movix + moviebox + papa)
+            // Dédup par NAME pour les backups Cloudstream/Nakios (Movix appelle
+            // Cloudstream en interne, sign URLs diffèrent → distinctBy src ne marche pas).
+            val merged = (cloudstream + movix + moviebox + papa).let { all ->
+                val seen = mutableSetOf<String>()
+                all.filter { srv ->
+                    val isBackup = srv.id.startsWith("cs_resource_") ||
+                            srv.id.startsWith("cs_playinfo_") ||
+                            srv.id.startsWith("nakios_backup_")
+                    val key = if (isBackup) srv.name else "${srv.name}|${srv.src}"
+                    seen.add(key)
+                }
+            }
+            return@coroutineScope sortByLanguagePref(merged)
         }
         val parts = id.split("|")
 
@@ -740,7 +752,19 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
         //   VOSTFR   : Cloudstream/Movix/Moviebox VOSTFR → Papa VOSTFR
         //   VO       : idem
         // Papa VF reste devant Cloudstream VOSTFR (ce que l'utilisateur a demandé).
-        sortByLanguagePref(cloudstreamServers + movixServers + movieboxServers + sorted)
+        // Dédup par name pour backups (Movix → Cloudstream interne crée des doublons
+        // avec sign URL différent, donc distinctBy src ne suffit pas).
+        val deduped = (cloudstreamServers + movixServers + movieboxServers + sorted).let { all ->
+            val seen = mutableSetOf<String>()
+            all.filter { srv ->
+                val isBackup = srv.id.startsWith("cs_resource_") ||
+                        srv.id.startsWith("cs_playinfo_") ||
+                        srv.id.startsWith("nakios_backup_")
+                val key = if (isBackup) srv.name else "${srv.name}|${srv.src}"
+                seen.add(key)
+            }
+        }
+        sortByLanguagePref(deduped)
     }
 
     /** Public helper appelable depuis d'autres providers (ex: MovixProvider) pour
@@ -981,6 +1005,31 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
-        return Extractor.extract(server.src, server)
+        val src = server.src
+        // Cloudstream/Nakios backups : URLs déjà résolues, on délègue au provider
+        // d'origine pour récupérer les bons headers (Referer moviebox.ph etc.) sans
+        // passer par Extractor.extract qui ne connaît pas ces hosts.
+        if (server.id.startsWith("cs_resource_") || server.id.startsWith("cs_playinfo_")) {
+            return Video(
+                source = src,
+                headers = mutableMapOf(
+                    "Referer" to "https://moviebox.ph/",
+                    "User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36",
+                ),
+            )
+        }
+        if (server.id.startsWith("nakios_backup_")) {
+            return try { NakiosProvider.getVideo(server) }
+            catch (e: Exception) { Video(source = src) }
+        }
+        // URLs directes (MP4/HLS/MPD) → lecture immédiate sans extraction.
+        if (src.matches(Regex(".*\\.(mp4|m3u8|mpd|webm|mkv)(\\?.*)?$", RegexOption.IGNORE_CASE))) {
+            return Video(source = src)
+        }
+        // Vrais extracteurs (Videasy/Doodstream/Voe/Filemoon/Kakaflix/...) :
+        // timeout 5s pour passer rapidement au serveur suivant si la source est down.
+        return kotlinx.coroutines.withTimeoutOrNull(5_000L) {
+            Extractor.extract(server.src, server)
+        } ?: throw Exception("Timeout 5s sur extraction de ${server.name}")
     }
 }
