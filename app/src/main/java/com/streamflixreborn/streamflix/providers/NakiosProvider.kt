@@ -490,6 +490,49 @@ object NakiosProvider : Provider, ProviderConfigUrl {
         return People(id = id, name = name, filmography = emptyList())
     }
 
+    /** Helper public : récupère les sources Nakios pour un TMDB id, à utiliser depuis
+     *  d'autres providers en backup (ex: CloudstreamProvider). Pas de Moiflix/etc.
+     *  - Movie : `tmdbId` direct
+     *  - Episode : `tmdbId|season|episode` */
+    suspend fun fetchNakiosBackupServers(
+        tmdbId: String,
+        videoType: Video.Type,
+        season: Int = 0,
+        episode: Int = 0,
+    ): List<Video.Server> {
+        if (tmdbId.isBlank() || !tmdbId.all { it.isDigit() }) return emptyList()
+        val path = when (videoType) {
+            is Video.Type.Movie -> "/api/sources/movie/$tmdbId"
+            is Video.Type.Episode -> {
+                if (season <= 0 || episode <= 0) return emptyList()
+                "/api/sources/tv/$tmdbId/$season/$episode"
+            }
+        }
+        val body = apiGet(path) ?: return emptyList()
+        val resp = try {
+            gson.fromJson(body, SourcesResponse::class.java)
+        } catch (e: Exception) {
+            Log.e(TAG, "fetchNakiosBackupServers parse failed: ${e.message}")
+            return emptyList()
+        }
+        val sources = resp?.sources ?: emptyList()
+        return sources.mapNotNull { src ->
+            val srcUrl = src.url ?: return@mapNotNull null
+            val absoluteUrl = if (srcUrl.startsWith("http")) srcUrl else "$baseUrl$srcUrl"
+            val label = buildString {
+                append("Nakios — ")
+                append(src.name ?: src.provider ?: "")
+                src.quality?.takeIf { it.isNotBlank() }?.let { append(" $it") }
+                src.lang?.takeIf { it.isNotBlank() }?.let { append(" [$it]") }
+            }
+            Video.Server(
+                id = "nakios_backup_${src.id ?: srcUrl}",
+                name = label.trim(),
+                src = absoluteUrl,
+            )
+        }
+    }
+
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> = coroutineScope {
         val path = when (videoType) {
             is Video.Type.Movie -> "/api/sources/movie/$id"

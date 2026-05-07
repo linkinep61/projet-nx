@@ -1,79 +1,79 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
     android:background="#000000">
 
-    <!-- Header sobre — juste titre + Annuler -->
-    <LinearLayout
+    <!-- WebView : caché par défaut. Rendue visible seulement si le captcha
+         requiert une interaction (timeout 5s sans auto-résolution). -->
+    <WebView
+        android:id="@+id/pds_captcha_webview"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:paddingStart="16dp"
-        android:paddingEnd="12dp"
-        android:paddingTop="10dp"
-        android:paddingBottom="10dp"
-        android:background="#1A1A1A"
-        android:gravity="center_vertical">
+        android:layout_height="match_parent"
+        android:visibility="invisible"
+        android:focusable="true"
+        android:focusableInTouchMode="true" />
+
+    <!-- Overlay minimaliste : centre, juste un spinner + message + bouton Annuler.
+         Couvre toute l'écran tant que le captcha se résout en arrière-plan. -->
+    <LinearLayout
+        android:id="@+id/pds_captcha_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:background="#000000"
+        android:padding="32dp">
+
+        <ProgressBar
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:indeterminateTint="#FF6600" />
 
         <TextView
             android:id="@+id/pds_captcha_title"
-            android:layout_width="0dp"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Vérification…"
+            android:layout_marginTop="20dp"
+            android:text="Vérification de sécurité…"
             android:textColor="#FFFFFF"
-            android:textSize="14sp"
+            android:textSize="16sp"
             android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/pds_captcha_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center"
+            android:text="Cloudflare en cours…"
+            android:textColor="#AAAAAA"
+            android:textSize="13sp" />
+
+        <!-- Progress bar invisible mais utilisée par l'activity pour le %
+             chargement WebView. -->
+        <ProgressBar
+            android:id="@+id/pds_captcha_progress"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="2dp"
+            android:layout_marginTop="20dp"
+            android:indeterminate="true"
+            android:visibility="invisible"
+            android:indeterminateTint="#FF6600" />
 
         <Button
             android:id="@+id/pds_captcha_cancel"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginTop="36dp"
             android:text="Annuler"
             android:textColor="#FFFFFF"
             android:textSize="13sp"
             android:background="#333333"
-            android:paddingStart="14dp"
-            android:paddingEnd="14dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp" />
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp" />
+
     </LinearLayout>
 
-    <!-- Status text (caché par défaut, affiché si erreur) -->
-    <TextView
-        android:id="@+id/pds_captcha_status"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:padding="6dp"
-        android:text=""
-        android:textColor="#CCCCCC"
-        android:textSize="11sp"
-        android:gravity="center"
-        android:background="#0F0F0F"
-        android:visibility="gone" />
-
-    <!-- Progress bar fine en haut -->
-    <ProgressBar
-        android:id="@+id/pds_captcha_progress"
-        style="?android:attr/progressBarStyleHorizontal"
-        android:layout_width="match_parent"
-        android:layout_height="2dp"
-        android:indeterminate="true"
-        android:indeterminateTint="#FF6600" />
-
-    <!-- WebView : occupe le reste de l'écran. La page de Papadustream
-         s'affiche normalement, le widget Cloudflare se résout tout seul.
-         focusable + focusableInTouchMode pour la navigation D-pad sur TV. -->
-    <WebView
-        android:id="@+id/pds_captcha_webview"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:focusable="true"
-        android:focusableInTouchMode="true"
-        android:nextFocusRight="@id/pds_captcha_cancel"
-        android:nextFocusUp="@id/pds_captcha_cancel" />
-
-</LinearLayout>
+</FrameLayout>

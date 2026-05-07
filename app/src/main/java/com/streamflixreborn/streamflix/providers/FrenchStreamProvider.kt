@@ -1301,6 +1301,19 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             tid to year
         }.getOrNull() ?: (null to null)
 
+        // 2026-05-06 : Cloudstream en backup #2 (priorité après natif, avant Movix/Moviebox)
+        // car il démarre vite (TMDB-driven, MovieBox+ playback via /resource bcdn).
+        val cloudstreamBackup = if (tmdbIdResolved != null) runCatching {
+            val csId = when (videoType) {
+                is Video.Type.Movie -> "$tmdbIdResolved"
+                is Video.Type.Episode -> "$tmdbIdResolved:${videoType.season.number}:${videoType.number}"
+            }
+            val csVideoType = if (videoType is Video.Type.Episode)
+                videoType.copy(tvShow = videoType.tvShow.copy(id = "$tmdbIdResolved"))
+            else videoType
+            CloudstreamProvider.getServers(csId, csVideoType)
+        }.getOrNull().orEmpty() else emptyList()
+
         val movixBackup = if (tmdbIdResolved != null) runCatching {
             val movixVideoType = if (videoType is Video.Type.Episode)
                 videoType.copy(tvShow = videoType.tvShow.copy(id = "$tmdbIdResolved"))
@@ -1316,10 +1329,10 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             MovieboxProvider.getMovieboxSourcesByTmdbId(tmdbIdResolved, videoType)
         }.getOrNull().orEmpty() else emptyList()
 
-        Log.d("FrenchStream", "Servers: native=${nativeServers.size} + movix=${movixBackup.size} + moviebox=${movieboxBackup.size} (tmdbId=$tmdbIdResolved)")
-        // Dédup par src URL — Movix peut déjà avoir Moviebox dans son cache
+        Log.d("FrenchStream", "Servers: native=${nativeServers.size} + cloudstream=${cloudstreamBackup.size} + movix=${movixBackup.size} + moviebox=${movieboxBackup.size} (tmdbId=$tmdbIdResolved)")
+        // Dédup par src URL — Cloudstream/Movix peuvent partager les mêmes sources MovieBox+
         val seenSrc = mutableSetOf<String>()
-        val servers = (nativeServers + movixBackup + movieboxBackup)
+        val servers = (nativeServers + cloudstreamBackup + movixBackup + movieboxBackup)
             .filter { it.src.isBlank() || seenSrc.add(it.src.lowercase().trim()) }
 
         // Sort: VF/TrueFrench first, then by service reliability, VOSTFR/VO last

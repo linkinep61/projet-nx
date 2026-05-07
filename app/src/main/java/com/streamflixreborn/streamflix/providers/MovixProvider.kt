@@ -1670,23 +1670,27 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             }
         }
 
-        // 2026-05-05 : Papadustream backup ajouté AVANT le tri pour que toutes
-        // les sources (Movix + Papa) soient triées ensemble par langue (VF →
-        // VOSTFR → VO) au lieu d'avoir Papa appendées sans tri à la fin.
-        val papaBackup = try {
-            PapadustreamProvider.getPapaSourcesByTmdbId(id, videoType)
+        // 2026-05-06 : Cloudstream backup #2 — démarre vite, MovieBox+ via /resource
+        // bcdn (sans pre-roll). Insertion juste après les sources Movix natives.
+        val cloudstreamBackup = try {
+            val csId = when (videoType) {
+                is Video.Type.Movie -> id
+                is Video.Type.Episode -> id.substringBefore("-").let { tid ->
+                    "$tid:${videoType.season.number}:${videoType.number}"
+                }
+            }
+            CloudstreamProvider.getServers(csId, videoType)
         } catch (e: Exception) {
-            Log.d("MovixProvider", "Papadustream backup failed for $id: ${e.message}")
+            Log.d("MovixProvider", "Cloudstream backup failed for $id: ${e.message}")
             emptyList()
         }
-        if (papaBackup.isNotEmpty()) {
-            Log.d("MovixProvider", "+ Papadustream backup : ${papaBackup.size} sources (mergées avant tri)")
-            servers.addAll(papaBackup)
+        if (cloudstreamBackup.isNotEmpty()) {
+            Log.d("MovixProvider", "+ Cloudstream backup : ${cloudstreamBackup.size} sources")
+            servers.addAll(cloudstreamBackup)
         }
 
         // 2026-05-05 : Moviebox backup — recherche par titre TMDB + filtrage FR
-        // strict côté Moviebox (subtitles ou dubs FR uniquement). Renvoie 0-1
-        // sources selon que Moviebox a le titre ou pas.
+        // strict côté Moviebox (subtitles ou dubs FR uniquement).
         val movieboxBackup = try {
             val tmdbIdInt = when (videoType) {
                 is Video.Type.Movie -> id.toIntOrNull()
@@ -1701,6 +1705,20 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
         if (movieboxBackup.isNotEmpty()) {
             Log.d("MovixProvider", "+ Moviebox backup : ${movieboxBackup.size} sources")
             servers.addAll(movieboxBackup)
+        }
+
+        // 2026-05-06 : Papadustream EN DERNIER — captcha CF friction, on l'utilise
+        // que si rien d'autre n'a marché. (User request : ne pas mettre Papa dans
+        // les premiers fournisseurs car son captcha popup est ugly.)
+        val papaBackup = try {
+            PapadustreamProvider.getPapaSourcesByTmdbId(id, videoType)
+        } catch (e: Exception) {
+            Log.d("MovixProvider", "Papadustream backup failed for $id: ${e.message}")
+            emptyList()
+        }
+        if (papaBackup.isNotEmpty()) {
+            Log.d("MovixProvider", "+ Papadustream backup (last resort) : ${papaBackup.size} sources")
+            servers.addAll(papaBackup)
         }
 
         // 2026-05-05 : Coflix backup — site français multi-hosters (Lulustream,

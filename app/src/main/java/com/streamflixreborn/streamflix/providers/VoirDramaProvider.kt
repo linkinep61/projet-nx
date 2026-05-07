@@ -996,9 +996,42 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
                 Log.d("VoirDramaProvider", "DC enrich: added ${dcUnique.size} backup servers")
             }
 
-            // 2026-05-05 : Moviebox backup pour les K-Dramas (Moviebox a un gros
-            // catalogue de dramas asiatiques avec sous-titres FR, parfait fallback
-            // quand VoirDrama et Dramacool foirent).
+            // 2026-05-06 : Cloudstream backup #2 — pour les K-Dramas, Cloudstream
+            // (MovieBox+) couvre une partie du catalogue avec audio/sub FR.
+            val cloudstreamBackup = if (!showTitle.isNullOrBlank()) {
+                try {
+                    val year = document.selectFirst("h1.entry-title")?.text()?.let {
+                        Regex("""\((\d{4})\)""").find(it)?.groupValues?.get(1)?.toIntOrNull()
+                    }
+                    val csVideoType = when (videoType) {
+                        is Video.Type.Movie -> Video.Type.Movie(
+                            id = "0", title = showTitle,
+                            releaseDate = year?.toString() ?: "",
+                            poster = videoType.poster, imdbId = videoType.imdbId,
+                        )
+                        is Video.Type.Episode -> Video.Type.Episode(
+                            id = "0", number = videoType.number,
+                            title = videoType.title, poster = videoType.poster,
+                            overview = videoType.overview,
+                            tvShow = videoType.tvShow.copy(
+                                id = "0", title = showTitle,
+                                releaseDate = year?.toString() ?: videoType.tvShow.releaseDate,
+                            ),
+                            season = videoType.season,
+                        )
+                    }
+                    CloudstreamProvider.getServers("0", csVideoType)
+                        .also {
+                            if (it.isNotEmpty()) Log.d("VoirDramaProvider",
+                                "+ Cloudstream backup pour '$showTitle' : ${it.size} sources")
+                        }
+                } catch (e: Exception) {
+                    Log.d("VoirDramaProvider", "Cloudstream backup failed: ${e.message}")
+                    emptyList()
+                }
+            } else emptyList()
+
+            // 2026-05-05 : Moviebox backup pour les K-Dramas.
             val movieboxBackup = if (!showTitle.isNullOrBlank()) {
                 try {
                     val year = document.selectFirst("h1.entry-title")?.text()?.let {
@@ -1018,7 +1051,7 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
                 }
             } else emptyList()
 
-            voirDramaSorted + dcUnique + movieboxBackup
+            voirDramaSorted + cloudstreamBackup + dcUnique + movieboxBackup
             } // close coroutineScope
         } catch (e: Exception) {
             Log.e("VoirDramaProvider", "getServers error: ", e)

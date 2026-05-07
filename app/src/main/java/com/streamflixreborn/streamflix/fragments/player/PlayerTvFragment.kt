@@ -208,6 +208,8 @@ class PlayerTvFragment : Fragment() {
         val bypassUrl: String,
     )
 
+    /** Flag : a-t-on déjà auto-sélectionné un sous-titre OpenSubtitles ? */
+    private var autoSubtitleApplied = false
     private var _binding: FragmentPlayerTvBinding? = null
     private val binding get() = _binding!!
     private var isSetupDone = false
@@ -782,6 +784,8 @@ class PlayerTvFragment : Fragment() {
                         when (state) {
                             PlayerViewModel.SubtitleState.Loading -> {}
                             is PlayerViewModel.SubtitleState.SuccessOpenSubtitles -> {
+                                // 2026-05-07 : auto-download désactivé. Le user choisit
+                                // manuellement dans le menu Sous-titres.
                                 binding.settings.openSubtitles = state.subtitles
                             }
 

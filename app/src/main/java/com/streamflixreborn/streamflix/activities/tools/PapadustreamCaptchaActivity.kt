@@ -72,6 +72,8 @@ class PapadustreamCaptchaActivity : AppCompatActivity() {
     }
 
     private lateinit var webView: WebView
+    private lateinit var overlay: android.view.View
+    private lateinit var title: TextView
     private lateinit var status: TextView
     private lateinit var progress: ProgressBar
     private lateinit var cancelBtn: Button
@@ -107,6 +109,8 @@ class PapadustreamCaptchaActivity : AppCompatActivity() {
         }
 
         webView = findViewById(R.id.pds_captcha_webview)
+        overlay = findViewById(R.id.pds_captcha_overlay)
+        title = findViewById(R.id.pds_captcha_title)
         status = findViewById(R.id.pds_captcha_status)
         progress = findViewById(R.id.pds_captcha_progress)
         cancelBtn = findViewById(R.id.pds_captcha_cancel)
@@ -118,6 +122,18 @@ class PapadustreamCaptchaActivity : AppCompatActivity() {
             "Referer" to "https://papadustream.courses/",
             "User-Agent" to ANDROID_CHROME_UA,
         ))
+
+        // 2026-05-06 : la WebView reste TOUJOURS cachée (request user — la page
+        // de Papadustream est moche, on veut une UX clean). Le captcha Cloudflare
+        // Turnstile en mode "managed" se résout automatiquement en arrière-plan
+        // dans la majorité des cas. Si après 30s rien ne résout, on abandonne
+        // silencieusement et l'extractor renverra une liste vide de servers.
+        mainHandler.postDelayed({
+            if (!captured && !isFinishing) {
+                Log.d(TAG, "Captcha timeout 30s → giving up silently")
+                finishWithResult(null, "captcha timeout")
+            }
+        }, 30_000L)
     }
 
     private fun finishWithResult(iframeUrl: String?, reason: String) {
@@ -130,8 +146,8 @@ class PapadustreamCaptchaActivity : AppCompatActivity() {
         } else {
             setResult(Activity.RESULT_CANCELED)
         }
-        // Petit délai pour que l'utilisateur voie le succès avant fermeture
-        mainHandler.postDelayed({ if (!isFinishing) finish() }, 500)
+        // Délai de 1s pour que l'utilisateur voie "✓ Vérification réussie" avant fermeture
+        mainHandler.postDelayed({ if (!isFinishing) finish() }, 1000)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -162,7 +178,10 @@ class PapadustreamCaptchaActivity : AppCompatActivity() {
             fun onIframeUrl(url: String) {
                 Log.d(TAG, "Iframe URL captured: $url")
                 mainHandler.post {
-                    status.text = "✓ Source trouvée — chargement…"
+                    // Affiche un état de succès clair avant fermeture (mimique le
+                    // checkmark vert d'un vrai widget Cloudflare).
+                    title.text = "✓ Vérification réussie"
+                    status.text = "Chargement de la source…"
                     finishWithResult(url, "iframe captured")
                 }
             }

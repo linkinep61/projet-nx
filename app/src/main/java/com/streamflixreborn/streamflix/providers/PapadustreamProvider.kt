@@ -602,6 +602,17 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             // Papa en dernier (12 sources mais nécessite captcha → friction).
             // User a explicitement demandé cet ordre pour optimiser l'UX.
             // Moviebox backup ajouté en parallèle si dispo (FR-only).
+            val cloudstreamServersD = async {
+                try {
+                    val csId = when (videoType) {
+                        is Video.Type.Movie -> id
+                        is Video.Type.Episode -> id.substringBefore("-").let { tid ->
+                            "$tid:${videoType.season.number}:${videoType.number}"
+                        }
+                    }
+                    CloudstreamProvider.getServers(csId, videoType)
+                } catch (_: Exception) { emptyList() }
+            }
             val movixServersD = async {
                 try { MovixProvider.getServers(id, videoType) } catch (_: Exception) { emptyList() }
             }
@@ -616,11 +627,13 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
                     else emptyList()
                 } catch (_: Exception) { emptyList() }
             }
+            val cloudstream = cloudstreamServersD.await()
             val movix = movixServersD.await()
             val papa = papaServersD.await()
             val moviebox = movieboxServersD.await()
-            Log.d(TAG, "Hybrid getServers (Movix-id $id) : movix=${movix.size} + papa=${papa.size} + moviebox=${moviebox.size}")
-            return@coroutineScope sortByLanguagePref(movix + papa + moviebox)
+            Log.d(TAG, "Hybrid getServers (Movix-id $id) : cloudstream=${cloudstream.size} + movix=${movix.size} + moviebox=${moviebox.size} + papa=${papa.size} (papa last)")
+            // Papa en dernier (captcha CF friction). Cloudstream / Movix / Moviebox d'abord.
+            return@coroutineScope sortByLanguagePref(cloudstream + movix + moviebox + papa)
         }
         val parts = id.split("|")
 
@@ -681,6 +694,19 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
         // (nécessite captcha → friction UX).
         val papaShowId = "${parts[0]}|${parts[1]}"
         val tmdbId = synchronized(tmdbCacheLock) { papaToTmdbShowId[papaShowId] }
+
+        // Cloudstream backup #2 : démarre vite, MovieBox+ via /resource bcdn (no pre-roll)
+        val cloudstreamServers = if (tmdbId != null) {
+            try {
+                val csEpisodeId = "$tmdbId:${parts[2]}:${parts[3]}"
+                CloudstreamProvider.getServers(csEpisodeId, videoType)
+                    .also { Log.d(TAG, "+ Cloudstream sources via TMDB id $tmdbId : ${it.size}") }
+            } catch (e: Exception) {
+                Log.d(TAG, "Cloudstream backup failed for $papaShowId: ${e.message}")
+                emptyList()
+            }
+        } else emptyList()
+
         val movixServers = if (tmdbId != null) {
             try {
                 // Format Movix episode id : "<tmdbId>-s<S>e<E>"
@@ -707,8 +733,14 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             }
         } else emptyList()
 
-        // Combine Movix + Papa + Moviebox puis tri global VF → VOSTFR → VO (request user)
-        sortByLanguagePref(movixServers + sorted + movieboxServers)
+        // Tri global VF → VOSTFR → VO. Dans chaque tier de langue, sortByLanguagePref
+        // place automatiquement Papa native APRÈS les backups Cloudstream/Movix/Moviebox
+        // (cf. tier 1 vs tier 0 dans la fonction). Donc :
+        //   VF tier  : Cloudstream/Movix/Moviebox VF → Papa VF (captcha)
+        //   VOSTFR   : Cloudstream/Movix/Moviebox VOSTFR → Papa VOSTFR
+        //   VO       : idem
+        // Papa VF reste devant Cloudstream VOSTFR (ce que l'utilisateur a demandé).
+        sortByLanguagePref(cloudstreamServers + movixServers + movieboxServers + sorted)
     }
 
     /** Public helper appelable depuis d'autres providers (ex: MovixProvider) pour
@@ -717,6 +749,55 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
      *  Retourne emptyList si Papadustream n'a pas le show.  */
     suspend fun getPapaSourcesByTmdbId(id: String, videoType: Video.Type): List<Video.Server> {
         return tryPapaByTmdbId(id, videoType)
+    }
+
+    /** 2026-05-06 : helper title-based pour les anime providers (qui n'ont pas
+     *  d'id TMDB direct). Cherche sur Papadustream par titre, fetch la fiche
+     *  série, construit l'URL épisode et extrait les liens.
+     *  Retourne emptyList si pas de match. */
+    suspend fun getPapaSourcesByTitle(
+        title: String,
+        seasonNum: Int,
+        episodeNum: Int,
+        year: Int? = null,
+    ): List<Video.Server> {
+        return try {
+            if (title.isBlank() || seasonNum <= 0 || episodeNum <= 0) return emptyList()
+            val showUrl = withTimeoutOrNull(8_000) {
+                searchPapaShowUrl(title, year)
+            } ?: return emptyList()
+            val pageUrl = "${showUrl.removeSuffix(".html").removeSuffix("/")}/" +
+                    "$seasonNum-saison/$episodeNum-episode.html"
+            val doc = httpGet(pageUrl) ?: return emptyList()
+            val liens = doc.select("div.lien.fx-row").mapNotNull { div ->
+                val onclick = div.attr("onclick")
+                val m = Regex("""getxfield\(\s*this\s*,\s*'(\d+)'\s*,\s*'([a-z0-9_]+)'\s*,\s*'([a-z]+)'\s*\)""")
+                    .find(onclick) ?: return@mapNotNull null
+                val dleId = m.groupValues[1]
+                val xfield = m.groupValues[2]
+                val type = m.groupValues[3]
+                val hosterName = div.selectFirst(".serv")?.text()?.trim()?.uppercase()
+                    ?: xfield.substringBefore("_").uppercase()
+                val lang = when {
+                    xfield.endsWith("_vf") -> "VF"
+                    xfield.endsWith("_vostfr") -> "VOSTFR"
+                    xfield.endsWith("_vo") -> "VO"
+                    else -> ""
+                }
+                val label = "$hosterName${if (lang.isNotBlank()) " [$lang]" else ""}"
+                val src = "$pageUrl#xf=$xfield&id=$dleId&t=$type"
+                Video.Server(
+                    id = "papadustream_${xfield}_${dleId}",
+                    name = "Papadustream — $label",
+                    src = src,
+                )
+            }
+            Log.d(TAG, "getPapaSourcesByTitle('$title' s${seasonNum}e$episodeNum) → ${liens.size} liens")
+            liens
+        } catch (e: Exception) {
+            Log.d(TAG, "getPapaSourcesByTitle failed: ${e.message}")
+            emptyList()
+        }
     }
 
     /** Bridge title-based : pour un show importé de Movix (TMDB id), on cherche

@@ -572,11 +572,32 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
                 priority.entries.firstOrNull { host.contains(it.key) }?.value ?: 50
             }
 
-            // 2026-05-05 : Moviebox backup pour les animes (gros catalogue d'anime
-            // VOSTFR/VF dispo sur Moviebox).
+            // 2026-05-05/06 : Cloudstream + Moviebox backups pour les animes
+            // (gros catalogue d'anime VOSTFR/VF). Cloudstream renvoie null si
+            // pas de match strict → pas de source vide affichée.
             val showTitle = document.selectFirst("h1.entry-title")?.text()?.trim()
                 ?.replace(Regex("""\s*VOSTFR|\s*VF$|\s*\(\d{4}\)""", RegexOption.IGNORE_CASE), "")
                 ?.trim()
+
+            val cloudstreamBackup = if (!showTitle.isNullOrBlank()) {
+                try {
+                    val csVideoType: Video.Type = when (videoType) {
+                        is Video.Type.Movie -> Video.Type.Movie(
+                            id = "0", title = showTitle, releaseDate = videoType.releaseDate,
+                            poster = videoType.poster, imdbId = videoType.imdbId,
+                        )
+                        is Video.Type.Episode -> Video.Type.Episode(
+                            id = "0", number = videoType.number, title = videoType.title,
+                            poster = videoType.poster, overview = videoType.overview,
+                            tvShow = videoType.tvShow.copy(id = "0", title = showTitle),
+                            season = videoType.season,
+                        )
+                    }
+                    CloudstreamProvider.getServers("0", csVideoType)
+                        .also { if (it.isNotEmpty()) Log.d("VoirAnimeProvider", "+ Cloudstream: ${it.size}") }
+                } catch (_: Exception) { emptyList() }
+            } else emptyList()
+
             val movieboxBackup = if (!showTitle.isNullOrBlank()) {
                 try {
                     val type = if (videoType is Video.Type.Movie) 1 else 2
@@ -589,7 +610,18 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
                 } catch (_: Exception) { emptyList() }
             } else emptyList()
 
-            sorted + movieboxBackup
+            // Papadustream backup en dernier (captcha CF)
+            val papaBackup = if (!showTitle.isNullOrBlank() && videoType is Video.Type.Episode) {
+                try {
+                    PapadustreamProvider.getPapaSourcesByTitle(
+                        title = showTitle,
+                        seasonNum = videoType.season.number,
+                        episodeNum = videoType.number,
+                    ).also { if (it.isNotEmpty()) Log.d("VoirAnimeProvider", "+ Papa: ${it.size}") }
+                } catch (_: Exception) { emptyList() }
+            } else emptyList()
+
+            sorted + cloudstreamBackup + movieboxBackup + papaBackup
         } catch (e: Exception) {
             Log.e("VoirAnimeProvider", "getServers error: ", e)
             emptyList()
