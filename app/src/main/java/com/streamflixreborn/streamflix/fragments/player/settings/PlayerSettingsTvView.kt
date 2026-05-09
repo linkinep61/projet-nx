@@ -903,10 +903,13 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                 binding.ivSettingFavorite.nextFocusRightId = R.id.iv_setting_ban
                 binding.ivSettingBan.nextFocusRightId = View.NO_ID
             } else {
-                binding.ivSettingFavorite.visibility = View.GONE
-                // 2026-05-08 : NE PAS reset ivSettingBan à GONE si c'est un
-                // Settings.Server IPTV — ma branche plus haut l'a déjà mis VISIBLE.
+                // 2026-05-08 / 2026-05-09 : NE PAS reset ivSettingFavorite/ivSettingBan
+                // à GONE si c'est un Settings.Server IPTV — la branche plus haut
+                // (ligne ~817) les a déjà mis VISIBLE pour le picker IPTV.
+                // Sans ce check, le ❤ et la ✕ étaient invisibles pour les servers IPTV
+                // sur TV (bug : "le favori serveur n'apparaît pas sur Vegeta TV").
                 if (!(item is Settings.Server && item.isIptv && item.channelKey != null)) {
+                    binding.ivSettingFavorite.visibility = View.GONE
                     binding.ivSettingBan.visibility = View.GONE
                 }
             }
