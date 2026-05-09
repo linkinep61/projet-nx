@@ -41,8 +41,8 @@ android {
         applicationId "com.streamfr.app"
         minSdk 21
         targetSdk 35
-        versionCode 10872
-        versionName "1.7.172"
+        versionCode 10873
+        versionName "1.7.173"
 
         buildConfigField "String", "APP_LAYOUT", "\"${properties.getProperty("APP_LAYOUT")}\""
         buildConfigField "String", "TMDB_API_KEY", "\"${properties.getProperty("TMDB_API_KEY")}\""
@@ -131,6 +131,10 @@ dependencies {
     implementation 'androidx.media3:media3-exoplayer-hls:1.8.0'
     implementation 'androidx.media3:media3-session:1.8.0'
     implementation 'androidx.media3:media3-ui:1.8.0'
+    // 2026-05-09 v15 : nextlib via JitPack — codec pack FFmpeg pour Media3.
+    // Permet de décoder AC3, E-AC3, MP2, FLAC, et tous les codecs exotiques que
+    // ExoPlayer ne supporte pas en natif. Active via EXTENSION_RENDERER_MODE_PREFER.
+    implementation 'io.github.anilbeesetti.nextlib:nextlib-media3ext:0.8.4'
 
     implementation 'com.squareup.retrofit2:retrofit:2.11.0'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'

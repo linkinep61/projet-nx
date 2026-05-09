@@ -41,6 +41,31 @@ class MainTvActivity : FragmentActivity() {
         private var isFreshProcessLaunch = true
     }
 
+    /** 2026-05-09 v3 : intercept OK key au niveau activity pour TOUS providers.
+     *  - Si controls cachés → show + focus sur SETTINGS (bouton "fictif" neutre,
+     *    OK suivant ouvre les paramètres, pas pause).
+     *  - Si controls visibles → comportement natif (D-pad vers play/pause +
+     *    OK pause comme attendu, OK sur settings ouvre settings, etc.). */
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.action == android.view.KeyEvent.ACTION_DOWN &&
+            (event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
+             event.keyCode == android.view.KeyEvent.KEYCODE_ENTER)) {
+            try {
+                val navHost = supportFragmentManager.findFragmentById(binding.navMainFragment.id)
+                val currentFragment = navHost?.childFragmentManager?.fragments?.lastOrNull()
+                val playerView = currentFragment?.view?.findViewById<androidx.media3.ui.PlayerView>(R.id.pv_player)
+                if (playerView != null && !playerView.isControllerFullyVisible) {
+                    val settingsBtn = playerView.findViewById<View>(androidx.media3.ui.R.id.exo_settings)
+                    playerView.showController()
+                    settingsBtn?.requestFocus()
+                    return true  // consume → pas de pause
+                }
+                // Controls visibles : on laisse passer (focus sur play/pause = pause).
+            } catch (_: Throwable) {}
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     private var _binding: ActivityMainTvBinding? = null
     private val binding get() = _binding!!
 

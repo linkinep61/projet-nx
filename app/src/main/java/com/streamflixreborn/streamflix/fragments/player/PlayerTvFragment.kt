@@ -389,6 +389,21 @@ class PlayerTvFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // 2026-05-09 v17 : pose tout de suite la channelKey IPTV partagée pour
+        // que le picker (favoris/coche) marche dès la 1re ouverture.
+        run {
+            val isIptvCtx = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                args.id.startsWith("movixlivetv::") ||
+                args.id.startsWith("livehub::") ||
+                args.id.startsWith("sportlive::") ||
+                args.id.startsWith("match::")
+            com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsView
+                .Settings.Server.currentIptvChannelKey =
+                if (isIptvCtx) args.id else null
+        }
+
         // Defer ExoPlayer creation to allow the layout to inflate and render first.
         // Codec enumeration is pre-warmed in StreamFlixApp so build() is fast (~100ms).
         android.os.Handler(android.os.Looper.getMainLooper()).post {
@@ -413,8 +428,14 @@ class PlayerTvFragment : Fragment() {
             val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
             if (isIptv) {
                 binding.pvPlayer.useController = true
-                binding.pvPlayer.controllerShowTimeoutMs = 0
-                binding.pvPlayer.showController()
+                // 2026-05-09 v3 : timeout 5s (au lieu de 0 qui les forçait toujours
+                // visibles). ExoPlayer gère NATIVEMENT le bon comportement OK :
+                //  - controls hidden + OK → show controls (consume, pas de pause)
+                //  - controls visible + OK → focused button reçoit (= pause)
+                // Avec timeout 5s, controls auto-hide → 1er OK les ré-affiche.
+                binding.pvPlayer.controllerShowTimeoutMs = 5000
+                binding.pvPlayer.controllerHideOnTouch = true
+                binding.pvPlayer.controllerAutoShow = true
             }
         }
         binding.pvPlayer.onMediaPreviousClicked = ::handleMediaPrevious
@@ -1879,15 +1900,16 @@ class PlayerTvFragment : Fragment() {
                         .build()
                 )
             if (isLiveIptvChannel) {
-                // 2026-05-09 : speed range élargi à 0.85-1.15 — si le buffer chute,
-                // ralenti jusqu'à 85% pour laisser le buffer se remplir. Anti-coupure.
+                // 2026-05-09 v6 : cible 60s derrière live edge (au lieu de 30s)
+                // pour mettre le curseur à ~30-40% de la barre, gros buffer ahead,
+                // marge max avant timeout. ExoPlayer ajuste vitesse ±3% imperceptible.
                 mediaItemBuilder.setLiveConfiguration(
                     MediaItem.LiveConfiguration.Builder()
-                        .setTargetOffsetMs(60_000L)         // 60s derrière live edge (cible)
-                        .setMinOffsetMs(15_000L)            // jamais plus proche que 15s
-                        .setMaxOffsetMs(180_000L)           // jamais plus loin que 3 min
-                        .setMinPlaybackSpeed(0.85f)         // ralenti aggressif anti-coupure
-                        .setMaxPlaybackSpeed(1.15f)         // rattrape rapide
+                        .setTargetOffsetMs(60_000L)         // cible 60s derrière live (gros buffer ahead)
+                        .setMinOffsetMs(30_000L)            // jamais < 30s du live
+                        .setMaxOffsetMs(180_000L)           // jamais > 3 min derrière
+                        .setMinPlaybackSpeed(0.97f)         // ralenti subtil si trop près
+                        .setMaxPlaybackSpeed(1.03f)         // accélère subtil si trop loin
                         .build()
                 )
             }
@@ -2001,6 +2023,9 @@ class PlayerTvFragment : Fragment() {
                         if (!iptvCurrentStreamHasWorked) {
                             iptvCurrentStreamHasWorked = true
                             Log.d("PlayerTvFragment", "IPTV stream marked as working — sticky server enabled")
+                            // 2026-05-09 v13 : refresh proactif du token Stalker toutes les 3 min,
+                            // AVANT qu'il expire. Évite le 403 réactif qui cause un cut de 25s.
+                            scheduleProactiveTokenRefresh()
                         }
                         // Restore the normal 2s auto-hide for the controller
                         // (we forced it to 0 during IPTV extraction so the
@@ -2158,7 +2183,15 @@ class PlayerTvFragment : Fragment() {
                                 }
                             }
                         }
-                        if (player.hasReallyFinished()) {
+                        // 2026-05-09 : IPTV ne déclenche JAMAIS l'autoplay
+                        // next-episode (bug BFMTV qui s'auto-skipait quand
+                        // ExoPlayer croyait le live "fini").
+                        val isLiveIptvNoAutoSkip = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                            args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                            args.id.startsWith("match::")
+                        if (player.hasReallyFinished() && !isLiveIptvNoAutoSkip) {
                             if (UserPreferences.autoplay) {
                                 playNextEpisodeAcrossSeasons(autoplay = true)
                             }
@@ -2246,8 +2279,11 @@ class PlayerTvFragment : Fragment() {
                         val errCodeName = error.errorCodeName
                         iptvRetryCount++
 
-                        // 2026-05-09 : check si erreur HTTP permanente (server cassé/bloqué)
-                        // ou si on a retry trop de fois sans que le stream marche jamais.
+                        // 2026-05-09 v3 : STICKY ABSOLU si stream a marché.
+                        // Stream a fonctionné une fois → JAMAIS de switch auto,
+                        // retry indéfiniment le même server (token expiry est
+                        // souvent transitoire). User switche manuellement s'il veut.
+                        // Switch SEULEMENT si stream n'a jamais marché.
                         val errMsg = (error.cause?.message ?: error.message ?: "").lowercase()
                         val isPermanentHttpError = errMsg.contains("response code: 403") ||
                             errMsg.contains("response code: 404") ||
@@ -2255,8 +2291,8 @@ class PlayerTvFragment : Fragment() {
                             errMsg.contains("response code: 451") ||
                             errMsg.contains("response code: 456")
                         val MAX_RETRIES_BEFORE_SWITCH = 3
-                        val shouldSwitch = isPermanentHttpError ||
-                            (!iptvCurrentStreamHasWorked && iptvRetryCount >= MAX_RETRIES_BEFORE_SWITCH)
+                        val shouldSwitch = !iptvCurrentStreamHasWorked &&
+                            (isPermanentHttpError || iptvRetryCount >= MAX_RETRIES_BEFORE_SWITCH)
 
                         if (shouldSwitch) {
                             Log.w("PlayerTvFragment", "IPTV switch on ${server.name} ($errCodeName, retry=$iptvRetryCount, hasWorked=$iptvCurrentStreamHasWorked, permanentHttp=$isPermanentHttpError)")
@@ -2277,9 +2313,31 @@ class PlayerTvFragment : Fragment() {
 
                         Log.w("PlayerTvFragment", "IPTV retry on ${server.name} ($errCodeName) — retry #$iptvRetryCount, sticky (hasWorked=$iptvCurrentStreamHasWorked)")
                         try {
-                            // NE PAS appeler seekToDefaultPosition() ici (flush le buffer).
-                            player.prepare()
-                            player.playWhenReady = true
+                            // 2026-05-09 v13 : Stalker + 403 → fresh handshake via
+                            // refreshServerUrl (re-handshake complet, pas juste cache).
+                            val isStalker = server.id.startsWith("vegeta_stream::") ||
+                                server.id.startsWith("ola_stream::")
+                            if (isStalker && isPermanentHttpError) {
+                                Log.d("PlayerTvFragment", "Stalker token expired → fresh handshake")
+                                iptvRetryCount = 0
+                                viewLifecycleOwner.lifecycleScope.launch {
+                                    val newServer = withContext(Dispatchers.IO) {
+                                        if (server.id.startsWith("vegeta_stream::")) {
+                                            com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(server)
+                                        } else null
+                                    }
+                                    if (newServer != null && _binding != null) {
+                                        viewModel.getVideo(newServer)
+                                    } else {
+                                        // Fallback : prepare() simple si refresh échoue
+                                        player.prepare()
+                                        player.playWhenReady = true
+                                    }
+                                }
+                            } else {
+                                player.prepare()
+                                player.playWhenReady = true
+                            }
                         } catch (e: Exception) {
                             Log.w("PlayerTvFragment", "Sticky retry prepare failed: ${e.message}")
                         }
@@ -2315,7 +2373,18 @@ class PlayerTvFragment : Fragment() {
             player.addListener(newListener)
             activePlayerListener = newListener
 
-            if (startPositionMs != null) {
+            // 2026-05-09 v12 : pour IPTV live, seekToDefaultPosition (= live edge
+            // moins targetOffsetMs = mid-bar). Évite le "stagne en timeout"
+            // après URL refresh quand currentPosition pointe vers une position
+            // qui n'existe plus dans le nouveau manifest.
+            val isLiveIptvStream = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                args.id.startsWith("match::")
+            if (isLiveIptvStream) {
+                player.seekToDefaultPosition()
+            } else if (startPositionMs != null) {
                 player.seekTo(startPositionMs)
             } else if (currentPosition == 0L) {
                 val videoType = args.videoType
@@ -2510,51 +2579,68 @@ class PlayerTvFragment : Fragment() {
 
         private fun startProgressHandler() {
             progressHandler = android.os.Handler(android.os.Looper.getMainLooper())
+            var liveCheckCounter = 0
             progressRunnable = Runnable {
                 if (player.isPlaying) {
-                    val show = player.currentPosition in 3000..120000
-                    showSkipIntroButton(show)
-                    updateNextEpisodeOverlay()
-                    // 2026-05-09 : contrôle manuel vitesse pour IPTV live —
-                    // LiveConfiguration MediaItem est ignorée par certains
-                    // streams (Vegeta Stalker n'a pas toujours de fenêtre DVR
-                    // déclarée). On surveille currentLiveOffset et on ajuste
-                    // la vitesse pour garder le playhead 30s+ derrière le live.
                     val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
                         args.id.startsWith("match::")
-                    if (isLiveIptv) adjustLivePlaybackSpeed()
+                    if (!isLiveIptv) {
+                        val show = player.currentPosition in 3000..120000
+                        showSkipIntroButton(show)
+                        updateNextEpisodeOverlay()
+                    } else {
+                        // 2026-05-09 v14 : detection emergency — si buffer ahead
+                        // chute sous 15s alors qu'on a déjà eu 30s+, le token
+                        // est probablement en train d'expirer. Force refresh now
+                        // sans attendre le timer 60s.
+                        liveCheckCounter++
+                        val pos = player.currentPosition
+                        val buf = player.bufferedPosition
+                        val ahead = (buf - pos).coerceAtLeast(0)
+                        if (liveCheckCounter >= 5) {
+                            liveCheckCounter = 0
+                            Log.d("PlayerTvFragment", "Live buffer: pos=${pos/1000}s buf=${buf/1000}s ahead=${ahead/1000}s")
+                        }
+                        // Emergency : ahead < 15s AND on a déjà streamé > 20s = token mort
+                        if (ahead < 15_000L && pos > 20_000L && !emergencyRefreshInFlight) {
+                            val cs = currentServer
+                            if (cs != null && cs.id.startsWith("vegeta_stream::")) {
+                                emergencyRefreshInFlight = true
+                                Log.d("PlayerTvFragment", "EMERGENCY refresh — buffer ahead=${ahead/1000}s < 15s")
+                                viewLifecycleOwner.lifecycleScope.launch {
+                                    val newServer = withContext(Dispatchers.IO) {
+                                        com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(cs)
+                                    }
+                                    if (newServer != null && _binding != null) {
+                                        viewModel.getVideo(newServer)
+                                    }
+                                    // cooldown 30s avant prochaine emergency
+                                    kotlinx.coroutines.delay(30_000L)
+                                    emergencyRefreshInFlight = false
+                                }
+                            }
+                        }
+                    }
                 }
                 progressHandler.postDelayed(progressRunnable, 1000)
             }
             progressHandler.post(progressRunnable)
         }
 
-        /** 2026-05-09 v2 : maintient le playhead à ~70% de la barre (= 30s+
-         *  derrière le live edge). Ralentis très agressifs quand on dérive
-         *  vers live. Si le live edge nous touche (offset < 3s), seekBack
-         *  d'urgence à 30s pour récupérer immédiatement la marge. */
+        /** 2026-05-09 v3 : best practices HLS live — speed range 0.95-1.05
+         *  (subtil, pas perceptible). Cible 25s derrière live edge. */
         private fun adjustLivePlaybackSpeed() {
             val offset = player.currentLiveOffset
             if (offset == androidx.media3.common.C.TIME_UNSET) return
-            // Urgence : si le live nous rattrape, seek back de 30s d'un coup.
-            if (offset in 0L..3_000L) {
-                val pos = player.currentPosition
-                val newPos = (pos - 30_000L).coerceAtLeast(0)
-                Log.w("PlayerLiveOffset", "URGENT seekBack: offset=${offset}ms → pos $pos→$newPos")
-                player.seekTo(newPos)
-                player.setPlaybackSpeed(1.0f)
-                return
-            }
             val targetSpeed = when {
-                offset < 10_000 -> 0.75f      // < 10s : ralenti FORT pour creuser
-                offset < 20_000 -> 0.85f      // < 20s : ralenti modéré-fort
-                offset < 30_000 -> 0.93f      // < 30s : ralenti léger
-                offset > 90_000 -> 1.10f      // > 90s : rattrape rapide
-                offset > 60_000 -> 1.05f      // > 60s : rattrape léger
-                else -> 1.0f                  // 30-60s = cible, vitesse normale
+                offset < 10_000 -> 0.95f      // < 10s : ralenti subtil
+                offset < 20_000 -> 0.98f      // < 20s : ralenti très léger
+                offset > 50_000 -> 1.05f      // > 50s : rattrape
+                offset > 35_000 -> 1.02f      // > 35s : rattrape léger
+                else -> 1.0f                  // 20-35s = cible
             }
             val current = player.playbackParameters.speed
             if (kotlin.math.abs(current - targetSpeed) > 0.005f) {
@@ -2567,6 +2653,43 @@ class PlayerTvFragment : Fragment() {
             if (::progressHandler.isInitialized) {
                 progressHandler.removeCallbacks(progressRunnable)
             }
+            proactiveRefreshHandler?.removeCallbacksAndMessages(null)
+            proactiveRefreshHandler = null
+        }
+
+        // 2026-05-09 v13 : refresh proactif du token Stalker (Vegeta/Ola).
+        // Schedule un refresh toutes les 3 min — avant que le token n'expire
+        // naturellement, on récupère une fresh URL et on la set sur le player.
+        // Le cut est court (~3-5s) et anticipé, pas un 25s subi.
+        private var proactiveRefreshHandler: android.os.Handler? = null
+        @Volatile private var emergencyRefreshInFlight = false
+
+        private fun scheduleProactiveTokenRefresh() {
+            val server = currentServer ?: return
+            val isStalker = server.id.startsWith("vegeta_stream::") ||
+                server.id.startsWith("ola_stream::")
+            if (!isStalker) return
+
+            proactiveRefreshHandler?.removeCallbacksAndMessages(null)
+            proactiveRefreshHandler = android.os.Handler(android.os.Looper.getMainLooper())
+            proactiveRefreshHandler?.postDelayed({
+                val current = currentServer
+                if (current != null && _binding != null) {
+                    Log.d("PlayerTvFragment", "Proactive token refresh (60s) — fresh handshake")
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        val newServer = withContext(Dispatchers.IO) {
+                            if (current.id.startsWith("vegeta_stream::")) {
+                                com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(current)
+                            } else null
+                        }
+                        if (newServer != null && _binding != null) {
+                            Log.d("PlayerTvFragment", "Got fresh URL — switching seamlessly")
+                            viewModel.getVideo(newServer)
+                        }
+                    }
+                    scheduleProactiveTokenRefresh()
+                }
+            }, 60 * 1000L)
         }
 
     private fun updateNextEpisodeOverlay() {
@@ -2750,29 +2873,48 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
                 args.id.startsWith("match::")
-            // 2026-05-09 : Vegeta TV (Stalker) ne déclare pas toujours de fenêtre
-            // DVR live → la LiveConfiguration MediaItem est parfois ignorée.
-            // Solution : forcer le démarrage avec 30s déjà buffered. Le playhead
-            // démarre 30s derrière le live edge → le live ne le rattrape pas.
-            // Recovery rapide après coupure : 5s seulement.
-            val loadControl = DefaultLoadControl.Builder()
-                .setBufferDurationsMs(
-                    if (isLiveIptv) 90_000 else 30_000,      // minBuffer: 1.5 min IPTV
-                    if (isLiveIptv) 600_000                  // maxBuffer: 10 min IPTV
-                    else if (extraBuffering) 300_000 else 120_000,
-                    if (isLiveIptv) 30_000 else 1_500,       // playback start: 30s derrière live
-                    if (isLiveIptv) 5_000 else 3_000         // rebuffer threshold: 5s
-                )
-                .setPrioritizeTimeOverSizeThresholds(true)
-                .build()
+            // 2026-05-09 v11 : recovery ULTRA RAPIDE après cut (1s au lieu de 3s).
+            val loadControl = if (isLiveIptv) {
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        30_000,    // minBuffer
+                        300_000,   // maxBuffer
+                        10_000,    // playback start
+                        1_000      // rebuffer threshold ultra court
+                    )
+                    .setPrioritizeTimeOverSizeThresholds(true)
+                    .build()
+            } else {
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        30_000,
+                        if (extraBuffering) 300_000 else 120_000,
+                        1_500,
+                        3_000
+                    )
+                    .setPrioritizeTimeOverSizeThresholds(true)
+                    .build()
+            }
 
             val baseBuilder = if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1 && !currentSoftwareDecoder) {
                 ExoPlayer.Builder(requireContext())
             } else {
-                val renderersFactory = DefaultRenderersFactory(requireContext()).apply {
-                    setEnableDecoderFallback(true)
-                    if (currentSoftwareDecoder) {
+                // 2026-05-09 v16 : nextlib namespace =
+                // io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
+                // (pas androidx.media3.decoder.ffmpeg). Pour IPTV on utilise
+                // NextRenderersFactory qui enregistre auto FFmpeg AC3/E-AC3/MP2…
+                val renderersFactory = if (isLiveIptv) {
+                    Log.d("PlayerTvFragment", "Using NextRenderersFactory (nextlib FFmpeg) for IPTV")
+                    io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory(requireContext()).apply {
+                        setEnableDecoderFallback(true)
                         setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+                    }
+                } else {
+                    DefaultRenderersFactory(requireContext()).apply {
+                        setEnableDecoderFallback(true)
+                        if (currentSoftwareDecoder) {
+                            setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+                        }
                     }
                 }
                 ExoPlayer.Builder(requireContext(), renderersFactory)
@@ -3082,12 +3224,27 @@ class PlayerTvFragment : Fragment() {
                     )
 
                     val lang = UserPreferences.currentProvider?.language?.substringBefore("-")
+                    val builder = player.trackSelectionParameters.buildUpon()
                     if (lang == "es") {
-                        player.trackSelectionParameters =
-                            player.trackSelectionParameters.buildUpon()
-                                .setPreferredAudioLanguage("spa")
-                                .build()
+                        builder.setPreferredAudioLanguage("spa")
                     }
+                    // 2026-05-09 : pour IPTV, prioriser AAC > AC3 > MP3 (plutôt
+                    // qu'EAC-3 que le décodeur hardware Chromecast ne supporte
+                    // pas → "pas de son sur Canal+ Live"). Si le stream a une
+                    // piste AAC, ExoPlayer la préfère et le son marche.
+                    val isLiveIptvCh = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                        args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                        args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                        args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                        args.id.startsWith("match::")
+                    if (isLiveIptvCh) {
+                        builder.setPreferredAudioMimeTypes(
+                            androidx.media3.common.MimeTypes.AUDIO_AAC,
+                            androidx.media3.common.MimeTypes.AUDIO_AC3,
+                            androidx.media3.common.MimeTypes.AUDIO_MPEG,
+                        )
+                    }
+                    player.trackSelectionParameters = builder.build()
 
                     mediaSession = MediaSession.Builder(requireContext(), player)
                         .build()
