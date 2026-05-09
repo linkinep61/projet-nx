@@ -233,6 +233,15 @@ object MiniPlayerController {
 
     fun playChannel(channelId: String, channelName: String, channelPoster: String?) {
         Log.d(TAG, "playChannel: $channelName ($channelId)")
+        // 2026-05-09 : STOP le player avant de switcher de canal, sinon si le
+        // fetch du nouveau canal foire, la chaîne précédente continue de jouer
+        // (bug : "je clique BFMTV et le player joue Canal+ que j'avais cliqué avant").
+        try {
+            player?.let { p ->
+                p.stop()
+                p.clearMediaItems()
+            }
+        } catch (_: Throwable) {}
         currentChannelId = channelId
         currentChannelName = channelName
         currentChannelPoster = channelPoster

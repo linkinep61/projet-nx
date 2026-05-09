@@ -64,7 +64,16 @@ object VegetaTvProvider : Provider, IptvProvider {
 
     // ───────── Channel registry ─────────
 
-    private data class VegetaStreamRef(val serverIdx: Int, val label: String, val url: String)
+    /** 2026-05-09 v13 : ajout baseUrl/mac/cmd pour permettre le refresh proactif
+     *  du token Stalker via re-handshake (sans devoir re-scanner tout le serveur). */
+    private data class VegetaStreamRef(
+        val serverIdx: Int,
+        val label: String,
+        val url: String,
+        val baseUrl: String = "",
+        val mac: String = "",
+        val cmd: String = "",
+    )
 
     private class ChannelInfo(
         val displayName: String,
@@ -661,10 +670,9 @@ object VegetaTvProvider : Provider, IptvProvider {
                 val keep = if (isFr) true else frNameRegex.containsMatchIn(rawName)
                 if (!keep) continue
 
-                // 2026-05-08 : filtre langue partagé via IptvLangFilter (helper
-                // utilisé aussi par OlaTv et MovixLiveTv pour cohérence).
+                // 2026-05-08 : filtre langue partagé via IptvLangFilter.
+                // Log retiré : spam massif dans logcat sur chaque chaîne |AR|/|TR|/...
                 if (!com.streamflixreborn.streamflix.utils.IptvLangFilter.isFrCompatible(rawName)) {
-                    Log.d(TAG, "Server[$serverIdx]: skip non-FR → '$rawName'")
                     continue
                 }
 
@@ -868,7 +876,10 @@ object VegetaTvProvider : Provider, IptvProvider {
                     }
                     if (info.streams.none { it.url == streamUrl }) {
                         val label = extractVariantLabel(rawName).ifBlank { "Server $serverIdx" }
-                        info.streams.add(VegetaStreamRef(serverIdx, label, streamUrl))
+                        info.streams.add(VegetaStreamRef(
+                            serverIdx, label, streamUrl,
+                            baseUrl = baseUrl, mac = mac, cmd = cmd,  // pour refresh
+                        ))
                         totalAdded++
                     }
                 }
@@ -1006,6 +1017,9 @@ object VegetaTvProvider : Provider, IptvProvider {
                         put("serverIdx", s.serverIdx)
                         put("label", s.label)
                         put("url", s.url)
+                        put("baseUrl", s.baseUrl)
+                        put("mac", s.mac)
+                        put("cmd", s.cmd)
                     }
                     streams.put(obj)
                 }
@@ -1063,6 +1077,9 @@ object VegetaTvProvider : Provider, IptvProvider {
                             serverIdx = s.getInt("serverIdx"),
                             label = s.getString("label"),
                             url = s.getString("url"),
+                            baseUrl = s.optString("baseUrl", ""),
+                            mac = s.optString("mac", ""),
+                            cmd = s.optString("cmd", ""),
                         ))
                     }
                     channelRegistry[key] = info
@@ -1657,6 +1674,44 @@ object VegetaTvProvider : Provider, IptvProvider {
                 }
                 if (phase3Done && ondemandJob?.isActive != true) break
             }
+        }
+    }
+
+    /** 2026-05-09 v13 : refresh proactif d'une URL Stalker.
+     *  Cherche le StreamRef qui matche l'URL du server, refait un handshake
+     *  Stalker complet (handshake + create_link) pour obtenir un nouveau token,
+     *  retourne un Video.Server avec la nouvelle URL.
+     *
+     *  Returns null si pas de mapping (URL pas en cache ou pas Stalker). */
+    suspend fun refreshServerUrl(server: Video.Server): Video.Server? = withContext(Dispatchers.IO) {
+        try {
+            val parts = server.id.removePrefix("vegeta_stream::").split("::", limit = 3)
+            if (parts.size < 3) return@withContext null
+            val oldUrl = parts[2]
+            val ref = synchronized(registryLock) {
+                channelRegistry.values.flatMap { it.streams }.firstOrNull { it.url == oldUrl }
+            }
+            if (ref == null || ref.baseUrl.isBlank() || ref.mac.isBlank() || ref.cmd.isBlank()) {
+                Log.d(TAG, "refreshServerUrl: no Stalker context for ${server.name}")
+                return@withContext null
+            }
+            val newUrl = resolveStreamCmd(ref.baseUrl, ref.mac, ref.cmd) ?: return@withContext null
+            Log.d(TAG, "refreshServerUrl: ${server.name} → fresh token URL")
+            // Update the in-memory ref with the new URL so the next refresh picks it up
+            synchronized(registryLock) {
+                val info = channelRegistry.values.firstOrNull { it.streams.contains(ref) }
+                if (info != null) {
+                    info.streams.remove(ref)
+                    info.streams.add(ref.copy(url = newUrl))
+                }
+            }
+            Video.Server(
+                id = "vegeta_stream::${ref.serverIdx}::${ref.label}::$newUrl",
+                name = server.name,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "refreshServerUrl error: ${e.message}")
+            null
         }
     }
 

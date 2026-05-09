@@ -814,6 +814,10 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             // Si banni : alpha 0.4 + ne sera pas joué auto au démarrage chaîne.
             // Cumul illimité (pas de max).
             val srvChannelKey = (item as? Settings.Server)?.channelKey
+            if (item is Settings.Server) {
+                android.util.Log.d("FavoriteDebug",
+                    "Server bind: id='${item.id}' isIptv=${item.isIptv} channelKey='$srvChannelKey' name='${item.name}'")
+            }
             if (item is Settings.Server && item.isIptv && srvChannelKey != null) {
                 // Croix (✕) — toggle ban persistant
                 val isBanned = IptvBannedServers.isBanned(srvChannelKey, item.id)
@@ -845,7 +849,18 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     if (isFav) 0xFFFF4444.toInt() else 0xFF808080.toInt()
                 )
                 binding.ivSettingFavorite.setOnClickListener {
-                    IptvFavorites.toggleFavorite(srvChannelKey, item.id)
+                    val nowFav = IptvFavorites.toggleFavorite(srvChannelKey, item.id)
+                    android.util.Log.d("FavoriteDebug",
+                        "Server heart click: channelKey='$srvChannelKey' serverId='${item.id}' nowFav=$nowFav")
+                    // 2026-05-09 v17 : update visual immédiatement, sans attendre
+                    // notifyDataSetChanged (qui peut être lent ou ne pas re-bind cette ligne).
+                    binding.ivSettingFavorite.setImageResource(
+                        if (nowFav) R.drawable.ic_favorite_enable
+                        else R.drawable.ic_favorite_disable
+                    )
+                    binding.ivSettingFavorite.imageTintList = android.content.res.ColorStateList.valueOf(
+                        if (nowFav) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                    )
                     settingsView.refreshServerList()
                     settingsView.onServerFavoriteToggled?.invoke(item)
                 }

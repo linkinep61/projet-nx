@@ -53,9 +53,13 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                 override fun onEvents(player: Player, events: Player.Events) {
                     if (events.contains(Player.EVENT_PLAYLIST_METADATA_CHANGED)) {
                         Settings.Server.init(value)
+                        // 2026-05-09 v17 : refresh aussi pour synchroniser le checkmark
+                        // si mediaServerId arrive en même temps (cas IPTV WiTV).
+                        Settings.Server.refresh(value)
                         onServerListUpdated()
                     }
-                    if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
+                    if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION) ||
+                        events.contains(Player.EVENT_MEDIA_METADATA_CHANGED)) {
                         Settings.Server.refresh(value)
                     }
                     if (events.contains(Player.EVENT_TRACKS_CHANGED)) {
@@ -1371,12 +1375,21 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                             name = it.name,
                         )
                     })
-                    list.firstOrNull()?.isSelected = true
+                    // 2026-05-09 v17 : ne pas systématiquement marquer le 1er.
+                    // Si le player connaît déjà mediaServerId (chaîne IPTV en cours
+                    // de lecture), on sélectionne ce server-là pour afficher la coche.
+                    // Fallback sur le 1er si rien n'est encore en lecture.
+                    val currentId = player.mediaMetadata.mediaServerId
+                    val matched = if (!currentId.isNullOrBlank()) {
+                        list.firstOrNull { it.id == currentId }
+                    } else null
+                    (matched ?: list.firstOrNull())?.isSelected = true
                 }
 
                 fun refresh(player: ExoPlayer) {
+                    val currentId = player.mediaMetadata.mediaServerId
                     list.forEach {
-                        it.isSelected = (it.id == player.mediaMetadata.mediaServerId)
+                        it.isSelected = (it.id == currentId)
                     }
                 }
             }
