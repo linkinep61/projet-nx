@@ -111,6 +111,17 @@ class TvShowViewHolder(
             is ContentTvShowRecommendationsMobileBinding -> displayRecommendationsMobile(_binding)
             is ContentTvShowRecommendationsTvBinding -> displayRecommendationsTv(_binding)
         }
+
+        // 2026-05-08 : si chaîne IPTV bannie, grise la card (alpha 0.4).
+        // L'user peut quand même cliquer pour la lire (override volontaire)
+        // ou long-press → menu → "Débannir" pour la réactiver.
+        if (isIptvProvider()) {
+            val isBanned = com.streamflixreborn.streamflix.fragments.player.settings
+                .IptvBannedChannels.isBanned(tvShow.id)
+            try {
+                _binding.root.alpha = if (isBanned) 0.4f else 1.0f
+            } catch (_: Throwable) { }
+        }
     }
 
     /**
@@ -126,33 +137,81 @@ class TvShowViewHolder(
      */
     private fun handleIptvFavoriteLongPress(): Boolean {
         if (!isIptvProvider()) return false
+        // 2026-05-08 : long-press IPTV propose un menu contextuel
+        //  - Ajouter / Retirer des favoris (★ + ❤ servers)
+        //  - Bannir / Débannir cette chaîne
         val providerName = tvShow.providerName ?: UserPreferences.currentProvider?.name ?: return false
-        val nowFavorite = com.streamflixreborn.streamflix.utils.IptvFavoritesStore.toggle(providerName, tvShow.id)
-        val msg = if (nowFavorite) "Ajouté aux favoris" else "Retiré des favoris"
-        Toast.makeText(context, "${tvShow.title} — $msg", Toast.LENGTH_SHORT).show()
-        // Trigger refresh of home so the Favoris row updates. We do this by
-        // bouncing the current provider through UserPreferences — the home
-        // observers re-render on this signal across the app.
-        try {
-            val current = UserPreferences.currentProvider
-            if (current != null) UserPreferences.currentProvider = current
-        } catch (_: Throwable) { /* best-effort refresh */ }
+        // 2026-05-08 : "favori" = ★ store OU ❤ servers store. Si l'user a ajouté
+        // la chaîne via ❤ sur un server, on doit pouvoir la retirer du Hub via
+        // ce menu. Donc on détecte les 2 sources.
+        val isStoreFavorite = com.streamflixreborn.streamflix.utils.IptvFavoritesStore.isFavorite(providerName, tvShow.id)
+        val hasServerFavorites = com.streamflixreborn.streamflix.fragments.player.settings
+            .IptvFavorites.count(tvShow.id) > 0
+        val isFavorite = isStoreFavorite || hasServerFavorites
+        val isBanned = com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedChannels.isBanned(tvShow.id)
+
+        val options = arrayOf(
+            if (isFavorite) "★ Retirer des favoris" else "★ Ajouter aux favoris",
+            if (isBanned) "✕ Débannir cette chaîne" else "✕ Bannir cette chaîne",
+        )
+
+        androidx.appcompat.app.AlertDialog.Builder(context)
+            .setTitle(tvShow.title)
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> {
+                        if (isFavorite) {
+                            // Retirer des 2 stores : ★ channel-fav + ❤ server-favs.
+                            // Sinon un seul ❤ resté actif laisse la chaîne dans le Hub.
+                            if (isStoreFavorite) {
+                                com.streamflixreborn.streamflix.utils.IptvFavoritesStore.toggle(providerName, tvShow.id)
+                            }
+                            if (hasServerFavorites) {
+                                com.streamflixreborn.streamflix.fragments.player.settings
+                                    .IptvFavorites.clearAllForChannel(tvShow.id)
+                            }
+                            Toast.makeText(context, "${tvShow.title} — Retiré des favoris", Toast.LENGTH_SHORT).show()
+                        } else {
+                            com.streamflixreborn.streamflix.utils.IptvFavoritesStore.toggle(providerName, tvShow.id)
+                            Toast.makeText(context, "${tvShow.title} — Ajouté aux favoris", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    1 -> {
+                        val nowBanned = com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedChannels.toggle(tvShow.id)
+                        val msg = if (nowBanned) "Bannie (cachée du catalogue)" else "Réactivée"
+                        Toast.makeText(context, "${tvShow.title} — $msg", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                // Refresh home pour que les changements soient visibles
+                try {
+                    val current = UserPreferences.currentProvider
+                    if (current != null) UserPreferences.currentProvider = current
+                } catch (_: Throwable) { }
+            }
+            .show()
         return true
     }
 
     private fun isIptvProvider(): Boolean {
         // Match WiTv (ch::, sport::), OlaTv (ola::, ola_ep::), Vegeta TV (vegeta::,
-        // vegeta_ep::) IDs, plus the provider names. Keeping the prefix checks too
-        // because tvShow objects sometimes lack providerName.
+        // vegeta_ep::), Sport Live (sportlive::), Movix LiveTV (movixlivetv::),
+        // TV Hub (livehub::) IDs, plus les providerNames.
         return tvShow.providerName == "WiTV"
             || tvShow.providerName == "OLA TV"
             || tvShow.providerName == "Vegeta TV"
+            || tvShow.providerName == "Sport Live"
+            || tvShow.providerName == "Movix LiveTV"
+            || tvShow.providerName == "TV Hub"
             || tvShow.id.startsWith("ch::")
             || tvShow.id.startsWith("sport::")
             || tvShow.id.startsWith("ola::")
             || tvShow.id.startsWith("ola_ep::")
             || tvShow.id.startsWith("vegeta::")
             || tvShow.id.startsWith("vegeta_ep::")
+            || tvShow.id.startsWith("sportlive::")
+            || tvShow.id.startsWith("match::")
+            || tvShow.id.startsWith("movixlivetv::")
+            || tvShow.id.startsWith("livehub::")
     }
 
     private fun checkProviderAndRun(action: () -> Unit) {

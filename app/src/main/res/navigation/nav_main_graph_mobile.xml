@@ -256,4 +256,9 @@
         android:id="@+id/settings_about"
         android:name="com.streamflixreborn.streamflix.fragments.settings.about.SettingsAboutMobileFragment"
         android:label="fragment_settings_about_mobile" />
+    <fragment
+        android:id="@+id/fragment_extractor_stats_mobile"
+        android:name="com.streamflixreborn.streamflix.fragments.extractor_stats.ExtractorStatsMobileFragment"
+        android:label="fragment_extractor_stats_mobile"
+        tools:layout="@layout/fragment_extractor_stats" />
 </navigation>

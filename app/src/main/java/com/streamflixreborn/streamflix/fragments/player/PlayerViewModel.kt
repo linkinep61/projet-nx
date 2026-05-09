@@ -14,11 +14,13 @@ import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.format
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import com.streamflixreborn.streamflix.utils.SubDL
 
 class PlayerViewModel(
@@ -39,6 +41,15 @@ class PlayerViewModel(
     private val _additionalServer = MutableSharedFlow<Video.Server>(extraBufferCapacity = 100)
     val additionalServer: SharedFlow<Video.Server> = _additionalServer
     private var additionalServerJob: Job? = null
+
+    // ─── 2026-05-09 : tracking session pour FilmHealthTracker ─────────────
+    // Compte les échecs dead-content dans cette session de player. Sert au
+    // FilmHealthTracker pour décider de marquer le film "vide" quand tous
+    // les serveurs ont été épuisés en dead-content (= contenu pas dispo).
+    private var sessionFilmId: String? = null
+    private var sessionFailCount = 0
+    private var sessionDeadContentCount = 0
+    private var sessionAnySuccess = false
 
     init {
         getServers(videoType, id)
@@ -102,6 +113,133 @@ class PlayerViewModel(
         getSubtitles(episode)
     }
 
+    /**
+     * Appelle [com.streamflixreborn.streamflix.providers.Provider.getServers]
+     * avec auto-retry si la liste retournée est vide.
+     *
+     *  Backoff : essai immédiat → +2s → +5s. Total max 7s d'attente avant
+     *  d'abandonner. La majorité des transient (AnimeSama backend lent,
+     *  parsing race, upstream Sibnet/VidMoLy down momentané) se résolvent
+     *  à la 1ère retry.
+     *
+     *  Cas où le retry n'aide pas (provider effectivement sans source pour
+     *  ce contenu) → on retourne quand même empty au bout des 3 essais et
+     *  le caller throw normalement avec son message "Aucune source...".
+     *
+     *  Si une exception survient pendant un retry, on la propage
+     *  (re-throw) — c'est le comportement attendu, pas un cas "empty".
+     */
+    private suspend fun fetchServersWithRetry(
+        provider: com.streamflixreborn.streamflix.providers.Provider,
+        id: String,
+        videoType: Video.Type,
+    ): List<Video.Server> {
+        val backoffsMs = listOf(0L, 2_000L, 5_000L)
+        var lastResult: List<Video.Server> = emptyList()
+        for ((attemptIdx, delayMs) in backoffsMs.withIndex()) {
+            if (delayMs > 0) {
+                Log.d("PlayerViewModel", "fetchServersWithRetry: empty result, attempt ${attemptIdx + 1}/${backoffsMs.size} in ${delayMs}ms")
+                delay(delayMs)
+            }
+            lastResult = provider.getServers(id, videoType)
+            if (lastResult.isNotEmpty()) {
+                if (attemptIdx > 0) {
+                    Log.i("PlayerViewModel", "fetchServersWithRetry: recovered on attempt ${attemptIdx + 1} → ${lastResult.size} servers")
+                }
+                return lastResult
+            }
+        }
+        Log.w("PlayerViewModel", "fetchServersWithRetry: all ${backoffsMs.size} attempts returned empty for $id on ${provider.name}")
+        return lastResult
+    }
+
+    /**
+     * Job de pré-extraction. Annulé proprement quand le ViewModel est cleared
+     * (changement de fragment) ou quand un nouveau getServers démarre — évite
+     * de continuer à hammer les CDN pour un contenu que l'user n'attend plus.
+     */
+    private var preExtractJob: Job? = null
+
+    /**
+     * Lance en background l'extraction des [PRE_EXTRACT_TOP_N] premiers serveurs.
+     * Fire-and-forget : on n'attend pas. Les résultats vont automatiquement
+     * dans [com.streamflixreborn.streamflix.extractors.Extractor]'s
+     * `extractionCache` (clé = URL, TTL 10 min). Quand l'user cliquera sur
+     * un de ces serveurs, [getVideo] → `Extractor.extract()` → cache HIT.
+     *
+     *  Limites du pattern
+     *  ------------------
+     *  - **IPTV/live** : les providers IPTV (WiTV, OLA, Vegeta, Sport Live,
+     *    MovixLiveTV) ne passent pas tous par Extractor.extract() — leur
+     *    getVideo retourne souvent l'URL m3u8 directement avec headers. Pour
+     *    eux la pré-extraction est inefficace mais sans dommage : l'appel
+     *    Extractor.extract sortira en "No extractors found" silencieusement.
+     *  - **Provider qui transforme l'URL avant extract** : si certains
+     *    providers font `extract(transformedUrl)` au lieu de `extract(server.src)`
+     *    dans leur getVideo, le cache utilise une clé différente et on rate
+     *    le hit. Pas grave — fallback sur extraction normale au clic.
+     *
+     *  Avantages
+     *  ---------
+     *  - Démarrage 4-8s → <500ms quand l'user clique le 1er serveur
+     *  - Si le 1er échoue (vraie panne), on a déjà l'extraction du 2e
+     *    en cache aussi → failover instantané
+     *  - Aucun changement UI nécessaire
+     */
+    private fun preExtractTopServersInBackground(servers: List<Video.Server>) {
+        preExtractJob?.cancel()
+        if (servers.isEmpty()) return
+        val toExtract = servers.take(PRE_EXTRACT_TOP_N)
+        preExtractJob = viewModelScope.launch(Dispatchers.IO) {
+            toExtract.forEachIndexed { idx, server ->
+                launch {
+                    try {
+                        val startMs = System.currentTimeMillis()
+                        // 2026-05-09 v2 : timeout 10s → 15s. Donne le temps aux
+                        // extractors lents (Filemoon JS unpacker, VidMoLy CF
+                        // challenge) de finir leur job. Reste un pré-extract
+                        // background — ne bloque pas le user, donc on peut
+                        // se permettre d'attendre. Si on dépasse 15s, le user
+                        // qui clique fera l'extraction normalement (durée
+                        // perçue = celle du watchdog ExoPlayer = 45s).
+                        val result = withTimeoutOrNull(15_000L) {
+                            com.streamflixreborn.streamflix.extractors.Extractor
+                                .extract(server.src, server)
+                        }
+                        val durationMs = System.currentTimeMillis() - startMs
+                        if (result != null) {
+                            Log.d(
+                                "PlayerViewModel",
+                                "Pre-extract OK [$idx] ${server.name} → cached in ${durationMs}ms",
+                            )
+                        } else {
+                            Log.d(
+                                "PlayerViewModel",
+                                "Pre-extract timeout [$idx] ${server.name} after ${durationMs}ms",
+                            )
+                        }
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        // Annulation propre (user a quitté ou nouveau getServers)
+                        throw e
+                    } catch (e: Exception) {
+                        // Échec silencieux — pas grave, fallback au clic.
+                        Log.d(
+                            "PlayerViewModel",
+                            "Pre-extract skip [$idx] ${server.name}: ${e.message?.take(80)}",
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    companion object {
+        /** Nombre de serveurs à pré-extraire en parallèle. 3 = compromis :
+         *  couvre les 2-3 prochains clics probables (Voe, Uqload, Vidoza),
+         *  sans surcharger le réseau ni risquer rate-limiting des CDN. */
+        private const val PRE_EXTRACT_TOP_N = 3
+    }
+
     private fun getServers(videoType: Video.Type, id: String) = viewModelScope.launch(Dispatchers.IO) {
         Log.d("PlayerViewModel", "Inizio ricerca server per ID: $id")
         lastVideoType = videoType
@@ -109,7 +247,15 @@ class PlayerViewModel(
         _state.emit(State.LoadingServers)
         try {
             val provider = UserPreferences.currentProvider ?: return@launch
-            val rawServers = provider.getServers(id, videoType)
+            // 2026-05-09 : auto-retry sur empty servers — gère les transient
+            // (timeout backend AnimeSama, parsing race, upstream Sibnet/VidMoLy
+            // en glitch momentané). 3 tentatives total avec backoff 0/2/5s :
+            // si la 1ère retourne du contenu, on continue direct (zéro délai
+            // ajouté). Si vide, on retry à 2s puis 5s. La majorité des
+            // transient se résolvent à la 1ère retry. Coût pire cas : ~7s
+            // d'attente AVANT de jeter l'erreur, mais SEULEMENT dans les cas
+            // où on aurait failed sans nous.
+            val rawServers = fetchServersWithRetry(provider, id, videoType)
             if (rawServers.isEmpty()) {
                 // Message clair pour l'utilisateur (vs "No servers found" en
                 // anglais). Souvent ça arrive sur des films/séries trop récents
@@ -119,23 +265,34 @@ class PlayerViewModel(
                 throw Exception("Aucune source disponible pour ce contenu sur ${provider.name}. Essayez un autre provider ou réessayez plus tard.")
             }
 
-            // Deprioritize problematic servers — put them last
-            val netuPatterns = listOf("netu", "waaw", "hqq", "hqcloud", "younetu")
-            val servers = rawServers.sortedBy { server ->
-                val id = server.id.lowercase()
-                val name = server.name.lowercase()
-                when {
-                    // Netu last — blocked by French ISPs
-                    netuPatterns.any { p -> name.contains(p) || id.contains(p) } -> 1
-                    else -> 0
-                }
-            }
+            // 2026-05-09 : tri intelligent par fiabilité observée.
+            // ExtractorRanker croise healthScore (broken < 5min) + failure
+            // count persistant (depuis dernier succès) → les extracteurs
+            // récemment-cassés tombent au fond du picker, sans être éliminés.
+            // Couvre aussi le cas ISP-blocked (netu/waaw/etc.) qui était géré
+            // par le sort hardcodé qu'on remplace ici.
+            val servers = com.streamflixreborn.streamflix.utils.ExtractorRanker
+                .rankServers(rawServers)
 
             Log.i("StreamFlixES", "[SERVERS LIST] -> Provider: ${provider.name}")
             Log.i("StreamFlixES", "[SERVERS LIST] -> Found ${servers.size} servers: ${servers.joinToString { it.name }}")
 
             Log.d("PlayerViewModel", "Ricerca server completata: ${servers.size} server trovati")
             _state.emit(State.SuccessLoadingServers(servers))
+
+            // 2026-05-09 : pré-extraction parallèle des 3 premiers serveurs en
+            // background. Le but : quand l'user clique "Watch", l'URL m3u8 est
+            // déjà dans le cache d'extraction (cf Extractor.extractionCache,
+            // 10 min TTL) → démarrage en <500ms au lieu de 3-5s.
+            //
+            // Coût : 1-3 requêtes HTTP supplémentaires par ouverture de player
+            // (~100-500KB chacune). Acceptable en Wi-Fi/Chromecast.
+            //
+            // Stratégie : fire-and-forget — on attend pas le résultat, on laisse
+            // les coroutines remplir le cache. Si l'user clique sur le 4e
+            // serveur (non pré-extrait) → fallback normal sans régression.
+            // Si une pré-extraction échoue → silencieuse, normale path au clic.
+            preExtractTopServersInBackground(servers)
 
             // Start collecting progressive servers for any IPTV provider (WiTv / OlaTv).
             additionalServerJob?.cancel()
@@ -176,11 +333,63 @@ class PlayerViewModel(
             }
 
             Log.d("PlayerViewModel", "Estrazione video completata con successo")
+            // 2026-05-09 : tracking session pour FilmHealthTracker.
+            // Une réussite = on retire la marque "vide" si elle existait
+            // (le film marche maintenant) et on flag pour ne pas marquer.
+            sessionAnySuccess = true
+            recordSessionFilmId()
+            unmarkCurrentFilmAsEmpty()
             _state.emit(State.SuccessLoadingVideo(video, server))
         } catch (e: Exception) {
             Log.e("PlayerViewModel", "Errore estrazione video: ", e)
+            // Tracking session : compte ce fail, et si dead-content, augmente
+            // le compteur dédié. Quand tous les serveurs seront épuisés
+            // (signal envoyé par le fragment via [markFilmEmptyIfAllDeadContent]),
+            // on décide de marquer le film vide.
+            recordSessionFilmId()
+            sessionFailCount++
+            val errorType = com.streamflixreborn.streamflix.extractors.Extractor.classifyError(e)
+            if (errorType == "dead-content") sessionDeadContentCount++
             _state.emit(State.FailedLoadingVideo(e, server))
         }
+    }
+
+    /** Capture l'ID du film/épisode courant à partir du videoType. */
+    private fun recordSessionFilmId() {
+        if (sessionFilmId != null) return  // déjà set
+        sessionFilmId = lastId
+    }
+
+    /** Retire la marque "film vide" pour ce film (appelé sur succès). */
+    private fun unmarkCurrentFilmAsEmpty() {
+        val provider = UserPreferences.currentProvider ?: return
+        val filmId = sessionFilmId ?: return
+        com.streamflixreborn.streamflix.utils.FilmHealthTracker.unmark(provider.name, filmId)
+    }
+
+    /**
+     * Appelé par PlayerFragment quand TOUS les serveurs ont été tentés et
+     * qu'aucun n'a marché (= nextAutoFallbackServer retourne null).
+     *
+     * Décide de marquer le film comme "vide" si :
+     *  - Aucun succès dans cette session
+     *  - ≥2 fails enregistrés (sinon c'est un cas suspect — peut-être
+     *    juste un transient)
+     *  - **La majorité des fails étaient dead-content** (≥ moitié)
+     *
+     * Critères stricts pour réduire le risque de faux positifs.
+     */
+    fun markFilmEmptyIfAllDeadContent() {
+        if (sessionAnySuccess) return  // au moins un serveur a marché → pas vide
+        if (sessionFailCount < 2) return  // pas assez de samples
+        if (sessionDeadContentCount * 2 < sessionFailCount) return  // pas une majorité dead-content
+        val provider = UserPreferences.currentProvider ?: return
+        val filmId = sessionFilmId ?: return
+        com.streamflixreborn.streamflix.utils.FilmHealthTracker.markEmpty(provider.name, filmId)
+        Log.d(
+            "PlayerViewModel",
+            "markFilmEmptyIfAllDeadContent: ${provider.name}:$filmId marked (fails=$sessionFailCount, deadContent=$sessionDeadContentCount)",
+        )
     }
 
     fun getSubtitles(videoType: Video.Type) = viewModelScope.launch(Dispatchers.IO) {

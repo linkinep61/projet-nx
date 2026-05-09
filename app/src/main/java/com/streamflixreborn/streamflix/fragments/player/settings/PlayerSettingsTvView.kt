@@ -809,6 +809,55 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                 }
             }
 
+            // 2026-05-08 : ban croix sur picker Server IPTV (TV).
+            // Click croix → toggle ban (persisté SharedPrefs)
+            // Si banni : alpha 0.4 + ne sera pas joué auto au démarrage chaîne.
+            // Cumul illimité (pas de max).
+            val srvChannelKey = (item as? Settings.Server)?.channelKey
+            if (item is Settings.Server && item.isIptv && srvChannelKey != null) {
+                // Croix (✕) — toggle ban persistant
+                val isBanned = IptvBannedServers.isBanned(srvChannelKey, item.id)
+                item.isBanned = isBanned
+                binding.root.alpha = if (isBanned) 0.4f else 1.0f
+                binding.ivSettingBan.visibility = View.VISIBLE
+                binding.ivSettingBan.imageTintList = android.content.res.ColorStateList.valueOf(
+                    if (isBanned) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                )
+                binding.ivSettingBan.setOnClickListener {
+                    if (isBanned) {
+                        IptvBannedServers.unban(srvChannelKey, item.id)
+                    } else {
+                        IptvBannedServers.recordBan(srvChannelKey, item.id)
+                    }
+                    settingsView.refreshServerList()
+                    // 2026-05-08 : trigger refetch pour backfill compensation
+                    settingsView.onServerBanned?.invoke(item)
+                }
+
+                // Cœur (♥) — toggle favori (max 5/chaîne)
+                val isFav = IptvFavorites.isFavorite(srvChannelKey, item.id)
+                binding.ivSettingFavorite.visibility = View.VISIBLE
+                binding.ivSettingFavorite.setImageResource(
+                    if (isFav) R.drawable.ic_favorite_enable
+                    else R.drawable.ic_favorite_disable
+                )
+                binding.ivSettingFavorite.imageTintList = android.content.res.ColorStateList.valueOf(
+                    if (isFav) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                )
+                binding.ivSettingFavorite.setOnClickListener {
+                    IptvFavorites.toggleFavorite(srvChannelKey, item.id)
+                    settingsView.refreshServerList()
+                    settingsView.onServerFavoriteToggled?.invoke(item)
+                }
+
+                // D-pad : right row → favorite → ban
+                binding.root.nextFocusRightId = R.id.iv_setting_favorite
+                binding.ivSettingFavorite.nextFocusRightId = R.id.iv_setting_ban
+                binding.ivSettingBan.nextFocusRightId = View.NO_ID
+            } else if (item is Settings.Server) {
+                binding.root.alpha = 1.0f
+            }
+
             // IPTV-specific buttons: favorite (★) and ban (✕) — for ChannelVariant items
             if (item is Settings.ChannelVariant && item.isIptv) {
                 // Favorite button
@@ -821,35 +870,31 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     if (item.isFavorite) 0xFFFF4444.toInt() else 0xFF808080.toInt()
                 )
                 binding.ivSettingFavorite.setOnClickListener {
-                    android.util.Log.d("FavoriteDebug",
-                        "★ click TV: channelKey='${item.channelKey}' id='${item.id}' " +
-                        "name='${item.name}' isIptv=${item.isIptv} " +
-                        "wasFav=${item.isFavorite}")
                     if (item.channelKey.isBlank()) {
                         android.util.Log.w("FavoriteDebug",
                             "channelKey is BLANK on TV — toggleFavorite will no-op!")
                     }
                     val nowFav = IptvFavorites.toggleFavorite(item.channelKey, item.id)
-                    android.util.Log.d("FavoriteDebug",
-                        "toggleFavorite returned $nowFav, persisted=${IptvFavorites.isFavorite(item.channelKey, item.id)}")
                     item.isFavorite = nowFav
-                    // Unfavorite all others in the same channel
-                    if (nowFav) {
-                        Settings.ChannelVariant.list.filter { it !== item && it.isIptv }.forEach {
-                            it.isFavorite = false
-                        }
-                    }
+                    // 2026-05-08 : N favoris autorisés (max 20 store-side, pas 1 forcé).
                     settingsView.onChannelVariantFavoriteToggled?.invoke(item)
                     settingsView.refreshChannelVariantList()
                 }
 
-                // Ban button (✕)
+                // Ban button (✕) — toggle grise/dégrise (persisté SharedPrefs)
+                val variantBanned = IptvBannedServers.isBanned(item.channelKey, item.id)
+                binding.root.alpha = if (variantBanned) 0.4f else 1.0f
                 binding.ivSettingBan.visibility = View.VISIBLE
-                binding.ivSettingBan.imageTintList = android.content.res.ColorStateList.valueOf(0xFF808080.toInt())
+                binding.ivSettingBan.imageTintList = android.content.res.ColorStateList.valueOf(
+                    if (variantBanned) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                )
                 binding.ivSettingBan.setOnClickListener {
+                    if (variantBanned) {
+                        IptvBannedServers.unban(item.channelKey, item.id)
+                    } else {
+                        IptvBannedServers.recordBan(item.channelKey, item.id)
+                    }
                     settingsView.onChannelVariantBanned?.invoke(item)
-                    // Remove from list and refresh
-                    Settings.ChannelVariant.ban(item)
                     settingsView.refreshChannelVariantList()
                 }
 
@@ -859,7 +904,11 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                 binding.ivSettingBan.nextFocusRightId = View.NO_ID
             } else {
                 binding.ivSettingFavorite.visibility = View.GONE
-                binding.ivSettingBan.visibility = View.GONE
+                // 2026-05-08 : NE PAS reset ivSettingBan à GONE si c'est un
+                // Settings.Server IPTV — ma branche plus haut l'a déjà mis VISIBLE.
+                if (!(item is Settings.Server && item.isIptv && item.channelKey != null)) {
+                    binding.ivSettingBan.visibility = View.GONE
+                }
             }
 
             // Downloads disabled on TV — not enough storage on these devices

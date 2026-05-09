@@ -133,8 +133,18 @@ class TvShowMobileFragment : Fragment() {
 
     private fun isIptvChannel(tvShow: TvShow): Boolean {
         return tvShow.providerName == "WiTV"
+            || tvShow.providerName == "OLA TV"
+            || tvShow.providerName == "Vegeta TV"
+            || tvShow.providerName == "Sport Live"
+            || tvShow.providerName == "Movix LiveTV"
+            || tvShow.providerName == "TV Hub"
             || tvShow.id.startsWith("ch::")
             || tvShow.id.startsWith("sport::")
+            || tvShow.id.startsWith("ola::")
+            || tvShow.id.startsWith("vegeta::")
+            || tvShow.id.startsWith("sportlive::")
+            || tvShow.id.startsWith("movixlivetv::")
+            || tvShow.id.startsWith("livehub::")
     }
 
     private fun autoPlayChannel(tvShow: TvShow) {

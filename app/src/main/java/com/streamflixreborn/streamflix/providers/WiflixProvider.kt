@@ -48,7 +48,13 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             return cachePortalURL.ifEmpty{ field }
         }
 
-    override val defaultBaseUrl: String = "https://flemmix.farm/"
+    // 2026-05-07 : flemmix.farm était hijacké → redirige vers clictune.com → dlink8.com
+    // (système de monétisation pubs). Quand `onChangeUrl()` échoue (Cloudflare bloque
+    // le portail, réseau lent au cold-start, ou auto-update désactivé), l'app tombait
+    // sur ces redirects → 403/contenu invalide → provider cassé.
+    // flemmix.prof est le site principal officiel (icône 🚨 sur wiflix-adresses.fun)
+    // et héberge le vrai contenu Wiflix (template `flemmixnew` reconnu par le code).
+    override val defaultBaseUrl: String = "https://flemmix.prof/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)

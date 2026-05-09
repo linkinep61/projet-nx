@@ -72,6 +72,25 @@
         app:layout_constraintTop_toTopOf="@id/tv_providers_label"
         tools:ignore="ContentDescription,UseAppTint" />
 
+    <!-- 2026-05-08 : Bouton Paramètres en haut à GAUCHE — symétrique du
+         cadenas/téléchargements à droite. D-pad friendly via bg_tv_button_focus. -->
+    <ImageView
+        android:id="@+id/btn_providers_settings"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_marginStart="32dp"
+        android:padding="10dp"
+        android:src="@drawable/ic_menu_settings"
+        android:tint="#FFFFFF"
+        android:focusable="true"
+        android:focusableInTouchMode="false"
+        android:contentDescription="Paramètres"
+        android:background="@drawable/bg_tv_button_focus"
+        app:layout_constraintBottom_toBottomOf="@id/tv_providers_label"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="@id/tv_providers_label"
+        tools:ignore="UseAppTint" />
+
     <!-- 2026-05-05 : Bouton cadenas pour le contrôle parental.
          Au clic → demande PIN (setup le 1er fois, vérification ensuite) → ouvre
          dialog de gestion des providers verrouillés. -->

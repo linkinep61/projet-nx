@@ -55,6 +55,12 @@ class ProvidersTvFragment : Fragment() {
         // Downloads disabled on TV — not enough storage on these devices
         binding.btnProvidersDownloads.visibility = View.GONE
 
+        // 2026-05-08 : raccourci Paramètres depuis le Home Fournisseur (TV).
+        // Focusable D-pad (bg_tv_button_focus appliqué dans le XML).
+        binding.btnProvidersSettings.setOnClickListener {
+            findNavController().navigate(R.id.settings)
+        }
+
         // 2026-05-05 : Bouton cadenas pour le contrôle parental
         binding.btnProvidersLock.setOnClickListener {
             com.streamflixreborn.streamflix.ui.PinDialog.showAuth(

@@ -87,6 +87,7 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import org.chromium.net.CronetEngine
 import com.google.android.gms.net.CronetProviderInstaller
 import com.streamflixreborn.streamflix.fragments.player.settings.IptvFavorites
+import com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedServers
 import com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsView
 import java.util.Base64 
 import java.io.File
@@ -257,7 +258,14 @@ class PlayerMobileFragment : Fragment() {
     // si le player reste bloqué en STATE_BUFFERING > N secondes (Darkibox & co
     // qui renvoient une URL valide mais ne délivrent pas de données).
     private var bufferingWatchdog: kotlinx.coroutines.Job? = null
-    private val BUFFERING_TIMEOUT_MS = 10_000L
+    // 2026-05-09 v2 : 10s → 20s → 45s.
+    // Règle user : "il faut que la source aille jusqu'à l'échec avant de
+    // changer". Le watchdog ne doit PAS kill prématurément une source qui
+    // charge lentement — ExoPlayer fire ses propres erreurs (TCP timeout,
+    // 404, 403, format unsupported) en 15-30s typiquement. 45s = filet de
+    // sécurité absolu pour les vraies pannes silencieuses (genre le CDN
+    // accepte la connexion mais ne renvoie jamais de bytes).
+    private val BUFFERING_TIMEOUT_MS = 45_000L
     private var usingCronet = false
     private var usingDoH = false
     private var usingBrowserOkHttp = false
@@ -479,7 +487,12 @@ class PlayerMobileFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch { 
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.CREATED).collect { state ->
                 when (state) {
-                    PlayerViewModel.State.LoadingServers -> {}
+                    PlayerViewModel.State.LoadingServers -> {
+                        // 2026-05-09 : afficher l'overlay de chargement dès le
+                        // début pour pas laisser un écran noir vide. La barre
+                        // de progression fictive simule un chargement de 5s.
+                        showLoadingOverlay()
+                    }
                     is PlayerViewModel.State.SuccessLoadingServers -> {
                         servers = state.servers
                         val sToServer = servers.firstOrNull {
@@ -526,9 +539,39 @@ class PlayerMobileFragment : Fragment() {
                                 return@collect
                             }
 
+                            // 2026-05-08 : pose la channelKey IPTV partagée pour
+                            // que Settings.Server.isIptv puisse calculer son channelKey
+                            // (utilisé par les boutons croix/cœur du picker).
+                            val isIptvCtx = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                                args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                                args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                                args.id.startsWith("movixlivetv::") ||
+                                args.id.startsWith("livehub::") ||
+                                args.id.startsWith("sportlive::") ||
+                                args.id.startsWith("match::")
+                            PlayerSettingsView.Settings.Server.currentIptvChannelKey =
+                                if (isIptvCtx) args.id else null
+
+                            // 2026-05-08 : tri par priorité IPTV : favoris (par ordre user)
+                            // → non-favoris non-bannis → bannis. Garantit que le fallback
+                            // onPlayerError essaie fav#1, puis fav#2, etc., avant les autres.
+                            val orderedServers = if (isIptvCtx) {
+                                val favIds = IptvFavorites.getFavoritesForChannel(args.id)
+                                val favIdSet = favIds.toSet()
+                                val favRank: (String) -> Int = { id ->
+                                    val r = favIds.indexOf(id)
+                                    if (r >= 0) r else Int.MAX_VALUE
+                                }
+                                state.servers.sortedWith(compareBy(
+                                    { IptvBannedServers.isBanned(args.id, it.id) },  // false avant true → non-bannis d'abord
+                                    { !favIdSet.contains(it.id) },                    // false avant true → favoris d'abord
+                                    { favRank(it.id) }                                // ordre user dans favoris
+                                ))
+                            } else state.servers
+
                             player.playlistMetadata = MediaMetadata.Builder()
                                 .setTitle(state.toString())
-                                .setMediaServers(state.servers.map {
+                                .setMediaServers(orderedServers.map {
                                     MediaServer(
                                         id = it.id,
                                         name = it.name,
@@ -565,16 +608,50 @@ class PlayerMobileFragment : Fragment() {
                                 binding.settings.refreshChannelVariantList()
                             }
 
+                            // 2026-05-08 : ban d'un Settings.Server IPTV → trigger
+                            // reload des servers pour que le backfill compense
+                            // (provider voit nonBannedCount < 5 → scanne nouveaux).
+                            binding.settings.onServerBanned = {
+                                viewModel.reloadServersAfterBypass()
+                            }
+                            binding.settings.onServerFavoriteToggled = {
+                                // Re-trigger : le tri par favoris est appliqué au prochain
+                                // setMediaServers, donc on relance pour que la liste se réordonne.
+                                viewModel.reloadServersAfterBypass()
+                            }
+
                             // Chaîne starts empty — clear old entries from previous channel
                             PlayerSettingsView.Settings.ChannelVariant.list.clear()
                             binding.settings.refreshChannelVariantList()
 
-                            // If there's a favorite, prioritize it
-                            val favServer = state.servers.firstOrNull { server ->
-                                server.id.startsWith("ola_stream::") &&
-                                    IptvFavorites.isFavorite(currentChannelKey, server.id)
+                            // 2026-05-08 : continuité mini→fullscreen + favoris multi.
+                            //  1. Si on vient du mini, reprendre le SAME server.
+                            //  2. Sinon, prendre le 1er favori marqué par l'user
+                            //     (par ordre de marquage = priorité utilisateur).
+                            //  3. Sinon servers.first() par défaut.
+                            val miniServer = if (com.streamflixreborn.streamflix.utils.MiniPlayerController.transitioningToFullscreen) {
+                                com.streamflixreborn.streamflix.utils.MiniPlayerController.currentMiniServer()
+                            } else null
+                            val matchedMiniServer = miniServer?.let { mini ->
+                                state.servers.firstOrNull { it.id == mini.id }
                             }
-                            viewModel.getVideo(favServer ?: state.servers.first())
+                            // Favoris multi-server (max 5, ordre = priorité)
+                            val orderedFavIds = IptvFavorites.getFavoritesForChannel(currentChannelKey)
+                            val favServer = orderedFavIds.firstNotNullOfOrNull { favId ->
+                                state.servers.firstOrNull { it.id == favId }
+                            }
+                            // 2026-05-08 : skip les bannis pour le démarrage auto.
+                            // L'user ne veut pas qu'un server grisé soit joué.
+                            val firstNonBanned = state.servers.firstOrNull { srv ->
+                                !IptvBannedServers.isBanned(currentChannelKey, srv.id)
+                            }
+                            val initialServer = matchedMiniServer ?: favServer ?: firstNonBanned ?: state.servers.first()
+                            if (matchedMiniServer != null) {
+                                Log.d("PlayerMobileFragment", "Mini→fullscreen : reprise sur ${matchedMiniServer.name}")
+                            } else if (favServer != null) {
+                                Log.d("PlayerMobileFragment", "Favori prioritaire : ${favServer.name} (${orderedFavIds.size}/${IptvFavorites.MAX_FAVORITES_PER_CHANNEL})")
+                            }
+                            viewModel.getVideo(initialServer)
                         }
 
                     }
@@ -601,6 +678,9 @@ class PlayerMobileFragment : Fragment() {
                         UserPreferences.unmarkChannelFailed(args.id)
                         cancelAwaitMoreServers()
                         cancelPatienceMessages()
+                        // Cache l'overlay de chargement — on a un Video prêt,
+                        // ExoPlayer va prendre le relais visuellement.
+                        hideLoadingOverlay()
                         PlayerSettingsView.Settings.ExtraBuffering.init(state.video.extraBuffering)
                         PlayerSettingsView.Settings.SoftwareDecoder.init(false)
                         displayVideo(state.video, state.server)
@@ -608,6 +688,9 @@ class PlayerMobileFragment : Fragment() {
 
                     is PlayerViewModel.State.FailedLoadingVideo -> {
                         cancelPatienceMessages()
+                        // Re-afficher l'overlay : on tente le serveur suivant,
+                        // donc on revient en mode chargement (chargement à 0).
+                        showLoadingOverlay()
                         // Drop this broken variant from the visible Chaîne page so the user
                         // doesn't see piling up dead entries. Re-emitted next session.
                         pruneBrokenVariant(state.server)
@@ -621,13 +704,21 @@ class PlayerMobileFragment : Fragment() {
                         val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
                                 || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
                                 || args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                        // 2026-05-09 : nextAutoFallbackServer skip VOSTFR/VO si on
+                        // était en VF — évite de jouer du sub contre la volonté user.
                         val nextServer = if (isLiveIptv) null
-                            else servers.getOrNull(servers.indexOf(state.server) + 1)
+                            else nextAutoFallbackServer(servers, state.server)
                         if (nextServer != null) {
                             viewModel.getVideo(nextServer)
                         } else if (tryNextChannelVariant(state.server)) {
                             // OLA channel variant fallback succeeded — playing next variant
                         } else {
+                            // 2026-05-09 : tous les serveurs ont été tentés et tous
+                            // ont fail. Demande au ViewModel de marquer ce film comme
+                            // "présumé sans source" SI le pattern d'échecs le justifie
+                            // (≥2 fails dont la majorité dead-content). Ça pousse le
+                            // film en bas du home au prochain refresh.
+                            viewModel.markFilmEmptyIfAllDeadContent()
                             val provider = UserPreferences.currentProvider
                             // For IPTV providers (WiTv / OlaTv) keep the player open and wait for
                             // additional progressive servers instead of closing immediately.
@@ -1215,7 +1306,13 @@ class PlayerMobileFragment : Fragment() {
         val btnNext = binding.pvPlayer.controller.binding.btnCustomNext
 
         // IPTV channel navigation: prev/next channel buttons
-        val isIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
+        // 2026-05-08 : ajout vegeta::/vegeta_ep:: oubliés (le code ola:: était
+        // là, mais vegeta absent → boutons prev/next ne marchaient pas pour VegetaTV).
+        // 2026-05-08 : ajout livehub:: pour TV Hub (zap entre favoris).
+        val isIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+            args.id.startsWith("livehub::")
         if (isIptvChannel) {
             setupChannelNavigationButtons(btnPrevious, btnNext)
             return
@@ -1312,6 +1409,18 @@ class PlayerMobileFragment : Fragment() {
                 resolvePoster = { provider.getChannelPoster(it) }
             }
             is com.streamflixreborn.streamflix.providers.OlaTvProvider -> {
+                prevId = provider.getPreviousChannelId(args.id)
+                nextId = provider.getNextChannelId(args.id)
+                resolveDisplayName = { provider.getChannelDisplayName(it) }
+                resolvePoster = { provider.getChannelPoster(it) }
+            }
+            is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> {
+                prevId = provider.getPreviousChannelId(args.id)
+                nextId = provider.getNextChannelId(args.id)
+                resolveDisplayName = { provider.getChannelDisplayName(it) }
+                resolvePoster = { provider.getChannelPoster(it) }
+            }
+            is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> {
                 prevId = provider.getPreviousChannelId(args.id)
                 nextId = provider.getNextChannelId(args.id)
                 resolveDisplayName = { provider.getChannelDisplayName(it) }
@@ -1427,6 +1536,148 @@ class PlayerMobileFragment : Fragment() {
         patienceRunnables.forEach { h.removeCallbacks(it) }
         patienceRunnables.clear()
         patienceHandler = null
+    }
+
+    /**
+     * Retourne le prochain serveur à essayer en failover auto, avec
+     * dégradation de langue contrôlée.
+     *
+     *  Règles :
+     *  1. Cherche d'abord le prochain serveur de la MÊME langue que le current
+     *     (si current=VF → cherche le prochain VF dispo dans la liste)
+     *  2. Si aucun de la même langue → DÉGRADE :
+     *     - VF épuisés → essaie le 1er VOSTFR de la liste (sub français = OK)
+     *     - VOSTFR épuisés → essaie le 1er VO de la liste (mieux que rien)
+     *  3. VO épuisés → STOP (vraiment plus rien à essayer)
+     *
+     *  Cette dégradation contrôlée évite le piège qu'on avait observé :
+     *  "stop dès que les VF foirent" laissait l'user devant un message
+     *  d'erreur alors qu'il y avait peut-être un VOSTFR/VO qui marchait.
+     *
+     *  L'user peut toujours cliquer manuellement n'importe quel server
+     *  dans le picker (qui montre la liste complète).
+     */
+    private fun nextAutoFallbackServer(allServers: List<Video.Server>, current: Video.Server?): Video.Server? {
+        if (current == null) return null
+        val curIdx = allServers.indexOf(current)
+        if (curIdx < 0) return null
+
+        val currentLang = detectServerLanguage(current.name)
+
+        // Étape 1 : cherche le prochain server de la MÊME langue.
+        for (i in (curIdx + 1) until allServers.size) {
+            val candidate = allServers[i]
+            if (detectServerLanguage(candidate.name) == currentLang) {
+                return candidate
+            }
+        }
+
+        // Étape 2 : dégradation contrôlée. Si on était en VF → on accepte VOSTFR.
+        // Si on était en VOSTFR → on accepte VO. Si on était en VO → STOP.
+        val fallbackLang = when (currentLang) {
+            "vf" -> "vostfr"
+            "vostfr" -> "vo"
+            else -> return null  // VO épuisés → vraiment STOP
+        }
+        // On scanne TOUTE la liste (pas juste après curIdx) pour trouver le 1er
+        // server du fallback lang — il peut être avant curIdx dans l'ordre brut.
+        return allServers.firstOrNull { detectServerLanguage(it.name) == fallbackLang }
+    }
+
+    /** Détection langue cohérente avec ExtractorRanker. Retourne "vf", "vostfr", "vo". */
+    private fun detectServerLanguage(name: String): String {
+        val lower = name.lowercase()
+        // VOSTFR check FIRST car contient "FR" qui matcherait VF.
+        if (lower.contains(Regex("\\b(vostfr|vost|sub|subbed)\\b"))) return "vostfr"
+        if (lower.contains(Regex("\\b(vff|vfq|vfi|vf|french|francais|français)\\b"))) return "vf"
+        if (lower.contains(Regex("\\b(vo|raw|multi|eng|english|spa|ita|german|deu|jap)\\b"))) return "vo"
+        // Pas de marker → assume VF (cas IPTV / chaînes sport)
+        return "vf"
+    }
+
+    /** Animateur de la barre de progression fictive (0 → 95% sur 5s, stagne à 95%). */
+    private var loadingBarAnimator: android.animation.ObjectAnimator? = null
+    /** Handler pour le delay de 250ms avant affichage — évite de flasher
+     *  l'overlay sur les chargements rapides (cache HIT du pre-extract). */
+    private val loadingShowHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var loadingShowRunnable: Runnable? = null
+
+    /** Délai avant affichage de l'overlay. Sous ce délai, l'overlay ne flash
+     *  pas — utile quand le pre-extract a déjà caché et que le chargement
+     *  est instantané. Au-dessus, l'user voit le spinner et la barre. */
+    private val LOADING_OVERLAY_SHOW_DELAY_MS = 250L
+
+    /**
+     * Affiche l'overlay de chargement : spinner centré + barre de progression
+     * fictive. Appelé sur LoadingServers + LoadingVideo (échec d'un serveur,
+     * tentative du suivant).
+     *
+     *  Délai 250ms avant affichage : si le chargement complète AVANT
+     *  (cas du cache HIT du pre-extract), l'overlay ne s'affiche jamais.
+     *  C'est le pattern "delayed display" recommandé pour les loaders qui
+     *  évite de flasher pour rien.
+     */
+    /** True si on est sur une chaîne IPTV — pour skip le loading overlay
+     *  (le buffer ExoPlayer gère déjà le chargement) qui bloque l'accès
+     *  au menu Settings sur ces providers. */
+    private fun isIptvChannelContext(): Boolean {
+        val id = args.id
+        return id.startsWith("ch::") || id.startsWith("sport::") ||
+            id.startsWith("ola::") || id.startsWith("ola_ep::") ||
+            id.startsWith("vegeta::") || id.startsWith("vegeta_ep::") ||
+            id.startsWith("livehub::") || id.startsWith("movixlivetv::") ||
+            id.startsWith("sportlive::")
+    }
+
+    private fun showLoadingOverlay() {
+        // 2026-05-08 : skip sur IPTV — l'overlay plein écran bloque l'accès
+        // au menu Serveurs/Settings, et le buffer ExoPlayer gère déjà la
+        // sensation de chargement.
+        if (isIptvChannelContext()) return
+        if (_binding == null) return
+        val overlay = binding.loadingOverlay
+        if (overlay.isVisible) return  // déjà affiché, ne pas reset l'animation
+
+        // Annule un éventuel show précédent en attente.
+        loadingShowRunnable?.let { loadingShowHandler.removeCallbacks(it) }
+
+        val runnable = Runnable {
+            if (_binding == null) return@Runnable
+            val ov = binding.loadingOverlay
+            val bar = binding.loadingOverlayBar
+            ov.visibility = View.VISIBLE
+            bar.progress = 0
+            loadingBarAnimator?.cancel()
+            // Animate from 0 to 95 over 5s. On stagne à 95% pour ne pas mentir
+            // (l'attente réelle peut dépasser 5s, surtout quand un extracteur
+            // foire et qu'on en essaye un autre). Le hideLoadingOverlay() snap
+            // à 100% quand le chargement vrai est terminé.
+            loadingBarAnimator = android.animation.ObjectAnimator
+                .ofInt(bar, "progress", 0, 95)
+                .apply {
+                    duration = 5_000L
+                    interpolator = android.view.animation.DecelerateInterpolator()
+                    start()
+                }
+        }
+        loadingShowRunnable = runnable
+        loadingShowHandler.postDelayed(runnable, LOADING_OVERLAY_SHOW_DELAY_MS)
+    }
+
+    /** Cache l'overlay, annule le delay et stoppe l'animation. Appelé sur
+     *  SuccessLoadingVideo. Si l'overlay n'a jamais été affiché (chargement
+     *  plus rapide que LOADING_OVERLAY_SHOW_DELAY_MS), c'est un no-op visuel. */
+    private fun hideLoadingOverlay() {
+        if (_binding == null) return
+        // Annule le show en attente si pas encore exécuté.
+        loadingShowRunnable?.let { loadingShowHandler.removeCallbacks(it) }
+        loadingShowRunnable = null
+        loadingBarAnimator?.cancel()
+        loadingBarAnimator = null
+        if (binding.loadingOverlay.isVisible) {
+            binding.loadingOverlayBar.progress = 100
+            binding.loadingOverlay.visibility = View.GONE
+        }
     }
 
     /** Mark a server as tried and remove it from the Chaîne page so broken variants
@@ -2035,7 +2286,7 @@ class PlayerMobileFragment : Fragment() {
                             if (player.playbackState == Player.STATE_BUFFERING &&
                                 player.currentPosition == initialPosition) {
                                 val server = currentServer
-                                val nextServer = server?.let { servers.getOrNull(servers.indexOf(it) + 1) }
+                                val nextServer = nextAutoFallbackServer(servers, server)
                                 Log.w("PlayerNetwork",
                                     "BUFFERING timeout (${BUFFERING_TIMEOUT_MS}ms) on ${server?.name} " +
                                     "→ ${if (nextServer != null) "switching to ${nextServer.name}" else "no more servers"}")
@@ -2075,7 +2326,8 @@ class PlayerMobileFragment : Fragment() {
                     if (playbackState == Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
                     Log.w("PlayerMobileFragment", "Live IPTV stuck in $playbackState — re-preparing")
                     try {
-                        player.seekToDefaultPosition()
+                        // 2026-05-08 : pas de seekToDefaultPosition (flush buffer →
+                        // charge/stop/recharge en boucle). prepare() seul suffit.
                         player.prepare()
                         player.playWhenReady = true
                     } catch (e: Exception) {
@@ -2213,7 +2465,7 @@ class PlayerMobileFragment : Fragment() {
                     Log.e("PlayerNetwork", "403 error! usingCronet=$usingCronet, source=${player.currentMediaItem?.localConfiguration?.uri?.toString()?.take(80)}")
                     val server = currentServer ?: return
                     pruneBrokenVariant(server)
-                    val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
+                    val nextServer = nextAutoFallbackServer(servers, server)
                     if (nextServer != null) {
                         Log.d("PlayerNetwork", "403 → trying next server: ${nextServer.name}")
                         viewModel.getVideo(nextServer)
@@ -2237,8 +2489,20 @@ class PlayerMobileFragment : Fragment() {
                         || errorCauseMsg.contains("WebView fetch timed out")
                 if (isConnectionTimeout) {
                     val server = currentServer ?: return
+                    // 2026-05-08 : pour IPTV, sticky absolu APRÈS 1er READY.
+                    // L'user a explicitement choisi (ou démarré sur un favori) —
+                    // pas de switch auto. Avant 1er READY, on cherche encore une
+                    // source utilisable comme avant.
+                    val isLiveIptvNow = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                        args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                        args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                    if (isLiveIptvNow && iptvCurrentStreamHasWorked) {
+                        Log.w("PlayerNetwork", "Connection timeout IPTV sticky (already worked) → re-prepare same server")
+                        try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
+                        return
+                    }
                     pruneBrokenVariant(server)
-                    val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
+                    val nextServer = nextAutoFallbackServer(servers, server)
                     if (nextServer != null) {
                         Log.w("PlayerNetwork", "Connection timeout on ${server.name}, auto-switching to ${nextServer.name}")
                         viewModel.getVideo(nextServer)
@@ -2262,7 +2526,10 @@ class PlayerMobileFragment : Fragment() {
                     iptvRetryCount++
                     Log.w("PlayerMobileFragment", "IPTV retry on ${server.name} ($errCodeName) — retry #$iptvRetryCount, sticky (never auto-switch)")
                     try {
-                        player.seekToDefaultPosition()
+                        // 2026-05-08 : NE PAS appeler seekToDefaultPosition() — flush
+                        // le buffer accumulé → "ça charge, ça stoppe, ça recharge" en
+                        // boucle. prepare() seul re-établit la connexion HLS live
+                        // sans perdre le buffer en cours.
                         player.prepare()
                         player.playWhenReady = true
                     } catch (e: Exception) {
@@ -2283,7 +2550,7 @@ class PlayerMobileFragment : Fragment() {
                     val server = currentServer ?: return
                     val errCodeName = error.errorCodeName
                     pruneBrokenVariant(server)
-                    val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
+                    val nextServer = nextAutoFallbackServer(servers, server)
                     if (nextServer != null) {
                         Log.w(
                             "PlayerNetwork",
@@ -2676,11 +2943,11 @@ class PlayerMobileFragment : Fragment() {
         // never cuts. Bigger buffer windows + longer rebuffer threshold.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                if (isLiveIptv) 30_000 else 30_000,      // minBuffer: 30s live (was 5s)
-                if (isLiveIptv) 120_000                  // maxBuffer: 120s live (was 30s)
+                if (isLiveIptv) 30_000 else 30_000,      // minBuffer
+                if (isLiveIptv) 180_000                  // maxBuffer: 3 min mobile (était 2 min)
                 else if (extraBuffering) 300_000 else 120_000,
-                if (isLiveIptv) 2_000 else 1_500,        // playback start: 2s buffered (was 500ms)
-                if (isLiveIptv) 5_000 else 3_000         // rebuffer threshold: 5s (was 1.5s)
+                if (isLiveIptv) 3_000 else 1_500,        // playback start: 3s buffered (était 2s)
+                if (isLiveIptv) 5_000 else 3_000         // rebuffer threshold
             )
             .setPrioritizeTimeOverSizeThresholds(true)   // prefer time-based buffer over size cap
             .build()

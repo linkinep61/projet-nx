@@ -1281,8 +1281,17 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
             var isSelected: Boolean = false
             var isFavorite: Boolean = false
 
-            /** True if this is an IPTV (OLA TV) variant — enables ban/favorite UI. */
-            val isIptv: Boolean get() = id.startsWith("ola_stream::")
+            /** True if this is an IPTV variant — enables ban/favorite UI.
+             *  2026-05-08 : élargi de OlaTV uniquement → tous les providers IPTV
+             *  (WiTV, Vegeta, MovixLiveTv, SportLive). Sans ça l'user n'avait pas
+             *  la croix/cœur en dehors d'OLA. */
+            val isIptv: Boolean get() = id.startsWith("ola_stream::") ||
+                id.startsWith("vegeta_stream::") ||
+                id.startsWith("movixlivetv__") ||
+                id.startsWith("sport_") ||
+                id.startsWith("ch::") ||
+                id.startsWith("sport::") ||
+                id.startsWith("m3u8::")
 
             companion object : Settings() {
                 val list = mutableListOf<ChannelVariant>()
@@ -1295,7 +1304,8 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                     get() = list.size > 1
 
                 /**
-                 * Ban a channel variant: remove it from the list.
+                 * Ban a channel variant: remove it from the list AND persist
+                 * the ban en SharedPrefs (sinon il reviendrait au prochain reload).
                  * Returns the index it was at, or -1 if not found.
                  */
                 fun ban(variant: ChannelVariant): Int {
@@ -1303,6 +1313,8 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                     if (index >= 0) {
                         list.removeAt(index)
                         IptvFavorites.removeFavorite(variant.channelKey, variant.id)
+                        // 2026-05-08 : persister le ban (avant : juste UI → revenait au reload)
+                        IptvBannedServers.recordBan(variant.channelKey, variant.id)
                     }
                     return index
                 }
@@ -1322,9 +1334,31 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
             val name: String,
         ) : Item {
             var isSelected: Boolean = false
+            /** True si l'user a click la croix pour bannir ce server. Persisté
+             *  dans IptvBannedServers + restauré au prochain ouverture. */
+            var isBanned: Boolean = false
+
+            /** True si l'id est un IPTV server (préfixe reconnu). */
+            val isIptv: Boolean get() = id.startsWith("ola_stream::") ||
+                id.startsWith("vegeta_stream::") ||
+                id.startsWith("movixlivetv__") ||
+                id.startsWith("sport_") ||
+                id.startsWith("ch::") ||
+                id.startsWith("sport::") ||
+                id.startsWith("m3u8::")
+
+            /** ChannelKey pour les opérations IPTV (favoris/bans persistents).
+             *  Lit la valeur statique posée par PlayerMobileFragment/PlayerTvFragment
+             *  au démarrage de l'écran player IPTV (= args.id). */
+            val channelKey: String? get() = if (isIptv) currentIptvChannelKey else null
 
             companion object : Settings() {
                 val list = mutableListOf<Server>()
+
+                /** ChannelKey statique partagée entre tous les Settings.Server
+                 *  IPTV de la session courante. Posée par PlayerXxxFragment au
+                 *  démarrage si on ouvre une chaîne IPTV. Null pour film/série. */
+                var currentIptvChannelKey: String? = null
 
                 val selected: Server?
                     get() = list.find { it.isSelected }

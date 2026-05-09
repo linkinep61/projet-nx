@@ -243,4 +243,9 @@
         android:id="@+id/settings"
         android:name="com.streamflixreborn.streamflix.fragments.settings.SettingsTvFragment"
         android:label="fragment_settings_tv" />
+    <fragment
+        android:id="@+id/fragment_extractor_stats_tv"
+        android:name="com.streamflixreborn.streamflix.fragments.extractor_stats.ExtractorStatsTvFragment"
+        android:label="fragment_extractor_stats_tv"
+        tools:layout="@layout/fragment_extractor_stats" />
 </navigation>

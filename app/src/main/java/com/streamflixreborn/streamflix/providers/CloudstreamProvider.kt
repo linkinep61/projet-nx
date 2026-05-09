@@ -1,7 +1,9 @@
 package com.streamflixreborn.streamflix.providers
 
+import android.content.Context
 import android.util.Log
 import com.streamflixreborn.streamflix.BuildConfig
+import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.Extractor
 import com.streamflixreborn.streamflix.models.Category
@@ -112,15 +114,43 @@ object CloudstreamProvider : Provider {
         )
     }
 
+    // 2026-05-08 : FIX /resource 406 "find no content" + ROBUSTIFICATION.
+    // Cause identifiée : le serveur MovieBox+ refuse les `device_id` de 32 chars
+    // (notre ancienne valeur UUID-like). Format attendu = 16 chars hex.
+    // Pour pas se reprendre le piège (si le serveur blacklist un device_id précis),
+    // on génère un device_id 16 chars hex RANDOM au premier launch et on le
+    // persiste en SharedPreferences. Chaque user a donc son propre device_id stable.
+    // Ref : github.com/NivinCNC/CNCVerse-Cloud-Stream-Extension (CNCVerse).
     private const val USER_AGENT =
         "com.community.oneroom/50020045 (Linux; U; Android 13; en_US; 23078RKD5C; Build/TQ2A.230405.003; Cronet/135.0.7012.3)"
-    private val CLIENT_INFO = """
+
+    /** device_id 16 chars hex stable par install. Généré au 1er accès, persisté. */
+    private val persistedDeviceId: String by lazy {
+        val prefs = StreamFlixApp.instance.applicationContext
+            .getSharedPreferences("cloudstream_provider", Context.MODE_PRIVATE)
+        val existing = prefs.getString("device_id_v1", null)
+        // Sanity-check : exactement 16 chars hex, sinon on régénère
+        if (existing != null && existing.length == 16 && existing.all { it.isDigit() || it in 'a'..'f' }) {
+            existing
+        } else {
+            val bytes = ByteArray(8)
+            java.security.SecureRandom().nextBytes(bytes)
+            val newId = bytes.joinToString("") { "%02x".format(it) }
+            prefs.edit().putString("device_id_v1", newId).apply()
+            Log.d(TAG, "Generated new persisted device_id: $newId")
+            newId
+        }
+    }
+
+    private val CLIENT_INFO: String by lazy {
+        """
         {"package_name":"com.community.oneroom","version_name":"3.0.03.0529.03","version_code":50020045,
-        "os":"android","os_version":"13","install_ch":"ps","device_id":"a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        "os":"android","os_version":"13","install_ch":"ps","device_id":"$persistedDeviceId",
         "install_store":"ps","gaid":"00000000-0000-0000-0000-000000000000","brand":"Redmi",
         "model":"23078RKD5C","system_language":"fr","net":"NETWORK_WIFI","region":"FR",
         "timezone":"Europe/Paris","sp_code":"40401","X-Play-Mode":"2"}
-    """.trimIndent().replace("\n", "").replace("        ", "")
+        """.trimIndent().replace("\n", "").replace("        ", "")
+    }
 
     private const val MAIN_PAGE_PATH = "/wefeed-mobile-bff/tab-operating"
     private const val SEARCH_PATH = "/wefeed-mobile-bff/subject-api/search"
@@ -128,6 +158,19 @@ object CloudstreamProvider : Provider {
     private const val RESOURCE_PATH = "/wefeed-mobile-bff/subject-api/resource"
     private const val PLAY_INFO_PATH = "/wefeed-mobile-bff/subject-api/play-info"
     private const val SEASON_INFO_PATH = "/wefeed-mobile-bff/subject-api/season-info"
+    private const val EXT_CAPTIONS_PATH = "/wefeed-mobile-bff/subject-api/get-ext-captions"
+
+    /** Cache des URLs SRT FR par subjectId, populé au getServers, lu au getVideo.
+     *  FR-only : Streamflix est FR-only et le user veut JUSTE les sous-titres FR
+     *  (pas le bordel multi-langue qu'affiche Cloudstream officiel). */
+    private val frenchCaptionsCache = ConcurrentHashMap<String, List<String>>()
+
+    /** Cache des streams MP4/HLS par subjectId, populé avant unification, lu au
+     *  getVideo pour construire un master m3u8 multi-quality. Liste de
+     *  (resolution, url, linkType) où linkType=1 HLS, =2 MP4. Permet à ExoPlayer
+     *  d'exposer les qualités réelles du film dans son onglet Qualité au lieu
+     *  d'avoir un MP4 unique fixe. */
+    private val cloudstreamStreamsCache = ConcurrentHashMap<String, List<Triple<Int, String, Int>>>()
 
     /** Regex pour identifier un suffixe de langue non-FR dans un titre. */
     private val LANG_NON_FR_REGEX = Regex(
@@ -256,11 +299,20 @@ object CloudstreamProvider : Provider {
                 resp.use {
                     val code = it.code
                     if (code in setOf(403, 407, 429, 500, 502, 503, 504)) {
-                        Log.d(TAG, "Host $host returned $code, retry next")
+                        // 2026-05-09 : log explicite incluant le path pour debug
+                        // (MovieBox+ /resource qui retournerait silencieusement 407
+                        // serait un signal de signature cassée).
+                        Log.d(TAG, "apiGet $host$pathWithQuery returned $code, retry next")
                         return@use
                     }
-                    if (!it.isSuccessful) return@withContext null
+                    if (!it.isSuccessful) {
+                        Log.d(TAG, "apiGet $host$pathWithQuery NOT OK (code=$code), giving up")
+                        return@withContext null
+                    }
                     val body = it.body?.string() ?: return@withContext null
+                    // 2026-05-09 : diagnostic. Si le body est vide ou ne contient
+                    // pas "list", c'est suspect (changement format API ?).
+                    Log.d(TAG, "apiGet ${pathWithQuery.take(60)} → ${code} size=${body.length} (head: ${body.take(150)})")
                     lastGoodHost = host  // mémorise le host qui répond
                     return@withContext JSONObject(body)
                 }
@@ -1746,6 +1798,29 @@ object CloudstreamProvider : Provider {
             }
         }
 
+        // 2026-05-08 : AUTO-SWITCH dub FR — MovieBox+ stocke chaque dub comme
+        // un sujet séparé. findSubjectId retourne souvent le dub d'origine
+        // (anglais, Hindi pour le marché indien). Si un dub français existe
+        // (ex: "MovieBox (French Audio)" visible dans Cloudstream officiel), on
+        // swap subjectId AVANT lancement des async pour récupérer ses streams
+        // FR natifs au lieu de l'anglais avec sub.
+        // Coût : 1 appel /get sequentiel (~200ms). Cache la réponse pour
+        // éviter le re-fetch dans getRespD.
+        var initialGetCached: JSONObject? = null
+        if (!subjectId.isNullOrBlank()) {
+            try {
+                initialGetCached = apiGet(SUBJECT_GET_PATH, mapOf("subjectId" to subjectId!!))
+                val frSid = initialGetCached?.let { findFrenchDubSubjectId(it) }
+                if (frSid != null && frSid != subjectId) {
+                    Log.d(TAG, "Auto-switch vers dub FR : sid=$subjectId → $frSid")
+                    subjectId = frSid
+                    initialGetCached = null  // invalide pour le nouveau sid → refetch
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Initial /get for FR-dub check failed: ${e.message}")
+            }
+        }
+
         // Backup Nakios — lance EN PARALLÈLE de MovieBox+ (TMDB-id-based, indépendant)
         val nakiosBackupD = async {
             val tid = tmdbId ?: return@async emptyList<Video.Server>()
@@ -1790,7 +1865,52 @@ object CloudstreamProvider : Provider {
 
         val servers = mutableListOf<Video.Server>()
 
-        // Pipeline MovieBox+ : seulement si on a un subjectId
+        // 2026-05-08 : FAST PATH + DÉTECTION LANGUE — `/get` retourne 2 trésors :
+        //  1. `data.resourceDetectors[].resolutionList[]` = liens MP4 directs
+        //     (CDN bcdn.hakunaymatata.com, zéro pubs).
+        //  2. `data.dubs[]` (avec lanCode) + `data.subtitles` (CSV) = dispo audio/sub
+        //     pour calculer si le stream est VF / VOSTFR / VO.
+        //  On fait 1 SEUL appel /get partagé entre le fast path et le marquage langue.
+        val getRespD = async {
+            // Réutilise initialGetCached si pas de switch (cache hit)
+            initialGetCached?.let { return@async it }
+            val sid = subjectId ?: return@async null
+            try {
+                apiGet(SUBJECT_GET_PATH, mapOf("subjectId" to sid))
+            } catch (e: Exception) {
+                Log.w(TAG, "/get prefetch failed: ${e.message}")
+                null
+            }
+        }
+
+        val resourceDetectorsD = async {
+            val resp = getRespD.await() ?: return@async emptyList<Video.Server>()
+            try {
+                parseResourceDetectorsFromJson(resp, subjectId!!, se, ep)
+            } catch (e: Exception) {
+                Log.w(TAG, "resourceDetectors fast path failed: ${e.message}")
+                emptyList()
+            }
+        }
+
+        // 2026-05-08 : SOUS-TITRES AUTO — fetch SRT FR en parallèle. Populé dans
+        // frenchCaptionsCache pour que getVideo les attache au Video automatiquement.
+        // Si captions FR dispo → langSuffix devient [VF auto] (pas pénalisé) au lieu
+        // de [VOSTFR] (pénalisé -100). UX = équivalent VF.
+        val frenchCaptionsD = async {
+            val resp = getRespD.await() ?: return@async emptyList<String>()
+            val sid = subjectId ?: return@async emptyList()
+            val rid = firstResourceIdFromGet(resp, se, ep) ?: return@async emptyList()
+            try {
+                fetchFrenchCaptions(sid, rid, ep)
+            } catch (e: Exception) {
+                Log.w(TAG, "Fetch FR captions failed: ${e.message}")
+                emptyList()
+            }
+        }
+
+        // 2026-05-08 : pipeline /resource RÉACTIVÉ. Les 406 venaient du bump
+        // UA/CLIENT_INFO en 50090111 — restauration en 50020045 = ça remarche.
         if (!subjectId.isNullOrBlank()) {
             val sid: String = subjectId!!
             // Tenter /resource pour les 4 résolutions en parallèle
@@ -1839,6 +1959,96 @@ object CloudstreamProvider : Provider {
             Log.d(TAG, "getServers $id : MovieBox+ → ${servers.size} streams")
         }
 
+        // 2026-05-08 : Append fast path resourceDetectors EN TÊTE (les MP4 directs
+        // bcdn.hakunaymatata.com sont les plus rapides + zéro pubs = best UX).
+        val rdServers = resourceDetectorsD.await()
+        if (rdServers.isNotEmpty()) {
+            // Insert au début : ils s'affichent en premier dans le picker
+            servers.addAll(0, rdServers)
+            Log.d(TAG, "getServers $id : +${rdServers.size} streams resourceDetectors (fast path)")
+        }
+
+        // 2026-05-08 : POLITIQUE STRICTE FR-only (user s'est plaint des [VF auto]
+        // qui menteaient pour Matrix anglais). Règle : les servers Cloudstream
+        // n'apparaissent dans le picker QUE si le film est confirmé FR :
+        //   - dub FR détecté dans dubs[] → [VF] OK, on garde
+        //   - sinon, captions FR vraiment récupérées via /get-ext-captions → [VF auto] OK
+        //   - sinon (VO/VOSTFR/inconnu) → SUPPRESSION des servers Cloudstream
+        //     du picker. User tombe sur Movix/Nakios FR (les backups TMDB-id-based).
+        val frenchCaps = frenchCaptionsD.await()
+        if (frenchCaps.isNotEmpty() && subjectId != null) {
+            frenchCaptionsCache[subjectId] = frenchCaps
+            Log.d(TAG, "getServers $id : ${frenchCaps.size} sous-titre(s) FR cachés pour sid=$subjectId")
+        }
+        // 2026-05-08 : UNIFICATION + multi-qualité.
+        //  1. Extrait les Triple(resolution, url, linkType) depuis tous les
+        //     csServers AVANT d'unifier → cache pour le master m3u8 au getVideo.
+        //  2. Unifie en 1 seul "Cloudstream" dans le picker.
+        //  3. Au getVideo, construit un master HLS playlist côté client agrégeant
+        //     ces qualités → ExoPlayer parse → onglet Qualité expose les vraies
+        //     qualités MovieBox+ (360p/480p/720p/1080p selon ce que le film a).
+        val csServers = servers.filter { it.id.startsWith("cs_") }
+        if (csServers.size >= 1 && subjectId != null) {
+            val streams = csServers.mapNotNull { srv ->
+                val match = Regex("\\[(\\d+)p (MP4|HLS)]").find(srv.name) ?: return@mapNotNull null
+                val res = match.groupValues[1].toIntOrNull() ?: return@mapNotNull null
+                val format = match.groupValues[2]
+                val linkType = if (format == "HLS") 1 else 2
+                Triple(res, srv.src, linkType)
+            }.distinctBy { it.first }.sortedByDescending { it.first }
+            if (streams.isNotEmpty()) {
+                cloudstreamStreamsCache[subjectId!!] = streams
+                Log.d(TAG, "getServers $id : ${streams.size} qualité(s) Cloudstream cachées : ${streams.map { it.first }.joinToString()}p")
+            }
+        }
+        if (csServers.size > 1) {
+            // 2026-05-08 (revert) : user veut UNIQUEMENT les 2 premières qualités
+            // (1080p + 720p, ou les 2 plus hautes dispo). 480p/360p drop —
+            // niveau de qualité inacceptable + clutter le picker. Trie par
+            // résolution desc, dédup par résolution (MP4 prioritaire), puis
+            // take(2).
+            val sorted = csServers.sortedWith(compareByDescending<Video.Server> {
+                Regex("\\[(\\d+)p").find(it.name)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            }.thenBy { if (it.name.contains("MP4")) 0 else 1 })
+            val seenRes = mutableSetOf<Int>()
+            val uniqueByRes = sorted.filter { srv ->
+                val r = Regex("\\[(\\d+)p").find(srv.name)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+                seenRes.add(r)
+            }.take(2)  // 2026-05-08 : top 2 résolutions seulement
+            val others = servers.filter { !it.id.startsWith("cs_") }
+            servers.clear()
+            servers.addAll(uniqueByRes)
+            servers.addAll(others)
+            Log.d(TAG, "getServers $id : ${uniqueByRes.size} qualités Cloudstream gardées (top 2 : ${uniqueByRes.map { it.name }})")
+        }
+
+        val getRespFinal = getRespD.await()
+        val hasFrDub = getRespFinal?.let { hasFrenchDub(it) } == true
+        val hasFrCaptions = frenchCaps.isNotEmpty()
+        // POLITIQUE STRICTE : SEUL le dub FR vrai (audio en français) garde les
+        // servers Cloudstream visibles. Les "[VF auto]" (audio EN + sub FR)
+        // mentaient pour Matrix → on les bannit. Les SRT FR cachés restent
+        // attachés au getVideo en bonus (utiles si dub FR coexiste avec sub FR).
+        if (hasFrDub) {
+            for (i in servers.indices) {
+                val srv = servers[i]
+                if (srv.id.startsWith("cs_") && !srv.name.contains(Regex("\\[V[FO]"))) {
+                    servers[i] = srv.copy(name = "${srv.name} [VF]")
+                }
+            }
+            Log.d(TAG, "getServers $id : Cloudstream gardés (dub FR confirmé, captions=$hasFrCaptions)")
+        } else {
+            // FILTRE DUR : retire TOUS les servers Cloudstream natifs (cs_*).
+            // User préfère 0 server Cloudstream plutôt qu'un faux VF.
+            // Movix/Nakios backups TMDB-id-based prennent le relais avec du VF garanti.
+            val before = servers.size
+            servers.removeAll { it.id.startsWith("cs_") }
+            val removed = before - servers.size
+            if (removed > 0) {
+                Log.d(TAG, "getServers $id : retiré $removed servers Cloudstream non-VF (hasFrDub=false, hasFrCaptions=$hasFrCaptions ignoré)")
+            }
+        }
+
         // Append Nakios backup (lance toujours, ne dépend pas de MovieBox+)
         val nakiosServers = nakiosBackupD.await()
         if (nakiosServers.isNotEmpty()) {
@@ -1855,6 +2065,269 @@ object CloudstreamProvider : Provider {
 
         Log.d(TAG, "getServers $id → total=${servers.size}")
         servers
+    }
+
+    /** Vrai si la réponse `/get` liste un dub `fr` dans `data.dubs[]`.
+     *  Utilisé pour décider si on garde les servers Cloudstream dans le picker. */
+    private fun hasFrenchDub(getResp: JSONObject): Boolean {
+        val dubs = getResp.optJSONObject("data")?.optJSONArray("dubs") ?: return false
+        for (i in 0 until dubs.length()) {
+            val dub = dubs.optJSONObject(i) ?: continue
+            val code = dub.optString("lanCode").lowercase()
+            val name = dub.optString("lanName").lowercase()
+            if (code == "fr" || code == "fre" || code == "fra" ||
+                name.contains("french") || name.contains("français") || name.contains("francais")) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /** Cherche dans `data.dubs[]` un dub français et retourne son subjectId.
+     *  MovieBox+ stocke chaque dub comme un sujet séparé : Hidden Figures EN
+     *  est SID_A, son dub Hindi est SID_B, son dub FR est SID_C. Notre
+     *  findSubjectId tombe souvent sur le dub Hindi (catalogue indien). Pour
+     *  avoir le vrai dub FR, il faut sélectionner le bon subjectId.
+     *
+     *  Format : `dubs: [{subjectId, lanCode, lanName, original, type}]` */
+    private fun findFrenchDubSubjectId(getResp: JSONObject): String? {
+        val dubs = getResp.optJSONObject("data")?.optJSONArray("dubs") ?: return null
+        for (i in 0 until dubs.length()) {
+            val dub = dubs.optJSONObject(i) ?: continue
+            val code = dub.optString("lanCode").lowercase()
+            val name = dub.optString("lanName").lowercase()
+            if (code == "fr" || code == "fre" || code == "fra" ||
+                name.contains("french") || name.contains("français") || name.contains("francais")) {
+                val sid = dub.optString("subjectId").takeIf { it.isNotBlank() }
+                if (sid != null) return sid
+            }
+        }
+        return null
+    }
+
+    /** Cherche dans la JSON `/get` le 1er `resourceId` qui matche l'épisode demandé.
+     *  Utilisé pour appeler `/get-ext-captions` qui retourne les SRT FR/etc. */
+    private fun firstResourceIdFromGet(resp: JSONObject, se: Int, ep: Int): String? {
+        val detectors = resp.optJSONObject("data")?.optJSONArray("resourceDetectors") ?: return null
+        for (i in 0 until detectors.length()) {
+            val detector = detectors.optJSONObject(i) ?: continue
+            val resolutionList = detector.optJSONArray("resolutionList") ?: continue
+            for (j in 0 until resolutionList.length()) {
+                val item = resolutionList.optJSONObject(j) ?: continue
+                if (item.optInt("se", 0) != se || item.optInt("ep", 0) != ep) continue
+                val rid = item.optString("resourceId").takeIf { it.isNotBlank() }
+                if (rid != null) return rid
+            }
+        }
+        return null
+    }
+
+    /** Fetche les sous-titres FR pour un film via `/get-ext-captions`.
+     *  FR-only : on ne ramène QUE les français (le user veut juste ça, pas le
+     *  bordel multi-langue d'autres apps). Returns liste d'URLs SRT.
+     *
+     *  Format réponse :
+     *  ```
+     *  data.extCaptions: [
+     *    { lan: "fr", lanName: "Français", url: "https://cacdn.../subtitle/X.srt?..." }, ...
+     *  ]
+     *  ```
+     */
+    private suspend fun fetchFrenchCaptions(subjectId: String, resourceId: String, episode: Int): List<String> {
+        val resp = apiGet(EXT_CAPTIONS_PATH, mapOf(
+            "subjectId" to subjectId,
+            "resourceId" to resourceId,
+            "episode" to "$episode",
+        )) ?: return emptyList()
+        val captions = resp.optJSONObject("data")?.optJSONArray("extCaptions") ?: return emptyList()
+        val frUrls = mutableListOf<String>()
+        for (i in 0 until captions.length()) {
+            val c = captions.optJSONObject(i) ?: continue
+            val lan = c.optString("lan").lowercase()
+            val lanName = c.optString("lanName").lowercase()
+            if (lan == "fr" || lan == "fre" || lan == "fra" ||
+                lanName.contains("fran") || lanName.contains("french")) {
+                val url = c.optString("url").takeIf { it.isNotBlank() } ?: continue
+                frUrls += url
+            }
+        }
+        return frUrls
+    }
+
+    /** Extrait le subjectId depuis l'id d'un Video.Server Cloudstream natif.
+     *  Format : `cs_{prefix}_{subjectId}_{...}` → retourne subjectId. */
+    private fun parseSidFromCsId(id: String): String? {
+        if (!id.startsWith("cs_")) return null
+        val parts = id.split("_")
+        // cs_rd_SID_..., cs_resource_SID_..., cs_playinfo_SID_...
+        return parts.getOrNull(2)?.takeIf { it.isNotBlank() && it.all(Char::isDigit) }
+    }
+
+    /** Construit un master HLS playlist avec les MP4/HLS comme variants.
+     *  Encodé en data URI pour pas avoir besoin de proxy HTTP local.
+     *  ExoPlayer parse le master, expose chaque variant comme une qualité dans
+     *  son onglet Qualité (Auto + 360p/480p/720p/1080p selon ce qu'on lui passe).
+     *
+     *  Pour les MP4 : on les wrappe dans un sub-playlist VOD single-segment
+     *  (data URI lui-même) avec EXT-X-MAP-style. ExoPlayer Media3 supporte
+     *  les MP4 progressifs en sub-playlists HLS.
+     *
+     *  Pour les HLS m3u8 : on les laisse tels quels comme variant URL.
+     */
+    private fun buildMasterM3u8Uri(streams: List<Triple<Int, String, Int>>): String {
+        val resMap = mapOf(
+            240 to (426 to 240), 360 to (640 to 360), 480 to (854 to 480),
+            720 to (1280 to 720), 1080 to (1920 to 1080),
+            1440 to (2560 to 1440), 2160 to (3840 to 2160),
+        )
+        val bandwidthMap = mapOf(
+            240 to 400_000, 360 to 800_000, 480 to 1_500_000,
+            720 to 4_000_000, 1080 to 8_000_000,
+            1440 to 16_000_000, 2160 to 35_000_000,
+        )
+        val sb = StringBuilder("#EXTM3U\n#EXT-X-VERSION:3\n")
+        for ((res, url, linkType) in streams) {
+            val (w, h) = resMap[res] ?: (1280 to 720)
+            val bw = bandwidthMap[res] ?: 4_000_000
+            sb.append("#EXT-X-STREAM-INF:BANDWIDTH=$bw,RESOLUTION=${w}x${h}\n")
+            if (linkType == 1) {
+                // HLS m3u8 direct → variant URL inline
+                sb.append("$url\n")
+            } else {
+                // MP4 progressif → wrappé dans un sub-playlist VOD single-segment
+                val subPlaylist = """#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:9999
+#EXTINF:9999.0,
+$url
+#EXT-X-ENDLIST"""
+                val subDataUri = "data:application/vnd.apple.mpegurl;base64," +
+                    android.util.Base64.encodeToString(
+                        subPlaylist.toByteArray(Charsets.UTF_8),
+                        android.util.Base64.NO_WRAP
+                    )
+                sb.append("$subDataUri\n")
+            }
+        }
+        return "data:application/vnd.apple.mpegurl;base64," +
+            android.util.Base64.encodeToString(
+                sb.toString().toByteArray(Charsets.UTF_8),
+                android.util.Base64.NO_WRAP
+            )
+    }
+
+    /** FAST PATH : exploite `data.resourceDetectors[].resolutionList[]` retourné
+     *  par `/subject-api/get`. Évite les 4-5 appels paginés `/resource`.
+     *  Prend la JSON déjà fetchée (partagée avec [computeLangSuffix]) pour ne
+     *  faire qu'1 seul appel /get total. Filtre par `se`/`ep` pour l'épisode.
+     *
+     *  Format retourné par MovieBox+ :
+     *  ```
+     *  resourceDetectors: [{
+     *    resolutionList: [
+     *      { resolution: 720, resourceLink: "...", linkType: 2, se: 0, ep: 0 }, ...
+     *    ]
+     *  }]
+     *  ```
+     *  `linkType: 2` = MP4 direct, `linkType: 1` = HLS m3u8.
+     *  CDN observé : `bcdn.hakunaymatata.com` (rapide, sans pubs).
+     */
+    private fun parseResourceDetectorsFromJson(resp: JSONObject, subjectId: String, se: Int, ep: Int): List<Video.Server> {
+        val detectors = resp.optJSONObject("data")?.optJSONArray("resourceDetectors") ?: return emptyList()
+
+        val candidates = mutableListOf<Triple<Int, String, Int>>()  // (resolution, url, linkType)
+        for (i in 0 until detectors.length()) {
+            val detector = detectors.optJSONObject(i) ?: continue
+            val resolutionList = detector.optJSONArray("resolutionList") ?: continue
+            for (j in 0 until resolutionList.length()) {
+                val item = resolutionList.optJSONObject(j) ?: continue
+                val itemSe = item.optInt("se", 0)
+                val itemEp = item.optInt("ep", 0)
+                if (itemSe != se || itemEp != ep) continue
+                val link = item.optString("resourceLink").takeIf { it.isNotBlank() } ?: continue
+                val res = item.optInt("resolution", 0)
+                val linkType = item.optInt("linkType", 2)
+                candidates += Triple(res, link, linkType)
+            }
+        }
+
+        val deduped = candidates.distinctBy { it.second }.sortedByDescending { it.first }
+
+        return deduped.mapIndexed { idx, t ->
+            val (res, url, linkType) = t
+            val format = if (linkType == 1) "HLS" else "MP4"
+            Video.Server(
+                id = "cs_rd_${subjectId}_${se}_${ep}_${res}_$idx",
+                name = "Cloudstream [${res}p $format]",
+                src = url,
+            )
+        }
+    }
+
+    /** Détecte la langue audio/sous-titres dispo pour un sujet MovieBox+ et
+     *  retourne le suffix à coller au name d'un Video.Server pour que
+     *  [ExtractorRanker.computeLanguagePenalty] applique la bonne pénalité.
+     *
+     *  Logique :
+     *   - `data.dubs[].lanCode` contient "fr" → `[VF]` (score full)
+     *   - sinon, `frenchCaptionsAvailable=true` → `[VF auto]` (sub FR auto-attaché)
+     *     → ranker matche "vf" mais pas "vostfr" → score full aussi
+     *   - sinon, `data.subtitles` contient FR mais pas auto-attaché → `[VOSTFR]`
+     *     (-100 pénalité pour redescendre)
+     *   - sinon → `[VO]` (-150 pénalité)
+     *   - dubs vide ET subs vides → "" (no marker, ranker assume VF)
+     */
+    private fun computeLangSuffix(getResp: JSONObject?, frenchCaptionsAvailable: Boolean = false): String {
+        if (getResp == null) return ""
+        val data = getResp.optJSONObject("data") ?: return ""
+
+        // 1. Check dubs[] FR → vrai VF
+        val dubs = data.optJSONArray("dubs")
+        if (dubs != null) {
+            for (i in 0 until dubs.length()) {
+                val dub = dubs.optJSONObject(i) ?: continue
+                val code = dub.optString("lanCode").lowercase()
+                val name = dub.optString("lanName").lowercase()
+                if (code == "fr" || code == "fre" || code == "fra" ||
+                    name.contains("french") || name.contains("français") || name.contains("francais")) {
+                    return " [VF]"
+                }
+            }
+        }
+
+        // 2. Captions FR auto-attachées → équivalent VF côté UX, pas de pénalité
+        if (frenchCaptionsAvailable) return " [VF auto]"
+
+        // 3. Check subtitles (string CSV ou array) — fallback si captions API a foiré
+        val subtitlesRaw = data.opt("subtitles")
+        val subtitlesStr = when (subtitlesRaw) {
+            is String -> subtitlesRaw
+            is JSONArray -> {
+                val sb = StringBuilder()
+                for (i in 0 until subtitlesRaw.length()) {
+                    if (i > 0) sb.append(",")
+                    sb.append(subtitlesRaw.optString(i))
+                }
+                sb.toString()
+            }
+            else -> ""
+        }.lowercase()
+        if (subtitlesStr.contains("français") || subtitlesStr.contains("francais") ||
+            subtitlesStr.contains("french") ||
+            subtitlesStr.split(",").map { it.trim() }.any { it == "fr" || it == "fre" || it == "fra" }) {
+            return " [VOSTFR]"
+        }
+
+        // 3. Edge case : metadata vide (dubs=[] ET subtitles="") = serveur n'a pas
+        //    indexé la langue. Ne PAS marquer [VO] qui pénaliserait à tort un film
+        //    FR (cas observé : Les Tuche 2, OSS 117). Sans suffix, ranker assume VF.
+        val dubsEmpty = dubs == null || dubs.length() == 0
+        val subsEmpty = subtitlesStr.isBlank()
+        if (dubsEmpty && subsEmpty) return ""
+
+        // 4. Au moins une dub/sub existe mais aucune n'est FR → vraiment VO
+        return " [VO]"
     }
 
     /** Cherche le stream d'un épisode/film donné dans /resource (paginé par 10).
@@ -1909,9 +2382,29 @@ object CloudstreamProvider : Provider {
                 Video(source = original.src)
             }
         }
-        // MovieBox+ direct (bcdn ou hcdn3 — déjà MP4/HLS direct)
+        // MovieBox+ direct (MP4 1080p max). Master m3u8 multi-quality testé via
+        // data URI imbriqué → ExoPlayer Media3 le rejette. Pour vraie multi-
+        // qualité dans l'onglet Qualité, faudrait un proxy HTTP local (NanoHTTPD
+        // ou OkHttp interceptor) qui sert master + sub-playlists. Pas prio.
+        // En attendant : 1 server "Cloudstream" pointant sur la max résolution.
+        val sid = parseSidFromCsId(server.id)
+        val source = server.src
+
+        val frenchSubs = sid?.let { frenchCaptionsCache[it] } ?: emptyList()
+        val subtitles = frenchSubs.mapIndexed { idx, url ->
+            Video.Subtitle(
+                label = if (idx == 0) "Français" else "Français (${idx + 1})",
+                file = url,
+                default = idx == 0,
+                initialDefault = idx == 0,
+            )
+        }
+        if (subtitles.isNotEmpty()) {
+            Log.d(TAG, "getVideo ${server.id} : +${subtitles.size} sous-titre(s) FR auto")
+        }
         return Video(
-            source = server.src,
+            source = source,
+            subtitles = subtitles,
             headers = mutableMapOf(
                 "Referer" to "https://moviebox.ph/",
                 "User-Agent" to USER_AGENT,

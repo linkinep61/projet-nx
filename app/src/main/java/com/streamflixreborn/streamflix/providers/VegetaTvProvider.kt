@@ -483,7 +483,12 @@ object VegetaTvProvider : Provider, IptvProvider {
 
                 val flagFr = flags.contains("🇫🇷") || flags.contains(" FR") || flags.endsWith("FR")
                 val hasGlobal = flags.contains("🌐")
-                val isFr = flagFr
+                // 2026-05-08 : positions 39-47 confirmées FR par user. Si le flag
+                // 🇫🇷 est absent (peut arriver quand serveurs.txt change), on
+                // promeut quand même ces positions comme FR pour pas perdre
+                // les bons serveurs.
+                val isFrByPosition = pos in 39..47
+                val isFr = flagFr || isFrByPosition
 
                 if (!isFr && !hasGlobal) continue
 
@@ -629,6 +634,13 @@ object VegetaTvProvider : Provider, IptvProvider {
                 //  - Server is GLOBAL  → only keep names matching FR brand regex
                 val keep = if (isFr) true else frNameRegex.containsMatchIn(rawName)
                 if (!keep) continue
+
+                // 2026-05-08 : filtre langue partagé via IptvLangFilter (helper
+                // utilisé aussi par OlaTv et MovixLiveTv pour cohérence).
+                if (!com.streamflixreborn.streamflix.utils.IptvLangFilter.isFrCompatible(rawName)) {
+                    Log.d(TAG, "Server[$serverIdx]: skip non-FR → '$rawName'")
+                    continue
+                }
 
                 val cleaned = rawName
                     .replace(Regex("^(FR|ES|PT|EN|DE|IT|AR|TR|NL|PL|RO|US|UK|BE|CH)[|:\\s]+", RegexOption.IGNORE_CASE), "")
@@ -1096,20 +1108,28 @@ object VegetaTvProvider : Provider, IptvProvider {
         }
     }
 
-    /** On-demand backfill: when getServers is called on a channel that has 0 streams,
-     *  trigger an immediate scan of the next 2 untouched servers in the background.
-     *  The lateRegistryWatcher will then emit any newly-found streams to the player. */
+    /** On-demand backfill: scanne les serveurs FR pas encore explorés pour
+     *  compenser les bans / gaps. 2026-05-08 : passé de 2 → 5 serveurs par
+     *  trigger pour que l'user qui a tout banni sauf 1 favori voie 4 nouveaux
+     *  variants se charger d'un coup au lieu de getServers répétés.
+     *  Le lateRegistryWatcher émettra les nouveaux streams au picker au fur
+     *  et à mesure qu'ils sont trouvés. */
     @Volatile private var ondemandJob: Job? = null
     private fun triggerOnDemandBackfill(reason: String) {
         if (ondemandJob?.isActive == true) return
         ondemandJob = scope.launch {
             try {
                 val alreadyDone = frServerIndices.toSet()
+                // 2026-05-08 : skip les serveurs marqués morts (cache 24h).
+                // Évite de gaspiller 8-10s sur des serveurs qu'on sait foireux.
                 val nextPair = vegetaServers
-                    .filter { it.idx !in alreadyDone }
+                    .filter { it.idx !in alreadyDone && !IptvDeadServersCache.isDead("vegeta", it.idx) }
                     .sortedBy { if (it.isFr) 0 else 1 }
-                    .take(2)
-                if (nextPair.isEmpty()) return@launch
+                    .take(5)
+                if (nextPair.isEmpty()) {
+                    Log.d(TAG, "On-demand backfill ($reason): no servers left to scan (alreadyDone=${alreadyDone.size}, dead=${IptvDeadServersCache.deadCount("vegeta")})")
+                    return@launch
+                }
                 Log.d(TAG, "On-demand backfill ($reason): scanning ${nextPair.map { it.idx }}")
                 coroutineScope {
                     nextPair.map { server ->
@@ -1117,9 +1137,20 @@ object VegetaTvProvider : Provider, IptvProvider {
                             try {
                                 var added = ingestServerChannelsViaXtreamM3u(server.idx, server.xtreamUrl, server.isFr)
                                 if (added == 0) added = ingestServerChannelsViaStalker(server.idx, server.baseUrl)
-                                if (added > 0) frServerIndices.add(server.idx)
+                                if (added > 0) {
+                                    frServerIndices.add(server.idx)
+                                    // Au cas où un serveur ressuscite : décache
+                                    IptvDeadServersCache.unmarkDead("vegeta", server.idx)
+                                } else {
+                                    // 2026-05-08 : marquer mort si les 2 méthodes (Xtream m3u
+                                    // ET Stalker) ont échoué → skip pendant 24h. Évite de
+                                    // gaspiller 8-10s à chaque backfill sur des serveurs morts.
+                                    IptvDeadServersCache.markDead("vegeta", server.idx)
+                                    Log.d(TAG, "Server[${server.idx}] marked dead (24h cache)")
+                                }
                             } catch (e: Exception) {
                                 Log.d(TAG, "On-demand server[${server.idx}]: ${e.message}")
+                                IptvDeadServersCache.markDead("vegeta", server.idx)
                             }
                         }
                     }.awaitAll()
@@ -1260,9 +1291,16 @@ object VegetaTvProvider : Provider, IptvProvider {
 
         val categoryOrder = listOf("Généraliste", "Cinéma", "Info", "Sport", "Musique", "Documentaire", "Enfants")
         val sections = mutableListOf<Category>()
+        // 2026-05-08 : helper inline pour filtrer une chaîne bannie. Cross-provider
+        // via IptvBannedChannels.normalize() qui strip "vegeta::".
+        val isChannelBanned: (String) -> Boolean = { id ->
+            com.streamflixreborn.streamflix.fragments.player.settings
+                .IptvBannedChannels.isBanned(id)
+        }
         for (catName in categoryOrder) {
             val items = curatedChannels
                 .filter { it.category == catName }
+                .filter { !isChannelBanned("vegeta::${it.key}") }
                 .map { c ->
                     TvShow(
                         id = "vegeta::${c.key}",
@@ -1287,6 +1325,7 @@ object VegetaTvProvider : Provider, IptvProvider {
                 .map { (key, info) -> Triple(key, info.displayName, info.logo) }
         }
         val extraItems = registrySnapshot
+            .filter { !isChannelBanned("vegeta::${it.first}") }
             .sortedBy { it.second.lowercase() }
             .take(OTHER_CHANNELS_HOME_LIMIT)
             .map { (key, displayName, logo) ->
@@ -1302,43 +1341,59 @@ object VegetaTvProvider : Provider, IptvProvider {
             sections.add(Category(name = "Autres chaînes", list = extraItems))
         }
 
-        // ─── "Favoris" — user-favorited channels (long-press a channel to add).
-        // Always last so it sits just before the bottom Paramètres tab.
-        val favoriteIds = com.streamflixreborn.streamflix.utils.IptvFavoritesStore.getFavorites(name)
-        if (favoriteIds.isNotEmpty()) {
-            val curatedByKey = curatedChannels.associateBy { "vegeta::${it.key}" }
-            val registryByKey = synchronized(registryLock) {
-                channelRegistry.entries.associate { (k, info) -> "vegeta::$k" to Triple(k, info.displayName, info.logo) }
-            }
-            val favItems = mutableListOf<TvShow>()
-            for (favId in favoriteIds) {
-                val curated = curatedByKey[favId]
-                if (curated != null) {
-                    favItems += TvShow(
-                        id = favId,
-                        title = curated.displayName,
-                        poster = logoUrlFor(curated.displayName),
-                        banner = logoUrlFor(curated.displayName),
-                        providerName = name,
-                    )
-                    continue
+        // 2026-05-08 (pivot) : section "★ Favoris" RETIRÉE de Vegeta.
+        // Favoris UNIQUEMENT dans TV Hub (option 1).
+
+        // 2026-05-08 : section "✕ Chaînes bannies" EN BAS du home.
+        // L'user veut un dossier fixe pour ranger les chaînes bannies (au lieu
+        // de les cacher). Construit à partir du curated + registry pour ne pas
+        // perdre une chaîne bannie qui ne serait que dans le registry.
+        try {
+            val bannedKeys = com.streamflixreborn.streamflix.fragments.player.settings
+                .IptvBannedChannels.getAllBannedKeys()
+            if (bannedKeys.isNotEmpty()) {
+                val bannedItems = mutableListOf<TvShow>()
+                val seen = mutableSetOf<String>()
+                // Curated d'abord (logos plus propres)
+                for (c in curatedChannels) {
+                    val id = "vegeta::${c.key}"
+                    if (com.streamflixreborn.streamflix.fragments.player.settings
+                            .IptvBannedChannels.isBanned(id)) {
+                        if (seen.add(id)) {
+                            bannedItems += TvShow(
+                                id = id,
+                                title = c.displayName,
+                                poster = logoUrlFor(c.displayName),
+                                banner = logoUrlFor(c.displayName),
+                                providerName = name,
+                            )
+                        }
+                    }
                 }
-                val reg = registryByKey[favId]
-                if (reg != null) {
-                    val (_, displayName, logo) = reg
-                    favItems += TvShow(
-                        id = favId,
-                        title = displayName,
-                        poster = logo.ifEmpty { logoUrlFor(displayName) },
-                        banner = logo.ifEmpty { logoUrlFor(displayName) },
-                        providerName = name,
-                    )
+                // Puis registry (chaînes non-curated)
+                val registrySnap2 = synchronized(registryLock) {
+                    channelRegistry.entries.map { (k, info) -> Triple(k, info.displayName, info.logo) }
+                }
+                for ((key, displayName, logo) in registrySnap2) {
+                    val id = "vegeta::$key"
+                    if (com.streamflixreborn.streamflix.fragments.player.settings
+                            .IptvBannedChannels.isBanned(id)) {
+                        if (seen.add(id)) {
+                            bannedItems += TvShow(
+                                id = id,
+                                title = displayName,
+                                poster = logo.ifEmpty { logoUrlFor(displayName) },
+                                banner = logo.ifEmpty { logoUrlFor(displayName) },
+                                providerName = name,
+                            )
+                        }
+                    }
+                }
+                if (bannedItems.isNotEmpty()) {
+                    sections.add(Category(name = "✕ Chaînes bannies", list = bannedItems))
                 }
             }
-            if (favItems.isNotEmpty()) {
-                sections.add(Category(name = "Favoris", list = favItems))
-            }
-        }
+        } catch (_: Throwable) { }
 
         sections
     } catch (e: Exception) {
@@ -1508,15 +1563,16 @@ object VegetaTvProvider : Provider, IptvProvider {
 
             Log.d(TAG, "getServers '$key': ${servers.size} servers (total in registry: ${info.streams.size})")
 
-            // 2026-05-05 v2 : seuil élevé de 2 → 10 et on retire la condition
-            // `!phase3Done` — l'utilisateur voulait voir plus de variants
-            // (server #39, #43 → seulement 2 alors que Vegeta a 71 serveurs).
-            // Ça scanne 2 nouveaux serveurs à chaque getServers tant qu'on
-            // n'a pas atteint 10 variants. Le job s'auto-rate-limit via le
-            // check `ondemandJob?.isActive == true` au début de
-            // triggerOnDemandBackfill, donc pas de spam.
-            if (servers.size < 10) {
-                triggerOnDemandBackfill("backfill $key (${servers.size}/10)")
+            // 2026-05-08 : SEUIL CIBLE = 5 items VISIBLES (non-bannis) dans le
+            // picker. Les bannis (grisés) ne comptent PAS dans le total.
+            // Si on tombe sous 5 → backfill auto pour compenser. User reste
+            // toujours avec 5 choix réels.
+            // Note : channelKey côté UI = args.id (= `id` ici), pas la key normalisée.
+            val nonBannedCount = servers.count { srv ->
+                !com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedServers.isBanned(id, srv.id)
+            }
+            if (nonBannedCount < 5) {
+                triggerOnDemandBackfill("backfill $key ($nonBannedCount non-bannis / 5 cible)")
             }
 
             currentEmitJob?.cancel()
@@ -1534,8 +1590,13 @@ object VegetaTvProvider : Provider, IptvProvider {
                     _additionalServers.emit(server)
                     emitted++
                 }
-                // Late watcher: if backfill completes after this, emit new streams.
-                spawnLateRegistryWatcher(key)
+                // 2026-05-08 : late watcher RÉACTIVÉ quand backfill nécessaire.
+                // Si on a moins de 5 non-bannis, le backfill va trouver des
+                // nouveaux variants → le watcher les émet au picker en live.
+                // Pas de spam quand le user a déjà ses 5+ : sticky respecté.
+                if (nonBannedCount < 5) {
+                    spawnLateRegistryWatcher(key)
+                }
             }
 
             servers.ifEmpty { emptyList() }

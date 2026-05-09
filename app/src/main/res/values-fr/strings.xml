@@ -26,7 +26,7 @@
     <string name="app_layout_apply">Appliquer</string>
 
     <string name="providers_all_languages">Toutes les langues</string>
-    <string name="providers_choose_title">Choisir un fournisseur</string>
+    <string name="providers_choose_title">Fournisseur</string>
 
     <string name="main_menu_change_provider">Changer de fournisseur</string>
     <string name="main_menu_search">Rechercher</string>

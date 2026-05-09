@@ -59,6 +59,13 @@ class ProvidersMobileFragment : Fragment() {
             findNavController().navigate(R.id.downloads)
         }
 
+        // 2026-05-08 : raccourci Paramètres depuis le Home Fournisseur
+        // (utile pour accéder rapidement à l'onglet "Extracteurs", au choix
+        // du provider par défaut, etc. sans passer par le menu hamburger).
+        binding.ivSettings.setOnClickListener {
+            findNavController().navigate(R.id.settings)
+        }
+
         // 2026-05-05 : contrôle parental — bouton cadenas
         binding.ivParentalLock.setOnClickListener {
             com.streamflixreborn.streamflix.ui.PinDialog.showAuth(
