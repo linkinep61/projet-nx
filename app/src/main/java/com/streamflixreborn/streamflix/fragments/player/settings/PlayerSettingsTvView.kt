@@ -828,14 +828,40 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     if (isBanned) 0xFFFF4444.toInt() else 0xFF808080.toInt()
                 )
                 binding.ivSettingBan.setOnClickListener {
+                    val nowBanned = !isBanned
                     if (isBanned) {
                         IptvBannedServers.unban(srvChannelKey, item.id)
                     } else {
                         IptvBannedServers.recordBan(srvChannelKey, item.id)
                     }
+                    android.util.Log.d("FavoriteDebug",
+                        "Server ban click: channelKey='$srvChannelKey' id='${item.id}' nowBanned=$nowBanned")
+                    // 2026-05-09 v17 : update visuel instantané
+                    binding.root.alpha = if (nowBanned) 0.4f else 1.0f
+                    binding.ivSettingBan.imageTintList = android.content.res.ColorStateList.valueOf(
+                        if (nowBanned) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                    )
                     settingsView.refreshServerList()
                     // 2026-05-08 : trigger refetch pour backfill compensation
                     settingsView.onServerBanned?.invoke(item)
+                }
+                // 2026-05-09 v18 : long-press OK = menu contextuel Favori/Bannir
+                // (fallback fiable, indépendant du focus chain D-pad RIGHT).
+                binding.root.setOnLongClickListener {
+                    val ctx = binding.root.context
+                    val opts = arrayOf(
+                        "♥ " + (if (binding.ivSettingFavorite.tag == "fav") "Retirer du favori" else "Marquer favori"),
+                        "✕ Bannir / Débannir ce serveur"
+                    )
+                    androidx.appcompat.app.AlertDialog.Builder(ctx)
+                        .setTitle("Action sur ce serveur")
+                        .setItems(opts) { _, which ->
+                            when (which) {
+                                0 -> binding.ivSettingFavorite.performClick()
+                                1 -> binding.ivSettingBan.performClick()
+                            }
+                        }.show()
+                    true
                 }
 
                 // Cœur (♥) — toggle favori (max 5/chaîne)
@@ -875,6 +901,8 @@ class PlayerSettingsTvView @JvmOverloads constructor(
 
             // IPTV-specific buttons: favorite (★) and ban (✕) — for ChannelVariant items
             if (item is Settings.ChannelVariant && item.isIptv) {
+                android.util.Log.d("FavoriteDebug",
+                    "Variant bind: id='${item.id}' channelKey='${item.channelKey}' name='${item.name}' isFav=${item.isFavorite}")
                 // Favorite button
                 binding.ivSettingFavorite.visibility = View.VISIBLE
                 binding.ivSettingFavorite.setImageResource(
@@ -891,7 +919,16 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     }
                     val nowFav = IptvFavorites.toggleFavorite(item.channelKey, item.id)
                     item.isFavorite = nowFav
-                    // 2026-05-08 : N favoris autorisés (max 20 store-side, pas 1 forcé).
+                    android.util.Log.d("FavoriteDebug",
+                        "Variant heart click: channelKey='${item.channelKey}' id='${item.id}' nowFav=$nowFav")
+                    // 2026-05-09 v17 : update visuel instantané
+                    binding.ivSettingFavorite.setImageResource(
+                        if (nowFav) R.drawable.ic_favorite_enable
+                        else R.drawable.ic_favorite_disable
+                    )
+                    binding.ivSettingFavorite.imageTintList = android.content.res.ColorStateList.valueOf(
+                        if (nowFav) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                    )
                     settingsView.onChannelVariantFavoriteToggled?.invoke(item)
                     settingsView.refreshChannelVariantList()
                 }
@@ -904,13 +941,39 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     if (variantBanned) 0xFFFF4444.toInt() else 0xFF808080.toInt()
                 )
                 binding.ivSettingBan.setOnClickListener {
+                    val nowBanned = !variantBanned
                     if (variantBanned) {
                         IptvBannedServers.unban(item.channelKey, item.id)
                     } else {
                         IptvBannedServers.recordBan(item.channelKey, item.id)
                     }
+                    android.util.Log.d("FavoriteDebug",
+                        "Variant ban click: channelKey='${item.channelKey}' id='${item.id}' nowBanned=$nowBanned")
+                    // 2026-05-09 v17 : update visuel instantané
+                    binding.root.alpha = if (nowBanned) 0.4f else 1.0f
+                    binding.ivSettingBan.imageTintList = android.content.res.ColorStateList.valueOf(
+                        if (nowBanned) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                    )
                     settingsView.onChannelVariantBanned?.invoke(item)
                     settingsView.refreshChannelVariantList()
+                }
+                // 2026-05-09 v18 : long-press OK = menu contextuel Favori/Bannir
+                // (fallback fiable, indépendant du focus chain D-pad RIGHT).
+                binding.root.setOnLongClickListener {
+                    val ctx = binding.root.context
+                    val opts = arrayOf(
+                        "♥ " + (if (binding.ivSettingFavorite.tag == "fav") "Retirer du favori" else "Marquer favori"),
+                        "✕ Bannir / Débannir ce serveur"
+                    )
+                    androidx.appcompat.app.AlertDialog.Builder(ctx)
+                        .setTitle("Action sur ce serveur")
+                        .setItems(opts) { _, which ->
+                            when (which) {
+                                0 -> binding.ivSettingFavorite.performClick()
+                                1 -> binding.ivSettingBan.performClick()
+                            }
+                        }.show()
+                    true
                 }
 
                 // D-pad: right goes to favorite, then ban
