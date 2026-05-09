@@ -1444,12 +1444,18 @@ class PlayerTvFragment : Fragment() {
          */
         private fun setupChannelZapping() {
             val provider = UserPreferences.currentProvider
-            val isIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") || args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+            // 2026-05-09 : ajout livehub::/sportlive::/match::
+            val isIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                args.id.startsWith("match::")
             if (!isIptv) return
 
             val orderedIds = when (provider) {
                 is WiTvProvider -> provider.getOrderedChannelIds()
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getOrderedChannelIds()
+                is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getOrderedChannelIds()
                 else -> return
             }
             if (orderedIds.size < 2) return
@@ -1488,11 +1494,16 @@ class PlayerTvFragment : Fragment() {
             val channelName = when (provider) {
                 is WiTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(channelId)
+                is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(channelId)
+                is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(channelId)
                 else -> null
-            } ?: channelId.removePrefix("ch::").removePrefix("sport::").removePrefix("ola::")
+            } ?: channelId.removePrefix("ch::").removePrefix("sport::")
+                .removePrefix("ola::").removePrefix("vegeta::").removePrefix("livehub::")
             val channelLogo = when (provider) {
                 is WiTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(channelId)
+                is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(channelId)
+                is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(channelId)
                 else -> null
             }
 
