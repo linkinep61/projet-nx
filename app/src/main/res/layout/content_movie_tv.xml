@@ -121,52 +121,20 @@
         app:layout_goneMarginStart="70dp"
         tools:text="Genres" />
 
-    <TextView
-        android:id="@+id/tv_movie_overview_label"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="40dp"
-        android:layout_marginTop="20dp"
-        android:layout_marginEnd="70dp"
-        android:text="@string/movie_synopsis_label"
-        android:textColor="#FFFFFF"
-        android:textSize="20sp"
-        android:textStyle="bold"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toEndOf="@id/iv_movie_poster"
-        app:layout_constraintTop_toBottomOf="@id/tv_movie_genres"
-        app:layout_goneMarginStart="70dp" />
-
-    <TextView
-        android:id="@+id/tv_movie_overview"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="40dp"
-        android:layout_marginTop="8dp"
-        android:layout_marginEnd="70dp"
-        android:ellipsize="end"
-        android:maxLines="10"
-        android:textColor="#C0C0C0"
-        android:textSize="16sp"
-        android:lineSpacingExtra="4dp"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toEndOf="@id/iv_movie_poster"
-        app:layout_constraintTop_toBottomOf="@id/tv_movie_overview_label"
-        app:layout_goneMarginStart="70dp"
-        tools:text="Overview" />
-
+    <!-- 2026-05-09 v18 : boutons remontés AVANT le synopsis pour qu'ils soient
+         toujours visibles sur TV peu importe la longueur du synopsis. -->
     <TextView
         android:id="@+id/btn_movie_watch_now"
         style="@style/AppTheme.Widget.Tv.Button"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginStart="40dp"
-        android:layout_marginTop="30dp"
+        android:layout_marginTop="20dp"
         android:focusable="true"
         android:focusableInTouchMode="true"
         android:text="@string/movie_watch_now"
         app:layout_constraintStart_toEndOf="@id/iv_movie_poster"
-        app:layout_constraintTop_toBottomOf="@id/tv_movie_overview"
+        app:layout_constraintTop_toBottomOf="@id/tv_movie_genres"
         app:layout_goneMarginStart="70dp" />
 
     <ProgressBar
@@ -190,12 +158,12 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginStart="25dp"
-        android:layout_marginTop="30dp"
+        android:layout_marginTop="20dp"
         android:focusable="true"
         android:focusableInTouchMode="true"
         android:text="@string/movie_trailer"
         app:layout_constraintStart_toEndOf="@id/btn_movie_watch_now"
-        app:layout_constraintTop_toBottomOf="@id/tv_movie_overview" />
+        app:layout_constraintTop_toBottomOf="@id/tv_movie_genres" />
 
     <ImageView
         android:id="@+id/btn_movie_favorite"
@@ -203,7 +171,7 @@
         android:layout_width="wrap_content"
         android:layout_height="0dp"
         android:layout_marginStart="20dp"
-        android:layout_marginTop="30dp"
+        android:layout_marginTop="20dp"
         android:focusable="true"
         android:focusableInTouchMode="true"
         android:paddingStart="10dp"
@@ -211,7 +179,48 @@
         android:src="@drawable/ic_favorite_disable"
         android:tint="@drawable/color_button_text"
         app:layout_constraintStart_toEndOf="@id/btn_movie_trailer"
-        app:layout_constraintTop_toBottomOf="@id/tv_movie_overview"
+        app:layout_constraintTop_toBottomOf="@id/tv_movie_genres"
+        app:layout_constraintBottom_toBottomOf="@id/btn_movie_trailer"
         tools:ignore="ContentDescription,UseAppTint" />
+
+    <!-- Barrier pour que le synopsis soit en dessous de TOUS les boutons + progressBar -->
+    <androidx.constraintlayout.widget.Barrier
+        android:id="@+id/barrier_buttons_bottom"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        app:barrierDirection="bottom"
+        app:constraint_referenced_ids="pb_movie_progress,btn_movie_trailer,btn_movie_favorite" />
+
+    <TextView
+        android:id="@+id/tv_movie_overview_label"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="40dp"
+        android:layout_marginTop="20dp"
+        android:layout_marginEnd="70dp"
+        android:text="@string/movie_synopsis_label"
+        android:textColor="#FFFFFF"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toEndOf="@id/iv_movie_poster"
+        app:layout_constraintTop_toBottomOf="@id/barrier_buttons_bottom"
+        app:layout_goneMarginStart="70dp" />
+
+    <TextView
+        android:id="@+id/tv_movie_overview"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="40dp"
+        android:layout_marginTop="8dp"
+        android:layout_marginEnd="70dp"
+        android:textColor="#C0C0C0"
+        android:textSize="16sp"
+        android:lineSpacingExtra="4dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toEndOf="@id/iv_movie_poster"
+        app:layout_constraintTop_toBottomOf="@id/tv_movie_overview_label"
+        app:layout_goneMarginStart="70dp"
+        tools:text="Overview" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

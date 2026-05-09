@@ -488,15 +488,18 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                         if (isBanned) 0xFFFF4444.toInt() else 0xFF808080.toInt()
                     )
                     binding.ivSettingBan.setOnClickListener {
+                        val nowBanned = !isBanned
                         if (isBanned) {
                             IptvBannedServers.unban(srvChannelKey, item.id)
                         } else {
                             IptvBannedServers.recordBan(srvChannelKey, item.id)
                         }
+                        // 2026-05-09 v18 : update visuel instantané
+                        binding.root.alpha = if (nowBanned) 0.4f else 1.0f
+                        binding.ivSettingBan.imageTintList = android.content.res.ColorStateList.valueOf(
+                            if (nowBanned) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                        )
                         settingsView.refreshServerList()
-                        // 2026-05-08 : trigger refetch des servers pour que le
-                        // backfill auto charge un nouveau server à la place du banni
-                        // (compense → maintien 5 non-bannis cible).
                         settingsView.onServerBanned?.invoke(item)
                     }
 
@@ -511,10 +514,16 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                         if (isFav) 0xFFFF4444.toInt() else 0xFF808080.toInt()
                     )
                     binding.ivSettingFavorite.setOnClickListener {
-                        IptvFavorites.toggleFavorite(srvChannelKey, item.id)
+                        val nowFav = IptvFavorites.toggleFavorite(srvChannelKey, item.id)
+                        // 2026-05-09 v18 : update visuel instantané
+                        binding.ivSettingFavorite.setImageResource(
+                            if (nowFav) R.drawable.ic_favorite_enable
+                            else R.drawable.ic_favorite_disable
+                        )
+                        binding.ivSettingFavorite.imageTintList = android.content.res.ColorStateList.valueOf(
+                            if (nowFav) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                        )
                         settingsView.refreshServerList()
-                        // 2026-05-08 : trigger refetch pour réordonner la liste
-                        // (favoris en tête au prochain setMediaServers).
                         settingsView.onServerFavoriteToggled?.invoke(item)
                     }
                 } else {
@@ -543,8 +552,14 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                     }
                     val nowFav = IptvFavorites.toggleFavorite(item.channelKey, item.id)
                     item.isFavorite = nowFav
-                    // 2026-05-08 : NE PAS unfavorite les autres — max 20 favoris
-                    // gérés en interne par le store (LRU si dépassement).
+                    // 2026-05-09 v18 : update visuel instantané
+                    binding.ivSettingFavorite.setImageResource(
+                        if (nowFav) R.drawable.ic_favorite_enable
+                        else R.drawable.ic_favorite_disable
+                    )
+                    binding.ivSettingFavorite.imageTintList = android.content.res.ColorStateList.valueOf(
+                        if (nowFav) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                    )
                     settingsView.onChannelVariantFavoriteToggled?.invoke(item)
                     settingsView.refreshChannelVariantList()
                 }
@@ -557,11 +572,17 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                     if (variantBanned) 0xFFFF4444.toInt() else 0xFF808080.toInt()
                 )
                 binding.ivSettingBan.setOnClickListener {
+                    val nowBanned = !variantBanned
                     if (variantBanned) {
                         IptvBannedServers.unban(item.channelKey, item.id)
                     } else {
                         IptvBannedServers.recordBan(item.channelKey, item.id)
                     }
+                    // 2026-05-09 v18 : update visuel instantané
+                    binding.root.alpha = if (nowBanned) 0.4f else 1.0f
+                    binding.ivSettingBan.imageTintList = android.content.res.ColorStateList.valueOf(
+                        if (nowBanned) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                    )
                     settingsView.onChannelVariantBanned?.invoke(item)
                     settingsView.refreshChannelVariantList()
                 }
