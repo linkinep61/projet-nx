@@ -53,6 +53,10 @@ object MiniPlayerController {
     private const val BUFFERING_WATCHDOG_MS = 10_000L
 
     private var player: ExoPlayer? = null
+    // Promoted to field so we can apply per-channel headers (Referer/Origin)
+    // before each play. Necessary for sources like meritend.net that 403
+    // sans Referer correct.
+    private var httpDataSourceFactory: DefaultHttpDataSource.Factory? = null
     private var loadJob: Job? = null
     private var retryJob: Job? = null
     private var progressiveServerJob: Job? = null
@@ -197,6 +201,7 @@ object MiniPlayerController {
             .setConnectTimeoutMs(15_000)
             .setReadTimeoutMs(15_000)
             .setAllowCrossProtocolRedirects(true)
+        httpDataSourceFactory = httpDataSource
 
         val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSource)
 
@@ -270,9 +275,14 @@ object MiniPlayerController {
                 )
 
                 // Get servers (initial batch: OTF, WiTV, Vavoo)
-                val servers = withContext(Dispatchers.IO) {
+                val rawServers = withContext(Dispatchers.IO) {
                     provider.getServers(channelId, videoType)
                 }
+                // 2026-05-09 : tri par fiabilité observée — les variantes
+                // qui ont récemment foiré (Vegeta server X down, OTF cert
+                // expiré, etc.) tombent au fond. La 1ère tentative tape
+                // donc le server le plus probable de marcher.
+                val servers = ExtractorRanker.rankServers(rawServers)
 
                 // Start collecting progressive OLA TV servers (variants) — works for any
                 // IPTV provider since IptvProvider declares additionalServersFlow.
@@ -438,6 +448,26 @@ object MiniPlayerController {
 
             // Play
             val p = player ?: return
+            // Apply per-video request headers (Referer/Origin/UA) BEFORE prepare
+            // so sources like meritend.net (403 sans bon Referer + UA Android)
+            // reçoivent les bonnes credentials. Sans ça, ExoPlayer envoie juste
+            // son UA par défaut (Windows) qui ne matche pas le UA WebView Android
+            // utilisé pour générer le token → fingerprint mismatch → 403.
+            val perVideoHeaders = video.headers ?: emptyMap()
+            // CRITIQUE : User-Agent doit être appliqué via setUserAgent (setDefault-
+            // RequestProperties l'ignore pour ce header spécifique dans Media3).
+            val perVideoUA = perVideoHeaders["User-Agent"]
+            if (perVideoUA != null) {
+                httpDataSourceFactory?.setUserAgent(perVideoUA)
+            } else {
+                httpDataSourceFactory?.setUserAgent(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                )
+            }
+            // Headers SANS User-Agent (déjà géré ci-dessus)
+            httpDataSourceFactory?.setDefaultRequestProperties(
+                perVideoHeaders.filterKeys { it != "User-Agent" }
+            )
             val mediaItem = MediaItem.Builder()
                 .setUri(video.source.toUri())
                 .setMimeType(video.type)
@@ -557,6 +587,16 @@ object MiniPlayerController {
     /** Clear the transition flag (called by fullscreen player after attach). */
     fun clearTransitionFlag() {
         transitioningToFullscreen = false
+    }
+
+    /** 2026-05-08 : exposer le server actuellement joué par le mini-player.
+     *  Utilisé par PlayerMobileFragment quand on passe mini → fullscreen pour
+     *  REPRENDRE EXACTEMENT le même server (sinon le fullscreen reprend le 1er
+     *  de la liste, qui peut être un mauvais variant — ex: Arte allemand sur
+     *  Vegeta[39] alors que le mini jouait Vegeta[43] HD français).
+     *  Returns null si rien ne joue. */
+    fun currentMiniServer(): Video.Server? {
+        return availableServers.getOrNull(currentServerIndex)
     }
 
     fun stopAsync() {

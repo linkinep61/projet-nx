@@ -394,6 +394,12 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             true
         }
 
+        findPreference<Preference>("p_settings_extractor_stats")?.setOnPreferenceClickListener {
+            androidx.navigation.fragment.NavHostFragment.findNavController(this)
+                .navigate(com.streamflixreborn.streamflix.R.id.fragment_extractor_stats_tv)
+            true
+        }
+
         findPreference<SwitchPreference>("AUTOPLAY")?.isChecked = UserPreferences.autoplay
         findPreference<SwitchPreference>("AUTOPLAY")?.setOnPreferenceChangeListener { _, newValue ->
             UserPreferences.autoplay = newValue as Boolean

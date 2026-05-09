@@ -38,7 +38,12 @@ open class VidMoLyExtractor : Extractor() {
             link.replace(Regex("vidmoly\\.(to|me|net)"), "vidmoly.biz")
         else link
 
-        val hlsUrl = try { extractByIntercepting(target, timeoutMs = 45_000L) }
+        // 2026-05-09 v2 : timeout 45s → 12s → 25s.
+        //   - 45s = laissait des hangs visibles user
+        //   - 12s = trop court, certains CF challenges + WebView init prennent
+        //     15-20s sur device modeste
+        //   - 25s = compromis OK pour CF challenge (5-15s) + un peu de marge
+        val hlsUrl = try { extractByIntercepting(target, timeoutMs = 25_000L) }
             catch (e: Exception) {
                 throw Exception("VidMoLy: extraction failed for $link (${e.message})")
             }

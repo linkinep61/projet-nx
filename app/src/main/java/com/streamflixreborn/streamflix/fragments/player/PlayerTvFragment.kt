@@ -76,6 +76,7 @@ import com.bumptech.glide.Glide
 import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
 import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.fragments.player.settings.IptvFavorites
+import com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedServers
 import com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsView
 import com.streamflixreborn.streamflix.database.AppDatabase
 import com.streamflixreborn.streamflix.databinding.ContentExoControllerTvBinding
@@ -530,6 +531,17 @@ class PlayerTvFragment : Fragment() {
                             return@collect
                         }
 
+                        // 2026-05-08 : pose la channelKey IPTV partagée pour le picker.
+                        val isIptvCtxTv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                            args.id.startsWith("movixlivetv::") ||
+                            args.id.startsWith("livehub::") ||
+                            args.id.startsWith("sportlive::") ||
+                            args.id.startsWith("match::")
+                        PlayerSettingsView.Settings.Server.currentIptvChannelKey =
+                            if (isIptvCtxTv) args.id else null
+
                         player.playlistMetadata = MediaMetadata.Builder()
                             .setTitle(state.toString())
                             .setMediaServers(state.servers.map {
@@ -576,7 +588,20 @@ class PlayerTvFragment : Fragment() {
                         PlayerSettingsView.Settings.ChannelVariant.list.clear()
                         binding.settings.refreshChannelVariantList()
 
-                        viewModel.getVideo(state.servers.first())
+                        // 2026-05-08 : favoris multi-server (max 5) + skip bannis
+                        val orderedFavIds = IptvFavorites.getFavoritesForChannel(args.id)
+                        val favServer = orderedFavIds.firstNotNullOfOrNull { favId ->
+                            state.servers.firstOrNull { it.id == favId }
+                        }
+                        // Skip les bannis — l'user ne veut pas qu'un server grisé soit joué
+                        val firstNonBanned = state.servers.firstOrNull { srv ->
+                            !IptvBannedServers.isBanned(args.id, srv.id)
+                        }
+                        val initialServer = favServer ?: firstNonBanned ?: state.servers.first()
+                        if (favServer != null) {
+                            Log.d("PlayerTvFragment", "Favori prioritaire : ${favServer.name} (${orderedFavIds.size}/${IptvFavorites.MAX_FAVORITES_PER_CHANNEL})")
+                        }
+                        viewModel.getVideo(initialServer)
 
                     }
                         is PlayerViewModel.State.FailedLoadingServers -> {
@@ -1255,7 +1280,11 @@ class PlayerTvFragment : Fragment() {
             val btnNext = binding.pvPlayer.controller.binding.btnCustomNext
 
             // IPTV channel navigation: prev/next channel buttons
-            val isIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") || args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+            // 2026-05-08 : ajout livehub:: pour TV Hub.
+            val isIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                args.id.startsWith("livehub::")
             if (isIptvChannel) {
                 setupChannelNavigationButtons(btnPrevious, btnNext)
                 return
@@ -1367,6 +1396,14 @@ class PlayerTvFragment : Fragment() {
                     nextId = provider.getNextChannelId(args.id)
                 }
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> {
+                    prevId = provider.getPreviousChannelId(args.id)
+                    nextId = provider.getNextChannelId(args.id)
+                }
+                is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> {
+                    prevId = provider.getPreviousChannelId(args.id)
+                    nextId = provider.getNextChannelId(args.id)
+                }
+                is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> {
                     prevId = provider.getPreviousChannelId(args.id)
                     nextId = provider.getNextChannelId(args.id)
                 }
@@ -1502,11 +1539,15 @@ class PlayerTvFragment : Fragment() {
             val channelName = when (provider) {
                 is WiTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(channelId)
+                is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(channelId)
+                is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(channelId)
                 else -> null
             } ?: channelId
             val channelPoster = when (provider) {
                 is WiTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(channelId)
+                is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(channelId)
+                is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(channelId)
                 else -> null
             }
 
@@ -1958,7 +1999,8 @@ class PlayerTvFragment : Fragment() {
                         if (playbackState == Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
                         Log.w("PlayerTvFragment", "Live IPTV stuck in $playbackState — re-preparing")
                         try {
-                            player.seekToDefaultPosition()
+                            // 2026-05-08 : pas de seekToDefaultPosition (flush buffer
+                            // → charge/stop/recharge en boucle). prepare() seul suffit.
                             player.prepare()
                             player.playWhenReady = true
                         } catch (e: Exception) {
@@ -2120,6 +2162,15 @@ class PlayerTvFragment : Fragment() {
                             || errorCauseMsg.contains("WebView fetch timed out")
                     if (isConnectionTimeout) {
                         val server = currentServer ?: return
+                        // 2026-05-08 : sticky absolu IPTV après 1er READY.
+                        val isLiveIptvNow = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                        if (isLiveIptvNow && iptvCurrentStreamHasWorked) {
+                            Log.w("PlayerNetwork", "Connection timeout IPTV sticky (already worked) → re-prepare same server")
+                            try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
+                            return
+                        }
                         pruneBrokenVariant(server)
                         val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
                         if (nextServer != null) {
@@ -2146,7 +2197,11 @@ class PlayerTvFragment : Fragment() {
                         iptvRetryCount++
                         Log.w("PlayerTvFragment", "IPTV retry on ${server.name} ($errCodeName) — retry #$iptvRetryCount, sticky (never auto-switch)")
                         try {
-                            player.seekToDefaultPosition()
+                            // 2026-05-08 : NE PAS appeler seekToDefaultPosition() ici.
+                            // Ça flush le buffer accumulé → user voit "ça charge, ça
+                            // stoppe, ça recharge" en boucle. Pour HLS live, prepare()
+                            // seul re-établit la connexion en gardant le buffer en cours
+                            // dont on a besoin pour la reprise sans freeze.
                             player.prepare()
                             player.playWhenReady = true
                         } catch (e: Exception) {
@@ -2572,15 +2627,22 @@ class PlayerTvFragment : Fragment() {
 
         private fun buildPlayer(extraBuffering: Boolean): ExoPlayer {
             val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") || args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
-            // Per user request: precharge as much as possible so the live stream
-            // never cuts. Bigger buffer windows + longer rebuffer threshold.
+            // 2026-05-08 : compromis IPTV TV — assez de buffer pour absorber les
+            // hiccups CDN/FAI, mais pas excessif (live HLS rarely DVR donc max
+            // ~60s utile en pratique). RAM TV plus fournie que mobile mais on
+            // évite quand même la dépense inutile.
+            //   minBuffer 30s : seuil rebuffer normal, ne freeze pas dès petit hoquet
+            //   maxBuffer 180s : 3 min de marge, suffisant pour gros incident
+            //   playback start 2s : démarrage rapide
+            //   rebuffer threshold 5s : reprise rapide après freeze (pas 10s
+            //     qui ferait freeze visible)
             val loadControl = DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
-                    if (isLiveIptv) 30_000 else 30_000,      // minBuffer: 30s live (was 5s)
-                    if (isLiveIptv) 120_000                  // maxBuffer: 120s live (was 30s)
+                    if (isLiveIptv) 30_000 else 30_000,      // minBuffer
+                    if (isLiveIptv) 180_000                  // maxBuffer: 3 min live
                     else if (extraBuffering) 300_000 else 120_000,
-                    if (isLiveIptv) 2_000 else 1_500,        // playback start: 2s buffered (was 500ms)
-                    if (isLiveIptv) 5_000 else 3_000         // rebuffer threshold: 5s (was 1.5s)
+                    if (isLiveIptv) 2_000 else 1_500,        // playback start
+                    if (isLiveIptv) 5_000 else 3_000         // rebuffer threshold (reprise)
                 )
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build()

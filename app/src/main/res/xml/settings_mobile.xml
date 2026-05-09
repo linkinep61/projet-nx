@@ -422,6 +422,12 @@
             android:title="@string/settings_telegram"
             app:iconSpaceReserved="false" />
 
+        <Preference
+            android:key="p_settings_extractor_stats"
+            android:title="Extracteurs"
+            android:summary="Liste des extracteurs ayant échoué (rapport bug)"
+            app:iconSpaceReserved="false" />
+
         <SwitchPreference
             android:key="UPDATE_CHECK_ENABLED"
             android:title="@string/settings_update_check"

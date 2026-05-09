@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    2026-05-08 — Wrapper layout pour SettingsMobileFragment.
+
+    PreferenceFragmentCompat ne rend pas de toolbar par défaut. Cette UI hôte
+    ajoute une Toolbar avec une flèche back en haut à gauche, puis laisse le
+    fragment populer le FrameLayout en dessous via son propre onCreateView.
+
+    La Toolbar utilise androidx.appcompat (et NON MaterialToolbar) car le
+    SettingsFragment hérite d'un thème PreferenceThemeOverlay qui ne déclare
+    pas tous les attributs Material — un MaterialToolbar plante au moment de
+    l'inflate avec "Failed to resolve attribute at index N".
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <androidx.appcompat.widget.Toolbar
+        android:id="@+id/toolbar_settings_wrapper"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        android:background="?android:attr/colorPrimary"
+        app:title="Paramètres"
+        app:titleTextColor="#FFFFFF"
+        app:navigationIcon="@drawable/ic_back_white" />
+
+    <!-- Le PreferenceFragmentCompat ajoute sa RecyclerView ici. -->
+    <FrameLayout
+        android:id="@+id/settings_content_host"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+</LinearLayout>

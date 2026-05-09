@@ -15,6 +15,7 @@ import com.streamflixreborn.streamflix.utils.AppLanguageManager
 import com.streamflixreborn.streamflix.utils.ArtworkRepairScheduler
 import com.streamflixreborn.streamflix.utils.CacheUtils
 import com.streamflixreborn.streamflix.utils.DnsResolver
+import com.streamflixreborn.streamflix.utils.IptvTlsHelper
 import com.streamflixreborn.streamflix.utils.IsrgRootTrustProvider
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.CoroutineScope
@@ -89,6 +90,13 @@ class StreamFlixApp : Application() {
         // 1. Install ISRG Root X1 globally for Let's Encrypt. On Android < 7 (API 24)
         // network_security_config.xml is not supported so the certificate must be injected manually.
         IsrgRootTrustProvider.install()
+
+        // 1b. 2026-05-09 : trust-all SSLSocketFactory pour les hosts IPTV
+        // (Vavoo via Movix LiveTV) qui ont des certs expirés. Scoped par host
+        // — la validation reste stricte pour tous les autres domaines (TMDB,
+        // Movix API, etc.). Sans ça, ExoPlayer/HttpURLConnection refuse
+        // la TLS handshake et le m3u8 ne se charge pas (black screen).
+        IptvTlsHelper.install()
 
         // 2. Inizializzazione preferenze (con applicationContext)
         UserPreferences.setup(this)

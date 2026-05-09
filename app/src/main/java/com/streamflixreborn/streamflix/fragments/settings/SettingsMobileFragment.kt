@@ -18,6 +18,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.constraintlayout.widget.Group
 import androidx.lifecycle.lifecycleScope
+import androidx.navigation.fragment.findNavController
 import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.Preference
@@ -67,6 +68,8 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
     private var currentScreenState = SettingsScreenState(rootKey = null, title = null)
     private val screenBackStack = ArrayDeque<SettingsScreenState>()
     private lateinit var settingsBackCallback: OnBackPressedCallback
+    /** Toolbar de notre wrapper (cf onCreateView) — null avant inflate. */
+    private var wrapperToolbar: androidx.appcompat.widget.Toolbar? = null
 
     private lateinit var backupRestoreManager: BackupRestoreManager
     private var backupLoadingDialog: AlertDialog? = null
@@ -186,9 +189,67 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         requireActivity().onBackPressedDispatcher.addCallback(this, settingsBackCallback)
     }
 
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: android.view.ViewGroup?,
+        savedInstanceState: Bundle?,
+    ): View {
+        // 2026-05-08 : on wrappe le PreferenceFragmentCompat dans un layout qui
+        // ajoute une Toolbar (flèche back en haut à gauche). Sans ça,
+        // l'utilisateur arrivait sur Paramètres sans aucun moyen visuel de
+        // revenir à l'écran Fournisseur — il fallait connaître la touche back
+        // système (pas évident pour un user lambda sur mobile sans bouton
+        // physique).
+        val wrapper = inflater.inflate(
+            R.layout.fragment_settings_wrapper_mobile,
+            container,
+            false,
+        ) as android.view.ViewGroup
+        val host = wrapper.findViewById<android.widget.FrameLayout>(R.id.settings_content_host)
+
+        // IMPORTANT : on récupère la Toolbar AVANT super.onCreateView, car
+        // super déclenche onCreatePreferences → renderCurrentScreen →
+        // applyScreenTitle, qui veut écrire dans wrapperToolbar.
+        val toolbar = wrapper.findViewById<androidx.appcompat.widget.Toolbar>(
+            R.id.toolbar_settings_wrapper,
+        )
+        wrapperToolbar = toolbar
+        // Aligne le titre de la Toolbar sur l'état courant (sous-écran ouvert)
+        // pour que le user voie où il est dans la hiérarchie de paramètres.
+        toolbar.title = currentScreenState.title ?: "Paramètres"
+
+        // PreferenceFragmentCompat inflate sa propre RecyclerView ; on la place
+        // dans notre FrameLayout en dessous de la Toolbar.
+        val original = super.onCreateView(inflater, host, savedInstanceState)
+        if (original != null) host.addView(original)
+        // Le titre suit le sous-écran courant (cf renderCurrentScreen). Sur
+        // l'écran racine on affiche "Paramètres" (déjà set en XML).
+        toolbar.setNavigationOnClickListener {
+            // Si on est dans un sous-écran de paramètres → on remonte d'UN niveau,
+            // exactement comme la touche back système (réutilise le callback
+            // existant pour ne pas dupliquer la logique).
+            // Sinon → on quitte les paramètres et on retourne au Home Fournisseur.
+            if (screenBackStack.isNotEmpty()) {
+                currentScreenState = screenBackStack.removeLast()
+                settingsBackCallback.isEnabled = screenBackStack.isNotEmpty()
+                renderCurrentScreen()
+            } else {
+                findNavController().popBackStack()
+            }
+        }
+
+        return wrapper
+    }
+
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         SettingsListStyler.attach(view, isTv = false)
+    }
+
+    override fun onDestroyView() {
+        // Évite de retenir une vue détruite (et donc une fuite d'activity).
+        wrapperToolbar = null
+        super.onDestroyView()
     }
 
     override fun onPreferenceTreeClick(preference: Preference): Boolean {
@@ -213,7 +274,12 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
     }
 
     private fun applyScreenTitle() {
-        activity?.title = currentScreenState.title ?: getString(R.string.player_settings_title)
+        val title = currentScreenState.title ?: getString(R.string.player_settings_title)
+        activity?.title = title
+        // 2026-05-08 : on met aussi le titre dans notre Toolbar wrapper pour
+        // que la barre du haut reflète le sous-écran courant ("Sauvegarde",
+        // "Extracteurs"…) au lieu de rester figée sur "Paramètres".
+        wrapperToolbar?.title = title
     }
 
     private fun renderCurrentScreen() {
@@ -356,6 +422,11 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
 
         findPreference<Preference>("p_settings_telegram")?.setOnPreferenceClickListener {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/+Jxyj7znoNQsyMjg0")))
+            true
+        }
+
+        findPreference<Preference>("p_settings_extractor_stats")?.setOnPreferenceClickListener {
+            findNavController().navigate(R.id.fragment_extractor_stats_mobile)
             true
         }
 

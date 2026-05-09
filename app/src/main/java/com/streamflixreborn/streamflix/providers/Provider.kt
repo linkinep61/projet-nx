@@ -118,6 +118,23 @@ interface Provider {
             WiTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             OlaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             VegetaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
+            // 2026-05-07 : Sport Live — agrégateur méta des chaînes Sport des
+            // 3 providers IPTV (WiTV, OLA, Vegeta). Une chaîne = 1 entrée,
+            // plusieurs servers (un par provider qui l'a). Pas de backend
+            // propre, zéro requête réseau directe.
+            SportLiveProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
+            // 2026-05-08 : Movix LiveTV MASQUÉ pour l'instant — performances
+            // insuffisantes (catalogue 771 chaînes Vavoo, lent à charger,
+            // nombreuses sources qui timeout). Le code reste en place car
+            // SportLive l'utilise comme source de mirrors via
+            // findRawIdsForNormKey + getServers pour ses chaînes sport.
+            // À réactiver quand les perfs seront acceptables.
+            // MovixLiveTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
+            // 2026-05-08 : LiveTV Hub — méta-provider qui agrège WiTV+Ola+Vegeta
+            // pour les chaînes mainstream (TF1/France2-5/M6/Arte/BFM/etc.).
+            // Comme SportLive mais pour le généraliste. Favoris/bans
+            // s'appliquent cross-provider via channelKey commun.
+            LiveTvHubProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
         )
 
         // Helper functions to check support

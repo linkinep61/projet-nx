@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingHorizontal="16dp"
+    android:paddingVertical="12dp"
+    android:background="@drawable/bg_extractor_item_focusable"
+    android:focusable="true"
+    android:focusableInTouchMode="false"
+    android:clickable="true">
+
+    <TextView
+        android:id="@+id/tv_extractor_name"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:textColor="?android:attr/textColorPrimary"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/tv_extractor_count"
+        tools:text="Filemoon" />
+
+    <TextView
+        android:id="@+id/tv_extractor_count"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:minWidth="40dp"
+        android:gravity="end"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:textColor="#E53935"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        tools:text="42" />
+
+    <!-- Ligne 1 sous le nom : breakdown par type d'erreur (ex: "timeout x3, 403 x2"). -->
+    <TextView
+        android:id="@+id/tv_extractor_errors"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:textSize="12sp"
+        android:textColor="?android:attr/textColorSecondary"
+        android:maxLines="2"
+        android:ellipsize="end"
+        app:layout_constraintTop_toBottomOf="@id/tv_extractor_name"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/tv_extractor_count"
+        tools:text="timeout x3, 403 x2" />
+
+    <!-- Ligne 2 : provider source d'où viennent les échecs (ex: "via Movix, FrenchStream"). -->
+    <TextView
+        android:id="@+id/tv_extractor_providers"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:textSize="11sp"
+        android:textStyle="italic"
+        android:textColor="?android:attr/textColorTertiary"
+        android:maxLines="2"
+        android:ellipsize="end"
+        app:layout_constraintTop_toBottomOf="@id/tv_extractor_errors"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/tv_extractor_count"
+        tools:text="via Movix x4, FrenchStream x1" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

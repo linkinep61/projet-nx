@@ -329,6 +329,11 @@ object WiTvProvider : Provider, IptvProvider {
             val link = card.selectFirst("a[href*=.html]") ?: return@forEach
             val href = link.attr("href").let { if (it.startsWith("http")) it else "$baseUrl$it" }
             val title = card.selectFirst(".ann-short_price")?.text()?.trim() ?: return@forEach
+            // 2026-05-08 : filtre langue partagé — exclut les chaînes non-FR
+            // (DE/EN/etc.) du catalog WiTV pour cohérence avec Vegeta/Ola/MovixLiveTv.
+            if (!com.streamflixreborn.streamflix.utils.IptvLangFilter.isFrCompatible(title)) {
+                return@forEach
+            }
             val img = card.selectFirst("img")?.attr("src")?.let {
                 if (it.startsWith("http")) it else "$baseUrl$it"
             } ?: ""
@@ -1270,7 +1275,18 @@ object WiTvProvider : Provider, IptvProvider {
         val sections = mutableListOf<Category>()
 
         // Snapshot to avoid ConcurrentModificationException (Phase 2 modifies registry in background)
-        val snapshot = synchronized(registryLock) { LinkedHashMap(channelRegistry) }
+        val rawSnapshot = synchronized(registryLock) { LinkedHashMap(channelRegistry) }
+        // 2026-05-08 : filtre les chaînes bannies (cross-provider via channelKey
+        // normalisé) pour éviter qu'elles repeuplent le home après scan.
+        val snapshot = LinkedHashMap(rawSnapshot.filter { (key, _) ->
+            !com.streamflixreborn.streamflix.fragments.player.settings
+                .IptvBannedChannels.isBanned("ch::$key")
+        })
+
+        // 2026-05-08 (pivot) : section "★ Favoris" RETIRÉE de WiTV.
+        // Le user veut les favoris UNIQUEMENT dans TV Hub (option 1) pour
+        // garder WiTV "pur catalog" et avoir TV Hub comme vue agrégée des
+        // favoris cross-provider.
 
         // WiTV categories — same order as witvCategories (Généraliste first)
         // Sport events inserted right after Musique
@@ -1289,26 +1305,28 @@ object WiTvProvider : Provider, IptvProvider {
             }
         }
 
-        // ─── "Favoris" — user-favorited channels (long-press a channel to add).
-        // Last section so it sits right before the bottom Paramètres tab. Only
-        // shown if the user has actually marked any channel as favorite.
-        val favoriteIds = com.streamflixreborn.streamflix.utils.IptvFavoritesStore.getFavorites(name)
-        if (favoriteIds.isNotEmpty()) {
-            val favItems = mutableListOf<TvShow>()
-            for (favId in favoriteIds) {
-                // ID format is "ch::<key>" or "sport::<url>" — sport events are
-                // ephemeral so we skip them (they expire daily).
-                if (favId.startsWith("ch::")) {
-                    val key = favId.removePrefix("ch::")
-                    val info = snapshot[key] ?: continue
+        // 2026-05-08 : section "✕ Chaînes bannies" EN BAS du home.
+        // L'user a demandé un dossier fixe en bas pour ranger les chaînes bannies
+        // (au lieu de les cacher complètement). Ça permet de les débannir facilement
+        // via long-press → menu. Source = rawSnapshot (avant filtre ban).
+        try {
+            val bannedKeys = com.streamflixreborn.streamflix.fragments.player.settings
+                .IptvBannedChannels.getAllBannedKeys()
+            if (bannedKeys.isNotEmpty()) {
+                val bannedItems = mutableListOf<TvShow>()
+                for ((key, info) in rawSnapshot) {
                     if (!info.hasServer()) continue
-                    favItems += toTvShow(key, info)
+                    // normalize matching (cross-provider) : la WiTV key seule peut suffire
+                    val normalizedKey = key.lowercase().trim()
+                    if (bannedKeys.contains(normalizedKey)) {
+                        bannedItems += toTvShow(key, info)
+                    }
+                }
+                if (bannedItems.isNotEmpty()) {
+                    sections.add(Category(name = "✕ Chaînes bannies", list = sortByTnt(bannedItems)))
                 }
             }
-            if (favItems.isNotEmpty()) {
-                sections.add(Category(name = "Favoris", list = sortByTnt(favItems)))
-            }
-        }
+        } catch (_: Throwable) { }
 
         sections
     } catch (e: Exception) {

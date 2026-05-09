@@ -942,8 +942,25 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             Log.e("MovixProvider", "Error loading home: ${e.message}")
         }
 
+        // 2026-05-09 : pousser les films marqués "présumés vides" en bas
+        // de chaque section. FilmHealthTracker apprend des échecs réels de
+        // l'user (films qu'il a cliqués où TOUS les serveurs ont fail en
+        // dead-content). TTL 7j, auto-reset au prochain succès.
+        // ZERO film n'est caché — juste rétrogradé.
+        val sortedByHealth = categories.map { cat ->
+            val healthSorted = com.streamflixreborn.streamflix.utils.FilmHealthTracker
+                .sortByHealth(name, cat.list) { item ->
+                    when (item) {
+                        is com.streamflixreborn.streamflix.models.Movie -> item.id
+                        is com.streamflixreborn.streamflix.models.TvShow -> item.id
+                        else -> ""
+                    }
+                }
+            cat.copy(list = healthSorted)
+        }
+
         // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films
-        return categories.sortedWith(compareBy { cat ->
+        return sortedByHealth.sortedWith(compareBy { cat ->
             val n = cat.name.lowercase()
             val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
             val isSeries = n.contains("séri") || n.contains("seri") || n.contains("saison") || n.contains("tv")

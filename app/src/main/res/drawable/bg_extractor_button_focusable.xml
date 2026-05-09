@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Background des boutons "Rapport bug Telegram" / "Effacer" — TV-friendly :
+    - Focus D-pad : fond plein vert néon
+    - Press : ripple
+    - Default : gris foncé bordure verte
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#00B600" />
+            <stroke android:width="2dp" android:color="#FFFFFF" />
+            <corners android:radius="6dp" />
+            <padding android:left="16dp" android:right="16dp" android:top="10dp" android:bottom="10dp" />
+        </shape>
+    </item>
+
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#1B5E20" />
+            <corners android:radius="6dp" />
+            <padding android:left="16dp" android:right="16dp" android:top="10dp" android:bottom="10dp" />
+        </shape>
+    </item>
+
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#1F1F1F" />
+            <stroke android:width="1dp" android:color="#00B600" />
+            <corners android:radius="6dp" />
+            <padding android:left="16dp" android:right="16dp" android:top="10dp" android:bottom="10dp" />
+        </shape>
+    </item>
+
+</selector>

@@ -4,6 +4,7 @@ import android.util.Log
 import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
+import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import okhttp3.Cache
 import okhttp3.OkHttpClient
@@ -163,6 +164,7 @@ abstract class Extractor {
             VidMoLyExtractor(),
             VidMoLyExtractor.ToDomain(),
             YflixExtractor(),
+            MeritendExtractor(),
             MoiflixExtractor(),
             PapadustreamExtractor(),
             MovieboxExtractor(),
@@ -230,6 +232,11 @@ abstract class Extractor {
             // qui sert via embed.maz.quest -> Yandex Disk public API.
             MazQuestExtractor(),
             YandexDiskExtractor(),
+            // 2026-05-09 : extracteur pour bll.embedseek.com (alias "Bll" dans
+            // les listes Movix). Movix l'index pour les nouveautés (films
+            // sortis < 7 jours) où Wiflix/FStream/Cpasmal n'ont pas encore
+            // indexé. Permet de gagner des sources VF sur les films récents.
+            EmbedSeekExtractor(),
         )
 
         // ── A: Extraction cache ─────────────────────────────────────────────
@@ -259,9 +266,13 @@ abstract class Extractor {
         private fun recordSuccess(serverName: String) {
             // Successful extraction resets the failure counter for that server.
             serverHealth.remove(serverName)
+            // Reset aussi le compteur persistant — l'écran "Extracteurs" affiche
+            // donc les échecs CONSÉCUTIFS (depuis le dernier succès), pas le
+            // cumul. Détecte mieux les extracteurs vraiment cassés vs bruit.
+            com.streamflixreborn.streamflix.utils.ExtractorFailureTracker.recordSuccess(serverName)
         }
 
-        private fun recordFailure(serverName: String) {
+        private fun recordFailure(serverName: String, error: Throwable? = null) {
             val now = System.currentTimeMillis()
             val rec = serverHealth.getOrPut(serverName) { ServerHealth() }
             synchronized(rec) {
@@ -276,7 +287,125 @@ abstract class Extractor {
                     Log.w("Extractor", "Server '$serverName' marked broken until ${rec.brokenUntilMs} (${rec.failureCount} failures in window)")
                 }
             }
+            // Persistance pour l'écran "Extracteurs" dans Paramètres
+            // (auto-reset au bump de versionCode).
+            // On enrichit avec :
+            //  - **type d'erreur** : classifié depuis l'exception (timeout, 403, 404…)
+            //    pour distinguer "serveur mort" vs "ils ont changé leur HTML".
+            //  - **provider source** : lu depuis UserPreferences.currentProvider —
+            //    l'utilisateur navigue forcément depuis un provider à un instant T,
+            //    donc cette valeur reflète bien d'où vient l'appel (y compris pour
+            //    les chaînes de backup type Movix → Cloudstream → ...).
+            val errorType = error?.let { classifyError(it) }
+            val providerName = runCatching { UserPreferences.currentProvider?.name }.getOrNull()
+            com.streamflixreborn.streamflix.utils.ExtractorFailureTracker.recordFailure(
+                extractorName = serverName,
+                errorType = errorType,
+                providerName = providerName,
+            )
         }
+
+        /**
+         * Classifie une exception en label court, utilisable comme clé dans
+         * la breakdown du rapport bug. On marche la cause-chain (les libs HTTP
+         * wrap souvent la vraie cause sous IOException/CancellationException).
+         *
+         * Labels possibles :
+         *  - **timeout** : SocketTimeoutException, withTimeout, message "timeout"
+         *  - **dns-fail** : UnknownHostException
+         *  - **connect-fail** : ConnectException
+         *  - **ssl-fail** : SSLException, CertificateException
+         *  - **403** / **404** / **5xx** / **http-NNN** : HttpException ou message
+         *  - **parsing** : JSONException, NoSuchElementException, NullPointer dans
+         *    Jsoup, IndexOutOfBounds (sélecteur cassé)
+         *  - **other** : tout le reste
+         */
+        fun classifyError(e: Throwable): String {
+            // Walk causes (jusqu'à 6 niveaux pour éviter une boucle si cycle).
+            var cur: Throwable? = e
+            var depth = 0
+            while (cur != null && depth < 6) {
+                when (cur) {
+                    is java.net.SocketTimeoutException -> return "timeout"
+                    is java.net.UnknownHostException -> return "dns-fail"
+                    is java.net.ConnectException -> return "connect-fail"
+                    is javax.net.ssl.SSLException -> return "ssl-fail"
+                    is java.security.cert.CertificateException -> return "ssl-fail"
+                    is org.json.JSONException -> return "parsing"
+                    is java.util.NoSuchElementException -> return "parsing"
+                    is IndexOutOfBoundsException -> return "parsing"
+                    is kotlinx.coroutines.TimeoutCancellationException -> return "timeout"
+                    is java.io.InterruptedIOException -> return "timeout"
+                }
+                // Retrofit HttpException → exposer le code HTTP via reflection.
+                if (cur::class.simpleName == "HttpException") {
+                    val code = runCatching {
+                        cur!!::class.java.getMethod("code").invoke(cur) as? Int
+                    }.getOrNull()
+                    if (code != null) {
+                        return when (code) {
+                            403 -> "403"
+                            404 -> "404"
+                            in 500..599 -> "5xx"
+                            else -> "http-$code"
+                        }
+                    }
+                }
+                val msg = cur.message?.lowercase().orEmpty()
+                when {
+                    // 2026-05-09 : "dead-content" — la VIDÉO a été supprimée
+                    // côté CDN (Vidoza "File was deleted", Filemoon "video not
+                    // found", VOE "title 404", etc.). C'est PAS un bug de
+                    // l'extracteur — l'extracteur fait son boulot, c'est juste
+                    // le contenu qui a été retiré ou expiré. À distinguer
+                    // strictement des autres erreurs (cf [isDeadContentError]
+                    // qui décide de ne PAS pénaliser l'extracteur).
+                    msg.contains("deleted") -> return "dead-content"
+                    msg.contains("video not found") -> return "dead-content"
+                    msg.contains("video expired") -> return "dead-content"
+                    msg.contains("file removed") -> return "dead-content"
+                    msg.contains("file not found") -> return "dead-content"
+                    msg.contains("removed by") -> return "dead-content"
+                    msg.contains("tombstone") -> return "dead-content"
+                    msg.contains("link rot") -> return "dead-content"
+                    // 2026-05-09 : Videasy aggregator dit explicitement
+                    // "source unavailable" / "enc-dec returned no result"
+                    // quand il connaît le film mais aucun de ses CDN sources
+                    // ne l'a vraiment. C'est PAS un bug d'extracteur — c'est
+                    // juste que le contenu n'est pas hébergé.
+                    msg.contains("source unavailable") -> return "dead-content"
+                    msg.contains("enc-dec returned no result") -> return "dead-content"
+                    msg.contains("no source") -> return "dead-content"
+                    msg.contains("no streams") -> return "dead-content"
+                    msg.contains("no result") -> return "dead-content"
+                    msg.contains("403") && msg.contains("forbidden") -> return "403"
+                    msg.contains("404") && msg.contains("not found") -> return "404"
+                    msg.contains("timeout") || msg.contains("timed out") -> return "timeout"
+                    msg.contains("ssl") -> return "ssl-fail"
+                    msg.contains("unable to resolve host") -> return "dns-fail"
+                }
+                cur = cur.cause
+                depth++
+            }
+            return "other"
+        }
+
+        /**
+         * Vrai si l'erreur indique que le CONTENU est mort (URL morte,
+         * vidéo supprimée, expirée), pas que l'EXTRACTEUR a un bug.
+         *
+         *  Cas typiques :
+         *  - Vidoza "File was deleted" (Movix indexe une URL morte)
+         *  - Filemoon "video not found"
+         *  - VOE "title 404"
+         *  - Filemoon "Filemoon: link rot detected"
+         *
+         *  Quand vrai → on log dans le tracker pour la visibilité, mais on
+         *  N'incrémente PAS le compteur principal (l'extracteur n'est pas
+         *  cassé, c'est le provider qui indexe du mort). Le score du ranker
+         *  reste sain pour cet extracteur, il garde sa place naturelle.
+         */
+        fun isDeadContentError(errorType: String): Boolean = errorType == "dead-content"
 
         /**
          * Returns 1.0 for healthy servers, 0.0 for ones currently in the "broken" window.
@@ -402,13 +531,26 @@ abstract class Extractor {
             if (foundExtractor != null) {
                 Log.i("StreamFlixES", "[EXTRACTOR] -> Starting: ${foundExtractor.name} (URL: $finalLink)")
                 val name = foundExtractor.name
+                // 2026-05-09 : mesure de latence d'extraction (Option B du plan
+                // smart sort). Wrapper avec System.currentTimeMillis() avant/après
+                // — coût négligeable (<1µs) et 0 impact sur la lecture vidéo.
+                // Sur succès → recordExtraction qui alimente la moyenne mobile
+                // utilisée par ExtractorRanker pour trier les serveurs.
+                val extractStartMs = System.currentTimeMillis()
                 val video = try {
                     foundExtractor.extract(finalLink)
                 } catch (e: Exception) {
-                    // C: track the failure so the provider can grey/sort this server out
-                    recordFailure(name)
+                    // C: track the failure so the provider can grey/sort this server out.
+                    // On passe l'exception pour permettre au tracker de classifier
+                    // le type d'erreur (timeout / 403 / parsing / …) et de logger
+                    // le provider source (UserPreferences.currentProvider) dans le
+                    // rapport bug — utile pour debug à distance.
+                    recordFailure(name, error = e)
                     throw e
                 }
+                val extractDurationMs = System.currentTimeMillis() - extractStartMs
+                com.streamflixreborn.streamflix.utils.ExtractorLatencyTracker
+                    .recordExtraction(name, extractDurationMs)
                 Log.i("StreamFlixES", "[VIDEO] -> Extracted: ${video.source}")
                 // C: success → wipe any prior failure counter
                 recordSuccess(name)

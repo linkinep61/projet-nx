@@ -109,7 +109,10 @@ object OlaTvProvider : Provider, IptvProvider {
     // Keeps the "Chaîne" page tidy so the user can pick a source manually.
     // Server renewal (requestNextBatch) bypasses this cap — those extra servers
     // are only used by the automatic failover, not shown in the Chaîne list.
-    private const val MAX_VARIANTS_PER_CHANNEL = 5
+    // 2026-05-08 : passé de 5 à 10 pour avoir de la marge avec les bans IPTV.
+    // Logique : user bannit jusqu'à 5 servers → reste au moins 5 non-bannis
+    // visibles dans le picker. Couvre le cas "tous bannis sauf favoris".
+    private const val MAX_VARIANTS_PER_CHANNEL = 10
 
     // Max servers per renewal batch (host-diversity cap applied fresh each batch)
     private const val RENEWAL_BATCH_SIZE = 24
@@ -1352,6 +1355,12 @@ object OlaTvProvider : Provider, IptvProvider {
         var added = 0
         synchronized(registryLock) {
             for (ch in channels) {
+                // 2026-05-08 : filtre langue partagé — exclut DE/EN/etc. à l'ingestion
+                // pour pas que des chaînes allemandes/anglaises se retrouvent dans le
+                // bucket FR (cf. bug Arte allemand sur VegetaTV).
+                if (!com.streamflixreborn.streamflix.utils.IptvLangFilter.isFrCompatible(ch.name)) {
+                    continue
+                }
                 val key = norm(ch.name)
                 if (key.isBlank()) continue
                 val info = channelRegistry.getOrPut(key) {
@@ -1726,9 +1735,16 @@ object OlaTvProvider : Provider, IptvProvider {
 
         val categoryOrder = listOf("Généraliste", "Cinéma", "Info", "Sport", "Musique", "Documentaire", "Enfants")
         val sections = mutableListOf<Category>()
+        // 2026-05-08 : helper inline pour filtrer une chaîne bannie. Cross-provider
+        // via IptvBannedChannels.normalize() qui strip "ola::".
+        val isChannelBanned: (String) -> Boolean = { id ->
+            com.streamflixreborn.streamflix.fragments.player.settings
+                .IptvBannedChannels.isBanned(id)
+        }
         for (catName in categoryOrder) {
             val items = curatedChannels
                 .filter { it.category == catName }
+                .filter { !isChannelBanned("ola::${it.key}") }
                 .map { c ->
                     TvShow(
                         id = "ola::${c.key}",
@@ -1755,6 +1771,7 @@ object OlaTvProvider : Provider, IptvProvider {
                 .map { (key, info) -> Triple(key, info.displayName, info.logo) }
         }
         val extraItems = registrySnapshot
+            .filter { !isChannelBanned("ola::${it.first}") }
             .sortedBy { it.second.lowercase() }
             .take(OTHER_CHANNELS_HOME_LIMIT)
             .map { (key, displayName, logo) ->
@@ -1770,44 +1787,57 @@ object OlaTvProvider : Provider, IptvProvider {
             sections.add(Category(name = "Autres chaînes", list = extraItems))
         }
 
-        // ─── "Favoris" — user-favorited channels (long-press a channel to add).
-        // Always last so it sits just before the bottom Paramètres tab.
-        val favoriteIds = com.streamflixreborn.streamflix.utils.IptvFavoritesStore.getFavorites(name)
-        if (favoriteIds.isNotEmpty()) {
-            val curatedByKey = curatedChannels.associateBy { "ola::${it.key}" }
-            val registryByKey = synchronized(registryLock) {
-                channelRegistry.entries.associate { (k, info) -> "ola::$k" to Triple(k, info.displayName, info.logo) }
-            }
-            val favItems = mutableListOf<TvShow>()
-            for (favId in favoriteIds) {
-                // Try curated first (has hardcoded logo), then registry.
-                val curated = curatedByKey[favId]
-                if (curated != null) {
-                    favItems += TvShow(
-                        id = favId,
-                        title = curated.displayName,
-                        poster = logoUrlFor(curated.displayName),
-                        banner = logoUrlFor(curated.displayName),
-                        providerName = name,
-                    )
-                    continue
+        // 2026-05-08 (pivot) : section "★ Favoris" RETIRÉE de Ola.
+        // Favoris UNIQUEMENT dans TV Hub (option 1).
+
+        // 2026-05-08 : section "✕ Chaînes bannies" EN BAS du home.
+        // Dossier fixe pour ranger les chaînes bannies. Construit à partir du
+        // curated + registry. Click sur une chaîne bannie → long-press → menu
+        // "Débannir" pour la réactiver.
+        try {
+            val bannedKeys = com.streamflixreborn.streamflix.fragments.player.settings
+                .IptvBannedChannels.getAllBannedKeys()
+            if (bannedKeys.isNotEmpty()) {
+                val bannedItems = mutableListOf<TvShow>()
+                val seen = mutableSetOf<String>()
+                for (c in curatedChannels) {
+                    val id = "ola::${c.key}"
+                    if (com.streamflixreborn.streamflix.fragments.player.settings
+                            .IptvBannedChannels.isBanned(id)) {
+                        if (seen.add(id)) {
+                            bannedItems += TvShow(
+                                id = id,
+                                title = c.displayName,
+                                poster = logoUrlFor(c.displayName),
+                                banner = logoUrlFor(c.displayName),
+                                providerName = name,
+                            )
+                        }
+                    }
                 }
-                val reg = registryByKey[favId]
-                if (reg != null) {
-                    val (_, displayName, logo) = reg
-                    favItems += TvShow(
-                        id = favId,
-                        title = displayName,
-                        poster = logo.ifEmpty { logoUrlFor(displayName) },
-                        banner = logo.ifEmpty { logoUrlFor(displayName) },
-                        providerName = name,
-                    )
+                val regSnap2 = synchronized(registryLock) {
+                    channelRegistry.entries.map { (k, info) -> Triple(k, info.displayName, info.logo) }
+                }
+                for ((key, displayName, logo) in regSnap2) {
+                    val id = "ola::$key"
+                    if (com.streamflixreborn.streamflix.fragments.player.settings
+                            .IptvBannedChannels.isBanned(id)) {
+                        if (seen.add(id)) {
+                            bannedItems += TvShow(
+                                id = id,
+                                title = displayName,
+                                poster = logo.ifEmpty { logoUrlFor(displayName) },
+                                banner = logo.ifEmpty { logoUrlFor(displayName) },
+                                providerName = name,
+                            )
+                        }
+                    }
+                }
+                if (bannedItems.isNotEmpty()) {
+                    sections.add(Category(name = "✕ Chaînes bannies", list = bannedItems))
                 }
             }
-            if (favItems.isNotEmpty()) {
-                sections.add(Category(name = "Favoris", list = favItems))
-            }
-        }
+        } catch (_: Throwable) { }
 
         sections
     } catch (e: Exception) {
