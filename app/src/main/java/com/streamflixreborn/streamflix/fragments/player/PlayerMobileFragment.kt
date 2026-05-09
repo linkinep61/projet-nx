@@ -2123,7 +2123,16 @@ class PlayerMobileFragment : Fragment() {
             )
         }
 
-        val mediaItem = MediaItem.Builder()
+        // 2026-05-09 : pour IPTV live HLS, on configure un offset cible de 60s
+        // derrière le live edge. Sans ça l'user dit que "le download va jusqu'au
+        // bout de la barre, ce qui crée des coupures intempestives". Avec un
+        // targetOffset 60s, le playback head reste stable au milieu du buffer.
+        val isLiveIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+            args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+            args.id.startsWith("match::")
+        val mediaItemBuilder = MediaItem.Builder()
             .setUri(video.source.toUri())
             .setMimeType(video.type)
             .setSubtitleConfigurations(video.subtitles.map { subtitle ->
@@ -2138,7 +2147,22 @@ class PlayerMobileFragment : Fragment() {
                     .setMediaServerId(server.id)
                     .build()
             )
-            .build()
+        if (isLiveIptvChannel) {
+            // 2026-05-09 : speed range élargi à 0.85-1.15 — si le buffer chute,
+            // ExoPlayer peut ralentir jusqu'à 85% pour laisser le buffer se
+            // remplir avant que le live rattrape. Si la connection redevient
+            // bonne, accélère jusqu'à 115% pour rattraper la cible 60s.
+            mediaItemBuilder.setLiveConfiguration(
+                MediaItem.LiveConfiguration.Builder()
+                    .setTargetOffsetMs(60_000L)         // 60s derrière live edge (cible)
+                    .setMinOffsetMs(15_000L)            // jamais plus proche que 15s
+                    .setMaxOffsetMs(180_000L)           // jamais plus loin que 3 min
+                    .setMinPlaybackSpeed(0.85f)         // ralenti aggressif anti-coupure
+                    .setMaxPlaybackSpeed(1.15f)         // rattrape rapide
+                    .build()
+            )
+        }
+        val mediaItem = mediaItemBuilder.build()
 
         if (needsWebViewDs) {
             // Route .ts segment requests through WebView's network stack
@@ -2845,10 +2869,47 @@ class PlayerMobileFragment : Fragment() {
                 val show = player.currentPosition in 3000..120000
                 showSkipIntroButton(show)
                 updateNextEpisodeOverlay()
+                // 2026-05-09 : contrôle vitesse anti-coupure pour IPTV live.
+                val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                    args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                    args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                    args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                    args.id.startsWith("match::")
+                if (isLiveIptv) adjustLivePlaybackSpeed()
             }
             progressHandler.postDelayed(progressRunnable, 1000)
         }
         progressHandler.post(progressRunnable)
+    }
+
+    /** 2026-05-09 v2 : maintient le playhead à ~70% de la barre (30s+ derrière
+     *  le live edge). Ralentis agressifs + seekBack d'urgence si live nous
+     *  rattrape. Anti-coupure pour les streams Stalker sans fenêtre DVR. */
+    private fun adjustLivePlaybackSpeed() {
+        val offset = player.currentLiveOffset
+        if (offset == androidx.media3.common.C.TIME_UNSET) return
+        // Urgence : seekBack 30s si live nous touche
+        if (offset in 0L..3_000L) {
+            val pos = player.currentPosition
+            val newPos = (pos - 30_000L).coerceAtLeast(0)
+            Log.w("PlayerLiveOffset", "URGENT seekBack: offset=${offset}ms → pos $pos→$newPos")
+            player.seekTo(newPos)
+            player.setPlaybackSpeed(1.0f)
+            return
+        }
+        val targetSpeed = when {
+            offset < 10_000 -> 0.75f
+            offset < 20_000 -> 0.85f
+            offset < 30_000 -> 0.93f
+            offset > 90_000 -> 1.10f
+            offset > 60_000 -> 1.05f
+            else -> 1.0f
+        }
+        val current = player.playbackParameters.speed
+        if (kotlin.math.abs(current - targetSpeed) > 0.005f) {
+            player.setPlaybackSpeed(targetSpeed)
+            Log.d("PlayerLiveOffset", "offset=${offset/1000}s → speed=${targetSpeed}x")
+        }
     }
 
     private fun stopProgressHandler() {
@@ -2984,19 +3045,18 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("match::")
         // Per user request: precharge as much as possible so the live stream
         // never cuts. Bigger buffer windows + longer rebuffer threshold.
-        // 2026-05-09 : préchargement augmenté — l'user disait "le flux se fait
-        // rattraper par la vidéo" sur mobile (3 min, puis 6 min insuffisants
-        // pour le foot). Bumped max buffer 6 min → 10 min, min 60s → 90s,
-        // playback start 5s, rebuffer threshold 15s.
+        // 2026-05-09 : Vegeta TV (Stalker) ne déclare pas toujours de fenêtre
+        // DVR live → LiveConfiguration MediaItem ignorée. Solution : 30s buffered
+        // avant démarrage = le playhead commence 30s derrière le live edge.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                if (isLiveIptv) 90_000 else 30_000,      // minBuffer: 1.5 min IPTV (était 60s)
-                if (isLiveIptv) 600_000                  // maxBuffer: 10 min IPTV (était 6 min)
+                if (isLiveIptv) 90_000 else 30_000,      // minBuffer: 1.5 min IPTV
+                if (isLiveIptv) 600_000                  // maxBuffer: 10 min IPTV
                 else if (extraBuffering) 300_000 else 120_000,
-                if (isLiveIptv) 5_000 else 1_500,        // playback start: 5s buffered
-                if (isLiveIptv) 15_000 else 3_000        // rebuffer threshold: 15s (était 10s)
+                if (isLiveIptv) 30_000 else 1_500,       // playback start: 30s derrière live
+                if (isLiveIptv) 5_000 else 3_000         // rebuffer threshold: 5s
             )
-            .setPrioritizeTimeOverSizeThresholds(true)   // prefer time-based buffer over size cap
+            .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
         val baseBuilder = if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1 && !currentSoftwareDecoder) {

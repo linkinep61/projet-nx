@@ -915,9 +915,15 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             }
 
             // Downloads disabled on TV — not enough storage on these devices
+            // 2026-05-09 : NE PAS reset nextFocusRightId pour les Settings.Server
+            // IPTV — la branche ligne ~854 a déjà mis le focus chain
+            // root → favorite → ban. Le reset à NO_ID rendait le ❤/✕
+            // inaccessibles au D-pad sur Vegeta TV.
             binding.ivSettingDownload.apply {
                 visibility = View.GONE
-                if (item !is Settings.ChannelVariant || !(item as? Settings.ChannelVariant)?.isIptv.let { it == true }) {
+                val isIptvServerWithKey = item is Settings.Server && item.isIptv && item.channelKey != null
+                val isIptvVariant = item is Settings.ChannelVariant && item.isIptv
+                if (!isIptvServerWithKey && !isIptvVariant) {
                     binding.root.nextFocusRightId = View.NO_ID
                 }
             }

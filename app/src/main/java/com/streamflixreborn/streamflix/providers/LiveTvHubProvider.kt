@@ -137,6 +137,26 @@ object LiveTvHubProvider : Provider, IptvProvider {
         HubChannel("Canal+ Sport", "canalsport", "canalplussport", "Sport"),
         HubChannel("Canal+ Sport 360", "canalsport360", "canalplussport360", "Sport"),
         HubChannel("Canal+ Foot", "canalfoot", "canalplusfoot", "Sport"),
+        // 2026-05-09 : catégorie dédiée "Canal+ Live"
+        HubChannel("Canal+ Live 1", "canalpluslive1", "canalpluslive1", "Canal+ Live"),
+        HubChannel("Canal+ Live 2", "canalpluslive2", "canalpluslive2", "Canal+ Live"),
+        HubChannel("Canal+ Live 3", "canalpluslive3", "canalpluslive3", "Canal+ Live"),
+        HubChannel("Canal+ Live 4", "canalpluslive4", "canalpluslive4", "Canal+ Live"),
+        HubChannel("Canal+ Live 5", "canalpluslive5", "canalpluslive5", "Canal+ Live"),
+        HubChannel("Canal+ Live 6", "canalpluslive6", "canalpluslive6", "Canal+ Live"),
+        HubChannel("Canal+ Live 7", "canalpluslive7", "canalpluslive7", "Canal+ Live"),
+        HubChannel("Canal+ Live 8", "canalpluslive8", "canalpluslive8", "Canal+ Live"),
+        HubChannel("Canal+ Live 9", "canalpluslive9", "canalpluslive9", "Canal+ Live"),
+        HubChannel("Canal+ Live 10", "canalpluslive10", "canalpluslive10", "Canal+ Live"),
+        HubChannel("Canal+ Live 11", "canalpluslive11", "canalpluslive11", "Canal+ Live"),
+        HubChannel("Canal+ Live 12", "canalpluslive12", "canalpluslive12", "Canal+ Live"),
+        HubChannel("Canal+ Live 13", "canalpluslive13", "canalpluslive13", "Canal+ Live"),
+        HubChannel("Canal+ Live 14", "canalpluslive14", "canalpluslive14", "Canal+ Live"),
+        HubChannel("Canal+ Live 15", "canalpluslive15", "canalpluslive15", "Canal+ Live"),
+        HubChannel("Canal+ Live 16", "canalpluslive16", "canalpluslive16", "Canal+ Live"),
+        HubChannel("Canal+ Live 17", "canalpluslive17", "canalpluslive17", "Canal+ Live"),
+        HubChannel("Canal+ Live 18", "canalpluslive18", "canalpluslive18", "Canal+ Live"),
+        HubChannel("Canal+ Live 19", "canalpluslive19", "canalpluslive19", "Canal+ Live"),
         HubChannel("beIN Sports 1", "beinsports1", "beinsports1", "Sport"),
         HubChannel("beIN Sports 2", "beinsports2", "beinsports2", "Sport"),
         HubChannel("beIN Sports 3", "beinsports3", "beinsports3", "Sport"),
@@ -204,7 +224,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
 
     /** Ordre fixe des catégories au home (cohérent avec WiTV/Ola/Vegeta). */
     private val categoryOrder: List<String> = listOf(
-        "Généraliste", "Cinéma", "Info", "Sport", "Musique", "Documentaire", "Enfants",
+        "Généraliste", "Cinéma", "Canal+ Live", "Info", "Sport", "Musique", "Documentaire", "Enfants",
     )
 
     private val channelById: Map<String, HubChannel> by lazy {

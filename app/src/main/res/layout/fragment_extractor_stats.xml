@@ -6,10 +6,13 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
+    <!-- 2026-05-09 : layout_height fixé à 56dp (était ?attr/actionBarSize qui
+         crashait sur le thème TV Leanback — n'a pas cet AppCompat attr).
+         56dp est la hauteur standard d'une toolbar Material. -->
     <androidx.appcompat.widget.Toolbar
         android:id="@+id/toolbar_extractor_stats"
         android:layout_width="match_parent"
-        android:layout_height="?attr/actionBarSize"
+        android:layout_height="56dp"
         android:background="?android:attr/colorPrimary"
         app:title="Extracteurs"
         app:titleTextColor="#FFFFFF"

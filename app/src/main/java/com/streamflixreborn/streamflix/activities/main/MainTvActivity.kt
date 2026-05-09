@@ -245,31 +245,45 @@ class MainTvActivity : FragmentActivity() {
     }
     
     private fun updateNavigationVisibility() {
-        UserPreferences.currentProvider?.let { provider ->
-            binding.navMain.menu.findItem(R.id.movies)?.apply {
-                isVisible = Provider.supportsMovies(provider)
-                title = when (provider.name) {
-                    "VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga" -> getString(R.string.main_menu_series_fr)
-                    else -> getString(R.string.main_menu_movies)
-                }
-                if (provider.name in listOf("VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga")) {
-                    setIcon(R.drawable.ic_menu_tv)
-                }
-            }
-            val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
-            binding.navMain.menu.findItem(R.id.tv_shows)?.apply {
-                isVisible = Provider.supportsTvShows(provider)
-                title = when {
-                    isIptv || provider.name in setOf("CableVisionHD", "TvporinternetHD") ->
-                        getString(R.string.main_menu_all_channels)
-                    provider.name in setOf("VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga") ->
-                        getString(R.string.main_menu_series)
-                    else -> getString(R.string.main_menu_tv_shows)
-                }
-            }
-            // Favoris tab — IPTV providers only.
-            binding.navMain.menu.findItem(R.id.iptv_favorites)?.isVisible = isIptv
+        val provider = UserPreferences.currentProvider
+        if (provider == null) {
+            // 2026-05-09 : aucun provider sélectionné (cold start fresh) → cache
+            // tous les onglets dépendants de la DB pour éviter le crash
+            // "Current provider is not set" quand l'user clique avant d'avoir
+            // pris un provider. Seul l'onglet Providers reste visible.
+            binding.navMain.menu.findItem(R.id.home)?.isVisible = false
+            binding.navMain.menu.findItem(R.id.search)?.isVisible = false
+            binding.navMain.menu.findItem(R.id.movies)?.isVisible = false
+            binding.navMain.menu.findItem(R.id.tv_shows)?.isVisible = false
+            binding.navMain.menu.findItem(R.id.iptv_favorites)?.isVisible = false
+            return
         }
+        // Provider sélectionné : restaure la visibilité des onglets pertinents.
+        binding.navMain.menu.findItem(R.id.home)?.isVisible = true
+        binding.navMain.menu.findItem(R.id.search)?.isVisible = true
+        binding.navMain.menu.findItem(R.id.movies)?.apply {
+            isVisible = Provider.supportsMovies(provider)
+            title = when (provider.name) {
+                "VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga" -> getString(R.string.main_menu_series_fr)
+                else -> getString(R.string.main_menu_movies)
+            }
+            if (provider.name in listOf("VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga")) {
+                setIcon(R.drawable.ic_menu_tv)
+            }
+        }
+        val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
+        binding.navMain.menu.findItem(R.id.tv_shows)?.apply {
+            isVisible = Provider.supportsTvShows(provider)
+            title = when {
+                isIptv || provider.name in setOf("CableVisionHD", "TvporinternetHD") ->
+                    getString(R.string.main_menu_all_channels)
+                provider.name in setOf("VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga") ->
+                    getString(R.string.main_menu_series)
+                else -> getString(R.string.main_menu_tv_shows)
+            }
+        }
+        // Favoris tab — IPTV providers only.
+        binding.navMain.menu.findItem(R.id.iptv_favorites)?.isVisible = isIptv
     }
 
     fun adjustLayoutDelta(deltaX: Int?, deltaY: Int?) {

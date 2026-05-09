@@ -140,11 +140,21 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         currentScreenState = SettingsScreenState(rootKey = rootKey, title = null)
         renderCurrentScreen()
 
-        db = AppDatabase.getInstance(requireContext())
-        movieDao = db.movieDao()
-        tvShowDao = db.tvShowDao()
-        episodeDao = db.episodeDao()
-        seasonDao = db.seasonDao()
+        // 2026-05-09 : si aucun provider sélectionné (install fresh), AppDatabase
+        // throw IllegalStateException → crashe les Paramètres. On try-catch :
+        // les features DB-dépendantes (backup/restore, history…) ne marcheront
+        // pas tant qu'aucun provider n'est pris, mais le reste du settings reste
+        // accessible.
+        try {
+            db = AppDatabase.getInstance(requireContext())
+            movieDao = db.movieDao()
+            tvShowDao = db.tvShowDao()
+            episodeDao = db.episodeDao()
+            seasonDao = db.seasonDao()
+        } catch (e: IllegalStateException) {
+            android.util.Log.w("SettingsTvFragment",
+                "Aucun provider sélectionné — DB skip, settings limité : ${e.message}")
+        }
         
         val allProvidersToBackup = Provider.providers.keys.toMutableList().apply {
             listOf("it", "en", "es", "de", "fr").forEach { lang ->

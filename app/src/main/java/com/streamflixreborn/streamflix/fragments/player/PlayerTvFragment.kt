@@ -1853,7 +1853,17 @@ class PlayerTvFragment : Fragment() {
 
             val currentPosition = startPositionMs ?: player.currentPosition
 
-            val mediaItem = MediaItem.Builder()
+            // 2026-05-09 : pour IPTV live HLS, on configure un offset cible de 60s
+            // derrière le live edge. Sans ça la barre de progression M3U va
+            // jusqu'au bout (le playback head rattrape le live), créant des
+            // coupures intempestives. Avec targetOffset 60s + speed 0.97-1.03,
+            // le playback head reste stable au milieu du buffer.
+            val isLiveIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                args.id.startsWith("match::")
+            val mediaItemBuilder = MediaItem.Builder()
                 .setUri(video.source.toUri())
                 .setMimeType(video.type)
                 .setSubtitleConfigurations(video.subtitles.map { subtitle ->
@@ -1868,7 +1878,20 @@ class PlayerTvFragment : Fragment() {
                         .setMediaServerId(server.id)
                         .build()
                 )
-                .build()
+            if (isLiveIptvChannel) {
+                // 2026-05-09 : speed range élargi à 0.85-1.15 — si le buffer chute,
+                // ralenti jusqu'à 85% pour laisser le buffer se remplir. Anti-coupure.
+                mediaItemBuilder.setLiveConfiguration(
+                    MediaItem.LiveConfiguration.Builder()
+                        .setTargetOffsetMs(60_000L)         // 60s derrière live edge (cible)
+                        .setMinOffsetMs(15_000L)            // jamais plus proche que 15s
+                        .setMaxOffsetMs(180_000L)           // jamais plus loin que 3 min
+                        .setMinPlaybackSpeed(0.85f)         // ralenti aggressif anti-coupure
+                        .setMaxPlaybackSpeed(1.15f)         // rattrape rapide
+                        .build()
+                )
+            }
+            val mediaItem = mediaItemBuilder.build()
 
             if (!needsWebViewDs) {
                 httpDataSource.setDefaultRequestProperties(
@@ -2492,10 +2515,52 @@ class PlayerTvFragment : Fragment() {
                     val show = player.currentPosition in 3000..120000
                     showSkipIntroButton(show)
                     updateNextEpisodeOverlay()
+                    // 2026-05-09 : contrôle manuel vitesse pour IPTV live —
+                    // LiveConfiguration MediaItem est ignorée par certains
+                    // streams (Vegeta Stalker n'a pas toujours de fenêtre DVR
+                    // déclarée). On surveille currentLiveOffset et on ajuste
+                    // la vitesse pour garder le playhead 30s+ derrière le live.
+                    val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                        args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                        args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                        args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                        args.id.startsWith("match::")
+                    if (isLiveIptv) adjustLivePlaybackSpeed()
                 }
                 progressHandler.postDelayed(progressRunnable, 1000)
             }
             progressHandler.post(progressRunnable)
+        }
+
+        /** 2026-05-09 v2 : maintient le playhead à ~70% de la barre (= 30s+
+         *  derrière le live edge). Ralentis très agressifs quand on dérive
+         *  vers live. Si le live edge nous touche (offset < 3s), seekBack
+         *  d'urgence à 30s pour récupérer immédiatement la marge. */
+        private fun adjustLivePlaybackSpeed() {
+            val offset = player.currentLiveOffset
+            if (offset == androidx.media3.common.C.TIME_UNSET) return
+            // Urgence : si le live nous rattrape, seek back de 30s d'un coup.
+            if (offset in 0L..3_000L) {
+                val pos = player.currentPosition
+                val newPos = (pos - 30_000L).coerceAtLeast(0)
+                Log.w("PlayerLiveOffset", "URGENT seekBack: offset=${offset}ms → pos $pos→$newPos")
+                player.seekTo(newPos)
+                player.setPlaybackSpeed(1.0f)
+                return
+            }
+            val targetSpeed = when {
+                offset < 10_000 -> 0.75f      // < 10s : ralenti FORT pour creuser
+                offset < 20_000 -> 0.85f      // < 20s : ralenti modéré-fort
+                offset < 30_000 -> 0.93f      // < 30s : ralenti léger
+                offset > 90_000 -> 1.10f      // > 90s : rattrape rapide
+                offset > 60_000 -> 1.05f      // > 60s : rattrape léger
+                else -> 1.0f                  // 30-60s = cible, vitesse normale
+            }
+            val current = player.playbackParameters.speed
+            if (kotlin.math.abs(current - targetSpeed) > 0.005f) {
+                player.setPlaybackSpeed(targetSpeed)
+                Log.d("PlayerLiveOffset", "offset=${offset/1000}s → speed=${targetSpeed}x")
+            }
         }
 
         private fun stopProgressHandler() {
@@ -2685,16 +2750,18 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
                 args.id.startsWith("match::")
-            // 2026-05-09 : préchargement augmenté — l'user disait "le buffing sur
-            // les chaînes de foot est trop lent, ça se fait rattraper par la vidéo"
-            // sur TV. Bumped à 10 min comme mobile.
+            // 2026-05-09 : Vegeta TV (Stalker) ne déclare pas toujours de fenêtre
+            // DVR live → la LiveConfiguration MediaItem est parfois ignorée.
+            // Solution : forcer le démarrage avec 30s déjà buffered. Le playhead
+            // démarre 30s derrière le live edge → le live ne le rattrape pas.
+            // Recovery rapide après coupure : 5s seulement.
             val loadControl = DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
-                    if (isLiveIptv) 90_000 else 30_000,      // minBuffer: 1.5 min IPTV (était 60s)
-                    if (isLiveIptv) 600_000                  // maxBuffer: 10 min IPTV (était 6 min)
+                    if (isLiveIptv) 90_000 else 30_000,      // minBuffer: 1.5 min IPTV
+                    if (isLiveIptv) 600_000                  // maxBuffer: 10 min IPTV
                     else if (extraBuffering) 300_000 else 120_000,
-                    if (isLiveIptv) 5_000 else 1_500,        // playback start: 5s buffered
-                    if (isLiveIptv) 15_000 else 3_000        // rebuffer threshold: 15s (était 10s)
+                    if (isLiveIptv) 30_000 else 1_500,       // playback start: 30s derrière live
+                    if (isLiveIptv) 5_000 else 3_000         // rebuffer threshold: 5s
                 )
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build()

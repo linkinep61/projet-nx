@@ -166,8 +166,12 @@ object VegetaTvProvider : Provider, IptvProvider {
             .replace(Regex("\\[.*?]"), " ")
             .replace(Regex("\\(.*?\\)"), " ")
             .replace(Regex("^\\s*(fr|france)\\s*[:|\\-]\\s*"), "")
+        // 2026-05-09 : "live" est strippé SEULEMENT s'il n'est PAS suivi d'un
+        // chiffre. Ça préserve "Canal+ Live 1" (live partie du nom) tout en
+        // strippant "TF1 LIVE HD" (live = quality tag).
         val midTag = Regex(
-            "\\b(hd|sd|fhd|uhd|4k|raw|hevc|h\\.?265|ppv|ott|live|test|backup|fhdr|sdr)\\b" +
+            "\\b(hd|sd|fhd|uhd|4k|raw|hevc|h\\.?265|ppv|ott|test|backup|fhdr|sdr)\\b" +
+                "|\\blive\\b(?!\\s*\\d)" +
                 "|(?:\\+\\s?1)|(?:1080p|720p|480p|360p)"
         )
         val endQualifier = Regex(
@@ -413,6 +417,28 @@ object VegetaTvProvider : Provider, IptvProvider {
             CuratedChannel("canalplusboxoffice", "Canal+ Box Office", "Cinéma"),
             CuratedChannel("canalplusgrandecran", "Canal+ Grand Écran", "Cinéma"),
             CuratedChannel("canalplusfoot", "Canal+ Foot", "Sport"),
+            // 2026-05-09 : catégorie dédiée "Canal+ Live" pour les chaînes
+            // multi-feeds Canal+ + chaînes Canal+ classiques (Cinéma/Séries/etc.
+            // restent en Cinéma).
+            CuratedChannel("canalpluslive1", "Canal+ Live 1", "Canal+ Live"),
+            CuratedChannel("canalpluslive2", "Canal+ Live 2", "Canal+ Live"),
+            CuratedChannel("canalpluslive3", "Canal+ Live 3", "Canal+ Live"),
+            CuratedChannel("canalpluslive4", "Canal+ Live 4", "Canal+ Live"),
+            CuratedChannel("canalpluslive5", "Canal+ Live 5", "Canal+ Live"),
+            CuratedChannel("canalpluslive6", "Canal+ Live 6", "Canal+ Live"),
+            CuratedChannel("canalpluslive7", "Canal+ Live 7", "Canal+ Live"),
+            CuratedChannel("canalpluslive8", "Canal+ Live 8", "Canal+ Live"),
+            CuratedChannel("canalpluslive9", "Canal+ Live 9", "Canal+ Live"),
+            CuratedChannel("canalpluslive10", "Canal+ Live 10", "Canal+ Live"),
+            CuratedChannel("canalpluslive11", "Canal+ Live 11", "Canal+ Live"),
+            CuratedChannel("canalpluslive12", "Canal+ Live 12", "Canal+ Live"),
+            CuratedChannel("canalpluslive13", "Canal+ Live 13", "Canal+ Live"),
+            CuratedChannel("canalpluslive14", "Canal+ Live 14", "Canal+ Live"),
+            CuratedChannel("canalpluslive15", "Canal+ Live 15", "Canal+ Live"),
+            CuratedChannel("canalpluslive16", "Canal+ Live 16", "Canal+ Live"),
+            CuratedChannel("canalpluslive17", "Canal+ Live 17", "Canal+ Live"),
+            CuratedChannel("canalpluslive18", "Canal+ Live 18", "Canal+ Live"),
+            CuratedChannel("canalpluslive19", "Canal+ Live 19", "Canal+ Live"),
             // Sport extras
             CuratedChannel("beinsportmax4", "beIN Sports MAX 4", "Sport"),
             CuratedChannel("beinsportmax5", "beIN Sports MAX 5", "Sport"),
@@ -1289,7 +1315,7 @@ object VegetaTvProvider : Provider, IptvProvider {
     override suspend fun getHome(): List<Category> = try {
         scope.launch { try { ensureRegistry() } catch (_: Exception) { } }
 
-        val categoryOrder = listOf("Généraliste", "Cinéma", "Info", "Sport", "Musique", "Documentaire", "Enfants")
+        val categoryOrder = listOf("Généraliste", "Cinéma", "Canal+ Live", "Info", "Sport", "Musique", "Documentaire", "Enfants")
         val sections = mutableListOf<Category>()
         // 2026-05-08 : helper inline pour filtrer une chaîne bannie. Cross-provider
         // via IptvBannedChannels.normalize() qui strip "vegeta::".
