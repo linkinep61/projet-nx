@@ -2183,25 +2183,54 @@ class PlayerTvFragment : Fragment() {
                     }
 
                     // Fallback 3 (IPTV): for live channels, retry the same stream first.
-                    // Sticky server: once a server has worked (STATE_READY), we NEVER
-                    // auto-switch away from it on transient errors — we just re-prepare
-                    // forever. The user can manually switch if they want. Switch only
-                    // happens (a) before first successful playback, after retries fail,
-                    // or (b) on permanent HTTP errors (403/404).
-                    val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") || args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                    // Sticky server: une fois qu'un server a fonctionné (STATE_READY)
+                    // on NE BASCULE JAMAIS sur erreur transitoire — on re-prépare juste.
+                    // Switch quand :
+                    //   (a) le stream n'a jamais fonctionné ET retry > MAX_RETRIES_BEFORE_SWITCH
+                    //   (b) erreur HTTP permanente (403/404/410/456 = blocked/dead)
+                    //   (c) ERROR_CODE_IO_BAD_HTTP_STATUS répétée (= server bloqué)
+                    val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                        args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                        args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                        args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                        args.id.startsWith("match::")
                     if (isLiveIptv) {
                         val server = currentServer ?: return
                         val errCodeName = error.errorCodeName
-                        // Per user request: NEVER auto-switch on IPTV. Always re-prepare
-                        // the same server. The user picks another manually if needed.
                         iptvRetryCount++
-                        Log.w("PlayerTvFragment", "IPTV retry on ${server.name} ($errCodeName) — retry #$iptvRetryCount, sticky (never auto-switch)")
+
+                        // 2026-05-09 : check si erreur HTTP permanente (server cassé/bloqué)
+                        // ou si on a retry trop de fois sans que le stream marche jamais.
+                        val errMsg = (error.cause?.message ?: error.message ?: "").lowercase()
+                        val isPermanentHttpError = errMsg.contains("response code: 403") ||
+                            errMsg.contains("response code: 404") ||
+                            errMsg.contains("response code: 410") ||
+                            errMsg.contains("response code: 451") ||
+                            errMsg.contains("response code: 456")
+                        val MAX_RETRIES_BEFORE_SWITCH = 3
+                        val shouldSwitch = isPermanentHttpError ||
+                            (!iptvCurrentStreamHasWorked && iptvRetryCount >= MAX_RETRIES_BEFORE_SWITCH)
+
+                        if (shouldSwitch) {
+                            Log.w("PlayerTvFragment", "IPTV switch on ${server.name} ($errCodeName, retry=$iptvRetryCount, hasWorked=$iptvCurrentStreamHasWorked, permanentHttp=$isPermanentHttpError)")
+                            pruneBrokenVariant(server)
+                            val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
+                            if (nextServer != null) {
+                                iptvRetryCount = 0
+                                iptvCurrentStreamHasWorked = false
+                                viewModel.getVideo(nextServer)
+                                return
+                            } else if (tryNextChannelVariant(server)) {
+                                iptvRetryCount = 0
+                                iptvCurrentStreamHasWorked = false
+                                return
+                            }
+                            Log.e("PlayerTvFragment", "IPTV switch demandé mais pas de server suivant disponible")
+                        }
+
+                        Log.w("PlayerTvFragment", "IPTV retry on ${server.name} ($errCodeName) — retry #$iptvRetryCount, sticky (hasWorked=$iptvCurrentStreamHasWorked)")
                         try {
-                            // 2026-05-08 : NE PAS appeler seekToDefaultPosition() ici.
-                            // Ça flush le buffer accumulé → user voit "ça charge, ça
-                            // stoppe, ça recharge" en boucle. Pour HLS live, prepare()
-                            // seul re-établit la connexion en gardant le buffer en cours
-                            // dont on a besoin pour la reprise sans freeze.
+                            // NE PAS appeler seekToDefaultPosition() ici (flush le buffer).
                             player.prepare()
                             player.playWhenReady = true
                         } catch (e: Exception) {
@@ -2626,23 +2655,23 @@ class PlayerTvFragment : Fragment() {
         private var currentSoftwareDecoder = false
 
         private fun buildPlayer(extraBuffering: Boolean): ExoPlayer {
-            val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") || args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
-            // 2026-05-08 : compromis IPTV TV — assez de buffer pour absorber les
-            // hiccups CDN/FAI, mais pas excessif (live HLS rarely DVR donc max
-            // ~60s utile en pratique). RAM TV plus fournie que mobile mais on
-            // évite quand même la dépense inutile.
-            //   minBuffer 30s : seuil rebuffer normal, ne freeze pas dès petit hoquet
-            //   maxBuffer 180s : 3 min de marge, suffisant pour gros incident
-            //   playback start 2s : démarrage rapide
-            //   rebuffer threshold 5s : reprise rapide après freeze (pas 10s
-            //     qui ferait freeze visible)
+            // 2026-05-09 : ajout des préfixes IPTV oubliés (livehub::/sportlive::/match::)
+            val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                args.id.startsWith("match::")
+            // 2026-05-09 : préchargement augmenté — l'user disait "le flux se fait
+            // rattraper par la vidéo" sur mobile + report TV. Bumped pour aligner
+            // mobile+TV : minBuffer 60s, maxBuffer 6 min, playback start 5s,
+            // rebuffer threshold 10s.
             val loadControl = DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
-                    if (isLiveIptv) 30_000 else 30_000,      // minBuffer
-                    if (isLiveIptv) 180_000                  // maxBuffer: 3 min live
+                    if (isLiveIptv) 60_000 else 30_000,      // minBuffer: 1 min IPTV (était 30s)
+                    if (isLiveIptv) 360_000                  // maxBuffer: 6 min IPTV (était 3 min)
                     else if (extraBuffering) 300_000 else 120_000,
-                    if (isLiveIptv) 2_000 else 1_500,        // playback start
-                    if (isLiveIptv) 5_000 else 3_000         // rebuffer threshold (reprise)
+                    if (isLiveIptv) 5_000 else 1_500,        // playback start: 5s buffered (était 2s)
+                    if (isLiveIptv) 10_000 else 3_000        // rebuffer threshold: 10s (était 5s)
                 )
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build()
