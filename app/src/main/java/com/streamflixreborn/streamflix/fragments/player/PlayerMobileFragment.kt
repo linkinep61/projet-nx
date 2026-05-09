@@ -701,9 +701,11 @@ class PlayerMobileFragment : Fragment() {
                         // tryNextChannelVariant call below still handles same-channel
                         // variants, and the IPTV ingestion keeps running in the background
                         // so additional sources show up in the Chaîne page.
-                        val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
-                                || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
-                                || args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                        val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                            args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                            args.id.startsWith("match::")
                         // 2026-05-09 : nextAutoFallbackServer skip VOSTFR/VO si on
                         // était en VF — évite de jouer du sub contre la volonté user.
                         val nextServer = if (isLiveIptv) null
@@ -1626,7 +1628,7 @@ class PlayerMobileFragment : Fragment() {
             id.startsWith("ola::") || id.startsWith("ola_ep::") ||
             id.startsWith("vegeta::") || id.startsWith("vegeta_ep::") ||
             id.startsWith("livehub::") || id.startsWith("movixlivetv::") ||
-            id.startsWith("sportlive::")
+            id.startsWith("sportlive::") || id.startsWith("match::")
     }
 
     private fun showLoadingOverlay() {
@@ -1751,7 +1753,9 @@ class PlayerMobileFragment : Fragment() {
         // (avoids segment-auth issues from separate OkHttp fetches).
         val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
-            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+            args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+            args.id.startsWith("match::")
         if (isLiveIptv) {
             handleLiveRecord(server)
             return
@@ -2278,7 +2282,9 @@ class PlayerMobileFragment : Fragment() {
                 } else {
                     val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
-                        args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                        args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                        args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                        args.id.startsWith("match::")
                     if (!isLiveIptv && bufferingWatchdog == null) {
                         val initialPosition = player.currentPosition
                         bufferingWatchdog = viewLifecycleOwner.lifecycleScope.launch {
@@ -2321,7 +2327,9 @@ class PlayerMobileFragment : Fragment() {
                 // exhausted) AND on STATE_IDLE (transient blip with no error).
                 val isLiveIptvStream = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
                     args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
-                    args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                    args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                    args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                    args.id.startsWith("match::")
                 if (isLiveIptvStream && (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE)) {
                     if (playbackState == Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
                     Log.w("PlayerMobileFragment", "Live IPTV stuck in $playbackState — re-preparing")
@@ -2495,7 +2503,9 @@ class PlayerMobileFragment : Fragment() {
                     // source utilisable comme avant.
                     val isLiveIptvNow = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
-                        args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                        args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                        args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                        args.id.startsWith("match::")
                     if (isLiveIptvNow && iptvCurrentStreamHasWorked) {
                         Log.w("PlayerNetwork", "Connection timeout IPTV sticky (already worked) → re-prepare same server")
                         try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
@@ -2975,16 +2985,16 @@ class PlayerMobileFragment : Fragment() {
         // Per user request: precharge as much as possible so the live stream
         // never cuts. Bigger buffer windows + longer rebuffer threshold.
         // 2026-05-09 : préchargement augmenté — l'user disait "le flux se fait
-        // rattraper par la vidéo" sur mobile (3 min insuffisant). Bumped max
-        // buffer 3 min → 6 min, min 30s → 60s, playback start 3s → 5s, rebuffer
-        // threshold 5s → 10s. Donne ~6 min de marge devant le head live.
+        // rattraper par la vidéo" sur mobile (3 min, puis 6 min insuffisants
+        // pour le foot). Bumped max buffer 6 min → 10 min, min 60s → 90s,
+        // playback start 5s, rebuffer threshold 15s.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                if (isLiveIptv) 60_000 else 30_000,      // minBuffer: 1 min IPTV (était 30s)
-                if (isLiveIptv) 360_000                  // maxBuffer: 6 min IPTV (était 3 min)
+                if (isLiveIptv) 90_000 else 30_000,      // minBuffer: 1.5 min IPTV (était 60s)
+                if (isLiveIptv) 600_000                  // maxBuffer: 10 min IPTV (était 6 min)
                 else if (extraBuffering) 300_000 else 120_000,
-                if (isLiveIptv) 5_000 else 1_500,        // playback start: 5s buffered (était 3s)
-                if (isLiveIptv) 10_000 else 3_000        // rebuffer threshold: 10s (était 5s)
+                if (isLiveIptv) 5_000 else 1_500,        // playback start: 5s buffered
+                if (isLiveIptv) 15_000 else 3_000        // rebuffer threshold: 15s (était 10s)
             )
             .setPrioritizeTimeOverSizeThresholds(true)   // prefer time-based buffer over size cap
             .build()

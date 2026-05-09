@@ -636,9 +636,11 @@ class PlayerTvFragment : Fragment() {
                             // IPTV: never auto-advance on extractor failure (same sticky
                             // policy as onPlayerError). Auto-jumping between OLA/Vegeta
                             // variants during initial loading was breaking playback.
-                            val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::")
-                                    || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
-                                    || args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                            val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                                args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                                args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                                args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                                args.id.startsWith("match::")
                             val nextServer = if (isLiveIptv) null
                                 else servers.getOrNull(servers.indexOf(state.server) + 1)
                             if (nextServer != null) {
@@ -1455,6 +1457,7 @@ class PlayerTvFragment : Fragment() {
             val orderedIds = when (provider) {
                 is WiTvProvider -> provider.getOrderedChannelIds()
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getOrderedChannelIds()
+                is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getOrderedChannelIds()
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getOrderedChannelIds()
                 else -> return
             }
@@ -1938,7 +1941,9 @@ class PlayerTvFragment : Fragment() {
                         // sa propre logique sticky).
                         val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
                             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
-                            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                            args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                            args.id.startsWith("match::")
                         if (!isLiveIptv && bufferingWatchdog == null) {
                             val startedAt = System.currentTimeMillis()
                             val initialPosition = player.currentPosition
@@ -1985,7 +1990,11 @@ class PlayerTvFragment : Fragment() {
                         updatePlayerScale()
 
                         // Preload adjacent channel servers for fast zapping
-                        val isIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") || args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") || args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                        val isIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                            args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                            args.id.startsWith("match::")
                         if (isIptv) {
                             val provider = UserPreferences.currentProvider
                             if (provider is WiTvProvider) {
@@ -2002,7 +2011,9 @@ class PlayerTvFragment : Fragment() {
                     // re-trigger preparation.
                     val isLiveIptvStream = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
-                        args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                        args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                        args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                        args.id.startsWith("match::")
                     if (isLiveIptvStream && (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE)) {
                         // Don't re-prepare immediately on STATE_IDLE if we never reached
                         // READY (initial load) — that would loop. Only auto-resume if
@@ -2176,7 +2187,9 @@ class PlayerTvFragment : Fragment() {
                         // 2026-05-08 : sticky absolu IPTV après 1er READY.
                         val isLiveIptvNow = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
                             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
-                            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::")
+                            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                            args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                            args.id.startsWith("match::")
                         if (isLiveIptvNow && iptvCurrentStreamHasWorked) {
                             Log.w("PlayerNetwork", "Connection timeout IPTV sticky (already worked) → re-prepare same server")
                             try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
@@ -2672,17 +2685,16 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
                 args.id.startsWith("match::")
-            // 2026-05-09 : préchargement augmenté — l'user disait "le flux se fait
-            // rattraper par la vidéo" sur mobile + report TV. Bumped pour aligner
-            // mobile+TV : minBuffer 60s, maxBuffer 6 min, playback start 5s,
-            // rebuffer threshold 10s.
+            // 2026-05-09 : préchargement augmenté — l'user disait "le buffing sur
+            // les chaînes de foot est trop lent, ça se fait rattraper par la vidéo"
+            // sur TV. Bumped à 10 min comme mobile.
             val loadControl = DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
-                    if (isLiveIptv) 60_000 else 30_000,      // minBuffer: 1 min IPTV (était 30s)
-                    if (isLiveIptv) 360_000                  // maxBuffer: 6 min IPTV (était 3 min)
+                    if (isLiveIptv) 90_000 else 30_000,      // minBuffer: 1.5 min IPTV (était 60s)
+                    if (isLiveIptv) 600_000                  // maxBuffer: 10 min IPTV (était 6 min)
                     else if (extraBuffering) 300_000 else 120_000,
-                    if (isLiveIptv) 5_000 else 1_500,        // playback start: 5s buffered (était 2s)
-                    if (isLiveIptv) 10_000 else 3_000        // rebuffer threshold: 10s (était 5s)
+                    if (isLiveIptv) 5_000 else 1_500,        // playback start: 5s buffered
+                    if (isLiveIptv) 15_000 else 3_000        // rebuffer threshold: 15s (était 10s)
                 )
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build()
