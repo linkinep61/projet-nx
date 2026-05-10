@@ -1908,13 +1908,15 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
                 args.id.startsWith("match::")
             // 2026-05-09 : roue de chargement masquée pour IPTV uniquement.
-            // Auto-recovery (STATE_ENDED → displayVideo) ne montre rien ; pour les
-            // films/séries on garde le spinner pour signaler le buffering normal.
+            // keepContentOnPlayerReset reset à false ici — il sera mis à true
+            // uniquement juste avant les reloads auto-recovery pour ne pas casser
+            // le transfert mini→fullscreen (view fraîche sans frame précédente).
             try {
                 binding.pvPlayer.setShowBuffering(
                     if (isLiveIptvChannel) androidx.media3.ui.PlayerView.SHOW_BUFFERING_NEVER
                     else androidx.media3.ui.PlayerView.SHOW_BUFFERING_WHEN_PLAYING
                 )
+                binding.pvPlayer.setKeepContentOnPlayerReset(false)
             } catch (_: Exception) {}
             val mediaItemBuilder = MediaItem.Builder()
                 .setUri(video.source.toUri())
@@ -2043,7 +2045,10 @@ class PlayerTvFragment : Fragment() {
                                     if (cs != null && cv != null) {
                                         Log.w("PlayerTvFragment",
                                             "IPTV stuck in BUFFERING > 10s on ${cs.name} → FULL RELOAD via displayVideo")
-                                        try { binding.pvPlayer.controller.hide() } catch (_: Exception) {}
+                                        try {
+                                            binding.pvPlayer.controller.hide()
+                                            binding.pvPlayer.setKeepContentOnPlayerReset(true)
+                                        } catch (_: Exception) {}
                                         try {
                                             displayVideo(cv, cs)
                                         } catch (e: Exception) {
@@ -2122,11 +2127,12 @@ class PlayerTvFragment : Fragment() {
                             val cs = currentServer
                             val cv = currentVideo
                             if (cs != null && cv != null) {
-                                // Masque les contrôles pour rendre le reload transparent
-                                // (l'user ne voit que la dernière frame figée + une frame
-                                // par seconde de buffer pendant le re-prepare).
+                                // Masque les contrôles + active keep_content pour que la
+                                // dernière frame reste figée pendant le re-prepare (au lieu
+                                // d'écran noir).
                                 try {
                                     binding.pvPlayer.controller.hide()
+                                    binding.pvPlayer.setKeepContentOnPlayerReset(true)
                                 } catch (_: Exception) {}
                                 viewLifecycleOwner.lifecycleScope.launch {
                                     kotlinx.coroutines.delay(50L)
@@ -2727,7 +2733,10 @@ class PlayerTvFragment : Fragment() {
                             if (cs != null && cv != null) {
                                 Log.w("PlayerTvFragment",
                                     "PREEMPTIVE reload — buffer drain ${aheadSec}s, 5 ticks de baisse continue")
-                                try { binding.pvPlayer.controller.hide() } catch (_: Exception) {}
+                                try {
+                                    binding.pvPlayer.controller.hide()
+                                    binding.pvPlayer.setKeepContentOnPlayerReset(true)
+                                } catch (_: Exception) {}
                                 viewLifecycleOwner.lifecycleScope.launch {
                                     try {
                                         displayVideo(cv, cs)

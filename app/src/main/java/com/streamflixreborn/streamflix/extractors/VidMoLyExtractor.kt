@@ -221,8 +221,16 @@ open class VidMoLyExtractor : Extractor() {
 
                     cont.invokeOnCancellation {
                         resolved = true
-                        webView.stopLoading()
-                        webView.destroy()
+                        // 2026-05-10 : invokeOnCancellation s'exécute sur kotlinx
+                        // DefaultExecutor (thread background) → WebView.stopLoading()
+                        // et destroy() doivent être postés sur le main thread, sinon
+                        // crash "WebView method called on wrong thread".
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            try {
+                                webView.stopLoading()
+                                webView.destroy()
+                            } catch (_: Exception) {}
+                        }
                     }
                 }
             }

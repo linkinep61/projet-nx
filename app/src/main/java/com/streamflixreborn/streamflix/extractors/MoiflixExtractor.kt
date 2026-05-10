@@ -212,8 +212,13 @@ open class MoiflixExtractor : Extractor() {
 
                     cont.invokeOnCancellation {
                         resolved = true
-                        webView.stopLoading()
-                        webView.destroy()
+                        // 2026-05-10 : WebView méthodes doivent tourner sur main thread
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            try {
+                                webView.stopLoading()
+                                webView.destroy()
+                            } catch (_: Exception) {}
+                        }
                     }
                 }
             }
