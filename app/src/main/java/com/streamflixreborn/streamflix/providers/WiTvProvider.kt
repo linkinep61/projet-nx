@@ -1608,10 +1608,19 @@ object WiTvProvider : Provider, IptvProvider {
         // Direct m3u8 (cluone.dad resolved in getServers)
         if (originalUrl.startsWith("m3u8::")) {
             val parts = originalUrl.removePrefix("m3u8::").split("||referer=", "||ua=")
-            val m3u8 = parts[0]
+            val m3u8Original = parts[0]
             val referer = parts.getOrElse(1) { "" }
             val ua = parts.getOrElse(2) { USER_AGENT }
-            Log.d(TAG, "  DIRECT M3U8: $m3u8")
+            // 2026-05-09 v25 : MPEG-TS swap pour Xtream-codes URLs (comme TiviMate).
+            // Le `m3u8::` est juste notre préfixe interne. L'URL réelle peut être
+            // soit HLS (.m3u8) soit MPEG-TS (.ts ou query extension=ts). Si Xtream
+            // HLS → swap vers .ts pour stream HTTP continu sans rate-limit segments.
+            val m3u8 = if (m3u8Original.contains("/live/") && m3u8Original.endsWith(".m3u8")) {
+                m3u8Original.removeSuffix(".m3u8") + ".ts"
+            } else {
+                m3u8Original
+            }
+            Log.d(TAG, "  DIRECT M3U8: $m3u8 (MPEG-TS swap if Xtream)")
             val hdrs = mutableMapOf("User-Agent" to ua.ifBlank { USER_AGENT })
             if (referer.isNotBlank()) hdrs["Referer"] = referer
             return Video(m3u8, headers = hdrs)

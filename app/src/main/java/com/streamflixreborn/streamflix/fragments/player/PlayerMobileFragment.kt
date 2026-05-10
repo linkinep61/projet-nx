@@ -2147,6 +2147,15 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
             args.id.startsWith("match::")
+        // 2026-05-09 : roue de chargement masquée pour IPTV uniquement (recovery
+        // transparente). Pour VOD on garde le spinner normal.
+        try {
+            binding.pvPlayer.setShowBuffering(
+                if (isLiveIptvChannel) androidx.media3.ui.PlayerView.SHOW_BUFFERING_NEVER
+                else androidx.media3.ui.PlayerView.SHOW_BUFFERING_WHEN_PLAYING
+            )
+            binding.pvPlayer.setKeepContentOnPlayerReset(true)
+        } catch (_: Exception) {}
         val mediaItemBuilder = MediaItem.Builder()
             .setUri(video.source.toUri())
             .setMimeType(video.type)
@@ -2206,10 +2215,24 @@ class PlayerMobileFragment : Fragment() {
                 || video.type == androidx.media3.common.MimeTypes.APPLICATION_M3U8
             val teeFactory = com.streamflixreborn.streamflix.download.TeeDataSourceFactory(dataSourceFactory)
             if (isHls) {
+                // 2026-05-09 v23 : retry 403 sur HLS Live (cf PlayerTvFragment).
+                val errorPolicy = object : androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy() {
+                    override fun getRetryDelayMsFor(info: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo): Long {
+                        val ex = info.exception
+                        if (ex is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException && ex.responseCode == 403) {
+                            Log.d("PlayerMobileFragment", "HLS 403 → retry 1.5s (manifest refresh)")
+                            return 1500L
+                        }
+                        return super.getRetryDelayMsFor(info)
+                    }
+                    override fun getMinimumLoadableRetryCount(dataType: Int): Int = 6
+                }
                 val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(teeFactory)
+                    .setAllowChunklessPreparation(true)
+                    .setLoadErrorHandlingPolicy(errorPolicy)
                     .createMediaSource(mediaItem)
                 player.setMediaSource(hlsSource)
-                Log.d("PlayerDebug", "HLS: using TeeDataSource (REC button can tap)")
+                Log.d("PlayerDebug", "HLS v23: TeeDataSource + retry-403 policy")
             } else {
                 // Non-HLS (mp4 progressive). Wrap with TeeDataSource for REC.
                 val progressiveSource = androidx.media3.exoplayer.source.ProgressiveMediaSource
@@ -2342,6 +2365,33 @@ class PlayerMobileFragment : Fragment() {
                             bufferingWatchdog = null
                         }
                     }
+                    // 2026-05-09 : watchdog BUFFERING IPTV — anti écran-figé sur Ola.
+                    // Si le player est en BUFFERING avec position inchangée pendant 10s
+                    // ET qu'on a déjà eu STATE_READY (= flux marchait avant), c'est qu'on
+                    // est figé (Stalker resolution lente, serveur OlaTv qui répond pas).
+                    // On force un displayVideo() qui re-résout avec nouveau token.
+                    if (isLiveIptv && iptvCurrentStreamHasWorked && bufferingWatchdog == null) {
+                        val initialPosition = player.currentPosition
+                        bufferingWatchdog = viewLifecycleOwner.lifecycleScope.launch {
+                            kotlinx.coroutines.delay(10_000L)
+                            if (player.playbackState == Player.STATE_BUFFERING &&
+                                player.currentPosition == initialPosition && _binding != null) {
+                                val cs = currentServer
+                                val cv = currentVideo
+                                if (cs != null && cv != null) {
+                                    Log.w("PlayerMobileFragment",
+                                        "IPTV stuck in BUFFERING > 10s on ${cs.name} → FULL RELOAD via displayVideo")
+                                    try { binding.pvPlayer.controller.hide() } catch (_: Exception) {}
+                                    try {
+                                        displayVideo(cv, cs)
+                                    } catch (e: Exception) {
+                                        Log.w("PlayerMobileFragment", "Buffering watchdog reload failed: ${e.message}")
+                                    }
+                                }
+                            }
+                            bufferingWatchdog = null
+                        }
+                    }
                 }
 
                 // Once we actually reach READY, restore the normal 2s auto-hide
@@ -2372,12 +2422,28 @@ class PlayerMobileFragment : Fragment() {
                     args.id.startsWith("match::")
                 if (isLiveIptvStream && (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE)) {
                     if (playbackState == Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
-                    Log.w("PlayerMobileFragment", "Live IPTV stuck in $playbackState — re-preparing")
+                    Log.w("PlayerMobileFragment", "Live IPTV stuck in $playbackState — FULL RELOAD via displayVideo")
+                    // Identique à PlayerTvFragment : displayVideo direct contourne le
+                    // distinctUntilChanged du StateFlow (qui bloque l'émission identique).
                     try {
-                        // 2026-05-08 : pas de seekToDefaultPosition (flush buffer →
-                        // charge/stop/recharge en boucle). prepare() seul suffit.
-                        player.prepare()
-                        player.playWhenReady = true
+                        val cs = currentServer
+                        val cv = currentVideo
+                        if (cs != null && cv != null) {
+                            try { binding.pvPlayer.controller.hide() } catch (_: Exception) {}
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                kotlinx.coroutines.delay(50L)
+                                if (_binding != null) {
+                                    try {
+                                        displayVideo(cv, cs)
+                                    } catch (e: Exception) {
+                                        Log.w("PlayerMobileFragment", "displayVideo reload failed: ${e.message}")
+                                    }
+                                }
+                            }
+                        } else {
+                            player.prepare()
+                            player.playWhenReady = true
+                        }
                     } catch (e: Exception) {
                         Log.w("PlayerMobileFragment", "Auto-resume failed: ${e.message}")
                     }
@@ -2931,6 +2997,9 @@ class PlayerMobileFragment : Fragment() {
     private fun startProgressHandler() {
         progressHandler = android.os.Handler(android.os.Looper.getMainLooper())
         var liveCheckCounter = 0
+        // 2026-05-09 PISTE A : tracking du drain buffer (cf PlayerTvFragment).
+        var lastAheadSec = -1
+        var consecutiveDrainTicks = 0
         progressRunnable = Runnable {
             if (player.isPlaying) {
                 val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
@@ -2943,37 +3012,43 @@ class PlayerMobileFragment : Fragment() {
                     showSkipIntroButton(show)
                     updateNextEpisodeOverlay()
                 } else {
-                    // 2026-05-09 v14 : detection emergency buffer < 15s.
                     liveCheckCounter++
                     val pos = player.currentPosition
                     val buf = player.bufferedPosition
                     val ahead = (buf - pos).coerceAtLeast(0)
+                    val aheadSec = (ahead / 1000).toInt()
                     if (liveCheckCounter >= 5) {
                         liveCheckCounter = 0
-                        Log.d("PlayerMobileFragment", "Live buffer: pos=${pos/1000}s buf=${buf/1000}s ahead=${ahead/1000}s")
+                        Log.d("PlayerMobileFragment", "Live buffer: pos=${pos/1000}s buf=${buf/1000}s ahead=${aheadSec}s")
                     }
-                    if (ahead < 15_000L && pos > 20_000L && !emergencyRefreshInFlight) {
+                    // PISTE A : détection drain buffer (5 ticks consécutifs en baisse + ahead<25s)
+                    if (lastAheadSec >= 0 && aheadSec < lastAheadSec) {
+                        consecutiveDrainTicks++
+                    } else {
+                        consecutiveDrainTicks = 0
+                    }
+                    lastAheadSec = aheadSec
+                    if (consecutiveDrainTicks >= 5 && aheadSec < 25 &&
+                        iptvCurrentStreamHasWorked && !preemptiveReloadInFlight) {
+                        preemptiveReloadInFlight = true
+                        consecutiveDrainTicks = 0
                         val cs = currentServer
-                        val isStalkerCs = cs != null && (cs.id.startsWith("vegeta_stream::") || cs.id.startsWith("ola_stream::"))
-                        if (cs != null && isStalkerCs) {
-                            emergencyRefreshInFlight = true
-                            Log.d("PlayerMobileFragment", "EMERGENCY refresh — buffer ahead=${ahead/1000}s < 15s")
+                        val cv = currentVideo
+                        if (cs != null && cv != null) {
+                            Log.w("PlayerMobileFragment",
+                                "PREEMPTIVE reload — buffer drain ${aheadSec}s, 5 ticks de baisse continue")
+                            try { binding.pvPlayer.controller.hide() } catch (_: Exception) {}
                             viewLifecycleOwner.lifecycleScope.launch {
-                                val newServer = withContext(Dispatchers.IO) {
-                                    when {
-                                        cs.id.startsWith("vegeta_stream::") ->
-                                            com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(cs)
-                                        cs.id.startsWith("ola_stream::") ->
-                                            com.streamflixreborn.streamflix.providers.OlaTvProvider.refreshServerUrl(cs)
-                                        else -> null
-                                    }
+                                try {
+                                    displayVideo(cv, cs)
+                                } catch (e: Exception) {
+                                    Log.w("PlayerMobileFragment", "Preemptive displayVideo failed: ${e.message}")
                                 }
-                                if (newServer != null && _binding != null) {
-                                    viewModel.getVideo(newServer)
-                                }
-                                kotlinx.coroutines.delay(30_000L)
-                                emergencyRefreshInFlight = false
+                                kotlinx.coroutines.delay(20_000L)
+                                preemptiveReloadInFlight = false
                             }
+                        } else {
+                            preemptiveReloadInFlight = false
                         }
                     }
                 }
@@ -3014,6 +3089,8 @@ class PlayerMobileFragment : Fragment() {
     // les 3 min, AVANT expiry → cut court et prévisible vs 25s subi.
     private var proactiveRefreshHandler: android.os.Handler? = null
     @Volatile private var emergencyRefreshInFlight = false
+    // 2026-05-09 PISTE A : flag anti-reload-en-rafale pour le préemptif drain.
+    @Volatile private var preemptiveReloadInFlight = false
 
     private fun scheduleProactiveTokenRefresh() {
         val server = currentServer ?: return
@@ -3502,13 +3579,20 @@ class PlayerMobileFragment : Fragment() {
 
         dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
 
+        // 2026-05-09 : handleAudioFocus=false pour IPTV Live (cf PlayerTvFragment).
+        // Empêche les pauses auto sur Bluetooth/notif/audio focus loss.
+        val isLiveIptvHere = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+            args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+            args.id.startsWith("match::")
         player = buildPlayer(extraBuffering).also { player ->
                 player.setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(C.USAGE_MEDIA)
                         .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
                         .build(),
-                    true,
+                    !isLiveIptvHere,
                 )
 
                 val lang = UserPreferences.currentProvider?.language?.substringBefore("-")
