@@ -554,13 +554,15 @@ object VegetaTvProvider : Provider, IptvProvider {
                     .header("Accept", "*/*")
                     .build()
                 val resp = client.newCall(req).execute()
-                // Cap body size at 10 MB to avoid OutOfMemoryError on huge m3us
-                // (some Xtream servers return 100k+ channels = 100+ MB).
-                // 10 MB is enough for all FR channels — typical FR-only m3u is ~200KB.
-                val MAX_BODY_BYTES = 10L * 1024 * 1024
+                // 2026-05-10 : cap 50MB (au lieu de 10MB skip) — certains Xtream FR
+                // renvoient une m3u globale 30-50MB qu'on doit truncate au lieu de
+                // skip totalement (sinon TF1 introuvable + token impossible à obtenir).
+                // La truncation préserve les premiers ~50MB où FR/TF1 est généralement
+                // listé en haut.
+                val MAX_BODY_BYTES = 50L * 1024 * 1024
                 val contentLength = resp.body?.contentLength() ?: -1L
-                if (contentLength > MAX_BODY_BYTES) {
-                    Log.w(TAG, "  fetchWithProxy too large via $label (${contentLength / 1024 / 1024}MB > 25MB) — skipping")
+                if (contentLength > MAX_BODY_BYTES * 2) {
+                    Log.w(TAG, "  fetchWithProxy too large via $label (${contentLength / 1024 / 1024}MB > ${MAX_BODY_BYTES * 2 / 1024 / 1024}MB) — skipping")
                     resp.close()
                     return@withContext null
                 }

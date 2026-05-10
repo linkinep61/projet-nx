@@ -2147,14 +2147,15 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
             args.id.startsWith("match::")
-        // 2026-05-09 : roue de chargement masquée pour IPTV uniquement (recovery
-        // transparente). Pour VOD on garde le spinner normal.
+        // 2026-05-09 : roue de chargement masquée pour IPTV uniquement.
+        // keepContentOnPlayerReset reset à false — sera mis à true uniquement
+        // juste avant les reloads auto-recovery (sinon casse mini→fullscreen).
         try {
             binding.pvPlayer.setShowBuffering(
                 if (isLiveIptvChannel) androidx.media3.ui.PlayerView.SHOW_BUFFERING_NEVER
                 else androidx.media3.ui.PlayerView.SHOW_BUFFERING_WHEN_PLAYING
             )
-            binding.pvPlayer.setKeepContentOnPlayerReset(true)
+            binding.pvPlayer.setKeepContentOnPlayerReset(false)
         } catch (_: Exception) {}
         val mediaItemBuilder = MediaItem.Builder()
             .setUri(video.source.toUri())
@@ -2210,9 +2211,15 @@ class PlayerMobileFragment : Fragment() {
             // (sans extension .m3u8 dans l'URL) avec type=APPLICATION_M3U8. On
             // teste donc le `type` en plus de la source URL pour router vers
             // HlsMediaSource au lieu de ProgressiveMediaSource.
-            val isHls = video.source.contains(".m3u8")
+            // 2026-05-10 : .ts force Progressive (MPEG-TS continu), même si l'URL
+            // contient /live/. Sinon HlsPlaylistParser tente de parser le binaire
+            // comme playlist HLS et crashe (#EXTM3U manquant).
+            val urlEndsWithTs = video.source.substringBefore('?').endsWith(".ts", ignoreCase = true)
+            val isHls = !urlEndsWithTs && (
+                video.source.contains(".m3u8")
                 || video.source.contains("/live/")
                 || video.type == androidx.media3.common.MimeTypes.APPLICATION_M3U8
+            )
             val teeFactory = com.streamflixreborn.streamflix.download.TeeDataSourceFactory(dataSourceFactory)
             if (isHls) {
                 // 2026-05-09 v23 : retry 403 sur HLS Live (cf PlayerTvFragment).
@@ -2381,7 +2388,10 @@ class PlayerMobileFragment : Fragment() {
                                 if (cs != null && cv != null) {
                                     Log.w("PlayerMobileFragment",
                                         "IPTV stuck in BUFFERING > 10s on ${cs.name} → FULL RELOAD via displayVideo")
-                                    try { binding.pvPlayer.controller.hide() } catch (_: Exception) {}
+                                    try {
+                                binding.pvPlayer.controller.hide()
+                                binding.pvPlayer.setKeepContentOnPlayerReset(true)
+                            } catch (_: Exception) {}
                                     try {
                                         displayVideo(cv, cs)
                                     } catch (e: Exception) {
@@ -2429,7 +2439,10 @@ class PlayerMobileFragment : Fragment() {
                         val cs = currentServer
                         val cv = currentVideo
                         if (cs != null && cv != null) {
-                            try { binding.pvPlayer.controller.hide() } catch (_: Exception) {}
+                            try {
+                                binding.pvPlayer.controller.hide()
+                                binding.pvPlayer.setKeepContentOnPlayerReset(true)
+                            } catch (_: Exception) {}
                             viewLifecycleOwner.lifecycleScope.launch {
                                 kotlinx.coroutines.delay(50L)
                                 if (_binding != null) {
@@ -3037,7 +3050,10 @@ class PlayerMobileFragment : Fragment() {
                         if (cs != null && cv != null) {
                             Log.w("PlayerMobileFragment",
                                 "PREEMPTIVE reload — buffer drain ${aheadSec}s, 5 ticks de baisse continue")
-                            try { binding.pvPlayer.controller.hide() } catch (_: Exception) {}
+                            try {
+                                binding.pvPlayer.controller.hide()
+                                binding.pvPlayer.setKeepContentOnPlayerReset(true)
+                            } catch (_: Exception) {}
                             viewLifecycleOwner.lifecycleScope.launch {
                                 try {
                                     displayVideo(cv, cs)
