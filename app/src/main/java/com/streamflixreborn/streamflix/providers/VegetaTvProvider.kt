@@ -1683,6 +1683,61 @@ object VegetaTvProvider : Provider, IptvProvider {
      *  retourne un Video.Server avec la nouvelle URL.
      *
      *  Returns null si pas de mapping (URL pas en cache ou pas Stalker). */
+
+    /**
+     * 2026-05-09 v25 : Renewal d'un server banni — retourne un server alternatif du
+     * même channel que l'user n'a pas encore vu/banni. Permet au picker de rester
+     * plein après un kick. Identique au flow OlaTvProvider.requestSingleReplacement.
+     */
+    fun requestSingleReplacement(bannedServerId: String, currentServerIds: Set<String>): Video.Server? {
+        val parts = bannedServerId.removePrefix("vegeta_stream::").split("::", limit = 3)
+        if (parts.size < 3) return null
+        val bannedUrl = parts[2]
+        // Trouve le channelKey du banned server
+        val channelKey = synchronized(registryLock) {
+            channelRegistry.entries.firstOrNull { (_, info) ->
+                info.streams.any { it.url == bannedUrl }
+            }?.key
+        } ?: run {
+            Log.w(TAG, "requestSingleReplacement: channelKey introuvable pour URL bannie ${bannedUrl.take(80)}")
+            return null
+        }
+        // 2026-05-09 v25 : recherche élargie. D'abord dans le channelKey exact,
+        // puis dans les channelKeys similaires (ex: tf1, tf1hd, tf1plus1) pour
+        // maximiser les chances de trouver un remplaçant si le pool exact est vide.
+        val sameKeyCandidates = synchronized(registryLock) {
+            channelRegistry[channelKey]?.streams?.toList() ?: emptyList()
+        }
+        val similarKeys = synchronized(registryLock) {
+            channelRegistry.keys.filter { other ->
+                other != channelKey && (
+                    other.startsWith(channelKey) || channelKey.startsWith(other) ||
+                    other.contains(channelKey) || channelKey.contains(other)
+                )
+            }
+        }
+        val similarCandidates = synchronized(registryLock) {
+            similarKeys.flatMap { k -> channelRegistry[k]?.streams ?: emptyList() }
+        }
+        val allCandidates = sameKeyCandidates + similarCandidates
+        val available = allCandidates.filter { ref ->
+            val candidateId = "vegeta_stream::${ref.serverIdx}::${ref.label}::${ref.url}"
+            ref.url != bannedUrl &&
+                candidateId !in currentServerIds &&
+                !com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedServers.isBanned("vegeta::$channelKey", candidateId)
+        }
+        Log.d(TAG, "requestSingleReplacement('$channelKey'): pool=${sameKeyCandidates.size}+${similarCandidates.size} similar, available=${available.size}, current=${currentServerIds.size}")
+        val replacement = available.firstOrNull() ?: run {
+            Log.w(TAG, "requestSingleReplacement('$channelKey'): pool ÉPUISÉ — aucun remplaçant disponible")
+            return null
+        }
+        Log.d(TAG, "requestSingleReplacement('$channelKey'): replacing with Vegeta[${replacement.serverIdx}] ${replacement.label}")
+        return Video.Server(
+            id = "vegeta_stream::${replacement.serverIdx}::${replacement.label}::${replacement.url}",
+            name = "Vegeta[${replacement.serverIdx}] ${replacement.label}",
+        )
+    }
+
     suspend fun refreshServerUrl(server: Video.Server): Video.Server? = withContext(Dispatchers.IO) {
         try {
             val parts = server.id.removePrefix("vegeta_stream::").split("::", limit = 3)
@@ -1719,14 +1774,24 @@ object VegetaTvProvider : Provider, IptvProvider {
         try {
             val parts = server.id.removePrefix("vegeta_stream::").split("::", limit = 3)
             if (parts.size < 3) throw Exception("Bad server id")
-            val streamUrl = parts[2]
+            val originalUrl = parts[2]
             // Mark this stream as the last-known-good for the channel — next time
             // getServers is called we'll surface it first (with a ★ prefix).
-            streamUrlToChannelKey[streamUrl]?.let { channelKey ->
-                lastGoodStreamUrl[channelKey] = streamUrl
-                Log.d(TAG, "getVideo: pinning $streamUrl as last-known-good for '$channelKey'")
+            streamUrlToChannelKey[originalUrl]?.let { channelKey ->
+                lastGoodStreamUrl[channelKey] = originalUrl
+                Log.d(TAG, "getVideo: pinning $originalUrl as last-known-good for '$channelKey'")
             }
-            Log.d(TAG, "getVideo → ${streamUrl.take(120)}")
+            // 2026-05-09 v25 : MPEG-TS au lieu de HLS pour Xtream-codes (comme TiviMate).
+            // L'URL Xtream `host/live/USER/PASS/CHANNEL.m3u8` peut être jouée en `.ts`
+            // pour obtenir un stream HTTP CONTINU — pas de manifest, pas de tokens
+            // segments expirants, pas de rate-limit 50s sur les segments.
+            // ExoPlayer auto-détecte `.ts` → ProgressiveMediaSource (single connexion).
+            val streamUrl = if (originalUrl.contains("/live/") && originalUrl.endsWith(".m3u8")) {
+                originalUrl.removeSuffix(".m3u8") + ".ts"
+            } else {
+                originalUrl
+            }
+            Log.d(TAG, "getVideo → ${streamUrl.take(120)} (MPEG-TS swap if Xtream)")
             Video(streamUrl, headers = mapOf("User-Agent" to USER_AGENT))
         } catch (e: Exception) {
             Log.e(TAG, "getVideo error", e); throw e

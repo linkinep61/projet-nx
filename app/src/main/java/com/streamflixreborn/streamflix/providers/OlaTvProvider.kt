@@ -642,6 +642,13 @@ object OlaTvProvider : Provider, IptvProvider {
      *  If cmd is already a direct *external* http URL, return it directly. Else
      *  (localhost:* form, which is how the MAC portal encodes "you must call create_link"),
      *  call create_link to get the real upstream URL. */
+    // 2026-05-09 : cache token Stalker par (baseUrl, mac). TTL 30s — ce qui couvre
+    // une rafale de résolutions (open channel + zap rapide) sans risque d'expiry.
+    // Évite ~200-1000ms de handshake à chaque resolveStreamCmd.
+    private data class CachedToken(val token: String, val ts: Long)
+    private val tokenCache = java.util.concurrent.ConcurrentHashMap<String, CachedToken>()
+    private val TOKEN_CACHE_TTL_MS = 30_000L
+
     private fun resolveStreamCmd(baseUrl: String, mac: String, cmd: String): String? {
         val rawCmd = cmd.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
         // Direct external HTTP URLs are playable as-is. Localhost URLs are placeholders
@@ -655,12 +662,21 @@ object OlaTvProvider : Provider, IptvProvider {
             val cookie = "mac=$encodedMac; stb_lang=en; timezone=Europe%2FLondon"
             val stbUA = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3"
 
-            // Re-handshake (token may have expired)
-            val hsBody = client.newCall(Request.Builder()
-                .url("$portalBase?type=stb&action=handshake&token=&JsHttpRequest=1-xml")
-                .header("User-Agent", stbUA).header("Cookie", cookie).build()
-            ).execute().body?.string() ?: ""
-            val token = JSONObject(hsBody).getJSONObject("js").getString("token")
+            // Token avec cache 30s — saute le handshake si token frais
+            val tokenKey = "$baseUrl::$mac"
+            val now = System.currentTimeMillis()
+            val cached = tokenCache[tokenKey]
+            val token = if (cached != null && (now - cached.ts) < TOKEN_CACHE_TTL_MS) {
+                cached.token
+            } else {
+                val hsBody = client.newCall(Request.Builder()
+                    .url("$portalBase?type=stb&action=handshake&token=&JsHttpRequest=1-xml")
+                    .header("User-Agent", stbUA).header("Cookie", cookie).build()
+                ).execute().body?.string() ?: ""
+                val freshToken = JSONObject(hsBody).getJSONObject("js").getString("token")
+                tokenCache[tokenKey] = CachedToken(freshToken, now)
+                freshToken
+            }
 
             val cmdEncoded = java.net.URLEncoder.encode(rawCmd, "UTF-8")
             val linkReq = Request.Builder()
@@ -696,6 +712,10 @@ object OlaTvProvider : Provider, IptvProvider {
     // Cache resolved upstream URLs (localhost → upstream) per (cid, cmd) so repeated plays
     // of the same variant don't trigger redundant create_link calls.
     private val resolvedUrlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    // 2026-05-09 : timestamps des URLs résolues pour TTL 60s. play_token expire vite,
+    // donc on n'utilise une URL en cache que si elle a moins de 60s.
+    private val resolvedUrlTs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val RESOLVED_URL_TTL_MS = 60_000L
 
     // URLs that have recently failed — used for ordering: demoted URLs are emitted
     // LAST so the player tries fresh URLs first. No TTL throw: a demoted URL is still
@@ -2084,9 +2104,35 @@ object OlaTvProvider : Provider, IptvProvider {
             // CRITICAL: clear the replay buffer so a new subscriber (e.g. MiniPlayerController
             // switching from TF1 to France 2) doesn't receive stale servers from the previous channel.
             _additionalServers.resetReplayCache()
+            // 2026-05-09 : pre-warm parallèle des top 3 servers — résout les URLs en
+            // background pour qu'elles soient en cache quand l'user clique. Saute le
+            // handshake/create_link au moment du play → instant play sur les top 3.
+            scope.launch(Dispatchers.IO) {
+                streamsSnapshot.take(3).forEach { stream ->
+                    launch {
+                        try {
+                            val creds = getMacCredentials(stream.cid) ?: return@launch
+                            val rawCmd = stream.url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
+                            // Skip si URL directe ou déjà en cache résolu
+                            if (rawCmd.startsWith("http") && !rawCmd.contains("localhost") &&
+                                !rawCmd.contains("127.0.0.1")) return@launch
+                            val cacheKey = "${stream.cid}::${stream.url}"
+                            val cachedTs = resolvedUrlTs[cacheKey] ?: 0L
+                            if (resolvedUrlCache.containsKey(cacheKey) &&
+                                (System.currentTimeMillis() - cachedTs) < RESOLVED_URL_TTL_MS) return@launch
+                            val resolved = resolveStreamCmd(creds.baseUrl, creds.mac, stream.url)
+                            if (resolved != null) {
+                                resolvedUrlCache[cacheKey] = resolved
+                                resolvedUrlTs[cacheKey] = System.currentTimeMillis()
+                                Log.d(TAG, "  pre-warmed cid=${stream.cid} ${stream.label}")
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+            }
             currentEmitJob = scope.launch {
-                // Tiny delay so the player has time to subscribe to the flow.
-                delay(150)
+                // 2026-05-09 : 150 → 50ms (gain de ~100ms perçus avant 1ère emission)
+                delay(50)
                 // Emit additional variants — SKIP the first stream because it's already
                 // the initial server. De-duplicate by URL. Cap to MAX_VARIANTS_PER_CHANNEL
                 // so a hot channel with 50 cids doesn't flood the Chaîne page (memory + UX).
@@ -2119,7 +2165,7 @@ object OlaTvProvider : Provider, IptvProvider {
                 val seenUrls = streamsSnapshot.map { it.url }.toMutableSet()
                 val waitDeadlineMs = System.currentTimeMillis() + 60_000L
                 while (isActive && System.currentTimeMillis() < waitDeadlineMs && !phase3Done) {
-                    delay(1500)
+                    delay(500) // 2026-05-09 : 1500 → 500ms = nouvelles streams Phase 3 vues 3x plus vite
                     val latest = synchronized(registryLock) { channelRegistry[key]?.streams?.toList() } ?: continue
                     val newStreams = latest.filter { seenUrls.add(it.url) }
                     if (newStreams.isNotEmpty()) {
@@ -2186,14 +2232,23 @@ object OlaTvProvider : Provider, IptvProvider {
             val streamUrl = when {
                 // Direct upstream URL (no resolution needed) — instant play.
                 rawCmd.startsWith("http") && !isLocalhost -> rawCmd
+                // 2026-05-09 : check le pre-warmed cache (rempli en background dans
+                // getServers). Si l'URL est en cache ET fraîche (<60s), on l'utilise
+                // direct → instant play sans handshake.
+                resolvedUrlCache.containsKey("$cid::$cmd") &&
+                    (System.currentTimeMillis() - (resolvedUrlTs["$cid::$cmd"] ?: 0L)) < RESOLVED_URL_TTL_MS -> {
+                    val cachedUrl = resolvedUrlCache["$cid::$cmd"]!!
+                    Log.d(TAG, "getVideo: pre-warmed cache hit for cid=$cid (instant play)")
+                    cachedUrl
+                }
                 // Localhost placeholder — must hit create_link to get the real URL.
-                // Never cache these: MAC portal tokens expire within minutes → 401 errors.
-                // Always resolve fresh for reliability.
                 else -> {
                     val creds = getMacCredentials(cid) ?: throw Exception("Could not get MAC creds for cid=$cid")
                     val resolved = resolveStreamCmd(creds.baseUrl, creds.mac, cmd)
                         ?: throw Exception("create_link returned null")
                     Log.d(TAG, "getVideo resolved fresh for cid=$cid: ${resolved.take(80)}")
+                    resolvedUrlCache["$cid::$cmd"] = resolved
+                    resolvedUrlTs["$cid::$cmd"] = System.currentTimeMillis()
                     resolved
                 }
             }

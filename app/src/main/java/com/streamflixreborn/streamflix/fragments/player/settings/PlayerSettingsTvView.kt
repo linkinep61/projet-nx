@@ -110,7 +110,27 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             if (direction == View.FOCUS_RIGHT || direction == View.FOCUS_LEFT) {
                 return super.focusSearch(focused, direction) ?: focused
             }
-            // Block DOWN escape from the list
+            // 2026-05-09 v25 : DOWN doit permettre le scroll dans la liste
+            // (sinon les bannis tout en bas sont inaccessibles à la télécommande).
+            // On laisse super.focusSearch chercher le prochain item dans la liste,
+            // et on bloque uniquement l'escape EN DEHORS du rvSettings.
+            if (direction == View.FOCUS_DOWN) {
+                val next = super.focusSearch(focused, direction)
+                // Si next est dans le rvSettings, on autorise (scroll naturel)
+                if (next != null && binding.rvSettings.findContainingItemView(next) != null) {
+                    return next
+                }
+                // Sinon on essaie de scroller manuellement dans la liste
+                val lm = binding.rvSettings.layoutManager as? androidx.recyclerview.widget.LinearLayoutManager
+                val lastPos = lm?.findLastCompletelyVisibleItemPosition() ?: -1
+                val totalCount = binding.rvSettings.adapter?.itemCount ?: 0
+                if (lastPos >= 0 && lastPos < totalCount - 1) {
+                    binding.rvSettings.smoothScrollToPosition(lastPos + 1)
+                    return focused  // garde focus actuel, scroll fait le reste
+                }
+                return focused  // déjà tout en bas
+            }
+            // Block UP escape (sauf cas géré plus haut)
             return focused
         }
         return super.focusSearch(focused, direction) ?: focused
