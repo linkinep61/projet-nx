@@ -573,7 +573,12 @@ class PlayerTvFragment : Fragment() {
                             })
                             .build()
                         binding.settings.setOnServerSelectedListener { server ->
-                            viewModel.getVideo(state.servers.find { server.id == it.id }!!)
+                            // 2026-05-10 : pas de !! qui crashait sur serveurs ajoutés
+                            // dynamiquement (kick + replacement). Si pas dans state.servers,
+                            // on construit un Video.Server à partir des données Settings.Server.
+                            val target = state.servers.find { server.id == it.id }
+                                ?: Video.Server(id = server.id, name = server.name)
+                            viewModel.getVideo(target)
                         }
                         // Downloads disabled on TV — not enough storage
                         // binding.settings.setOnServerDownloadClickedListener { ... }
@@ -2029,36 +2034,11 @@ class PlayerTvFragment : Fragment() {
                                 bufferingWatchdog = null
                             }
                         }
-                        // 2026-05-09 : watchdog BUFFERING IPTV — anti écran-figé sur Ola.
-                        // Stuck en BUFFERING avec position inchangée pendant 10s +
-                        // iptvCurrentStreamHasWorked → force un displayVideo() qui re-résout
-                        // (nouveau token Stalker / nouvelle URL). Les fausses alertes du blip
-                        // réseau classique (3-5s de buffer) passent sous le radar de 10s.
-                        if (isLiveIptv && iptvCurrentStreamHasWorked && bufferingWatchdog == null) {
-                            val initialPosition = player.currentPosition
-                            bufferingWatchdog = viewLifecycleOwner.lifecycleScope.launch {
-                                kotlinx.coroutines.delay(10_000L)
-                                if (player.playbackState == Player.STATE_BUFFERING &&
-                                    player.currentPosition == initialPosition && _binding != null) {
-                                    val cs = currentServer
-                                    val cv = currentVideo
-                                    if (cs != null && cv != null) {
-                                        Log.w("PlayerTvFragment",
-                                            "IPTV stuck in BUFFERING > 10s on ${cs.name} → FULL RELOAD via displayVideo")
-                                        try {
-                                            binding.pvPlayer.controller.hide()
-                                            binding.pvPlayer.setKeepContentOnPlayerReset(true)
-                                        } catch (_: Exception) {}
-                                        try {
-                                            displayVideo(cv, cs)
-                                        } catch (e: Exception) {
-                                            Log.w("PlayerTvFragment", "Buffering watchdog reload failed: ${e.message}")
-                                        }
-                                    }
-                                }
-                                bufferingWatchdog = null
-                            }
-                        }
+                        // 2026-05-10 : BUFFERING watchdog IPTV désactivé.
+                        // Causait crash natif MediaCodec (pression heap JVM Chromecast)
+                        // en empilant des reloads sur des chaînes instables comme TF1
+                        // Vegeta. Le STATE_ENDED handler + préemptif drain couvrent
+                        // déjà les cas critiques sans surcharger les codecs.
                     }
 
                     if (playbackState == Player.STATE_READY) {
@@ -2116,7 +2096,13 @@ class PlayerTvFragment : Fragment() {
                         // READY (initial load) — that would loop. Only auto-resume if
                         // the stream had been playing.
                         if (playbackState == Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
+                        // 2026-05-10 : guard anti-rentrance. Pendant un displayVideo de
+                        // recovery, le player passe par STATE_IDLE qui re-déclenchait ce
+                        // handler → boucle de switches rapides. Si un reload est en cours,
+                        // on ignore les transitions de player du reload lui-même.
+                        if (preemptiveReloadInFlight) return
                         Log.w("PlayerTvFragment", "Live IPTV stuck in $playbackState — FULL RELOAD via displayVideo")
+                        preemptiveReloadInFlight = true
                         // 2026-05-09 : viewModel.getVideo() ne marche PAS pour relancer
                         // le même flux car le StateFlow ignore l'émission identique
                         // (distinctUntilChanged) → displayVideo n'est jamais ré-appelé.
@@ -2130,9 +2116,12 @@ class PlayerTvFragment : Fragment() {
                                 // Masque les contrôles + active keep_content pour que la
                                 // dernière frame reste figée pendant le re-prepare (au lieu
                                 // d'écran noir).
+                                // 2026-05-10 : keep_content RETIRÉ — causait image figée
+                                // sur l'ancienne frame quand la SurfaceView ne se rafraîchit
+                                // pas après le reset. Mieux vaut un bref flash noir qu'une
+                                // image figée + flux qui continue derrière.
                                 try {
                                     binding.pvPlayer.controller.hide()
-                                    binding.pvPlayer.setKeepContentOnPlayerReset(true)
                                 } catch (_: Exception) {}
                                 viewLifecycleOwner.lifecycleScope.launch {
                                     kotlinx.coroutines.delay(50L)
@@ -2143,12 +2132,24 @@ class PlayerTvFragment : Fragment() {
                                             Log.w("PlayerTvFragment", "displayVideo reload failed: ${e.message}")
                                         }
                                     }
+                                    // 2026-05-10 : reset keep_content après 2s pour libérer
+                                    // la surface — sinon l'image reste figée sur la dernière
+                                    // frame même si le nouveau stream est en train de jouer.
+                                    kotlinx.coroutines.delay(2_000L)
+                                    if (_binding != null) {
+                                        try { binding.pvPlayer.setKeepContentOnPlayerReset(false) } catch (_: Exception) {}
+                                    }
+                                    // Cooldown additionnel — laisse le stream se stabiliser.
+                                    kotlinx.coroutines.delay(23_000L)
+                                    preemptiveReloadInFlight = false
                                 }
                             } else {
+                                preemptiveReloadInFlight = false
                                 player.prepare()
                                 player.playWhenReady = true
                             }
                         } catch (e: Exception) {
+                            preemptiveReloadInFlight = false
                             Log.w("PlayerTvFragment", "Auto-resume failed: ${e.message}")
                         }
                     }
@@ -2373,18 +2374,38 @@ class PlayerTvFragment : Fragment() {
                         val shouldSwitch = !iptvCurrentStreamHasWorked &&
                             (isPermanentHttpError || iptvRetryCount >= MAX_RETRIES_BEFORE_SWITCH)
 
-                        if (shouldSwitch) {
+                        // 2026-05-10 : cooldown anti-cascade. Si un auto-switch s'est fait
+                        // il y a moins de 10s, on ne switch pas encore — on laisse le retry
+                        // sur le même serveur. Sinon on cycle entre tous les serveurs en
+                        // ne laissant à chacun que ~1-2s pour démarrer.
+                        val nowMs = System.currentTimeMillis()
+                        val sinceLastSwitch = nowMs - lastAutoSwitchTime
+                        val switchCooldownMs = 10_000L
+                        // 2026-05-10 : si le server est un favori (cœur marqué), JAMAIS
+                        // auto-switch même en phase initiale. L'user a explicitement
+                        // marqué ce server comme préféré, on respecte son choix.
+                        val isFavoriteServer = try {
+                            com.streamflixreborn.streamflix.fragments.player.settings.IptvFavorites
+                                .isFavorite(args.id, server.id)
+                        } catch (_: Exception) { false }
+                        if (shouldSwitch && isFavoriteServer) {
+                            Log.d("PlayerTvFragment", "IPTV switch demandé mais server est favori — on retry à la place")
+                        } else if (shouldSwitch && sinceLastSwitch < switchCooldownMs) {
+                            Log.d("PlayerTvFragment", "IPTV switch demandé mais cooldown ${(switchCooldownMs - sinceLastSwitch)/1000}s — on retry à la place")
+                        } else if (shouldSwitch) {
                             Log.w("PlayerTvFragment", "IPTV switch on ${server.name} ($errCodeName, retry=$iptvRetryCount, hasWorked=$iptvCurrentStreamHasWorked, permanentHttp=$isPermanentHttpError)")
                             pruneBrokenVariant(server)
                             val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
                             if (nextServer != null) {
                                 iptvRetryCount = 0
                                 iptvCurrentStreamHasWorked = false
+                                lastAutoSwitchTime = nowMs
                                 viewModel.getVideo(nextServer)
                                 return
                             } else if (tryNextChannelVariant(server)) {
                                 iptvRetryCount = 0
                                 iptvCurrentStreamHasWorked = false
+                                lastAutoSwitchTime = nowMs
                                 return
                             }
                             Log.e("PlayerTvFragment", "IPTV switch demandé mais pas de server suivant disponible")
@@ -2694,6 +2715,12 @@ class PlayerTvFragment : Fragment() {
             // pendant que l'ancien player a encore ~25s de buffer pour jouer.
             var lastAheadSec = -1
             var consecutiveDrainTicks = 0
+            // 2026-05-10 : flag pour éviter le préemptif sur les streams qui ne
+            // buffent jamais (serveurs lents qui livrent à 1:1 = ahead toujours 0/1).
+            // Le préemptif ne tire QUE si on a vu un buffer sain (>= 15s) au moins
+            // une fois — sinon c'est un faux positif (on ne peut pas anticiper un
+            // drain sur un stream qui n'avait jamais d'avance).
+            var bufferEverHealthy = false
             progressRunnable = Runnable {
                 if (player.isPlaying) {
                     val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
@@ -2722,9 +2749,11 @@ class PlayerTvFragment : Fragment() {
                             consecutiveDrainTicks = 0
                         }
                         lastAheadSec = aheadSec
-                        // Trigger : 5 ticks consécutifs en drain (=5s) + ahead<25s
-                        // + iptvCurrentStreamHasWorked + pas déjà un reload en cours.
-                        if (consecutiveDrainTicks >= 5 && aheadSec < 25 &&
+                        if (aheadSec >= 15) bufferEverHealthy = true
+                        // Trigger : 5 ticks consécutifs en drain + ahead<25s
+                        // + iptvCurrentStreamHasWorked + pas déjà un reload en cours
+                        // + bufferEverHealthy (= on a vu >=15s d'avance au moins une fois).
+                        if (consecutiveDrainTicks >= 5 && aheadSec < 25 && bufferEverHealthy &&
                             iptvCurrentStreamHasWorked && !preemptiveReloadInFlight) {
                             preemptiveReloadInFlight = true
                             consecutiveDrainTicks = 0
@@ -2735,7 +2764,6 @@ class PlayerTvFragment : Fragment() {
                                     "PREEMPTIVE reload — buffer drain ${aheadSec}s, 5 ticks de baisse continue")
                                 try {
                                     binding.pvPlayer.controller.hide()
-                                    binding.pvPlayer.setKeepContentOnPlayerReset(true)
                                 } catch (_: Exception) {}
                                 viewLifecycleOwner.lifecycleScope.launch {
                                     try {
@@ -3315,12 +3343,17 @@ class PlayerTvFragment : Fragment() {
         private fun createDefaultHttpDataSourceFactory(): HttpDataSource.Factory {
             usingCronet = false
             usingDoH = false
-            Log.d("PlayerNetwork", "Using DefaultHttpDataSource (Java HttpURLConnection, system DNS)")
-            return DefaultHttpDataSource.Factory()
+            Log.d("PlayerNetwork", "Using DefaultHttpDataSource + LiveReconnecting wrapper")
+            val base = DefaultHttpDataSource.Factory()
                 .setUserAgent(NetworkClient.USER_AGENT)
                 .setConnectTimeoutMs(20_000)        // 2026-05-09 v25 : 15s → 20s (tolérant Tahiti/satellite)
                 .setReadTimeoutMs(30_000)
                 .setAllowCrossProtocolRedirects(true)
+            // 2026-05-10 : wrapper qui reconnecte auto sur EOF pour live MPEG-TS
+            // (Xtream-codes Vegeta/Ola/WiTv qui envoient Connection: close après
+            // chaque chunk). Pour les segments HLS/VOD, le wrapper laisse l'EOF
+            // passer normalement (détection URL au runtime).
+            return com.streamflixreborn.streamflix.utils.LiveReconnectingHttpDataSource.Factory(base)
         }
 
         /**
