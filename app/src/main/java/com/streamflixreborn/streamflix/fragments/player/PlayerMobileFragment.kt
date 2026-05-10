@@ -2163,13 +2163,14 @@ class PlayerMobileFragment : Fragment() {
                     .build()
             )
         if (isLiveIptvChannel) {
-            // 2026-05-09 v6 : cible 60s derrière live edge pour curseur à ~30-40%
-            // de la barre, gros buffer ahead, marge max avant timeout.
+            // 2026-05-09 v19 : cible 30s derrière live edge (safe partout).
+            // Évite BEHIND_LIVE_WINDOW sur flux M3U courts. ExoPlayer ajuste
+            // vitesse ±3% imperceptible pour maintenir offset.
             mediaItemBuilder.setLiveConfiguration(
                 MediaItem.LiveConfiguration.Builder()
-                    .setTargetOffsetMs(60_000L)
-                    .setMinOffsetMs(30_000L)
-                    .setMaxOffsetMs(180_000L)
+                    .setTargetOffsetMs(30_000L)
+                    .setMinOffsetMs(10_000L)
+                    .setMaxOffsetMs(90_000L)
                     .setMinPlaybackSpeed(0.97f)
                     .setMaxPlaybackSpeed(1.03f)
                     .build()
@@ -2622,15 +2623,30 @@ class PlayerMobileFragment : Fragment() {
                             iptvRetryCount = 0
                             viewLifecycleOwner.lifecycleScope.launch {
                                 val newServer = withContext(Dispatchers.IO) {
-                                    if (server.id.startsWith("vegeta_stream::")) {
-                                        com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(server)
-                                    } else null
+                                    when {
+                                        server.id.startsWith("vegeta_stream::") ->
+                                            com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(server)
+                                        server.id.startsWith("ola_stream::") ->
+                                            com.streamflixreborn.streamflix.providers.OlaTvProvider.refreshServerUrl(server)
+                                        else -> null
+                                    }
                                 }
                                 if (newServer != null && _binding != null) {
                                     viewModel.getVideo(newServer)
-                                } else {
-                                    player.prepare()
-                                    player.playWhenReady = true
+                                } else if (_binding != null) {
+                                    // 2026-05-09 v19 : refresh impossible — prune + auto-switch
+                                    // vers le server suivant au lieu de boucler en prepare().
+                                    Log.w("PlayerMobileFragment",
+                                        "Refresh impossible (no Stalker context) — pruning ${server.name} and auto-switching")
+                                    pruneBrokenVariant(server)
+                                    val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
+                                        ?: servers.firstOrNull { it.id != server.id }
+                                    if (nextServer != null) {
+                                        viewModel.getVideo(nextServer)
+                                    } else {
+                                        player.prepare()
+                                        player.playWhenReady = true
+                                    }
                                 }
                             }
                         } else {
@@ -2938,12 +2954,19 @@ class PlayerMobileFragment : Fragment() {
                     }
                     if (ahead < 15_000L && pos > 20_000L && !emergencyRefreshInFlight) {
                         val cs = currentServer
-                        if (cs != null && cs.id.startsWith("vegeta_stream::")) {
+                        val isStalkerCs = cs != null && (cs.id.startsWith("vegeta_stream::") || cs.id.startsWith("ola_stream::"))
+                        if (cs != null && isStalkerCs) {
                             emergencyRefreshInFlight = true
                             Log.d("PlayerMobileFragment", "EMERGENCY refresh — buffer ahead=${ahead/1000}s < 15s")
                             viewLifecycleOwner.lifecycleScope.launch {
                                 val newServer = withContext(Dispatchers.IO) {
-                                    com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(cs)
+                                    when {
+                                        cs.id.startsWith("vegeta_stream::") ->
+                                            com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(cs)
+                                        cs.id.startsWith("ola_stream::") ->
+                                            com.streamflixreborn.streamflix.providers.OlaTvProvider.refreshServerUrl(cs)
+                                        else -> null
+                                    }
                                 }
                                 if (newServer != null && _binding != null) {
                                     viewModel.getVideo(newServer)
@@ -3006,9 +3029,13 @@ class PlayerMobileFragment : Fragment() {
                 Log.d("PlayerMobileFragment", "Proactive token refresh (60s) — fresh handshake")
                 viewLifecycleOwner.lifecycleScope.launch {
                     val newServer = withContext(Dispatchers.IO) {
-                        if (current.id.startsWith("vegeta_stream::")) {
-                            com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(current)
-                        } else null
+                        when {
+                            current.id.startsWith("vegeta_stream::") ->
+                                com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(current)
+                            current.id.startsWith("ola_stream::") ->
+                                com.streamflixreborn.streamflix.providers.OlaTvProvider.refreshServerUrl(current)
+                            else -> null
+                        }
                     }
                     if (newServer != null && _binding != null) {
                         viewModel.getVideo(newServer)
@@ -3177,7 +3204,9 @@ class PlayerMobileFragment : Fragment() {
                 Log.d("PlayerMobileFragment", "Using NextRenderersFactory (nextlib FFmpeg) for IPTV")
                 io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory(requireContext()).apply {
                     setEnableDecoderFallback(true)
-                    setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+                    // 2026-05-09 v19 : MODE_ON (pas PREFER) — vidéo H264 sur HW,
+                    // FFmpeg uniquement en fallback audio.
+                    setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
                 }
             } else {
                 DefaultRenderersFactory(requireContext()).apply {

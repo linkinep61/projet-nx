@@ -446,7 +446,10 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                             Settings.ChannelVariant.list.forEach { it.isSelected = false }
                             item.isSelected = true
                             settingsView.onChannelVariantSelected?.invoke(item)
-                            settingsView.displaySettings(Setting.MAIN)
+                            // 2026-05-09 v19 : NE PAS retourner au menu principal —
+                            // l'user veut voir si la source démarre. Si elle reste
+                            // figée, il peut immédiatement en choisir une autre.
+                            settingsView.refreshChannelVariantList()
                         }
 
                         is Settings.Server -> {
@@ -455,7 +458,9 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                             Settings.Server.list.forEach { it.isSelected = false }
                             item.isSelected = true
                             settingsView.onServerSelected?.invoke(item)
-                            settingsView.displaySettings(Setting.MAIN)
+                            // 2026-05-09 v19 : NE PAS retourner au menu principal —
+                            // laisser l'user tester d'autres sources si la 1re ne démarre pas.
+                            settingsView.refreshServerList()
                         }
 
                         // (ban and favorite are handled by their own buttons below)

@@ -41,8 +41,16 @@ android {
         applicationId "com.streamfr.app"
         minSdk 21
         targetSdk 35
-        versionCode 10874
-        versionName "1.7.174"
+        versionCode 10876
+        versionName "1.7.176"
+
+        // 2026-05-09 v19 : drop x86 (32-bit) uniquement. Aucun téléphone/TV/box
+        // ne tourne en x86 32-bit. On GARDE x86_64 pour l'émulateur Pixel 8 dans
+        // Android Studio (qui a besoin de FFmpeg pour tester l'audio AC3/MP2).
+        // Économise ~8 MB sur l'APK final.
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'
+        }
 
         buildConfigField "String", "APP_LAYOUT", "\"${properties.getProperty("APP_LAYOUT")}\""
         buildConfigField "String", "TMDB_API_KEY", "\"${properties.getProperty("TMDB_API_KEY")}\""

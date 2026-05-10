@@ -1466,39 +1466,12 @@ class PlayerTvFragment : Fragment() {
          * Called from setupChannelNavigationButtons after the provider check.
          */
         private fun setupChannelZapping() {
-            val provider = UserPreferences.currentProvider
-            // 2026-05-09 : ajout livehub::/sportlive::/match::
-            val isIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
-                args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
-                args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
-                args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                args.id.startsWith("match::")
-            if (!isIptv) return
-
-            val orderedIds = when (provider) {
-                is WiTvProvider -> provider.getOrderedChannelIds()
-                is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getOrderedChannelIds()
-                is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getOrderedChannelIds()
-                is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getOrderedChannelIds()
-                else -> return
-            }
-            if (orderedIds.size < 2) return
-
-            binding.pvPlayer.onChannelUp = {
-                val currentId = pendingZapChannelId ?: args.id
-                val idx = orderedIds.indexOf(currentId)
-                val prevIdx = if (idx > 0) idx - 1 else orderedIds.lastIndex
-                val targetId = orderedIds[prevIdx]
-                scheduleChannelZap(targetId, prevIdx + 1, provider)
-            }
-
-            binding.pvPlayer.onChannelDown = {
-                val currentId = pendingZapChannelId ?: args.id
-                val idx = orderedIds.indexOf(currentId)
-                val nextIdx = if (idx < orderedIds.lastIndex) idx + 1 else 0
-                val targetId = orderedIds[nextIdx]
-                scheduleChannelZap(targetId, nextIdx + 1, provider)
-            }
+            // 2026-05-09 v19 : zapping D-pad UP/DOWN DÉSACTIVÉ — l'user a demandé
+            // de virer ce comportement (faisait n'importe quoi sur TV : changement
+            // de chaîne involontaire à chaque interaction D-pad). On force les
+            // callbacks à null pour que UP/DOWN passent au focus chain natif.
+            binding.pvPlayer.onChannelUp = null
+            binding.pvPlayer.onChannelDown = null
         }
 
         private fun scheduleChannelZap(channelId: String, channelNumber: Int, provider: Any?) {
@@ -1900,14 +1873,16 @@ class PlayerTvFragment : Fragment() {
                         .build()
                 )
             if (isLiveIptvChannel) {
-                // 2026-05-09 v6 : cible 60s derrière live edge (au lieu de 30s)
-                // pour mettre le curseur à ~30-40% de la barre, gros buffer ahead,
-                // marge max avant timeout. ExoPlayer ajuste vitesse ±3% imperceptible.
+                // 2026-05-09 v19 : cible 30s derrière live edge (recommandé docs Media3).
+                // Évite ERROR_CODE_BEHIND_LIVE_WINDOW sur les flux M3U courts (DVR
+                // window ~30s). ExoPlayer ajuste vitesse ±3% imperceptible pour
+                // maintenir l'offset → curseur stable à ~50% de barre, buffer ahead
+                // 5-10s constants, zéro pos négatif.
                 mediaItemBuilder.setLiveConfiguration(
                     MediaItem.LiveConfiguration.Builder()
-                        .setTargetOffsetMs(60_000L)         // cible 60s derrière live (gros buffer ahead)
-                        .setMinOffsetMs(30_000L)            // jamais < 30s du live
-                        .setMaxOffsetMs(180_000L)           // jamais > 3 min derrière
+                        .setTargetOffsetMs(30_000L)         // cible 30s derrière live (safe partout)
+                        .setMinOffsetMs(10_000L)            // jamais < 10s du live
+                        .setMaxOffsetMs(90_000L)            // jamais > 90s derrière
                         .setMinPlaybackSpeed(0.97f)         // ralenti subtil si trop près
                         .setMaxPlaybackSpeed(1.03f)         // accélère subtil si trop loin
                         .build()
@@ -2322,16 +2297,32 @@ class PlayerTvFragment : Fragment() {
                                 iptvRetryCount = 0
                                 viewLifecycleOwner.lifecycleScope.launch {
                                     val newServer = withContext(Dispatchers.IO) {
-                                        if (server.id.startsWith("vegeta_stream::")) {
-                                            com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(server)
-                                        } else null
+                                        when {
+                                            server.id.startsWith("vegeta_stream::") ->
+                                                com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(server)
+                                            server.id.startsWith("ola_stream::") ->
+                                                com.streamflixreborn.streamflix.providers.OlaTvProvider.refreshServerUrl(server)
+                                            else -> null
+                                        }
                                     }
                                     if (newServer != null && _binding != null) {
                                         viewModel.getVideo(newServer)
-                                    } else {
-                                        // Fallback : prepare() simple si refresh échoue
-                                        player.prepare()
-                                        player.playWhenReady = true
+                                    } else if (_binding != null) {
+                                        // 2026-05-09 v19 : refresh impossible (stream M3U sans
+                                        // contexte Stalker, ou cache JSON sans baseUrl/mac/cmd).
+                                        // Au lieu de boucler indéfiniment sur prepare(), on prune
+                                        // le server cassé et on auto-switch vers le suivant.
+                                        Log.w("PlayerTvFragment",
+                                            "Refresh impossible (no Stalker context) — pruning ${server.name} and auto-switching")
+                                        pruneBrokenVariant(server)
+                                        val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
+                                            ?: servers.firstOrNull { it.id != server.id }
+                                        if (nextServer != null) {
+                                            viewModel.getVideo(nextServer)
+                                        } else {
+                                            player.prepare()
+                                            player.playWhenReady = true
+                                        }
                                     }
                                 }
                             } else {
@@ -2607,12 +2598,19 @@ class PlayerTvFragment : Fragment() {
                         // Emergency : ahead < 15s AND on a déjà streamé > 20s = token mort
                         if (ahead < 15_000L && pos > 20_000L && !emergencyRefreshInFlight) {
                             val cs = currentServer
-                            if (cs != null && cs.id.startsWith("vegeta_stream::")) {
+                            val isStalkerCs = cs != null && (cs.id.startsWith("vegeta_stream::") || cs.id.startsWith("ola_stream::"))
+                            if (cs != null && isStalkerCs) {
                                 emergencyRefreshInFlight = true
                                 Log.d("PlayerTvFragment", "EMERGENCY refresh — buffer ahead=${ahead/1000}s < 15s")
                                 viewLifecycleOwner.lifecycleScope.launch {
                                     val newServer = withContext(Dispatchers.IO) {
-                                        com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(cs)
+                                        when {
+                                            cs.id.startsWith("vegeta_stream::") ->
+                                                com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(cs)
+                                            cs.id.startsWith("ola_stream::") ->
+                                                com.streamflixreborn.streamflix.providers.OlaTvProvider.refreshServerUrl(cs)
+                                            else -> null
+                                        }
                                     }
                                     if (newServer != null && _binding != null) {
                                         viewModel.getVideo(newServer)
@@ -2678,9 +2676,13 @@ class PlayerTvFragment : Fragment() {
                     Log.d("PlayerTvFragment", "Proactive token refresh (60s) — fresh handshake")
                     viewLifecycleOwner.lifecycleScope.launch {
                         val newServer = withContext(Dispatchers.IO) {
-                            if (current.id.startsWith("vegeta_stream::")) {
-                                com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(current)
-                            } else null
+                            when {
+                                current.id.startsWith("vegeta_stream::") ->
+                                    com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(current)
+                                current.id.startsWith("ola_stream::") ->
+                                    com.streamflixreborn.streamflix.providers.OlaTvProvider.refreshServerUrl(current)
+                                else -> null
+                            }
                         }
                         if (newServer != null && _binding != null) {
                             Log.d("PlayerTvFragment", "Got fresh URL — switching seamlessly")
@@ -2907,7 +2909,12 @@ class PlayerTvFragment : Fragment() {
                     Log.d("PlayerTvFragment", "Using NextRenderersFactory (nextlib FFmpeg) for IPTV")
                     io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory(requireContext()).apply {
                         setEnableDecoderFallback(true)
-                        setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+                        // 2026-05-09 v19 : MODE_ON (pas PREFER) — la vidéo H264 reste
+                        // sur le décodeur hardware Amlogic (sinon écran noir car
+                        // FFmpeg software H264 trop lent sur Chromecast). FFmpeg
+                        // sert UNIQUEMENT en fallback audio quand le HW refuse
+                        // (AC3/E-AC3/MP2 non supportés en HW).
+                        setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
                     }
                 } else {
                     DefaultRenderersFactory(requireContext()).apply {

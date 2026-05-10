@@ -2218,6 +2218,68 @@ object OlaTvProvider : Provider, IptvProvider {
         }
     }
 
+    /**
+     * 2026-05-09 v18 : refresh server URL for an existing OLA Video.Server.
+     * Symétrique à VegetaTvProvider.refreshServerUrl : sur 403 / token expiré,
+     * refait un handshake Stalker et un create_link pour obtenir une URL
+     * fraîche avec un play_token tout neuf. Le fast-path "URL HTTP directe →
+     * as-is" de resolveStreamCmd est BYPASSÉ ici (sinon on retombe sur l'URL
+     * expirée). Returns le Video.Server avec la nouvelle URL ou null en cas
+     * d'échec.
+     */
+    suspend fun refreshServerUrl(server: Video.Server): Video.Server? = withContext(Dispatchers.IO) {
+        try {
+            val parts = server.id.removePrefix("ola_stream::").split("::", limit = 3)
+            if (parts.size < 3) return@withContext null
+            val cid = parts[0]
+            val label = parts[1]
+            val cmd = parts[2]
+            val creds = getMacCredentials(cid) ?: run {
+                Log.d(TAG, "refreshServerUrl: no MAC creds for cid=$cid")
+                return@withContext null
+            }
+            // Force handshake + create_link même si cmd est URL HTTP directe.
+            // C'est le seul moyen d'obtenir un nouveau play_token côté Stalker.
+            val rawCmd = cmd.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
+            val newUrl = try {
+                val encodedMac = java.net.URLEncoder.encode(creds.mac, "UTF-8")
+                val portalBase = "${creds.baseUrl.trimEnd('/')}/portal.php"
+                val cookie = "mac=$encodedMac; stb_lang=en; timezone=Europe%2FLondon"
+                val stbUA = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3"
+                val hsBody = client.newCall(Request.Builder()
+                    .url("$portalBase?type=stb&action=handshake&token=&JsHttpRequest=1-xml")
+                    .header("User-Agent", stbUA).header("Cookie", cookie).build()
+                ).execute().body?.string() ?: ""
+                val token = JSONObject(hsBody).getJSONObject("js").getString("token")
+                val cmdEncoded = java.net.URLEncoder.encode(rawCmd, "UTF-8")
+                val linkReq = Request.Builder()
+                    .url("$portalBase?type=itv&action=create_link&cmd=$cmdEncoded&series=&forced_storage=undefined&fav=0&JsHttpRequest=1-xml")
+                    .header("User-Agent", stbUA).header("Cookie", cookie)
+                    .header("Authorization", "Bearer $token").build()
+                val linkBody = client.newCall(linkReq).execute().body?.string() ?: ""
+                JSONObject(linkBody).getJSONObject("js").getString("cmd")
+                    .removePrefix("ffrt ").removePrefix("ffmpeg ").trim().ifBlank { null }
+            } catch (e: Exception) {
+                Log.w(TAG, "refreshServerUrl create_link failed: ${e.message}")
+                null
+            } ?: return@withContext null
+            Log.d(TAG, "refreshServerUrl: cid=$cid → fresh token URL ${newUrl.take(80)}")
+            // Note : on ne modifie PAS l'OlaStreamRef en mémoire — la cmd
+            // canonique reste identique, c'est juste le token résolu qui change.
+            // Le nouveau Video.Server contient la nouvelle URL résolue dans son id.
+            // ATTENTION : on ne peut pas mettre l'URL résolue dans l'id (le format
+            // attendu par getVideo c'est cmd, pas url). Donc on retourne un id
+            // de fast-track qui contourne resolveStreamCmd.
+            Video.Server(
+                id = "ola_fasttrack::${cid}::${newUrl}",
+                name = server.name,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "refreshServerUrl error: ${e.message}")
+            null
+        }
+    }
+
     // ───────── Helpers ─────────
 
     private fun toTvShow(key: String, info: ChannelInfo): TvShow = TvShow(

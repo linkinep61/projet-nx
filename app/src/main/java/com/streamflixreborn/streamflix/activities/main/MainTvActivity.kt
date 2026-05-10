@@ -54,13 +54,17 @@ class MainTvActivity : FragmentActivity() {
                 val navHost = supportFragmentManager.findFragmentById(binding.navMainFragment.id)
                 val currentFragment = navHost?.childFragmentManager?.fragments?.lastOrNull()
                 val playerView = currentFragment?.view?.findViewById<androidx.media3.ui.PlayerView>(R.id.pv_player)
-                if (playerView != null && !playerView.isControllerFullyVisible) {
+                // 2026-05-09 v19 : NE PAS intercepter quand le panel Settings est ouvert
+                // (sinon clic OK dans le picker = redirige sur le bouton settings → cassé).
+                val settingsPanel = currentFragment?.view?.findViewById<View>(R.id.settings)
+                val settingsPanelVisible = settingsPanel != null && settingsPanel.visibility == View.VISIBLE
+                if (!settingsPanelVisible && playerView != null && !playerView.isControllerFullyVisible) {
                     val settingsBtn = playerView.findViewById<View>(androidx.media3.ui.R.id.exo_settings)
                     playerView.showController()
                     settingsBtn?.requestFocus()
                     return true  // consume → pas de pause
                 }
-                // Controls visibles : on laisse passer (focus sur play/pause = pause).
+                // Controls visibles ou panel Settings ouvert : on laisse passer.
             } catch (_: Throwable) {}
         }
         return super.dispatchKeyEvent(event)

@@ -431,7 +431,16 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                             Settings.ChannelVariant.list.forEach { it.isSelected = false }
                             item.isSelected = true
                             settingsView.onChannelVariantSelected?.invoke(item)
-                            settingsView.hide()
+                            // 2026-05-09 v19 : NE PAS fermer — l'user veut voir
+                            // si la source démarre. Update visuel direct sans
+                            // notifyDataSetChanged (sinon RecyclerView blow les
+                            // ViewHolders → focus perdu → D-pad zapp les chaînes
+                            // du player en arrière-plan).
+                            // refreshChannelVariantList tu peux appeler quand
+                            // même mais on re-request focus juste après.
+                            val focusedView = binding.root
+                            settingsView.refreshChannelVariantList()
+                            binding.root.post { focusedView.requestFocus() }
                         }
 
                         is Settings.Server -> {
@@ -440,7 +449,12 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                             Settings.Server.list.forEach { it.isSelected = false }
                             item.isSelected = true
                             settingsView.onServerSelected?.invoke(item)
-                            settingsView.hide()
+                            // 2026-05-09 v19 : NE PAS fermer + préserver le focus
+                            // après le notifyDataSetChanged (sinon focus part
+                            // sur le player en background → D-pad zapp les chaînes).
+                            val focusedView = binding.root
+                            settingsView.refreshServerList()
+                            binding.root.post { focusedView.requestFocus() }
                         }
                         else -> {}
                     }

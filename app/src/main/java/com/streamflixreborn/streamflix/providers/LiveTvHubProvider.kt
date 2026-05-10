@@ -43,7 +43,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
     override val name = "TV Hub"
     override val baseUrl: String = "https://localhost/"
     override val logo: String =
-        "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_livetvhub"
+        "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_favori"
     override val language = "fr"
 
     private const val TAG = "LiveTvHubProvider"
