@@ -40,7 +40,11 @@ object VegetaTvProvider : Provider, IptvProvider {
     override val language = "fr"
 
     private const val TAG = "VegetaTvProvider"
-    private const val USER_AGENT = "VLC/3.0.18 LibVLC/3.0.18"
+    // 2026-05-10 : UA Mozilla au lieu de VLC. Certains Xtream FR (notamment
+    // tvgold-max.info) fingerprintent l'UA VLC : sur GET sans Range header,
+    // le serveur coupe la connexion à 136 KB → ExoPlayer fail avec
+    // "Loading finished before preparation is complete". UA Mozilla → stream OK.
+    private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14) Chrome/130.0.0.0 Mobile Safari/537.36"
     private const val VEGETA_SERVERS_URL = "http://212.47.64.168/serveurs.txt"
 
     // ───────── HTTP ─────────
@@ -554,15 +558,15 @@ object VegetaTvProvider : Provider, IptvProvider {
                     .header("Accept", "*/*")
                     .build()
                 val resp = client.newCall(req).execute()
-                // 2026-05-10 : cap 50MB (au lieu de 10MB skip) — certains Xtream FR
-                // renvoient une m3u globale 30-50MB qu'on doit truncate au lieu de
-                // skip totalement (sinon TF1 introuvable + token impossible à obtenir).
-                // La truncation préserve les premiers ~50MB où FR/TF1 est généralement
-                // listé en haut.
-                val MAX_BODY_BYTES = 50L * 1024 * 1024
+                // 2026-05-10 : cap 10MB stricte. Le bump à 50MB causait OutOfMemory
+                // sur Oppo/Chromecast (RAM limitée). Truncation à 10MB suffit pour
+                // trouver TF1 et obtenir un token valide. Si le serveur renvoie une
+                // m3u globale 50MB qui ne contient pas TF1 dans les premiers 10MB,
+                // on skip ce serveur — il y en a d'autres dans la liste Vegeta.
+                val MAX_BODY_BYTES = 10L * 1024 * 1024
                 val contentLength = resp.body?.contentLength() ?: -1L
-                if (contentLength > MAX_BODY_BYTES * 2) {
-                    Log.w(TAG, "  fetchWithProxy too large via $label (${contentLength / 1024 / 1024}MB > ${MAX_BODY_BYTES * 2 / 1024 / 1024}MB) — skipping")
+                if (contentLength > MAX_BODY_BYTES * 5) {
+                    Log.w(TAG, "  fetchWithProxy too large via $label (${contentLength / 1024 / 1024}MB > ${MAX_BODY_BYTES * 5 / 1024 / 1024}MB) — skipping")
                     resp.close()
                     return@withContext null
                 }
