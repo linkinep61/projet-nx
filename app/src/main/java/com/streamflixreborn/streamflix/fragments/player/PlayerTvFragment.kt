@@ -405,7 +405,7 @@ class PlayerTvFragment : Fragment() {
             id.startsWith("vegeta::") || id.startsWith("vegeta_ep::") ||
             id.startsWith("livehub::") || id.startsWith("movixlivetv::") ||
             id.startsWith("sportlive::") || id.startsWith("match::") ||
-            id.startsWith("vavoo::")
+            id.startsWith("vavoo::") || id.startsWith("bxt::")
     }
 
     private fun showLoadingOverlay() {
@@ -1457,7 +1457,7 @@ class PlayerTvFragment : Fragment() {
             val isIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
-                args.id.startsWith("livehub::") || args.id.startsWith("vavoo::")
+                args.id.startsWith("livehub::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
             if (isIptvChannel) {
                 setupChannelNavigationButtons(btnPrevious, btnNext)
                 return
@@ -1584,6 +1584,10 @@ class PlayerTvFragment : Fragment() {
                     prevId = provider.getPreviousChannelId(args.id)
                     nextId = provider.getNextChannelId(args.id)
                 }
+                is com.streamflixreborn.streamflix.providers.BoxXtemusProvider -> {
+                    prevId = provider.getPreviousChannelId(args.id)
+                    nextId = provider.getNextChannelId(args.id)
+                }
                 else -> {
                     btnPrevious.visibility = View.GONE
                     btnNext.visibility = View.GONE
@@ -1648,16 +1652,18 @@ class PlayerTvFragment : Fragment() {
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelDisplayName(channelId)
+                is com.streamflixreborn.streamflix.providers.BoxXtemusProvider -> provider.getChannelDisplayName(channelId)
                 else -> null
             } ?: channelId.removePrefix("ch::").removePrefix("sport::")
                 .removePrefix("ola::").removePrefix("vegeta::").removePrefix("livehub::")
-                .removePrefix("vavoo::")
+                .removePrefix("vavoo::").removePrefix("bxt::")
             val channelLogo = when (provider) {
                 is WiTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelPoster(channelId)
+                is com.streamflixreborn.streamflix.providers.BoxXtemusProvider -> provider.getChannelPoster(channelId)
                 else -> null
             }
 
@@ -1707,6 +1713,7 @@ class PlayerTvFragment : Fragment() {
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelDisplayName(channelId)
+                is com.streamflixreborn.streamflix.providers.BoxXtemusProvider -> provider.getChannelDisplayName(channelId)
                 else -> null
             } ?: channelId
             val channelPoster = when (provider) {
@@ -1715,6 +1722,7 @@ class PlayerTvFragment : Fragment() {
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelPoster(channelId)
+                is com.streamflixreborn.streamflix.providers.BoxXtemusProvider -> provider.getChannelPoster(channelId)
                 else -> null
             }
 
@@ -2016,7 +2024,7 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
             // 2026-05-09 : roue de chargement masquée pour IPTV uniquement.
             // keepContentOnPlayerReset reset à false ici — il sera mis à true
             // uniquement juste avant les reloads auto-recovery pour ne pas casser
@@ -2117,7 +2125,7 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
                         // 2026-05-11 (user) : 2 règles selon état du stream :
                         // (A) Pré-READY (extracteur silencieux) → skip 30s
                         // (B) Post-READY (coupure réseau) → 15s super-buffer same server
@@ -2199,7 +2207,7 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
                         if (isIptv) {
                             val provider = UserPreferences.currentProvider
                             if (provider is WiTvProvider) {
@@ -2398,7 +2406,7 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
                         if (player.hasReallyFinished() && !isLiveIptvNoAutoSkip) {
                             if (UserPreferences.autoplay) {
                                 playNextEpisodeAcrossSeasons(autoplay = true)
@@ -2453,7 +2461,7 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
                         if (isLiveIptvNow && iptvCurrentStreamHasWorked) {
                             Log.w("PlayerNetwork", "Connection timeout IPTV sticky (already worked) → re-prepare same server")
                             try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
@@ -2687,7 +2695,7 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
             if (isLiveIptvStream) {
                 player.seekToDefaultPosition()
             } else if (startPositionMs != null) {
@@ -3233,7 +3241,7 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
             // 2026-05-09 : retour aux valeurs qui marchaient avant (30s/10s) — sur
             // Tahiti satellite, 15s/3s c'était trop fin et causait des BUFFERING fréquents.
             val loadControl = if (isLiveIptv) {
@@ -3571,7 +3579,7 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
             player.setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
@@ -3611,7 +3619,7 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
             player = buildPlayer(extraBuffering).also { player ->
                     player.setAudioAttributes(
                         AudioAttributes.Builder()

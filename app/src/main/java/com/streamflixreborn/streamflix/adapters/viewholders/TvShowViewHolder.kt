@@ -195,7 +195,7 @@ class TvShowViewHolder(
     private fun isIptvProvider(): Boolean {
         // Match WiTv (ch::, sport::), OlaTv (ola::, ola_ep::), Vegeta TV (vegeta::,
         // vegeta_ep::), Sport Live (sportlive::), Movix LiveTV (movixlivetv::),
-        // TV Hub (livehub::) IDs, plus les providerNames.
+        // TV Hub (livehub::), 3BoxTV (bxt::) IDs, plus les providerNames.
         return tvShow.providerName == "WiTV"
             || tvShow.providerName == "OLA TV"
             || tvShow.providerName == "Vegeta TV"
@@ -203,6 +203,7 @@ class TvShowViewHolder(
             || tvShow.providerName == "Sport Live"
             || tvShow.providerName == "Movix LiveTV"
             || tvShow.providerName == "TV Hub"
+            || tvShow.providerName == "3BoxTV"
             || tvShow.id.startsWith("ch::")
             || tvShow.id.startsWith("sport::")
             || tvShow.id.startsWith("ola::")
@@ -214,6 +215,7 @@ class TvShowViewHolder(
             || tvShow.id.startsWith("match::")
             || tvShow.id.startsWith("movixlivetv::")
             || tvShow.id.startsWith("livehub::")
+            || tvShow.id.startsWith("bxt::")
     }
 
     private fun checkProviderAndRun(action: () -> Unit) {
@@ -358,6 +360,21 @@ class TvShowViewHolder(
                 // catégorie pour rester lisible.
                 if (tvShow.providerName == "Vavoo TV") {
                     val fallbackUrl = com.streamflixreborn.streamflix.providers.VavooProvider
+                        .fallbackLogoUrlFor(tvShow.title)
+                    error(
+                        com.bumptech.glide.Glide.with(imageView.context)
+                            .load(fallbackUrl)
+                            .apply(
+                                com.bumptech.glide.request.RequestOptions()
+                                    .placeholder(transparentDrawable)
+                                    .fallback(transparentDrawable)
+                                    .error(transparentDrawable)
+                            )
+                    )
+                }
+                // 2026-05-11 : 3BoxTV — même mécanique de fallback.
+                if (tvShow.providerName == "3BoxTV") {
+                    val fallbackUrl = com.streamflixreborn.streamflix.providers.BoxXtemusProvider
                         .fallbackLogoUrlFor(tvShow.title)
                     error(
                         com.bumptech.glide.Glide.with(imageView.context)
