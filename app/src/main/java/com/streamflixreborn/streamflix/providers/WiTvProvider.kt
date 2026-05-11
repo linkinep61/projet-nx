@@ -1283,10 +1283,23 @@ object WiTvProvider : Provider, IptvProvider {
                 .IptvBannedChannels.isBanned("ch::$key")
         })
 
-        // 2026-05-08 (pivot) : section "★ Favoris" RETIRÉE de WiTV.
-        // Le user veut les favoris UNIQUEMENT dans TV Hub (option 1) pour
-        // garder WiTV "pur catalog" et avoir TV Hub comme vue agrégée des
-        // favoris cross-provider.
+        // ─── ★ Favoris EN TÊTE ───
+        // 2026-05-10 (user) : "applique le fix favoris Vavoo aux autres providers
+        // aussi, qu'ils en bénéficient". → réintroduction de la section Favoris
+        // que l'IptvFavorites(Tv|Mobile)Fragment cherche dans getHome() pour
+        // peupler l'onglet ❤. (TV Hub continue d'agréger en parallèle.)
+        try {
+            val favKeys = com.streamflixreborn.streamflix.utils.IptvFavoritesStore
+                .getAllCanonicalFavorites()
+            if (favKeys.isNotEmpty()) {
+                val favItems = snapshot
+                    .filter { (key, info) -> key in favKeys && info.hasServer() }
+                    .map { (k, v) -> toTvShow(k, v) }
+                if (favItems.isNotEmpty()) {
+                    sections.add(Category(name = "Favoris", list = favItems))
+                }
+            }
+        } catch (_: Throwable) { }
 
         // WiTV categories — same order as witvCategories (Généraliste first)
         // Sport events inserted right after Musique

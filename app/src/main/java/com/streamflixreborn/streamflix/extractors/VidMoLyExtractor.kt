@@ -221,10 +221,11 @@ open class VidMoLyExtractor : Extractor() {
 
                     cont.invokeOnCancellation {
                         resolved = true
-                        // 2026-05-10 : invokeOnCancellation s'exécute sur kotlinx
-                        // DefaultExecutor (thread background) → WebView.stopLoading()
-                        // et destroy() doivent être postés sur le main thread, sinon
-                        // crash "WebView method called on wrong thread".
+                        // 2026-05-10 : invokeOnCancellation tourne sur kotlinx
+                        // DefaultExecutor (background) → WebView.stopLoading() et
+                        // destroy() doivent être posté sur le main thread, sinon
+                        // crash "WebView method called on wrong thread" qui plante
+                        // l'app entière (ex: AnimeSama / Assassination Classroom).
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
                             try {
                                 webView.stopLoading()

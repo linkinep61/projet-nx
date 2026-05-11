@@ -282,15 +282,14 @@ class HomeTvFragment : Fragment() {
 
         MiniPlayerController.onIptvChannelClick = { tvShow ->
             if (tvShow.id == MiniPlayerController.currentChannelId) {
-                // Same channel clicked again → flag for transfer, let fullscreen player steal it
                 Log.d("HomeTv", "Same channel clicked, flagging for transfer: ${tvShow.title}")
                 MiniPlayerController.transitioningToFullscreen = true
                 if (_binding != null) { binding.miniPlayerView.player = null }
-                false // not handled → TvShowViewHolder will navigate to full player
+                false
             } else {
                 Log.d("HomeTv", "Mini player intercept: ${tvShow.title} (${tvShow.id})")
                 MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
-                true // handled → playing in mini player
+                true
             }
         }
 

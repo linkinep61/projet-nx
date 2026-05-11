@@ -199,6 +199,7 @@ class TvShowViewHolder(
         return tvShow.providerName == "WiTV"
             || tvShow.providerName == "OLA TV"
             || tvShow.providerName == "Vegeta TV"
+            || tvShow.providerName == "Vavoo TV"
             || tvShow.providerName == "Sport Live"
             || tvShow.providerName == "Movix LiveTV"
             || tvShow.providerName == "TV Hub"
@@ -208,6 +209,7 @@ class TvShowViewHolder(
             || tvShow.id.startsWith("ola_ep::")
             || tvShow.id.startsWith("vegeta::")
             || tvShow.id.startsWith("vegeta_ep::")
+            || tvShow.id.startsWith("vavoo::")
             || tvShow.id.startsWith("sportlive::")
             || tvShow.id.startsWith("match::")
             || tvShow.id.startsWith("movixlivetv::")
@@ -338,6 +340,24 @@ class TvShowViewHolder(
                 // For OlaTv we also have a curated fallback URL (initials avatar).
                 if (tvShow.providerName == "OLA TV") {
                     val fallbackUrl = com.streamflixreborn.streamflix.providers.OlaTvProvider
+                        .fallbackLogoUrlFor(tvShow.title)
+                    error(
+                        com.bumptech.glide.Glide.with(imageView.context)
+                            .load(fallbackUrl)
+                            .apply(
+                                com.bumptech.glide.request.RequestOptions()
+                                    .placeholder(transparentDrawable)
+                                    .fallback(transparentDrawable)
+                                    .error(transparentDrawable)
+                            )
+                    )
+                }
+                // 2026-05-11 (Option C) : pour Vavoo, fallback ui-avatars quand
+                // l'URL primaire 404 (typiquement les logos cassés renvoyés par
+                // l'API Vavoo). Plus de tuile noire — initiales coloriées par
+                // catégorie pour rester lisible.
+                if (tvShow.providerName == "Vavoo TV") {
+                    val fallbackUrl = com.streamflixreborn.streamflix.providers.VavooProvider
                         .fallbackLogoUrlFor(tvShow.title)
                     error(
                         com.bumptech.glide.Glide.with(imageView.context)

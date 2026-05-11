@@ -115,21 +115,25 @@ interface Provider {
             // 2026-05-05: Moviebox (themoviebox.org/aoneroom) — niche K-Dramas + animes + films Hollywood VF.
             // v1: catalogue uniquement (search/browse). Extraction streams TODO v2.
             MovieboxProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
+            // ═══════════════════════════════════════════════════════════════
+            //  IPTV providers — Vavoo EN TÊTE (catalogue le plus large + stable)
+            // ═══════════════════════════════════════════════════════════════
+            // Vavoo : ~1000 chaînes IPTV FR via vavoo.to/oha.to/huhu.to/kool.to
+            // (catalogue MediaHubMX, ping signature via lokke.app/api/app/ping).
+            // Home organisé par genre, TNT order pour les chaînes principales.
+            VavooProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             WiTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             OlaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             VegetaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
-            // 2026-05-07 : Sport Live — agrégateur méta des chaînes Sport des
-            // 3 providers IPTV (WiTV, OLA, Vegeta). Une chaîne = 1 entrée,
-            // plusieurs servers (un par provider qui l'a). Pas de backend
-            // propre, zéro requête réseau directe.
-            SportLiveProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
-            // 2026-05-08 : Movix LiveTV MASQUÉ pour l'instant — performances
-            // insuffisantes (catalogue 771 chaînes Vavoo, lent à charger,
-            // nombreuses sources qui timeout). Le code reste en place car
-            // SportLive l'utilise comme source de mirrors via
-            // findRawIdsForNormKey + getServers pour ses chaînes sport.
-            // À réactiver quand les perfs seront acceptables.
-            // MovixLiveTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
+            // 2026-05-10 : SportLiveProvider supprimé (demande user). Le
+            // fichier .kt physique a été retiré. Pour les chaînes sport, le
+            // user passe directement par WiTV/Vegeta/Vavoo qui les listent.
+            // 2026-05-10 : Movix LiveTV SUPPRIMÉ. Le code dépendait de
+            // l'API Movix (api.movix.cash/livetv) avec des mirrors qui
+            // timeout. Vavoo fonctionne bien dans Lokke car Lokke a un
+            // VPN intégré qui débloque l'accès propre — sans VPN, depuis
+            // Tahiti, le throttle vavoo casse la lecture. On garde Vegeta
+            // + LiveReconnect comme solution IPTV.
             // 2026-05-08 : LiveTV Hub — méta-provider qui agrège WiTV+Ola+Vegeta
             // pour les chaînes mainstream (TF1/France2-5/M6/Arte/BFM/etc.).
             // Comme SportLive mais pour le généraliste. Favoris/bans

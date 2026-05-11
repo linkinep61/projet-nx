@@ -514,7 +514,10 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             if (UserPreferences.enableTmdb) {
                 runCatching {
                     coroutineScope {
-                        featured.map { item ->
+                        // 2026-05-10 : CAP à 15 items pour éviter de spammer TMDB
+                        // (sinon ~500 appels/home → ANR Chromecast). Le reste se
+                        // chargera quand l'user scroll/clique.
+                        featured.take(15).map { item ->
                             async {
                                 runCatching {
                                     val title = when (item) {

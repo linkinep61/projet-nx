@@ -189,7 +189,8 @@ class LpayerExtractor : Extractor() {
 
                     cont.invokeOnCancellation {
                         resolved = true
-                        // 2026-05-10 : WebView méthodes doivent tourner sur main thread
+                        // 2026-05-10 : WebView méthodes doivent tourner sur main thread,
+                        // sinon crash "WebView method called on wrong thread".
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
                             try {
                                 webView.stopLoading()

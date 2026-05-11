@@ -100,3 +100,6 @@ outputs/
 memory/
 .claude/
 .kotlin/
+
+# Source logos kept locally for re-processing (not committed)
+logo_sources/

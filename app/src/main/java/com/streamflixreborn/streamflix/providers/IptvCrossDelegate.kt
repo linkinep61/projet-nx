@@ -113,8 +113,8 @@ object IptvCrossDelegate {
                 server.id.startsWith("ch::") || server.id.startsWith("m3u8::") ||
                     server.id.startsWith("sport::") ->
                     WiTvProvider.getVideo(server)
-                server.id.startsWith("movixlivetv__") ->
-                    MovixLiveTvProvider.getVideo(server)
+                // 2026-05-10 : Movix LiveTV (Vavoo) retiré (inaccessible Tahiti
+                // sans VPN propre).
                 else -> null
             }
         } catch (e: Exception) {

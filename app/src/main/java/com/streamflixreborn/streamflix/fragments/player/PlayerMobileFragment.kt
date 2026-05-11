@@ -283,6 +283,10 @@ class PlayerMobileFragment : Fragment() {
     private var iptvRetryCount = 0
     private val IPTV_MAX_RETRIES_SAME_STREAM = 3
     private var iptvCurrentStreamHasWorked = false
+    // 2026-05-11 : pour VOD aussi — true dès STATE_READY pour différencier
+    // "petite coupure pendant lecture" (swap rapide) vs "n'a jamais démarré"
+    // (sticky, l'user veut choisir manuellement).
+    private var vodCurrentStreamHasWorked = false
 
     // ── WebView overlay (Netu anti-bot bypass — touch-friendly for mobile) ──
     private var webViewOverlay: FrameLayout? = null
@@ -724,7 +728,7 @@ class PlayerMobileFragment : Fragment() {
                             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                            args.id.startsWith("match::")
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
                         // 2026-05-09 : nextAutoFallbackServer skip VOSTFR/VO si on
                         // était en VF — évite de jouer du sub contre la volonté user.
                         val nextServer = if (isLiveIptv) null
@@ -1333,7 +1337,7 @@ class PlayerMobileFragment : Fragment() {
         val isIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
-            args.id.startsWith("livehub::")
+            args.id.startsWith("livehub::") || args.id.startsWith("vavoo::")
         if (isIptvChannel) {
             setupChannelNavigationButtons(btnPrevious, btnNext)
             return
@@ -1442,6 +1446,12 @@ class PlayerMobileFragment : Fragment() {
                 resolvePoster = { provider.getChannelPoster(it) }
             }
             is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> {
+                prevId = provider.getPreviousChannelId(args.id)
+                nextId = provider.getNextChannelId(args.id)
+                resolveDisplayName = { provider.getChannelDisplayName(it) }
+                resolvePoster = { provider.getChannelPoster(it) }
+            }
+            is com.streamflixreborn.streamflix.providers.VavooProvider -> {
                 prevId = provider.getPreviousChannelId(args.id)
                 nextId = provider.getNextChannelId(args.id)
                 resolveDisplayName = { provider.getChannelDisplayName(it) }
@@ -1774,7 +1784,7 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
         if (isLiveIptv) {
             handleLiveRecord(server)
             return
@@ -2050,6 +2060,7 @@ class PlayerMobileFragment : Fragment() {
         if (currentServer?.id != server.id) {
             iptvRetryCount = 0
             iptvCurrentStreamHasWorked = false
+            vodCurrentStreamHasWorked = false
         }
         currentServer = server
         updatePlayerHeader()
@@ -2150,7 +2161,7 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
         // 2026-05-09 : roue de chargement masquée pour IPTV uniquement.
         // keepContentOnPlayerReset reset à false — sera mis à true uniquement
         // juste avant les reloads auto-recovery (sinon casse mini→fullscreen).
@@ -2356,21 +2367,51 @@ class PlayerMobileFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::")
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                    // 2026-05-11 (user) : 2 règles selon état du stream :
+                    //
+                    // (A) PRÉ-READY (épisode jamais lancé, extracteur silencieux) :
+                    //     SKIP au server suivant après 30s. Sinon l'user reste planté
+                    //     indéfiniment sur un extracteur qui rend une URL morte.
+                    //
+                    // (B) POST-READY (épisode déjà joué, juste une coupure réseau) :
+                    //     ZÉRO swap. À 15s buffering, on auto-active ExtraBuffering
+                    //     (maxBufferMs 120s→300s) + re-init MÊME serveur avec seekTo
+                    //     pour reprendre où l'user était. L'épisode marchait donc
+                    //     le server est OK, juste un blip réseau.
                     if (!isLiveIptv && bufferingWatchdog == null) {
                         val initialPosition = player.currentPosition
                         bufferingWatchdog = viewLifecycleOwner.lifecycleScope.launch {
-                            kotlinx.coroutines.delay(BUFFERING_TIMEOUT_MS)
-                            if (player.playbackState == Player.STATE_BUFFERING &&
-                                player.currentPosition == initialPosition) {
-                                val server = currentServer
-                                val nextServer = nextAutoFallbackServer(servers, server)
-                                Log.w("PlayerNetwork",
-                                    "BUFFERING timeout (${BUFFERING_TIMEOUT_MS}ms) on ${server?.name} " +
-                                    "→ ${if (nextServer != null) "switching to ${nextServer.name}" else "no more servers"}")
-                                if (server != null) pruneBrokenVariant(server)
-                                if (nextServer != null) {
-                                    viewModel.getVideo(nextServer)
+                            if (!vodCurrentStreamHasWorked) {
+                                // (A) Pré-READY : 30s puis skip server
+                                kotlinx.coroutines.delay(30_000L)
+                                if (player.playbackState == Player.STATE_BUFFERING &&
+                                    player.currentPosition == initialPosition &&
+                                    !vodCurrentStreamHasWorked) {
+                                    val server = currentServer
+                                    val nextServer = nextAutoFallbackServer(servers, server)
+                                    Log.w("PlayerNetwork",
+                                        "Pre-READY 30s freeze on ${server?.name} → skip to ${nextServer?.name}")
+                                    if (server != null) pruneBrokenVariant(server)
+                                    if (nextServer != null) viewModel.getVideo(nextServer)
+                                }
+                            } else {
+                                // (B) Post-READY : 15s puis super-buffer, jamais de swap
+                                kotlinx.coroutines.delay(15_000L)
+                                if (player.playbackState == Player.STATE_BUFFERING &&
+                                    player.currentPosition == initialPosition &&
+                                    !currentExtraBuffering) {
+                                    val server = currentServer
+                                    val video = currentVideo
+                                    if (server != null && video != null) {
+                                        val savedPos = player.currentPosition
+                                        Log.w("PlayerNetwork",
+                                            "Post-READY 15s freeze on ${server.name} → ExtraBuffering ON @${savedPos}ms")
+                                        PlayerSettingsView.Settings.ExtraBuffering.init(true)
+                                        initializePlayer(true, currentSoftwareDecoder, video.source)
+                                        displayVideo(video, server)
+                                        try { player.seekTo(savedPos) } catch (_: Exception) {}
+                                    }
                                 }
                             }
                             bufferingWatchdog = null
@@ -2397,6 +2438,11 @@ class PlayerMobileFragment : Fragment() {
                         // 2026-05-09 v13 : refresh proactif du token Stalker toutes les 3 min.
                         scheduleProactiveTokenRefresh()
                     }
+                    // 2026-05-11 : VOD too — flag pour swap rapide sur "petite coupure"
+                    if (!vodCurrentStreamHasWorked) {
+                        vodCurrentStreamHasWorked = true
+                        Log.d("PlayerMobileFragment", "VOD stream marked as working — fast-swap on glitch enabled")
+                    }
                 }
 
                 // Live IPTV auto-resume: re-prepare on STATE_ENDED (playlist tail
@@ -2405,7 +2451,7 @@ class PlayerMobileFragment : Fragment() {
                     args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                     args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                     args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                    args.id.startsWith("match::")
+                    args.id.startsWith("match::") || args.id.startsWith("vavoo::")
                 if (isLiveIptvStream && (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE)) {
                     if (playbackState == Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
                     // 2026-05-10 : guard anti-rentrance (cf PlayerTvFragment).
@@ -2535,7 +2581,7 @@ class PlayerMobileFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::")
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::")
                     if (player.hasReallyFinished() && !isLiveIptvNoAutoSkip) {
                         if (UserPreferences.autoplay) {
                             playNextEpisodeAcrossSeasons(autoplay = true)
@@ -2612,7 +2658,7 @@ class PlayerMobileFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::")
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::")
                     if (isLiveIptvNow && iptvCurrentStreamHasWorked) {
                         Log.w("PlayerNetwork", "Connection timeout IPTV sticky (already worked) → re-prepare same server")
                         try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
@@ -2639,7 +2685,7 @@ class PlayerMobileFragment : Fragment() {
                     args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                     args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                     args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                    args.id.startsWith("match::")
+                    args.id.startsWith("match::") || args.id.startsWith("vavoo::")
                 if (isLiveIptv) {
                     val server = currentServer ?: return
                     val errCodeName = error.errorCodeName
@@ -2742,22 +2788,36 @@ class PlayerMobileFragment : Fragment() {
                 // try the next server when an error fires, so a dead first lecteur
                 // (e.g. vidmoly with an expired token) auto-fails over to the
                 // following one.
+                // 2026-05-11 (user) : RÈGLE 403/serveur HS uniquement.
+                // Avant : tout error non-handled (incluant decoder error, glitch
+                // transitoire) → auto-switch serveur. User : "si la vidéo bug au lieu
+                // de reprendre sur le même serveur s'auto swap, c'est pas bon".
+                // Nouveau : seulement swap si l'erreur indique vraiment un serveur
+                // HS (404/410/451/456/500/502/503). Sinon STICKY = re-prepare le
+                // même server (l'user a explicitement choisi, on respecte).
                 run {
                     val server = currentServer ?: return
                     val errCodeName = error.errorCodeName
-                    pruneBrokenVariant(server)
-                    val nextServer = nextAutoFallbackServer(servers, server)
-                    if (nextServer != null) {
-                        Log.w(
-                            "PlayerNetwork",
-                            "Unhandled player error on ${server.name} ($errCodeName: ${error.message}) — auto-switching to ${nextServer.name}"
-                        )
-                        viewModel.getVideo(nextServer)
-                    } else if (!tryNextChannelVariant(server)) {
-                        Log.e(
-                            "PlayerNetwork",
-                            "Unhandled player error on ${server.name} ($errCodeName) and no more servers to try"
-                        )
+                    val msg = (error.message ?: "") + " " + (error.cause?.message ?: "")
+                    val isServerDead = Regex("\\b(404|410|451|456|500|502|503|504)\\b").containsMatchIn(msg) ||
+                        errCodeName.contains("HTTP_DATA_SOURCE_FORBIDDEN") ||
+                        errCodeName.contains("DECODING_FAILED")
+                    if (isServerDead) {
+                        pruneBrokenVariant(server)
+                        val nextServer = nextAutoFallbackServer(servers, server)
+                        if (nextServer != null) {
+                            Log.w("PlayerNetwork",
+                                "Server HS on ${server.name} ($errCodeName: ${error.message}) — auto-switching to ${nextServer.name}")
+                            viewModel.getVideo(nextServer)
+                        } else if (!tryNextChannelVariant(server)) {
+                            Log.e("PlayerNetwork", "Server HS on ${server.name} ($errCodeName) and no more servers")
+                        }
+                    } else {
+                        // Erreur transitoire (glitch décodeur, network blip) — STICKY.
+                        // L'user a choisi ce serveur, on garde. Re-prepare pour reprendre.
+                        Log.w("PlayerNetwork",
+                            "Transient error on ${server.name} ($errCodeName: ${error.message}) — STICKY (re-prepare same server)")
+                        try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
                     }
                 }
             }
@@ -2771,7 +2831,7 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
         if (isLiveIptvStream) {
             player.seekToDefaultPosition()
         } else if (currentPosition == 0L) {
@@ -3017,7 +3077,7 @@ class PlayerMobileFragment : Fragment() {
                     args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                     args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                     args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                    args.id.startsWith("match::")
+                    args.id.startsWith("match::") || args.id.startsWith("vavoo::")
                 if (!isLiveIptv) {
                     val show = player.currentPosition in 3000..120000
                     showSkipIntroButton(show)
@@ -3258,11 +3318,15 @@ class PlayerMobileFragment : Fragment() {
 
     private fun buildPlayer(extraBuffering: Boolean): ExoPlayer {
         // 2026-05-09 : ajout des préfixes IPTV oubliés (livehub::/sportlive::/match::)
+        // 2026-05-11 : ajout vavoo:: — sans ça l'image figeait 4s sur Oppo car
+        // buildPlayer utilisait le LoadControl VOD (bufferForPlayback 1.5s) au lieu
+        // du LoadControl IPTV (10s) → quand le buffer vidéo se vidait brièvement,
+        // décodeur c2.mtk.avc.decoder à 0 fps pendant 4s.
         val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
         // Per user request: precharge as much as possible so the live stream
         // never cuts. Bigger buffer windows + longer rebuffer threshold.
         // 2026-05-09 v11 : recovery ULTRA RAPIDE après cut (1s).
@@ -3345,8 +3409,11 @@ class PlayerMobileFragment : Fragment() {
     private fun needsCronet(url: String): Boolean {
         // Cronet uses Chrome's TLS stack (JA3 fingerprint matches real browsers)
         // These CDNs reject non-Chromium TLS fingerprints (OkHttp → 404)
+        // anime-sama.fr : DoH résout mais TCP/TLS échoue sur certains réseaux ;
+        // Cronet (HTTP/3, ECH) débloque ces cas.
         return url.contains("vidzy.live", ignoreCase = true)
             || url.contains("cfglobalcdn.com", ignoreCase = true)
+            || url.contains("anime-sama.", ignoreCase = true)
     }
 
     private fun needsDoH(url: String): Boolean {
@@ -3361,11 +3428,15 @@ class PlayerMobileFragment : Fragment() {
         // par OkHttp+DoH mais le DefaultHttpDataSource (HttpURLConnection +
         // DNS système) résout sur un autre edge -> token rejeté avec 403
         // (vu sur OPPO + NordVPN actif, 4 mai 2026).
+        // anime-sama.* : storage CDN (s5/s22.anime-sama.fr) DNS-bloqué chez
+        // certains FAI (Tahiti satellite). DoH by-passe ça (vu en log Chromecast :
+        // ERROR_CODE_IO_NETWORK_CONNECTION_FAILED + UnknownHostException).
         return url.contains("sprintcdn", ignoreCase = true)
             || url.contains("r66nv9ed.com", ignoreCase = true)
             || url.contains("cloudatacdn.com", ignoreCase = true)
             || url.contains("cdndirector.dailymotion.com", ignoreCase = true)
             || url.contains("dmcdn.net", ignoreCase = true)
+            || url.contains("anime-sama.", ignoreCase = true)
     }
 
     private fun needsBrowserOkHttp(url: String): Boolean {
@@ -3602,7 +3673,7 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
         player = buildPlayer(extraBuffering).also { player ->
                 player.setAudioAttributes(
                     AudioAttributes.Builder()
@@ -3624,7 +3695,7 @@ class PlayerMobileFragment : Fragment() {
                     args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                     args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                     args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                    args.id.startsWith("match::")
+                    args.id.startsWith("match::") || args.id.startsWith("vavoo::")
                 if (isLiveIptvCh) {
                     tsBuilder.setPreferredAudioMimeTypes(
                         androidx.media3.common.MimeTypes.AUDIO_AAC,

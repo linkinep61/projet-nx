@@ -1088,17 +1088,30 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             }
         }
 
-        // Sort: Sibnet first (most reliable), then others
-        servers.sortWith(compareByDescending<Video.Server> {
-            when {
-                it.name.contains("Sibnet", ignoreCase = true) -> 3
-                it.name.contains("SendVid", ignoreCase = true) -> 2
-                it.name.contains("VidMoLy", ignoreCase = true) -> 1
-                // Lpayer en dernier: WebView + décryptage = lent (~5-10s)
-                it.name.contains("Lpayer", ignoreCase = true) -> -1
-                else -> 0
+        // 2026-05-10 : RÈGLE STRICTE — tout VO/VOSTFR à la fin, jamais mélangé
+        // avec le VF. PRIMARY = langue (VF avant VO/VOSTFR), SECONDARY = priorité
+        // extracteur (Sibnet > SendVid > VidMoLy > autres > Lpayer).
+        servers.sortWith(
+            compareBy<Video.Server> { srv ->
+                // 0 = VF (ou aucun tag), 1 = VO/VOSTFR (toujours en bas)
+                val n = srv.name
+                when {
+                    n.contains("VOSTFR", ignoreCase = true) -> 1
+                    n.contains("(VO)", ignoreCase = true) -> 1
+                    Regex("""\bVO\b""").containsMatchIn(n) -> 1
+                    else -> 0
+                }
+            }.thenByDescending { srv ->
+                when {
+                    srv.name.contains("Sibnet", ignoreCase = true) -> 3
+                    srv.name.contains("SendVid", ignoreCase = true) -> 2
+                    srv.name.contains("VidMoLy", ignoreCase = true) -> 1
+                    // Lpayer en dernier: WebView + décryptage = lent (~5-10s)
+                    srv.name.contains("Lpayer", ignoreCase = true) -> -1
+                    else -> 0
+                }
             }
-        })
+        )
 
         // 2026-05-05 : Moviebox + Cloudstream backups pour les animes.
         val slug = id.substringBefore("@").substringBefore("/")
@@ -1149,7 +1162,23 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             } catch (_: Exception) { emptyList() }
         } else emptyList()
 
-        return servers + cloudstreamBackup + movieboxBackup + papaBackup
+        // 2026-05-10 v3 : BRUTE FORCE — pénalité -500000 sur tout VO/VOSTFR.
+        // Garantit absolument qu'aucun VO/VOSTFR ne peut jamais passer au-dessus
+        // d'un VF, peu importe quelle priorité interne il a. sortedByDescending
+        // est stable donc préserve l'ordre relatif au sein de chaque groupe.
+        val isVoLike: (Video.Server) -> Boolean = { srv ->
+            val n = srv.name
+            n.contains("VOSTFR", ignoreCase = true) ||
+            n.contains("(VO)", ignoreCase = true) ||
+            Regex("""\bVO\b""").containsMatchIn(n)
+        }
+        val all = servers + cloudstreamBackup + movieboxBackup + papaBackup
+        val sorted = all.withIndex().sortedByDescending { (idx, srv) ->
+            // Score: idx inversé (préserve ordre original) + -500000 si VO/VOSTFR
+            val voOffset = if (isVoLike(srv)) -500000 else 0
+            (1000 - idx) + voOffset  // les VF gardent leur ordre, les VO chutent
+        }.map { it.value }
+        return sorted
     }
 
     // ========== HELPERS ==========
@@ -1180,12 +1209,18 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         val url = server.src
         Log.d(TAG, "[getVideo] Server: ${server.name}, src: $url")
 
-        // Direct MP4 links (anime-sama.fr hosting)
-        if (url.contains("anime-sama.fr") || url.endsWith(".mp4")) {
+        // 2026-05-10 : Direct MP4 links hébergés sur anime-sama.fr (subdomains
+        // s5/s22.anime-sama.fr). Les "redirections" .to/.pw/.si/.tv/.org sont
+        // UNIQUEMENT au niveau du site web (page HTML), le CDN de stockage des
+        // MP4 n'existe que sur .fr. Donc PAS de rewrite — on garde l'URL .fr
+        // d'origine. Le DNS .fr peut être bloqué chez certains FAI (Tahiti) ;
+        // PlayerTvFragment.needsDoH() force OkHttp+DoH pour anime-sama.* qui
+        // by-passe ce blocage.
+        if (url.contains("anime-sama.", ignoreCase = true) || url.endsWith(".mp4")) {
             return Video(
                 source = url,
                 headers = mapOf(
-                    "Referer" to baseUrl,
+                    "Referer" to "https://anime-sama.fr/",
                     "User-Agent" to USER_AGENT
                 )
             )

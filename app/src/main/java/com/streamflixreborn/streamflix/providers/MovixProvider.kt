@@ -93,7 +93,10 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
     // contenus (cpasmal sur séries pré-2010 par ex.) et nous font perdre des
     // secondes à chaque chargement. On garde l'appel "au cas où" mais avec un
     // timeout strict + désactivation temporaire après N timeouts/erreurs.
-    private const val ENDPOINT_TIMEOUT_MS = 4_000L
+    // 2026-05-11 : 4s → 2.5s. La plupart des endpoints répondent en 200-500ms ;
+    // 4s c'était over-conservative et bottleneck-ait getServers via awaitAll
+    // (qui attend le plus lent). 2.5s = bonne tolérance réseau sans plomber.
+    private const val ENDPOINT_TIMEOUT_MS = 2_500L
     private const val ENDPOINT_FAILURE_THRESHOLD = 5
     private const val ENDPOINT_DISABLED_MS = 30L * 60L * 1000L // 30 min
     private data class EndpointHealth(
@@ -201,8 +204,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
     /** Construit la liste des Video.Server backups TMDB-iframe pour Movix.
      *  Identique à NakiosProvider mais avec son propre wiring local
      *  (paramètres season/episode en Int car Movix Episode VideoType les a
-     *  déjà parsés). */
-    private fun buildTmdbBackupServersForMovix(
+     *  déjà parsés).
+     *  2026-05-11 : exposé en public pour permettre à d'autres providers
+     *  (VoirDrama, AnimeSama, FrenchAnime, FrenchManga, VoirAnime, UnJourUnFilm)
+     *  d'enrichir leur picker de serveurs avec les sources Movix. */
+    fun buildTmdbBackupServersForMovix(
         tmdbId: String,
         videoType: Video.Type,
     ): List<Video.Server> {
@@ -1443,32 +1449,35 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                         }
                     }
 
-                    // 2026-05-04 : Yflix.to backup (TMDB id → title+year → search → /watch URL)
+                    // 2026-05-11 : Yflix + Moiflix partagent la même lookup TMDB
+                    // (title+year). Avant : 2 appels TMDB séparés. Maintenant : 1
+                    // appel partagé via async commun → gain ~150-300ms.
+                    val tmdbMovieDetailsDeferred = async {
+                        val tmdbIdInt = tmdbId.toIntOrNull() ?: return@async null
+                        try { tmdbService.getMovieDetails(tmdbIdInt, TMDB_API_KEY) }
+                        catch (_: Exception) { null }
+                    }
                     val yflixDeferred = async {
                         runEndpoint("yflix-movie") {
-                            val tmdbIdInt = tmdbId.toIntOrNull() ?: return@runEndpoint emptyList()
-                            val movie = try {
-                                tmdbService.getMovieDetails(tmdbIdInt, TMDB_API_KEY)
-                            } catch (_: Exception) { null }
-                            val title = movie?.title ?: return@runEndpoint emptyList()
+                            val movie = tmdbMovieDetailsDeferred.await() ?: return@runEndpoint emptyList()
+                            val title = movie.title ?: return@runEndpoint emptyList()
                             val year = movie.release_date?.take(4)?.toIntOrNull()
                             val watchPath = searchYflix(title, year, "Movie") ?: return@runEndpoint emptyList()
                             listOf(buildYflixServer(watchPath))
                         }
                     }
-                    // 2026-05-04 : Moiflix backup (TMDB id → title → search → /movie/{slug})
                     val moiflixDeferred = async {
                         runEndpoint("moiflix-movie") {
-                            val tmdbIdInt = tmdbId.toIntOrNull() ?: return@runEndpoint emptyList()
-                            val movie = try {
-                                tmdbService.getMovieDetails(tmdbIdInt, TMDB_API_KEY)
-                            } catch (_: Exception) { null }
-                            val title = movie?.title ?: return@runEndpoint emptyList()
+                            val movie = tmdbMovieDetailsDeferred.await() ?: return@runEndpoint emptyList()
+                            val title = movie.title ?: return@runEndpoint emptyList()
                             val year = movie.release_date?.take(4)?.toIntOrNull()
                             val matchUrl = searchMoiflix(title, year, "Film") ?: return@runEndpoint emptyList()
                             listOf(buildMoiflixServer(matchUrl))
                         }
                     }
+                    // 2026-05-11 : ROLLBACK lien VoirDrama-Movix. Le user veut garder
+                    // les providers séparés pour bien voir quelle source produit quel
+                    // serveur. VoirDrama reste accessible en standalone.
                     awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, videasyDeferred, yflixDeferred, moiflixDeferred)
                 }
 
@@ -1661,32 +1670,34 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                         }
                     }
 
-                    // 2026-05-04 : Yflix.to backup pour TV episode
+                    // 2026-05-11 : Yflix + Moiflix partagent la même lookup TMDB TV
+                    // (1 call au lieu de 2) → gain ~150-300ms.
+                    val tmdbTvDetailsDeferred = async {
+                        val tmdbIdInt = tmdbId.toIntOrNull() ?: return@async null
+                        try { tmdbService.getTvDetails(tmdbIdInt, TMDB_API_KEY) }
+                        catch (_: Exception) { null }
+                    }
                     val yflixDeferred = async {
                         runEndpoint("yflix-tv") {
-                            val tmdbIdInt = tmdbId.toIntOrNull() ?: return@runEndpoint emptyList()
-                            val tv = try {
-                                tmdbService.getTvDetails(tmdbIdInt, TMDB_API_KEY)
-                            } catch (_: Exception) { null }
-                            val title = tv?.name ?: return@runEndpoint emptyList()
+                            val tv = tmdbTvDetailsDeferred.await() ?: return@runEndpoint emptyList()
+                            val title = tv.name ?: return@runEndpoint emptyList()
                             val year = tv.first_air_date?.take(4)?.toIntOrNull()
                             val watchPath = searchYflix(title, year, "TV") ?: return@runEndpoint emptyList()
                             listOf(buildYflixServer(watchPath, season = seasonNum, episode = episodeNum))
                         }
                     }
-                    // 2026-05-04 : Moiflix backup pour TV episode
                     val moiflixDeferred = async {
                         runEndpoint("moiflix-tv") {
-                            val tmdbIdInt = tmdbId.toIntOrNull() ?: return@runEndpoint emptyList()
-                            val tv = try {
-                                tmdbService.getTvDetails(tmdbIdInt, TMDB_API_KEY)
-                            } catch (_: Exception) { null }
-                            val title = tv?.name ?: return@runEndpoint emptyList()
+                            val tv = tmdbTvDetailsDeferred.await() ?: return@runEndpoint emptyList()
+                            val title = tv.name ?: return@runEndpoint emptyList()
                             val year = tv.first_air_date?.take(4)?.toIntOrNull()
                             val matchUrl = searchMoiflix(title, year, "Show") ?: return@runEndpoint emptyList()
                             listOf(buildMoiflixServer(matchUrl, season = seasonNum, episode = episodeNum))
                         }
                     }
+                    // 2026-05-11 : ROLLBACK lien VoirDrama-Movix. Le user veut garder
+                    // les providers séparés pour bien voir quelle source produit quel
+                    // serveur. VoirDrama reste accessible en standalone.
                     awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, seriesDlDeferred, videasyDeferred, mazQuestDeferred, yflixDeferred, moiflixDeferred)
                 }
 
