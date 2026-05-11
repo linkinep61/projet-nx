@@ -677,13 +677,16 @@ object BoxXtemusProvider : Provider, IptvProvider {
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         ensureRegistry()
         val ch = channelById(id) ?: return emptyList()
-        // Server src embarque l'index pour retrouver la chaîne (et donc UA/referer)
-        // dans getVideo. Format : "bxt-src::<channelId>" — sera mappé via channelById.
+        // 2026-05-11 : on encode l'ID de la chaîne dans le server.id (suffixé)
+        // pour pouvoir retrouver les headers UA/referer custom dans getVideo.
+        // Le src est l'URL D'ORIGINE de la chaîne (c3v9.short.gy/...) — pas
+        // un placeholder. Ainsi tout code path qui lit src directement (sans
+        // appeler getVideo) obtient au moins une URL HTTP valide.
         return listOf(
             Video.Server(
-                id = "${ch.id}::main",
+                id = "bxt-ch::${ch.id}",
                 name = "${ch.channelName} [3BoxTV]",
-                src = "bxt-src::${ch.id}",
+                src = ch.streamUrl,
             )
         )
     }
@@ -704,13 +707,18 @@ object BoxXtemusProvider : Provider, IptvProvider {
         var customUa = "Mozilla/5.0 (Linux; Android 14) Chrome/131.0.0.0 Mobile Safari/537.36"
         var customReferer = "https://box.xtemus.com/"
 
-        // Résoudre l'ID si le server.src est notre format bxt-src::ID
-        if (src.startsWith("bxt-src::")) {
-            val channelId = src.removePrefix("bxt-src::")
+        // 2026-05-11 : retrouve la chaîne via server.id (encodé "bxt-ch::ID") pour
+        // récupérer les headers custom (userAgent, referer) requis par l'anti-bot.
+        // Le src est déjà l'URL d'origine de la chaîne (mis là par getServers pour
+        // tolérer les code paths qui shortcut getVideo).
+        if (server.id.startsWith("bxt-ch::")) {
+            val channelId = server.id.removePrefix("bxt-ch::")
             val ch = channelById(channelId)
             if (ch != null) {
                 if (ch.userAgent.isNotBlank()) customUa = ch.userAgent
                 if (ch.referer.isNotBlank()) customReferer = ch.referer
+                // Aligne src avec streamUrl du registry (au cas où server.src ait
+                // été altéré par downstream code).
                 src = ch.streamUrl
             } else {
                 Log.w(TAG, "Channel not found for $channelId, fallback to literal src")
