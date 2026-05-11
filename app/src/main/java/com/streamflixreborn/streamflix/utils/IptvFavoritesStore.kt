@@ -52,6 +52,14 @@ object IptvFavoritesStore {
             return vid.lowercase().trim()
         }
 
+        // 2026-05-11 : 3BoxTV — même logique que Vavoo, ID interne opaque.
+        if (channelId.startsWith("bxt::")) {
+            val canonical = com.streamflixreborn.streamflix.providers.BoxXtemusProvider
+                .toCanonicalKey(channelId)
+            if (!canonical.isNullOrBlank()) return canonical
+            return channelId.substringAfterLast("::").lowercase().trim()
+        }
+
         return channelId
             .removePrefix("vegeta_ep::")
             .removePrefix("vegeta::")
@@ -75,6 +83,7 @@ object IptvFavoritesStore {
         "Vegeta TV" -> "vegeta::"
         "TV Hub" -> "livehub::"
         "Vavoo TV" -> "vavoo::"
+        "3BoxTV" -> "bxt::"
         else -> ""
     }
 

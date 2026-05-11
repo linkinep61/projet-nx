@@ -41,15 +41,16 @@ android {
         applicationId "com.streamfr.app"
         minSdk 21
         targetSdk 35
-        versionCode 10880
-        versionName "1.7.180"
+        versionCode 10881
+        versionName "1.7.181"
 
-        // 2026-05-09 v19 : drop x86 (32-bit) uniquement. Aucun téléphone/TV/box
-        // ne tourne en x86 32-bit. On GARDE x86_64 pour l'émulateur Pixel 8 dans
-        // Android Studio (qui a besoin de FFmpeg pour tester l'audio AC3/MP2).
-        // Économise ~8 MB sur l'APK final.
+        // 2026-05-11 : RESTAURATION x86 (32-bit) — abandonné en v19 par erreur.
+        // Certains émulateurs (Genymotion, AVD images anciennes) et surtout les
+        // TV Sharp Aquos avec CPU Intel Atom utilisent x86 32-bit. Sans cet ABI
+        // l'install échoue ("APK incompatible") sur ces devices. Le surcoût est
+        // ~8 MB sur l'APK final mais c'est nécessaire pour la compat large.
         ndk {
-            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'
+            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
         }
 
         buildConfigField "String", "APP_LAYOUT", "\"${properties.getProperty("APP_LAYOUT")}\""

@@ -728,7 +728,7 @@ class PlayerMobileFragment : Fragment() {
                             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
                         // 2026-05-09 : nextAutoFallbackServer skip VOSTFR/VO si on
                         // était en VF — évite de jouer du sub contre la volonté user.
                         val nextServer = if (isLiveIptv) null
@@ -1337,7 +1337,7 @@ class PlayerMobileFragment : Fragment() {
         val isIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
-            args.id.startsWith("livehub::") || args.id.startsWith("vavoo::")
+            args.id.startsWith("livehub::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
         if (isIptvChannel) {
             setupChannelNavigationButtons(btnPrevious, btnNext)
             return
@@ -1452,6 +1452,12 @@ class PlayerMobileFragment : Fragment() {
                 resolvePoster = { provider.getChannelPoster(it) }
             }
             is com.streamflixreborn.streamflix.providers.VavooProvider -> {
+                prevId = provider.getPreviousChannelId(args.id)
+                nextId = provider.getNextChannelId(args.id)
+                resolveDisplayName = { provider.getChannelDisplayName(it) }
+                resolvePoster = { provider.getChannelPoster(it) }
+            }
+            is com.streamflixreborn.streamflix.providers.BoxXtemusProvider -> {
                 prevId = provider.getPreviousChannelId(args.id)
                 nextId = provider.getNextChannelId(args.id)
                 resolveDisplayName = { provider.getChannelDisplayName(it) }
@@ -1784,7 +1790,7 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
         if (isLiveIptv) {
             handleLiveRecord(server)
             return
@@ -2161,7 +2167,7 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
         // 2026-05-09 : roue de chargement masquée pour IPTV uniquement.
         // keepContentOnPlayerReset reset à false — sera mis à true uniquement
         // juste avant les reloads auto-recovery (sinon casse mini→fullscreen).
@@ -2235,6 +2241,13 @@ class PlayerMobileFragment : Fragment() {
                 || video.source.contains("/live/")
                 || video.type == androidx.media3.common.MimeTypes.APPLICATION_M3U8
             )
+            // 2026-05-11 : détection DASH (.mpd) — utilisé par 3BoxTV (LCI live etc.).
+            // Sans cette branche, le DASH tombe dans ProgressiveMediaSource qui
+            // ne sait pas lire un manifest XML → "UnrecognizedInputFormatException".
+            val isDash = !isHls && !urlEndsWithTs && (
+                video.source.substringBefore('?').endsWith(".mpd", ignoreCase = true)
+                || video.type == androidx.media3.common.MimeTypes.APPLICATION_MPD
+            )
             val teeFactory = com.streamflixreborn.streamflix.download.TeeDataSourceFactory(dataSourceFactory)
             if (isHls) {
                 // 2026-05-09 v23 : retry 403 sur HLS Live (cf PlayerTvFragment).
@@ -2255,8 +2268,15 @@ class PlayerMobileFragment : Fragment() {
                     .createMediaSource(mediaItem)
                 player.setMediaSource(hlsSource)
                 Log.d("PlayerDebug", "HLS v23: TeeDataSource + retry-403 policy")
+            } else if (isDash) {
+                // DASH (.mpd) — utilisé par les flux live français (TF1, France TV, etc.)
+                // via le pipeline 3BoxTV (RSS feed → URL signée vers .mpd).
+                val dashSource = androidx.media3.exoplayer.dash.DashMediaSource.Factory(teeFactory)
+                    .createMediaSource(mediaItem)
+                player.setMediaSource(dashSource)
+                Log.d("PlayerDebug", "DASH: DashMediaSource + TeeDataSource")
             } else {
-                // Non-HLS (mp4 progressive). Wrap with TeeDataSource for REC.
+                // Non-HLS / Non-DASH (mp4 progressive). Wrap with TeeDataSource for REC.
                 val progressiveSource = androidx.media3.exoplayer.source.ProgressiveMediaSource
                     .Factory(teeFactory)
                     .createMediaSource(mediaItem)
@@ -2367,7 +2387,7 @@ class PlayerMobileFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
                     // 2026-05-11 (user) : 2 règles selon état du stream :
                     //
                     // (A) PRÉ-READY (épisode jamais lancé, extracteur silencieux) :
@@ -2451,7 +2471,7 @@ class PlayerMobileFragment : Fragment() {
                     args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                     args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                     args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                    args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                    args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
                 if (isLiveIptvStream && (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE)) {
                     if (playbackState == Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
                     // 2026-05-10 : guard anti-rentrance (cf PlayerTvFragment).
@@ -2581,7 +2601,7 @@ class PlayerMobileFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
                     if (player.hasReallyFinished() && !isLiveIptvNoAutoSkip) {
                         if (UserPreferences.autoplay) {
                             playNextEpisodeAcrossSeasons(autoplay = true)
@@ -2658,7 +2678,7 @@ class PlayerMobileFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
                     if (isLiveIptvNow && iptvCurrentStreamHasWorked) {
                         Log.w("PlayerNetwork", "Connection timeout IPTV sticky (already worked) → re-prepare same server")
                         try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
@@ -2685,7 +2705,7 @@ class PlayerMobileFragment : Fragment() {
                     args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                     args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                     args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                    args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                    args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
                 if (isLiveIptv) {
                     val server = currentServer ?: return
                     val errCodeName = error.errorCodeName
@@ -2831,7 +2851,7 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
         if (isLiveIptvStream) {
             player.seekToDefaultPosition()
         } else if (currentPosition == 0L) {
@@ -3077,7 +3097,7 @@ class PlayerMobileFragment : Fragment() {
                     args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                     args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                     args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                    args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                    args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
                 if (!isLiveIptv) {
                     val show = player.currentPosition in 3000..120000
                     showSkipIntroButton(show)
@@ -3326,7 +3346,7 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
         // Per user request: precharge as much as possible so the live stream
         // never cuts. Bigger buffer windows + longer rebuffer threshold.
         // 2026-05-09 v11 : recovery ULTRA RAPIDE après cut (1s).
@@ -3673,7 +3693,7 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
         player = buildPlayer(extraBuffering).also { player ->
                 player.setAudioAttributes(
                     AudioAttributes.Builder()
@@ -3695,7 +3715,7 @@ class PlayerMobileFragment : Fragment() {
                     args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                     args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                     args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                    args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                    args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
                 if (isLiveIptvCh) {
                     tsBuilder.setPreferredAudioMimeTypes(
                         androidx.media3.common.MimeTypes.AUDIO_AAC,
