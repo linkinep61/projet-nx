@@ -34,9 +34,24 @@ object IptvFavoritesStore {
         ctx.getSharedPreferences("${BuildConfig.APPLICATION_ID}.$PREFS_NAME", Context.MODE_PRIVATE)
     }
 
-    /** Strip le préfixe provider du channelId pour avoir la clé canonique. */
+    /** Strip le préfixe provider du channelId pour avoir la clé canonique.
+     *  2026-05-10 : cas spécial Vavoo — l'ID interne est opaque (UUID-like
+     *  donné par l'API), pas un nom canonique. On délègue au provider pour
+     *  convertir l'ID interne → clé canonique (= nom de chaîne normalisé). */
     private fun normalize(channelId: String): String {
         if (channelId.isBlank()) return channelId
+
+        // Vavoo : ID interne opaque → résoudre la clé canonique via le provider.
+        if (channelId.startsWith("vavoo::")) {
+            val vid = channelId.removePrefix("vavoo::")
+            val canonical = com.streamflixreborn.streamflix.providers.VavooProvider
+                .getCanonicalKeyForChannelId(vid)
+            if (!canonical.isNullOrBlank()) return canonical
+            // Fallback : si registry pas encore chargée, utilise l'id brut
+            // (sera réconcilié au prochain appel quand registry chargée).
+            return vid.lowercase().trim()
+        }
+
         return channelId
             .removePrefix("vegeta_ep::")
             .removePrefix("vegeta::")
@@ -52,20 +67,28 @@ object IptvFavoritesStore {
             .trim()
     }
 
-    /** Reconstruit le préfixe provider à partir du nom pour reformer un channelId. */
+    /** Reconstruit le préfixe provider à partir du nom pour reformer un channelId.
+     *  2026-05-10 : Sport Live et Movix LiveTV retirés (providers supprimés). */
     private fun prefixFor(providerName: String): String = when (providerName) {
         "WiTV" -> "ch::"
         "OLA TV" -> "ola::"
         "Vegeta TV" -> "vegeta::"
-        "Movix LiveTV" -> "movixlivetv::"
-        "Sport Live" -> "sportlive::"
         "TV Hub" -> "livehub::"
+        "Vavoo TV" -> "vavoo::"
         else -> ""
     }
 
     /** Returns all favorited channel IDs SPÉCIFIQUES au provider courant.
      *  En interne le store est cross-provider — on reformate les ids avec le
-     *  préfixe du provider pour matcher les channelIds qu'il retourne. */
+     *  préfixe du provider pour matcher les channelIds qu'il retourne.
+     *
+     *  2026-05-10 : pour Vavoo on retourne les canonical keys préfixées
+     *  ("vavoo::canonical::tf1") sans tenter de résoudre l'ID Vavoo interne.
+     *  Raison : la résolution dépend du registry chargé, et la fragment appelle
+     *  getFavorites AVANT getHome. Donc à froid on aurait un set vide → "Aucun
+     *  favori" affiché à tort, et la fragment ne triggererait jamais getHome
+     *  pour charger le registry. La résolution se fait dans getHome (Favoris
+     *  section) qui appelle ensureRegistry() au début. */
     fun getFavorites(providerName: String): Set<String> {
         val canonicalKeys = prefs.getStringSet(GLOBAL_KEY, emptySet()) ?: emptySet()
         val prefix = prefixFor(providerName)

@@ -157,8 +157,14 @@ open class YflixExtractor : Extractor() {
 
                     cont.invokeOnCancellation {
                         resolved = true
-                        webView.stopLoading()
-                        webView.destroy()
+                        // 2026-05-11 : WebView methods MUST run on main thread (the
+                        // cancellation handler may fire from DefaultExecutor when
+                        // withTimeout cancels). Sans ce wrap : crash fatal
+                        // "WebView method called on thread 'DefaultExecutor'".
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            try { webView.stopLoading() } catch (_: Throwable) {}
+                            try { webView.destroy() } catch (_: Throwable) {}
+                        }
                     }
                 }
             }

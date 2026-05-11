@@ -242,7 +242,12 @@ class MainTvActivity : FragmentActivity() {
                             binding.navMain.requestFocus()
                         }
                     }
-                    R.id.settings, R.id.search, R.id.movies, R.id.tv_shows, R.id.downloads -> {
+                    R.id.settings, R.id.search, R.id.movies, R.id.tv_shows, R.id.downloads, R.id.iptv_favorites -> {
+                        // 2026-05-10 : ajout iptv_favorites — back depuis l'onglet
+                        // ❤ Favoris doit retourner au home du provider courant
+                        // (avant : tombait dans else → navigateUp → pop start
+                        // destination = providers, donc l'user revenait au
+                        // sélecteur de provider au lieu du home Vavoo/Vegeta/etc.)
                         navigateToProviderHome(navController)
                         binding.navMain.requestFocus()
                     }

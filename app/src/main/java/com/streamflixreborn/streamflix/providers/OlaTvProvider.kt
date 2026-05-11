@@ -1784,6 +1784,52 @@ object OlaTvProvider : Provider, IptvProvider {
             com.streamflixreborn.streamflix.fragments.player.settings
                 .IptvBannedChannels.isBanned(id)
         }
+
+        // ─── ★ Favoris EN TÊTE ───
+        // 2026-05-10 (user) : "applique le fix favoris Vavoo aux autres providers
+        // aussi". → réintroduction de la section "Favoris" qu'IptvFavorites(Tv|
+        // Mobile)Fragment cherche dans getHome() pour peupler l'onglet ❤.
+        try {
+            val favKeys = com.streamflixreborn.streamflix.utils.IptvFavoritesStore
+                .getAllCanonicalFavorites()
+            if (favKeys.isNotEmpty()) {
+                val favItems = mutableListOf<TvShow>()
+                // 1. Curated d'abord
+                for (c in curatedChannels) {
+                    if (c.key in favKeys && !isChannelBanned("ola::${c.key}")) {
+                        favItems += TvShow(
+                            id = "ola::${c.key}",
+                            title = c.displayName,
+                            poster = logoUrlFor(c.displayName),
+                            banner = logoUrlFor(c.displayName),
+                            providerName = name,
+                        )
+                    }
+                }
+                // 2. Registry channels (non-curated) qui sont en favoris
+                val seen = favItems.map { it.id }.toMutableSet()
+                val regSnap = synchronized(registryLock) {
+                    channelRegistry.entries.map { (k, info) -> Triple(k, info.displayName, info.logo) }
+                }
+                for ((key, displayName, logo) in regSnap) {
+                    val id = "ola::$key"
+                    if (key in favKeys && !isChannelBanned(id) && id !in seen) {
+                        favItems += TvShow(
+                            id = id,
+                            title = displayName,
+                            poster = logo.ifEmpty { logoUrlFor(displayName) },
+                            banner = logo.ifEmpty { logoUrlFor(displayName) },
+                            providerName = name,
+                        )
+                        seen += id
+                    }
+                }
+                if (favItems.isNotEmpty()) {
+                    sections.add(Category(name = "Favoris", list = favItems))
+                }
+            }
+        } catch (_: Throwable) { }
+
         for (catName in categoryOrder) {
             val items = curatedChannels
                 .filter { it.category == catName }

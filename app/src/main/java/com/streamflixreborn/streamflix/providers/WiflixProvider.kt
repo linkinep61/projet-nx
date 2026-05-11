@@ -248,7 +248,8 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             ))
         }
         if (featuredItems.isNotEmpty() && UserPreferences.enableTmdb) {
-            for (item in featuredItems) {
+            // 2026-05-10 : CAP à 15 items pour éviter ~500 appels TMDB en burst au home.
+            for (item in featuredItems.take(15)) {
                 try {
                     val title = when (item) {
                         is TvShow -> item.title.substringBefore(" - ")

@@ -1283,6 +1283,115 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
         }.distinctBy { (it as? TvShow)?.id ?: (it as? Movie)?.id }
     }
 
+    // ==================== PUBLIC HELPER (MovixProvider linking) ====================
+    //
+    // 2026-05-11 : MovixProvider K-drama enrichment.
+    //
+    // Movix expose souvent 0 ou 1 serveur pour les K-dramas (Reply 1988, etc.) car
+    // les sources FR (fstream/links/wiflix/cpasmal) ne les indexent pas. Yflix peut
+    // les trouver mais l'extracteur WebView échoue sur certaines pages (timeout 25s
+    // sans .m3u8 capté).
+    //
+    // VoirDrama (+ Dramacool9 fallback) a une couverture beaucoup plus large sur
+    // l'Asia. On appelle ce helper depuis MovixProvider.getServers pour ENRICHIR
+    // les servers d'une série/film K-drama identifié par son titre TMDB.
+    //
+    // Le src URL pointe vers un embed (Filemoon, Lpayer, MovPlayer, etc.) qui est
+    // routé par Extractor.extract côté Movix → les extracteurs existants prennent
+    // le relais. Pas besoin de prefix custom sur l'ID.
+    //
+    // Limites :
+    //   - Timeout 2.5s côté Movix (runEndpoint) — si VoirDrama search est lent,
+    //     les servers n'apparaissent pas. C'est acceptable : ce sont des bonus.
+    //   - Pas de matching par TMDB ID (VoirDrama n'a pas d'ID TMDB) → fuzzy match
+    //     par titre normalisé + bonus année.
+    suspend fun findAndGetServersByTitle(
+        title: String,
+        year: Int?,
+        videoType: Video.Type
+    ): List<Video.Server> {
+        if (title.isBlank()) return emptyList()
+        initializeService()
+        return try {
+            // 1) Recherche cross (VoirDrama + Dramacool) — page 1 seulement
+            val results = search(title, 1)
+            if (results.isEmpty()) {
+                Log.d("VoirDramaProvider", "findAndGetServersByTitle: no results for '$title'")
+                return emptyList()
+            }
+
+            // 2) Fuzzy match : meilleur score par titre + année
+            fun normalize(s: String) = s.lowercase()
+                .replace(Regex("""\(\d{4}\)"""), " ")
+                .replace(Regex("""\b(saison|season|vostfr|vost|vf|vo|fr)\b"""), " ")
+                .replace(Regex("""[^a-z0-9\s]"""), " ")
+                .replace(Regex("""\s+"""), " ")
+                .trim()
+            val targetNorm = normalize(title)
+
+            data class Candidate(val id: String, val title: String, val score: Int)
+            val candidates = results.mapNotNull { item ->
+                val triple: Triple<String, String, Int?> = when (item) {
+                    is Movie -> Triple(item.id, item.title, item.released?.get(java.util.Calendar.YEAR))
+                    is TvShow -> Triple(item.id, item.title, item.released?.get(java.util.Calendar.YEAR))
+                    else -> return@mapNotNull null
+                }
+                val itemId = triple.first
+                val itemTitle = triple.second
+                val itemYear = triple.third
+                val itemNorm = normalize(itemTitle)
+                var score = when {
+                    itemNorm == targetNorm -> 100
+                    itemNorm.startsWith("$targetNorm ") || targetNorm.startsWith("$itemNorm ") -> 80
+                    itemNorm.contains(targetNorm) || targetNorm.contains(itemNorm) -> 50
+                    else -> 0
+                }
+                if (score == 0) return@mapNotNull null
+                // Bonus année si match (Calendar.YEAR == year passé en param)
+                if (year != null && itemYear != null && itemYear == year) score += 20
+                Candidate(itemId, itemTitle, score)
+            }.sortedByDescending { it.score }
+
+            if (candidates.isEmpty()) {
+                Log.d("VoirDramaProvider", "findAndGetServersByTitle: no match for '$title' (year=$year)")
+                return emptyList()
+            }
+            val best = candidates.first()
+            Log.d("VoirDramaProvider", "findAndGetServersByTitle: '$title' → '${best.title}' " +
+                "(id=${best.id}, score=${best.score})")
+
+            // 3) Pour Episode : récupérer la liste des épisodes puis trouver le bon numéro
+            //    Pour Movie : appeler getServers directement avec l'ID du show (équivalent
+            //    page detail sur VoirDrama / episode-1 sur Dramacool).
+            when (videoType) {
+                is Video.Type.Episode -> {
+                    val episodes = try {
+                        getEpisodesBySeason(best.id)
+                    } catch (e: Exception) {
+                        Log.w("VoirDramaProvider", "getEpisodesBySeason failed for ${best.id}: ${e.message}")
+                        return emptyList()
+                    }
+                    val ep = episodes.firstOrNull { it.number == videoType.number }
+                    if (ep == null) {
+                        Log.d("VoirDramaProvider", "Episode ${videoType.number} not found on VoirDrama '${best.title}'")
+                        return emptyList()
+                    }
+                    getServers(ep.id, videoType).map { s ->
+                        s.copy(name = "${s.name} [VoirDrama]")
+                    }
+                }
+                is Video.Type.Movie -> {
+                    getServers(best.id, videoType).map { s ->
+                        s.copy(name = "${s.name} [VoirDrama]")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("VoirDramaProvider", "findAndGetServersByTitle error: ${e.message}")
+            emptyList()
+        }
+    }
+
     // ==================== SERVICE ====================
 
     private interface VoirDramaService {

@@ -43,10 +43,13 @@ class LiveReconnectingHttpDataSource(
     override fun read(buffer: ByteArray, offset: Int, readLength: Int): Int {
         var result = try {
             wrapped.read(buffer, offset, readLength)
-        } catch (e: HttpDataSource.HttpDataSourceException) {
-            // Network read error during stream — treat as EOF for reconnect logic.
+        } catch (e: Exception) {
+            // 2026-05-10 v2 : ÉLARGI à toutes les exceptions réseau (pas juste
+            // HttpDataSourceException). Connection: close peut déclencher
+            // SocketException, IOException, EOFException, etc. — toutes doivent
+            // déclencher le reconnect sur live progressive.
             if (enableReconnect) {
-                Log.d(TAG, "Read exception on live URL → treating as EOF for reconnect: ${e.message}")
+                Log.d(TAG, "Read exception (${e.javaClass.simpleName}) on live URL → treating as EOF for reconnect: ${e.message}")
                 C.RESULT_END_OF_INPUT
             } else throw e
         }
