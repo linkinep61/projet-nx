@@ -2086,19 +2086,36 @@ class PlayerTvFragment : Fragment() {
                 usingWebView = false
                 Log.d("PlayerNetwork", "DataSource hot-swap: explicit MediaSource (no player rebuild)")
             } else {
-                // 2026-05-04 : auto-detect HLS comme PlayerMobileFragment.
-                // Sans ça, les URLs proxy (api.nakios.fit/api/sources/proxy?url=...m3u8)
-                // tombent sur ProgressiveMediaSource avec extractors progressifs
-                // (Mp4Extractor, etc.) -> UnrecognizedInputFormatException sur TV.
-                // Le mobile a le même check qui sauvait. Heuristique simple :
-                // .m3u8 dans l'URL OU dans une query param OU MimeType déclaré HLS.
-                // 2026-05-09 v25 : SIMPLIFICATION RADICALE — comme mini player + Tivimate.
-                // setMediaItem direct, DefaultMediaSourceFactory auto-détecte le format
-                // (HLS pour .m3u8, Progressive pour autres). Pas de LoadErrorHandlingPolicy
-                // custom, pas de HlsMediaSource explicit. Less is more — les défauts
-                // ExoPlayer marchent déjà bien.
-                player.setMediaItem(mediaItem)
-                Log.d("PlayerDebug", "TV: setMediaItem v25 (auto-detect + ExoPlayer defaults)")
+                // 2026-05-11 : détection EXPLICITE HLS/DASH (parité PlayerMobileFragment).
+                // L'auto-detect via setMediaItem marche dans 90% des cas mais peut louper
+                // les .mpd quand le URL contient JWT/queryparams. Force le choix correct
+                // de MediaSource pour 3BoxTV (DASH LCI live + HLS GitHub) et Vavoo.
+                val urlEndsWithTs = video.source.substringBefore('?').endsWith(".ts", ignoreCase = true)
+                val srcLowerNoQuery = video.source.lowercase().substringBefore('?')
+                val isHls = !urlEndsWithTs && (
+                    srcLowerNoQuery.contains(".m3u8")
+                    || video.source.contains(".m3u8")
+                    || video.type == androidx.media3.common.MimeTypes.APPLICATION_M3U8
+                )
+                val isDash = !isHls && !urlEndsWithTs && (
+                    srcLowerNoQuery.endsWith(".mpd")
+                    || video.type == androidx.media3.common.MimeTypes.APPLICATION_MPD
+                )
+                if (isHls) {
+                    val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(dataSourceFactory)
+                        .setAllowChunklessPreparation(true)
+                        .createMediaSource(mediaItem)
+                    player.setMediaSource(hlsSource)
+                    Log.d("PlayerDebug", "TV: HlsMediaSource (explicit)")
+                } else if (isDash) {
+                    val dashSource = androidx.media3.exoplayer.dash.DashMediaSource.Factory(dataSourceFactory)
+                        .createMediaSource(mediaItem)
+                    player.setMediaSource(dashSource)
+                    Log.d("PlayerDebug", "TV: DashMediaSource (explicit, .mpd)")
+                } else {
+                    player.setMediaItem(mediaItem)
+                    Log.d("PlayerDebug", "TV: setMediaItem (auto-detect + ExoPlayer defaults)")
+                }
                 usingWebView = false
             }
 
