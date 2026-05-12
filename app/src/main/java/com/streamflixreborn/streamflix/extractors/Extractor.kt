@@ -237,6 +237,9 @@ abstract class Extractor {
             // sortis < 7 jours) où Wiflix/FStream/Cpasmal n'ont pas encore
             // indexé. Permet de gagner des sources VF sur les films récents.
             EmbedSeekExtractor(),
+            // 2026-05-12 : SendVid — utilisé par AnimeSiteProvider (lecteurs 1 VOSTFR + 5 VF).
+            // Page embed contient <source src="..mp4"> direct, hash time-limited ~4h.
+            SendvidExtractor(),
         )
 
         // ── A: Extraction cache ─────────────────────────────────────────────
@@ -414,6 +417,59 @@ abstract class Extractor {
         fun healthScore(serverName: String): Float {
             val rec = serverHealth[serverName] ?: return 1f
             return if (System.currentTimeMillis() < rec.brokenUntilMs) 0f else 1f
+        }
+
+        /**
+         * Returns the set of extractor names currently flagged broken
+         * (≥3 failures in window, brokenUntil > now). Used by PlayerViewModel
+         * to re-sort server lists pushing broken ones to bottom.
+         */
+        fun brokenServerNames(): Set<String> {
+            val now = System.currentTimeMillis()
+            return serverHealth.entries
+                .filter { now < it.value.brokenUntilMs }
+                .map { it.key }
+                .toSet()
+        }
+
+        /** Expose recordFailure pour le pre-extract validation (HEAD check du stream).
+         *  Quand le HEAD échoue après extraction réussie, on doit quand même flag
+         *  l'extracteur en failure pour que le tri healthScore le pousse en bas.
+         *
+         *  Pour HEAD-fail c'est une mort certaine (404/timeout du stream final),
+         *  on bypass le seuil de 3 failures et on marque broken immédiatement.
+         *  Le tri voit broken→bas, fallback skip → user attend pas dessus.
+         *  La passe 2 (re-extract sans HEAD) peut un-flag si c'était un faux positif. */
+        fun recordFailureExternal(serverName: String, errorTag: String = "external") {
+            val now = System.currentTimeMillis()
+            val rec = serverHealth.getOrPut(serverName) { ServerHealth() }
+            synchronized(rec) {
+                rec.firstFailureAtMs = now
+                rec.failureCount = HEALTH_FAILURE_THRESHOLD  // trip threshold
+                rec.brokenUntilMs = now + HEALTH_BROKEN_DURATION_MS
+            }
+            Log.w("Extractor", "Server '$serverName' marked broken (external/$errorTag, instant flag, until ${rec.brokenUntilMs})")
+            // Track aussi en persistance pour l'écran "Extracteurs"
+            val providerName = runCatching { UserPreferences.currentProvider?.name }.getOrNull()
+            com.streamflixreborn.streamflix.utils.ExtractorFailureTracker.recordFailure(
+                extractorName = serverName,
+                errorType = errorTag,
+                providerName = providerName,
+            )
+        }
+
+        /** Expose recordSuccess pour le pre-extract 2nde passe — quand la
+         *  ré-extraction sans HEAD check passe, on un-flag le broken pour rendre
+         *  le serveur ré-éligible (couvre le cas "HEAD ment, GET marche"). */
+        fun recordSuccessExternal(serverName: String) {
+            recordSuccess(serverName)
+        }
+
+        /** Invalide une entrée du cache d'extraction par URL d'embed. Utilisé par
+         *  PlayerViewModel quand la validation HEAD post-extraction échoue, pour
+         *  éviter qu'ExoPlayer reçoive ensuite l'URL morte au clic user. */
+        fun invalidateCache(embedUrl: String) {
+            extractionCache.remove(embedUrl)
         }
 
         suspend fun extract(link: String, server: Video.Server? = null): Video {

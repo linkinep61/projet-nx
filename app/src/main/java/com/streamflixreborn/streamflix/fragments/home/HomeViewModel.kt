@@ -392,6 +392,7 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
     }
 
     private suspend fun getHomeInternal() {
+        val t0 = System.currentTimeMillis()
         hasLoaded = true
         val provider = UserPreferences.currentProvider ?: run {
             _state.emit(State.FailedLoading(IllegalStateException("No provider selected")))
@@ -399,21 +400,42 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         }
         currentProvider = provider
         val appContext = StreamFlixApp.instance.applicationContext
+        Log.d("HomeBoot", "[${provider.name}] start +${System.currentTimeMillis() - t0}ms")
         val cachedCategories = HomeCacheStore.read(appContext, provider)
+        Log.d("HomeBoot", "[${provider.name}] cache read +${System.currentTimeMillis() - t0}ms (categories=${cachedCategories?.size ?: 0})")
         if (!cachedCategories.isNullOrEmpty()) {
             _state.emit(State.SuccessLoading(cachedCategories))
+            Log.d("HomeBoot", "[${provider.name}] emit cache +${System.currentTimeMillis() - t0}ms")
         } else {
             _state.emit(State.Loading)
         }
 
         loadUserDataCache(provider)
 
+        // 2026-05-12 : skip le network refresh si le cache home est récent
+        // (< 5 min). Évite les 43 calls TMDB sur Cloudstream à chaque retour
+        // home, et la re-shuffle visuelle qui suit ~3s après l'entrée.
+        // Pour forcer un refresh : pull-to-refresh ou clear cache.
+        val cacheAgeMs = HomeCacheStore.ageMs(appContext, provider)
+        if (!cachedCategories.isNullOrEmpty() && cacheAgeMs != null && cacheAgeMs < 5 * 60 * 1000L) {
+            Log.d("HomeBoot", "[${provider.name}] SKIP network (cache age ${cacheAgeMs / 1000}s) total=${System.currentTimeMillis() - t0}ms")
+            return
+        }
+
         try {
+            Log.d("HomeBoot", "[${provider.name}] getHome() START +${System.currentTimeMillis() - t0}ms (cacheAge=${cacheAgeMs?.div(1000)}s)")
             val categories = provider.getHome().toMutableList()
+            Log.d("HomeBoot", "[${provider.name}] getHome() END +${System.currentTimeMillis() - t0}ms (categories=${categories.size})")
 
             // Emit base categories immediately so the UI appears fast.
             // Enrichment (20 extra requests) runs AFTER this first display.
-            HomeCacheStore.write(appContext, provider, categories)
+            // Si nb catégories suspect-bas (< 2) vs cache existant plus riche, on NE write PAS.
+            val shouldWriteCache = cachedCategories.isNullOrEmpty() || categories.size >= cachedCategories.size
+            if (shouldWriteCache) {
+                HomeCacheStore.write(appContext, provider, categories)
+            } else {
+                Log.w("HomeBoot", "[${provider.name}] partial result (${categories.size} cats) < cache (${cachedCategories.size}) — NOT overwriting cache")
+            }
             _state.emit(State.SuccessLoading(categories))
 
             // Enrich carousels in the background — deferred so it doesn't

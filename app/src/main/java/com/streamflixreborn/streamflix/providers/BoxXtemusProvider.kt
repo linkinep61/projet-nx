@@ -339,7 +339,16 @@ object BoxXtemusProvider : Provider, IptvProvider {
             val url = obj.optString("url").trim()
             val rawName = obj.optString("name").trim()
             val infold = obj.optString("infold").trim()
+            // 2026-05-12 : optim home — les URLs molotov.tv des jaquettes sont en
+            // 480x480 PNG (~200-400 KB chacune). Pour 60+ chaînes visibles à la fois
+            // sur la home, ça représente ~20 MB de PNG à télécharger en parallèle →
+            // home très lente sur Chromecast/TV. On force 120x120 dans l'URL : même
+            // CDN, même endpoint, juste plus petit (~5-15 KB par image, soit 15× moins
+            // de données). Pas de perte visuelle car les cards font ~150px à l'affichage.
             val image = obj.optString("image").trim()
+                .replace("/i/480x480/", "/i/120x120/")
+                .replace("/i/720x720/", "/i/120x120/")
+                .replace("/i/1080x1080/", "/i/120x120/")
 
             // Header row (a 'stations' field but no 'url') → skip
             if (url.isBlank() || !url.startsWith("http", ignoreCase = true)) {
@@ -725,13 +734,44 @@ object BoxXtemusProvider : Provider, IptvProvider {
             }
         }
 
-        // 2026-05-11 : ANTI-BOT BYPASS via WebView pour les URLs `c3v9.short.gy/me/...`.
-        // Le système 3BoxTV chaîne 2-3 pages html.bet qui font JS + geo IP check
-        // + proxy URL expansion. On laisse un WebView exécuter ce JS avec le UA
-        // et Referer fournis par le JSON source, et on intercepte le stream
-        // final (m3u8/mpd/ts) quand le JS le déclenche.
-        if (src.contains("c3v9.short.gy/me/", ignoreCase = true)) {
-            Log.d(TAG, "Anti-bot URL detected, resolving via WebView: $src")
+        // 2026-05-12 : SOLUTION — bypass la page anti-bot c3v9/x0k7rxds.html.bet
+        // dont le JS check date(userAgent)+referrer et FAIL sur Chromecast WebView
+        // (document.referrer mal propagé). Le success path du JS fait :
+        //   window.location.assign("https://" + navigator.userAgent)
+        // ce qui construit une URL `https://<userinfo>@host/path` où userinfo =
+        // le userAgent custom de 3BoxTV. On construit cette URL nous-mêmes et on
+        // l'envoie direct à la WebView qui suit alors le pipeline normal
+        // (geo check + token fetch sans fingerprint check).
+        val userinfoBypassUrl = if (customUa.contains('@') && src.contains("c3v9.short.gy/me/", ignoreCase = true)) {
+            "https://$customUa"
+        } else null
+        Log.d(TAG, "BXT userinfo bypass URL: ${userinfoBypassUrl?.take(200)}")
+        if (userinfoBypassUrl != null) {
+            // Charge directement l'URL "humaine" (userinfo-based) dans la WebView.
+            // Skip TOUT le check date/referrer de x0k7rxds.html.bet.
+            Log.d(TAG, "Bypass html.bet via userinfo URL, WebView extraction starting")
+            val webResolved = extractViaWebView(userinfoBypassUrl, customUa, customReferer)
+            if (webResolved != null) {
+                Log.d(TAG, "WebView extracted via userinfo: $webResolved")
+                src = webResolved
+                customUa = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                customReferer = "https://box.xtemus.com/"
+            } else {
+                Log.w(TAG, "userinfo bypass extraction failed, falling back to standard WebView")
+                val webResolved2 = extractViaWebView(src, customUa, customReferer)
+                if (webResolved2 != null) {
+                    src = webResolved2
+                    customUa = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                    customReferer = "https://box.xtemus.com/"
+                }
+            }
+        } else if (src.contains("c3v9.short.gy/me/", ignoreCase = true)) {
+            // 2026-05-11 : ANTI-BOT BYPASS via WebView pour les URLs `c3v9.short.gy/me/...`.
+            // Le système 3BoxTV chaîne 2-3 pages html.bet qui font JS + geo IP check
+            // + proxy URL expansion. On laisse un WebView exécuter ce JS avec le UA
+            // et Referer fournis par le JSON source, et on intercepte le stream
+            // final (m3u8/mpd/ts) quand le JS le déclenche.
+            Log.d(TAG, "No @URL in userAgent, resolving via WebView: $src")
             val webResolved = extractViaWebView(src, customUa, customReferer)
             if (webResolved != null) {
                 Log.d(TAG, "WebView extracted stream: $webResolved")
@@ -772,16 +812,21 @@ object BoxXtemusProvider : Provider, IptvProvider {
             resp.close()
             Log.d(TAG, "Resolved $src → $finalUrl (Content-Type=$contentType, body=${body.length} chars)")
 
-            // Étape 3 : si la réponse est un RSS/XML, parser pour extraire le stream URL
-            val isRss = contentType.contains("xml") || contentType.contains("rss") ||
-                body.trimStart().startsWith("<?xml") || body.trimStart().startsWith("<rss")
+            // Étape 3 : si la réponse est un RSS feed (cas LCI live), parser pour
+            // extraire le stream URL. EXCLUT explicitement DASH (application/dash+xml)
+            // et HLS — ces formats sont gérés directement par ExoPlayer, pas via RSS.
+            val isDashOrHls = contentType.contains("dash+xml") || contentType.contains("mpegurl") ||
+                body.trimStart().startsWith("<MPD", ignoreCase = true) ||
+                body.trimStart().startsWith("#EXTM3U")
+            val isRss = !isDashOrHls && (contentType.contains("rss") ||
+                body.trimStart().startsWith("<rss") ||
+                (contentType.contains("xml") && body.contains("<channel", ignoreCase = true)))
             if (isRss && body.isNotBlank()) {
                 val streamUrl = extractStreamUrlFromRss(body)
                 if (streamUrl != null) {
                     Log.d(TAG, "Extracted stream from RSS: $streamUrl")
                     src = streamUrl
                 } else {
-                    Log.w(TAG, "RSS parsed but no stream URL found in: ${body.take(200)}")
                     src = finalUrl
                 }
             } else {
@@ -912,35 +957,147 @@ object BoxXtemusProvider : Provider, IptvProvider {
                         request: android.webkit.WebResourceRequest?,
                     ): android.webkit.WebResourceResponse? {
                         val reqUrl = request?.url?.toString() ?: return null
-                        // Capture stream m3u8/mpd/ts
+                        val host = request.url?.host ?: ""
+
+                        // Block trackers/decoy hosts (pings, not streams).
+                        // pecon.us = leopard.hosting placeholder "PLEASE CLEAR THE CACHE"
+                        // que c3v9 sert quand fingerprint match bot/Cast.
+                        if (host.contains("supportduweb") || host.contains("smotret.tv") ||
+                            host.contains("pecon.us")) {
+                            Log.d(TAG, "WV BLOCKED decoy: $host")
+                            return android.webkit.WebResourceResponse("text/plain", "utf-8", null)
+                        }
+
+                        // Capture stream m3u8/mpd/ts depuis n'importe quel host.
                         if (reqUrl.contains(".m3u8") || reqUrl.contains(".mpd") ||
                             (reqUrl.contains(".ts") && !reqUrl.contains(".html"))) {
                             Log.d(TAG, "WebView intercepted stream: $reqUrl")
-                            // Résolution synchrone — shouldInterceptRequest tourne sur
-                            // un thread WebView dédié, mais cont.resume est thread-safe.
-                            // Pas besoin de re-poster sur main.
                             resolve(reqUrl)
                             return android.webkit.WebResourceResponse(
                                 "text/plain", "utf-8", null,
                             )
                         }
-                        // Block known tracker/decoy URLs (la JS appelle des
-                        // services.supportduweb.com pour tracker + decoy ts)
-                        val host = request.url?.host ?: ""
-                        if (host.contains("supportduweb") ||
-                            host.contains("leopard.hosting.pecon.us") ||
-                            host.contains("smotret.tv")) {
-                            return android.webkit.WebResourceResponse(
-                                "text/plain", "utf-8", null,
-                            )
+
+                        // 2026-05-12 : INTERCEPT + REWRITE html.bet pages pour injecter
+                        // notre override Date+navigator AVANT que le script inline de
+                        // la page tourne. C'est la SEULE façon fiable d'override les
+                        // primitives JS avant que le code anti-bot les lise (le shim
+                        // injecté via evaluateJavascript dans onPageStarted arrive
+                        // après que le inline script a déjà tourné).
+                        if (host.contains("html.bet") &&
+                            !reqUrl.contains("favicon") && !reqUrl.contains("cdn-cgi")) {
+                            try {
+                                val rewriteClient = okhttp3.OkHttpClient.Builder()
+                                    .followRedirects(true)
+                                    .followSslRedirects(true)
+                                    .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                                    .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                                    .build()
+                                val origReq = okhttp3.Request.Builder()
+                                    .url(reqUrl)
+                                    .header("User-Agent", userAgent)
+                                    .header("Referer", referer.ifBlank { "https://c3v9.short.gy/" })
+                                    .build()
+                                val origResp = rewriteClient.newCall(origReq).execute()
+                                val origHtml = origResp.body?.string() ?: ""
+                                origResp.close()
+                                val escapedUaJs = userAgent.replace("\\", "\\\\").replace("'", "\\'")
+                                // Override Date methods AVANT le inline script.
+                                // Force navigator.userAgent au cas où.
+                                val overrideScript = """<script>
+                                    (function(){
+                                      try {
+                                        Object.defineProperty(navigator, 'userAgent', { get: function(){ return '$escapedUaJs'; }, configurable: true });
+                                        Date.prototype.getDate = Date.prototype.getUTCDate;
+                                        Date.prototype.getMonth = Date.prototype.getUTCMonth;
+                                        Date.prototype.getFullYear = Date.prototype.getUTCFullYear;
+                                        Date.prototype.getDay = Date.prototype.getUTCDay;
+                                        Date.prototype.getHours = Date.prototype.getUTCHours;
+                                        Date.prototype.getMinutes = Date.prototype.getUTCMinutes;
+                                        Date.prototype.getSeconds = Date.prototype.getUTCSeconds;
+                                        Date.prototype.getTimezoneOffset = function(){ return 0; };
+                                      } catch(e){}
+                                    })();
+                                </script>"""
+                                val rewritten = if (origHtml.contains("<head>", ignoreCase = true)) {
+                                    Regex("(?i)<head>").replaceFirst(origHtml, "<head>$overrideScript")
+                                } else if (origHtml.contains("<html", ignoreCase = true)) {
+                                    Regex("(?i)(<html[^>]*>)").replaceFirst(origHtml, "$1<head>$overrideScript</head>")
+                                } else {
+                                    "<html><head>$overrideScript</head>$origHtml</html>"
+                                }
+                                Log.d(TAG, "WV REWROTE $host (orig=${origHtml.length}, new=${rewritten.length})")
+                                val bytes = rewritten.toByteArray(Charsets.UTF_8)
+                                return android.webkit.WebResourceResponse(
+                                    "text/html", "UTF-8",
+                                    java.io.ByteArrayInputStream(bytes),
+                                )
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Rewrite failed for $host: ${e.message}")
+                            }
                         }
                         return null
+                    }
+
+                    override fun onPageStarted(
+                        view: android.webkit.WebView?,
+                        startedUrl: String?,
+                        favicon: android.graphics.Bitmap?,
+                    ) {
+                        // 2026-05-12 : sur Chromecast WebView, navigator.userAgent
+                        // peut ne pas être propagé correctement depuis settings.
+                        // On le force via Object.defineProperty AVANT que le JS
+                        // de la page lise navigator.userAgent dans son check date.
+                        // Force-définit aussi navigator.userAgentData pour cohérence
+                        // si la page le lit (Client Hints).
+                        val escapedUa = userAgent.replace("\\", "\\\\").replace("'", "\\'")
+                        // 2026-05-12 : timezone fix CRITIQUE — sur Chromecast en Tahiti
+                        // (UTC-10), today.getDate() = jour local (11) alors que le marqueur
+                        // date dans userAgent suit UTC (12). Le check anti-bot
+                        // `re.test(navigator.userAgent)` échouait → décoy systématique.
+                        // On force Date.prototype.getDate/getMonth/getFullYear à retourner
+                        // les valeurs UTC pour matcher le marqueur du UA.
+                        val shim = """
+                            (function(){
+                              try {
+                                Object.defineProperty(navigator, 'userAgent', { get: () => '$escapedUa', configurable: true });
+                                Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+                                Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 5, configurable: true });
+                                Object.defineProperty(navigator, 'platform', { get: () => 'Linux armv81', configurable: true });
+                                Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.', configurable: true });
+                                if (!window.chrome) window.chrome = { runtime: {} };
+                                Date.prototype.getDate = Date.prototype.getUTCDate;
+                                Date.prototype.getMonth = Date.prototype.getUTCMonth;
+                                Date.prototype.getFullYear = Date.prototype.getUTCFullYear;
+                                Date.prototype.getDay = Date.prototype.getUTCDay;
+                                Date.prototype.getHours = Date.prototype.getUTCHours;
+                                Date.prototype.getMinutes = Date.prototype.getUTCMinutes;
+                                Date.prototype.getSeconds = Date.prototype.getUTCSeconds;
+                                Date.prototype.getTimezoneOffset = function() { return 0; };
+                              } catch(e) {}
+                            })();
+                        """.trimIndent()
+                        view?.evaluateJavascript(shim, null)
                     }
 
                     override fun onPageFinished(
                         view: android.webkit.WebView?, finishedUrl: String?,
                     ) {
                         if (view == null || resolved) return
+                        // 2026-05-12 : re-confirme navigator.userAgent + log ce que
+                        // la page va lire. Permet de diagnostiquer si le check date
+                        // de l'anti-bot JS passe.
+                        val escapedUa = userAgent.replace("\\", "\\\\").replace("'", "\\'")
+                        view.evaluateJavascript(
+                            """
+                            (function(){
+                              try { Object.defineProperty(navigator, 'userAgent', { get: () => '$escapedUa', configurable: true }); } catch(e){}
+                              var today = new Date();
+                              var dateStr = today.getDate()+''+(today.getMonth()+1)+''+today.getFullYear();
+                              return JSON.stringify({ua:navigator.userAgent.length, dateStr:dateStr, uaContainsDate:navigator.userAgent.indexOf(dateStr)>=0, ref:document.referrer});
+                            })();
+                            """.trimIndent()
+                        ) { result -> Log.d(TAG, "WV JS check: $result") }
                         // Safety net : si après 15s rien capté, abandon
                         view.postDelayed({
                             if (!resolved) {

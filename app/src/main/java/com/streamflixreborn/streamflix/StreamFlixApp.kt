@@ -84,34 +84,53 @@ class StreamFlixApp : Application() {
             override fun onActivityDestroyed(activity: Activity) { if (currentActivity == activity) currentActivity = null }
         })
 
-        // 0. Initialize Conscrypt for modern SSL on old Android
-        Security.insertProviderAt(Conscrypt.newProvider(), 1)
+        // 0. Initialize Conscrypt for modern SSL on old Android.
+        // 2026-05-12 : wrap try-catch — sur certains firmwares custom (Sharp Aquos
+        // TVE19A Android 11 confirmé), Conscrypt.newProvider() peut throw et
+        // crasher l'app au démarrage. Si Conscrypt échoue, on tombe sur le SSL
+        // système (suffisant Android 11+).
+        try {
+            Security.insertProviderAt(Conscrypt.newProvider(), 1)
+        } catch (e: Throwable) {
+            Log.e("StreamFlixApp", "Conscrypt init failed (using system SSL): ${e.message}")
+        }
 
         // 1. Install ISRG Root X1 globally for Let's Encrypt. On Android < 7 (API 24)
         // network_security_config.xml is not supported so the certificate must be injected manually.
-        IsrgRootTrustProvider.install()
+        try {
+            IsrgRootTrustProvider.install()
+        } catch (e: Throwable) {
+            Log.e("StreamFlixApp", "IsrgRootTrustProvider failed: ${e.message}")
+        }
 
-        // 1b. 2026-05-09 : trust-all SSLSocketFactory pour les hosts IPTV
-        // (Vavoo via Movix LiveTV) qui ont des certs expirés. Scoped par host
-        // — la validation reste stricte pour tous les autres domaines (TMDB,
-        // Movix API, etc.). Sans ça, ExoPlayer/HttpURLConnection refuse
-        // la TLS handshake et le m3u8 ne se charge pas (black screen).
-        IptvTlsHelper.install()
+        // 1b. trust-all SSLSocketFactory pour les hosts IPTV.
+        try {
+            IptvTlsHelper.install()
+        } catch (e: Throwable) {
+            Log.e("StreamFlixApp", "IptvTlsHelper failed: ${e.message}")
+        }
 
-        // 2. Inizializzazione preferenze (con applicationContext)
-        UserPreferences.setup(this)
-        DnsResolver.setDnsUrl(UserPreferences.dohProviderUrl)
+        // 2. Inizializzazione preferenze.
+        try {
+            UserPreferences.setup(this)
+            DnsResolver.setDnsUrl(UserPreferences.dohProviderUrl)
+        } catch (e: Throwable) {
+            Log.e("StreamFlixApp", "UserPreferences/DNS setup failed: ${e.message}", e)
+        }
 
-        // 2.5 Cold start = no active provider. Wipe BEFORE any background work
-        // (URL refresh, ArtworkRepair, etc.) so nothing touches the previous
-        // provider's network or RAM. The user's pick on the providers screen
-        // re-sets currentProvider and triggers loading explicitly. This avoids
-        // OOM crashes on low-RAM devices when a memory-heavy provider (e.g.
-        // VegetaTV registry ~130MB) auto-loads at launch.
-        UserPreferences.currentProvider = null
+        // 2.5 Cold start = no active provider.
+        try {
+            UserPreferences.currentProvider = null
+        } catch (e: Throwable) {
+            Log.e("StreamFlixApp", "currentProvider reset failed: ${e.message}")
+        }
 
         // 3. Download manager
-        com.streamflixreborn.streamflix.download.DownloadManager.init(this)
+        try {
+            com.streamflixreborn.streamflix.download.DownloadManager.init(this)
+        } catch (e: Throwable) {
+            Log.e("StreamFlixApp", "DownloadManager init failed: ${e.message}")
+        }
 
         val appContext = applicationContext
         val isTv = packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
@@ -121,16 +140,15 @@ class StreamFlixApp : Application() {
             // Pre-init Cronet in background — saves 300-800ms when player opens
             try { getCronetEngine(appContext) } catch (_: Exception) {}
 
-            AppDatabase.setup(appContext)
+            try { AppDatabase.setup(appContext) } catch (_: Throwable) {}
             // Skip ArtworkRepair on TV — too expensive for Chromecast's limited resources
             if (!isTv) {
-                ArtworkRepairScheduler.schedule(appContext, UserPreferences.currentProvider)
+                try { ArtworkRepairScheduler.schedule(appContext, UserPreferences.currentProvider) } catch (_: Throwable) {}
             }
-            CacheUtils.autoClearIfNeeded(appContext, thresholdMb = threshold)
+            try { CacheUtils.autoClearIfNeeded(appContext, thresholdMb = threshold) } catch (_: Throwable) {}
 
             // Refresh URLs only for the ACTIVE provider at startup.
-            // Other providers refresh lazily when the user switches to them.
-            refreshActiveProviderUrl()
+            try { refreshActiveProviderUrl() } catch (_: Throwable) {}
         }
 
         // Pre-warm ExoPlayer class loading + codec enumeration on a background thread.

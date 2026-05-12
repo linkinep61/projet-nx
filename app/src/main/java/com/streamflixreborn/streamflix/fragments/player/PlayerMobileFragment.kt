@@ -1601,10 +1601,24 @@ class PlayerMobileFragment : Fragment() {
 
         val currentLang = detectServerLanguage(current.name)
 
-        // Étape 1 : cherche le prochain server de la MÊME langue.
+        // 2026-05-12 : skip les serveurs flaggés broken par le pre-extract
+        // HEAD check. Match par "core extractor" (ex: "VidMoLy") pour que
+        // les variantes avec/sans "Movix —" préfix matchent.
+        fun extractorCore(name: String): String {
+            val stripped = name.substringAfter(" — ").substringAfter(" · ").trim()
+            return stripped.substringBefore(" - ").substringBefore(" (").substringBefore(" [").trim().uppercase()
+        }
+        val brokenCores = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames()
+            .map { extractorCore(it) }.filter { it.isNotBlank() }.toSet()
+        fun isBroken(srv: Video.Server): Boolean {
+            if (brokenCores.isEmpty()) return false
+            return extractorCore(srv.name) in brokenCores
+        }
+
+        // Étape 1 : cherche le prochain server NON-BROKEN de la MÊME langue.
         for (i in (curIdx + 1) until allServers.size) {
             val candidate = allServers[i]
-            if (detectServerLanguage(candidate.name) == currentLang) {
+            if (detectServerLanguage(candidate.name) == currentLang && !isBroken(candidate)) {
                 return candidate
             }
         }
@@ -1617,7 +1631,12 @@ class PlayerMobileFragment : Fragment() {
             else -> return null  // VO épuisés → vraiment STOP
         }
         // On scanne TOUTE la liste (pas juste après curIdx) pour trouver le 1er
-        // server du fallback lang — il peut être avant curIdx dans l'ordre brut.
+        // server NON-BROKEN du fallback lang — il peut être avant curIdx dans l'ordre brut.
+        val nextNonBroken = allServers.firstOrNull {
+            detectServerLanguage(it.name) == fallbackLang && !isBroken(it)
+        }
+        if (nextNonBroken != null) return nextNonBroken
+        // Dernier recours : aucun serveur sain, on accepte un broken (HEAD peut mentir)
         return allServers.firstOrNull { detectServerLanguage(it.name) == fallbackLang }
     }
 
@@ -1663,7 +1682,8 @@ class PlayerMobileFragment : Fragment() {
             id.startsWith("ola::") || id.startsWith("ola_ep::") ||
             id.startsWith("vegeta::") || id.startsWith("vegeta_ep::") ||
             id.startsWith("livehub::") || id.startsWith("movixlivetv::") ||
-            id.startsWith("sportlive::") || id.startsWith("match::")
+            id.startsWith("sportlive::") || id.startsWith("match::") ||
+            id.startsWith("bxt::")
     }
 
     private fun showLoadingOverlay() {
@@ -2403,16 +2423,25 @@ class PlayerMobileFragment : Fragment() {
                         val initialPosition = player.currentPosition
                         bufferingWatchdog = viewLifecycleOwner.lifecycleScope.launch {
                             if (!vodCurrentStreamHasWorked) {
-                                // (A) Pré-READY : 30s puis skip server
-                                kotlinx.coroutines.delay(30_000L)
+                                // (A) Pré-READY : 10s puis skip server
+                                // 2026-05-12 : baissé de 30s→10s pour accélérer
+                                // le fallback en série quand plein de serveurs morts.
+                                // Le HEAD check pre-extract filtre déjà en amont.
+                                kotlinx.coroutines.delay(10_000L)
                                 if (player.playbackState == Player.STATE_BUFFERING &&
                                     player.currentPosition == initialPosition &&
                                     !vodCurrentStreamHasWorked) {
                                     val server = currentServer
                                     val nextServer = nextAutoFallbackServer(servers, server)
                                     Log.w("PlayerNetwork",
-                                        "Pre-READY 30s freeze on ${server?.name} → skip to ${nextServer?.name}")
-                                    if (server != null) pruneBrokenVariant(server)
+                                        "Pre-READY 10s freeze on ${server?.name} → skip to ${nextServer?.name}")
+                                    if (server != null) {
+                                        pruneBrokenVariant(server)
+                                        // 2026-05-12 : flag instantanément le serveur broken
+                                        // → fallback suivant le skip → cascade rapide
+                                        com.streamflixreborn.streamflix.extractors.Extractor
+                                            .recordFailureExternal(server.name, "pre-ready-freeze")
+                                    }
                                     if (nextServer != null) viewModel.getVideo(nextServer)
                                 }
                             } else {

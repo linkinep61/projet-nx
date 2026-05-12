@@ -30,12 +30,53 @@ class LiveReconnectingHttpDataSource(
 
     override fun open(dataSpec: DataSpec): Long {
         currentSpec = dataSpec
-        val urlPath = dataSpec.uri.toString().substringBefore('?').lowercase()
-        // Détection : live MPEG-TS Progressive (Xtream-codes pattern).
-        enableReconnect = urlPath.contains("/live/") && urlPath.endsWith(".ts")
+        val urlFull = dataSpec.uri.toString().lowercase()
+        val urlPath = urlFull.substringBefore('?')
+
+        // 2026-05-11 : Détection RESTRICTIVE Xtream IPTV continu.
+        //
+        // Avant : on activait reconnect dès qu'on voyait `/live/` + `.ts`. Mais
+        // les segments HLS individuels (TF1 via netplus.ch, etc.) ont aussi ce
+        // pattern. Résultat : après chaque segment HLS d'1 MB, le wrapper essayait
+        // de re-fetch le même segment → ExoPlayer bloqué en BUFFERING.
+        //
+        // Nouvelle heuristique : un VRAI Xtream IPTV continu a :
+        //   - `/live/USER/PASS/STREAM_ID.ts` (credentials en path)
+        //   - PAS de marqueurs HLS (`seq=`, `chunk-`, `_seg_`, `.m3u8`, `tok_`)
+        //   - Souvent sur port custom (8080, 25461, 80 IP-based)
+        //
+        // Un segment HLS Live a typiquement :
+        //   - `seq=NNN` ou `chunk-NNN` dans le path/query
+        //   - `tok_XXXX/` token signé en début de path
+        //   - Hosts CDN classiques (cloudfront, akamaized, cdn-*, cache*.host.tld)
+        //
+        // Si MARQUEUR HLS détecté → désactive reconnect, ExoPlayer gère la
+        // séquence des segments lui-même via HlsMediaSource.
+        val hasHlsMarker = urlFull.contains("seq=") ||
+            urlPath.contains("/tok_") ||
+            urlPath.contains("/chunk-") ||
+            urlPath.contains("/chunk_") ||
+            urlPath.contains("_seg_") ||
+            urlPath.contains("/seg-") ||
+            urlPath.contains("/segment-") ||
+            urlPath.contains(".m4s") ||
+            // HLS hosts CDN connus
+            urlFull.contains("akamaized.net") ||
+            urlFull.contains("cloudfront.net") ||
+            urlFull.contains("netplus.ch") ||
+            urlFull.contains("diff.tf1.fr") ||
+            urlFull.contains("ftven.fr") ||
+            urlFull.contains("bct.nextradiotv.com")
+
+        enableReconnect = !hasHlsMarker &&
+            urlPath.contains("/live/") &&
+            urlPath.endsWith(".ts")
         reconnectAttempts = 0
         if (enableReconnect) {
-            Log.d(TAG, "Live progressive detected, auto-reconnect enabled for ${dataSpec.uri}")
+            Log.d(TAG, "Live progressive (Xtream) detected, auto-reconnect enabled for ${dataSpec.uri}")
+        } else if (urlPath.contains("/live/") && urlPath.endsWith(".ts")) {
+            // Pattern /live/.ts mais avec marqueurs HLS → log pour debug
+            Log.v(TAG, "HLS segment (not Xtream) detected, reconnect DISABLED for ${dataSpec.uri}")
         }
         return wrapped.open(dataSpec)
     }
