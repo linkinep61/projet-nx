@@ -112,6 +112,11 @@ interface Provider {
             WiflixProvider to ProviderSupport(movies = true, tvShows = true),
             VoirDramaProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             VoirAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
+            // 2026-05-12 : AnimeSite (animesite.fr) — provider anime FR. Next.js SPA,
+            // catalogue parsé depuis la home server-rendered. 5 lecteurs par épisode
+            // (sendvid x2 + myvi + sbfull + sendvid VF) — pour l'instant seul sendvid
+            // est supporté (extractor existant). Series-only (movies = false).
+            AnimeSiteProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
             // 2026-05-05: Moviebox (themoviebox.org/aoneroom) — niche K-Dramas + animes + films Hollywood VF.
             // v1: catalogue uniquement (search/browse). Extraction streams TODO v2.
             MovieboxProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),

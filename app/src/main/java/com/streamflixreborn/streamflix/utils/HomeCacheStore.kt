@@ -18,6 +18,8 @@ import java.util.concurrent.ConcurrentHashMap
 object HomeCacheStore {
     private val gson = Gson()
     private val memoryCache = ConcurrentHashMap<String, List<CachedCategory>>()
+    // 2026-05-12 : timestamp d'écriture en mémoire pour TTL.
+    private val writeTimestamps = ConcurrentHashMap<String, Long>()
 
     fun read(context: Context, provider: Provider): List<Category>? {
         val cacheKey = cacheKey(provider)
@@ -32,14 +34,27 @@ object HomeCacheStore {
             val type = object : TypeToken<List<CachedCategory>>() {}.type
             val payload: List<CachedCategory> = gson.fromJson(file.readText(), type)
             memoryCache[cacheKey] = payload
+            // Disk file mtime = timestamp d'écriture, init memoire avec ça
+            writeTimestamps.putIfAbsent(cacheKey, file.lastModified())
             payload.toCategories()
         }.recoverCatching {
             if (it is JsonSyntaxException) {
                 memoryCache.remove(cacheKey)
+                writeTimestamps.remove(cacheKey)
                 file.delete()
             }
             null
         }.getOrNull()
+    }
+
+    /** Renvoie l'âge du cache en millisecondes, ou null si pas de cache. */
+    fun ageMs(context: Context, provider: Provider): Long? {
+        val cacheKey = cacheKey(provider)
+        val ts = writeTimestamps[cacheKey]
+            ?: cacheFile(context, cacheKey).takeIf { it.exists() }?.lastModified()
+            ?: return null
+        writeTimestamps.putIfAbsent(cacheKey, ts)
+        return System.currentTimeMillis() - ts
     }
 
     fun write(context: Context, provider: Provider, categories: List<Category>) {
@@ -47,6 +62,7 @@ object HomeCacheStore {
             val payload = categories.map { CachedCategory.from(it) }
             val cacheKey = cacheKey(provider)
             memoryCache[cacheKey] = payload
+            writeTimestamps[cacheKey] = System.currentTimeMillis()
             cacheFile(context, cacheKey).apply {
                 parentFile?.mkdirs()
                 writeText(gson.toJson(payload))
@@ -57,6 +73,7 @@ object HomeCacheStore {
     fun clear(context: Context, provider: Provider) {
         val cacheKey = cacheKey(provider)
         memoryCache.remove(cacheKey)
+        writeTimestamps.remove(cacheKey)
         cacheFile(context, cacheKey).delete()
     }
 

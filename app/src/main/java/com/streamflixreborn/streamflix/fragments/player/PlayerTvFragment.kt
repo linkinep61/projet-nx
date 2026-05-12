@@ -297,6 +297,14 @@ class PlayerTvFragment : Fragment() {
     private var nextEpisodePrefetchTargetId: String? = null
     private var nextEpisodePrefetchJob: Job? = null
     private var nextEpisodeOverlayDismissed = false
+
+    // 2026-05-12 : flag set in attachTransferredPlayer. Quand on vient du mini-player
+    // (taper sur la mini pour passer en grand), le player est déjà en train de jouer
+    // et on a juste swap les surfaces. Il NE FAUT PAS re-fetch les servers ni appeler
+    // displayVideo, sinon le player se RESET avec un nouveau MediaItem et perd la
+    // position de lecture en cours. Sans ce flag, mini→grand donne un grand player
+    // qui se ré-initialise → metadata duration 0:05 → ENDED state → écran noir.
+    private var attachedFromMiniPlayer = false
     private val chooserReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
@@ -469,11 +477,22 @@ class PlayerTvFragment : Fragment() {
         // Codec enumeration is pre-warmed in StreamFlixApp so build() is fast (~100ms).
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             if (isAdded && _binding != null) {
-                val transferred = MiniPlayerController.transferPlayer()
-                if (transferred != null) {
-                    attachTransferredPlayer(transferred)
-                } else {
+                // 2026-05-12 : BoxXtemus (bxt::) — le transfer mini→grand pose
+                // problème (leopard.ts a une métadonnée de durée finie qui fait
+                // ENDED state au surface swap). Comportement comme les autres
+                // providers : on STOP le mini et on RECHARGE depuis zéro dans
+                // le grand player. C'est ce que le user attend.
+                val isBoxXtemus = args.id.startsWith("bxt::")
+                if (isBoxXtemus) {
+                    MiniPlayerController.stop()
                     initializePlayer(false)
+                } else {
+                    val transferred = MiniPlayerController.transferPlayer()
+                    if (transferred != null) {
+                        attachTransferredPlayer(transferred)
+                    } else {
+                        initializePlayer(false)
+                    }
                 }
             }
         }
@@ -608,13 +627,26 @@ class PlayerTvFragment : Fragment() {
                             return@collect
                         }
 
-                        // Guard: state can be emitted (especially via additionalServersFlow
-                        // after a re-collect) BEFORE the lateinit `player` is built. In that
-                        // case, defer until the player exists. The flow will re-emit the
-                        // latest state once the view is fully created.
+                        // 2026-05-12 : state.servers peut arriver AVANT que le lateinit
+                        // player ne soit construit (Handler.post différe le init pour
+                        // perf, mais la flow StateFlow réplay la valeur courante au
+                        // subscriber dès .collect() — donc défile avant le post message).
+                        // Avant : return@collect → handler jamais re-déclenché → écran
+                        // bloqué (scénario double-click sans mini intermediate).
+                        // Maintenant : on attend activement que le player soit init
+                        // (poll 50ms, normalement < 500ms total).
                         if (!::player.isInitialized) {
-                            Log.d("PlayerTvFragment", "state.servers received but player not init yet — deferring")
-                            return@collect
+                            Log.d("PlayerTvFragment", "state.servers received but player not init yet — waiting")
+                            var waited = 0
+                            while (!::player.isInitialized && isAdded && waited < 10_000) {
+                                delay(50)
+                                waited += 50
+                            }
+                            if (!isAdded || !::player.isInitialized) {
+                                Log.w("PlayerTvFragment", "Gave up waiting for player init (added=$isAdded init=${::player.isInitialized})")
+                                return@collect
+                            }
+                            Log.d("PlayerTvFragment", "Player init done after ${waited}ms, continuing state.servers handling")
                         }
 
                         // 2026-05-08 : pose la channelKey IPTV partagée pour le picker.
@@ -624,7 +656,7 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("movixlivetv::") ||
                             args.id.startsWith("livehub::") ||
                             args.id.startsWith("sportlive::") ||
-                            args.id.startsWith("match::")
+                            args.id.startsWith("match::") || args.id.startsWith("bxt::")
                         PlayerSettingsView.Settings.Server.currentIptvChannelKey =
                             if (isIptvCtxTv) args.id else null
 
@@ -756,7 +788,14 @@ class PlayerTvFragment : Fragment() {
                         if (favServer != null) {
                             Log.d("PlayerTvFragment", "Favori prioritaire : ${favServer.name} (${orderedFavIds.size}/${IptvFavorites.MAX_FAVORITES_PER_CHANNEL})")
                         }
-                        viewModel.getVideo(initialServer)
+                        // 2026-05-12 : SKIP le re-fetch quand le player a été transféré depuis le
+                        // mini-player. Le player joue déjà — re-fetch + displayVideo() reset le
+                        // MediaItem, perd la position, et fini sur "00:05 / 00:05 ENDED".
+                        if (attachedFromMiniPlayer) {
+                            Log.d("PlayerTvFragment", "Skip viewModel.getVideo() — player already running (transferred from mini)")
+                        } else {
+                            viewModel.getVideo(initialServer)
+                        }
 
                     }
                         is PlayerViewModel.State.FailedLoadingServers -> {
@@ -794,6 +833,10 @@ class PlayerTvFragment : Fragment() {
                             // Drop the broken variant from the Chaîne page so dead entries
                             // don't pile up. Re-emitted next session if Phase 3 finds it.
                             pruneBrokenVariant(state.server)
+                            // 2026-05-12 : flag broken instant + skip-broken pour le next
+                            // (extraction failed = mort certaine).
+                            com.streamflixreborn.streamflix.extractors.Extractor
+                                .recordFailureExternal(state.server.name, "extraction-failed")
                             // IPTV: never auto-advance on extractor failure (same sticky
                             // policy as onPlayerError). Auto-jumping between OLA/Vegeta
                             // variants during initial loading was breaking playback.
@@ -801,9 +844,25 @@ class PlayerTvFragment : Fragment() {
                                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                                args.id.startsWith("match::")
+                                args.id.startsWith("match::") || args.id.startsWith("bxt::")
+                            // Skip-broken pour next : core matching pour zapper aussi
+                            // les variantes (Movix — VidMoLy vs VidMoLy).
+                            fun extractorCore(name: String): String {
+                                val stripped = name.substringAfter(" — ").substringAfter(" · ").trim()
+                                return stripped.substringBefore(" - ").substringBefore(" (").substringBefore(" [").trim().uppercase()
+                            }
+                            val brokenCoresFailed = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames()
+                                .map { extractorCore(it) }.filter { it.isNotBlank() }.toSet()
+                            fun isBrokenSrv(srv: com.streamflixreborn.streamflix.models.Video.Server): Boolean {
+                                if (brokenCoresFailed.isEmpty()) return false
+                                return extractorCore(srv.name) in brokenCoresFailed
+                            }
+                            val currentIdx = servers.indexOf(state.server)
                             val nextServer = if (isLiveIptv) null
-                                else servers.getOrNull(servers.indexOf(state.server) + 1)
+                                else if (currentIdx >= 0) {
+                                    servers.drop(currentIdx + 1).firstOrNull { !isBrokenSrv(it) }
+                                        ?: servers.getOrNull(currentIdx + 1)  // fallback brut si plus aucun sain
+                                } else null
                             if (nextServer != null) {
                                 viewModel.getVideo(nextServer)
                             } else if (tryNextChannelVariant(state.server)) {
@@ -2144,21 +2203,49 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
                             args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
                         // 2026-05-11 (user) : 2 règles selon état du stream :
-                        // (A) Pré-READY (extracteur silencieux) → skip 30s
+                        // (A) Pré-READY (extracteur silencieux) → skip 10s
+                        //     (était 30s, baissé 2026-05-12 pour accélérer le fallback
+                        //     quand plein de serveurs morts en série. Le HEAD check
+                        //     pre-extract filtre déjà beaucoup en amont.)
                         // (B) Post-READY (coupure réseau) → 15s super-buffer same server
                         if (!isLiveIptv && bufferingWatchdog == null) {
                             val initialPosition = player.currentPosition
                             bufferingWatchdog = viewLifecycleOwner.lifecycleScope.launch {
                                 if (!vodCurrentStreamHasWorked) {
-                                    kotlinx.coroutines.delay(30_000L)
+                                    kotlinx.coroutines.delay(10_000L)
                                     if (player.playbackState == Player.STATE_BUFFERING &&
                                         player.currentPosition == initialPosition &&
                                         !vodCurrentStreamHasWorked) {
                                         val server = currentServer
-                                        val nextServer = server?.let { servers.getOrNull(servers.indexOf(it) + 1) }
+                                        // 2026-05-12 : skip directement aux serveurs NON-broken.
+                                        // Match par "core extractor" (ex: "VidMoLy") pour que
+                                        // les variantes avec/sans "Movix —" préfix matchent.
+                                        fun extractorCore(name: String): String {
+                                            val stripped = name.substringAfter(" — ").substringAfter(" · ").trim()
+                                            return stripped.substringBefore(" - ").substringBefore(" (").substringBefore(" [").trim().uppercase()
+                                        }
+                                        val brokenCores = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames()
+                                            .map { extractorCore(it) }.filter { it.isNotBlank() }.toSet()
+                                        fun isServerBroken(srv: com.streamflixreborn.streamflix.models.Video.Server): Boolean {
+                                            if (brokenCores.isEmpty()) return false
+                                            return extractorCore(srv.name) in brokenCores
+                                        }
+                                        val currentIdx = server?.let { servers.indexOf(it) } ?: -1
+                                        val nextServer = if (currentIdx >= 0) {
+                                            // Cherche le prochain serveur NON-broken
+                                            servers.drop(currentIdx + 1).firstOrNull { !isServerBroken(it) }
+                                                ?: servers.getOrNull(currentIdx + 1)  // fallback brut si plus aucun sain
+                                        } else null
                                         Log.w("PlayerNetwork",
-                                            "Pre-READY 30s freeze on ${server?.name} → skip to ${nextServer?.name}")
-                                        if (server != null) pruneBrokenVariant(server)
+                                            "Pre-READY 10s freeze on ${server?.name} → skip to ${nextServer?.name} (skipping broken)")
+                                        if (server != null) {
+                                            pruneBrokenVariant(server)
+                                            // 2026-05-12 : flag instantanément le serveur broken
+                                            // (10s playback freeze = mort certaine côté ExoPlayer).
+                                            // Au prochain fallback, ce serveur sera skip → cascade rapide.
+                                            com.streamflixreborn.streamflix.extractors.Extractor
+                                                .recordFailureExternal(server.name, "pre-ready-freeze")
+                                        }
                                         if (nextServer != null) viewModel.getVideo(nextServer)
                                     }
                                 } else {
@@ -2243,7 +2330,7 @@ class PlayerTvFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::")
+                        args.id.startsWith("match::") || args.id.startsWith("bxt::")
                     if (isLiveIptvStream && (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE)) {
                         // Don't re-prepare immediately on STATE_IDLE if we never reached
                         // READY (initial load) — that would loop. Only auto-resume if
@@ -2506,7 +2593,7 @@ class PlayerTvFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::")
+                        args.id.startsWith("match::") || args.id.startsWith("bxt::")
                     if (isLiveIptv) {
                         val server = currentServer ?: return
                         val errCodeName = error.errorCodeName
@@ -2932,7 +3019,7 @@ class PlayerTvFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::")
+                        args.id.startsWith("match::") || args.id.startsWith("bxt::")
                     if (!isLiveIptv) {
                         val show = player.currentPosition in 3000..120000
                         showSkipIntroButton(show)
@@ -3583,6 +3670,7 @@ class PlayerTvFragment : Fragment() {
          */
         private fun attachTransferredPlayer(transferred: ExoPlayer) {
             Log.d("PlayerTvFragment", "Attaching transferred ExoPlayer from mini player")
+            attachedFromMiniPlayer = true
             player = transferred
             if (!::httpDataSource.isInitialized) {
                 httpDataSource = createDefaultHttpDataSourceFactory()
@@ -3613,7 +3701,18 @@ class PlayerTvFragment : Fragment() {
             binding.settings.subtitleView = binding.pvPlayer.subtitleView
             binding.settings.onSubtitlesClicked = { viewModel.getSubtitles(args.videoType) }
             MiniPlayerController.clearTransitionFlag()
-            Log.d("PlayerTvFragment", "Transferred player attached — no codec re-init needed")
+            // 2026-05-12 : pour les IPTV Live, le .ts a une métadonnée de durée
+            // (5s pour leopard 3BoxTV, finite pour Xtream) — ExoPlayer end-of-streams
+            // dès qu'il atteint cette durée. REPEAT_MODE_ONE force le re-loop sur
+            // EOF (l'URL re-fetch potentiellement de nouvelles données). Force play
+            // au cas où l'attach aurait pause.
+            if (isLiveIptvHere) {
+                player.repeatMode = androidx.media3.common.Player.REPEAT_MODE_ONE
+            }
+            if (!player.playWhenReady) {
+                player.playWhenReady = true
+            }
+            Log.d("PlayerTvFragment", "Transferred player attached — no codec re-init needed (repeat=${player.repeatMode} playWhenReady=${player.playWhenReady})")
         }
 
         private fun initializePlayer(extraBuffering: Boolean, softwareDecoder: Boolean = currentSoftwareDecoder, videoUrl: String = "") {
@@ -3659,7 +3758,7 @@ class PlayerTvFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::")
+                        args.id.startsWith("match::") || args.id.startsWith("bxt::")
                     if (isLiveIptvCh) {
                         builder.setPreferredAudioMimeTypes(
                             androidx.media3.common.MimeTypes.AUDIO_AAC,
@@ -4395,7 +4494,7 @@ class PlayerTvFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::")
+            args.id.startsWith("match::") || args.id.startsWith("bxt::")
         player = buildPlayer(extraBuffering).also { player ->
                 player.setAudioAttributes(
                     AudioAttributes.Builder()

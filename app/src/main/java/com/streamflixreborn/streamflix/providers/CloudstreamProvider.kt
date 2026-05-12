@@ -612,7 +612,7 @@ object CloudstreamProvider : Provider {
             sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
             withWatchProviders = TMDb3.Params.WithBuilder(watchProviderId),
             withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
-        ).results.map(mapMovie)
+        ).results.filter { it.posterPath != null }.map(mapMovie)
     }.getOrDefault(emptyList())
 
     private suspend fun discoverTvOnProvider(
@@ -624,7 +624,7 @@ object CloudstreamProvider : Provider {
             sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
             withWatchProviders = TMDb3.Params.WithBuilder(watchProviderId),
             withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
-        ).results.map(mapTv)
+        ).results.filter { it.posterPath != null }.map(mapTv)
     }.getOrDefault(emptyList())
 
     /** Home Cloudstream :
@@ -832,122 +832,12 @@ object CloudstreamProvider : Provider {
             }.getOrDefault(emptyList())
         }
 
-        // Aspire les tabs MovieBox+ et garde uniquement les items avec signal FR strict
-        // (audio FR / natif français / piste sub FR explicite). Pas de fallback subtitles.
-        val newReleasesD = async {
-            runCatching {
-                val tabRequests = mutableListOf<Deferred<JSONObject?>>()
-                for (tabId in 0..5) {
-                    for (page in 1..2) {
-                        tabRequests += async {
-                            apiGet(MAIN_PAGE_PATH, mapOf("page" to "$page", "tabId" to "$tabId", "version" to ""))
-                        }
-                    }
-                }
-                val tabs = tabRequests.awaitAll()
-                // sid → (item, releaseDateForSort, originalRanking)
-                val items = mutableMapOf<String, Pair<AppAdapter.Item, String>>()
-                var rank = 0
-                var seen = 0; var rejShort = 0; var rejNoSid = 0; var rejDup = 0
-                fun consumeSubject(raw: JSONObject) {
-                    seen++
-                    val s = raw.optJSONObject("subject") ?: raw
-                    if (isShortDrama(s)) { rejShort++; return }
-                    // La home MovieBox+ ne fournit PAS language/countryName. Le filtre FR
-                    // sera fait après ingestion via /subject-api/get (cf. classifyFrench).
-                    // On garde tout sauf shorts/dupes/items sans sid.
-                    val title = s.optString("title")
-                    val sid = s.optString("subjectId").takeIf { it.isNotBlank() }
-                    if (sid == null) { rejNoSid++; return }
-                    if (sid in items) { rejDup++; return }
-                    val release = s.optString("releaseDate").orEmpty()
-                    val cleanTitle = title.replace(LANG_SUFFIX_REGEX, "").trim()
-                    val poster = s.optJSONObject("cover")?.optString("url")
-                    val rating = s.optString("imdbRatingValue").toDoubleOrNull()
-                    val sType = s.optInt("subjectType", 1)
-                    val parsed: AppAdapter.Item = when (sType) {
-                        1 -> Movie(
-                            id = "cs::m::$sid", title = cleanTitle,
-                            overview = s.optString("description").takeIf { it.isNotBlank() },
-                            released = release.takeIf { it.isNotBlank() },
-                            poster = poster, banner = poster,
-                            rating = rating, providerName = name,
-                        )
-                        2 -> TvShow(
-                            id = "cs::s::$sid", title = cleanTitle,
-                            overview = s.optString("description").takeIf { it.isNotBlank() },
-                            released = release.takeIf { it.isNotBlank() },
-                            poster = poster, banner = poster,
-                            rating = rating, providerName = name,
-                        )
-                        else -> return
-                    }
-                    // Pour le tri : releaseDate si présent, sinon clé d'ordre d'arrivée pour
-                    // garder un fallback déterministe ("Z9999..." est < "AAAA" donc passe en tail)
-                    val sortKey = if (release.isNotBlank()) release else "0000-00-00#%05d".format(rank)
-                    rank++
-                    items[sid] = parsed to sortKey
-                }
-                Log.d(TAG, "tab-operating : ${tabs.size} réponses, ${tabs.count { it != null }} non-null")
-                var totalBanner = 0; var totalGroup = 0; var totalFilter = 0; var totalOther = 0
-                var subjectsFromBanners = 0; var subjectsFromGroups = 0
-                for ((idx, resp) in tabs.withIndex()) {
-                    val arr = resp?.optJSONObject("data")?.optJSONArray("items")
-                        ?: resp?.optJSONObject("data")?.optJSONArray("topics")
-                    if (arr == null) {
-                        Log.d(TAG, "  tab[$idx] : data.items NULL")
-                        continue
-                    }
-                    for (i in 0 until arr.length()) {
-                        val it = arr.optJSONObject(i) ?: continue
-                        val type = it.optString("type")
-                        when (type) {
-                            "FILTER" -> { totalFilter++; continue }
-                            "BANNER" -> {
-                                totalBanner++
-                                val banners = it.optJSONObject("banner")?.optJSONArray("banners")
-                                if (banners != null) {
-                                    for (j in 0 until banners.length()) {
-                                        val b = banners.optJSONObject(j) ?: continue
-                                        subjectsFromBanners++
-                                        consumeSubject(b)
-                                    }
-                                }
-                                continue
-                            }
-                            else -> {}
-                        }
-                        val subjs = it.optJSONArray("subjects")
-                            ?: it.optJSONObject("group")?.optJSONArray("subjects")
-                        if (subjs != null) {
-                            totalGroup++
-                            for (j in 0 until subjs.length()) {
-                                val raw = subjs.optJSONObject(j) ?: continue
-                                subjectsFromGroups++
-                                consumeSubject(raw)
-                            }
-                        } else {
-                            totalOther++
-                            // Inspect first one to see what type/keys this is
-                            if (idx == 0 && totalOther <= 3) {
-                                Log.d(TAG, "  tab[0] item type='$type' keys=${it.keys().asSequence().toList()}")
-                            }
-                        }
-                    }
-                }
-                Log.d(TAG, "ingestion : BANNER=$totalBanner (→$subjectsFromBanners subjects), GROUP=$totalGroup (→$subjectsFromGroups subjects), FILTER=$totalFilter, OTHER=$totalOther")
-                Log.d(TAG, "filtres : seen=$seen, rejShort=$rejShort, rejNoSid=$rejNoSid, rejDup=$rejDup, kept=${items.size}")
-                // Filtre FR via /subject-api/get : on classifie TOUT le pool unique
-                // (semaphore=15 ≈ 6-10s). Garde tout item ayant un signal FR : audio FR
-                // (dub) / originellement français / piste sub FR explicite (dubs type=1)
-                // / champ subtitles listant Français/French (VOSTFR jouable).
-                val sortedByDate = items.entries.sortedByDescending { it.value.second }
-                val signals = classifyFrench(sortedByDate.map { it.key })
-                val frItems = sortedByDate.filter { signals.containsKey(it.key) }.map { it.value.first }
-                Log.d(TAG, "Nouveau sur Cloudstream : pool=${items.size} → testés=${sortedByDate.size} → FR=${frItems.size}")
-                frItems.take(30)
-            }.getOrElse { emptyList<AppAdapter.Item>() }
-        }
+        // 2026-05-12 : SUPPRIMÉ — `newReleasesD` (MovieBox+ tabs + classifyFrench
+        // sur 400+ items via /subject-api/get) tournait en async background MAIS
+        // n'était JAMAIS await(). 12 calls /main_page + ~424 calls /subject-api/get
+        // = ~18-25 secondes de travail HTTP pour résultat jamais consommé.
+        // Le "Nouveau sur Cloudstream" est déjà construit à partir de newMovies
+        // + newTv (TMDB Discover region=FR) plus bas — pas besoin de doublon.
 
         // Catégories par plateforme (Discover Movie + Tv, sortBy popularity desc, FR)
         val netflixMoviesD     = async { discoverMoviesOnProvider(8, mapMovie) }
@@ -965,15 +855,17 @@ object CloudstreamProvider : Provider {
         val maxMoviesD         = async { discoverMoviesOnProvider(1899, mapMovie) }  // Max FR
 
         val sections = mutableListOf<Category>()
-        val featured = trendingD.await().take(10).mapNotNull { it.toAppItem() }
+        val featured = trendingD.await()
+            .filter { it.posterPath != null }
+            .take(10).mapNotNull { it.toAppItem() }
         if (featured.isNotEmpty()) sections.add(Category(name = Category.FEATURED, list = featured))
 
         // 1) Nouveau sur Cloudstream — toutes les nouveautés FR + VOSTFR sorties sur le
         //    marché français, triées par date. TMDB Discover region=FR retourne le
         //    contenu localisé pour la France (films français natifs + films étrangers
         //    sortis en France = VOSTFR/VF disponibles). Jaquettes garanties (TMDB).
-        val newMovies = newMoviesD.await().map(mapMovie)
-        val newTv = newTvD.await().map(mapTv)
+        val newMovies = newMoviesD.await().filter { it.posterPath != null }.map(mapMovie)
+        val newTv = newTvD.await().filter { it.posterPath != null }.map(mapTv)
         val nouveauTout = mutableListOf<AppAdapter.Item>()
         nouveauTout += newMovies
         nouveauTout += newTv
@@ -1009,16 +901,16 @@ object CloudstreamProvider : Provider {
         addPlatformRow("Sur Max",            maxMoviesD.await(),       emptyList())
 
         // 3) Catégories de fond (toutes plateformes)
-        val popularTv = popularTvD.await().map(mapTv)
+        val popularTv = popularTvD.await().filter { it.posterPath != null }.map(mapTv)
         if (popularTv.isNotEmpty()) sections.add(Category(name = "Séries populaires", list = popularTv))
 
-        val topTv = topTvD.await().map(mapTv)
+        val topTv = topTvD.await().filter { it.posterPath != null }.map(mapTv)
         if (topTv.isNotEmpty()) sections.add(Category(name = "Séries les mieux notées", list = topTv))
 
-        val popularMovies = popularMoviesD.await().map(mapMovie)
+        val popularMovies = popularMoviesD.await().filter { it.posterPath != null }.map(mapMovie)
         if (popularMovies.isNotEmpty()) sections.add(Category(name = "Films populaires", list = popularMovies))
 
-        val topMovies = topMoviesD.await().map(mapMovie)
+        val topMovies = topMoviesD.await().filter { it.posterPath != null }.map(mapMovie)
         if (topMovies.isNotEmpty()) sections.add(Category(name = "Films les mieux notés", list = topMovies))
 
         Log.d(TAG, "getHome Cloudstream : ${sections.size} sections — featured=${featured.size}, nouveau=${nouveauSorted.size}, nouveauxFilms=${newMovies.size}, nouvellesSeries=${newTv.size}")

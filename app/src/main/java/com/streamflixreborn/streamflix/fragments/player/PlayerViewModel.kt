@@ -15,6 +15,7 @@ import com.streamflixreborn.streamflix.utils.format
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -29,7 +30,10 @@ class PlayerViewModel(
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<State>(State.LoadingServers)
-    val state: Flow<State> = _state
+    // 2026-05-12 : exposé en StateFlow (au lieu de Flow) pour accès .value depuis le fragment.
+    // Permet de re-process l'état courant après init lazy du player (scénario double-click
+    // où state.servers peut arriver AVANT que ::player.isInitialized soit true).
+    val state: kotlinx.coroutines.flow.StateFlow<State> = _state
 
     private val _subtitleState = MutableSharedFlow<SubtitleState>()
     val subtitleState: SharedFlow<SubtitleState> = _subtitleState
@@ -190,9 +194,59 @@ class PlayerViewModel(
         preExtractJob?.cancel()
         if (servers.isEmpty()) return
         val toExtract = servers.take(PRE_EXTRACT_TOP_N)
+        // 2026-05-12 : skip IPTV — chaînes live, pas pertinent
+        val providerNameForHead = UserPreferences.currentProvider?.name.orEmpty()
+        val isIptvProvider = providerNameForHead in setOf(
+            "WiTv", "OlaTv", "VegetaTv", "Vavoo", "3BoxTV", "LiveTvHub", "SportLive"
+        )
         preExtractJob = viewModelScope.launch(Dispatchers.IO) {
+            // 2026-05-12 : SCAN HEAD léger sur TOUS les servers en background.
+            // Pas d'extraction (pas de WebView, pas de JS), juste HEAD HTTP sur
+            // server.src (URL embed). HEAD 404/410/connect-refused → server mort
+            // → flagged broken → tri pousse en bas, fallback skip.
+            // Servers déjà inclus dans le top N (toExtract) sont skipped — l'extract
+            // les couvre déjà avec HEAD post-extraction (plus précis car teste l'URL
+            // de stream final).
+            // Coût : ~13 HEAD requests × ~200-500ms ≈ 2-3s en parallèle.
+            if (!isIptvProvider) {
+                val toScan = servers.drop(toExtract.size)
+                toScan.forEach { srv ->
+                    launch {
+                        val embedUrl = srv.src
+                        if (!embedUrl.startsWith("http", ignoreCase = true)) return@launch
+                        if (embedUrl.startsWith("data:")) return@launch
+                        try {
+                            val alive = withTimeoutOrNull(2_500L) {
+                                val client = okhttp3.OkHttpClient.Builder()
+                                    .connectTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
+                                    .readTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
+                                    .followRedirects(true)
+                                    .build()
+                                val req = okhttp3.Request.Builder().url(embedUrl).head().build()
+                                client.newCall(req).execute().use { resp ->
+                                    // 4xx (sauf 405 Method Not Allowed) → mort
+                                    // 405 = serveur n'accepte pas HEAD mais peut servir GET
+                                    val code = resp.code
+                                    code != 405 && (code in 200..399 || code == 403)
+                                }
+                            } ?: false
+                            if (!alive) {
+                                com.streamflixreborn.streamflix.extractors.Extractor
+                                    .recordFailureExternal(srv.name, "embed-head-failed")
+                                Log.d("PlayerViewModel", "Background HEAD-scan: ${srv.name} → embed dead, flagged broken")
+                            }
+                        } catch (_: kotlinx.coroutines.CancellationException) {
+                            // ignore
+                        } catch (_: Exception) {
+                            // ignore — un échec réseau ne flag pas
+                        }
+                    }
+                }
+            }
+
+            val jobs = mutableListOf<Job>()
             toExtract.forEachIndexed { idx, server ->
-                launch {
+                jobs += launch {
                     try {
                         val startMs = System.currentTimeMillis()
                         // 2026-05-09 v2 : timeout 10s → 15s. Donne le temps aux
@@ -208,10 +262,65 @@ class PlayerViewModel(
                         }
                         val durationMs = System.currentTimeMillis() - startMs
                         if (result != null) {
-                            Log.d(
-                                "PlayerViewModel",
-                                "Pre-extract OK [$idx] ${server.name} → cached in ${durationMs}ms",
+                            // 2026-05-12 : validation HEAD du stream après extraction.
+                            // Si le serveur de stream final est 404/410/timeout, on
+                            // l'écarte AVANT qu'ExoPlayer perde 15s à constater l'échec.
+                            // Skip pour data: URIs (Vidoza/Filemoon master.m3u8 inline),
+                            // skip pour les hosts WebView-only (LuluVdo).
+                            val streamUrl = result.source
+                            // 2026-05-12 : skip HEAD pour IPTV — les chaînes live ont
+                            // des URLs avec tokens dynamiques qui rejettent souvent les
+                            // HEAD requests, et le user n'a pas un grand nombre de fallbacks
+                            // (typiquement 1-2 par chaîne), donc l'optim apporte rien.
+                            val providerName = UserPreferences.currentProvider?.name.orEmpty()
+                            val isIptv = providerName in setOf(
+                                "WiTv", "OlaTv", "VegetaTv", "Vavoo", "3BoxTV", "LiveTvHub", "SportLive"
                             )
+                            val needsHeadCheck = !isIptv &&
+                                streamUrl.startsWith("http", ignoreCase = true) &&
+                                !streamUrl.startsWith("data:") &&
+                                !streamUrl.contains("luluvdo", ignoreCase = true) &&
+                                !streamUrl.contains("cfglobalcdn", ignoreCase = true)
+                            val headOk = if (!needsHeadCheck) true else {
+                                runCatching {
+                                    withTimeoutOrNull(3_000L) {
+                                        val client = okhttp3.OkHttpClient.Builder()
+                                            .connectTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
+                                            .readTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
+                                            .followRedirects(true)
+                                            .build()
+                                        val req = okhttp3.Request.Builder()
+                                            .url(streamUrl)
+                                            .head()
+                                            .apply {
+                                                result.headers?.forEach { (k, v) -> header(k, v) }
+                                            }
+                                            .build()
+                                        client.newCall(req).execute().use { resp -> resp.isSuccessful }
+                                    } ?: false
+                                }.getOrDefault(false)
+                            }
+                            if (!headOk) {
+                                // 2026-05-12 : HEAD échoué → flag broken (Option A user).
+                                // Le tri va pousser ce server en bas de liste donc
+                                // l'user n'attend pas dessus. Mais HEAD peut mentir
+                                // (CDN refuse HEAD mais GET marche) → la 2nde passe
+                                // (kickée plus loin) ré-extrait SANS HEAD et un-flag
+                                // si la vraie extraction passe.
+                                com.streamflixreborn.streamflix.extractors.Extractor
+                                    .invalidateCache(server.src)
+                                com.streamflixreborn.streamflix.extractors.Extractor
+                                    .recordFailureExternal(server.name, "head-failed")
+                                Log.d(
+                                    "PlayerViewModel",
+                                    "Pre-extract HEAD-fail [$idx] ${server.name} after ${durationMs}ms → flagged broken (2nd pass will retry)",
+                                )
+                            } else {
+                                Log.d(
+                                    "PlayerViewModel",
+                                    "Pre-extract OK [$idx] ${server.name} → cached in ${durationMs}ms",
+                                )
+                            }
                         } else {
                             Log.d(
                                 "PlayerViewModel",
@@ -230,14 +339,59 @@ class PlayerViewModel(
                     }
                 }
             }
+
+            // 2026-05-12 : 2nde passe DOUCE après que la 1re finit.
+            // But : récupérer les CDN qui mentent sur HEAD (refus HEAD mais GET OK).
+            // Couvre maintenant TOUS les servers flaggés broken (pas seulement les
+            // TOP N pre-extract). Comme ça si le background HEAD scan flag à tort
+            // une URL embed légitime, on récupère.
+            // Limite concurrence à 4 pour éviter de saturer (les broken sont jusqu'à
+            // 13-15 dans une liste de 17).
+            jobs.joinAll()
+            launch {
+                kotlinx.coroutines.delay(5_000L)  // laisse l'user voir la liste
+                val sem = kotlinx.coroutines.sync.Semaphore(4)
+                servers.forEachIndexed { idx, server ->
+                    launch {
+                        sem.acquire()
+                        try {
+                            val extractorName = server.name
+                            val isStillBroken = com.streamflixreborn.streamflix.extractors.Extractor
+                                .brokenServerNames()
+                                .any { extractorName.uppercase().contains(it.uppercase()) }
+                            if (!isStillBroken) return@launch
+                            val result = withTimeoutOrNull(15_000L) {
+                                com.streamflixreborn.streamflix.extractors.Extractor
+                                    .extract(server.src, server)
+                            }
+                            if (result != null && result.source.isNotBlank()) {
+                                // Extraction OK sans HEAD → faux positif HEAD → un-flag.
+                                com.streamflixreborn.streamflix.extractors.Extractor
+                                    .recordSuccessExternal(extractorName)
+                                Log.d(
+                                    "PlayerViewModel",
+                                    "2nd-pass RECOVERED [$idx] $extractorName → un-flagged broken",
+                                )
+                            }
+                        } catch (_: kotlinx.coroutines.CancellationException) {
+                            // ignore
+                        } catch (_: Exception) {
+                            // reste broken, ok.
+                        } finally {
+                            sem.release()
+                        }
+                    }
+                }
+            }
         }
     }
 
     companion object {
-        /** Nombre de serveurs à pré-extraire en parallèle. 3 = compromis :
-         *  couvre les 2-3 prochains clics probables (Voe, Uqload, Vidoza),
-         *  sans surcharger le réseau ni risquer rate-limiting des CDN. */
-        private const val PRE_EXTRACT_TOP_N = 3
+        /** Nombre de serveurs à pré-extraire en parallèle. 4 = compromis :
+         *  couvre les 3-4 prochains clics probables (Voe, Uqload, Vidoza, Filemoon),
+         *  reste safe sur Chromecast (~4 WebView max ≈ 600MB RAM).
+         *  2026-05-12 : passé de 3→4 (user request, latency Tahiti élevée). */
+        private const val PRE_EXTRACT_TOP_N = 4
     }
 
     private fun getServers(videoType: Video.Type, id: String) = viewModelScope.launch(Dispatchers.IO) {
@@ -277,8 +431,47 @@ class PlayerViewModel(
             Log.i("StreamFlixES", "[SERVERS LIST] -> Provider: ${provider.name}")
             Log.i("StreamFlixES", "[SERVERS LIST] -> Found ${servers.size} servers: ${servers.joinToString { it.name }}")
 
-            Log.d("PlayerViewModel", "Ricerca server completata: ${servers.size} server trovati")
-            _state.emit(State.SuccessLoadingServers(servers))
+            // 2026-05-12 : tri stable global qui pousse les extracteurs flaggés
+            // `markedBroken` (≥3 échecs dans la fenêtre, healthScore=0f) en bas
+            // de liste. Préserve l'ordre interne des providers (VF→VOSTFR→VO,
+            // qualité, etc.) pour les serveurs sains. Profite à tous les
+            // providers d'un coup, sans toucher leur logique de tri.
+            // Le pre-extract qui suit cible alors les N PREMIERS SAINS plutôt
+            // que de gaspiller des slots à retenter des morts récents.
+            //
+            // Détection broken : on extrait le "core" extractor de chaque server name
+            // pour faire match symétrique. Exemples :
+            //   "Movix — VidMoLy - VidMoly Vidéo 12 (VF)" → core "VIDMOLY"
+            //   "VidMoLy - VidMoly Vidéo 12 (VF)"        → core "VIDMOLY"
+            //   "Movix — Uqload (VF - HD)"               → core "UQLOAD"
+            //   "Premium (VF - HD)"                       → core "PREMIUM"
+            //   "Cloudstream [1080p MP4]"                 → core "CLOUDSTREAM"
+            // Si le core d'un broken == core d'un candidate → même extracteur → broken.
+            fun extractorCore(name: String): String {
+                val stripped = name.substringAfter(" — ").substringAfter(" · ").trim()
+                return stripped
+                    .substringBefore(" - ")
+                    .substringBefore(" (")
+                    .substringBefore(" [")
+                    .trim()
+                    .uppercase()
+            }
+            val brokenCores = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames()
+                .map { extractorCore(it) }
+                .filter { it.isNotBlank() }
+                .toSet()
+            fun isBroken(serverName: String): Boolean {
+                if (brokenCores.isEmpty()) return false
+                return extractorCore(serverName) in brokenCores
+            }
+            val sortedServers = servers.sortedBy { srv -> if (isBroken(srv.name)) 1 else 0 }
+            val brokenCount = sortedServers.count { isBroken(it.name) }
+            if (brokenCount > 0) {
+                Log.d("PlayerViewModel", "Pushed $brokenCount broken servers to bottom (cores=$brokenCores)")
+            }
+
+            Log.d("PlayerViewModel", "Ricerca server completata: ${sortedServers.size} server trovati")
+            _state.emit(State.SuccessLoadingServers(sortedServers))
 
             // 2026-05-09 : pré-extraction parallèle des 3 premiers serveurs en
             // background. Le but : quand l'user clique "Watch", l'URL m3u8 est
@@ -292,7 +485,7 @@ class PlayerViewModel(
             // les coroutines remplir le cache. Si l'user clique sur le 4e
             // serveur (non pré-extrait) → fallback normal sans régression.
             // Si une pré-extraction échoue → silencieuse, normale path au clic.
-            preExtractTopServersInBackground(servers)
+            preExtractTopServersInBackground(sortedServers)
 
             // Start collecting progressive servers for any IPTV provider (WiTv / OlaTv).
             additionalServerJob?.cancel()

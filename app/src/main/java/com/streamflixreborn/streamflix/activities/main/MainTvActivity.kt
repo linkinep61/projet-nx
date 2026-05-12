@@ -81,19 +81,61 @@ class MainTvActivity : FragmentActivity() {
         super.attachBaseContext(AppLanguageManager.wrap(newBase))
     }
 
+    // 2026-05-12 : sur les TV à CPU lent (Sharp Aquos TVE19A confirmé), l'init
+    // synchronique de onCreate prend ~5 secondes (dont 2.2s pour Conscrypt seul),
+    // ce qui dépasse le seuil ANR Android (5s sans yield main thread). L'OS tue
+    // l'activité silencieusement → splash figé sans crash.
+    // Solution : différer chaque étape via Handler.postDelayed pour yield le main
+    // thread entre les étapes. Le CPU total est identique mais l'ANR watchdog
+    // est satisfait à chaque frame.
+    private var savedStateForDeferredInit: Bundle? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Il setup delle preferenze è già avvenuto in StreamFlixApp
-        setTheme(ThemeManager.tvThemeRes(UserPreferences.selectedTheme))
-        
+        // try-catch sur setTheme : sur certains firmwares custom (Sharp TVE19A),
+        // un attribut Material non supporté peut crasher. On retombe sur le
+        // theme par défaut Android.
+        try {
+            setTheme(ThemeManager.tvThemeRes(UserPreferences.selectedTheme))
+        } catch (e: Throwable) {
+            android.util.Log.e("MainTvActivity", "setTheme failed: ${e.message}")
+        }
+
         super.onCreate(savedInstanceState)
-        
-        // Inizializza il provider con il context dell'attività per gestire eventuali bypass visibili
-        WiflixProvider.init(this)
+        savedStateForDeferredInit = savedInstanceState
 
-        _binding = ActivityMainTvBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-        applyThemeNavigationChrome()
+        // Chaîne d'étapes différées. Chaque step appelle le suivant via post.
+        // Le délai 250 ms laisse le rendu graphique se faire entre, et surtout
+        // yield le main thread à l'ANR watchdog.
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ runInitStep1() }, 50)
+    }
 
+    private fun runInitStep1() {
+        try { WiflixProvider.init(this) } catch (_: Throwable) {}
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ runInitStep2() }, 50)
+    }
+
+    private fun runInitStep2() {
+        try {
+            _binding = ActivityMainTvBinding.inflate(layoutInflater)
+        } catch (e: Throwable) {
+            android.util.Log.e("MainTvActivity", "inflate failed: ${e.message}")
+            return
+        }
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ runInitStep3() }, 50)
+    }
+
+    private fun runInitStep3() {
+        try {
+            setContentView(binding.root)
+            applyThemeNavigationChrome()
+        } catch (e: Throwable) {
+            android.util.Log.e("MainTvActivity", "setContentView failed: ${e.message}")
+            return
+        }
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ runInitStep4() }, 50)
+    }
+
+    private fun runInitStep4() {
         binding.ivSplashOverlay.animate()
             .alpha(0f)
             .setDuration(800)
@@ -118,6 +160,7 @@ class MainTvActivity : FragmentActivity() {
         // active provider. This avoids auto-loading a memory-heavy provider
         // (which can crash low-RAM devices) and forces the user to consciously
         // pick which category/provider they want to use today.
+        val savedInstanceState = savedStateForDeferredInit
         if (savedInstanceState == null && isFreshProcessLaunch) {
             UserPreferences.currentProvider = null
             isFreshProcessLaunch = false

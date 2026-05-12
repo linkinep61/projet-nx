@@ -944,6 +944,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                 categories.add(Category(name = "Films les mieux notés", list = topMovieItems))
             }
 
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // 2026-05-12 : ne PAS swallow CancellationException — sinon HomeViewModel
+            // pense que c'est un succès et cache le résultat partiel (ex: 2 catégories
+            // au lieu de 8). Propager pour que le caller skip l'écriture cache.
+            Log.w("MovixProvider", "getHome cancelled — propagating")
+            throw e
         } catch (e: Exception) {
             Log.e("MovixProvider", "Error loading home: ${e.message}")
         }

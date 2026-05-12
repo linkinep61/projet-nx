@@ -50,6 +50,11 @@ class ProvidersTvFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // 2026-05-12 : kill le mini-player IPTV qui pourrait encore tourner
+        // en background. Quand l'user revient au home picker provider, il
+        // ne doit PLUS entendre le son d'une chaîne TV qu'il venait de quitter.
+        com.streamflixreborn.streamflix.utils.MiniPlayerController.stop()
+
         initializeProviders()
 
         // Downloads disabled on TV — not enough storage on these devices
