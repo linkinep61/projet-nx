@@ -413,7 +413,8 @@ class PlayerTvFragment : Fragment() {
             id.startsWith("vegeta::") || id.startsWith("vegeta_ep::") ||
             id.startsWith("livehub::") || id.startsWith("movixlivetv::") ||
             id.startsWith("sportlive::") || id.startsWith("match::") ||
-            id.startsWith("vavoo::") || id.startsWith("bxt::")
+            id.startsWith("vavoo::") || id.startsWith("bxt::") ||
+            id.startsWith("myiptv-live::") || id.startsWith("myiptv::")
     }
 
     private fun showLoadingOverlay() {
@@ -467,7 +468,9 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("livehub::") ||
                 args.id.startsWith("sportlive::") ||
                 args.id.startsWith("match::") ||
-                args.id.startsWith("vavoo::")
+                args.id.startsWith("vavoo::") ||
+                args.id.startsWith("myiptv-live::") ||
+                args.id.startsWith("myiptv::")
             com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsView
                 .Settings.Server.currentIptvChannelKey =
                 if (isIptvCtx) args.id else null

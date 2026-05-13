@@ -76,6 +76,8 @@ class MainTvActivity : FragmentActivity() {
     private val viewModel by viewModels<MainViewModel>()
 
     private lateinit var updateAppDialog: UpdateAppTvDialog
+    /** 2026-05-12 : cached navController pour showIptvCategoryPicker hors onCreate. */
+    private var cachedNavController: androidx.navigation.NavController? = null
 
     override fun attachBaseContext(newBase: android.content.Context) {
         super.attachBaseContext(AppLanguageManager.wrap(newBase))
@@ -141,6 +143,26 @@ class MainTvActivity : FragmentActivity() {
         val navHostFragment = this.supportFragmentManager
             .findFragmentById(binding.navMainFragment.id) as NavHostFragment
         val navController = navHostFragment.navController
+        cachedNavController = navController
+
+        // 2026-05-12 (user "des retours tout le temps") : guard contre crash
+        // "Current provider is not set" — si on est restauré sur home/movies/tv_shows
+        // mais que currentProvider est null (process kill + restore), redirige vers
+        // l'écran providers AVANT que HomeTvFragment ne s'instancie et crashe.
+        if (UserPreferences.currentProvider == null) {
+            val dest = navController.currentDestination?.id
+            if (dest != null && dest != R.id.providers) {
+                runCatching {
+                    navController.navigate(
+                        R.id.providers,
+                        null,
+                        androidx.navigation.NavOptions.Builder()
+                            .setPopUpTo(navController.graph.startDestinationId, inclusive = false)
+                            .build(),
+                    )
+                }
+            }
+        }
 
         adjustLayoutDelta(null, null)
 
@@ -188,6 +210,35 @@ class MainTvActivity : FragmentActivity() {
         binding.navMain.setupWithNavController(navController)
         updateNavigationVisibility()
 
+        // 2026-05-12 (user "faire un bouton dédié") : item Catégories dans la sidebar.
+        // Clic → ouvre AlertDialog avec catégories du fragment courant (LIVE/MOVIE/SERIES).
+        binding.navMain.setOnItemSelectedListener { menuItem ->
+            when (menuItem.itemId) {
+                R.id.iptv_categories -> {
+                    val currentDestId = navController.currentDestination?.id ?: R.id.home
+                    showIptvCategoryPicker(currentDestId)
+                    return@setOnItemSelectedListener false
+                }
+                R.id.iptv_sources -> {
+                    startActivity(android.content.Intent(
+                        this,
+                        com.streamflixreborn.streamflix.activities.iptv.IptvSourcesActivity::class.java,
+                    ))
+                    return@setOnItemSelectedListener false
+                }
+            }
+            // 2026-05-12 (user "le bouton accueil TV ne sert à rien, seules les
+            // catégories l'alimentent") : pour Mon IPTV, clic sur TV/Films/Séries
+            // ouvre directement le picker au lieu de juste naviguer.
+            val handled = androidx.navigation.ui.NavigationUI.onNavDestinationSelected(menuItem, navController)
+            val provider = UserPreferences.currentProvider
+            if (handled && provider is com.streamflixreborn.streamflix.providers.MyIptvProvider &&
+                menuItem.itemId in setOf(R.id.home, R.id.movies, R.id.tv_shows)) {
+                binding.navMain.postDelayed({ showIptvCategoryPicker(menuItem.itemId) }, 350L)
+            }
+            handled
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             binding.navMainFragment.isFocusedByDefault = true
         }
@@ -226,6 +277,18 @@ class MainTvActivity : FragmentActivity() {
                 setOnClickListener {
                     // Navigazione manuale per evitare dipendenza da Safe Args Directions non generate
                     navController.navigate(R.id.providers)
+                }
+                // 2026-05-12 (user "il faut une touche pour retourner au menu changement
+                // de source") : long-press sur le header → ouvre directement le tableau
+                // des sources IPTV pour switch (sans repasser par la liste des providers).
+                setOnLongClickListener {
+                    if (UserPreferences.currentProvider is com.streamflixreborn.streamflix.providers.MyIptvProvider) {
+                        startActivity(android.content.Intent(
+                            this@MainTvActivity,
+                            com.streamflixreborn.streamflix.activities.iptv.IptvSourcesActivity::class.java,
+                        ))
+                        true
+                    } else false
                 }
             }
 
@@ -325,6 +388,47 @@ class MainTvActivity : FragmentActivity() {
         }
     }
     
+    /** 2026-05-12 (user "quand on clique TV, menu déroulant avec catégories") :
+     *  ouvre un AlertDialog listant toutes les catégories disponibles pour le type
+     *  donné (LIVE = home, MOVIE = movies, SERIES = tv_shows). Sur sélection,
+     *  stocke le filtre dans MyIptvProvider et reload le fragment courant. */
+    private fun showIptvCategoryPicker(menuItemId: Int) {
+        val provider = com.streamflixreborn.streamflix.providers.MyIptvProvider
+        val type = when (menuItemId) {
+            R.id.home -> com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.LIVE
+            R.id.movies -> com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.MOVIE
+            R.id.tv_shows -> com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.SERIES
+            else -> return
+        }
+        val categoriesWithCount = provider.availableCategoriesWithCount(type)
+        if (categoriesWithCount.isEmpty()) {
+            Toast.makeText(this, "Aucune catégorie en cache — recharge la source d'abord.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val totalCount = categoriesWithCount.sumOf { it.second }
+        // Format display : "FR| FRANCE FHD HD  (105)"
+        val displayItems = arrayOf("Toutes les catégories FR ($totalCount)") +
+            categoriesWithCount.map { (name, count) -> "$name  ($count)" }.toTypedArray()
+        // Garde les noms bruts pour le filtre (sans le compteur)
+        val rawNames = arrayOf<String?>(null) + categoriesWithCount.map { it.first }.toTypedArray()
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Choisir une catégorie")
+            .setItems(displayItems) { _, idx ->
+                val selected = rawNames[idx]
+                when (type) {
+                    com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.LIVE -> provider.selectedCategoryLive = selected
+                    com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.MOVIE -> provider.selectedCategoryMovie = selected
+                    com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.SERIES -> provider.selectedCategorySeries = selected
+                }
+                // 2026-05-12 (user "quand tu cliques une catégorie ça change pas le home") :
+                // notifie le viewModel via ProviderChangeNotifier — HomeTvFragment écoute
+                // ce flow et rappelle viewModel.getHome() qui va re-calculer avec le filtre.
+                com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
     private fun updateNavigationVisibility() {
         val provider = UserPreferences.currentProvider
         if (provider == null) {
@@ -337,6 +441,7 @@ class MainTvActivity : FragmentActivity() {
             binding.navMain.menu.findItem(R.id.movies)?.isVisible = false
             binding.navMain.menu.findItem(R.id.tv_shows)?.isVisible = false
             binding.navMain.menu.findItem(R.id.iptv_favorites)?.isVisible = false
+            binding.navMain.menu.findItem(R.id.iptv_categories)?.isVisible = false
             return
         }
         // Provider sélectionné : restaure la visibilité des onglets pertinents.
@@ -353,18 +458,26 @@ class MainTvActivity : FragmentActivity() {
             }
         }
         val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
+        val isMyIptv = provider is com.streamflixreborn.streamflix.providers.MyIptvProvider
         binding.navMain.menu.findItem(R.id.tv_shows)?.apply {
             isVisible = Provider.supportsTvShows(provider)
             title = when {
+                // 2026-05-12 : Mon IPTV expose vraies séries via Xtream API → garde "Séries TV"
+                isMyIptv -> getString(R.string.main_menu_tv_shows)
                 isIptv || provider.name in setOf("CableVisionHD", "TvporinternetHD") ->
                     getString(R.string.main_menu_all_channels)
                 provider.name in setOf("VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga") ->
                     getString(R.string.main_menu_series)
                 else -> getString(R.string.main_menu_tv_shows)
             }
+            // Force l'icône série (ic_menu_series) car le default est ic_menu_tv qui collide avec TV
+            if (isMyIptv) setIcon(R.drawable.ic_menu_series)
         }
         // Favoris tab — IPTV providers only.
         binding.navMain.menu.findItem(R.id.iptv_favorites)?.isVisible = isIptv
+        // 2026-05-12 : Catégories + Mes sources visibles uniquement pour Mon IPTV
+        binding.navMain.menu.findItem(R.id.iptv_categories)?.isVisible = isMyIptv
+        binding.navMain.menu.findItem(R.id.iptv_sources)?.isVisible = isMyIptv
     }
 
     fun adjustLayoutDelta(deltaX: Int?, deltaY: Int?) {

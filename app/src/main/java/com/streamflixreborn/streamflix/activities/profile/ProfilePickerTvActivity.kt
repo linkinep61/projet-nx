@@ -38,6 +38,12 @@ class ProfilePickerTvActivity : FragmentActivity() {
         setContentView(R.layout.activity_profile_picker_tv)
         rvProfiles = findViewById(R.id.rv_profiles)
         rvProfiles.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
+        // 2026-05-12 (user "on peut pas aller sur les 3 carrés") : force le
+        // RV à laisser le focus passer à ses enfants. Sans ça, sur TV, le
+        // focus reste sur le bouton "Gérer les profils" et ne remonte pas
+        // aux cards.
+        rvProfiles.isFocusable = true
+        rvProfiles.descendantFocusability = android.view.ViewGroup.FOCUS_AFTER_DESCENDANTS
         btnManage = findViewById(R.id.btn_manage_profiles)
         btnManage.setOnClickListener { openManagementDialog() }
     }
@@ -55,10 +61,22 @@ class ProfilePickerTvActivity : FragmentActivity() {
             onAddProfileClick = ::openAddProfileDialog,
             itemLayoutRes = R.layout.item_profile_tv,
         )
-        // Demande le focus initial sur le 1er profil (D-pad-friendly cold start).
-        rvProfiles.post {
-            rvProfiles.findViewHolderForAdapterPosition(0)?.itemView?.requestFocus()
+        // 2026-05-12 (user "on peut pas aller sur les 3 carrés") : focus initial
+        // robuste — on retry plusieurs fois car les viewholders peuvent prendre
+        // 50-100ms à apparaître après setAdapter. Boucle jusqu'à ce que le
+        // 1er item soit attaché OU 1s écoulée.
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        val startTime = System.currentTimeMillis()
+        lateinit var tryFocus: () -> Unit
+        tryFocus = {
+            val first = rvProfiles.findViewHolderForAdapterPosition(0)?.itemView
+            if (first != null) {
+                first.requestFocus()
+            } else if (System.currentTimeMillis() - startTime < 1500L) {
+                handler.postDelayed({ tryFocus() }, 50)
+            }
         }
+        handler.post { tryFocus() }
     }
 
     private fun onProfileClicked(profile: Profile) {

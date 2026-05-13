@@ -150,6 +150,16 @@ interface Provider {
             // Comme SportLive mais pour le généraliste. Favoris/bans
             // s'appliquent cross-provider via channelKey commun.
             LiveTvHubProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
+            // 2026-05-12 : Mon IPTV — provider user-configurable. L'utilisateur
+            // ajoute ses propres URLs M3U via IptvSourcesActivity (clic provider
+            // = ouvre tableau des sources). Auto-classification TV/Films/Séries
+            // affichées en sections dans getHome(). Group=IPTV pour rester
+            // visuellement avec Vavoo/WiTV/Ola dans l'onglet "TV / IPTV"
+            // du picker.
+            // 2026-05-12 (user "désactiver provisoirement ce provider, on va faire
+            // la mise à jour et le réactiver après") : Mon IPTV désactivé le temps
+            // de la mise à jour. Décommenter pour le réactiver.
+            // MyIptvProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
         )
 
         // Helper functions to check support

@@ -85,6 +85,11 @@
                 android:title="@string/settings_provider_no_options_title"
                 android:summary="@string/settings_provider_no_options_summary" />
         </PreferenceCategory>
+
+        <!-- 2026-05-12 : la section IPTV est désormais accessible via le bouton
+             dédié dans la sidebar (item "Mes sources"). On garde uniquement
+             ce stub vide pour préserver l'attribut clé si jamais référencé.
+             Retiré du XML pour éviter de dupliquer le menu Paramètres. -->
     </PreferenceScreen>
 
     <PreferenceScreen

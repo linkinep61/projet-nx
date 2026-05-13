@@ -112,6 +112,12 @@
             android:exported="false"
             android:theme="@style/AppTheme.Tv" />
 
+        <!-- 2026-05-12 : gestion des sources IPTV custom (MyIptvProvider). -->
+        <activity
+            android:name=".activities.iptv.IptvSourcesActivity"
+            android:exported="false"
+            android:theme="@style/AppTheme.Mobile" />
+
         <activity
             android:name=".activities.tools.QrScannerActivity"
             android:exported="false"

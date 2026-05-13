@@ -243,6 +243,10 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         updateOverviewLabels()
         updateProviderVisibilityState()
 
+        // 2026-05-12 : la section "Mes sources IPTV" a été retirée des Paramètres —
+        // elle est désormais accessible via le bouton dédié "Mes sources" dans la
+        // sidebar de Mon IPTV. Évite la duplication du menu Paramètres.
+
         findPreference<EditTextPreference>("provider_streamingcommunity_domain")?.apply {
             val currentValue = UserPreferences.streamingcommunityDomain
             summary = currentValue

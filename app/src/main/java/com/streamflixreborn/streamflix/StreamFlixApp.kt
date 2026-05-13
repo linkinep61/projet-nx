@@ -130,6 +130,14 @@ class StreamFlixApp : Application() {
             Log.e("StreamFlixApp", "ProfileStore setup failed: ${e.message}", e)
         }
 
+        // 2026-05-12 : setup IptvSourceStore (MyIptvProvider — sources IPTV
+        // configurables par l'utilisateur).
+        try {
+            com.streamflixreborn.streamflix.utils.IptvSourceStore.setup(this)
+        } catch (e: Throwable) {
+            Log.e("StreamFlixApp", "IptvSourceStore setup failed: ${e.message}", e)
+        }
+
         // 2.5 Cold start = no active provider + no active profile.
         // Force le ProfilePicker à apparaître à chaque cold start (Netflix-style).
         try {
