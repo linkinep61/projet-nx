@@ -146,6 +146,15 @@ class MainMobileActivity : FragmentActivity() {
             return
         }
 
+        // 2026-05-12 (user "profil multi-utilisateur style Netflix") : si aucun
+        // profil n'est actif (cold start ou switch en cours), rediriger vers
+        // l'écran "Qui regarde ?" avant d'afficher la home. Phase 1 = mobile-only.
+        if (com.streamflixreborn.streamflix.utils.ProfileManager.currentProfile() == null) {
+            finish()
+            startActivity(Intent(this, com.streamflixreborn.streamflix.activities.profile.ProfilePickerActivity::class.java))
+            return
+        }
+
         // Per user request: cold start lands on the Providers home with NO
         // active provider. This avoids auto-loading a memory-heavy provider
         // (which can crash low-RAM devices) and forces the user to consciously

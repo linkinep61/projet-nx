@@ -163,4 +163,21 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
+    <!-- 2026-05-12 : Bouton "Changer de profil" à côté de Paramètres.
+         Retourne à l'écran "Qui regarde ?" (ProfilePickerActivity). -->
+    <ImageView
+        android:id="@+id/iv_profile_switch"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:layout_marginStart="4dp"
+        android:layout_marginTop="12dp"
+        android:padding="10dp"
+        android:src="@drawable/ic_person_placeholder"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="Changer de profil"
+        app:tint="@android:color/white"
+        android:elevation="4dp"
+        app:layout_constraintStart_toEndOf="@id/iv_settings"
+        app:layout_constraintTop_toTopOf="parent" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>

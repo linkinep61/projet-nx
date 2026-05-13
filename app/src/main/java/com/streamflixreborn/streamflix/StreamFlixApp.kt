@@ -17,6 +17,7 @@ import com.streamflixreborn.streamflix.utils.CacheUtils
 import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.IptvTlsHelper
 import com.streamflixreborn.streamflix.utils.IsrgRootTrustProvider
+import com.streamflixreborn.streamflix.utils.ProfileStore
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -118,11 +119,24 @@ class StreamFlixApp : Application() {
             Log.e("StreamFlixApp", "UserPreferences/DNS setup failed: ${e.message}", e)
         }
 
-        // 2.5 Cold start = no active provider.
+        // 2026-05-12 : setup ProfileStore (multi-utilisateur Netflix-style).
+        // Bootstrap crée le profil "Principal" à la 1re ouverture après update.
+        // AppDatabase.setup (étape suivante) renomme les anciens fichiers DB
+        // pour les associer au profil par défaut → aucune perte de données.
+        try {
+            ProfileStore.setup(this)
+            ProfileStore.bootstrapIfNeeded()
+        } catch (e: Throwable) {
+            Log.e("StreamFlixApp", "ProfileStore setup failed: ${e.message}", e)
+        }
+
+        // 2.5 Cold start = no active provider + no active profile.
+        // Force le ProfilePicker à apparaître à chaque cold start (Netflix-style).
         try {
             UserPreferences.currentProvider = null
+            ProfileStore.setCurrentProfileId(null)
         } catch (e: Throwable) {
-            Log.e("StreamFlixApp", "currentProvider reset failed: ${e.message}")
+            Log.e("StreamFlixApp", "currentProvider/profile reset failed: ${e.message}")
         }
 
         // 3. Download manager

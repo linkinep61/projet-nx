@@ -171,6 +171,8 @@ class TvShowsMobileFragment : Fragment() {
                     Log.d("TvShowsMobile", "Same channel, stopping mini player for fullscreen (onResume): ${tvShow.title}")
                     MiniPlayerController.stopAsync()
                     false
+                } else if (tvShow.id.startsWith("bxt::")) {
+                    false
                 } else {
                     Log.d("TvShowsMobile", "Mini player intercept (onResume): ${tvShow.title}")
                     MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
@@ -298,6 +300,8 @@ class TvShowsMobileFragment : Fragment() {
             if (tvShow.id == MiniPlayerController.currentChannelId) {
                 Log.d("TvShowsMobile", "Same channel, stopping mini player for fullscreen: ${tvShow.title}")
                 MiniPlayerController.stopAsync()
+                false
+            } else if (tvShow.id.startsWith("bxt::")) {
                 false
             } else {
                 Log.d("TvShowsMobile", "Mini player intercept: ${tvShow.title} (${tvShow.id})")

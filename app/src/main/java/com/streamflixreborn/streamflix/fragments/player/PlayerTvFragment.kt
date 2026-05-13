@@ -2651,6 +2651,33 @@ class PlayerTvFragment : Fragment() {
                             Log.e("PlayerTvFragment", "IPTV switch demandé mais pas de server suivant disponible")
                         }
 
+                        // 2026-05-12 (user) : HARD CAP pour éviter boucle infinie.
+                        // Bug observé : BoxXtemus "Remarkably Bright Creatures" → URL
+                        // résolue = page HTML (frembed.one/embed/movie/...), ExoPlayer
+                        // renvoie ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED en boucle
+                        // (33+ retry/30s), pas de server suivant → on bouclait sans fin.
+                        // Si le stream n'a JAMAIS marché, retry >= 5, et pas de fallback,
+                        // on abandonne avec un toast plutôt que de boucler à l'infini.
+                        val HARD_RETRY_CAP = 5
+                        val isParseError = errCodeName == "ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED" ||
+                            errCodeName == "ERROR_CODE_PARSING_CONTAINER_MALFORMED" ||
+                            errCodeName == "ERROR_CODE_PARSING_MANIFEST_MALFORMED" ||
+                            errCodeName == "ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED"
+                        val noFallbackAvailable = servers.getOrNull(servers.indexOf(server) + 1) == null
+                        if (!iptvCurrentStreamHasWorked && iptvRetryCount >= HARD_RETRY_CAP && (isParseError || noFallbackAvailable)) {
+                            Log.e("PlayerTvFragment",
+                                "IPTV hard cap atteint sur ${server.name} ($errCodeName, retry=$iptvRetryCount, hasWorked=false, noFallback=$noFallbackAvailable) — abandon")
+                            try {
+                                android.widget.Toast.makeText(
+                                    requireContext(),
+                                    "Lecture impossible (${errCodeName.removePrefix("ERROR_CODE_")})",
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                            } catch (_: Exception) {}
+                            try { player.stop() } catch (_: Exception) {}
+                            return
+                        }
+
                         Log.w("PlayerTvFragment", "IPTV retry on ${server.name} ($errCodeName) — retry #$iptvRetryCount, sticky (hasWorked=$iptvCurrentStreamHasWorked)")
                         try {
                             // 2026-05-09 v13 : Stalker + 403 → fresh handshake via

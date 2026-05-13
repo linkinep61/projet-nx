@@ -103,36 +103,30 @@ class MainTvActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
         savedStateForDeferredInit = savedInstanceState
 
-        // Chaîne d'étapes différées. Chaque step appelle le suivant via post.
-        // Le délai 250 ms laisse le rendu graphique se faire entre, et surtout
-        // yield le main thread à l'ANR watchdog.
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ runInitStep1() }, 50)
-    }
-
-    private fun runInitStep1() {
+        // 2026-05-12 (user "fameux changement de profil TV", inflate fail
+        // Chromecast) : l'ancien design postDelayait l'inflate de ~200ms total
+        // sur 4 étapes. Sur Chromecast, ce délai laissait Android appeler
+        // onSaveInstanceState avant l'inflate → IllegalStateException
+        // "Can not perform this action after onSaveInstanceState" quand
+        // FragmentContainerView (NavHostFragment) tente d'enqueue une transaction.
+        // Solution : faire les steps SYNCHRO dans onCreate (avant que le système
+        // ait l'occasion de save state). Seul step4 (nav + listeners) reste
+        // déferré pour laisser le splash s'afficher.
         try { WiflixProvider.init(this) } catch (_: Throwable) {}
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ runInitStep2() }, 50)
-    }
-
-    private fun runInitStep2() {
         try {
             _binding = ActivityMainTvBinding.inflate(layoutInflater)
         } catch (e: Throwable) {
-            android.util.Log.e("MainTvActivity", "inflate failed: ${e.message}")
+            android.util.Log.e("MainTvActivity", "inflate failed: ${e.message}", e)
             return
         }
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ runInitStep3() }, 50)
-    }
-
-    private fun runInitStep3() {
         try {
             setContentView(binding.root)
             applyThemeNavigationChrome()
         } catch (e: Throwable) {
-            android.util.Log.e("MainTvActivity", "setContentView failed: ${e.message}")
+            android.util.Log.e("MainTvActivity", "setContentView failed: ${e.message}", e)
             return
         }
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ runInitStep4() }, 50)
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ runInitStep4() }, 100)
     }
 
     private fun runInitStep4() {
@@ -153,6 +147,16 @@ class MainTvActivity : FragmentActivity() {
         if (BuildConfig.APP_LAYOUT == "mobile" || (BuildConfig.APP_LAYOUT != "tv" && !packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK))) {
             finish()
             startActivity(Intent(this, MainMobileActivity::class.java))
+            return
+        }
+
+        // 2026-05-12 (user "on peut s'attaquer à la version télé") : si aucun
+        // profil n'est actif, redirect vers l'écran "Qui regarde ?" TV avant
+        // d'afficher la home. StreamFlixApp clear le profil au cold start →
+        // garantit que le picker apparaît à chaque cold launch (Netflix-style).
+        if (com.streamflixreborn.streamflix.utils.ProfileManager.currentProfile() == null) {
+            finish()
+            startActivity(Intent(this, com.streamflixreborn.streamflix.activities.profile.ProfilePickerTvActivity::class.java))
             return
         }
 

@@ -233,6 +233,14 @@ object MiniPlayerController {
 
     fun playChannel(channelId: String, channelName: String, channelPoster: String?) {
         Log.d(TAG, "playChannel: $channelName ($channelId)")
+        // 2026-05-12 : disable mini-player pour les chaînes 3BoxTV (bxt::).
+        // L'extraction WebView (userinfo bypass anti-bot) prend 20-40s pour
+        // les chaînes TF1/M6/etc. → le mini paraît cassé. User demande à
+        // laisser uniquement le grand player gérer ces chaînes.
+        if (channelId.startsWith("bxt::")) {
+            Log.d(TAG, "playChannel: skip mini-player for bxt:: channel $channelId")
+            return
+        }
         // 2026-05-09 : STOP le player avant de switcher de canal, sinon si le
         // fetch du nouveau canal foire, la chaîne précédente continue de jouer
         // (bug : "je clique BFMTV et le player joue Canal+ que j'avais cliqué avant").

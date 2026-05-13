@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="64dp"
+    android:layout_height="64dp"
+    android:layout_margin="4dp"
+    android:gravity="center"
+    android:textSize="32sp"
+    android:clickable="true"
+    android:focusable="true"
+    android:background="@drawable/bg_profile_avatar_tv"
+    tools:text="🎬" />

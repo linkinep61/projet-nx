@@ -161,7 +161,6 @@ object ExtractorRanker {
         "vidsrc.ru" to -15,
         "loadx" to -15,
         "vixsrc" to -10,
-        "vixcloud" to -10,
         "darkiworld" to -10,
         "ustr" to -10,
 

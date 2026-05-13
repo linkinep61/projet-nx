@@ -97,6 +97,8 @@ class IptvFavoritesTvFragment : Fragment() {
                         MiniPlayerController.transitioningToFullscreen = true
                         if (_binding != null) { binding.miniPlayerView.player = null }
                         false
+                    } else if (tvShow.id.startsWith("bxt::")) {
+                        false
                     } else {
                         MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
                         true
@@ -181,6 +183,8 @@ class IptvFavoritesTvFragment : Fragment() {
             if (tvShow.id == MiniPlayerController.currentChannelId) {
                 MiniPlayerController.transitioningToFullscreen = true
                 if (_binding != null) { binding.miniPlayerView.player = null }
+                false
+            } else if (tvShow.id.startsWith("bxt::")) {
                 false
             } else {
                 Log.d(TAG, "Mini player intercept (favorites): ${tvShow.title} (${tvShow.id})")

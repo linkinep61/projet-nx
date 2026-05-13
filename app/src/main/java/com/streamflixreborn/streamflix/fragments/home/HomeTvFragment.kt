@@ -212,6 +212,9 @@ class HomeTvFragment : Fragment() {
                     MiniPlayerController.transitioningToFullscreen = true
                     if (_binding != null) { binding.miniPlayerView.player = null }
                     false
+                } else if (tvShow.id.startsWith("bxt::")) {
+                    // 2026-05-12 : bxt:: skip mini → direct fullscreen
+                    false
                 } else {
                     Log.d("HomeTv", "Mini player intercept (onResume): ${tvShow.title}")
                     MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
@@ -285,6 +288,9 @@ class HomeTvFragment : Fragment() {
                 Log.d("HomeTv", "Same channel clicked, flagging for transfer: ${tvShow.title}")
                 MiniPlayerController.transitioningToFullscreen = true
                 if (_binding != null) { binding.miniPlayerView.player = null }
+                false
+            } else if (tvShow.id.startsWith("bxt::")) {
+                // 2026-05-12 : bxt:: skip mini → direct fullscreen
                 false
             } else {
                 Log.d("HomeTv", "Mini player intercept: ${tvShow.title} (${tvShow.id})")

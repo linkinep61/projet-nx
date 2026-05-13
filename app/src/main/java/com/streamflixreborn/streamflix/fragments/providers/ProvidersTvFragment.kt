@@ -66,6 +66,20 @@ class ProvidersTvFragment : Fragment() {
             findNavController().navigate(R.id.settings)
         }
 
+        // 2026-05-12 : bouton "Changer de profil" symétrique du mobile.
+        // Clear le profil actif + relance ProfilePickerTvActivity en task neuve.
+        binding.btnProvidersProfileSwitch.setOnClickListener {
+            com.streamflixreborn.streamflix.utils.ProfileManager.clearCurrentProfile()
+            val intent = android.content.Intent(
+                requireContext(),
+                com.streamflixreborn.streamflix.activities.profile.ProfilePickerTvActivity::class.java
+            ).addFlags(
+                android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                    android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK
+            )
+            startActivity(intent)
+        }
+
         // 2026-05-05 : Bouton cadenas pour le contrôle parental
         binding.btnProvidersLock.setOnClickListener {
             com.streamflixreborn.streamflix.ui.PinDialog.showAuth(

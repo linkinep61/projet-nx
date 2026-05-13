@@ -77,6 +77,14 @@
             </intent-filter>
         </activity>
 
+        <!-- 2026-05-12 : écran "Qui regarde ?" (Netflix-style) lancé par
+             MainMobileActivity quand aucun profil n'est actif. -->
+        <activity
+            android:name=".activities.profile.ProfilePickerActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize"
+            android:theme="@style/AppTheme.Mobile" />
+
         <activity
             android:name=".activities.tools.QrScannerActivity"
             android:exported="false"

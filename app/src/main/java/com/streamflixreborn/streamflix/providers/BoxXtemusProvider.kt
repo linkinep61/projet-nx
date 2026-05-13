@@ -790,6 +790,50 @@ object BoxXtemusProvider : Provider, IptvProvider {
         }
         val ua = customUa
 
+        // 2026-05-12 (user "observe les logs") : CONSUME PRE-EXTRACT CACHE.
+        // Si src pointe vers un host iframe connu (sharecloudy.com/iframe/...,
+        // vidmoly, voe...) → Extractor.extract a déjà un cache (rempli par
+        // pre-extract en background) ou peut lancer l'extracteur dédié.
+        // C'est BEAUCOUP mieux que notre HTTP resolve qui suit juste les
+        // redirects et chope du HTML d'embed → ExoPlayer PARSING_UNSUPPORTED.
+        // Bug observé : Beast / "De si remarquables créatures" → pre-extract
+        // trouvait le m3u8 en 2-4s, mais BoxXtemus.getVideo le re-résolvait en
+        // HTTP et tombait sur du HTML moovbob.fr → empty src → player figé.
+        val srcLowerPre = src.lowercase()
+        val isIframeEmbed = srcLowerPre.contains("sharecloudy.com/iframe/") ||
+            srcLowerPre.contains("/embed/") ||
+            (srcLowerPre.contains("/iframe/") && !srcLowerPre.contains("c3v9.short.gy") &&
+                !srcLowerPre.contains("html.bet"))
+        val isAlreadyStreamFast = srcLowerPre.substringBefore('?').let {
+            it.contains(".m3u8") || it.contains(".mpd") || it.endsWith(".ts") ||
+                it.endsWith(".mp4") || it.endsWith(".webm")
+        }
+        if (isIframeEmbed && !isAlreadyStreamFast) {
+            try {
+                Log.d(TAG, "Trying Extractor.extract for iframe URL (cache or dedicated extractor): $src")
+                val extracted = com.streamflixreborn.streamflix.extractors.Extractor.extract(src)
+                if (extracted.source.isNotBlank() && extracted.source != src) {
+                    Log.d(TAG, "Extractor.extract success: ${extracted.source.take(160)}")
+                    // Merge with our headers (UA/Referer) to keep anti-bot compat.
+                    val mergedHeaders = mutableMapOf<String, String>().apply {
+                        putAll(extracted.headers ?: emptyMap())
+                        // Only set our custom UA/Referer if extractor didn't already specify.
+                        putIfAbsent("User-Agent", ua)
+                        putIfAbsent("Referer", customReferer)
+                    }
+                    return Video(
+                        source = extracted.source,
+                        type = extracted.type,
+                        subtitles = extracted.subtitles,
+                        headers = mergedHeaders,
+                    )
+                }
+                Log.d(TAG, "Extractor.extract returned empty/same source — falling back to HTTP resolve")
+            } catch (e: Exception) {
+                Log.w(TAG, "Extractor.extract failed for $src: ${e.message} — falling back to HTTP resolve")
+            }
+        }
+
         val resolveClient = okhttp3.OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
@@ -797,9 +841,24 @@ object BoxXtemusProvider : Provider, IptvProvider {
             .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
             .build()
 
+        // 2026-05-12 : SKIP resolve step si src est déjà un stream URL identifié.
+        // L'étape resolve sert à suivre les redirects c3v9 → tvradiozap → real.
+        // Si WebView a déjà extrait un .m3u8/.mpd/.ts → c'est le vrai stream,
+        // ExoPlayer fera le GET lui-même. Inutile de gaspiller 5-10s ici.
+        // Ne s'applique pas au cas RSS feed (LCI live retourne du XML, doit être
+        // resolved + parsed).
+        val srcLowerForSkip = src.lowercase().substringBefore('?')
+        val isAlreadyStream = srcLowerForSkip.contains(".m3u8") ||
+            srcLowerForSkip.contains(".mpd") ||
+            srcLowerForSkip.endsWith(".ts") ||
+            srcLowerForSkip.endsWith(".mp4")
+        if (isAlreadyStream) {
+            Log.d(TAG, "Skip resolve step — src is already a stream URL: ${src.take(120)}")
+        }
+
         // Étape 1+2 : Suivre les redirections HTTP (GET car certains servers
         // ne répondent pas correctement au HEAD).
-        try {
+        if (!isAlreadyStream) try {
             val req = okhttp3.Request.Builder()
                 .url(src)
                 .header("User-Agent", ua)
@@ -811,6 +870,22 @@ object BoxXtemusProvider : Provider, IptvProvider {
             val body = resp.body?.string() ?: ""
             resp.close()
             Log.d(TAG, "Resolved $src → $finalUrl (Content-Type=$contentType, body=${body.length} chars)")
+
+            // 2026-05-12 : DETECTION DECOY HTML → fail fast plutôt que de donner
+            // une URL HTML à ExoPlayer qui se vautrera en UnrecognizedInputFormat
+            // et bouclera 48× en sticky mode pendant 30s.
+            // Cas typique : WebView extraction a foiré, resolve HTTP suit
+            // c3v9 → x0k7rxds.html.bet / 3j4jx9vm.html.bet (page HTML anti-bot).
+            // throw → outer catch swallow le log, mais on remarque src="" après pour
+            // empêcher ExoPlayer de tenter le HTML.
+            val finalHost = try { java.net.URI(finalUrl).host ?: "" } catch (_: Exception) { "" }
+            val isDecoyHtml = contentType.contains("text/html") &&
+                (finalHost.contains("html.bet") || finalHost.contains("pecon.us") ||
+                 finalHost.contains("supportduweb") || finalHost.contains("smotret.tv"))
+            if (isDecoyHtml) {
+                Log.w(TAG, "Resolved to decoy HTML page ($finalHost) — empty src to trigger fallback")
+                throw java.io.IOException("Decoy HTML page: $finalHost")
+            }
 
             // Étape 3 : si la réponse est un RSS feed (cas LCI live), parser pour
             // extraire le stream URL. EXCLUT explicitement DASH (application/dash+xml)
@@ -831,6 +906,24 @@ object BoxXtemusProvider : Provider, IptvProvider {
                 }
             } else {
                 src = finalUrl
+            }
+
+            // 2026-05-12 (user "vidéo qui se lit pas") : GENERIC HTML DETECTION.
+            // Si après resolve la réponse est text/html ET ne contient PAS de
+            // marqueur de stream (DASH MPD, HLS playlist, RSS feed), c'est une
+            // page d'embed (frembed.one/embed/...) qu'on ne sait pas extraire.
+            // Mieux vaut empty src → "No source found" → fallback rapide que
+            // de laisser ExoPlayer se vautrer sur le HTML pendant 30s.
+            // Bug observé : Remarkably Bright Creatures (BoxXtemus) → frembed.one
+            // retourne 56K de HTML, ExoPlayer crash en UnrecognizedInputFormatException
+            // en boucle 33+ fois (cf hard cap PlayerTvFragment 2026-05-12).
+            val srcLooksLikeStream = src.lowercase().substringBefore('?').let { s ->
+                s.contains(".m3u8") || s.contains(".mpd") || s.endsWith(".ts") ||
+                    s.endsWith(".mp4") || s.endsWith(".webm")
+            }
+            if (!srcLooksLikeStream && contentType.contains("text/html") && !isRss && !isDashOrHls) {
+                Log.w(TAG, "Resolved to generic HTML page ($finalHost, ${body.length} chars) — not a stream, empty src to trigger fallback")
+                src = ""
             }
 
             // Étape 4 : certains URLs (France TV/Info via ftven.fr) sont des endpoints
@@ -860,6 +953,22 @@ object BoxXtemusProvider : Provider, IptvProvider {
             }
         } catch (e: Exception) {
             Log.w(TAG, "Could not resolve stream for $src: ${e.message}")
+            // 2026-05-12 : si l'erreur indique decoy HTML page, on force src empty
+            // pour que PlayerViewModel.getVideo throw "No source found" → fallback
+            // au prochain server au lieu de boucler ExoPlayer sur l'HTML.
+            if (e.message?.contains("Decoy HTML page") == true) {
+                src = ""
+            }
+        }
+
+        // 2026-05-12 : final sanity check — si src est resté sur une URL anti-bot
+        // (cas où WebView extraction + resolve ont échoué et qu'on n'a pas pu
+        // détecter avant), on force empty pour éviter le loop ExoPlayer.
+        if (src.contains("html.bet") || src.contains("c3v9.short.gy/me/") ||
+            src.contains("pecon.us") || src.contains("supportduweb") ||
+            src.contains("smotret.tv")) {
+            Log.w(TAG, "Final src is decoy/unresolved ($src) — empty to trigger fallback")
+            src = ""
         }
 
         val srcLower = src.lowercase().substringBefore('?')

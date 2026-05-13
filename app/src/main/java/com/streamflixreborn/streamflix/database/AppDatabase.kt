@@ -13,9 +13,12 @@ import com.streamflixreborn.streamflix.database.dao.SeasonDao
 import com.streamflixreborn.streamflix.database.dao.TvShowDao
 import com.streamflixreborn.streamflix.models.Episode
 import com.streamflixreborn.streamflix.models.Movie
+import com.streamflixreborn.streamflix.models.Profile
 import com.streamflixreborn.streamflix.models.Season
 import com.streamflixreborn.streamflix.models.TvShow
+import com.streamflixreborn.streamflix.utils.ProfileManager
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import java.io.File
 
 @Database(
     entities = [
@@ -44,9 +47,11 @@ abstract class AppDatabase : RoomDatabase() {
         private var INSTANCE: AppDatabase? = null
         @Volatile
         private var currentProviderName: String? = null
+        @Volatile
+        private var currentProfileId: String? = null
 
         private fun sanitizeProviderName(name: String): String {
-            // Rimuove caratteri non validi per i nomi dei file DB, 
+            // Rimuove caratteri non validi per i nomi dei file DB,
             // come spazi, parentesi, e li converte in lowercase.
             return name.lowercase()
                 .replace("[^a-z0-9]".toRegex(), "_")
@@ -54,7 +59,25 @@ abstract class AppDatabase : RoomDatabase() {
                 .trim('_') // Rimuove underscore iniziale/finale
         }
 
+        /** 2026-05-12 : nom de fichier DB inclut maintenant le profileId pour
+         *  isoler les favoris/historique entre profils. Format :
+         *    `{profileId}_{providerName}.db`
+         *  Le profil "default" (créé à la 1re ouverture) hérite des DBs
+         *  existantes via [migrateLegacyDbFilesIfNeeded]. */
+        private fun buildDbFileName(profileId: String, providerName: String): String {
+            val safeProfile = profileId.lowercase().replace("[^a-z0-9_]".toRegex(), "_")
+            return "${safeProfile}_${sanitizeProviderName(providerName)}.db"
+        }
+
         fun setup(context: Context) {
+            // 2026-05-12 : à la 1re ouverture après update multi-profil, on
+            // renomme les anciens fichiers DB `{provider}.db` → `default_{provider}.db`
+            // pour préserver favoris/historique existants sans perte.
+            try {
+                migrateLegacyDbFilesIfNeeded(context)
+            } catch (e: Exception) {
+                android.util.Log.w("AppDatabase", "Legacy DB migration failed (non-fatal): ${e.message}")
+            }
             if (UserPreferences.currentProvider == null) return
 
             getInstance(context)
@@ -64,37 +87,85 @@ abstract class AppDatabase : RoomDatabase() {
             val providerName = UserPreferences.currentProvider?.name
                 ?: currentProviderName
                 ?: throw IllegalStateException("Current provider is not set")
+            val profileId = ProfileManager.currentProfileIdOrDefault()
 
-            return INSTANCE?.takeIf { currentProviderName == providerName } ?: synchronized(this) {
-                INSTANCE?.takeIf { currentProviderName == providerName } ?: run {
+            return INSTANCE?.takeIf {
+                currentProviderName == providerName && currentProfileId == profileId
+            } ?: synchronized(this) {
+                INSTANCE?.takeIf {
+                    currentProviderName == providerName && currentProfileId == profileId
+                } ?: run {
                     INSTANCE?.close()
-                    buildDatabase(providerName, context).also { instance ->
+                    buildDatabase(profileId, providerName, context).also { instance ->
                         INSTANCE = instance
                         currentProviderName = providerName
+                        currentProfileId = profileId
                     }
                 }
             }
         }
 
-        // Metodo per forzare il cambio di database quando cambia il provider
+        // Metodo per forzare il cambio di database quando cambia il provider OU profil
         fun resetInstance() {
             synchronized(this) {
                 INSTANCE?.close()
                 INSTANCE = null
                 currentProviderName = null
+                currentProfileId = null
             }
         }
 
         fun getInstanceForProvider(providerName: String, context: Context): AppDatabase {
-            return buildDatabase(providerName, context)
+            val profileId = ProfileManager.currentProfileIdOrDefault()
+            return buildDatabase(profileId, providerName, context)
         }
 
-        private fun buildDatabase(providerName: String, context: Context): AppDatabase {
-            val sanitizedName = sanitizeProviderName(providerName)
+        /** Renomme les anciens DBs `{provider}.db` → `default_{provider}.db`
+         *  pour qu'ils soient utilisés par le profil "default" auto-créé.
+         *  Idempotent : si déjà migré, no-op. */
+        private fun migrateLegacyDbFilesIfNeeded(context: Context) {
+            val dbDir = context.getDatabasePath("dummy").parentFile ?: return
+            if (!dbDir.exists()) return
+            val files = dbDir.listFiles() ?: return
+            files.forEach { f ->
+                val name = f.name
+                if (!name.endsWith(".db")) return@forEach
+                // Anciens fichiers : `{provider}.db` (ex: cloudstream.db, frenchstream.db).
+                // Nouveaux fichiers : `default_{provider}.db` (ou `{profileId}_...`).
+                // Si le nom commence par un underscore après un préfixe court, c'est
+                // probablement déjà préfixé. On regarde si "_db" pattern existant.
+                if (name.startsWith("${Profile.DEFAULT_ID}_") ||
+                    name.startsWith("p_") ||  // nouveau format profile ID
+                    name.contains("-journal") ||
+                    name.contains("-shm") ||
+                    name.contains("-wal")
+                ) return@forEach
+                // SKIP : c'est un ancien DB, le renommer.
+                val newName = "${Profile.DEFAULT_ID}_$name"
+                val target = File(dbDir, newName)
+                if (target.exists()) return@forEach  // Déjà migré ?
+                try {
+                    val ok = f.renameTo(target)
+                    // Rename aussi les fichiers WAL/SHM/journal associés s'ils existent.
+                    listOf("-journal", "-shm", "-wal").forEach { suffix ->
+                        val side = File(dbDir, "$name$suffix")
+                        if (side.exists()) {
+                            side.renameTo(File(dbDir, "$newName$suffix"))
+                        }
+                    }
+                    android.util.Log.d("AppDatabase", "Legacy DB migration: $name → $newName (ok=$ok)")
+                } catch (e: Exception) {
+                    android.util.Log.w("AppDatabase", "Failed to rename legacy DB $name: ${e.message}")
+                }
+            }
+        }
+
+        private fun buildDatabase(profileId: String, providerName: String, context: Context): AppDatabase {
+            val dbFileName = buildDbFileName(profileId, providerName)
             return Room.databaseBuilder(
                 context = context.applicationContext,
                 klass = AppDatabase::class.java,
-                name = "$sanitizedName.db"
+                name = dbFileName
             )
                 .allowMainThreadQueries()
                 .addMigrations(MIGRATION_1_2)

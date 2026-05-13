@@ -71,6 +71,22 @@ class ProvidersMobileFragment : Fragment() {
             findNavController().navigate(R.id.settings)
         }
 
+        // 2026-05-12 (user "ajoutes un bouton à côté de settings pour
+        // retourner sur ce fameux changement de profil") : raccourci vers
+        // l'écran "Qui regarde ?" depuis n'importe où dans la home des
+        // providers. Clear le profil actif + relance ProfilePickerActivity.
+        binding.ivProfileSwitch.setOnClickListener {
+            com.streamflixreborn.streamflix.utils.ProfileManager.clearCurrentProfile()
+            val intent = android.content.Intent(
+                requireContext(),
+                com.streamflixreborn.streamflix.activities.profile.ProfilePickerActivity::class.java
+            ).addFlags(
+                android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                    android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK
+            )
+            startActivity(intent)
+        }
+
         // 2026-05-05 : contrôle parental — bouton cadenas
         binding.ivParentalLock.setOnClickListener {
             com.streamflixreborn.streamflix.ui.PinDialog.showAuth(

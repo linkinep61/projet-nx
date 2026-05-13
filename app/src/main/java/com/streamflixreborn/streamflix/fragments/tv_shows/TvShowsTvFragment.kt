@@ -162,6 +162,8 @@ class TvShowsTvFragment : Fragment() {
                     MiniPlayerController.transitioningToFullscreen = true
                     if (_binding != null) { binding.miniPlayerView.player = null }
                     false
+                } else if (tvShow.id.startsWith("bxt::")) {
+                    false
                 } else {
                     Log.d("TvShowsTv", "Mini player intercept (onResume): ${tvShow.title}")
                     MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
@@ -309,6 +311,8 @@ class TvShowsTvFragment : Fragment() {
                 Log.d("TvShowsTv", "Same channel, flagging for transfer: ${tvShow.title}")
                 MiniPlayerController.transitioningToFullscreen = true
                 if (_binding != null) { binding.miniPlayerView.player = null }
+                false
+            } else if (tvShow.id.startsWith("bxt::")) {
                 false
             } else {
                 Log.d("TvShowsTv", "Mini player intercept: ${tvShow.title} (${tvShow.id})")

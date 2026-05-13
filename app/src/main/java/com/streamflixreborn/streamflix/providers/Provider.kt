@@ -133,7 +133,9 @@ interface Provider {
             // 2026-05-11 : 3BoxTV — backup IPTV agrégateur (Google Sheets TSV).
             // Parser TSV heuristique + logging debug actif. Logo nettoyé.
             // Si le parser cale sur certaines catégories, on calibrera via les logs.
-            BoxXtemusProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
+            // 2026-05-12 : DÉSACTIVÉ (demande user). Le fichier BoxXtemusProvider.kt
+            // reste en place — pour réactiver, dé-commenter la ligne ci-dessous.
+            // BoxXtemusProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             // 2026-05-10 : SportLiveProvider supprimé (demande user). Le
             // fichier .kt physique a été retiré. Pour les chaînes sport, le
             // user passe directement par WiTV/Vegeta/Vavoo qui les listent.

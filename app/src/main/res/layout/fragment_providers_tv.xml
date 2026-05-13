@@ -91,6 +91,25 @@
         app:layout_constraintTop_toTopOf="@id/tv_providers_label"
         tools:ignore="UseAppTint" />
 
+    <!-- 2026-05-12 : Bouton "Changer de profil" — à droite du bouton Paramètres.
+         Permet de revenir à l'écran "Qui regarde ?" sans cold start. -->
+    <ImageView
+        android:id="@+id/btn_providers_profile_switch"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_marginStart="8dp"
+        android:padding="10dp"
+        android:src="@drawable/ic_person_placeholder"
+        android:tint="#FFFFFF"
+        android:focusable="true"
+        android:focusableInTouchMode="false"
+        android:contentDescription="Changer de profil"
+        android:background="@drawable/bg_tv_button_focus"
+        app:layout_constraintBottom_toBottomOf="@id/tv_providers_label"
+        app:layout_constraintStart_toEndOf="@id/btn_providers_settings"
+        app:layout_constraintTop_toTopOf="@id/tv_providers_label"
+        tools:ignore="UseAppTint" />
+
     <!-- 2026-05-05 : Bouton cadenas pour le contrôle parental.
          Au clic → demande PIN (setup le 1er fois, vérification ensuite) → ouvre
          dialog de gestion des providers verrouillés. -->

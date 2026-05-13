@@ -41,8 +41,8 @@ android {
         applicationId "com.streamfr.app"
         minSdk 21
         targetSdk 35
-        versionCode 10884
-        versionName "1.7.184"
+        versionCode 10885
+        versionName "1.7.185"
 
         // 2026-05-11 : RESTAURATION x86 (32-bit) — abandonné en v19 par erreur.
         // Certains émulateurs (Genymotion, AVD images anciennes) et surtout les

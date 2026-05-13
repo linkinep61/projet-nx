@@ -95,6 +95,8 @@ class IptvFavoritesMobileFragment : Fragment() {
                     if (tvShow.id == MiniPlayerController.currentChannelId) {
                         MiniPlayerController.stopAsync()
                         false
+                    } else if (tvShow.id.startsWith("bxt::")) {
+                        false
                     } else {
                         MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
                         true
@@ -182,6 +184,8 @@ class IptvFavoritesMobileFragment : Fragment() {
         MiniPlayerController.onIptvChannelClick = { tvShow ->
             if (tvShow.id == MiniPlayerController.currentChannelId) {
                 MiniPlayerController.stopAsync()
+                false
+            } else if (tvShow.id.startsWith("bxt::")) {
                 false
             } else {
                 Log.d(TAG, "Mini player intercept (favorites): ${tvShow.title} (${tvShow.id})")
