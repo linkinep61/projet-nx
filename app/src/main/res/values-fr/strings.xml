@@ -30,7 +30,7 @@
 
     <string name="main_menu_change_provider">Changer de fournisseur</string>
     <string name="main_menu_search">Rechercher</string>
-    <string name="main_menu_home">Accueil</string>
+    <string name="main_menu_home">TV</string>
     <string name="main_menu_movies">Films</string>
     <string name="main_menu_tv_shows">Séries TV</string>
     <string name="main_menu_all_channels">Toutes les chaînes</string>

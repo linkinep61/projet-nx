@@ -10,8 +10,23 @@
 
     <item
         android:id="@id/home"
-        android:icon="@drawable/ic_menu_home"
+        android:icon="@drawable/ic_menu_tv"
         android:title="@string/main_menu_home" />
+
+    <!-- 2026-05-12 (user "il faudrait faire un bouton pour elle [la slide bar]") :
+         bouton dédié qui ouvre le picker de catégories. Visible uniquement pour
+         Mon IPTV (géré en code dans updateNavigationVisibility). -->
+    <item
+        android:id="@+id/iptv_categories"
+        android:icon="@drawable/ic_menu_search"
+        android:title="Catégories" />
+
+    <!-- 2026-05-12 (user "un bouton pour retourner aux sources") : bouton vers
+         IptvSourcesActivity. Visible uniquement pour Mon IPTV. -->
+    <item
+        android:id="@+id/iptv_sources"
+        android:icon="@drawable/ic_menu_iptv_sources"
+        android:title="Mes sources" />
 
     <item
         android:id="@id/movies"
@@ -20,7 +35,7 @@
 
     <item
         android:id="@id/tv_shows"
-        android:icon="@drawable/ic_menu_tv"
+        android:icon="@drawable/ic_menu_series"
         android:title="@string/main_menu_tv_shows" />
 
     <item

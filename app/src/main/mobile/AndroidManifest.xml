@@ -85,6 +85,12 @@
             android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize"
             android:theme="@style/AppTheme.Mobile" />
 
+        <!-- 2026-05-12 : gestion sources IPTV custom (MyIptvProvider). -->
+        <activity
+            android:name=".activities.iptv.IptvSourcesActivity"
+            android:exported="false"
+            android:theme="@style/AppTheme.Mobile" />
+
         <activity
             android:name=".activities.tools.QrScannerActivity"
             android:exported="false"

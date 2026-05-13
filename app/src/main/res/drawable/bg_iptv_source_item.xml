@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  2026-05-12 (user "les layouts ne sont pas accessibles avec la télécommande sur TV") :
+  selector avec focus visible pour les items de la liste des sources IPTV.
+  Bleu lumineux quand focused (D-pad), gris foncé sinon.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#4A90E2" />
+            <stroke android:width="3dp" android:color="#FFFFFF" />
+            <corners android:radius="12dp" />
+        </shape>
+    </item>
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#3A6BAA" />
+            <corners android:radius="12dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#252525" />
+            <corners android:radius="12dp" />
+        </shape>
+    </item>
+</selector>

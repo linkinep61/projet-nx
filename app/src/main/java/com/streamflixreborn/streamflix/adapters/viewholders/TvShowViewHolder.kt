@@ -204,6 +204,7 @@ class TvShowViewHolder(
             || tvShow.providerName == "Movix LiveTV"
             || tvShow.providerName == "TV Hub"
             || tvShow.providerName == "3BoxTV"
+            || tvShow.providerName == "Mon IPTV"
             || tvShow.id.startsWith("ch::")
             || tvShow.id.startsWith("sport::")
             || tvShow.id.startsWith("ola::")
@@ -216,6 +217,7 @@ class TvShowViewHolder(
             || tvShow.id.startsWith("movixlivetv::")
             || tvShow.id.startsWith("livehub::")
             || tvShow.id.startsWith("bxt::")
+            || tvShow.id.startsWith("myiptv-live::")
     }
 
     private fun checkProviderAndRun(action: () -> Unit) {

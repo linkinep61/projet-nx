@@ -465,7 +465,9 @@ class PlayerMobileFragment : Fragment() {
                 args.id.startsWith("movixlivetv::") ||
                 args.id.startsWith("livehub::") ||
                 args.id.startsWith("sportlive::") ||
-                args.id.startsWith("match::")
+                args.id.startsWith("match::") ||
+                args.id.startsWith("myiptv-live::") ||
+                args.id.startsWith("myiptv::")
             com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsView
                 .Settings.Server.currentIptvChannelKey =
                 if (isIptvCtx) args.id else null

@@ -76,6 +76,16 @@ class HomeTvFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // 2026-05-12 (user "des retours tout le temps") : si on est restauré
+        // sans provider sélectionné, on évite de toucher au viewModel (qui
+        // crashe à AppDatabase.getInstance). Naviguer vers providers screen.
+        if (UserPreferences.currentProvider == null) {
+            try {
+                androidx.navigation.fragment.NavHostFragment.findNavController(this).navigate(R.id.providers)
+            } catch (_: Throwable) {}
+            return
+        }
+
         initializeHome()
         initializeMiniPlayer()
 

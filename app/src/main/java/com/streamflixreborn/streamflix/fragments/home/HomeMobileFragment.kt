@@ -426,7 +426,28 @@ class HomeMobileFragment : Fragment() {
         binding.ivDownloads.setOnClickListener {
             findNavController().navigate(R.id.downloads)
         }
-        
+
+        // 2026-05-12 (user "mets un bouton retour pour retourner au menu
+        // des sources M3U IPTV") : sur Mon IPTV provider, le clic sur le
+        // logo provider en haut ouvre IptvSourcesActivity (= tableau des
+        // sources) au lieu de retourner au picker des providers. Ça permet
+        // de changer de source sans repasser par tout le menu.
+        if (com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+            is com.streamflixreborn.streamflix.providers.MyIptvProvider
+        ) {
+            binding.ivProviderLogo.setOnClickListener {
+                startActivity(
+                    android.content.Intent(
+                        requireContext(),
+                        com.streamflixreborn.streamflix.activities.iptv.IptvSourcesActivity::class.java,
+                    )
+                )
+            }
+            // Hint visuel : le logo devient "cliquable" avec ripple
+            binding.ivProviderLogo.isClickable = true
+            binding.ivProviderLogo.isFocusable = true
+        }
+
         // Hide background ImageView on mobile — wallpaper is at activity level
         binding.ivHomeBackground.visibility = View.GONE
     }
