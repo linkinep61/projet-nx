@@ -46,26 +46,18 @@ class ProviderViewHolder(
         if (provider.provider is com.streamflixreborn.streamflix.providers.MyIptvProvider) {
             MiniPlayerController.stop()
             UserPreferences.currentProvider = provider.provider
-            // 2026-05-12 (user "une fois préchargées vous ferez être capable de pouvoir
-            // aller directement à l'accueil TV") : si on a déjà chargé une source ET
-            // qu'un cache disque existe → saute IptvSourcesActivity, direct à MainActivity.
+            // 2026-05-13 (user "enlève cet écran on la met dans les paramètres") :
+            // le clic sur Mon IPTV va TOUJOURS direct à la home — pas d'IptvSourcesActivity
+            // intermédiaire. La gestion des sources est dans Paramètres → Paramètres
+            // du fournisseur → Mon IPTV.
             context.toActivity()?.apply {
-                val prefs = getSharedPreferences("iptv_last_source", android.content.Context.MODE_PRIVATE)
-                val lastSourceId = prefs.getString("last_id", null)
-                val lastSource = lastSourceId?.let {
-                    com.streamflixreborn.streamflix.utils.IptvSourceStore.getById(it)
-                }
-                val hasDiskCache = lastSource != null && java.io.File(
-                    cacheDir, "iptv/${lastSource.id}.tsv",
-                ).exists()
-                val target = if (hasDiskCache) {
-                    val isTv = com.streamflixreborn.streamflix.BuildConfig.APP_LAYOUT == "tv" ||
-                        (com.streamflixreborn.streamflix.BuildConfig.APP_LAYOUT != "mobile" &&
-                            packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK))
-                    if (isTv) com.streamflixreborn.streamflix.activities.main.MainTvActivity::class.java
-                    else com.streamflixreborn.streamflix.activities.main.MainMobileActivity::class.java
+                val isTv = com.streamflixreborn.streamflix.BuildConfig.APP_LAYOUT == "tv" ||
+                    (com.streamflixreborn.streamflix.BuildConfig.APP_LAYOUT != "mobile" &&
+                        packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK))
+                val target = if (isTv) {
+                    com.streamflixreborn.streamflix.activities.main.MainTvActivity::class.java
                 } else {
-                    com.streamflixreborn.streamflix.activities.iptv.IptvSourcesActivity::class.java
+                    com.streamflixreborn.streamflix.activities.main.MainMobileActivity::class.java
                 }
                 startActivity(Intent(this, target))
             }

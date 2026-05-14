@@ -243,9 +243,69 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         updateOverviewLabels()
         updateProviderVisibilityState()
 
-        // 2026-05-12 : la section "Mes sources IPTV" a été retirée des Paramètres —
-        // elle est désormais accessible via le bouton dédié "Mes sources" dans la
-        // sidebar de Mon IPTV. Évite la duplication du menu Paramètres.
+        // 2026-05-13 (user "mieux d'aller dans paramètres > fournisseur et mettre
+        // les sources IPTV dedans, voir en ajouter directement d'ici") : section
+        // Mon IPTV intégrée dans Paramètres du fournisseur. Visible uniquement
+        // quand current provider est MyIptvProvider.
+        val isMyIptv = UserPreferences.currentProvider is com.streamflixreborn.streamflix.providers.MyIptvProvider
+        findPreference<androidx.preference.PreferenceCategory>("pc_my_iptv")?.isVisible = isMyIptv
+        findPreference<Preference>("pref_iptv_manage_sources")?.setOnPreferenceClickListener {
+            startActivity(android.content.Intent(
+                requireContext(),
+                com.streamflixreborn.streamflix.activities.iptv.IptvSourcesActivity::class.java,
+            ))
+            true
+        }
+        findPreference<Preference>("pref_iptv_add_source")?.setOnPreferenceClickListener {
+            startActivity(android.content.Intent(
+                requireContext(),
+                com.streamflixreborn.streamflix.activities.iptv.IptvSourcesActivity::class.java,
+            ).apply {
+                putExtra("auto_add_source", true)
+            })
+            true
+        }
+        // 2026-05-13 (user "Home provider n'est toujours pas accessible") :
+        // bouton retour au home depuis les paramètres TV. Navigation via le
+        // NavController du fragment-host.
+        findPreference<Preference>("pref_back_to_home")?.setOnPreferenceClickListener {
+            val provider = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+            if (provider == null) {
+                Toast.makeText(requireContext(), "Aucun fournisseur sélectionné", Toast.LENGTH_SHORT).show()
+            } else try {
+                androidx.navigation.fragment.NavHostFragment.findNavController(this)
+                    .navigate(R.id.home)
+            } catch (_: Throwable) {
+                Toast.makeText(requireContext(), "Impossible de revenir au home", Toast.LENGTH_SHORT).show()
+            }
+            true
+        }
+        findPreference<Preference>("pref_iptv_clear_cache")?.setOnPreferenceClickListener {
+            // 2026-05-13 : invalide les 3 niveaux pour vrai refresh complet
+            com.streamflixreborn.streamflix.providers.MyIptvProvider.invalidateCache()
+            com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                requireContext(), com.streamflixreborn.streamflix.providers.MyIptvProvider,
+            )
+            Toast.makeText(requireContext(), "Cache IPTV vidé — re-téléchargement au prochain clic", Toast.LENGTH_LONG).show()
+            true
+        }
+
+        // 2026-05-13 (user "ça serait bien comme ça on peut avoir vraiment tout
+        // le contenu") : préférence filtre langue — invalide HomeCacheStore +
+        // reset filtres catégorie pour application immédiate.
+        findPreference<androidx.preference.ListPreference>("pref_iptv_language_filter")?.apply {
+            setOnPreferenceChangeListener { _, _ ->
+                val provider = com.streamflixreborn.streamflix.providers.MyIptvProvider
+                provider.selectedCategoryLive = null
+                provider.selectedCategoryMovie = null
+                provider.selectedCategorySeries = null
+                com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                    requireContext(), provider,
+                )
+                com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                true
+            }
+        }
 
         findPreference<EditTextPreference>("provider_streamingcommunity_domain")?.apply {
             val currentValue = UserPreferences.streamingcommunityDomain

@@ -24,8 +24,17 @@ object IptvClassifier {
     private val VOD_EXTENSIONS = setOf("mp4", "mkv", "avi", "mov", "wmv", "webm")
 
     private val LIVE_KEYWORDS = setOf("live", "tv ", "iptv", "channels", "chaînes", "chaine", "channel")
-    private val MOVIE_KEYWORDS = setOf("film", "movie", "vod ", "cinéma", "cinema", " hd ", "1080p", "4k")
-    private val SERIES_KEYWORDS = setOf("serie", "série", "show ", " show", "séries", "series", "saison", "season")
+    // 2026-05-13 (user "PTV se trompé dans la catégorie films et séries — c'est
+    // des chaînes qu'il a mis fillme") : retiré "1080p", "4k", " hd " des
+    // MOVIE_KEYWORDS. Ce sont des marqueurs de QUALITÉ, pas de type. Beaucoup
+    // de chaînes live (ARABE 4K, FRANCE 4K, BEIN SPORT 4K…) avaient leur group
+    // taggé "4K" et étaient donc mal classifiées comme films.
+    private val MOVIE_KEYWORDS = setOf("film", "movie", "vod ", "cinéma", "cinema")
+    // 2026-05-13 : élargi les SERIES_KEYWORDS pour mieux détecter les bouquets
+    // de séries — ajout de "tv shows", "shows", "séries tv", "drama", "novela"
+    // (telenovela). "show " seul est trop large (chaîne "show TV") → on garde
+    // mais via les patterns plus stricts.
+    private val SERIES_KEYWORDS = setOf("serie", "série", "séries", "series", "saison", "season", "tv shows", "tv show", "drama ", "novela", "telenovela")
 
     /** Pattern SXXEXX ou 1x05 ou "Episode X" — indique une série épisode. */
     private val SERIES_PATTERN = Regex(

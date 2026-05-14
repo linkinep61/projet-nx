@@ -4,6 +4,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.View
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
@@ -45,8 +46,84 @@ class MainTvActivity : FragmentActivity() {
      *  - Si controls cachés → show + focus sur SETTINGS (bouton "fictif" neutre,
      *    OK suivant ouvre les paramètres, pas pause).
      *  - Si controls visibles → comportement natif (D-pad vers play/pause +
-     *    OK pause comme attendu, OK sur settings ouvre settings, etc.). */
+     *    OK pause comme attendu, OK sur settings ouvre settings, etc.).
+     *
+     *  2026-05-13 (user "quand je fais gauche je peux pas aller directement sur
+     *  mon iptv TV et quand je fais haut ça fait rien") : intercept DPAD_LEFT
+     *  et DPAD_UP au niveau Activity quand le focus est sur une tile dans
+     *  hgv_category. La résolution `nextFocusLeft/Up` du XML ne s'applique
+     *  qu'au container, pas aux ViewHolders enfants → on force ici.
+     *  - LEFT depuis tile → focus sur le menu courant de la sidebar
+     *  - UP depuis tile → focus sur iv_iptv_categories si visible (Mon IPTV) */
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        // === LEFT/UP override pour Mon IPTV (ou tout provider) sur les tiles ===
+        if (event.action == android.view.KeyEvent.ACTION_DOWN && (
+            event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT ||
+            event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP)) {
+            try {
+                val focused = currentFocus
+                if (focused != null) {
+                    // Détecte si on est dans une tile (descendant de hgv_category)
+                    var ancestor: android.view.ViewParent? = focused.parent
+                    var insideHgv = false
+                    var insideTabFR = false
+                    while (ancestor != null) {
+                        if (ancestor is View && ancestor.id == R.id.hgv_category) {
+                            insideHgv = true
+                            break
+                        }
+                        // Don't intercept if we're already on the language tabs
+                        if (ancestor is View && (
+                            ancestor.id == R.id.tab_fr || ancestor.id == R.id.tab_vostfr ||
+                            ancestor.id == R.id.tab_language)) {
+                            insideTabFR = true
+                            break
+                        }
+                        ancestor = ancestor.parent
+                    }
+                    if (insideHgv && !insideTabFR) {
+                        if (event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT) {
+                            // LEFT → focus sur sidebar SI on est sur la 1ère tile.
+                            // 2026-05-13 (user "tu as fait la même chose pour
+                            // série et fin et home tu arrives pas") : la
+                            // détection RecyclerView doit walker la chaîne de
+                            // parents — sur Home la hiérarchie est plus
+                            // profonde (vgv_home > row > hgv_category > tile
+                            // wrapper > tile content). On remonte jusqu'à
+                            // trouver un RecyclerView et on demande la position.
+                            var node: android.view.View = focused
+                            var rv: androidx.recyclerview.widget.RecyclerView? = null
+                            var rvChild: android.view.View = focused
+                            for (lvl in 0..6) {
+                                val p = node.parent ?: break
+                                if (p is androidx.recyclerview.widget.RecyclerView) {
+                                    rv = p
+                                    rvChild = node
+                                    break
+                                }
+                                if (p is android.view.View) node = p else break
+                            }
+                            val pos = rv?.getChildAdapterPosition(rvChild) ?: -1
+                            if (pos == 0) {
+                                val ids = listOf(R.id.home, R.id.movies, R.id.tv_shows, R.id.iptv_favorites, R.id.search)
+                                for (id in ids) {
+                                    val target = binding.navMain.findViewById<View>(id)
+                                    if (target != null && target.isShown && target.requestFocus()) return true
+                                }
+                            }
+                        } else if (event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP) {
+                            // UP depuis tile → focus sur iv_iptv_categories si visible
+                            val ivCat = (currentFocus?.rootView as? View)
+                                ?.findViewById<View>(R.id.iv_iptv_categories)
+                            if (ivCat != null && ivCat.isShown && ivCat.visibility == View.VISIBLE) {
+                                if (ivCat.requestFocus()) return true
+                            }
+                        }
+                    }
+                }
+            } catch (_: Throwable) {}
+        }
+
         if (event.action == android.view.KeyEvent.ACTION_DOWN &&
             (event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
              event.keyCode == android.view.KeyEvent.KEYCODE_ENTER)) {
@@ -212,24 +289,39 @@ class MainTvActivity : FragmentActivity() {
 
         // 2026-05-12 (user "faire un bouton dédié") : item Catégories dans la sidebar.
         // Clic → ouvre AlertDialog avec catégories du fragment courant (LIVE/MOVIE/SERIES).
+        // 2026-05-13 (user "ça éviterait d'avoir des icônes partout") : items
+        // iptv_categories/iptv_sources retirés du menu. Le picker s'ouvre auto
+        // au clic sur TV/Films/Séries pour Mon IPTV.
         binding.navMain.setOnItemSelectedListener { menuItem ->
+            // 2026-05-13 (user "non dans la bar de gauche y a la place") :
+            // intercepte les 2 items IPTV (catégories + filtre langue) AVANT
+            // NavigationUI — ils n'ont pas de destination, juste un dialog à
+            // ouvrir.
             when (menuItem.itemId) {
-                R.id.iptv_categories -> {
+                R.id.iptv_categories_menu -> {
+                    // 2026-05-13 (user "et ça s'active que le 2e clic" +
+                    // wrong categories shown) : utilise la destination COURANTE
+                    // pour choisir le bon type de catégories (LIVE/MOVIE/SERIES).
                     val currentDestId = navController.currentDestination?.id ?: R.id.home
-                    showIptvCategoryPicker(currentDestId)
+                    val pickerType = when (currentDestId) {
+                        R.id.movies -> R.id.movies
+                        R.id.tv_shows -> R.id.tv_shows
+                        else -> R.id.home
+                    }
+                    showIptvCategoryPickerPublic(pickerType)
                     return@setOnItemSelectedListener false
                 }
-                R.id.iptv_sources -> {
-                    startActivity(android.content.Intent(
-                        this,
-                        com.streamflixreborn.streamflix.activities.iptv.IptvSourcesActivity::class.java,
-                    ))
+                R.id.iptv_language_menu -> {
+                    val provider = UserPreferences.currentProvider
+                    Log.d("MainTv", "iptv_language_menu clicked, provider=${provider?.name}, isVavoo=${provider is com.streamflixreborn.streamflix.providers.VavooProvider}")
+                    if (provider is com.streamflixreborn.streamflix.providers.VavooProvider) {
+                        showVavooCountryPicker()
+                    } else {
+                        showIptvLanguageFilterPicker()
+                    }
                     return@setOnItemSelectedListener false
                 }
             }
-            // 2026-05-12 (user "le bouton accueil TV ne sert à rien, seules les
-            // catégories l'alimentent") : pour Mon IPTV, clic sur TV/Films/Séries
-            // ouvre directement le picker au lieu de juste naviguer.
             val handled = androidx.navigation.ui.NavigationUI.onNavDestinationSelected(menuItem, navController)
             val provider = UserPreferences.currentProvider
             if (handled && provider is com.streamflixreborn.streamflix.providers.MyIptvProvider &&
@@ -275,8 +367,21 @@ class MainTvActivity : FragmentActivity() {
                 }
 
                 setOnClickListener {
-                    // Navigazione manuale per evitare dipendenza da Safe Args Directions non generate
-                    navController.navigate(R.id.providers)
+                    // 2026-05-13 (user "tu as vu du bouton paramètre on peut pas
+                    // retourner sur le home en haut") : click intelligent —
+                    // depuis settings/movies/tv_shows/favoris → ramène au Home
+                    // (raccourci utile sur Mon IPTV). Depuis le Home → providers
+                    // picker (comportement original). Navigazione manuale per
+                    // evitare dipendenza da Safe Args Directions non generate.
+                    val currentId = navController.currentDestination?.id
+                    val targetId = if (currentId == R.id.home || UserPreferences.currentProvider == null) {
+                        R.id.providers
+                    } else {
+                        R.id.home
+                    }
+                    try { navController.navigate(targetId) } catch (_: Throwable) {
+                        navController.navigate(R.id.providers)
+                    }
                 }
                 // 2026-05-12 (user "il faut une touche pour retourner au menu changement
                 // de source") : long-press sur le header → ouvre directement le tableau
@@ -388,6 +493,48 @@ class MainTvActivity : FragmentActivity() {
         }
     }
     
+    /** 2026-05-13 (user "il faut que tu fasses la même chose pour la TV") :
+     *  exposé en public pour que HomeTvFragment puisse l'appeler depuis ses
+     *  boutons IPTV top-left. */
+    fun showIptvCategoryPickerPublic(menuItemId: Int) = showIptvCategoryPicker(menuItemId)
+
+    /** 2026-05-13 : picker rapide du filtre langue (Auto / Toutes / FR strict).
+     *  Modifie le pref `pref_iptv_language_filter`, reset les filtres catégorie,
+     *  invalide HomeCacheStore et notifie le viewModel pour rafraîchir le home. */
+    fun showIptvLanguageFilterPicker() {
+        val provider = com.streamflixreborn.streamflix.providers.MyIptvProvider
+        val options = arrayOf(
+            "Auto (recommandé)" to "auto",
+            "Toutes les langues" to "all",
+            "Français uniquement" to "fr",
+        )
+        val current = provider.getLanguageFilterMode()
+        val currentIdx = options.indexOfFirst { it.second == current }.coerceAtLeast(0)
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Filtrer par langue")
+            .setSingleChoiceItems(options.map { it.first }.toTypedArray(), currentIdx) { dlg, idx ->
+                val newMode = options[idx].second
+                if (newMode != current) {
+                    provider.setLanguageFilterMode(newMode)
+                    provider.selectedCategoryLive = null
+                    provider.selectedCategoryMovie = null
+                    provider.selectedCategorySeries = null
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                        applicationContext, provider,
+                    )
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                    Toast.makeText(
+                        applicationContext,
+                        "Filtre langue : ${options[idx].first}",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+                dlg.dismiss()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
     /** 2026-05-12 (user "quand on clique TV, menu déroulant avec catégories") :
      *  ouvre un AlertDialog listant toutes les catégories disponibles pour le type
      *  donné (LIVE = home, MOVIE = movies, SERIES = tv_shows). Sur sélection,
@@ -406,9 +553,18 @@ class MainTvActivity : FragmentActivity() {
             return
         }
         val totalCount = categoriesWithCount.sumOf { it.second }
-        // Format display : "FR| FRANCE FHD HD  (105)"
-        val displayItems = arrayOf("Toutes les catégories FR ($totalCount)") +
-            categoriesWithCount.map { (name, count) -> "$name  ($count)" }.toTypedArray()
+        // 2026-05-13 (user "traduit l'anglais des catégories") : applique
+        // prettyCategoryName() pour traduire les tags iptv-org (General →
+        // Général, News → Actualités, etc.). Les noms RAW restent utilisés
+        // en interne comme valeur de filtre.
+        // 2026-05-13 (user "CHARGE MAL[E]") : étiquette "Toutes les catégories"
+        // sans "FR" — le picker liste TOUTES les catégories (ARABIC, ALBANIA,
+        // FRANCE HD, etc.), pas que les françaises. Le filtre langue FR est
+        // géré séparément via le bouton Pays/langue.
+        val displayItems = arrayOf("Toutes les catégories ($totalCount)") +
+            categoriesWithCount.map { (name, count) ->
+                "${provider.prettyCategoryName(name)}  ($count)"
+            }.toTypedArray()
         // Garde les noms bruts pour le filtre (sans le compteur)
         val rawNames = arrayOf<String?>(null) + categoriesWithCount.map { it.first }.toTypedArray()
         androidx.appcompat.app.AlertDialog.Builder(this)
@@ -420,6 +576,14 @@ class MainTvActivity : FragmentActivity() {
                     com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.MOVIE -> provider.selectedCategoryMovie = selected
                     com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.SERIES -> provider.selectedCategorySeries = selected
                 }
+                // 2026-05-13 (user "quand on clique sur une catégorie il faut
+                // que le Home change") : invalide le HomeCacheStore (sinon
+                // TTL 5 min skip le refresh réseau et le filtre n'est pas
+                // appliqué visuellement).
+                com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                    applicationContext,
+                    provider,
+                )
                 // 2026-05-12 (user "quand tu cliques une catégorie ça change pas le home") :
                 // notifie le viewModel via ProviderChangeNotifier — HomeTvFragment écoute
                 // ce flow et rappelle viewModel.getHome() qui va re-calculer avec le filtre.
@@ -441,7 +605,6 @@ class MainTvActivity : FragmentActivity() {
             binding.navMain.menu.findItem(R.id.movies)?.isVisible = false
             binding.navMain.menu.findItem(R.id.tv_shows)?.isVisible = false
             binding.navMain.menu.findItem(R.id.iptv_favorites)?.isVisible = false
-            binding.navMain.menu.findItem(R.id.iptv_categories)?.isVisible = false
             return
         }
         // Provider sélectionné : restaure la visibilité des onglets pertinents.
@@ -475,9 +638,50 @@ class MainTvActivity : FragmentActivity() {
         }
         // Favoris tab — IPTV providers only.
         binding.navMain.menu.findItem(R.id.iptv_favorites)?.isVisible = isIptv
-        // 2026-05-12 : Catégories + Mes sources visibles uniquement pour Mon IPTV
-        binding.navMain.menu.findItem(R.id.iptv_categories)?.isVisible = isMyIptv
-        binding.navMain.menu.findItem(R.id.iptv_sources)?.isVisible = isMyIptv
+        // 2026-05-13 (user "non dans la bar de gauche y a la place") : items
+        // IPTV (catégories + filtre langue) visibles dans la sidebar quand
+        // MyIptv ou Vavoo est actif. Catégories seulement pour MyIptv (Vavoo
+        // n'a pas de catégories user-pickable).
+        val isVavoo = provider is com.streamflixreborn.streamflix.providers.VavooProvider
+        binding.navMain.menu.findItem(R.id.iptv_categories_menu)?.isVisible = isMyIptv
+        binding.navMain.menu.findItem(R.id.iptv_language_menu)?.isVisible = isMyIptv || isVavoo
+    }
+
+    /** 2026-05-13 : picker pays Vavoo (item sidebar). */
+    fun showVavooCountryPicker() {
+        Log.d("MainTv", "showVavooCountryPicker called")
+        val current = com.streamflixreborn.streamflix.providers.VavooCountrySettings.getCurrent(this)
+        val list = com.streamflixreborn.streamflix.providers.VavooCountrySettings.list
+        val items = list.map {
+            "${it.flag} ${it.label}${if (it.code == current.code) "  ✓" else ""}"
+        }.toTypedArray()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Pays Vavoo")
+            .setItems(items) { _, idx ->
+                val picked = list[idx]
+                if (picked.code == current.code) return@setItems
+                com.streamflixreborn.streamflix.providers.VavooCountrySettings.setCurrent(this, picked)
+                com.streamflixreborn.streamflix.providers.VavooProvider.setCountryFilter(picked.filterValue)
+                // Force aussi le clear du cache home disque (sinon le home
+                // affiche les anciennes chaînes du pays précédent).
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                        this,
+                        com.streamflixreborn.streamflix.providers.VavooProvider,
+                    )
+                }
+                android.widget.Toast.makeText(
+                    this,
+                    "Vavoo : ${picked.flag} ${picked.label} — chargement…",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                // Notifie le home pour qu'il reload.
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
     }
 
     fun adjustLayoutDelta(deltaX: Int?, deltaY: Int?) {

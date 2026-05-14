@@ -51,6 +51,51 @@
 
     </LinearLayout>
 
+    <!-- 2026-05-13 (user "il n'y a pas l'icône catégorie dans film et dans série") :
+         2 boutons IPTV (catégories + filtre langue) top-left. Visibles seulement
+         pour MyIptvProvider. Focusables D-pad. -->
+    <LinearLayout
+        android:id="@+id/ll_iptv_actions"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="16dp"
+        android:visibility="gone"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/tab_language">
+
+        <ImageView
+            android:id="@+id/iv_iptv_categories"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_marginEnd="8dp"
+            android:padding="10dp"
+            android:src="@drawable/ic_categories_filter"
+            android:background="?android:attr/selectableItemBackground"
+            android:focusable="true"
+            android:focusableInTouchMode="false"
+            android:nextFocusLeft="@id/movies"
+            android:nextFocusRight="@id/iv_iptv_language"
+            android:nextFocusDown="@id/vgv_movies"
+            android:contentDescription="Catégories Films"
+            app:tint="@android:color/white" />
+
+        <ImageView
+            android:id="@+id/iv_iptv_language"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:padding="10dp"
+            android:src="@drawable/ic_iptv_language"
+            android:background="?android:attr/selectableItemBackground"
+            android:focusable="true"
+            android:focusableInTouchMode="false"
+            android:nextFocusLeft="@id/iv_iptv_categories"
+            android:nextFocusDown="@id/vgv_movies"
+            android:contentDescription="Filtre langue"
+            app:tint="@android:color/white" />
+    </LinearLayout>
+
     <androidx.leanback.widget.VerticalGridView
         android:id="@+id/vgv_movies"
         android:layout_width="0dp"
@@ -58,13 +103,13 @@
         android:clipChildren="false"
         android:clipToPadding="false"
         android:padding="@dimen/movies_spacing"
-        android:nextFocusUp="@id/tab_fr"
+        android:nextFocusUp="@id/iv_iptv_categories"
         app:focusOutEnd="true"
         app:focusOutFront="true"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/tab_language"
+        app:layout_constraintTop_toBottomOf="@id/ll_iptv_actions"
         app:numberOfColumns="6"
         tools:listitem="@layout/item_movie_grid_tv" />
 

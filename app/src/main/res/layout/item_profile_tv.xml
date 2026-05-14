@@ -10,10 +10,16 @@
     android:clickable="true"
     android:focusable="true">
 
+    <!-- 2026-05-13 (user "je voulais seulement mon fond d'écran normal ici, je
+         veux voir à travers") : tuile transparente, pas de frame coloré. Focus
+         = anneau blanc en foreground uniquement. Le wallpaper du home apparaît
+         derrière chaque emoji. -->
     <FrameLayout
+        android:id="@+id/fl_profile_avatar"
         android:layout_width="200dp"
         android:layout_height="200dp"
-        android:background="@drawable/bg_profile_avatar_tv"
+        android:background="@android:color/transparent"
+        android:foreground="@drawable/fg_profile_avatar_focus"
         android:duplicateParentState="true">
 
         <TextView
@@ -21,7 +27,11 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:gravity="center"
-            android:textSize="100sp"
+            android:textSize="120sp"
+            android:shadowColor="#80000000"
+            android:shadowDx="0"
+            android:shadowDy="2"
+            android:shadowRadius="6"
             tools:text="🎬" />
 
         <ImageView
@@ -37,15 +47,23 @@
             tools:ignore="ContentDescription" />
     </FrameLayout>
 
+    <!-- 2026-05-13 (user "y a pas marqué à qui appartient le profil") : nom du
+         profil bien visible sous l'avatar — bold + ombre noire pour contraster
+         sur n'importe quel wallpaper (clair ou foncé). -->
     <TextView
         android:id="@+id/tv_profile_name"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
+        android:layout_marginTop="20dp"
         android:textColor="#FFFFFF"
-        android:textSize="22sp"
+        android:textSize="24sp"
+        android:textStyle="bold"
         android:maxLines="1"
         android:ellipsize="end"
+        android:shadowColor="#CC000000"
+        android:shadowDx="0"
+        android:shadowDy="2"
+        android:shadowRadius="6"
         tools:text="Principal" />
 
 </LinearLayout>

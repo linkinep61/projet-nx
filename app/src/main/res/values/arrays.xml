@@ -1,5 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- 2026-05-13 (user "ça serait bien comme ça on peut avoir vraiment tout le
+         contenu") : choix utilisateur du filtre langue pour Mon IPTV.
+         Auto = comportement smart (50% threshold), All = pas de filtre,
+         FR = strict FR uniquement. -->
+    <string-array name="iptv_language_filter_entries">
+        <item>Auto (recommandé)</item>
+        <item>Toutes les langues</item>
+        <item>Français uniquement</item>
+    </string-array>
+    <string-array name="iptv_language_filter_values">
+        <item>auto</item>
+        <item>all</item>
+        <item>fr</item>
+    </string-array>
+
     <string-array name="theme_names">
         <item>@string/theme_default</item>
         <item>@string/theme_nero_amoled_oled</item>

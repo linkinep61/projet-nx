@@ -159,4 +159,40 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
+    <!-- 2026-05-13 (user "à côté de l'onglet téléchargement il faudrait mettre
+         un icône catégorie") : bouton picker catégorie pour Mon IPTV. Visibilité
+         togglée dans HomeMobileFragment selon le provider actif. -->
+    <ImageView
+        android:id="@+id/iv_iptv_categories"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginEnd="4dp"
+        android:layout_marginTop="16dp"
+        android:padding="8dp"
+        android:src="@drawable/ic_categories_filter"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="Catégories IPTV"
+        android:visibility="gone"
+        app:tint="@android:color/white"
+        app:layout_constraintEnd_toStartOf="@id/iv_iptv_language"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- 2026-05-13 (user "tu mets un troisième bouton à côté de téléchargement
+         ça peut être pas mal pour ce provider") : bouton globe pour switcher
+         entre Auto / Toutes les langues / FR uniquement. -->
+    <ImageView
+        android:id="@+id/iv_iptv_language"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginEnd="4dp"
+        android:layout_marginTop="16dp"
+        android:padding="8dp"
+        android:src="@drawable/ic_iptv_language"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="Filtre langue IPTV"
+        android:visibility="gone"
+        app:tint="@android:color/white"
+        app:layout_constraintEnd_toStartOf="@id/iv_downloads"
+        app:layout_constraintTop_toTopOf="parent" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>

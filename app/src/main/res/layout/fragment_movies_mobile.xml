@@ -43,6 +43,42 @@
 
     </LinearLayout>
 
+    <!-- 2026-05-13 (user "il y a pas de filtre de catégorie et de langue en
+         film et série") : barre des 2 boutons IPTV (catégories + filtre
+         langue) en haut. Visible seulement pour MyIptvProvider. -->
+    <LinearLayout
+        android:id="@+id/ll_iptv_actions"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginEnd="16dp"
+        android:layout_marginTop="8dp"
+        android:visibility="gone"
+        app:layout_constraintTop_toBottomOf="@id/tab_language"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <ImageView
+            android:id="@+id/iv_iptv_categories"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginEnd="4dp"
+            android:padding="8dp"
+            android:src="@drawable/ic_categories_filter"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Catégories Films"
+            app:tint="@android:color/white" />
+
+        <ImageView
+            android:id="@+id/iv_iptv_language"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:padding="8dp"
+            android:src="@drawable/ic_iptv_language"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Filtre langue"
+            app:tint="@android:color/white" />
+    </LinearLayout>
+
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rv_movies"
         android:layout_width="0dp"
@@ -55,7 +91,7 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/tab_language"
+        app:layout_constraintTop_toBottomOf="@id/ll_iptv_actions"
         app:spanCount="3"
         tools:listitem="@layout/item_movie_grid_mobile" />
 

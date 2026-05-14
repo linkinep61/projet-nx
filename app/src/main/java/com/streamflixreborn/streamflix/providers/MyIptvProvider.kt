@@ -72,22 +72,54 @@ object MyIptvProvider : Provider, IptvProvider {
     /** 2026-05-12 (user "au démarrage il met 0 film 0 série 0 TV alors qu'il trouve
      *  des chaînes") : compte direct depuis le cache classification (filtré FR).
      *  Utilisé par IptvSourcesActivity pour le toast "X TV • Y films • Z séries". */
-    suspend fun countByTypeFR(): Triple<Int, Int, Int> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-        // Force le chargement du cache si vide
-        val sources = IptvSourceStore.getAll()
+    /** 2026-05-13 (user "quand tu changes de source ils affichent les mêmes
+     *  chaînes en nombre en film et en série") : ajout du paramètre `sourceId`
+     *  pour ne compter QUE cette source-là. Si null = toutes les sources cumulées
+     *  (comportement original). Permet à IptvSourcesActivity d'afficher un toast
+     *  spécifique à la source qu'on vient d'ajouter, pas le total cumulé. */
+    suspend fun countByTypeFR(
+        sourceId: String? = null,
+    ): Triple<Int, Int, Int> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        // 2026-05-13 (bug "0 TV 0 films 0 séries malgré 158 chaînes chargées") :
+        // loadChannels seul ne classifie PAS, il faut appeler collectByType (ou
+        // équivalent) pour peupler classificationCache. On déclenche les 3 types.
+        val sources = if (sourceId != null) {
+            IptvSourceStore.getAll().filter { it.id == sourceId }
+        } else {
+            IptvSourceStore.getAll()
+        }
         for (s in sources) {
-            if (classificationCache[s.id] == null) loadChannels(s)
+            if (classificationCache[s.id] == null) {
+                val channels = loadChannels(s)
+                if (channels.isNotEmpty()) {
+                    // 2026-05-13 : essaie d'abord le cache classification disque
+                    val diskCached = loadClassificationFromDisk(s, channels)
+                    classificationCache[s.id] = diskCached ?: run {
+                        val byType = mutableMapOf<IptvClassifier.ContentType, MutableList<ClassifiedItem>>()
+                        channels.forEachIndexed { idx, ch ->
+                            val t = IptvClassifier.classify(ch)
+                            byType.getOrPut(t) { mutableListOf() }.add(ClassifiedItem(s, ch, idx, t))
+                        }
+                        val cc = CachedClassification(byType)
+                        saveClassificationToDisk(s.id, channels.size, byType)
+                        cc
+                    }
+                }
+            }
         }
         var live = 0; var movie = 0; var series = 0
-        for (cached in classificationCache.values) {
+        // 2026-05-13 : itère uniquement sur les sources demandées, pas tout
+        // classificationCache.values (qui peut contenir d'autres sources).
+        for (s in sources) {
+            val cached = classificationCache[s.id] ?: continue
             cached.byType[IptvClassifier.ContentType.LIVE]?.let { items ->
-                live += items.count { isFrenchChannel(it.channel) }
+                live += filterFrOrFallback(items).size
             }
             cached.byType[IptvClassifier.ContentType.MOVIE]?.let { items ->
-                movie += items.count { isFrenchChannel(it.channel) }
+                movie += filterFrOrFallback(items).size
             }
             cached.byType[IptvClassifier.ContentType.SERIES]?.let { items ->
-                series += items.count { isFrenchChannel(it.channel) }
+                series += filterFrOrFallback(items).size
             }
         }
         Triple(live, movie, series)
@@ -99,9 +131,10 @@ object MyIptvProvider : Provider, IptvProvider {
     fun availableCategoriesWithCount(type: IptvClassifier.ContentType): List<Pair<String, Int>> {
         val counts = mutableMapOf<String, Int>()
         for (cached in classificationCache.values) {
-            cached.byType[type]?.forEach { item ->
-                // Skip non-French entries
-                if (!isFrenchChannel(item.channel)) return@forEach
+            val items = cached.byType[type] ?: continue
+            // Applique le même filter FR-ou-fallback que collectByType
+            val toCount = filterFrOrFallback(items)
+            toCount.forEach { item ->
                 val g = item.channel.group?.trim()?.ifBlank { "Autres" } ?: "Autres"
                 counts[g] = (counts[g] ?: 0) + 1
             }
@@ -114,6 +147,57 @@ object MyIptvProvider : Provider, IptvProvider {
     /** Variante simple sans compteurs (compat). */
     fun availableCategories(type: IptvClassifier.ContentType): List<String> =
         availableCategoriesWithCount(type).map { it.first }
+
+    /** 2026-05-13 (user "traduit l'anglais des catégories") : traduit les noms
+     *  de catégories anglais courants (iptv-org, etc.) en français pour
+     *  affichage. Le nom RAW reste utilisé comme filtre — c'est seulement
+     *  l'affichage qui est traduit. Les noms non mappés sont retournés tels
+     *  quels (e.g. noms perso d'un Xtream Codes user). */
+    private val CATEGORY_FR_MAP = mapOf(
+        "general" to "Général",
+        "news" to "Actualités",
+        "undefined" to "Non classés",
+        "music" to "Musique",
+        "entertainment" to "Divertissement",
+        "movies" to "Films",
+        "kids" to "Enfants",
+        "lifestyle" to "Mode de vie",
+        "sports" to "Sport",
+        "series" to "Séries",
+        "documentary" to "Documentaire",
+        "animation" to "Animation",
+        "religious" to "Religieux",
+        "legislative" to "Législatif",
+        "education" to "Éducation",
+        "auto" to "Auto",
+        "comedy" to "Comédie",
+        "culture" to "Culture",
+        "business" to "Économie",
+        "science" to "Science",
+        "travel" to "Voyage",
+        "relax" to "Détente",
+        "interactive" to "Interactif",
+        "health" to "Santé",
+        "weather" to "Météo",
+        "shop" to "Téléachat",
+        "outdoor" to "Plein air",
+        "family" to "Famille",
+        "history" to "Histoire",
+        "cooking" to "Cuisine",
+        "regional" to "Régional",
+        "local" to "Local",
+        "autres" to "Autres",
+    )
+
+    fun prettyCategoryName(raw: String): String {
+        if (raw.isBlank()) return "Autres"
+        // 2026-05-13 : gère les noms multi-tags séparés par ';' (e.g.
+        // "News;Sports" → "Actualités · Sport").
+        return raw.split(';').joinToString(" · ") { part ->
+            val key = part.trim().lowercase()
+            CATEGORY_FR_MAP[key] ?: part.trim()
+        }
+    }
 
     /** OkHttpClient permissif — copie le comportement VU IPTV / TiviMate :
      *  trust-all certs + accept all hostnames. Nécessaire parce que les
@@ -152,7 +236,10 @@ object MyIptvProvider : Provider, IptvProvider {
     override suspend fun getHome(): List<Category> = withContext(Dispatchers.IO) {
         val sources = IptvSourceStore.getAll()
         if (sources.isEmpty()) {
-            return@withContext listOf(Category(name = "Aucune source — clic provider Mon IPTV pour configurer", list = emptyList()))
+            return@withContext listOf(Category(
+                name = "Aucune source IPTV — va dans Paramètres → Paramètres du fournisseur → Mon IPTV pour en ajouter une",
+                list = emptyList(),
+            ))
         }
 
         val (liveItems, errors) = collectByType(sources, IptvClassifier.ContentType.LIVE)
@@ -172,20 +259,48 @@ object MyIptvProvider : Provider, IptvProvider {
                 val sampleGroups = liveItems.take(20).map { it.channel.group ?: "(null)" }.distinct().take(5)
                 Log.w(TAG, "Filter '$selected' MATCH 0 items. Sample groups in pool: $sampleGroups")
             }
-            val titlePrefix = if (selected != null) "📡 $selected" else "📡 Toutes les chaînes FR"
+            val titlePrefix = if (selected != null) "📡 ${prettyCategoryName(selected)}" else {
+                // 2026-05-13 : titre dynamique selon le filtre langue.
+                when (getLanguageFilterMode()) {
+                    "all" -> "📡 Toutes les chaînes"
+                    "fr"  -> "📡 Toutes les chaînes FR"
+                    else  -> "📡 Toutes les chaînes" // "auto" : on ne sait pas ce qui a été filtré, label neutre
+                }
+            }
+            // 2026-05-13 (user "je croyais que tu voulais me faire un layout
+            // descendant pour éviter de défiler à l'infini, on a de la place
+            // encore en bas") : quand l'user a filtré sur UNE catégorie précise
+            // (FRANCE SD, BEIN SPORT, etc.) avec un nombre raisonnable de
+            // chaînes, on chunke en rangées de 8 → grille verticale qui remplit
+            // l'écran. Au-delà de ~200 chaînes ou si pas de filtre, on garde
+            // 1 row horizontale infinie pour éviter le freeze Chromecast
+            // (cf l'incident 511 rows × 8 tiles = OOM).
             val rowSize = 8
-            val totalRows = (filtered.size + rowSize - 1) / rowSize
-            for (rowIdx in 0 until totalRows) {
-                val from = rowIdx * rowSize
-                val to = minOf(from + rowSize, filtered.size)
-                val rowItems = filtered.subList(from, to)
-                // Pour la 1re ligne, on affiche le titre principal + count. Pour les
-                // suivantes, juste un espace pour ne pas spammer le même titre.
-                val rowTitle = if (rowIdx == 0) "$titlePrefix (${filtered.size})"
-                               else "  " // espace minimal pour séparer visuellement
+            // Cap à 2400 chaînes (= 300 rows) pour éviter le freeze Chromecast
+            // sur les bouquets énormes (4000+ chaînes). Le user a typiquement
+            // ~1700 chaînes FR, ça passe largement. Au-delà, fallback à 1 row
+            // infinie qui scroll horizontalement.
+            val maxChunkedChannels = 2400
+            val shouldChunk = filtered.size <= maxChunkedChannels
+            if (shouldChunk && filtered.isNotEmpty()) {
+                val tvShows = filtered.map { itemToTvShowLive(it) }
+                tvShows.chunked(rowSize).forEachIndexed { idx, chunk ->
+                    // 2026-05-13 (user "vire ça de mon IPTV" : la swiper FEATURED
+                    // avec "Série" / "Regarder maintenant" / dots apparaissait
+                    // sur les chunks de rangée 2+. Cause : Category.FEATURED ==
+                    // "" donc nom vide trigger le rendu swiper. On utilise un
+                    // espace invisible (caractère zero-width) pour les rangées
+                    // suivantes — non-vide donc pas FEATURED, mais visuellement
+                    // pas de header rendu.
+                    sections.add(Category(
+                        name = if (idx == 0) "$titlePrefix (${filtered.size})" else "​",
+                        list = chunk,
+                    ))
+                }
+            } else {
                 sections.add(Category(
-                    name = rowTitle,
-                    list = rowItems.map { itemToTvShowLive(it) },
+                    name = "$titlePrefix (${filtered.size})",
+                    list = filtered.map { itemToTvShowLive(it) },
                 ))
             }
         } else if (errors.isEmpty()) {
@@ -201,8 +316,15 @@ object MyIptvProvider : Provider, IptvProvider {
     override suspend fun getMovies(page: Int): List<Movie> = withContext(Dispatchers.IO) {
         val sources = IptvSourceStore.getAll()
         val (allMovies, _) = collectByType(sources, IptvClassifier.ContentType.MOVIE)
+        // 2026-05-13 (user "quand on change de catégorie le home ne change pas") :
+        // applique le filtre selectedCategoryMovie. Sans ça, le picker change le
+        // state mais getMovies() retourne tous les films, le picker semble cassé.
+        val selected = selectedCategoryMovie
+        val filtered = if (selected != null) {
+            allMovies.filter { (it.channel.group ?: "").trim() == selected }
+        } else allMovies
         // Tri alphabétique par nom puis pagination
-        val sorted = allMovies.sortedBy { it.channel.name.lowercase() }
+        val sorted = filtered.sortedBy { it.channel.name.lowercase() }
         val from = (page - 1) * PAGE_SIZE
         if (from >= sorted.size) return@withContext emptyList()
         val to = minOf(from + PAGE_SIZE, sorted.size)
@@ -236,8 +358,14 @@ object MyIptvProvider : Provider, IptvProvider {
     override suspend fun getTvShows(page: Int): List<TvShow> = withContext(Dispatchers.IO) {
         val sources = IptvSourceStore.getAll()
         val (allEpisodes, _) = collectByType(sources, IptvClassifier.ContentType.SERIES)
+        // 2026-05-13 (user "quand on change de catégorie le home ne change pas") :
+        // applique le filtre selectedCategorySeries avant le groupage par show.
+        val selected = selectedCategorySeries
+        val filtered = if (selected != null) {
+            allEpisodes.filter { (it.channel.group ?: "").trim() == selected }
+        } else allEpisodes
         // Grouper par nom de show + tri alpha
-        val byShow = allEpisodes.groupBy { IptvClassifier.extractShowName(it.channel.name) }
+        val byShow = filtered.groupBy { IptvClassifier.extractShowName(it.channel.name) }
         val shows = byShow.entries.sortedBy { it.key.lowercase() }
         val from = (page - 1) * PAGE_SIZE
         if (from >= shows.size) return@withContext emptyList()
@@ -392,8 +520,21 @@ object MyIptvProvider : Provider, IptvProvider {
             channel.url
         }
 
+        // 2026-05-13 (user "fonctionne en plein écran mais pas en mini player" —
+        // le mini-player démarre lentement parce qu'ExoPlayer auto-détecte le format
+        // depuis le contenu. On lui donne explicitement le MimeType pour skip cette
+        // étape et démarrer du 1er coup. */
+        val mimeType = when {
+            streamUrl.contains(".m3u8", ignoreCase = true) -> "application/vnd.apple.mpegurl"
+            streamUrl.contains(".mpd", ignoreCase = true) -> "application/dash+xml"
+            streamUrl.contains(".ts", ignoreCase = true) -> "video/mp2t"
+            streamUrl.contains(".mp4", ignoreCase = true) -> "video/mp4"
+            streamUrl.contains(".mkv", ignoreCase = true) -> "video/x-matroska"
+            else -> null
+        }
         return Video(
             source = streamUrl,
+            type = mimeType,
             headers = if (headers.isEmpty()) null else headers,
         )
     }
@@ -421,17 +562,38 @@ object MyIptvProvider : Provider, IptvProvider {
         for (source in sources) {
             try {
                 // 2026-05-12 : cache classification — évite re-classifier 176k items à chaque tab switch
-                val classified = classificationCache[source.id]
+                var classified = classificationCache[source.id]
+                if (classified == null) {
+                    // 2026-05-13 (user "Big lag sur Chromecast") : tente le cache
+                    // disque AVANT de re-classifier. La classification de 4088
+                    // chaînes prend 2-3s sur ARM, donc on persiste pour cold
+                    // starts rapides.
+                    val channels = loadChannels(source)
+                    if (channels.isEmpty()) {
+                        errors.add("⚠ '${source.name}' : aucune chaîne (URL invalide ?)")
+                        continue
+                    }
+                    val diskCached = loadClassificationFromDisk(source, channels)
+                    classified = diskCached ?: run {
+                        // Classifie une fois pour tous types et cache
+                        val byType = mutableMapOf<IptvClassifier.ContentType, MutableList<ClassifiedItem>>()
+                        channels.forEachIndexed { idx, ch ->
+                            val t = IptvClassifier.classify(ch)
+                            val item = ClassifiedItem(source, ch, idx, t)
+                            byType.getOrPut(t) { mutableListOf() }.add(item)
+                        }
+                        val cc = CachedClassification(byType)
+                        saveClassificationToDisk(source.id, channels.size, byType)
+                        cc
+                    }
+                    classificationCache[source.id] = classified
+                }
                 if (classified != null) {
-                    classified.byType[type]?.let { all.addAll(it.filter { isFrenchChannel(it.channel) }) }
+                    classified.byType[type]?.let { items -> all.addAll(filterFrOrFallback(items)) }
                     continue
                 }
+                // Code legacy (now dead but kept for safety) — should not reach here
                 val channels = loadChannels(source)
-                if (channels.isEmpty()) {
-                    errors.add("⚠ '${source.name}' : aucune chaîne (URL invalide ?)")
-                    continue
-                }
-                // Classifie une fois pour tous types et cache
                 val byType = mutableMapOf<IptvClassifier.ContentType, MutableList<ClassifiedItem>>()
                 channels.forEachIndexed { idx, ch ->
                     val t = IptvClassifier.classify(ch)
@@ -439,13 +601,106 @@ object MyIptvProvider : Provider, IptvProvider {
                     byType.getOrPut(t) { mutableListOf() }.add(item)
                 }
                 classificationCache[source.id] = CachedClassification(byType)
-                // 2026-05-12 (user "que les chaînes françaises") : filtre FR au moment du return
-                byType[type]?.let { all.addAll(it.filter { isFrenchChannel(it.channel) }) }
+                // 2026-05-13 (debug user "19/158 chaînes c'est trop peu") : log breakdown
+                val nLive = byType[IptvClassifier.ContentType.LIVE]?.size ?: 0
+                val nMovie = byType[IptvClassifier.ContentType.MOVIE]?.size ?: 0
+                val nSeries = byType[IptvClassifier.ContentType.SERIES]?.size ?: 0
+                Log.d(TAG, "collectByType '${source.name}': total=${channels.size} → LIVE=$nLive MOVIE=$nMovie SERIES=$nSeries")
+                // Log les 5 premiers MOVIE pour voir pourquoi ils sont classifiés ainsi
+                byType[IptvClassifier.ContentType.MOVIE]?.take(5)?.forEach { item ->
+                    Log.d(TAG, "  → MOVIE: name='${item.channel.name}' group='${item.channel.group}' url='${item.channel.url.take(80)}'")
+                }
+                byType[IptvClassifier.ContentType.SERIES]?.take(5)?.forEach { item ->
+                    Log.d(TAG, "  → SERIES: name='${item.channel.name}' group='${item.channel.group}' url='${item.channel.url.take(80)}'")
+                }
+                byType[type]?.let { items ->
+                    val frFiltered = filterFrOrFallback(items)
+                    Log.d(TAG, "collectByType '$type' fr-filter: ${items.size} → ${frFiltered.size}")
+                    if (items.size > frFiltered.size && frFiltered.size < items.size) {
+                        // Log les items rejetés par le filtre FR
+                        val rejected = items.filterNot { isFrenchChannel(it.channel) }.take(10)
+                        rejected.forEach { item ->
+                            Log.d(TAG, "  ✗ FR-rejected: name='${item.channel.name}' group='${item.channel.group}'")
+                        }
+                    }
+                    all.addAll(frFiltered)
+                }
             } catch (e: Exception) {
                 errors.add("❌ '${source.name}' : ${e.message?.take(80)}")
             }
         }
         return all to errors
+    }
+
+    /** 2026-05-13 (user "ça serait bien comme ça on peut avoir vraiment tout le
+     *  contenu") : mode du filtre langue — défini dans Paramètres → Mon IPTV
+     *  → Filtrer par langue, ou via le bouton globe du home.
+     *  - "auto" : comportement smart (seuil 50%) — défaut
+     *  - "all"  : pas de filtre, montre tout
+     *  - "fr"   : strict FR uniquement (cache les étrangères même si <50%) */
+    fun getLanguageFilterMode(): String {
+        return try {
+            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
+            androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getString("pref_iptv_language_filter", "auto") ?: "auto"
+        } catch (_: Throwable) { "auto" }
+    }
+
+    fun setLanguageFilterMode(mode: String) {
+        try {
+            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
+            androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
+                .edit().putString("pref_iptv_language_filter", mode).apply()
+        } catch (_: Throwable) {}
+    }
+
+    /** 2026-05-12 (user iptv-org/fr.m3u test : 158 chaînes FR avec group-title en
+     *  anglais "Entertainment", "News", etc. → filtre FR rejette tout) :
+     *  intelligent filter — applique le filtre FR. Si le résultat matche peu
+     *  d'items (<50%), c'est qu'on est sur un M3U déjà curé par région (genre
+     *  iptv-org/countries/fr.m3u où les channels n'ont pas "France" dans le
+     *  nom car le fichier ENTIER est français) → renvoie tous les items sans
+     *  filtre.
+     *
+     *  2026-05-13 (bug "19/158 chaînes") : seuil 0 trop strict — iptv-org/fr.m3u
+     *  a ~18 channels avec "France" dans le nom (sur 158), donc fallback ne se
+     *  déclenche pas et on perd 139 chaînes. Nouveau seuil : si <50% matchent,
+     *  fallback. Le filtre FR reste utile pour les gros Xtream Codes multi-pays
+     *  où >50% des channels ont "FR|" en préfixe explicite.
+     *
+     *  2026-05-13 (user "comme ça on peut avoir vraiment tout le contenu") :
+     *  override via pref `pref_iptv_language_filter` : "all" = bypass total,
+     *  "fr" = FR strict (même <50%), "auto" = comportement par défaut ci-dessus. */
+    private fun filterFrOrFallback(items: List<ClassifiedItem>): List<ClassifiedItem> {
+        if (items.isEmpty()) return items
+        when (getLanguageFilterMode()) {
+            "all" -> {
+                Log.d(TAG, "Filtre langue = 'all' (toutes langues) — bypass filtre FR")
+                return items
+            }
+            "fr" -> {
+                val filtered = items.filter { isFrenchChannel(it.channel) }
+                // 2026-05-13 (user "pas de film ni de série chargé") : si le
+                // mode strict retourne 0 alors qu'il y a des items, c'est
+                // probablement une catégorie VOD/Série Stalker dont les noms
+                // n'ont pas de marqueur "FR" (déjà filtrés par catégorie
+                // côté serveur). Fallback à tous les items pour pas masquer
+                // tout le contenu.
+                if (filtered.isEmpty() && items.isNotEmpty()) {
+                    Log.d(TAG, "Filtre langue = 'fr' (strict) — 0/${items.size} match, fallback tout (catégorie déjà filtrée par source)")
+                    return items
+                }
+                Log.d(TAG, "Filtre langue = 'fr' (strict) — ${filtered.size}/${items.size} chaînes FR")
+                return filtered
+            }
+            // "auto" → comportement smart (logique 50% threshold)
+        }
+        val filtered = items.filter { isFrenchChannel(it.channel) }
+        val frRatio = filtered.size.toDouble() / items.size
+        return if (frRatio < 0.5) {
+            Log.d(TAG, "Filtre FR matche peu (${filtered.size}/${items.size} = ${(frRatio * 100).toInt()}%) — source déjà curée par région, fallback no-filter")
+            items
+        } else filtered
     }
 
     /** 2026-05-12 (user "que les chaînes françaises qui apparaissent") : détecte si
@@ -455,21 +710,59 @@ object MyIptvProvider : Provider, IptvProvider {
     }
 
     /** Vrai si le nom contient des marqueurs FR. Utilisé pour pré-filtrer les
-     *  catégories Xtream et éviter de télécharger l'allemand/arabe/etc. */
+     *  catégories Xtream et éviter de télécharger l'allemand/arabe/etc.
+     *  2026-05-13 (user "qu'un film français ni de série") : ajout détection
+     *  " FR " comme mot autonome (word boundary) — les catégories Stalker VOD
+     *  ressemblent à "NOUVEAUTES FR 2026", "ACTION FR", "SERIES NETFLIX FR" :
+     *  "fr" y est un token séparé, pas un préfixe. Sans ce check, le filtre
+     *  strict masquait tout sauf 1 film par hasard. */
     internal fun isFrenchGroupName(name: String): Boolean {
         val s = name.lowercase().trim()
         // Préfixes courants des bouquets IPTV : "FR|", "FR -", "FR ", "FR_", etc.
         val frPrefixes = listOf("fr|", "fr -", "fr ", "fr-", "fr_", "fr.", "fr:", "fr/")
         if (frPrefixes.any { s.startsWith(it) }) return true
         // Mots-clés FR n'importe où dans le nom
-        val frKeywords = listOf("france", "français", "francais", "french", "🇫🇷")
+        val frKeywords = listOf("france", "français", "francais", "french", "🇫🇷", "vf", "vff")
         if (frKeywords.any { s.contains(it) }) return true
+        // "FR" comme mot autonome n'importe où : "NOUVEAUTES FR 2026",
+        // "ACTION FR", "SERIES NETFLIX FR", "VOD-FR-HD", etc.
+        if (FR_WORD_REGEX.containsMatchIn(s)) return true
         return false
+    }
+
+    private val FR_WORD_REGEX = Regex("\\bfr\\b")
+
+    /** 2026-05-13 (user "FR:TF1.SD c'est moche") : nettoie les noms de chaînes
+     *  affichés dans les tuiles. Les bouquets IPTV utilisent souvent les
+     *  `tvg-id` techniques en `name` : "FR:TF1.SD", "FR:France2.SD", "AR:MBC.HD".
+     *  - strip préfixe code langue 2 lettres + ":" : "FR:", "EN:", "AR:", etc.
+     *  - strip suffixe qualité : ".SD", ".HD", ".FHD", ".UHD", ".4K", ".HEVC", ".H265"
+     *  - remplace "." et "_" restants par espaces
+     *  - normalise les espaces multiples
+     *  Si le nom ne match aucun pattern → retourné tel quel (no-op safe). */
+    private fun prettyChannelName(raw: String): String {
+        var s = raw.trim()
+        if (s.isEmpty()) return raw
+        // Préfixe ISO 2 lettres + ":" (insensible à la casse)
+        s = s.replace(Regex("^[A-Za-z]{2}\\s*:\\s*"), "")
+        // Suffixes qualité courants (peuvent s'enchaîner : ".HEVC.HD")
+        val qualitySuffixRegex = Regex("(?i)\\.(sd|hd|fhd|uhd|4k|hevc|h265|h264|hd2|hq|lq|raw|backup|live)\\b")
+        var prev: String
+        do {
+            prev = s
+            s = s.replace(qualitySuffixRegex, "")
+        } while (s != prev)
+        // Restant : remplace . et _ par espaces, sauf si c'est un nom du genre "BFM.TV"
+        // → garde les points qui restent au milieu de mots, mais remplace "_" par espace
+        s = s.replace("_", " ")
+        // Compresse espaces
+        s = s.replace(Regex("\\s+"), " ").trim()
+        return if (s.isEmpty()) raw else s
     }
 
     private fun itemToTvShow(item: ClassifiedItem): TvShow = TvShow(
         id = "myiptv::${item.source.id}::${item.index}",
-        title = item.channel.name,
+        title = prettyChannelName(item.channel.name),
         poster = item.channel.logo,
         banner = item.channel.logo,
         providerName = name,
@@ -480,7 +773,7 @@ object MyIptvProvider : Provider, IptvProvider {
      *  detail + active mini-player. */
     private fun itemToTvShowLive(item: ClassifiedItem): TvShow = TvShow(
         id = "myiptv-live::${item.source.id}::${item.index}",
-        title = item.channel.name,
+        title = prettyChannelName(item.channel.name),
         overview = item.channel.group?.let { "📡 $it" },
         poster = item.channel.logo,
         banner = item.channel.logo,
@@ -489,7 +782,7 @@ object MyIptvProvider : Provider, IptvProvider {
 
     private fun itemToMovie(item: ClassifiedItem): Movie = Movie(
         id = "myiptv-movie::${item.source.id}::${item.index}",
-        title = item.channel.name,
+        title = prettyChannelName(item.channel.name),
         overview = item.channel.group,
         poster = item.channel.logo,
         banner = item.channel.logo,
@@ -622,6 +915,76 @@ object MyIptvProvider : Provider, IptvProvider {
         return java.io.File(dir, "${sourceId}.tsv")
     }
 
+    /** 2026-05-13 (user "Big lag sur Chromecast") : persiste la classification
+     *  des channels sur disque pour éviter le re-travail au cold start.
+     *  Format : 1 ligne par chaîne, contient juste le ContentType ("L"/"M"/"S")
+     *  dans l'ordre du fichier .tsv. Le total doit matcher pour qu'on accepte
+     *  le cache (sinon source a changé, on re-classifie). */
+    /** Version de l'extension : bumper à chaque changement de IptvClassifier
+     *  ou de format de classification pour invalider les anciens caches.
+     *  v3 = options préservées sur disque, donc xtream-type tag fonctionne au
+     *  reload, donc classification fiable. Les .classif2 d'avant peuvent avoir
+     *  des classifications fausses (xtream-type perdu → fallback heuristique). */
+    private fun classificationFile(sourceId: String): java.io.File? {
+        val ctx = try { com.streamflixreborn.streamflix.StreamFlixApp.instance } catch (_: Throwable) { return null }
+        val dir = java.io.File(ctx.cacheDir, "iptv")
+        if (!dir.exists()) dir.mkdirs()
+        return java.io.File(dir, "${sourceId}.classif3")
+    }
+
+    private fun saveClassificationToDisk(
+        sourceId: String,
+        totalChannels: Int,
+        byType: Map<IptvClassifier.ContentType, MutableList<ClassifiedItem>>,
+    ) {
+        val file = classificationFile(sourceId) ?: return
+        try {
+            // Build a flat array indexed by channel position : "L" / "M" / "S"
+            val classifications = CharArray(totalChannels) { 'L' }
+            byType.forEach { (type, items) ->
+                val ch = when (type) {
+                    IptvClassifier.ContentType.LIVE -> 'L'
+                    IptvClassifier.ContentType.MOVIE -> 'M'
+                    IptvClassifier.ContentType.SERIES -> 'S'
+                }
+                items.forEach { it -> classifications[it.index] = ch }
+            }
+            file.writeText(String(classifications))
+            Log.d(TAG, "Classification sauvée disque $sourceId : $totalChannels chaînes (${file.length()}B)")
+        } catch (e: Exception) {
+            Log.w(TAG, "Save classification fail: ${e.message}")
+        }
+    }
+
+    private fun loadClassificationFromDisk(
+        source: IptvSource,
+        channels: List<M3uParser.M3uChannel>,
+    ): CachedClassification? {
+        val file = classificationFile(source.id) ?: return null
+        if (!file.exists()) return null
+        return try {
+            val str = file.readText()
+            if (str.length != channels.size) {
+                Log.d(TAG, "Classification cache size mismatch (${str.length} vs ${channels.size}) — invalide, re-classifie")
+                return null
+            }
+            val byType = mutableMapOf<IptvClassifier.ContentType, MutableList<ClassifiedItem>>()
+            channels.forEachIndexed { idx, ch ->
+                val t = when (str[idx]) {
+                    'M' -> IptvClassifier.ContentType.MOVIE
+                    'S' -> IptvClassifier.ContentType.SERIES
+                    else -> IptvClassifier.ContentType.LIVE
+                }
+                byType.getOrPut(t) { mutableListOf() }.add(ClassifiedItem(source, ch, idx, t))
+            }
+            Log.d(TAG, "Classification rechargée depuis disque pour ${source.name} (${channels.size} chaînes, skip classification regex)")
+            CachedClassification(byType)
+        } catch (e: Exception) {
+            Log.w(TAG, "Load classification fail: ${e.message}")
+            null
+        }
+    }
+
     private fun saveToDisk(sourceId: String, channels: List<M3uParser.M3uChannel>) {
         val file = cacheFile(sourceId) ?: return
         try {
@@ -638,6 +1001,19 @@ object MyIptvProvider : Provider, IptvProvider {
                     writer.write(esc(ch.group))
                     writer.write("\t")
                     writer.write(esc(ch.tvgId))
+                    // 2026-05-13 (user "TF1 ne se lance pas / fais attention ça
+                    // se trouve le grand lecteur aussi") : ajout 6e colonne
+                    // pour les options. Sans ça, après cold start (chargement
+                    // depuis disque), stalker-cmd est perdu → getVideo lit
+                    // l'URL brute "ffmpeg http://localhost/ch/940_" → ExoPlayer
+                    // crash. Format : "k1=v1k2=v2" (séparateur unit-sep).
+                    writer.write("\t")
+                    // Format options : key1value1key2value2
+                    //    (Unit Separator) entre clé et valeur
+                    //    (Record Separator) entre paires
+                    writer.write(ch.options.entries.joinToString("") {
+                        "${esc(it.key)}${esc(it.value)}"
+                    })
                     writer.newLine()
                 }
             }
@@ -656,12 +1032,21 @@ object MyIptvProvider : Provider, IptvProvider {
                 for (line in lines) {
                     val parts = line.split('\t')
                     if (parts.size < 5) continue
+                    // 2026-05-13 : 6e colonne = options serializees
+                    // "k1v1k2v2". Format binary-safe.
+                    val options = if (parts.size >= 6 && parts[5].isNotEmpty()) {
+                        parts[5].split('').mapNotNull { kv ->
+                            val sep = kv.indexOf('')
+                            if (sep > 0) kv.substring(0, sep) to kv.substring(sep + 1) else null
+                        }.toMap()
+                    } else emptyMap()
                     out += M3uParser.M3uChannel(
                         name = parts[0],
                         url = parts[1],
                         logo = parts[2].takeIf { it.isNotEmpty() },
                         group = parts[3].takeIf { it.isNotEmpty() },
                         tvgId = parts[4].takeIf { it.isNotEmpty() },
+                        options = options,
                     )
                 }
             }
@@ -831,7 +1216,12 @@ object MyIptvProvider : Provider, IptvProvider {
         return null
     }
 
-    /** 2026-05-12 : fetch d'un portail Stalker MAG. Délégué à StalkerClient. */
+    /** 2026-05-12 : fetch d'un portail Stalker MAG. Délégué à StalkerClient.
+     *  2026-05-13 (user "rien en série alors je suis sûr il y en a plein") :
+     *  fetch également les VOD (films) et séries du Stalker en plus du live TV.
+     *  Tag explicite via `xtream-type` pour bypass la classification heuristique
+     *  (qui se trompe souvent sur les bouquets type "ARABE 4K" classifés MOVIE
+     *  à cause du "4K"). */
     private suspend fun fetchStalker(source: IptvSource): List<M3uParser.M3uChannel> = withContext(Dispatchers.IO) {
         val mac = source.mac?.takeIf { it.isNotBlank() } ?: run {
             Log.e(TAG, "Stalker ${source.name} : MAC manquante")
@@ -839,28 +1229,58 @@ object MyIptvProvider : Provider, IptvProvider {
         }
         val Stalker = com.streamflixreborn.streamflix.utils.StalkerClient
         val portalUrl = sanitizeUrl(source.url)
-        // 2026-05-12 (user "Des numéros c'est pas parlant") : fetch get_genres pour
-        // mapper les category_id (numériques) → noms friendly ("FR| GENERAL" etc.)
-        val genres = Stalker.getGenres(portalUrl, mac, source.userAgent, source.serial)
-        val stalkerChannels = Stalker.getAllChannels(
-            portalUrl = portalUrl,
-            mac = mac,
-            userAgent = source.userAgent,
-            serial = source.serial,
-        )
-        Log.d(TAG, "Stalker ${source.name} : ${stalkerChannels.size} chaînes, ${genres.size} genres mapped")
-        stalkerChannels.map { sc ->
-            // Resolve le category_id numérique en nom friendly si possible
-            val friendlyGroup = sc.group?.let { genres[it] ?: it }
-            M3uParser.M3uChannel(
-                name = sc.name,
-                url = sc.cmd,
-                logo = sc.logo,
-                group = friendlyGroup,
-                tvgId = sc.tvgId,
-                options = mapOf("stalker-cmd" to sc.cmd, "stalker-mac" to mac, "stalker-portal" to source.url),
+        // 2026-05-13 (user "Les catégories film et n'apparaissent pas comme elles
+        // devraient apparaître") : fetch 3 maps de catégories séparées (ITV/VOD/
+        // Series) car Stalker utilise des category_id différents par type.
+        val liveGenres = Stalker.getGenres(portalUrl, mac, source.userAgent, source.serial)
+        val vodCategories = Stalker.getVodCategories(portalUrl, mac, source.userAgent, source.serial)
+        val seriesCategories = Stalker.getSeriesCategories(portalUrl, mac, source.userAgent, source.serial)
+        val out = mutableListOf<M3uParser.M3uChannel>()
+        // === LIVE TV ===
+        val live = Stalker.getAllChannels(portalUrl, mac, source.userAgent, source.serial)
+        Log.d(TAG, "Stalker ${source.name} live : ${live.size} chaînes")
+        live.forEach { sc ->
+            val friendlyGroup = sc.group?.let { liveGenres[it] ?: it }
+            out += M3uParser.M3uChannel(
+                name = sc.name, url = sc.cmd, logo = sc.logo, group = friendlyGroup, tvgId = sc.tvgId,
+                options = mapOf(
+                    "stalker-cmd" to sc.cmd, "stalker-mac" to mac, "stalker-portal" to source.url,
+                    "xtream-type" to "live", // tag explicite → IptvClassifier le respecte
+                ),
             )
         }
+        // === VOD (films) ===
+        runCatching {
+            val vod = Stalker.getAllVod(portalUrl, mac, source.userAgent, source.serial)
+            Log.d(TAG, "Stalker ${source.name} VOD : ${vod.size} films")
+            vod.forEach { sc ->
+                val friendlyGroup = sc.group?.let { vodCategories[it] ?: it } ?: "Films"
+                out += M3uParser.M3uChannel(
+                    name = sc.name, url = sc.cmd, logo = sc.logo, group = friendlyGroup, tvgId = sc.tvgId,
+                    options = mapOf(
+                        "stalker-cmd" to sc.cmd, "stalker-mac" to mac, "stalker-portal" to source.url,
+                        "xtream-type" to "movie",
+                    ),
+                )
+            }
+        }.onFailure { Log.w(TAG, "Stalker VOD fetch fail: ${it.message}") }
+        // === SERIES ===
+        runCatching {
+            val series = Stalker.getAllSeries(portalUrl, mac, source.userAgent, source.serial)
+            Log.d(TAG, "Stalker ${source.name} Series : ${series.size} séries")
+            series.forEach { sc ->
+                val friendlyGroup = sc.group?.let { seriesCategories[it] ?: it } ?: "Séries"
+                out += M3uParser.M3uChannel(
+                    name = sc.name, url = sc.cmd, logo = sc.logo, group = friendlyGroup, tvgId = sc.tvgId,
+                    options = mapOf(
+                        "stalker-cmd" to sc.cmd, "stalker-mac" to mac, "stalker-portal" to source.url,
+                        "xtream-type" to "series",
+                    ),
+                )
+            }
+        }.onFailure { Log.w(TAG, "Stalker Series fetch fail: ${it.message}") }
+        Log.d(TAG, "Stalker ${source.name} : ${out.size} items au total (live+vod+series)")
+        out
     }
 
     /** Construit la liste des URLs à essayer dans l'ordre, en corrigeant les
@@ -892,6 +1312,7 @@ object MyIptvProvider : Provider, IptvProvider {
             cache.remove(sourceId)
             classificationCache.remove(sourceId)
             try { cacheFile(sourceId)?.delete() } catch (_: Exception) {}
+            try { classificationFile(sourceId)?.delete() } catch (_: Exception) {}
         } else {
             cache.clear()
             classificationCache.clear()
@@ -906,7 +1327,56 @@ object MyIptvProvider : Provider, IptvProvider {
     //   NON IMPLÉMENTÉ
     // ═══════════════════════════════════════════════════════════════
 
-    override suspend fun search(query: String, page: Int): List<AppAdapter.Item> = emptyList()
+    /** 2026-05-13 (user "la recherche ne fonctionne pas") : implémentation
+     *  recherche full-text sur les noms de chaînes (case-insensitive). Recherche
+     *  dans les 3 types (LIVE/MOVIE/SERIES) en parallèle. Retourne TvShow pour
+     *  les LIVE (pour qu'ils soient lus directement via le mini-player), Movie
+     *  pour les VOD. Paginé via PAGE_SIZE pour fluidité. */
+    override suspend fun search(query: String, page: Int): List<AppAdapter.Item> = withContext(Dispatchers.IO) {
+        val q = query.trim().lowercase()
+        if (q.isEmpty()) return@withContext emptyList()
+        val sources = IptvSourceStore.getAll()
+        if (sources.isEmpty()) return@withContext emptyList()
+        // Force la classification sur toutes les sources si pas en cache
+        val (liveItems, _) = collectByType(sources, IptvClassifier.ContentType.LIVE)
+        val (movieItems, _) = collectByType(sources, IptvClassifier.ContentType.MOVIE)
+        val (seriesItems, _) = collectByType(sources, IptvClassifier.ContentType.SERIES)
+        // Filtre par query
+        val matches = mutableListOf<AppAdapter.Item>()
+        liveItems.forEach { item ->
+            if (item.channel.name.lowercase().contains(q)) {
+                matches += itemToTvShowLive(item)
+            }
+        }
+        movieItems.forEach { item ->
+            if (item.channel.name.lowercase().contains(q)) {
+                matches += itemToMovie(item)
+            }
+        }
+        seriesItems.forEach { item ->
+            if (item.channel.name.lowercase().contains(q)) {
+                // Évite les doublons par show name pour les séries
+                val showName = IptvClassifier.extractShowName(item.channel.name)
+                val showId = "myiptv-show::${item.source.id}::${encodeId(showName)}"
+                if (matches.none { it is TvShow && it.id == showId }) {
+                    matches += TvShow(
+                        id = showId,
+                        title = showName,
+                        overview = item.channel.group,
+                        poster = item.channel.logo,
+                        banner = item.channel.logo,
+                        providerName = name,
+                    )
+                }
+            }
+        }
+        // Pagination
+        val from = (page - 1) * PAGE_SIZE
+        if (from >= matches.size) return@withContext emptyList()
+        val to = minOf(from + PAGE_SIZE, matches.size)
+        Log.d(TAG, "search('$q') page $page → ${matches.size} matches total, retourne ${to - from}")
+        matches.subList(from, to)
+    }
     override suspend fun getGenre(id: String, page: Int): Genre = throw UnsupportedOperationException()
     override suspend fun getPeople(id: String, page: Int): People = throw UnsupportedOperationException()
 }

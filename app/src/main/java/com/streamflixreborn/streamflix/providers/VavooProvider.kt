@@ -98,6 +98,25 @@ object VavooProvider : Provider, IptvProvider {
     @Volatile private var lastLoadTime = 0L
     private const val CACHE_DURATION = 30 * 60 * 1000L // 30 min
 
+    /** 2026-05-13 (user "tu peux pas faire comme MyIPTV et choisir la langue") :
+     *  filtre pays courant. Default "France" pour back-compat. Mis à jour par
+     *  VavooCountrySettings.setCurrent() ou directement via setCountryFilter()
+     *  qui invalide aussi le cache pour forcer un reload. */
+    @Volatile private var currentCountryFilter: String = "France"
+
+    fun setCountryFilter(filterValue: String) {
+        if (currentCountryFilter == filterValue) return
+        currentCountryFilter = filterValue
+        invalidateCache()
+        Log.d(TAG, "Country filter switched to '$filterValue', cache invalidated")
+    }
+
+    fun invalidateCache() {
+        registryLoaded = false
+        lastLoadTime = 0
+        cachedOrderedIds = null
+    }
+
     // 2026-05-10 : cache de la liste ordonnée des IDs (pour prev/next channel
     // navigation depuis le grand player). Calculé une seule fois après chaque
     // registry refresh, partagé par getPreviousChannelId et getNextChannelId.
@@ -580,15 +599,44 @@ object VavooProvider : Provider, IptvProvider {
     )
 
     private fun loadCatalogFromBase(baseUrl: String, signature: String): List<VavooChannel> {
+        // 2026-05-13 (user "et pour vavoo tout les langage") : si le pays
+        // courant est le sentinel ALL_COUNTRIES ("Monde entier"), itère tous
+        // les pays connus et combine les résultats. Sinon, charge le pays
+        // unique (comportement standard).
+        val countryFilter = currentCountryFilter
+        if (countryFilter == VavooCountrySettings.ALL_COUNTRIES) {
+            val combined = mutableListOf<VavooChannel>()
+            val seen = HashSet<String>()
+            for (country in VavooCountrySettings.allCountryFilterValues) {
+                try {
+                    val chans = loadCatalogForCountry(baseUrl, signature, country)
+                    for (c in chans) {
+                        // Dédoublonne par id (certains canaux apparaissent sous plusieurs pays)
+                        if (seen.add(c.id)) combined.add(c)
+                    }
+                    Log.d(TAG, "  + $country: ${chans.size} chaînes (total ${combined.size})")
+                } catch (e: Exception) {
+                    Log.w(TAG, "  ! $country failed: ${e.message}")
+                }
+            }
+            return combined
+        }
+        return loadCatalogForCountry(baseUrl, signature, countryFilter)
+    }
+
+    /** Charge le catalogue Vavoo pour UN pays donné. */
+    private fun loadCatalogForCountry(baseUrl: String, signature: String, countryFilter: String): List<VavooChannel> {
         val catalogUrl = "${baseUrl.trimEnd('/')}/mediahubmx-catalog.json"
         val headers = catalogHeaders(signature)
         val channels = mutableListOf<VavooChannel>()
         var cursorInt = 0
+        val isFrance = countryFilter.equals("France", ignoreCase = true)
 
         while (true) {
             // 2026-05-10 : body strict, validé par test depuis Console DevTools de Lokke.
             // language=de + region=AT + sort=name + cursor=0 + filter.group=France
             // → HTTP 200 avec items. Tout autre combo → HTTP 400 "Validation error".
+            // 2026-05-13 : filter.group = pays courant (France, Italy, Germany...).
             val body = JSONObject().apply {
                 put("language", "de")
                 put("region", "AT")
@@ -597,7 +645,7 @@ object VavooProvider : Provider, IptvProvider {
                 put("adult", false)
                 put("search", "")
                 put("sort", "name")
-                put("filter", JSONObject().apply { put("group", "France") })
+                put("filter", JSONObject().apply { put("group", countryFilter) })
                 put("cursor", cursorInt)
                 put("clientVersion", "3.1.0")
             }
@@ -615,9 +663,14 @@ object VavooProvider : Provider, IptvProvider {
                 val group = item.optString("group", "")
                 val country = extractCountry(group)
 
-                // Filtre France uniquement (la majorité des chaînes que veut le user)
-                if (!country.equals("France", ignoreCase = true) &&
-                    !country.equals("France Sport", ignoreCase = true)) continue
+                // 2026-05-13 : pour France, garde le filtre client historique
+                // (refuse "France XYZ" autres que "France Sport"). Pour les
+                // autres pays, accepte tout ce que l'API renvoie (l'API a
+                // déjà filtré côté serveur via filter.group).
+                if (isFrance) {
+                    if (!country.equals("France", ignoreCase = true) &&
+                        !country.equals("France Sport", ignoreCase = true)) continue
+                }
 
                 val ids = item.optJSONObject("ids")
                 val id = ids?.optString("id", "") ?: item.optString("id", url)

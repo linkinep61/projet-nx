@@ -3,6 +3,7 @@ package com.streamflixreborn.streamflix.activities.profile
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
@@ -27,6 +28,16 @@ class ProfilePickerAdapter(
         private const val VIEW_TYPE_ADD = 1
         /** Limite arbitraire pour ne pas dépasser un écran (Netflix en autorise 5). */
         const val MAX_PROFILES = 5
+
+        /** 2026-05-13 (user "ça serait plus joli") : palette d'avatars cyclée
+         *  par index de profil. 5 gradients vifs distincts. */
+        private val AVATAR_BACKGROUNDS = intArrayOf(
+            R.drawable.bg_profile_avatar_c1, // rose/rouge
+            R.drawable.bg_profile_avatar_c2, // violet/bleu
+            R.drawable.bg_profile_avatar_c3, // cyan/teal
+            R.drawable.bg_profile_avatar_c4, // vert
+            R.drawable.bg_profile_avatar_c5, // ambre/orange
+        )
     }
 
     override fun getItemViewType(position: Int): Int {
@@ -51,11 +62,16 @@ class ProfilePickerAdapter(
             holder.name.text = profile.name
             holder.lock.visibility = if (profile.pinHash != null) View.VISIBLE else View.GONE
             holder.itemView.setOnClickListener { onProfileClick(profile) }
+            // 2026-05-13 (user "voir à travers pour voir mon fond d'écran") :
+            // tuile transparente, le wallpaper du home reste visible derrière.
+            holder.avatar?.setBackgroundResource(android.R.color.transparent)
         } else {
             holder.emoji.text = "+"
             holder.name.text = "Ajouter"
             holder.lock.visibility = View.GONE
             holder.itemView.setOnClickListener { onAddProfileClick() }
+            // Carte "+ Ajouter" : juste la bordure pointillée pour la situer.
+            holder.avatar?.setBackgroundResource(R.drawable.bg_profile_avatar_add)
         }
     }
 
@@ -63,5 +79,8 @@ class ProfilePickerAdapter(
         val emoji: TextView = itemView.findViewById(R.id.tv_profile_emoji)
         val name: TextView = itemView.findViewById(R.id.tv_profile_name)
         val lock: ImageView = itemView.findViewById(R.id.iv_profile_lock)
+        // Nullable car l'ID a été ajouté côté layout 2026-05-13 ; safety pour
+        // les anciens layouts qui ne l'auraient pas (au cas où).
+        val avatar: FrameLayout? = itemView.findViewById(R.id.fl_profile_avatar)
     }
 }

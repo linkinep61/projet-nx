@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-05-13 (user "on voit même plus le numéro de la chaîne") : fond clair
+     pour les logos IPTV qui sont des PNG transparents avec contenu sombre
+     (France 2/5/Inter/etc.). Sans ça, "2"/"5" noirs sur fond foncé de tuile
+     = invisibles. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="#22FFFFFF" />
+    <stroke android:width="1dp" android:color="#33FFFFFF" />
+    <corners android:radius="12dp" />
+</shape>

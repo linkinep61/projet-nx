@@ -68,24 +68,74 @@ object StalkerClient {
         mac: String,
         userAgent: String? = null,
         serial: String? = null,
+    ): Map<String, String> = fetchCategoriesGeneric(portalUrl, mac, userAgent, serial,
+        "type=itv&action=get_genres", "ITV genres")
+
+    /** 2026-05-13 (user "Les catégories film et n'apparaissent pas comme elles
+     *  devraient apparaître") : fetch les noms de catégories VOD séparément
+     *  (Stalker mappe les category_id différemment pour ITV vs VOD vs Series).
+     *  Endpoint : type=vod&action=get_categories. */
+    suspend fun getVodCategories(
+        portalUrl: String,
+        mac: String,
+        userAgent: String? = null,
+        serial: String? = null,
+    ): Map<String, String> {
+        // 2026-05-13 (user "toujours pareil") : essaie 2 noms d'endpoint
+        // courants. Différents portails Stalker utilisent différents noms.
+        val a = fetchCategoriesGeneric(portalUrl, mac, userAgent, serial,
+            "type=vod&action=get_categories", "VOD categories")
+        if (a.isNotEmpty()) return a
+        val b = fetchCategoriesGeneric(portalUrl, mac, userAgent, serial,
+            "type=vod&action=get_genres", "VOD genres (fallback)")
+        if (b.isNotEmpty()) return b
+        // Dernier essai : endpoint avec category= au lieu de get_categories
+        return fetchCategoriesGeneric(portalUrl, mac, userAgent, serial,
+            "type=vod&action=get_genres_for_category", "VOD genres_for_category (fallback 2)")
+    }
+
+    /** Fetch les noms de catégories Series. */
+    suspend fun getSeriesCategories(
+        portalUrl: String,
+        mac: String,
+        userAgent: String? = null,
+        serial: String? = null,
+    ): Map<String, String> {
+        val a = fetchCategoriesGeneric(portalUrl, mac, userAgent, serial,
+            "type=series&action=get_categories", "Series categories")
+        if (a.isNotEmpty()) return a
+        val b = fetchCategoriesGeneric(portalUrl, mac, userAgent, serial,
+            "type=series&action=get_genres", "Series genres (fallback)")
+        if (b.isNotEmpty()) return b
+        return fetchCategoriesGeneric(portalUrl, mac, userAgent, serial,
+            "type=series&action=get_genres_for_category", "Series genres_for_category (fallback 2)")
+    }
+
+    private suspend fun fetchCategoriesGeneric(
+        portalUrl: String,
+        mac: String,
+        userAgent: String?,
+        serial: String?,
+        endpoint: String,
+        label: String,
     ): Map<String, String> {
         val ua = userAgent ?: DEFAULT_UA
         val base = normalizeBase(portalUrl)
         val token = handshake(base, mac, ua, serial) ?: return emptyMap()
-        val body = execPortal(base, "type=itv&action=get_genres", mac, ua, token, serial) ?: return emptyMap()
+        val body = execPortal(base, endpoint, mac, ua, token, serial) ?: return emptyMap()
         return try {
             val js = JSONObject(body).optJSONArray("js") ?: return emptyMap()
             val out = mutableMapOf<String, String>()
             for (i in 0 until js.length()) {
                 val o = js.optJSONObject(i) ?: continue
                 val id = o.optString("id", "")
-                val title = o.optString("title", "")
+                val title = o.optString("title", "").ifBlank { o.optString("name", "") }
                 if (id.isNotEmpty() && title.isNotEmpty()) out[id] = title
             }
-            Log.d(TAG, "Stalker genres : ${out.size} catégories nommées")
+            Log.d(TAG, "Stalker $label : ${out.size} catégories nommées")
             out
         } catch (e: Exception) {
-            Log.w(TAG, "getGenres parse fail: ${e.message}")
+            Log.w(TAG, "$label parse fail: ${e.message}")
             emptyMap()
         }
     }
@@ -120,7 +170,68 @@ object StalkerClient {
         return parseChannels(body)
     }
 
-    /** Résout l'URL réelle d'une chaîne Stalker à la demande (au moment du play). */
+    /** 2026-05-13 (user "rien en série alors je suis sûr il y en a plein") :
+     *  fetch VOD (films) du portail Stalker. Endpoint type=vod. Pagine via
+     *  get_ordered_list jusqu'à épuisement (max 5 pages = 500 items pour pas
+     *  surcharger). */
+    suspend fun getAllVod(
+        portalUrl: String,
+        mac: String,
+        userAgent: String? = null,
+        serial: String? = null,
+        maxPages: Int = 20, // 20 × ~25 items = ~500 films max — bumpé pour les gros bouquets
+    ): List<StalkerChannel> {
+        val ua = userAgent ?: DEFAULT_UA
+        val base = normalizeBase(portalUrl)
+        val token = handshake(base, mac, ua, serial) ?: return emptyList()
+        val all = mutableListOf<StalkerChannel>()
+        for (page in 1..maxPages) {
+            val body = execPortal(
+                base,
+                "type=vod&action=get_ordered_list&p=$page&genre=*&sortby=added",
+                mac, ua, token,
+            ) ?: break
+            val pageItems = parseChannels(body)
+            if (pageItems.isEmpty()) break
+            all += pageItems
+            Log.d(TAG, "Stalker VOD page $page : +${pageItems.size} items (total $all.size)")
+        }
+        return all
+    }
+
+    /** Fetch séries du portail Stalker. Endpoint type=series. */
+    suspend fun getAllSeries(
+        portalUrl: String,
+        mac: String,
+        userAgent: String? = null,
+        serial: String? = null,
+        maxPages: Int = 20, // 20 × ~25 items = ~500 séries max
+    ): List<StalkerChannel> {
+        val ua = userAgent ?: DEFAULT_UA
+        val base = normalizeBase(portalUrl)
+        val token = handshake(base, mac, ua, serial) ?: return emptyList()
+        val all = mutableListOf<StalkerChannel>()
+        for (page in 1..maxPages) {
+            val body = execPortal(
+                base,
+                "type=series&action=get_ordered_list&p=$page&genre=*&sortby=added",
+                mac, ua, token,
+            ) ?: break
+            val pageItems = parseChannels(body)
+            if (pageItems.isEmpty()) break
+            all += pageItems
+            Log.d(TAG, "Stalker Series page $page : +${pageItems.size} items (total $all.size)")
+        }
+        return all
+    }
+
+    /** Résout l'URL réelle d'une chaîne Stalker à la demande (au moment du play).
+     *  2026-05-13 : gère 3 cas :
+     *    1. cmd commence par "vod::<id>" → endpoint VOD avec id
+     *       Format id observé : "2450" ou "2450:2450" (Stalker peut dupliquer
+     *       l'id séparé par ":"). On prend la 1ère partie numérique.
+     *    2. cmd commence par "ffrt"/"ffmpeg" → endpoint live (ITV)
+     *    3. cmd vide/inattendu → fallback ITV */
     suspend fun createStreamLink(
         portalUrl: String,
         mac: String,
@@ -130,16 +241,32 @@ object StalkerClient {
         val ua = userAgent ?: DEFAULT_UA
         val base = normalizeBase(portalUrl)
         val token = handshake(base, mac, ua, null) ?: return null
-        val body = execPortal(
-            base,
-            "type=itv&action=create_link&cmd=${java.net.URLEncoder.encode(cmd, "UTF-8")}",
-            mac, ua, token,
-        ) ?: return null
+        // Détecte le type d'endpoint à utiliser
+        val endpoint = when {
+            cmd.startsWith("vod::") -> {
+                // Extract numeric id (handle "id" or "id:id" format)
+                val rawId = cmd.removePrefix("vod::").substringBefore(":")
+                Log.d(TAG, "createStreamLink VOD : id=$rawId (cmd=$cmd)")
+                "type=vod&action=create_link&cmd=${java.net.URLEncoder.encode("/media/$rawId.mpg", "UTF-8")}&series=0&forced_storage=0&disable_ad=0"
+            }
+            cmd.startsWith("series::") -> {
+                val rawId = cmd.removePrefix("series::").substringBefore(":")
+                Log.d(TAG, "createStreamLink SERIES : id=$rawId (cmd=$cmd)")
+                "type=series&action=create_link&cmd=${java.net.URLEncoder.encode("/media/$rawId.mpg", "UTF-8")}&series=1"
+            }
+            else -> "type=itv&action=create_link&cmd=${java.net.URLEncoder.encode(cmd, "UTF-8")}"
+        }
+        val body = execPortal(base, endpoint, mac, ua, token) ?: run {
+            Log.w(TAG, "createStreamLink: empty response for endpoint=$endpoint")
+            return null
+        }
         return try {
             val js = JSONObject(body).optJSONObject("js")
             val cmdField = js?.optString("cmd", "") ?: ""
+            Log.d(TAG, "createStreamLink response cmd=${cmdField.take(120)}")
             // Format typique : "ffmpeg http://stream.url/play.m3u8" → on prend après l'espace
-            cmdField.substringAfter(' ').takeIf { it.isNotEmpty() } ?: cmdField
+            val resolved = cmdField.substringAfter(' ').takeIf { it.isNotEmpty() } ?: cmdField
+            resolved.takeIf { it.isNotEmpty() && it.startsWith("http", ignoreCase = true) }
         } catch (e: Exception) {
             Log.w(TAG, "create_link parse fail: ${e.message}")
             null
@@ -210,20 +337,44 @@ object StalkerClient {
             val out = mutableListOf<StalkerChannel>()
             for (i in 0 until arr.length()) {
                 val ch = arr.optJSONObject(i) ?: continue
-                val name = ch.optString("name", ch.optString("title", ""))
-                val cmd = ch.optString("cmd", "")
-                if (name.isBlank() || cmd.isBlank()) continue
+                // 2026-05-13 (user "il est censé avoir tout ça pourquoi y a pas
+                // les séries") : pour VOD/Series Stalker le `cmd` est souvent
+                // vide — l'item porte juste un `id` numérique. On stocke alors
+                // un placeholder `vod::<id>` ou `series::<id>` qui sera résolu
+                // au moment du play (besoin de créer un endpoint dédié dans
+                // createStreamLink). On accepte aussi `o_name` (VOD-specific).
+                val name = ch.optString("name", "")
+                    .ifBlank { ch.optString("title", "") }
+                    .ifBlank { ch.optString("o_name", "") }
+                if (name.isBlank()) continue
+                val cmdRaw = ch.optString("cmd", "")
+                val id = ch.optString("id", "")
+                val cmd = when {
+                    cmdRaw.isNotBlank() -> cmdRaw
+                    id.isNotBlank() -> "vod::$id" // placeholder, resolve via create_link au play
+                    else -> { continue }
+                }
+                // 2026-05-13 (user "Les catégories n'apparaissent pas comme
+                // elles devraient") : préfère les noms friendly (category_name,
+                // category_title) avant les IDs numériques (category_id,
+                // tv_genre_id). Si seulement l'ID est présent, sera mappé
+                // par fetchStalker via la map dédiée par type.
+                val groupName = ch.optString("category_name", "").takeIf { it.isNotEmpty() }
+                    ?: ch.optString("category_title", "").takeIf { it.isNotEmpty() }
+                    ?: ch.optString("genre", "").takeIf { it.isNotEmpty() }
+                    ?: ch.optString("category_id", "").takeIf { it.isNotEmpty() }
+                    ?: ch.optString("tv_genre_id", "").takeIf { it.isNotEmpty() }
                 out += StalkerChannel(
                     name = name,
                     cmd = cmd,
                     logo = ch.optString("logo", "").takeIf { it.isNotEmpty() }
-                        ?: ch.optString("logo_url", "").takeIf { it.isNotEmpty() },
-                    group = ch.optString("tv_genre_id", "").takeIf { it.isNotEmpty() }
-                        ?: ch.optString("genre", "").takeIf { it.isNotEmpty() },
+                        ?: ch.optString("logo_url", "").takeIf { it.isNotEmpty() }
+                        ?: ch.optString("screenshot_uri", "").takeIf { it.isNotEmpty() },
+                    group = groupName,
                     tvgId = ch.optString("xmltv_id", "").takeIf { it.isNotEmpty() },
                 )
             }
-            Log.d(TAG, "Parsed ${out.size} Stalker channels")
+            Log.d(TAG, "Parsed ${out.size} Stalker items")
             out
         } catch (e: Exception) {
             Log.w(TAG, "parseChannels fail: ${e.message}, body=${body.take(200)}")

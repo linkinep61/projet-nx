@@ -7,11 +7,16 @@
     android:clipChildren="false"
     android:clipToPadding="false">
 
+    <!-- 2026-05-13 (user "tu peux pas décaler un peu l'écriture et la petite
+         parabole vers la droite") : marginStart bumped 70 → 140dp pour libérer
+         de la place pour les 2 boutons IPTV top-left (catégories + langue) qui
+         occupent ~112dp à partir du bord gauche. Évite l'overlap visuel entre
+         "📡 Toutes les chaînes" et les icônes du toolbar. -->
     <TextView
         android:id="@+id/tv_category_title"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginStart="70dp"
+        android:layout_marginStart="140dp"
         android:layout_marginEnd="70dp"
         android:textColor="#FFFFFF"
         android:textSize="20sp"
@@ -21,6 +26,11 @@
         app:layout_constraintTop_toTopOf="parent"
         tools:text="Title" />
 
+    <!-- 2026-05-13 (user "quand je vais sur la gauche ça m'envoie en haut") :
+         force nextFocusLeft sur @id/home (menu sidebar) pour que LEFT depuis
+         une tile aille bien sur la sidebar, pas sur les boutons IPTV au-dessus.
+         Sans ça, le focus part chercher le focusable le plus proche → IPTV
+         button qui est haut-gauche. -->
     <androidx.leanback.widget.HorizontalGridView
         android:id="@+id/hgv_category"
         android:layout_width="0dp"
@@ -31,6 +41,7 @@
         android:paddingStart="70dp"
         android:paddingEnd="70dp"
         android:scrollbars="none"
+        android:nextFocusLeft="@id/home"
         app:focusOutEnd="true"
         app:focusOutFront="true"
         app:layout_constraintEnd_toEndOf="parent"

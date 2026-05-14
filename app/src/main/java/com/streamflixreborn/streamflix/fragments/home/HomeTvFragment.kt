@@ -88,11 +88,31 @@ class HomeTvFragment : Fragment() {
 
         initializeHome()
         initializeMiniPlayer()
+        initializeIptvActions()
 
         // Lightweight refresh when provider changes
         viewLifecycleOwner.lifecycleScope.launch {
             ProviderChangeNotifier.providerChangeFlow.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect {
                 viewModel.getHome()
+            }
+        }
+
+        // 2026-05-13 (user "vire ça de mon iptv" — la swiper FEATURED apparaissait
+        // sur les chunks IPTV à cause de Category.FEATURED == "". Le fix code
+        // est appliqué, mais le HomeCache disque a déjà serializé les vieux
+        // chunks. One-shot migration : clear le cache home des providers IPTV
+        // une fois pour évacuer les mauvaises catégories. Le flag est posé
+        // une seule fois, prochaines lectures normales.
+        kotlin.runCatching {
+            val prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(requireContext())
+            val MIGRATION_KEY = "home_cache_iptv_chunked_v3_cleared"
+            if (!prefs.getBoolean(MIGRATION_KEY, false)) {
+                val current = UserPreferences.currentProvider
+                if (current is com.streamflixreborn.streamflix.providers.IptvProvider) {
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(requireContext(), current)
+                    Log.d("HomeTv", "One-shot: cleared home cache for ${current.name}")
+                }
+                prefs.edit().putBoolean(MIGRATION_KEY, true).apply()
             }
         }
 
@@ -453,22 +473,33 @@ class HomeTvFragment : Fragment() {
      * Constrain the home grid width so horizontal swipers stop
      * at the left edge of the mini player instead of scrolling behind it.
      */
+    /** 2026-05-13 (user "fait en sorte que les chaînes ne restent pas cachées
+     *  derrière le mini lecteur") : au lieu de rétrécir la largeur (qui faisait
+     *  que les chaînes du côté droit disparaissaient = "cachées"), on pousse le
+     *  grid VERS LE BAS pour que la 1re row arrive sous le mini-player. Comme
+     *  ça toutes les chaînes restent affichées en pleine largeur, juste un peu
+     *  plus bas. Le mini-player occupe le coin top-right au-dessus du vide. */
     private fun updateHomeGridForMiniPlayer(miniPlayerVisible: Boolean) {
         if (_binding == null) return
         if (miniPlayerVisible == homeGridConstrained) return
         homeGridConstrained = miniPlayerVisible
         val grid = binding.vgvHome
         val params = grid.layoutParams as ConstraintLayout.LayoutParams
-        if (miniPlayerVisible) {
-            // Mini player is 45% width + 16dp margin from end.
-            // Constrain grid to ~53% so rows don't go behind it.
-            params.matchConstraintPercentWidth = 0.53f
-            params.endToEnd = ConstraintLayout.LayoutParams.UNSET
-            params.horizontalBias = 0f
-        } else {
-            params.matchConstraintPercentWidth = 1f
-            params.endToEnd = ConstraintLayout.LayoutParams.PARENT_ID
-        }
+        // Reset largeur à 100% (on garde plus le rétrécissement)
+        params.matchConstraintPercentWidth = 1f
+        params.endToEnd = ConstraintLayout.LayoutParams.PARENT_ID
+        // Padding top dynamique : mini-player height ≈ 45% width × 9/16. Sur
+        // 1080p TV ça fait ~280-300dp avec sa marge top de 16dp. On met 320dp
+        // de top padding quand visible pour être safe sur toutes résolutions.
+        val density = resources.displayMetrics.density
+        val basePaddingTop = (16 * density).toInt()
+        val miniPlayerSafePadding = (320 * density).toInt()
+        grid.setPadding(
+            grid.paddingLeft,
+            if (miniPlayerVisible) miniPlayerSafePadding else basePaddingTop,
+            grid.paddingRight,
+            grid.paddingBottom,
+        )
         grid.layoutParams = params
     }
 
@@ -482,6 +513,62 @@ class HomeTvFragment : Fragment() {
         }
 
         binding.root.requestFocus()
+    }
+
+    /** 2026-05-13 (user "il faut que tu fasses la même chose pour la TV") :
+     *  initialise les boutons IPTV top-left :
+     *   - MyIptvProvider : catégories + filtre langue (2 boutons)
+     *   - VavooProvider  : picker pays (globe seul, catégories cachées)
+     *   - Autres         : tout caché */
+    private fun initializeIptvActions() {
+        val current = UserPreferences.currentProvider
+        val isMyIptv = current is com.streamflixreborn.streamflix.providers.MyIptvProvider
+        val isVavoo = current is com.streamflixreborn.streamflix.providers.VavooProvider
+        if (!isMyIptv && !isVavoo) {
+            binding.llIptvActions.visibility = View.GONE
+            return
+        }
+        // 2026-05-13 (user "non dans la bar de gauche y a la place") : les
+        // boutons IPTV sont maintenant dans la sidebar nav_main (items
+        // iptv_categories_menu et iptv_language_menu). On garde le LinearLayout
+        // GONE pour ne pas occuper d'espace dans le fragment.
+        binding.llIptvActions.visibility = View.GONE
+        // 2026-05-13 : sync le filtre pays Vavoo depuis prefs persistées au cas
+        // où l'app a été relancée (le @Volatile var dans VavooProvider repart
+        // à "France" sinon).
+        if (isVavoo) {
+            val saved = com.streamflixreborn.streamflix.providers.VavooCountrySettings
+                .getCurrent(requireContext())
+            com.streamflixreborn.streamflix.providers.VavooProvider.setCountryFilter(saved.filterValue)
+        }
+    }
+
+    /** 2026-05-13 (user "tu peux pas faire comme MyIPTV et choisir la langue") :
+     *  picker pays pour Vavoo. Refresh le home après changement. */
+    private fun showVavooCountryPicker() {
+        val ctx = requireContext()
+        val current = com.streamflixreborn.streamflix.providers.VavooCountrySettings.getCurrent(ctx)
+        val list = com.streamflixreborn.streamflix.providers.VavooCountrySettings.list
+        val items = list.map {
+            "${it.flag} ${it.label}${if (it.code == current.code) "  ✓" else ""}"
+        }.toTypedArray()
+        android.app.AlertDialog.Builder(ctx)
+            .setTitle("Pays Vavoo")
+            .setItems(items) { _, idx ->
+                val picked = list[idx]
+                if (picked.code == current.code) return@setItems
+                com.streamflixreborn.streamflix.providers.VavooCountrySettings.setCurrent(ctx, picked)
+                com.streamflixreborn.streamflix.providers.VavooProvider.setCountryFilter(picked.filterValue)
+                android.widget.Toast.makeText(
+                    ctx,
+                    "Vavoo : ${picked.flag} ${picked.label} — chargement…",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                // Force home reload pour récupérer le nouveau pays.
+                viewModel.getHome()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
     }
 
     private fun displayHome(categories: List<Category>) {
