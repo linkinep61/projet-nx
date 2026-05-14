@@ -159,7 +159,16 @@ class MainMobileActivity : FragmentActivity() {
         // active provider. This avoids auto-loading a memory-heavy provider
         // (which can crash low-RAM devices) and forces the user to consciously
         // pick which category/provider they want to use today.
-        if (savedInstanceState == null && isFreshProcessLaunch) {
+        // 2026-05-14 (user "à l'ouverture d'un profil j'ai que le home"
+        // [fournisseur]) : extra envoyé par ProfilePickerActivity quand l'user
+        // vient de pick un profil. Force le Home Fournisseur même si le profil
+        // a déjà un currentProvider mémorisé.
+        val forceProvidersScreen = intent?.getBooleanExtra("FORCE_PROVIDERS_SCREEN", false) == true
+        if (forceProvidersScreen) {
+            UserPreferences.currentProvider = null
+            isFreshProcessLaunch = false
+            // Stay on R.id.providers (start destination)
+        } else if (savedInstanceState == null && isFreshProcessLaunch) {
             // First activity in this OS process → wipe selection so we land on
             // the Providers home (avoids auto-loading a memory-heavy provider
             // that crashes low-RAM devices). The static flag survives activity
