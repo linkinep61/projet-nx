@@ -77,6 +77,7 @@ class ProfilePickerActivity : FragmentActivity() {
         startActivity(
             Intent(this, MainMobileActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                .putExtra("FORCE_PROVIDERS_SCREEN", true)
         )
     }
 

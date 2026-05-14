@@ -90,9 +90,13 @@ class ProfilePickerTvActivity : FragmentActivity() {
     private fun enterProfile(profile: Profile) {
         ProfileManager.setCurrentProfile(profile)
         Log.d(TAG, "Entering profile: ${profile.name} (${profile.id})")
+        // 2026-05-14 (user "à l'ouverture d'un profil j'ai que le home"
+        // [fournisseur]) : extra FORCE_PROVIDERS_SCREEN pour forcer le Home
+        // Fournisseur même si le profil a déjà un currentProvider mémorisé.
         startActivity(
             Intent(this, MainTvActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                .putExtra("FORCE_PROVIDERS_SCREEN", true)
         )
     }
 

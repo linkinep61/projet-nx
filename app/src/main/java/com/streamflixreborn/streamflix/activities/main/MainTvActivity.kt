@@ -264,7 +264,16 @@ class MainTvActivity : FragmentActivity() {
         // (which can crash low-RAM devices) and forces the user to consciously
         // pick which category/provider they want to use today.
         val savedInstanceState = savedStateForDeferredInit
-        if (savedInstanceState == null && isFreshProcessLaunch) {
+        // 2026-05-14 (user "à l'ouverture d'un profil j'ai que le home"
+        // [fournisseur]) : extra envoyé par ProfilePickerTvActivity quand l'user
+        // vient de pick un profil. Force le Home Fournisseur même si le profil
+        // a déjà un currentProvider mémorisé.
+        val forceProvidersScreen = intent?.getBooleanExtra("FORCE_PROVIDERS_SCREEN", false) == true
+        if (forceProvidersScreen) {
+            UserPreferences.currentProvider = null
+            isFreshProcessLaunch = false
+            // Stay on R.id.providers (the start destination).
+        } else if (savedInstanceState == null && isFreshProcessLaunch) {
             UserPreferences.currentProvider = null
             isFreshProcessLaunch = false
             // Stay on R.id.providers (the start destination).

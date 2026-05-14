@@ -167,9 +167,12 @@ class MainMobileActivity : FragmentActivity() {
             // |CLEAR_TASK) but is reset by the JVM on a real cold start.
             UserPreferences.currentProvider = null
             isFreshProcessLaunch = false
-            // 2026-05-13 (user "dernière URL m3u utilisée se charge par défaut") :
-            // si cache disque existe → skip providers picker, va direct à home Mon IPTV
-            tryAutoRestoreIptvSession(navController)
+            // 2026-05-14 (user "je veux pas que ce soit Mon IPTV qui s'ouvre
+            // en premier") : DESACTIVE l'auto-restore IPTV qui forçait Mon IPTV
+            // à charger automatiquement au cold start. Maintenant l'user voit
+            // toujours le picker de providers (Home Fournisseur) après avoir
+            // choisi son profil.
+            // tryAutoRestoreIptvSession(navController)
         } else if (savedInstanceState == null) {
             // Activity restart inside the same process — typically triggered by
             // a provider click (ProviderViewHolder restarts MainMobileActivity
