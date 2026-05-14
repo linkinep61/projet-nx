@@ -65,9 +65,31 @@ object UserPreferences {
     @Volatile
     var isGlobalSearchEnabled: Boolean = false
 
+    /** 2026-05-13 (user "à l'ouverture d'un profil pas par maman c'est Mon IPTV
+     *  qui s'ouvre au lieu du home fournisseur") : currentProvider est
+     *  maintenant stocké PAR PROFIL. Chaque profil a sa propre clé
+     *  CURRENT_PROVIDER_<profileId>. Un nouveau profil démarre avec
+     *  currentProvider=null → l'app affiche le picker de providers. */
+    private fun currentProviderKey(): String {
+        val profileId = ProfileManager.currentProfileIdOrDefault()
+        return "CURRENT_PROVIDER_$profileId"
+    }
+
     var currentProvider: Provider?
         get() {
-            val providerName = Key.CURRENT_PROVIDER.getString()
+            val perProfileKey = currentProviderKey()
+            // Lit la clé par-profil ; si vide ET que le profil est DEFAULT_ID,
+            // fallback sur l'ancienne clé globale (migration ascendante : le
+            // 1er profil Principal hérite du choix existant).
+            var providerName = prefs.getString(perProfileKey, null)
+            if (providerName == null &&
+                ProfileManager.currentProfileIdOrDefault() == com.streamflixreborn.streamflix.models.Profile.DEFAULT_ID) {
+                providerName = Key.CURRENT_PROVIDER.getString()
+                if (providerName != null) {
+                    // Migre la valeur globale vers la clé par-profil Principal.
+                    prefs.edit().putString(perProfileKey, providerName).apply()
+                }
+            }
             if (providerName?.startsWith("TMDb (") == true && providerName.endsWith(")")) {
                 val lang = providerName.substringAfter("TMDb (").substringBefore(")")
                 return TmdbProvider(lang)
@@ -79,6 +101,14 @@ object UserPreferences {
             // per forzare la creazione di un nuovo database file corretto.
             AppDatabase.resetInstance()
 
+            val perProfileKey = currentProviderKey()
+            if (value == null) {
+                prefs.edit().remove(perProfileKey).apply()
+            } else {
+                prefs.edit().putString(perProfileKey, value.name).apply()
+            }
+            // Garde aussi la clé globale legacy à jour pour compat (lecteurs
+            // tiers qui pourraient encore la lire).
             Key.CURRENT_PROVIDER.setString(value?.name)
             runCatching {
                 ArtworkRepairScheduler.schedule(StreamFlixApp.instance, value)
