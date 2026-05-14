@@ -57,6 +57,21 @@ object UserPreferences {
 
             val jsonString = Key.PROVIDER_CACHE.getString() ?: "{}"
             providerCache = runCatching { JSONObject(jsonString) }.getOrDefault(JSONObject())
+
+            // 2026-05-14 (user "il faut que ça soit pareil pour tout le monde,
+            // je veux pas que ça soit Mon IPTV qui s'ouvre en premier") :
+            // wipe one-shot des clés CURRENT_PROVIDER_<profileId> et de la
+            // clé globale legacy. Garantit que tous les profils (y compris
+            // Principal) démarrent sur Home Fournisseur après cette update.
+            val WIPE_KEY = "_v188_currentprovider_wipe_done"
+            if (!prefs.getBoolean(WIPE_KEY, false)) {
+                val toRemove = prefs.all.keys.filter { it.startsWith("CURRENT_PROVIDER") }
+                val editor = prefs.edit()
+                toRemove.forEach { editor.remove(it) }
+                editor.putBoolean(WIPE_KEY, true)
+                editor.apply()
+                Log.d(TAG, "One-shot wipe: cleared ${toRemove.size} CURRENT_PROVIDER keys")
+            }
         }
     }
 
@@ -78,18 +93,11 @@ object UserPreferences {
     var currentProvider: Provider?
         get() {
             val perProfileKey = currentProviderKey()
-            // Lit la clé par-profil ; si vide ET que le profil est DEFAULT_ID,
-            // fallback sur l'ancienne clé globale (migration ascendante : le
-            // 1er profil Principal hérite du choix existant).
-            var providerName = prefs.getString(perProfileKey, null)
-            if (providerName == null &&
-                ProfileManager.currentProfileIdOrDefault() == com.streamflixreborn.streamflix.models.Profile.DEFAULT_ID) {
-                providerName = Key.CURRENT_PROVIDER.getString()
-                if (providerName != null) {
-                    // Migre la valeur globale vers la clé par-profil Principal.
-                    prefs.edit().putString(perProfileKey, providerName).apply()
-                }
-            }
+            // 2026-05-14 (user "je veux pas que ça soit mon IPTV qui s'ouvre
+            // en premier") : pas de migration depuis la clé globale legacy.
+            // TOUS les profils démarrent avec currentProvider=null → app ouvre
+            // Home Fournisseur. L'user choisit lui-même à chaque profil.
+            val providerName = prefs.getString(perProfileKey, null)
             if (providerName?.startsWith("TMDb (") == true && providerName.endsWith(")")) {
                 val lang = providerName.substringAfter("TMDb (").substringBefore(")")
                 return TmdbProvider(lang)
