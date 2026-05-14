@@ -13,20 +13,10 @@
         android:icon="@drawable/ic_menu_tv"
         android:title="@string/main_menu_home" />
 
-    <!-- 2026-05-12 (user "il faudrait faire un bouton pour elle [la slide bar]") :
-         bouton dédié qui ouvre le picker de catégories. Visible uniquement pour
-         Mon IPTV (géré en code dans updateNavigationVisibility). -->
-    <item
-        android:id="@+id/iptv_categories"
-        android:icon="@drawable/ic_menu_search"
-        android:title="Catégories" />
-
-    <!-- 2026-05-12 (user "un bouton pour retourner aux sources") : bouton vers
-         IptvSourcesActivity. Visible uniquement pour Mon IPTV. -->
-    <item
-        android:id="@+id/iptv_sources"
-        android:icon="@drawable/ic_menu_iptv_sources"
-        android:title="Mes sources" />
+    <!-- 2026-05-13 (user "ça éviterait d'avoir des icônes partout") : items
+         iptv_categories et iptv_sources retirés. Le picker de catégorie s'ouvre
+         automatiquement au clic sur TV/Films/Séries. Mes sources est désormais
+         accessible via Paramètres → Paramètres du fournisseur → Mon IPTV. -->
 
     <item
         android:id="@id/movies"
@@ -42,6 +32,18 @@
         android:id="@+id/iptv_favorites"
         android:icon="@drawable/ic_favorite_enable"
         android:title="@string/main_menu_favorites" />
+
+    <!-- 2026-05-13 (user "mettre les 3 items avec favoris") : groupés avec
+         Favoris pour grouper visuellement les 3 fonctionnalités IPTV. -->
+    <item
+        android:id="@+id/iptv_categories_menu"
+        android:icon="@drawable/ic_categories_filter"
+        android:title="Catégories" />
+
+    <item
+        android:id="@+id/iptv_language_menu"
+        android:icon="@drawable/ic_iptv_language"
+        android:title="Pays/langue" />
 
     <item
         android:id="@id/settings"

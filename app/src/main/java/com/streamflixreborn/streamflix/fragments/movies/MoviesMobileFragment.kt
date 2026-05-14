@@ -59,6 +59,7 @@ class MoviesMobileFragment : Fragment() {
         shouldScrollToTop = true
         initializeLanguageTabs()
         initializeMovies()
+        initializeIptvActions()
 
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
@@ -120,6 +121,97 @@ class MoviesMobileFragment : Fragment() {
         _binding = null
     }
 
+    /** 2026-05-13 (user "il y a pas de filtre de catégorie et de langue en
+     *  film et série") : initialise les 2 boutons IPTV — catégories filtre
+     *  + filtre langue. Visibles uniquement sur Mon IPTV. */
+    private fun initializeIptvActions() {
+        val provider = UserPreferences.currentProvider
+        if (provider !is com.streamflixreborn.streamflix.providers.MyIptvProvider) {
+            binding.llIptvActions.visibility = View.GONE
+            return
+        }
+        binding.llIptvActions.visibility = View.VISIBLE
+        binding.ivIptvCategories.setOnClickListener {
+            showIptvMoviesCategoryPicker()
+        }
+        binding.ivIptvLanguage.setOnClickListener {
+            showIptvLanguageFilterPicker()
+        }
+    }
+
+    private fun showIptvMoviesCategoryPicker() {
+        val provider = com.streamflixreborn.streamflix.providers.MyIptvProvider
+        val type = com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.MOVIE
+        val categoriesWithCount = provider.availableCategoriesWithCount(type)
+        if (categoriesWithCount.isEmpty()) {
+            android.widget.Toast.makeText(
+                requireContext(),
+                "Aucune catégorie en cache — recharge la source d'abord.",
+                android.widget.Toast.LENGTH_SHORT,
+            ).show()
+            return
+        }
+        val totalCount = categoriesWithCount.sumOf { it.second }
+        val displayItems = arrayOf("Toutes les catégories ($totalCount)") +
+            categoriesWithCount.map { (n, c) -> "${provider.prettyCategoryName(n)}  ($c)" }
+                .toTypedArray()
+        val rawNames = arrayOf<String?>(null) +
+            categoriesWithCount.map { it.first }.toTypedArray()
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("Choisir une catégorie")
+            .setItems(displayItems) { _, idx ->
+                provider.selectedCategoryMovie = rawNames[idx]
+                com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                    requireContext().applicationContext, provider,
+                )
+                com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                // 2026-05-13 (user "des fois il faut cliquer plusieurs fois
+                // pour changer la catégorie") : double reload + delay pour
+                // s'assurer que la viewModel ne race pas avec la pagination
+                // précédente. Le 1er reload reset l'état, le 2e (après 100ms)
+                // garantit que le nouveau filtre est appliqué même si le
+                // viewModel avait un job en cours.
+                viewModel.getMovies()
+                binding.root.postDelayed({ viewModel.getMovies() }, 150L)
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun showIptvLanguageFilterPicker() {
+        val provider = com.streamflixreborn.streamflix.providers.MyIptvProvider
+        val options = arrayOf(
+            "Auto (recommandé)" to "auto",
+            "Toutes les langues" to "all",
+            "Français uniquement" to "fr",
+        )
+        val current = provider.getLanguageFilterMode()
+        val currentIdx = options.indexOfFirst { it.second == current }.coerceAtLeast(0)
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("Filtrer par langue")
+            .setSingleChoiceItems(options.map { it.first }.toTypedArray(), currentIdx) { dlg, idx ->
+                val newMode = options[idx].second
+                if (newMode != current) {
+                    provider.setLanguageFilterMode(newMode)
+                    provider.selectedCategoryLive = null
+                    provider.selectedCategoryMovie = null
+                    provider.selectedCategorySeries = null
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                        requireContext().applicationContext, provider,
+                    )
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                    viewModel.getMovies()
+                    android.widget.Toast.makeText(
+                        requireContext().applicationContext,
+                        "Filtre langue : ${options[idx].first}",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                }
+                dlg.dismiss()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
 
     private fun initializeLanguageTabs() {
         val providerName = UserPreferences.currentProvider?.name ?: return

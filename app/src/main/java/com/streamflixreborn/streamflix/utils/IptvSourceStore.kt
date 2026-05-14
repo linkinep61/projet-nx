@@ -26,6 +26,31 @@ object IptvSourceStore {
             "${BuildConfig.APPLICATION_ID}.preferences",
             Context.MODE_PRIVATE,
         )
+        seedDefaultSourceIfEmpty()
+    }
+
+    /** 2026-05-13 (user "mets une source en permanence sur ce provider, comme ça
+     *  les gens auront déjà une source à utiliser") : auto-ajoute iptv-org/fr.m3u
+     *  comme source par défaut si la liste est vide. Permet aux nouveaux users de
+     *  tester immédiatement sans avoir à ajouter manuellement. */
+    private fun seedDefaultSourceIfEmpty() {
+        if (prefs.getString(KEY_SOURCES_JSON, null) != null) return // déjà fait
+        if (prefs.getBoolean("default_source_seeded", false)) return
+        val defaultSource = IptvSource(
+            id = "default_iptvorg_fr",
+            type = IptvSource.Type.M3U,
+            name = "IPTV-Org France (gratuit)",
+            url = "https://iptv-org.github.io/iptv/countries/fr.m3u",
+        )
+        saveAll(listOf(defaultSource))
+        prefs.edit().putBoolean("default_source_seeded", true).apply()
+        // 2026-05-13 (user "auto-chargement de l'URL au démarrage") : set last_id
+        // dès le seed pour que tryAutoRestoreIptvSession puisse skip le picker
+        // des providers dès le 1er démarrage (une fois le M3U fetché).
+        val context = com.streamflixreborn.streamflix.StreamFlixApp.instance
+        context.getSharedPreferences("iptv_last_source", Context.MODE_PRIVATE)
+            .edit().putString("last_id", defaultSource.id).apply()
+        Log.d(TAG, "Default IPTV-Org FR source seeded + marked as last_id")
     }
 
     fun getAll(): List<IptvSource> {

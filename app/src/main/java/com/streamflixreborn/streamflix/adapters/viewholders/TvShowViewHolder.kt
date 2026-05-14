@@ -192,6 +192,24 @@ class TvShowViewHolder(
         return true
     }
 
+    /** 2026-05-13 (user "on peut peut être garder le carré c'est peut être pas
+     *  dérangeant à voir du moment que derrière on refond des fonds d'écran") :
+     *  carré clair arrondi derrière le logo IPTV (style icône d'app), comme ça
+     *  les logos avec contenu noir (France 2/5, France Inter) restent lisibles.
+     *  Le gradient du home est visible PARTOUT autour, donc pas dérangeant. */
+    private fun applyIptvLogoStyle(iv: ImageView) {
+        if (isIptvProvider()) {
+            iv.setBackgroundResource(R.drawable.bg_iptv_logo_light)
+            iv.scaleType = ImageView.ScaleType.FIT_CENTER
+            val pad = (10 * iv.resources.displayMetrics.density).toInt()
+            iv.setPadding(pad, pad, pad, pad)
+        } else {
+            iv.background = null
+            iv.scaleType = ImageView.ScaleType.CENTER_CROP
+            iv.setPadding(0, 0, 0, 0)
+        }
+    }
+
     private fun isIptvProvider(): Boolean {
         // Match WiTv (ch::, sport::), OlaTv (ola::, ola_ep::), Vegeta TV (vegeta::,
         // vegeta_ep::), Sport Live (sportlive::), Movix LiveTV (movixlivetv::),
@@ -414,6 +432,7 @@ class TvShowViewHolder(
             true
         }
         setPoster(binding.ivTvShowPoster)
+        applyIptvLogoStyle(binding.ivTvShowPoster)
         binding.tvTvShowQuality.apply {
             text = tvShow.quality ?: ""
             isVisible = !text.isNullOrEmpty()
@@ -462,6 +481,7 @@ class TvShowViewHolder(
             }
         }
         setPoster(binding.ivTvShowPoster)
+        applyIptvLogoStyle(binding.ivTvShowPoster)
         binding.tvTvShowQuality.apply {
             text = tvShow.quality ?: ""
             isVisible = !text.isNullOrEmpty()
@@ -496,6 +516,7 @@ class TvShowViewHolder(
             true
         }
         setPoster(binding.ivTvShowPoster)
+        applyIptvLogoStyle(binding.ivTvShowPoster)
         binding.tvTvShowQuality.apply {
             text = tvShow.quality ?: ""
             isVisible = !text.isNullOrEmpty()
@@ -537,6 +558,7 @@ class TvShowViewHolder(
             }
         }
         setPoster(binding.ivTvShowPoster)
+        applyIptvLogoStyle(binding.ivTvShowPoster)
         binding.tvTvShowQuality.apply {
             text = tvShow.quality ?: ""
             isVisible = !text.isNullOrEmpty()

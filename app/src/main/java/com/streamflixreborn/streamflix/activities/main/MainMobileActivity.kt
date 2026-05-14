@@ -167,7 +167,9 @@ class MainMobileActivity : FragmentActivity() {
             // |CLEAR_TASK) but is reset by the JVM on a real cold start.
             UserPreferences.currentProvider = null
             isFreshProcessLaunch = false
-            // Stay on R.id.providers (the start destination of the nav graph).
+            // 2026-05-13 (user "dernière URL m3u utilisée se charge par défaut") :
+            // si cache disque existe → skip providers picker, va direct à home Mon IPTV
+            tryAutoRestoreIptvSession(navController)
         } else if (savedInstanceState == null) {
             // Activity restart inside the same process — typically triggered by
             // a provider click (ProviderViewHolder restarts MainMobileActivity
@@ -645,5 +647,30 @@ class MainMobileActivity : FragmentActivity() {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
         }
+    }
+
+    /** 2026-05-13 (user "vrai refresh pas un truc faux") : auto-charge la
+     *  dernière source ET invalide le cache pour forcer un VRAI re-fetch réseau.
+     *  L'user voit le loading spinner + toasts pendant la vraie requête HTTP.
+     *  Si pas de last_id ou pas de source enregistrée → reste sur providers picker. */
+    private fun tryAutoRestoreIptvSession(navController: androidx.navigation.NavController) {
+        val prefs = getSharedPreferences("iptv_last_source", MODE_PRIVATE)
+        val lastSourceId = prefs.getString("last_id", null) ?: return
+        val source = com.streamflixreborn.streamflix.utils.IptvSourceStore.getById(lastSourceId) ?: return
+        // 2026-05-13 (user "vrai refresh, le home doit aussi se rafraîchir") :
+        // 3 niveaux de cache à invalider pour un VRAI refresh :
+        //  1. MyIptvProvider.cache (mémoire) + classificationCache
+        //  2. Disk cache TSV (cacheDir/iptv/*.tsv)
+        //  3. HomeCacheStore (snapshot home pour viewmodel) ← celui qui faisait
+        //     skip le network avec TTL 5min — c'est le vrai bug du "rien ne change"
+        com.streamflixreborn.streamflix.providers.MyIptvProvider.invalidateCache(source.id)
+        com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+            this, com.streamflixreborn.streamflix.providers.MyIptvProvider,
+        )
+        android.util.Log.d("MainMobile", "Auto-restore IPTV: 3 niveaux de cache invalidés pour ${source.name} → vrai re-fetch")
+        UserPreferences.currentProvider = com.streamflixreborn.streamflix.providers.MyIptvProvider
+        try {
+            navController.navigate(R.id.home)
+        } catch (_: Throwable) {}
     }
 }

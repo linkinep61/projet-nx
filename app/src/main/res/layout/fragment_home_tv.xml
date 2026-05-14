@@ -126,12 +126,72 @@
         android:clipToPadding="false"
         android:paddingTop="16dp"
         android:paddingBottom="16dp"
+        android:nextFocusDown="@id/iv_iptv_categories"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
         tools:itemCount="1"
         tools:listitem="@layout/content_category_swiper_tv" />
+
+    <!-- 2026-05-13 (user "il faut que tu fasses la même chose pour la TV
+         maintenant le même procédé ça serait vraiment cool avec les mêmes
+         boutons mais peut-être pas au même endroit") : 2 boutons IPTV top-left
+         (catégories + filtre langue) — visibles seulement pour Mon IPTV. Le
+         mini-player occupe top-right donc on les met top-left pour pas
+         overlapper. Focusable pour D-pad. -->
+    <!-- 2026-05-13 (user "non dans la bar de gauche y a la place") : icônes
+         placées verticalement dans la colonne gauche, sous les items du
+         sidebar nav_main (search/home/films/séries/favoris/settings) — alignées
+         pour avoir l'air d'icônes sidebar supplémentaires. -->
+    <LinearLayout
+        android:id="@+id/ll_iptv_actions"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:layout_marginStart="16dp"
+        android:layout_marginBottom="24dp"
+        android:visibility="gone"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent">
+
+        <!-- 2026-05-13 (user "ce serait plus simple de faire haut pour sortir et
+             passer par les boutons pour retourner dans la barre") :
+             - DPAD_LEFT depuis iv_iptv_categories → sidebar (nav_main item home)
+             - DPAD_UP depuis vgv_home → revient sur ces boutons (déjà câblé)
+             - DPAD_RIGHT entre catégories ↔ langue (déjà câblé) -->
+        <ImageView
+            android:id="@+id/iv_iptv_categories"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_marginBottom="8dp"
+            android:padding="10dp"
+            android:src="@drawable/ic_categories_filter"
+            android:background="?android:attr/selectableItemBackground"
+            android:focusable="true"
+            android:focusableInTouchMode="false"
+            android:nextFocusLeft="@id/home"
+            android:nextFocusRight="@id/vgv_home"
+            android:nextFocusDown="@id/iv_iptv_language"
+            android:nextFocusUp="@id/vgv_home"
+            android:contentDescription="Catégories IPTV"
+            app:tint="@android:color/white" />
+
+        <ImageView
+            android:id="@+id/iv_iptv_language"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:padding="10dp"
+            android:src="@drawable/ic_iptv_language"
+            android:background="?android:attr/selectableItemBackground"
+            android:focusable="true"
+            android:focusableInTouchMode="false"
+            android:nextFocusLeft="@id/home"
+            android:nextFocusRight="@id/vgv_home"
+            android:nextFocusUp="@id/iv_iptv_categories"
+            android:contentDescription="Filtre langue IPTV"
+            app:tint="@android:color/white" />
+    </LinearLayout>
 
     <include
         android:id="@+id/is_loading"

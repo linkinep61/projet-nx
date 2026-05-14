@@ -4,7 +4,7 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#181818">
+    android:background="@drawable/bg_wallpaper_tv">
 
     <TextView
         android:id="@+id/tv_profile_picker_title"
@@ -25,12 +25,13 @@
     <!-- 2026-05-12 : RV au CENTRE verticalement entre le titre et le bouton
          "Gérer". Avant : layout_height=wrap_content sans bottom constraint,
          donc la RV pouvait s'étendre jusqu'à se superposer au texte du bouton. -->
+    <!-- 2026-05-13 (user "l'icône est un peu bas") : RV en wrap_content +
+         centrée verticalement entre titre et bouton, au lieu de remplir toute
+         la zone (ce qui plaçait l'item en haut de la zone trop grande). -->
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rv_profiles"
         android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:layout_marginTop="40dp"
-        android:layout_marginBottom="40dp"
+        android:layout_height="wrap_content"
         android:layout_marginStart="80dp"
         android:layout_marginEnd="80dp"
         android:clipToPadding="false"
@@ -45,6 +46,7 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/tv_profile_picker_title"
+        app:layout_constraintVertical_bias="0.5"
         tools:itemCount="3"
         tools:listitem="@layout/item_profile_tv" />
 

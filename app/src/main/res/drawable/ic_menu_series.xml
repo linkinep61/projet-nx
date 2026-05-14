@@ -1,21 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-05-13 (user "L'icône qui est après film qui l'a pas remplacée") :
+     remplacé l'ancien stack de 3 rectangles (ressemblait à un sandwich /
+     liste de filtre) par l'icône Material video_library : 2 cartes
+     superposées avec un play triangle, universellement reconnue comme
+     "bibliothèque de séries". -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24"
     android:tint="?android:attr/textColorPrimary">
-    <!-- Stack of "episodes" : 3 superposed rounded rectangles to suggest a series -->
     <path
         android:fillColor="@android:color/white"
-        android:pathData="M3,7h14v2h-14z" />
-    <path
-        android:fillColor="@android:color/white"
-        android:pathData="M5,11h14v2h-14z" />
-    <path
-        android:fillColor="@android:color/white"
-        android:pathData="M7,15a2,2 0 0 1 2,-2h12a2,2 0 0 1 2,2v4a2,2 0 0 1 -2,2h-12a2,2 0 0 1 -2,-2z" />
-    <!-- Play triangle inside the largest rectangle -->
-    <path
-        android:fillColor="#181818"
-        android:pathData="M13,15.5l4.5,1.5l-4.5,1.5z" />
+        android:pathData="M4,6H2v14c0,1.1 0.9,2 2,2h14v-2H4V6zM20,2H8c-1.1,0 -2,0.9 -2,2v12c0,1.1 0.9,2 2,2h12c1.1,0 2,-0.9 2,-2V4c0,-1.1 -0.9,-2 -2,-2zM20,16H8V4h12v12zM10,7v8l6,-4z" />
 </vector>

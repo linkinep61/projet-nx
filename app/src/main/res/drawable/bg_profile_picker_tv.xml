@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-05-13 (user "le fond d'écran a disparu") : fond du picker = exactement
+     comme le home quand aucun film n'est focusé. Layer 1 : couleur de fond du
+     thème (suit ton choix : default / sunset / crimson / etc). Layer 2 : le
+     gradient latéral thémé (?attr/home_gradient_drawable) qui ajoute la teinte
+     subtile du thème (dégradé bord-vers-transparent). Aucun "machin rouge"
+     custom — c'est exactement ton thème courant. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="?attr/app_background_color" />
+        </shape>
+    </item>
+
+    <item android:drawable="?attr/home_gradient_drawable" />
+
+</layer-list>

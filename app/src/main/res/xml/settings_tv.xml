@@ -76,6 +76,41 @@
                 android:inputType="text" />
         </PreferenceCategory>
 
+        <!-- 2026-05-13 (user "mieux encore c'est d'aller dans les paramètres
+             paramètres du fournisseur et mettre les sources IPTV qu'on a ajouté
+             dedans voir en ajouter directement d'ici ça fera plus propre") :
+             Section Mon IPTV intégrée dans Paramètres du fournisseur.
+             Visible uniquement quand current provider == MyIptvProvider. -->
+        <PreferenceCategory
+            android:key="pc_my_iptv"
+            android:title="Mon IPTV">
+
+            <Preference
+                android:key="pref_iptv_manage_sources"
+                android:title="Mes sources IPTV"
+                android:summary="Gérer (ajouter, modifier, supprimer) les sources M3U/Stalker" />
+
+            <Preference
+                android:key="pref_iptv_add_source"
+                android:title="+ Ajouter une nouvelle source"
+                android:summary="Ouvre directement le formulaire d'ajout" />
+
+            <Preference
+                android:key="pref_iptv_clear_cache"
+                android:title="Vider le cache disque"
+                android:summary="Force le re-téléchargement complet de toutes les sources au prochain clic" />
+
+            <!-- 2026-05-13 (user "ça serait bien comme ça on peut avoir vraiment
+                 tout le contenu") : choix du filtre langue (Auto / Tout / FR strict). -->
+            <ListPreference
+                android:key="pref_iptv_language_filter"
+                android:title="Filtrer par langue"
+                android:summary="Auto : montre tout pour les playlists curées par région, filtre FR pour les gros bouquets multi-pays"
+                android:entries="@array/iptv_language_filter_entries"
+                android:entryValues="@array/iptv_language_filter_values"
+                android:defaultValue="auto" />
+        </PreferenceCategory>
+
         <PreferenceCategory
             android:key="pc_provider_empty_state"
             android:title="@string/settings_provider_connection_title">
@@ -85,11 +120,6 @@
                 android:title="@string/settings_provider_no_options_title"
                 android:summary="@string/settings_provider_no_options_summary" />
         </PreferenceCategory>
-
-        <!-- 2026-05-12 : la section IPTV est désormais accessible via le bouton
-             dédié dans la sidebar (item "Mes sources"). On garde uniquement
-             ce stub vide pour préserver l'attribut clé si jamais référencé.
-             Retiré du XML pour éviter de dupliquer le menu Paramètres. -->
     </PreferenceScreen>
 
     <PreferenceScreen

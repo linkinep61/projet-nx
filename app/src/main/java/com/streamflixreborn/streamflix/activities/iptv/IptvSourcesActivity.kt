@@ -53,6 +53,12 @@ class IptvSourcesActivity : FragmentActivity() {
         refreshList()
         updateHomeButtonVisibility()
         preloadAllSources()
+
+        // 2026-05-13 (user "ajouter directement d'ici") : si l'intent a un extra
+        // auto_add_source, on ouvre direct le picker M3U/Stalker à l'arrivée.
+        if (intent.getBooleanExtra("auto_add_source", false)) {
+            openTypePicker(null)
+        }
     }
 
     override fun onResume() {
@@ -171,7 +177,10 @@ class IptvSourcesActivity : FragmentActivity() {
                     // 2026-05-12 (user "0 TV 0 films 0 séries alors qu'il trouve des
                     // chaînes") : compte direct via countByTypeFR — précédemment on
                     // cherchait les mots dans les noms de catégories qui ont changé.
-                    val (live, movies, series) = com.streamflixreborn.streamflix.providers.MyIptvProvider.countByTypeFR()
+                    // 2026-05-13 (user "quand tu changes de source ils affichent
+                    // les mêmes chaînes en nombre") : passe sourceId pour ne
+                    // compter QUE cette source-là, pas le total cumulé.
+                    val (live, movies, series) = com.streamflixreborn.streamflix.providers.MyIptvProvider.countByTypeFR(source.id)
                     val total = live + movies + series
                     total to "📡 $live TV  •  📽 $movies films  •  📺 $series séries"
                 }.getOrElse {
@@ -220,14 +229,188 @@ class IptvSourcesActivity : FragmentActivity() {
         }
         AlertDialog.Builder(this)
             .setTitle("Type de source")
-            .setItems(arrayOf("M3U / M3U8 (URL playlist)", "Stalker MAG (URL portail + MAC)")) { _, idx ->
+            .setItems(arrayOf(
+                "M3U / M3U8 (URL playlist)",
+                "Stalker MAG (URL portail + MAC)",
+                "📦 Importer un pack (fichier de plusieurs sources)",
+            )) { _, idx ->
                 when (idx) {
                     0 -> openSourceForm(IptvSource.Type.M3U, null)
                     1 -> openSourceForm(IptvSource.Type.STALKER, null)
+                    2 -> openImportPackDialog()
                 }
             }
             .setNegativeButton("Annuler", null)
             .show()
+    }
+
+    /** 2026-05-13 (user "comment pour ajouter mon pack de source ça va être un
+     *  fichier avec plein de liens") : import bulk de sources via un fichier
+     *  ou une URL. Supporte 2 formats automatiquement détectés :
+     *
+     *  Format 1 (TXT simple) : 1 URL par ligne
+     *    https://server.com/playlist1.m3u
+     *    https://server.com/playlist2.m3u
+     *
+     *  Format 2 (JSON avancé) : array de configs complètes
+     *    [{"type":"M3U","name":"X","url":"..."},
+     *     {"type":"STALKER","name":"Y","url":"http://srv:8080/c/","mac":"00:1A:..."}]
+     */
+    private fun openImportPackDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Importer un pack de sources")
+            .setMessage("Choisis la source du pack :\n\n" +
+                "• Fichier local (.txt ou .json) sur le device\n" +
+                "• URL distante (Gist, Drive partagé, etc.)\n\n" +
+                "Format TXT : 1 URL M3U par ligne\n" +
+                "Format JSON : array d'objets {type, name, url[, mac]}")
+            .setPositiveButton("Fichier local") { _, _ -> launchFilePicker() }
+            .setNeutralButton("URL distante") { _, _ -> openImportUrlDialog() }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private val importFileLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val content = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    runCatching {
+                        contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                    }.getOrNull()
+                }
+                if (content == null) {
+                    Toast.makeText(this@IptvSourcesActivity, "Impossible de lire le fichier", Toast.LENGTH_LONG).show()
+                } else {
+                    importPackFromText(content)
+                }
+            }
+        }
+    }
+
+    private fun launchFilePicker() {
+        try {
+            importFileLauncher.launch(arrayOf("*/*"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Erreur ouverture sélecteur de fichier: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun openImportUrlDialog() {
+        val edit = EditText(this).apply {
+            inputType = InputType.TYPE_TEXT_VARIATION_URI
+            hint = "https://gist.github.com/.../raw/sources.txt"
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 24)
+            addView(edit, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("URL du pack")
+            .setView(container)
+            .setPositiveButton("Importer") { _, _ ->
+                val url = edit.text.toString().trim()
+                if (url.isEmpty()) return@setPositiveButton
+                scope.launch {
+                    val content = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching {
+                            val client = okhttp3.OkHttpClient.Builder()
+                                .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                                .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                                .build()
+                            val req = okhttp3.Request.Builder().url(url).build()
+                            client.newCall(req).execute().use { resp ->
+                                if (!resp.isSuccessful) null
+                                else resp.body?.string()
+                            }
+                        }.getOrNull()
+                    }
+                    if (content == null) {
+                        Toast.makeText(this@IptvSourcesActivity, "Impossible de fetcher l'URL", Toast.LENGTH_LONG).show()
+                    } else {
+                        importPackFromText(content)
+                    }
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun importPackFromText(content: String) {
+        val text = content.trim()
+        var added = 0
+        var skipped = 0
+        val skipReasons = mutableListOf<String>()
+        try {
+            // Détection auto : commence par '[' ou '{' → JSON
+            if (text.startsWith("[") || text.startsWith("{")) {
+                val arr = if (text.startsWith("[")) {
+                    org.json.JSONArray(text)
+                } else {
+                    // Singleton object
+                    org.json.JSONArray().put(org.json.JSONObject(text))
+                }
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val typeStr = obj.optString("type", "M3U").uppercase()
+                    val type = when (typeStr) {
+                        "M3U", "M3U8" -> IptvSource.Type.M3U
+                        "STALKER", "MAG" -> IptvSource.Type.STALKER
+                        else -> { skipped++; skipReasons += "type inconnu: $typeStr"; continue }
+                    }
+                    val name = obj.optString("name").takeIf { it.isNotBlank() } ?: "Source ${added + 1}"
+                    val url = obj.optString("url").takeIf { it.isNotBlank() }
+                        ?: run { skipped++; skipReasons += "URL manquante: $name"; continue }
+                    val mac = obj.optString("mac").takeIf { it.isNotBlank() }
+                    val ua = obj.optString("userAgent").takeIf { it.isNotBlank() }
+                    val src = IptvSource(
+                        id = IptvSourceStore.generateId(),
+                        type = type, name = name, url = url, mac = mac, userAgent = ua,
+                    )
+                    IptvSourceStore.upsert(src)
+                    added++
+                }
+            } else {
+                // Format TXT : 1 URL par ligne (commentaires avec # ignorés)
+                text.lines().map { it.trim() }.filter {
+                    it.isNotBlank() && !it.startsWith("#")
+                }.forEachIndexed { idx, url ->
+                    if (!url.startsWith("http://", true) && !url.startsWith("https://", true)) {
+                        skipped++; skipReasons += "ligne ${idx + 1} URL invalide"; return@forEachIndexed
+                    }
+                    val name = "Source ${added + 1}"
+                    val src = IptvSource(
+                        id = IptvSourceStore.generateId(),
+                        type = IptvSource.Type.M3U, name = name, url = url,
+                    )
+                    IptvSourceStore.upsert(src)
+                    added++
+                }
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "Erreur parse pack: ${e.message?.take(100)}", Toast.LENGTH_LONG).show()
+            return
+        }
+        // Invalide les caches pour repartir clean
+        MyIptvProvider.invalidateCache()
+        com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(this, MyIptvProvider)
+        com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+        val msg = buildString {
+            append("✓ $added source(s) importée(s)")
+            if (skipped > 0) append(", $skipped ignorée(s)")
+            if (skipReasons.isNotEmpty()) {
+                append("\n")
+                append(skipReasons.take(3).joinToString("\n"))
+                if (skipReasons.size > 3) append("\n…")
+            }
+        }
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+        refreshList()
     }
 
     /** Étape 2 : form pour entrer les détails de la source. */
@@ -325,6 +508,20 @@ class IptvSourcesActivity : FragmentActivity() {
                 val isNewSource = existing == null
                 IptvSourceStore.upsert(source)
                 MyIptvProvider.invalidateCache(source.id)
+                // 2026-05-13 (user "le Home est resté bloqué sur la source d'avant
+                // même en changeant de catégorie sur la nouvelle source") : le
+                // HomeCacheStore garde un snapshot 5 min de l'ancien état. Sans
+                // l'invalider, ajouter/éditer une source ne change pas le home
+                // tant que le snapshot n'a pas expiré. On vide aussi les filtres
+                // catégorie (les anciens noms RAW peuvent ne pas exister dans la
+                // nouvelle source) et on notifie le viewModel.
+                com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                    this, MyIptvProvider,
+                )
+                MyIptvProvider.selectedCategoryLive = null
+                MyIptvProvider.selectedCategoryMovie = null
+                MyIptvProvider.selectedCategorySeries = null
+                com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
                 if (isNewSource) {
                     // Nouvelle source → ouvre directement le contenu
                     Toast.makeText(this, "Chargement de '${source.name}'...", Toast.LENGTH_SHORT).show()
@@ -346,6 +543,12 @@ class IptvSourcesActivity : FragmentActivity() {
                     0 -> openSourceForm(source.type, source)
                     1 -> {
                         MyIptvProvider.invalidateCache(source.id)
+                        // 2026-05-13 : invalide aussi le snapshot home pour
+                        // forcer le re-fetch dès le prochain affichage.
+                        com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                            this, MyIptvProvider,
+                        )
+                        com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
                         Toast.makeText(this, "Cache vidé pour '${source.name}' — la prochaine ouverture re-fetch", Toast.LENGTH_SHORT).show()
                     }
                     2 -> confirmDelete(source)
@@ -362,6 +565,15 @@ class IptvSourcesActivity : FragmentActivity() {
             .setPositiveButton("Supprimer") { _, _ ->
                 IptvSourceStore.delete(source.id)
                 MyIptvProvider.invalidateCache(source.id)
+                // 2026-05-13 : invalide aussi le snapshot du home + filtres
+                // catégorie + notifie le viewModel pour rafraîchir immédiatement.
+                com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                    this, MyIptvProvider,
+                )
+                MyIptvProvider.selectedCategoryLive = null
+                MyIptvProvider.selectedCategoryMovie = null
+                MyIptvProvider.selectedCategorySeries = null
+                com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
                 refreshList()
             }
             .setNegativeButton("Annuler", null)

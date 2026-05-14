@@ -91,6 +91,45 @@
                 app:iconSpaceReserved="false" />
         </PreferenceCategory>
 
+        <!-- 2026-05-13 (user "mieux d'aller dans les paramètres → fournisseur et
+             mettre les sources IPTV qu'on a ajouté dedans") : section Mon IPTV
+             intégrée. Visible uniquement quand current provider == MyIptvProvider. -->
+        <PreferenceCategory
+            android:key="pc_my_iptv"
+            android:title="Mon IPTV"
+            app:iconSpaceReserved="false">
+
+            <Preference
+                android:key="pref_iptv_manage_sources"
+                android:title="Mes sources IPTV"
+                android:summary="Gérer (ajouter, modifier, supprimer) les sources M3U/Stalker"
+                app:iconSpaceReserved="false" />
+
+            <Preference
+                android:key="pref_iptv_add_source"
+                android:title="+ Ajouter une nouvelle source"
+                android:summary="Ouvre directement le formulaire d'ajout"
+                app:iconSpaceReserved="false" />
+
+            <Preference
+                android:key="pref_iptv_clear_cache"
+                android:title="Vider le cache disque"
+                android:summary="Force le re-téléchargement complet au prochain clic"
+                app:iconSpaceReserved="false" />
+
+            <!-- 2026-05-13 (user "ça serait bien comme ça on peut avoir vraiment
+                 tout le contenu") : option pour désactiver le filtre FR et tout
+                 voir, ou forcer FR strict pour les gros Xtream multi-pays. -->
+            <ListPreference
+                android:key="pref_iptv_language_filter"
+                android:title="Filtrer par langue"
+                android:summary="Auto : montre tout pour les playlists curées par région, filtre FR pour les gros bouquets multi-pays"
+                android:entries="@array/iptv_language_filter_entries"
+                android:entryValues="@array/iptv_language_filter_values"
+                android:defaultValue="auto"
+                app:iconSpaceReserved="false" />
+        </PreferenceCategory>
+
         <PreferenceCategory
             android:key="pc_provider_empty_state"
             android:title="@string/settings_provider_connection_title"

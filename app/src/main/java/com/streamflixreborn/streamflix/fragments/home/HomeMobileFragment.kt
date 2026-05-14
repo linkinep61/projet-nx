@@ -83,17 +83,43 @@ class HomeMobileFragment : Fragment() {
         // Initial load
         viewModel.getHome()
 
+        // 2026-05-13 (user "fais quelque chose de visuel pour faire voir qu'il y a
+        // bien un chargement et un refresh") : pour Mon IPTV, on affiche un toast
+        // au début et à la fin du load pour rassurer l'utilisateur.
+        val isIptvProvider = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider is
+            com.streamflixreborn.streamflix.providers.MyIptvProvider
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
                 when (state) {
-                    HomeViewModel.State.Loading -> binding.isLoading.apply {
-                        root.visibility = View.VISIBLE
-                        pbIsLoading.visibility = View.VISIBLE
-                        gIsLoadingRetry.visibility = View.GONE
+                    HomeViewModel.State.Loading -> {
+                        binding.isLoading.apply {
+                            root.visibility = View.VISIBLE
+                            pbIsLoading.visibility = View.VISIBLE
+                            gIsLoadingRetry.visibility = View.GONE
+                        }
+                        if (isIptvProvider) {
+                            // Toast appliCtx + LONG : survit aux transitions fragment
+                            Toast.makeText(
+                                requireContext().applicationContext,
+                                "🔄 Chargement de ta playlist IPTV…",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
                     }
                     is HomeViewModel.State.SuccessLoading -> {
                         displayHome(state.categories)
                         binding.isLoading.root.visibility = View.GONE
+                        if (isIptvProvider) {
+                            val total = state.categories.sumOf { it.list.size }
+                            // Délai 800ms pour laisser le toast Loading s'afficher d'abord
+                            binding.root.postDelayed({
+                                if (isAdded) Toast.makeText(
+                                    requireContext().applicationContext,
+                                    "✓ $total chaînes IPTV chargées",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            }, 800L)
+                        }
                     }
                     is HomeViewModel.State.FailedLoading -> {
                         val code = (state.error as? retrofit2.HttpException)?.code()
@@ -427,29 +453,135 @@ class HomeMobileFragment : Fragment() {
             findNavController().navigate(R.id.downloads)
         }
 
-        // 2026-05-12 (user "mets un bouton retour pour retourner au menu
-        // des sources M3U IPTV") : sur Mon IPTV provider, le clic sur le
-        // logo provider en haut ouvre IptvSourcesActivity (= tableau des
-        // sources) au lieu de retourner au picker des providers. Ça permet
-        // de changer de source sans repasser par tout le menu.
+        // 2026-05-13 (user "le bouton en haut à gauche pour retourner vers les
+        // providers actuellement il est bloqué pour aller sur les sources IPTV
+        // au lieu d'aller sur le Home provider") : le clic sur le logo provider
+        // RAMÈNE au picker des providers (R.id.providers). La gestion des
+        // sources reste accessible via Paramètres → Mon IPTV → Mes sources.
         if (com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
             is com.streamflixreborn.streamflix.providers.MyIptvProvider
         ) {
             binding.ivProviderLogo.setOnClickListener {
-                startActivity(
-                    android.content.Intent(
-                        requireContext(),
-                        com.streamflixreborn.streamflix.activities.iptv.IptvSourcesActivity::class.java,
-                    )
-                )
+                try {
+                    findNavController().navigate(R.id.providers)
+                } catch (_: Throwable) {}
             }
             // Hint visuel : le logo devient "cliquable" avec ripple
             binding.ivProviderLogo.isClickable = true
             binding.ivProviderLogo.isFocusable = true
+
+            // 2026-05-13 (user "à côté de l'onglet téléchargement il faudrait
+            // mettre un icône catégorie / mais que sur ce provider là") :
+            // bouton picker de catégorie visible uniquement sur Mon IPTV.
+            binding.ivIptvCategories.visibility = View.VISIBLE
+            binding.ivIptvCategories.setOnClickListener {
+                showIptvCategoryPicker()
+            }
+
+            // 2026-05-13 (user "tu mets un troisième bouton à côté de
+            // téléchargement ça peut être pas mal pour ce provider") :
+            // bouton globe pour switcher Auto/Toutes/FR strict.
+            binding.ivIptvLanguage.visibility = View.VISIBLE
+            binding.ivIptvLanguage.setOnClickListener {
+                showIptvLanguageFilterPicker()
+            }
+        } else {
+            binding.ivIptvCategories.visibility = View.GONE
+            binding.ivIptvLanguage.visibility = View.GONE
         }
 
         // Hide background ImageView on mobile — wallpaper is at activity level
         binding.ivHomeBackground.visibility = View.GONE
+    }
+
+    /** 2026-05-13 : ouvre un AlertDialog avec la liste des catégories LIVE
+     *  disponibles (avec count) + option "Toutes". Stocke le choix dans
+     *  MyIptvProvider.selectedCategoryLive, INVALIDE le HomeCacheStore
+     *  (sinon TTL 5 min skip le refresh), puis notifie le viewModel pour
+     *  recharger getHome() avec le filtre appliqué.
+     *  2026-05-13 (user "traduit l'anglais des catégories") : noms affichés
+     *  via prettyCategoryName() — mapping anglais → français. Le nom RAW
+     *  reste utilisé en interne pour le filtre. */
+    private fun showIptvCategoryPicker() {
+        val provider = com.streamflixreborn.streamflix.providers.MyIptvProvider
+        val type = com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.LIVE
+        val categoriesWithCount = provider.availableCategoriesWithCount(type)
+        if (categoriesWithCount.isEmpty()) {
+            android.widget.Toast.makeText(
+                requireContext(),
+                "Aucune catégorie en cache — recharge la source d'abord.",
+                android.widget.Toast.LENGTH_SHORT,
+            ).show()
+            return
+        }
+        val totalCount = categoriesWithCount.sumOf { it.second }
+        val displayItems = arrayOf("Toutes les catégories ($totalCount)") +
+            categoriesWithCount.map { (n, c) -> "${provider.prettyCategoryName(n)}  ($c)" }
+                .toTypedArray()
+        val rawNames = arrayOf<String?>(null) +
+            categoriesWithCount.map { it.first }.toTypedArray()
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("Choisir une catégorie")
+            .setItems(displayItems) { _, idx ->
+                provider.selectedCategoryLive = rawNames[idx]
+                // 2026-05-13 (user "quand on clique sur une catégorie il
+                // faut que le Home change") : HomeViewModel skip le network
+                // refresh si HomeCacheStore < 5 min. On invalide le snapshot
+                // pour FORCER un re-calcul avec le nouveau filtre.
+                com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                    requireContext().applicationContext,
+                    provider,
+                )
+                com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** 2026-05-13 : picker rapide du filtre langue. Modifie le pref
+     *  `pref_iptv_language_filter`, reset le filtre catégorie (sinon l'ancien
+     *  filtre cache peut masquer les nouveaux résultats), invalide les caches
+     *  et notifie le viewModel. */
+    private fun showIptvLanguageFilterPicker() {
+        val provider = com.streamflixreborn.streamflix.providers.MyIptvProvider
+        val options = arrayOf(
+            "Auto (recommandé)" to "auto",
+            "Toutes les langues" to "all",
+            "Français uniquement" to "fr",
+        )
+        val current = provider.getLanguageFilterMode()
+        val currentIdx = options.indexOfFirst { it.second == current }.coerceAtLeast(0)
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("Filtrer par langue")
+            .setSingleChoiceItems(options.map { it.first }.toTypedArray(), currentIdx) { dlg, idx ->
+                val newMode = options[idx].second
+                if (newMode != current) {
+                    provider.setLanguageFilterMode(newMode)
+                    // Reset filtre catégorie — l'ancien filtre RAW peut ne plus
+                    // matcher aucune chaîne dans le nouvel ensemble.
+                    provider.selectedCategoryLive = null
+                    provider.selectedCategoryMovie = null
+                    provider.selectedCategorySeries = null
+                    // 2026-05-13 : pas besoin d'invalider le cache M3U (les
+                    // channels parsées ne dépendent pas du filtre langue) ni
+                    // la classification (filterFrOrFallback est appliqué dans
+                    // collectByType après le cache hit, à chaque appel). On
+                    // efface SEULEMENT HomeCacheStore pour forcer le viewModel
+                    // à rappeler getHome() au lieu du snapshot.
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                        requireContext().applicationContext, provider,
+                    )
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                    android.widget.Toast.makeText(
+                        requireContext().applicationContext,
+                        "Filtre langue : ${options[idx].first}",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                }
+                dlg.dismiss()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
     }
 
     private fun displayHome(categories: List<Category>) {

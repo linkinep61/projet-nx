@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-05-13 (user "des meilleurs émoticônes sans que ça soit trop coûteux") :
+     palette d'avatars colorés, cyclés par profil. Aucun asset image. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <gradient android:angle="135" android:startColor="#FF6B6B" android:endColor="#C2185B" android:type="linear" />
+    <corners android:radius="28dp" />
+</shape>

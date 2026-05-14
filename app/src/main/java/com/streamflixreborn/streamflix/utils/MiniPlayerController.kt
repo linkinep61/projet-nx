@@ -205,13 +205,18 @@ object MiniPlayerController {
 
         val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSource)
 
+        // 2026-05-13 (user "le mini lecteur charge longtemps") : démarrage
+        // ultra rapide — on commence à jouer dès qu'1s de buffer est dispo
+        // (au lieu de 2.5s). Pour un flux live HLS avec segments de 6s, ça
+        // évite d'attendre 1 segment complet avant le 1er frame.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                /* minBufferMs */ 15_000,
-                /* maxBufferMs */ 50_000,
-                /* bufferForPlaybackMs */ 2_500,
-                /* bufferForPlaybackAfterRebufferMs */ 5_000
+                /* minBufferMs */ 5_000,
+                /* maxBufferMs */ 30_000,
+                /* bufferForPlaybackMs */ 1_000,
+                /* bufferForPlaybackAfterRebufferMs */ 2_000
             )
+            .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
         player = ExoPlayer.Builder(context)
@@ -490,7 +495,37 @@ object MiniPlayerController {
                 .setMimeType(video.type)
                 .build()
 
-            p.setMediaItem(mediaItem)
+            // 2026-05-13 (user "le mini lecteur charge longtemps sans rien
+            // faire alors que le grand lecteur est instantané") : le grand
+            // player utilise HlsMediaSource.Factory().setAllowChunkless-
+            // Preparation(true) qui permet à ExoPlayer de démarrer SANS
+            // télécharger toutes les sous-playlists. Le mini utilisait
+            // setMediaItem qui passe par auto-detection (lente). On bascule
+            // sur la même factory que le grand player pour les flux HLS.
+            val urlBeforeQuery = video.source.substringBefore('?')
+            val urlEndsWithTs = urlBeforeQuery.endsWith(".ts", ignoreCase = true)
+            val isHls = !urlEndsWithTs && (
+                urlBeforeQuery.endsWith(".m3u8", ignoreCase = true) ||
+                video.type == "application/vnd.apple.mpegurl" ||
+                video.type == "application/x-mpegURL"
+            )
+            val isDash = urlBeforeQuery.endsWith(".mpd", ignoreCase = true) ||
+                video.type == "application/dash+xml"
+            val dsFactory = httpDataSourceFactory
+            if (isHls && dsFactory != null) {
+                val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(dsFactory)
+                    .setAllowChunklessPreparation(true)
+                    .createMediaSource(mediaItem)
+                p.setMediaSource(hlsSource)
+                Log.d(TAG, "Using HlsMediaSource + chunklessPreparation (fast-start)")
+            } else if (isDash && dsFactory != null) {
+                val dashSource = androidx.media3.exoplayer.dash.DashMediaSource.Factory(dsFactory)
+                    .createMediaSource(mediaItem)
+                p.setMediaSource(dashSource)
+                Log.d(TAG, "Using DashMediaSource")
+            } else {
+                p.setMediaItem(mediaItem)
+            }
             p.prepare()
             p.play()
 

@@ -49,6 +49,7 @@ class MoviesTvFragment : Fragment() {
 
         initializeLanguageTabs()
         initializeMovies()
+        initializeIptvActions()
 
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
@@ -106,6 +107,27 @@ class MoviesTvFragment : Fragment() {
         _binding = null
     }
 
+
+    /** 2026-05-13 (user "il n'y a pas l'icône catégorie dans film et dans série") :
+     *  initialise les 2 boutons IPTV — catégories + filtre langue. Visibles
+     *  uniquement sur Mon IPTV. Délègue aux helpers publics de MainTvActivity. */
+    private fun initializeIptvActions() {
+        val isIptv = UserPreferences.currentProvider is
+            com.streamflixreborn.streamflix.providers.MyIptvProvider
+        if (!isIptv) {
+            binding.llIptvActions.visibility = View.GONE
+            return
+        }
+        binding.llIptvActions.visibility = View.VISIBLE
+        binding.ivIptvCategories.setOnClickListener {
+            (requireActivity() as? com.streamflixreborn.streamflix.activities.main.MainTvActivity)
+                ?.showIptvCategoryPickerPublic(R.id.movies)
+        }
+        binding.ivIptvLanguage.setOnClickListener {
+            (requireActivity() as? com.streamflixreborn.streamflix.activities.main.MainTvActivity)
+                ?.showIptvLanguageFilterPicker()
+        }
+    }
 
     private fun initializeLanguageTabs() {
         val providerName = UserPreferences.currentProvider?.name ?: return

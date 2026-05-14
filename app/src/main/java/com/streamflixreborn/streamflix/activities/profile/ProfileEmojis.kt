@@ -10,17 +10,27 @@ package com.streamflixreborn.streamflix.activities.profile
  * qui peuvent s'afficher comme des carrés sur les vieux firmwares TV.
  */
 object ProfileEmojis {
+    /** 2026-05-13 (user "image avec plein d'émoticones super à extraire") :
+     *  liste étendue à partir de l'image sample envoyée par le user — 67 emojis
+     *  organisés en 8 catégories. Tous Unicode <= 13, OK sur Chromecast Android
+     *  7+ (le ninja 🥷 et l'astronaute homme 👨‍🚀 peuvent fallback sur firmware
+     *  très ancien mais marchent sur Chromecast récent). */
     val list = listOf(
         // Cinéma / divertissement
-        "🎬", "🍿", "📺", "🎮", "🎵", "🎨",
-        // Smileys
-        "😀", "😎", "😊", "🤩", "🥳", "🤖",
-        // Animaux
-        "🐱", "🐶", "🦁", "🐯", "🐼", "🦊",
-        "🐰", "🐻", "🐧", "🦄",
-        // Persos fantaisie
-        "👾", "👽", "🧛", "🧙", "🦸", "🦹",
+        "🎬", "🍿", "📺", "🎮", "🎵", "🎨", "📷", "🎁",
+        // Smileys / faces
+        "😀", "😎", "😊", "🤩", "🥳", "😘", "🤖", "👽",
+        // Animaux 1
+        "🐱", "🐶", "🦁", "🐯", "🐼", "🦊", "🐰", "🐻",
+        // Animaux 2
+        "🐧", "🦄", "🦖", "🦉", "🐨", "🐷", "🐸", "🐵",
+        // Personnages
+        "🧛", "🧙", "🦸", "🤡", "🥷", "🕵️", "👮", "👨‍🚀",
         // Symboles
-        "⭐", "🔥", "⚡", "💖",
+        "⭐", "🔥", "⚡", "💖", "💎", "🏆", "💰", "⏳", "💡",
+        // Nourriture
+        "🍕", "🍔", "🍟", "🍩", "🍦", "🍉", "🍹", "🎂", "🍪",
+        // Voyage / nature
+        "🌍", "✈️", "🚀", "⛵", "🌈", "☀️", "🌙", "🌧️", "❄️",
     )
 }
