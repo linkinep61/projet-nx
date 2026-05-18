@@ -77,8 +77,11 @@ class VidsrcRuExtractor : Extractor() {
                 webView.loadUrl(link)
 
                 continuation.invokeOnCancellation {
-                    webView.stopLoading()
-                    webView.destroy()
+                    // v73 : WebView méthodes sur Main thread
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        try { webView.stopLoading() } catch (_: Exception) {}
+                        try { webView.destroy() } catch (_: Exception) {}
+                    }
                 }
             }
         }

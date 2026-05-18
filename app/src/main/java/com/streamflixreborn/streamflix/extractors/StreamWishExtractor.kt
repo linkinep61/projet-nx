@@ -216,8 +216,11 @@ open class StreamWishExtractor : Extractor() {
                     webView.loadUrl(url)
 
                     cont.invokeOnCancellation {
-                        webView.stopLoading()
-                        webView.destroy()
+                        // v73 : WebView méthodes sur Main thread
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            try { webView.stopLoading() } catch (_: Exception) {}
+                            try { webView.destroy() } catch (_: Exception) {}
+                        }
                     }
                 }
             }
