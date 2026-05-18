@@ -261,6 +261,22 @@ object FranimeSession {
                 var desiredIdx = getDesiredLecteurIndex();
                 var desiredName = getDesiredLecteurName();
                 logJs('CAPTURE_SCRIPT init: url=' + window.location.href + ' idx=' + desiredIdx + ' name=' + desiredName);
+                // v75 (user "franime ne charge plus le player iframe sur certains animes") :
+                //   Force user-gesture synthétique. Certains animes franime.fr n'injectent
+                //   pas l'iframe watch2 tant qu'aucune interaction user n'a eu lieu.
+                //   On dispatch des events pointer + click sur le body pour débloquer.
+                try {
+                    var b = document.body;
+                    if (b) {
+                        var evt = { bubbles: true, cancelable: true, view: window, clientX: 10, clientY: 10, button: 0 };
+                        b.dispatchEvent(new MouseEvent('mousedown', evt));
+                        b.dispatchEvent(new MouseEvent('mouseup', evt));
+                        b.dispatchEvent(new MouseEvent('click', evt));
+                        try { b.dispatchEvent(new PointerEvent('pointerdown', evt)); } catch(e){}
+                        try { b.dispatchEvent(new PointerEvent('pointerup', evt)); } catch(e){}
+                        try { b.focus(); } catch(e){}
+                    }
+                } catch(e){ logJs('synth gesture err: ' + e); }
                 var attempts = 0;
                 window.__franime_clicker = setInterval(function(){
                     attempts++;
