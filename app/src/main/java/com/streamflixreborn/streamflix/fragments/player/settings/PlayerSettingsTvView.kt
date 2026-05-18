@@ -143,6 +143,13 @@ class PlayerSettingsTvView @JvmOverloads constructor(
         displaySettings(Setting.MAIN)
     }
 
+    /** 2026-05-16 : ouvre direct sur la liste de serveurs (TV — accessible
+     *  via OK/Enter de la télécommande). */
+    fun showServers() {
+        this.visibility = View.VISIBLE
+        displaySettings(Setting.SERVERS)
+    }
+
     private fun displaySettings(setting: Setting) {
         currentSettings = setting
 
@@ -211,7 +218,18 @@ class PlayerSettingsTvView @JvmOverloads constructor(
     }
 
     fun refreshServerList() {
-        serversAdapter.notifyDataSetChanged()
+        // 2026-05-17 (user "le Focus ne reste pas sur serveur" sur Chromecast) :
+        // notifyItemChanged au lieu de notifyDataSetChanged → ne re-bind que
+        // les items (pas recréation ViewHolder) → le focus D-pad reste sur
+        // l'item sélectionné. Sur Chromecast plus lent que mobile, le full
+        // notifyDataSetChanged + requestFocus(root) en post() loupait
+        // souvent → focus partait vers un autre View en background.
+        val count = Settings.Server.list.size
+        if (count == 0) {
+            serversAdapter.notifyDataSetChanged()
+        } else {
+            serversAdapter.notifyItemRangeChanged(0, count, "select")
+        }
         settingsAdapter.notifyDataSetChanged()
     }
 
@@ -224,7 +242,13 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             list.clear()
             list.addAll(sorted)
         }
-        channelVariantAdapter.notifyDataSetChanged()
+        // 2026-05-17 (même fix focus que refreshServerList).
+        val cvCount = list.size
+        if (cvCount == 0) {
+            channelVariantAdapter.notifyDataSetChanged()
+        } else {
+            channelVariantAdapter.notifyItemRangeChanged(0, cvCount, "select")
+        }
         settingsAdapter.notifyDataSetChanged()
     }
 
@@ -668,7 +692,9 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                         }
                         prefix + item.name
                     }
-                    is Settings.Server -> item.name
+                    is Settings.Server -> {
+                        if (item.isLoading) "${item.name} ⟳" else item.name
+                    }
 
                     else -> ""
                 }

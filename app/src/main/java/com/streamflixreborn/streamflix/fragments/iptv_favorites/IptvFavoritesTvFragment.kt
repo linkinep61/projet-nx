@@ -97,8 +97,6 @@ class IptvFavoritesTvFragment : Fragment() {
                         MiniPlayerController.transitioningToFullscreen = true
                         if (_binding != null) { binding.miniPlayerView.player = null }
                         false
-                    } else if (tvShow.id.startsWith("bxt::")) {
-                        false
                     } else {
                         MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
                         true
@@ -166,6 +164,11 @@ class IptvFavoritesTvFragment : Fragment() {
                     is MiniPlayerController.State.Error -> {
                         binding.miniPlayerLoading.visibility = View.GONE
                         Log.e(TAG, "Mini player error: ${state.message}")
+                        // 2026-05-14 (user "tu vois pas que la vidéo mouline depuis tout
+                        // à l'heure") : feedback visible.
+                        Toast.makeText(requireContext(),
+                            "Stream indisponible — essaie une autre chaîne",
+                            Toast.LENGTH_LONG).show()
                     }
                 }
             }
@@ -183,8 +186,6 @@ class IptvFavoritesTvFragment : Fragment() {
             if (tvShow.id == MiniPlayerController.currentChannelId) {
                 MiniPlayerController.transitioningToFullscreen = true
                 if (_binding != null) { binding.miniPlayerView.player = null }
-                false
-            } else if (tvShow.id.startsWith("bxt::")) {
                 false
             } else {
                 Log.d(TAG, "Mini player intercept (favorites): ${tvShow.title} (${tvShow.id})")

@@ -32,6 +32,22 @@ object IptvFavorites {
      *  partagent tous la même clé normalisée "arte" → favoris partagés. */
     private fun normalize(channelKey: String): String {
         if (channelKey.isBlank()) return channelKey
+        // 2026-05-15 : extraction du slug réel pour les chaînes LiveTvHub
+        // composites (freeshot/bonus/dailymotion). Sinon, toutes les chaînes
+        // freeshot partageraient la même clé canonique "freeshot" → favoris
+        // catastrophiques.
+        if (channelKey.startsWith("livehub::freeshot::")) {
+            return channelKey.substringAfterLast("::")
+                .replace("-", "").lowercase().trim()
+        }
+        if (channelKey.startsWith("livehub::bonus::")) {
+            return "bonus" + channelKey.removePrefix("livehub::bonus::")
+                .substringBefore("::").lowercase().trim()
+        }
+        if (channelKey.startsWith("livehub::dailymotion::")) {
+            return "dm" + channelKey.removePrefix("livehub::dailymotion::")
+                .substringBefore("::").lowercase().trim()
+        }
         return channelKey
             .removePrefix("vegeta_ep::")
             .removePrefix("vegeta::")

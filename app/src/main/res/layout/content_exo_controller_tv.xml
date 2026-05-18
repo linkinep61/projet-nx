@@ -152,19 +152,59 @@
 
     </LinearLayout>
 
-    <androidx.media3.ui.DefaultTimeBar
-        android:id="@id/exo_progress"
+    <!-- 2026-05-17 v3 (user "la 2e barre accumule du flux supplémentaire,
+         le player switche dessus quand barre 1 finie") : 3 widgets dans un
+         même conteneur, on toggle la visibilité selon VOD vs live IPTV.
+         - VOD : exo_progress visible (seek bar standard bound au player)
+         - Live IPTV : les 2 custom DefaultTimeBar visibles, driven
+           manuellement pour montrer barre 1 = chunk N en lecture, barre 2 =
+           chunk N+1 pré-chargé en avance. Switch quand barre 1 finit. -->
+    <!-- 2026-05-17 v4 (user "60 premières secondes en haut, switch sur la
+         2e en dessous") : barres stackées verticalement. Bar 1 (en haut)
+         = chunk N en lecture (60s). Bar 2 (en bas) = chunk N+1 pré-chargé
+         (60s). Quand bar 1 atteint 60s → thumb passe sur bar 2 (switch).
+         Quand bar 2 finit → bar 1 reprend avec chunk N+2.
+         Pour VOD, on cache les 2 customs et on montre exo_progress. -->
+    <LinearLayout
+        android:id="@+id/exo_progress_dual_container"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginStart="22dp"
         android:layout_marginEnd="22dp"
         android:layout_marginBottom="4dp"
-        android:focusable="true"
-        android:focusableInTouchMode="true"
-        android:nextFocusDown="@id/btn_exo_aspect_ratio"
+        android:orientation="vertical"
         app:layout_constraintBottom_toTopOf="@id/exo_bottom_bar"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent" />
+        app:layout_constraintStart_toStartOf="parent">
+
+        <!-- Standard seek bar (VOD) — visible par défaut, hidden pour live IPTV -->
+        <androidx.media3.ui.DefaultTimeBar
+            android:id="@id/exo_progress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusDown="@id/btn_exo_aspect_ratio" />
+
+        <!-- Custom barre 1 (chunk en lecture, en haut) — visible pour live IPTV -->
+        <androidx.media3.ui.DefaultTimeBar
+            android:id="@+id/live_primary_progress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:focusable="false"
+            android:visibility="gone"
+            tools:visibility="visible" />
+
+        <!-- Custom barre 2 (chunk pré-chargé, en bas) — visible pour live IPTV -->
+        <androidx.media3.ui.DefaultTimeBar
+            android:id="@+id/live_secondary_progress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:focusable="false"
+            android:visibility="gone"
+            tools:visibility="visible" />
+    </LinearLayout>
 
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@id/exo_bottom_bar"

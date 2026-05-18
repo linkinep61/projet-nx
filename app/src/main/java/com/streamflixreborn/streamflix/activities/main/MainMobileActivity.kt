@@ -30,6 +30,7 @@ import com.streamflixreborn.streamflix.activities.tools.BypassWebViewActivity
 import com.streamflixreborn.streamflix.databinding.ActivityMainMobileBinding
 import com.streamflixreborn.streamflix.fragments.player.PlayerMobileFragment
 import com.streamflixreborn.streamflix.providers.WiflixProvider
+import com.streamflixreborn.streamflix.providers.FranimeProvider
 import com.streamflixreborn.streamflix.providers.Provider
 import com.streamflixreborn.streamflix.ui.UpdateAppMobileDialog
 import com.streamflixreborn.streamflix.utils.AppLanguageManager
@@ -105,6 +106,12 @@ class MainMobileActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
 
         WiflixProvider.init(this)
+        // 2026-05-16 : DessinAnime utilise aussi WebViewResolver pour bypass
+        // le JS Detection Challenge Cloudflare. init avec context activité
+        // car le dialog de captcha visible doit pouvoir s'attacher au theme.
+        // 2026-05-16 : DessinAnime DÉSACTIVÉ (serveur dessinanime.cc instable).
+        // try { DessinAnimeProvider.init(this) } catch (_: Throwable) {}
+        try { FranimeProvider.init(this) } catch (_: Throwable) {}
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val palette = ThemeManager.palette(UserPreferences.selectedTheme)
@@ -114,6 +121,12 @@ class MainMobileActivity : FragmentActivity() {
         _binding = ActivityMainMobileBinding.inflate(layoutInflater)
         setContentView(binding.root)
         applyThemeNavigationChrome()
+
+        // 2026-05-15 (user "éviter que les écrans mettre en veille tous les
+        // 5 minutes") : applique le flag KEEP_SCREEN_ON si l'option est ON.
+        if (UserPreferences.keepScreenOnApp) {
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
 
         ViewCompat.setOnApplyWindowInsetsListener(binding.mainContent) { view, windowInsets ->
             val insets = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -296,6 +309,14 @@ class MainMobileActivity : FragmentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // 2026-05-17 : touch timestamp pour qu'une recréation de process
+        // dans les 30 prochaines minutes ne re-bounce pas vers ProfilePicker
+        // (cf StreamFlixApp.onCreate logique smart-cold-start).
+        com.streamflixreborn.streamflix.utils.ProfileStore.touchLastActiveTimestamp()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -345,18 +366,34 @@ class MainMobileActivity : FragmentActivity() {
         val provider = UserPreferences.currentProvider ?: return
         val supportsMovies = Provider.supportsMovies(provider)
         val supportsTvShows = Provider.supportsTvShows(provider)
+        val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
+        val animeOnlyProviders = setOf(
+            "VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga",
+        )
+        val isAnimeOnly = provider.name in animeOnlyProviders
+
+        // 2026-05-14 (user "les logos à gauche ne correspondent pas du tout au
+        // provider") : Home tab affiche "Accueil" + icône maison pour les
+        // providers non-IPTV. "TV" + icône télé reste pour IPTV uniquement.
+        binding.bnvMain.menu.findItem(R.id.home)?.apply {
+            if (isIptv) {
+                setTitle(R.string.main_menu_home)
+                setIcon(R.drawable.ic_menu_tv)
+            } else {
+                title = "Accueil"
+                setIcon(R.drawable.ic_menu_home)
+            }
+        }
 
         binding.bnvMain.menu.findItem(R.id.movies)?.apply {
             isVisible = supportsMovies
-            title = when (provider.name) {
-                "VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga" -> getString(R.string.main_menu_series_fr)
-                else -> getString(R.string.main_menu_movies)
+            title = if (isAnimeOnly) {
+                getString(R.string.main_menu_series_fr)
+            } else {
+                getString(R.string.main_menu_movies)
             }
-            if (provider.name in listOf("VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga")) {
-                setIcon(R.drawable.ic_menu_tv)
-            }
+            setIcon(if (isAnimeOnly) R.drawable.ic_menu_tv else R.drawable.ic_menu_movie)
         }
-        val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
         binding.bnvMain.menu.findItem(R.id.tv_shows)?.apply {
             isVisible = supportsTvShows
             // IPTV providers (WiTv, OlaTv, …) show "Toutes les chaînes" instead of "Séries TV"
@@ -364,9 +401,14 @@ class MainMobileActivity : FragmentActivity() {
             title = when {
                 isIptv || provider.name in setOf("CableVisionHD", "TvporinternetHD") ->
                     getString(R.string.main_menu_all_channels)
-                provider.name in setOf("VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga") ->
-                    getString(R.string.main_menu_series)
+                isAnimeOnly ->
+                    getString(R.string.main_menu_series)  // "VOSTFR"
+                provider.name in setOf("DessinAnime", "AnimeSite") ->
+                    getString(R.string.main_menu_series_tab)
                 else -> getString(R.string.main_menu_tv_shows)
+            }
+            if (provider.name in setOf("DessinAnime", "AnimeSite")) {
+                setIcon(R.drawable.ic_menu_series)
             }
         }
         // Favoris tab — IPTV providers only. Sits between "Toutes les chaînes" and "Paramètres".

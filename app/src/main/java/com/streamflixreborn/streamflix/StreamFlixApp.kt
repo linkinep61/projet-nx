@@ -62,6 +62,51 @@ class StreamFlixApp : Application() {
                 }
             }
         }
+
+        // 2026-05-17 : DVR live cache. SimpleCache 100 Mo persistant sur disque.
+        //   Stocke les segments HLS Live qui passent. Bénéfices :
+        //   - Channel-switch rapide (segments cachés)
+        //   - Manifest persistance across sessions
+        //   - Protection contre les fetch transitoires échoués
+        //   Pour Chromecast (peu de stockage), 100 Mo = ~5-10 min de live HD.
+        @Volatile
+        private var _liveCache: androidx.media3.datasource.cache.SimpleCache? = null
+
+        fun getLiveCache(context: Context): androidx.media3.datasource.cache.SimpleCache? {
+            return _liveCache ?: synchronized(this) {
+                _liveCache ?: try {
+                    val cacheDir = java.io.File(context.cacheDir, "live_dvr_cache")
+                    cacheDir.mkdirs()
+                    val evictor = androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor(100L * 1024 * 1024) // 100 MB
+                    val databaseProvider = androidx.media3.database.StandaloneDatabaseProvider(context.applicationContext)
+                    androidx.media3.datasource.cache.SimpleCache(cacheDir, evictor, databaseProvider).also {
+                        _liveCache = it
+                        Log.d("StreamFlixApp", "Live DVR SimpleCache initialized (100 MB at $cacheDir)")
+                    }
+                } catch (e: Exception) {
+                    Log.w("StreamFlixApp", "Live cache init failed: ${e.message}")
+                    null
+                }
+            }
+        }
+
+        // 2026-05-17 (user "le cache est vidé à chaque changement de chaîne, il
+        //   y a intérêt") : clear le cache disque. Appelé à chaque channel-switch
+        //   et au retour Home pour garantir que les 100 Mo sont dédiés au flux
+        //   courant uniquement (pas pollués par segments d'anciennes chaînes).
+        fun clearLiveCache() {
+            synchronized(this) {
+                try {
+                    _liveCache?.release()
+                    _liveCache = null
+                    val cacheDir = java.io.File(instance.cacheDir, "live_dvr_cache")
+                    cacheDir.deleteRecursively()
+                    Log.d("StreamFlixApp", "Live DVR cache cleared (channel switch or home return)")
+                } catch (e: Exception) {
+                    Log.w("StreamFlixApp", "Live cache clear failed: ${e.message}")
+                }
+            }
+        }
     }
 
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -73,6 +118,21 @@ class StreamFlixApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+
+        // 2026-05-17 (user "ça peut faire cracher l'application au démarrage
+        //   sinon") : clear le cache DVR au démarrage de l'app. Évite d'hériter
+        //   d'un cache stale d'une session précédente qui pourrait avoir crashé
+        //   et laissé le cache dans un état inconsistant (entries DB orphelines,
+        //   fichiers tronqués, etc.).
+        try {
+            val cacheDir = java.io.File(cacheDir, "live_dvr_cache")
+            if (cacheDir.exists()) {
+                cacheDir.deleteRecursively()
+                Log.d("StreamFlixApp", "Live DVR cache cleared at app startup")
+            }
+        } catch (e: Exception) {
+            Log.w("StreamFlixApp", "Startup cache clear failed: ${e.message}")
+        }
 
         // Track current foreground Activity for WebView dialogs
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
@@ -138,11 +198,22 @@ class StreamFlixApp : Application() {
             Log.e("StreamFlixApp", "IptvSourceStore setup failed: ${e.message}", e)
         }
 
-        // 2.5 Cold start = no active provider + no active profile.
-        // Force le ProfilePicker à apparaître à chaque cold start (Netflix-style).
+        // 2.5 Cold start = no active provider + no active profile (Netflix-style).
+        // 2026-05-17 : sur Chromecast (low RAM), Android tue/recrée souvent le
+        // process pendant que l'app est en background. Sans précaution, chaque
+        // recréation effacerait le profil et bouncerait l'user vers le picker.
+        // Solution : check timestamp de dernière activité. Si < 30 min, c'est
+        // une recréation de process → on PRÉSERVE le profil. Sinon, vrai cold
+        // start → on clear comme avant.
         try {
-            UserPreferences.currentProvider = null
-            ProfileStore.setCurrentProfileId(null)
+            val recentSession = ProfileStore.isRecentlyActive()
+            if (!recentSession) {
+                UserPreferences.currentProvider = null
+                ProfileStore.setCurrentProfileId(null)
+                Log.d("StreamFlixApp", "Cold start: profile + provider cleared (Netflix-style)")
+            } else {
+                Log.d("StreamFlixApp", "Process recreated mid-session: profile preserved")
+            }
         } catch (e: Throwable) {
             Log.e("StreamFlixApp", "currentProvider/profile reset failed: ${e.message}")
         }

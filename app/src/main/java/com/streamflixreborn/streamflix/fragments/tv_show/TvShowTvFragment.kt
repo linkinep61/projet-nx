@@ -135,7 +135,6 @@ class TvShowTvFragment : Fragment() {
             || tvShow.providerName == "Sport Live"
             || tvShow.providerName == "Movix LiveTV"
             || tvShow.providerName == "TV Hub"
-            || tvShow.providerName == "3BoxTV"
             || tvShow.id.startsWith("ch::")
             || tvShow.id.startsWith("sport::")
             || tvShow.id.startsWith("ola::")
@@ -144,7 +143,6 @@ class TvShowTvFragment : Fragment() {
             || tvShow.id.startsWith("sportlive::")
             || tvShow.id.startsWith("movixlivetv::")
             || tvShow.id.startsWith("livehub::")
-            || tvShow.id.startsWith("bxt::")
     }
 
     private fun autoPlayChannel(tvShow: TvShow) {

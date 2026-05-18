@@ -171,6 +171,17 @@ class IptvSourcesActivity : FragmentActivity() {
         loadingOverlay.visibility = View.VISIBLE
         loadingOverlay.requestFocus()
 
+        // v60 : observe le StateFlow de MyIptvProvider pour update loadingText
+        //   avec le step en cours (Catégories TV, Chaînes: 1500, Films: 320…).
+        //   Le job de collect s'arrête quand loadingOverlay est caché à la fin.
+        val statusJob = scope.launch {
+            com.streamflixreborn.streamflix.providers.MyIptvProvider.loadingStatus.collect { status ->
+                if (status.isNotEmpty() && loadingOverlay.visibility == View.VISIBLE) {
+                    loadingText.text = "${source.name} — $status"
+                }
+            }
+        }
+
         scope.launch {
             val (channelsCount, classification) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 runCatching {
@@ -189,6 +200,8 @@ class IptvSourcesActivity : FragmentActivity() {
             }
 
             loadingOverlay.visibility = View.GONE
+            statusJob.cancel()
+            com.streamflixreborn.streamflix.providers.MyIptvProvider.loadingStatus.value = ""
             if (channelsCount == 0) {
                 Toast.makeText(
                     this@IptvSourcesActivity,
@@ -232,13 +245,114 @@ class IptvSourcesActivity : FragmentActivity() {
             .setItems(arrayOf(
                 "M3U / M3U8 (URL playlist)",
                 "Stalker MAG (URL portail + MAC)",
+                "Xtream Codes (URL serveur + login)",
                 "📦 Importer un pack (fichier de plusieurs sources)",
             )) { _, idx ->
                 when (idx) {
                     0 -> openSourceForm(IptvSource.Type.M3U, null)
                     1 -> openSourceForm(IptvSource.Type.STALKER, null)
-                    2 -> openImportPackDialog()
+                    2 -> openXtreamForm(null)
+                    3 -> openImportPackDialog()
                 }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** 2026-05-14 (user "ajouter une fonctionnalité pour des codes Xtream") :
+     *  formulaire dédié Xtream Codes. Construit l'URL M3U finale
+     *  `http://host:port/get.php?username=X&password=Y&type=m3u_plus&output=hls`
+     *  et la stocke comme source de type M3U (le pipeline M3U existant gère
+     *  ensuite tout : fetch playlist, parsing, live + VOD).
+     *
+     *  Stockage : on garde l'URL serveur dans `referer` (champ libre) et les
+     *  credentials dans le nom de la source pour l'instant. Plus tard, ajout
+     *  d'un Type.XTREAM dédié dans le model pour permettre l'édition propre. */
+    private fun openXtreamForm(existing: IptvSource?) {
+        fun fieldParams() = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        )
+        val nameInput = EditText(this).apply {
+            layoutParams = fieldParams()
+            hint = "Nom (ex: Mon abonnement Xtream)"
+            setText(existing?.name ?: "")
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+        }
+        val serverInput = EditText(this).apply {
+            layoutParams = fieldParams()
+            hint = "URL serveur (ex: http://srv.com:8080)"
+            inputType = InputType.TYPE_TEXT_VARIATION_URI
+        }
+        val userInput = EditText(this).apply {
+            layoutParams = fieldParams()
+            hint = "Username"
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+        val pwdInput = EditText(this).apply {
+            layoutParams = fieldParams()
+            hint = "Password"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+        }
+        val uaInput = EditText(this).apply {
+            layoutParams = fieldParams()
+            hint = "User-Agent (optionnel)"
+            setText(existing?.userAgent ?: "")
+        }
+        val container = LinearLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 0)
+            addView(nameInput)
+            addView(spacer())
+            addView(serverInput)
+            addView(spacer())
+            addView(userInput)
+            addView(spacer())
+            addView(pwdInput)
+            addView(spacer())
+            addView(uaInput)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Nouvelle source Xtream Codes")
+            .setView(container)
+            .setPositiveButton("Sauver") { _, _ ->
+                val name = nameInput.text.toString().trim()
+                val server = serverInput.text.toString().trim().trimEnd('/')
+                val user = userInput.text.toString().trim()
+                val pwd = pwdInput.text.toString().trim()
+                val ua = uaInput.text.toString().trim().takeIf { it.isNotBlank() }
+                if (name.isBlank() || server.isBlank() || user.isBlank() || pwd.isBlank()) {
+                    Toast.makeText(this, "Tous les champs (Nom, Serveur, User, Password) sont requis", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                if (!server.startsWith("http://", true) && !server.startsWith("https://", true)) {
+                    Toast.makeText(this, "URL serveur invalide (doit commencer par http:// ou https://)", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                // Construit l'URL M3U Xtream Codes standard
+                val m3uUrl = "$server/get.php?username=${java.net.URLEncoder.encode(user, "UTF-8")}" +
+                    "&password=${java.net.URLEncoder.encode(pwd, "UTF-8")}" +
+                    "&type=m3u_plus&output=hls"
+                val source = IptvSource(
+                    id = existing?.id ?: IptvSourceStore.generateId(),
+                    type = IptvSource.Type.M3U,
+                    name = name,
+                    url = m3uUrl,
+                    userAgent = ua,
+                )
+                IptvSourceStore.upsert(source)
+                MyIptvProvider.invalidateCache(source.id)
+                com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(this, MyIptvProvider)
+                MyIptvProvider.selectedCategoryLive = null
+                MyIptvProvider.selectedCategoryMovie = null
+                MyIptvProvider.selectedCategorySeries = null
+                com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                Toast.makeText(this, "Source Xtream '$name' créée", Toast.LENGTH_SHORT).show()
+                openSourceContent(source)
             }
             .setNegativeButton("Annuler", null)
             .show()

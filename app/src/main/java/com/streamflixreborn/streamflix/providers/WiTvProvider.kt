@@ -669,9 +669,14 @@ object WiTvProvider : Provider, IptvProvider {
             } catch (_: Exception) {}
 
             // 3b: For each genre (FR first, then fallback *), paginate to find channel variants
+            // v66 (user "il galère à trouver les serveurs / latence quand on clique") :
+            //   réduit maxPages 30→5 (lookup TF1/M6/etc. trouve sur p1 normalement) et
+            //   stoppe ASAP au premier match — pas de scan exhaustif. Avant: 30 pages
+            //   × N genres = 200+ requêtes potentielles avant retour. Maintenant: 5
+            //   pages × N genres MAX, break dès qu'on a 1 result.
             for (genreId in frGenreIds) {
                 if (results.isNotEmpty()) break
-                val maxPages = if (genreId == "*") 5 else 30 // more pages for targeted FR genre
+                val maxPages = if (genreId == "*") 3 else 5
                 for (page in 1..maxPages) {
                     val chReq = Request.Builder()
                         .url("$portalBase?type=itv&action=get_ordered_list&genre=$genreId&force_ch_link_check=&fav=0&sortby=name&p=$page&JsHttpRequest=1-xml")
@@ -718,14 +723,42 @@ object WiTvProvider : Provider, IptvProvider {
                         }
                     }
 
-                    // Sort: prefer exact match (score 0), then non-HEVC over HEVC
+                    // v67 (user "HEVC et TS = chaînes basse qualité OLA, évite trop de chargements") :
+                    //   Priorise HEVC (compression efficiente = moins de bande passante
+                    //   pour même qualité) et SD (résolution basse). Évite UHD/4K/FHD
+                    //   qui sont lourdes et saturent le réseau Chromecast. HEVC d'abord,
+                    //   car le décodeur HW Amlogic supporte HEVC natif.
+                    fun qualityRank(name: String): Int {
+                        val upper = name.uppercase()
+                        // v69 (user "j'ai des 4K en premier") : la résolution est
+                        //   checkée AVANT le codec. Sinon "4K HEVC" tombait à rank=0
+                        //   (HEVC matched first) au lieu de rank=5 (4K). Maintenant
+                        //   on rejette d'abord les résolutions lourdes, ensuite on
+                        //   priorise les codecs efficaces.
+                        return when {
+                            // Résolutions à éviter (lourdes en bande passante)
+                            "UHD" in upper || "4K" in upper -> 5
+                            "FHD" in upper -> 4
+                            "HD" in upper && "SD" !in upper -> 3  // HD pure (pas SD avec H dedans)
+                            // Maintenant les codecs/qualités légères
+                            "HEVC" in upper || "H265" in upper -> 0  // HEVC pure = meilleur ratio qualité/débit
+                            "SD" in upper -> 1                       // SD = résol basse → léger
+                            else -> 2  // pas de tag explicite = qualité moyenne
+                        }
+                    }
                     candidates.sortWith(compareBy(
                         { it.exactScore },
-                        { if (it.chName.contains("HEVC", ignoreCase = true)) 1 else 0 }
+                        { qualityRank(it.chName) }
                     ))
 
-                    // Resolve URLs for ALL candidates — each becomes a separate server option
-                    for (cand in candidates) {
+                    // v66 : limite à TOP 2 candidates (vs ALL) — résolution create_link
+                    //   coûte 1 round-trip HTTP chacune. Pour 5 variants × 1s = 5s avant
+                    //   retour. Avec top 2, retour en ~2s.
+                    // v67 : avec SD priorisée en tête, top 1 suffit pour basse qualité.
+                    //   Top 2 garde un fallback HD si SD échoue.
+                    val topCandidates = candidates.take(2)
+                    // Resolve URLs for top candidates only — each becomes a separate server option
+                    for (cand in topCandidates) {
                         val rawUrl = cand.cmd.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
 
                         // If URL is localhost (internal), resolve via create_link API
@@ -1443,7 +1476,29 @@ object WiTvProvider : Provider, IptvProvider {
 
     // ───────── Servers: one per source / iframe ─────────
 
-    override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> = try {
+    // v71 (user "passage mini→fullscreen WiTV galère") :
+    //   Cache des résultats getServers par id. Mini player et fullscreen
+    //   PlayerViewModel.init appellent tous les deux getServers → scan OLA
+    //   exécuté 2× (~5-10s × 2). Cache 60s = scan du Mini réutilisé par le
+    //   fullscreen → transfert instant.
+    private data class CachedServers(val servers: List<Video.Server>, val expiresAtMs: Long)
+    private val getServersCache = java.util.concurrent.ConcurrentHashMap<String, CachedServers>()
+    private val GET_SERVERS_TTL_MS = 60_000L
+
+    override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        // v71 : check cache (TTL 60s)
+        getServersCache[id]?.let { cached ->
+            if (System.currentTimeMillis() < cached.expiresAtMs) {
+                Log.d(TAG, "▶ getServers id=$id → cache HIT (${cached.servers.size} servers)")
+                return cached.servers
+            } else {
+                getServersCache.remove(id)
+            }
+        }
+        return getServersInternal(id, videoType)
+    }
+
+    private suspend fun getServersInternal(id: String, videoType: Video.Type): List<Video.Server> = try {
         val servers = mutableListOf<Video.Server>()
         Log.d(TAG, "▶ getServers id=$id")
 
@@ -1595,6 +1650,10 @@ object WiTvProvider : Provider, IptvProvider {
         }
 
         Log.d(TAG, "getServers -> ${servers.size} servers")
+        // v71 : populate cache pour éviter re-scan dans 60s (mini→fullscreen)
+        if (servers.isNotEmpty()) {
+            getServersCache[id] = CachedServers(servers.toList(), System.currentTimeMillis() + GET_SERVERS_TTL_MS)
+        }
         servers
     } catch (e: Exception) {
         Log.e(TAG, "getServers crash", e)

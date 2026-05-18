@@ -1164,22 +1164,32 @@ object VegetaTvProvider : Provider, IptvProvider {
      *  Le lateRegistryWatcher émettra les nouveaux streams au picker au fur
      *  et à mesure qu'ils sont trouvés. */
     @Volatile private var ondemandJob: Job? = null
-    private fun triggerOnDemandBackfill(reason: String) {
+    private fun triggerOnDemandBackfill(reason: String, priorityServerIdx: Int? = null) {
         if (ondemandJob?.isActive == true) return
         ondemandJob = scope.launch {
             try {
                 val alreadyDone = frServerIndices.toSet()
-                // 2026-05-08 : skip les serveurs marqués morts (cache 24h).
-                // Évite de gaspiller 8-10s sur des serveurs qu'on sait foireux.
-                val nextPair = vegetaServers
+                // 2026-05-17 v15 : priorité au server FAVORI (priorityServerIdx).
+                //   Si le user a marqué Vegeta[6] comme favori pour cette chaîne,
+                //   on scanne Vegeta[6] EN PREMIER → arrive en first dans
+                //   additionalServersFlow → MiniPlayer joue le favori direct
+                //   au lieu d'attendre/jouer un autre serveur d'abord.
+                val candidates = vegetaServers
                     .filter { it.idx !in alreadyDone && !IptvDeadServersCache.isDead("vegeta", it.idx) }
-                    .sortedBy { if (it.isFr) 0 else 1 }
-                    .take(5)
+                val nextPair = if (priorityServerIdx != null) {
+                    // Mettre le favori en premier (s'il est éligible), puis les autres
+                    val favorite = candidates.firstOrNull { it.idx == priorityServerIdx }
+                    val rest = candidates.filter { it.idx != priorityServerIdx }
+                        .sortedBy { if (it.isFr) 0 else 1 }
+                    (if (favorite != null) listOf(favorite) + rest else rest).take(5)
+                } else {
+                    candidates.sortedBy { if (it.isFr) 0 else 1 }.take(5)
+                }
                 if (nextPair.isEmpty()) {
                     Log.d(TAG, "On-demand backfill ($reason): no servers left to scan (alreadyDone=${alreadyDone.size}, dead=${IptvDeadServersCache.deadCount("vegeta")})")
                     return@launch
                 }
-                Log.d(TAG, "On-demand backfill ($reason): scanning ${nextPair.map { it.idx }}")
+                Log.d(TAG, "On-demand backfill ($reason): scanning ${nextPair.map { it.idx }}${if (priorityServerIdx != null) " (priority=Vegeta[$priorityServerIdx])" else ""}")
                 coroutineScope {
                     nextPair.map { server ->
                         async {
@@ -1618,10 +1628,24 @@ object VegetaTvProvider : Provider, IptvProvider {
         return try {
             ensureRegistry()
             val key = id.removePrefix("vegeta_ep::").removePrefix("vegeta::")
+
+            // 2026-05-17 v15 : extraire le serverIdx du favori (s'il y en a un)
+            //   pour prioriser son scan en arrière-plan. User clique TF1, son favori
+            //   est Vegeta[6] → backfill scanne Vegeta[6] EN PREMIER, sa variant
+            //   arrive direct via additionalServersFlow et le MiniPlayer joue
+            //   directement le favori (au lieu d'attendre 8s ou plus).
+            val favoriteServerIdx: Int? = try {
+                val favs = com.streamflixreborn.streamflix.fragments.player.settings.IptvFavorites
+                    .getFavoritesForChannel(id)
+                favs.firstNotNullOfOrNull { favId ->
+                    Regex("vegeta_stream::(\\d+)::").find(favId)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                }
+            } catch (_: Exception) { null }
+
             val info = synchronized(registryLock) { channelRegistry[key] }
             if (info == null) {
-                Log.w(TAG, "getServers: channel '$key' not found (registry size=${channelRegistry.size}) — triggering backfill")
-                triggerOnDemandBackfill("missing $key")
+                Log.w(TAG, "getServers: channel '$key' not found (registry size=${channelRegistry.size}) — triggering backfill" + (favoriteServerIdx?.let { " (favori prioritaire: Vegeta[$it])" } ?: ""))
+                triggerOnDemandBackfill("missing $key", favoriteServerIdx)
                 spawnLateRegistryWatcher(key)
                 return emptyList()
             }
@@ -1668,7 +1692,13 @@ object VegetaTvProvider : Provider, IptvProvider {
                 !com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedServers.isBanned(id, srv.id)
             }
             if (nonBannedCount < 5) {
-                triggerOnDemandBackfill("backfill $key ($nonBannedCount non-bannis / 5 cible)")
+                // 2026-05-17 v15 : check si le favori est DÉJÀ dans servers actuels.
+                //   Si non, on demande au backfill de le scanner en priorité.
+                val favoriteAlreadyPresent = favoriteServerIdx?.let { favIdx ->
+                    servers.any { it.id.startsWith("vegeta_stream::$favIdx::") }
+                } ?: true
+                val priorityForBackfill = if (!favoriteAlreadyPresent) favoriteServerIdx else null
+                triggerOnDemandBackfill("backfill $key ($nonBannedCount non-bannis / 5 cible)", priorityForBackfill)
             }
 
             currentEmitJob?.cancel()
@@ -1834,17 +1864,21 @@ object VegetaTvProvider : Provider, IptvProvider {
                 lastGoodStreamUrl[channelKey] = originalUrl
                 Log.d(TAG, "getVideo: pinning $originalUrl as last-known-good for '$channelKey'")
             }
-            // 2026-05-09 v25 : MPEG-TS au lieu de HLS pour Xtream-codes (comme TiviMate).
-            // L'URL Xtream `host/live/USER/PASS/CHANNEL.m3u8` peut être jouée en `.ts`
-            // pour obtenir un stream HTTP CONTINU — pas de manifest, pas de tokens
-            // segments expirants, pas de rate-limit 50s sur les segments.
-            // ExoPlayer auto-détecte `.ts` → ProgressiveMediaSource (single connexion).
-            val streamUrl = if (originalUrl.contains("/live/") && originalUrl.endsWith(".m3u8")) {
-                originalUrl.removeSuffix(".m3u8") + ".ts"
-            } else {
-                originalUrl
-            }
-            Log.d(TAG, "getVideo → ${streamUrl.take(120)} (MPEG-TS swap if Xtream)")
+            // 2026-05-17 (2e tentative HLS) : retour au .m3u8 HLS. Le .ts MPEG-TS
+            // avait une durée déclarée courte → STATE_ENDED constant → reload
+            // toutes les 2-3s = hachure visible permanente ("hécatombe").
+            //
+            // Le HLS .m3u8 avait UN risque connu (403 sur ParsingLoadable après
+            // 30-60s = manifest re-fetch rate-limité). Pour mitiger ce risque,
+            // on a maintenant côté player :
+            //   - 500/502/503 ajoutés à isPermanentHttpError → fresh handshake
+            //     via VegetaTvProvider.refreshServerUrl()
+            //   - anti-flap (3 reloads / 15s = stop + toast user)
+            //   - listener recovery attaché sur path mini→grand
+            // Donc le 403 occasionnel est géré proprement (1 hiccup ~5s), au
+            // lieu de la hachure permanente.
+            val streamUrl = originalUrl
+            Log.d(TAG, "getVideo → ${streamUrl.take(120)} (HLS mode)")
             Video(streamUrl, headers = mapOf("User-Agent" to USER_AGENT))
         } catch (e: Exception) {
             Log.e(TAG, "getVideo error", e); throw e

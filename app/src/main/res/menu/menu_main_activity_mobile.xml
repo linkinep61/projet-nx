@@ -23,10 +23,13 @@
         android:icon="@drawable/ic_menu_tv"
         android:title="@string/main_menu_tv_shows" />
 
+    <!-- 2026-05-14 : invisible par défaut. Visible only pour IPTV providers
+         (cf MainMobileActivity.updateNavigationVisibility). -->
     <item
         android:id="@+id/iptv_favorites"
         android:icon="@drawable/ic_favorite_enable"
-        android:title="@string/main_menu_favorites" />
+        android:title="@string/main_menu_favorites"
+        android:visible="false" />
 
     <item
         android:id="@id/settings"

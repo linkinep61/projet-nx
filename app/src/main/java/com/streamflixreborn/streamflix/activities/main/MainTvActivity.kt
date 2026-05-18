@@ -26,6 +26,7 @@ import com.streamflixreborn.streamflix.fragments.player.PlayerTvFragment
 import com.streamflixreborn.streamflix.ui.UpdateAppTvDialog
 import com.streamflixreborn.streamflix.providers.Provider
 import com.streamflixreborn.streamflix.providers.WiflixProvider
+import com.streamflixreborn.streamflix.providers.FranimeProvider
 import com.streamflixreborn.streamflix.utils.AppLanguageManager
 import com.streamflixreborn.streamflix.utils.CacheUtils
 import com.streamflixreborn.streamflix.utils.ThemeManager
@@ -192,6 +193,9 @@ class MainTvActivity : FragmentActivity() {
         // ait l'occasion de save state). Seul step4 (nav + listeners) reste
         // déferré pour laisser le splash s'afficher.
         try { WiflixProvider.init(this) } catch (_: Throwable) {}
+        // 2026-05-16 : DessinAnime DÉSACTIVÉ (serveur dessinanime.cc instable).
+        // try { DessinAnimeProvider.init(this) } catch (_: Throwable) {}
+        try { FranimeProvider.init(this) } catch (_: Throwable) {}
         try {
             _binding = ActivityMainTvBinding.inflate(layoutInflater)
         } catch (e: Throwable) {
@@ -204,6 +208,11 @@ class MainTvActivity : FragmentActivity() {
         } catch (e: Throwable) {
             android.util.Log.e("MainTvActivity", "setContentView failed: ${e.message}", e)
             return
+        }
+        // 2026-05-15 (user "éviter que les écrans mettre en veille tous les
+        // 5 minutes") : applique le flag KEEP_SCREEN_ON si l'option est ON.
+        if (UserPreferences.keepScreenOnApp) {
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ runInitStep4() }, 100)
     }
@@ -295,6 +304,21 @@ class MainTvActivity : FragmentActivity() {
 
         binding.navMain.setupWithNavController(navController)
         updateNavigationVisibility()
+
+        // 2026-05-14 (user "les icônes de la barre de gauche ne correspondent pas
+        // au provider en général pour les animés tu m'as mis des icônes pour un
+        // provider IPTV") : observe les changements de provider pour refresh la
+        // visibilité des items IPTV (Favoris/Catégories/Pays-langue) dans la
+        // sidebar. Sans ça, switch MyIptv → DessinAnime gardait les icônes IPTV
+        // jusqu'à navigation manuelle.
+        lifecycleScope.launch {
+            com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
+                .providerChangeFlow
+                .flowWithLifecycle(lifecycle, Lifecycle.State.STARTED)
+                .collect {
+                    updateNavigationVisibility()
+                }
+        }
 
         // 2026-05-12 (user "faire un bouton dédié") : item Catégories dans la sidebar.
         // Clic → ouvre AlertDialog avec catégories du fragment courant (LIVE/MOVIE/SERIES).
@@ -487,6 +511,10 @@ class MainTvActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.checkUpdate()
+        // 2026-05-17 : touch timestamp pour qu'une recréation de process
+        // dans les 30 prochaines minutes ne re-bounce pas vers ProfilePicker
+        // (cf StreamFlixApp.onCreate logique smart-cold-start).
+        com.streamflixreborn.streamflix.utils.ProfileStore.touchLastActiveTimestamp()
     }
 
     private fun applyThemeNavigationChrome() {
@@ -558,7 +586,12 @@ class MainTvActivity : FragmentActivity() {
         }
         val categoriesWithCount = provider.availableCategoriesWithCount(type)
         if (categoriesWithCount.isEmpty()) {
-            Toast.makeText(this, "Aucune catégorie en cache — recharge la source d'abord.", Toast.LENGTH_SHORT).show()
+            // v62 (user "au lieu d'un message, recharge la source automatiquement") :
+            //   classificationCache vide = source pas encore chargée dans cette
+            //   session. On lance le load en background, on affiche un dialog de
+            //   progression (alimenté par MyIptvProvider.loadingStatus), puis on
+            //   re-ouvre le picker une fois prêt.
+            triggerSourceReloadAndShowPicker(menuItemId, type)
             return
         }
         val totalCount = categoriesWithCount.sumOf { it.second }
@@ -593,13 +626,81 @@ class MainTvActivity : FragmentActivity() {
                     applicationContext,
                     provider,
                 )
-                // 2026-05-12 (user "quand tu cliques une catégorie ça change pas le home") :
-                // notifie le viewModel via ProviderChangeNotifier — HomeTvFragment écoute
-                // ce flow et rappelle viewModel.getHome() qui va re-calculer avec le filtre.
+                // 2026-05-14 (user "tu cliques une fois il se passe rien") :
+                // toast immédiat + notif flow. Sans le toast, l'user pense que
+                // son click n'est pas pris en compte pendant les 2-3s de fetch.
+                android.widget.Toast.makeText(
+                    this,
+                    "Chargement…",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
                 com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
             }
             .setNegativeButton("Annuler", null)
             .show()
+    }
+
+    /** v62 : charge la(les) source(s) IPTV en background puis re-ouvre le
+     *  picker catégories dès que la classification est prête. Évite le
+     *  message "recharge la source d'abord" en faisant le job automatiquement. */
+    private fun triggerSourceReloadAndShowPicker(
+        menuItemId: Int,
+        type: com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType,
+    ) {
+        val provider = com.streamflixreborn.streamflix.providers.MyIptvProvider
+        val lastSourceId = getSharedPreferences("iptv_last_source", MODE_PRIVATE)
+            .getString("last_id", null)
+        // Dialog de progression
+        val progressView = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(48, 48, 48, 48)
+            addView(android.widget.ProgressBar(this@MainTvActivity).apply {
+                isIndeterminate = true
+            })
+            addView(android.widget.TextView(this@MainTvActivity).apply {
+                id = android.R.id.text1
+                text = "Chargement…"
+                setPadding(0, 32, 0, 0)
+                textSize = 14f
+            })
+        }
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Préparation des catégories")
+            .setView(progressView)
+            .setCancelable(true)
+            .create()
+        dialog.show()
+        val statusView = progressView.findViewById<android.widget.TextView>(android.R.id.text1)
+        // Observe loadingStatus → update text
+        val statusJob = lifecycleScope.launch {
+            provider.loadingStatus.collect { status ->
+                if (status.isNotEmpty() && dialog.isShowing) {
+                    statusView.text = status
+                }
+            }
+        }
+        // Lance le load et re-ouvre le picker
+        lifecycleScope.launch {
+            runCatching {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    provider.countByTypeFR(lastSourceId)
+                }
+            }
+            statusJob.cancel()
+            provider.loadingStatus.value = ""
+            if (dialog.isShowing) dialog.dismiss()
+            // Re-tente d'ouvrir le picker maintenant que le cache est rempli
+            val refreshed = provider.availableCategoriesWithCount(type)
+            if (refreshed.isEmpty()) {
+                Toast.makeText(
+                    this@MainTvActivity,
+                    "Source vide ou inaccessible — vérifie tes sources IPTV.",
+                    Toast.LENGTH_LONG,
+                ).show()
+            } else {
+                showIptvCategoryPicker(menuItemId)
+            }
+        }
     }
 
     private fun updateNavigationVisibility() {
@@ -614,20 +715,40 @@ class MainTvActivity : FragmentActivity() {
             binding.navMain.menu.findItem(R.id.movies)?.isVisible = false
             binding.navMain.menu.findItem(R.id.tv_shows)?.isVisible = false
             binding.navMain.menu.findItem(R.id.iptv_favorites)?.isVisible = false
+            binding.navMain.menu.findItem(R.id.iptv_categories_menu)?.isVisible = false
+            binding.navMain.menu.findItem(R.id.iptv_language_menu)?.isVisible = false
             return
         }
         // Provider sélectionné : restaure la visibilité des onglets pertinents.
-        binding.navMain.menu.findItem(R.id.home)?.isVisible = true
+        val isIptvForHome = provider is com.streamflixreborn.streamflix.providers.IptvProvider
+        binding.navMain.menu.findItem(R.id.home)?.apply {
+            isVisible = true
+            // 2026-05-14 (user "les logos à gauche ne correspondent pas du tout
+            // au provider") : pour les providers NON-IPTV (animes, films, séries),
+            // l'onglet Home affiche "Accueil" + icône maison plutôt que "TV" +
+            // icône télé (qui ne correspond qu'aux IPTV).
+            if (isIptvForHome) {
+                setTitle(R.string.main_menu_home)  // "TV" en FR
+                setIcon(R.drawable.ic_menu_tv)
+            } else {
+                title = "Accueil"
+                setIcon(R.drawable.ic_menu_home)
+            }
+        }
         binding.navMain.menu.findItem(R.id.search)?.isVisible = true
+        // Anime providers : titles/icons spécifiques (Films→Séries VOSTFR, etc.)
+        val animeOnlyProviders = setOf(
+            "VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga",
+        )
+        val isAnimeOnly = provider.name in animeOnlyProviders
         binding.navMain.menu.findItem(R.id.movies)?.apply {
             isVisible = Provider.supportsMovies(provider)
-            title = when (provider.name) {
-                "VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga" -> getString(R.string.main_menu_series_fr)
-                else -> getString(R.string.main_menu_movies)
+            title = if (isAnimeOnly) {
+                getString(R.string.main_menu_series_fr)
+            } else {
+                getString(R.string.main_menu_movies)
             }
-            if (provider.name in listOf("VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga")) {
-                setIcon(R.drawable.ic_menu_tv)
-            }
+            setIcon(if (isAnimeOnly) R.drawable.ic_menu_tv else R.drawable.ic_menu_movie)
         }
         val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
         val isMyIptv = provider is com.streamflixreborn.streamflix.providers.MyIptvProvider
@@ -638,12 +759,21 @@ class MainTvActivity : FragmentActivity() {
                 isMyIptv -> getString(R.string.main_menu_tv_shows)
                 isIptv || provider.name in setOf("CableVisionHD", "TvporinternetHD") ->
                     getString(R.string.main_menu_all_channels)
-                provider.name in setOf("VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga") ->
-                    getString(R.string.main_menu_series)
+                isAnimeOnly ->
+                    getString(R.string.main_menu_series)  // "VOSTFR" (anime providers VF/VOSTFR split)
+                // 2026-05-14 (user "il est censé s'appeler série et il a pas
+                // icone qui correspond") : DessinAnime/AnimeSite affichent "Série"
+                // (singulier, comme main_menu_series_tab) + icône ic_menu_series
+                // pour matcher le nom. Pas "VOSTFR" (label langue), pas "Séries TV"
+                // (sonne IPTV).
+                provider.name in setOf("DessinAnime", "AnimeSite") ->
+                    getString(R.string.main_menu_series_tab)
                 else -> getString(R.string.main_menu_tv_shows)
             }
             // Force l'icône série (ic_menu_series) car le default est ic_menu_tv qui collide avec TV
-            if (isMyIptv) setIcon(R.drawable.ic_menu_series)
+            if (isMyIptv || provider.name in setOf("DessinAnime", "AnimeSite")) {
+                setIcon(R.drawable.ic_menu_series)
+            }
         }
         // Favoris tab — IPTV providers only.
         binding.navMain.menu.findItem(R.id.iptv_favorites)?.isVisible = isIptv

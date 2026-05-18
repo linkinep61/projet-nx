@@ -213,7 +213,7 @@ class TvShowViewHolder(
     private fun isIptvProvider(): Boolean {
         // Match WiTv (ch::, sport::), OlaTv (ola::, ola_ep::), Vegeta TV (vegeta::,
         // vegeta_ep::), Sport Live (sportlive::), Movix LiveTV (movixlivetv::),
-        // TV Hub (livehub::), 3BoxTV (bxt::) IDs, plus les providerNames.
+        // TV Hub (livehub::) IDs, plus les providerNames.
         return tvShow.providerName == "WiTV"
             || tvShow.providerName == "OLA TV"
             || tvShow.providerName == "Vegeta TV"
@@ -221,7 +221,6 @@ class TvShowViewHolder(
             || tvShow.providerName == "Sport Live"
             || tvShow.providerName == "Movix LiveTV"
             || tvShow.providerName == "TV Hub"
-            || tvShow.providerName == "3BoxTV"
             || tvShow.providerName == "Mon IPTV"
             || tvShow.id.startsWith("ch::")
             || tvShow.id.startsWith("sport::")
@@ -234,7 +233,6 @@ class TvShowViewHolder(
             || tvShow.id.startsWith("match::")
             || tvShow.id.startsWith("movixlivetv::")
             || tvShow.id.startsWith("livehub::")
-            || tvShow.id.startsWith("bxt::")
             || tvShow.id.startsWith("myiptv-live::")
     }
 
@@ -256,13 +254,20 @@ class TvShowViewHolder(
         }
         lastClickTime = now
 
-        // If mini player interceptor is set, try to play in mini player
+        // 2026-05-14 (user "j'arrive pas à lire mes épisodes de série") :
+        // BYPASS du mini player pour les épisodes série (myiptv-ep::). Le mini
+        // player prend channel.url qui est VIDE pour les séries Stalker → fail
+        // silencieux + skip getVideo() → ExoPlayer crash "No extractors for URL: ".
+        // Seules les chaînes live IPTV doivent passer par le mini player.
+        val isStalkerEpisode = tvShow.id.startsWith("myiptv-ep::") ||
+            tvShow.id.startsWith("myiptv-movie::") ||
+            tvShow.id.startsWith("myiptv-ep-stk::")
         val interceptor = MiniPlayerController.onIptvChannelClick
-        Log.d("TvShowViewHolder", "handleDirectPlay: interceptor=${if (interceptor != null) "SET" else "NULL"}, tvShow=${tvShow.title}")
-        if (interceptor != null && interceptor(tvShow)) {
+        Log.d("TvShowViewHolder", "handleDirectPlay: interceptor=${if (interceptor != null) "SET" else "NULL"}, isStalkerEpisode=$isStalkerEpisode, tvShow=${tvShow.title}")
+        if (!isStalkerEpisode && interceptor != null && interceptor(tvShow)) {
             return // interceptor handled the click (playing in mini player)
         }
-        // Interceptor returned false or not set → navigate to full player
+        // Interceptor returned false or not set OR isStalkerEpisode → navigate to full player
 
         // If mini player is active, flag transition so onPause doesn't release it.
         // PlayerTvFragment.onViewCreated will call transferPlayer() to reuse it.
@@ -392,21 +397,8 @@ class TvShowViewHolder(
                             )
                     )
                 }
-                // 2026-05-11 : 3BoxTV — même mécanique de fallback.
-                if (tvShow.providerName == "3BoxTV") {
-                    val fallbackUrl = com.streamflixreborn.streamflix.providers.BoxXtemusProvider
-                        .fallbackLogoUrlFor(tvShow.title)
-                    error(
-                        com.bumptech.glide.Glide.with(imageView.context)
-                            .load(fallbackUrl)
-                            .apply(
-                                com.bumptech.glide.request.RequestOptions()
-                                    .placeholder(transparentDrawable)
-                                    .fallback(transparentDrawable)
-                                    .error(transparentDrawable)
-                            )
-                    )
-                }
+                // 2026-05-17 : 3BoxTV/BoxXtemus retiré du projet — bloc de
+                // fallback logo supprimé.
             } else {
                 fallback(R.drawable.glide_fallback_cover)
             }
@@ -794,7 +786,20 @@ class TvShowViewHolder(
         binding.btnTvShowWatchNow.apply {
             isVisible = episodeToWatch != null
             setOnClickListener {
-                if (isIptvProvider()) {
+                // 2026-05-15 (user "sur Mon IPTV cliquer sur Regarder S1 E1 ne
+                // lance pas la lecture, suivant/précédent puis ça marche") :
+                // pour Mon IPTV SÉRIES, episodeToWatch.id encode déjà l'épisode
+                // précis (format myiptv-stalkerep::sourceId::chIdx::sN::eN). Si
+                // on passe par handleDirectPlay(), c'est tvShow.id (myiptv-show::)
+                // qui est envoyé au player → MyIptvProvider.getServers ne match
+                // aucun case → emptyList → écran noir. Fix : si on a un
+                // episodeToWatch valide pour Mon IPTV série, on prend le même
+                // chemin que les providers non-IPTV (navigue avec l'episode.id).
+                val isMonIptvEpisode = episodeToWatch != null && (
+                    episodeToWatch.id.startsWith("myiptv-stalkerep::") ||
+                    episodeToWatch.id.startsWith("myiptv-ep::")
+                )
+                if (isIptvProvider() && !isMonIptvEpisode) {
                     handleDirectPlay(findNavController())
                 } else {
                     val videoType = Video.Type.Episode(
@@ -826,8 +831,15 @@ class TvShowViewHolder(
                 }
             }
             val isSingleEpisode = tvShow.seasons.size <= 1 && (tvShow.seasons.firstOrNull()?.episodes?.size ?: 0) <= 1
+            // 2026-05-15 : pour Mon IPTV séries, afficher "S1 E1" au lieu de
+            // "Regarder maintenant" → cohérent avec ce qui sera réellement lu.
+            val isMonIptvEpisodeText = episodeToWatch != null && (
+                episodeToWatch.id.startsWith("myiptv-stalkerep::") ||
+                episodeToWatch.id.startsWith("myiptv-ep::")
+            )
             text = when {
-                isIptvProvider() || isSingleEpisode -> context.getString(R.string.movie_watch_now)
+                (isIptvProvider() && !isMonIptvEpisodeText) || isSingleEpisode ->
+                    context.getString(R.string.movie_watch_now)
                 else -> context.getString(R.string.tv_show_watch_season_episode, episodeSeason?.number ?: 1, episodeToWatch?.number ?: 1)
             }
         }
@@ -936,7 +948,20 @@ class TvShowViewHolder(
         binding.btnTvShowWatchNow.apply {
             isVisible = episodeToWatch != null
             setOnClickListener {
-                if (isIptvProvider()) {
+                // 2026-05-15 (user "sur Mon IPTV cliquer sur Regarder S1 E1 ne
+                // lance pas la lecture, suivant/précédent puis ça marche") :
+                // pour Mon IPTV SÉRIES, episodeToWatch.id encode déjà l'épisode
+                // précis (format myiptv-stalkerep::sourceId::chIdx::sN::eN). Si
+                // on passe par handleDirectPlay(), c'est tvShow.id (myiptv-show::)
+                // qui est envoyé au player → MyIptvProvider.getServers ne match
+                // aucun case → emptyList → écran noir. Fix : si on a un
+                // episodeToWatch valide pour Mon IPTV série, on prend le même
+                // chemin que les providers non-IPTV (navigue avec l'episode.id).
+                val isMonIptvEpisode = episodeToWatch != null && (
+                    episodeToWatch.id.startsWith("myiptv-stalkerep::") ||
+                    episodeToWatch.id.startsWith("myiptv-ep::")
+                )
+                if (isIptvProvider() && !isMonIptvEpisode) {
                     handleDirectPlay(findNavController())
                 } else {
                     val videoType = Video.Type.Episode(
@@ -968,8 +993,15 @@ class TvShowViewHolder(
                 }
             }
             val isSingleEpisode = tvShow.seasons.size <= 1 && (tvShow.seasons.firstOrNull()?.episodes?.size ?: 0) <= 1
+            // 2026-05-15 : pour Mon IPTV séries, afficher "S1 E1" au lieu de
+            // "Regarder maintenant" → cohérent avec ce qui sera réellement lu.
+            val isMonIptvEpisodeText = episodeToWatch != null && (
+                episodeToWatch.id.startsWith("myiptv-stalkerep::") ||
+                episodeToWatch.id.startsWith("myiptv-ep::")
+            )
             text = when {
-                isIptvProvider() || isSingleEpisode -> context.getString(R.string.movie_watch_now)
+                (isIptvProvider() && !isMonIptvEpisodeText) || isSingleEpisode ->
+                    context.getString(R.string.movie_watch_now)
                 else -> context.getString(R.string.tv_show_watch_season_episode, episodeSeason?.number ?: 1, episodeToWatch?.number ?: 1)
             }
         }

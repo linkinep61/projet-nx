@@ -488,6 +488,24 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             }
         }
 
+        // 2026-05-15 (user "éviter que les écrans mettre en veille") : toggle
+        // pour garder l'écran allumé pendant la navigation app.
+        findPreference<SwitchPreference>("KEEP_SCREEN_ON_APP")?.apply {
+            isChecked = UserPreferences.keepScreenOnApp
+            setOnPreferenceChangeListener { _, newValue ->
+                val enabled = newValue as Boolean
+                UserPreferences.keepScreenOnApp = enabled
+                activity?.window?.let { w ->
+                    if (enabled) {
+                        w.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    } else {
+                        w.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    }
+                }
+                true
+            }
+        }
+
         findPreference<SwitchPreference>("MINI_PLAYER_ENABLED")?.apply {
             isChecked = UserPreferences.miniPlayerEnabled
             setOnPreferenceChangeListener { _, newValue ->

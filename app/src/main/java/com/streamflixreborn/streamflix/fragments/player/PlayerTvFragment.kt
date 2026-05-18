@@ -108,6 +108,8 @@ import com.streamflixreborn.streamflix.providers.IptvProvider
 import com.streamflixreborn.streamflix.providers.WiTvProvider
 import com.streamflixreborn.streamflix.utils.viewModelsFactory
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import okhttp3.OkHttpClient
 // Removed: import okhttp3.internal.userAgent — it resolves to "okhttp/4.12.0"
 import java.util.Calendar
@@ -413,8 +415,158 @@ class PlayerTvFragment : Fragment() {
             id.startsWith("vegeta::") || id.startsWith("vegeta_ep::") ||
             id.startsWith("livehub::") || id.startsWith("movixlivetv::") ||
             id.startsWith("sportlive::") || id.startsWith("match::") ||
-            id.startsWith("vavoo::") || id.startsWith("bxt::") ||
-            id.startsWith("myiptv-live::") || id.startsWith("myiptv::")
+            id.startsWith("vavoo::") ||
+            id.startsWith("myiptv::") || id.startsWith("myiptv-live::") ||
+            id.startsWith("myiptv-movie::") || id.startsWith("myiptv-ep::") ||
+            id.startsWith("myiptv-show::") || id.startsWith("myiptv-season::") ||
+            id.startsWith("myiptv-stalkerep::")
+    }
+
+    // 2026-05-17 v54 (user "écran noir 1s au swap") :
+    //   Avant seekToNextMediaItem(), on PixelCopy la dernière frame du
+    //   SurfaceView vers un Bitmap et on l'affiche dans swap_freeze_overlay
+    //   (ImageView par-dessus le player). Pendant que le Codec2 Amlogic
+    //   flush/reset (~600-1000ms, écran noir naturel), le user voit la
+    //   dernière frame FIGÉE au lieu du noir. On cache l'overlay dès que
+    //   le player redonne du contenu (STATE_READY après swap).
+    //   Combiné au fade-out/in audio v52, le swap devient une PAUSE
+    //   visuelle/audio d'~500ms au lieu d'un cut net + écran noir.
+    @androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.N)
+    private suspend fun captureLastFrameToOverlay() {
+        try {
+            if (_binding == null) return
+            val pv = binding.pvPlayer
+            val overlay = try { binding.root.findViewById<android.widget.ImageView>(R.id.swap_freeze_overlay) } catch (_: Exception) { null } ?: return
+            // SurfaceView est dans le PlayerView. On cherche le SurfaceView enfant.
+            val surface = findSurfaceView(pv) ?: return
+            val w = pv.width
+            val h = pv.height
+            if (w <= 0 || h <= 0) return
+            val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            val captured = kotlinx.coroutines.suspendCancellableCoroutine<Boolean> { cont ->
+                try {
+                    android.view.PixelCopy.request(surface, bmp, { result ->
+                        if (cont.isActive) cont.resume(result == android.view.PixelCopy.SUCCESS) {}
+                    }, android.os.Handler(android.os.Looper.getMainLooper()))
+                } catch (e: Exception) {
+                    if (cont.isActive) cont.resume(false) {}
+                }
+            }
+            if (captured) {
+                overlay.setImageBitmap(bmp)
+                overlay.visibility = View.VISIBLE
+                overlay.alpha = 1f
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("PlayerTvFragment", "captureLastFrameToOverlay: ${e.message}")
+        }
+    }
+
+    private fun findSurfaceView(root: View): android.view.SurfaceView? {
+        if (root is android.view.SurfaceView) return root
+        if (root is android.view.ViewGroup) {
+            for (i in 0 until root.childCount) {
+                val child = root.getChildAt(i)
+                val found = findSurfaceView(child)
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
+    private fun hideFreezeOverlay() {
+        try {
+            if (_binding == null) return
+            val overlay = binding.root.findViewById<android.widget.ImageView>(R.id.swap_freeze_overlay) ?: return
+            overlay.visibility = View.GONE
+            overlay.setImageBitmap(null)
+        } catch (_: Exception) {}
+    }
+
+    // v58 : helper pour construire un MediaItem backup aligné avec primary.
+    //   Réutilisé par LAZY BACKUP et par swapToNextWithAudioFade (post-swap re-add)
+    //   pour garantir hasNext=true en permanence après chaque swap.
+    private fun buildLiveBackupItem(player: androidx.media3.exoplayer.ExoPlayer): MediaItem? {
+        return try {
+            val curUri = player.currentMediaItem?.localConfiguration?.uri ?: return null
+            val curMime = player.currentMediaItem?.localConfiguration?.mimeType
+            MediaItem.Builder()
+                .setUri(curUri)
+                .apply { curMime?.let { setMimeType(it) } }
+                .setLiveConfiguration(
+                    MediaItem.LiveConfiguration.Builder()
+                        .setTargetOffsetMs(55_000)
+                        .setMaxOffsetMs(120_000)
+                        .setMinOffsetMs(30_000)
+                        .setMinPlaybackSpeed(0.95f)
+                        .setMaxPlaybackSpeed(1.0f)
+                        .build()
+                )
+                .build()
+        } catch (_: Exception) { null }
+    }
+
+    // v52 + v54 + v58 : cross-fade audio + freeze frame + re-add backup post-swap.
+    //   Élimine la fenêtre de risque ~14s où hasNext=false (entre swap et next LAZY).
+    private suspend fun swapToNextWithAudioFade(player: androidx.media3.exoplayer.ExoPlayer) {
+        val savedVolume = try { player.volume } catch (_: Exception) { 1f }
+        try {
+            // v54 : capture frame AVANT le swap
+            captureLastFrameToOverlay()
+            // Fade out 150ms (10 steps de 15ms)
+            for (i in 9 downTo 0) {
+                player.volume = savedVolume * (i / 10f)
+                kotlinx.coroutines.delay(15L)
+            }
+            player.seekToNextMediaItem()
+            // v58 : re-ajoute IMMÉDIATEMENT un backup pour que hasNext reste true
+            //   en permanence → tout swap futur passe par la smooth path JUMELAGE,
+            //   jamais par le path CRITIQUE destructif viewModel.getVideo.
+            try {
+                val nextBackup = buildLiveBackupItem(player)
+                if (nextBackup != null) {
+                    player.addMediaItem(nextBackup)
+                    android.util.Log.d("PlayerTvFragment", "v58: backup re-ajouté post-swap → hasNext=true garanti")
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("PlayerTvFragment", "v58 re-add backup failed: ${e.message}")
+            }
+            // Petit délai pour laisser le décodeur amorcer
+            kotlinx.coroutines.delay(80L)
+            // Fade in 240ms (12 steps de 20ms)
+            for (i in 1..12) {
+                player.volume = savedVolume * (i / 12f)
+                kotlinx.coroutines.delay(20L)
+            }
+            player.volume = savedVolume
+            // v54 : attendre que le player rejoue (STATE_READY + buffer > 1s)
+            //   puis cacher l'overlay. Au pire 2s timeout.
+            val deadline = System.currentTimeMillis() + 2_000L
+            while (System.currentTimeMillis() < deadline) {
+                try {
+                    if (player.playbackState == androidx.media3.common.Player.STATE_READY &&
+                        player.isPlaying) {
+                        break
+                    }
+                } catch (_: Exception) {}
+                kotlinx.coroutines.delay(40L)
+            }
+            // Fade out de l'overlay pour transition douce (vs hard hide)
+            try {
+                val overlay = binding.root.findViewById<android.widget.ImageView>(R.id.swap_freeze_overlay)
+                if (overlay != null && overlay.visibility == View.VISIBLE) {
+                    for (a in 10 downTo 0) {
+                        overlay.alpha = a / 10f
+                        kotlinx.coroutines.delay(20L)
+                    }
+                }
+            } catch (_: Exception) {}
+            hideFreezeOverlay()
+        } catch (e: Exception) {
+            try { player.volume = savedVolume } catch (_: Exception) {}
+            hideFreezeOverlay()
+            android.util.Log.w("PlayerTvFragment", "swapToNextWithAudioFade: ${e.message}")
+        }
     }
 
     private fun showLoadingOverlay() {
@@ -438,6 +590,12 @@ class PlayerTvFragment : Fragment() {
                     interpolator = android.view.animation.DecelerateInterpolator()
                     start()
                 }
+            // 2026-05-16 : pendant le chargement, on affiche aussi le picker
+            // de serveurs DIRECTEMENT (pas le menu Main) — l'user voit l'état
+            // ET peut cliquer un autre serveur direct via la télécommande.
+            runCatching { binding.settings.showServers() }
+            // TV : focus le picker pour que la nav D-pad démarre dessus.
+            runCatching { binding.settings.requestFocus() }
         }
         loadingShowRunnable = runnable
         loadingShowHandler.postDelayed(runnable, LOADING_OVERLAY_SHOW_DELAY_MS)
@@ -449,6 +607,12 @@ class PlayerTvFragment : Fragment() {
         loadingShowRunnable = null
         loadingBarAnimator?.cancel()
         loadingBarAnimator = null
+        // 2026-05-16 : ferme aussi le picker serveurs + clear loading flags
+        runCatching {
+            com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsView.Settings.Server.list.forEach { it.isLoading = false }
+            binding.settings.refreshServerList()
+            binding.settings.hide()
+        }
         if (binding.loadingOverlay.isVisible) {
             binding.loadingOverlayBar.progress = 100
             binding.loadingOverlay.visibility = View.GONE
@@ -457,6 +621,15 @@ class PlayerTvFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+
+        // 2026-05-15 (user "vire cette foutue roulette pour Mon IPTV") : force
+        // GONE de tout overlay loading dès l'init pour les contenus IPTV.
+        if (isIptvChannelContext()) {
+            try {
+                binding.loadingOverlay.visibility = View.GONE
+                binding.pvPlayer.setShowBuffering(androidx.media3.ui.PlayerView.SHOW_BUFFERING_NEVER)
+            } catch (_: Exception) {}
+        }
 
         // 2026-05-09 v17 : pose tout de suite la channelKey IPTV partagée pour
         // que le picker (favoris/coche) marche dès la 1re ouverture.
@@ -480,22 +653,11 @@ class PlayerTvFragment : Fragment() {
         // Codec enumeration is pre-warmed in StreamFlixApp so build() is fast (~100ms).
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             if (isAdded && _binding != null) {
-                // 2026-05-12 : BoxXtemus (bxt::) — le transfer mini→grand pose
-                // problème (leopard.ts a une métadonnée de durée finie qui fait
-                // ENDED state au surface swap). Comportement comme les autres
-                // providers : on STOP le mini et on RECHARGE depuis zéro dans
-                // le grand player. C'est ce que le user attend.
-                val isBoxXtemus = args.id.startsWith("bxt::")
-                if (isBoxXtemus) {
-                    MiniPlayerController.stop()
-                    initializePlayer(false)
+                val transferred = MiniPlayerController.transferPlayer()
+                if (transferred != null) {
+                    attachTransferredPlayer(transferred)
                 } else {
-                    val transferred = MiniPlayerController.transferPlayer()
-                    if (transferred != null) {
-                        attachTransferredPlayer(transferred)
-                    } else {
-                        initializePlayer(false)
-                    }
+                    initializePlayer(false)
                 }
             }
         }
@@ -520,6 +682,9 @@ class PlayerTvFragment : Fragment() {
                 binding.pvPlayer.controllerHideOnTouch = true
                 binding.pvPlayer.controllerAutoShow = true
             }
+            // 2026-05-17 : la 2e seek bar (live_secondary_progress) est dans
+            //   le controller player donc sa visibilité suit automatiquement
+            //   celle du controller (comme la seek bar standard).
         }
         binding.pvPlayer.onMediaPreviousClicked = ::handleMediaPrevious
         binding.pvPlayer.onMediaNextClicked = ::handleMediaNext
@@ -659,7 +824,7 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("movixlivetv::") ||
                             args.id.startsWith("livehub::") ||
                             args.id.startsWith("sportlive::") ||
-                            args.id.startsWith("match::") || args.id.startsWith("bxt::")
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                         PlayerSettingsView.Settings.Server.currentIptvChannelKey =
                             if (isIptvCtxTv) args.id else null
 
@@ -675,21 +840,20 @@ class PlayerTvFragment : Fragment() {
                         binding.settings.setOnServerSelectedListener { server ->
                             // 2026-05-10 : feedback INSTANTANÉ au clic manuel pour
                             // éviter l'impression de "ça met une plombe à se déclencher".
-                            // Sans ça : on continue à lire le serveur courant pendant
-                            // toute la durée d'extraction du nouveau (jusqu'à 10s pour
-                            // VidMoLy/Lpayer/etc.) → l'user pense que rien ne se passe.
-                            // Avec ça : audio coupé immédiatement + Toast confirme.
                             try { player.stop() } catch (_: Exception) {}
+                            // 2026-05-16 : marque le serveur sélectionné comme
+                            // en cours de chargement (suffixe ⟳ dans le picker).
+                            runCatching {
+                                PlayerSettingsView.Settings.Server.list.forEach {
+                                    it.isLoading = (it.id == server.id)
+                                }
+                                binding.settings.refreshServerList()
+                            }
                             try {
                                 Toast.makeText(requireContext(),
                                     "Chargement ${server.name}…",
                                     Toast.LENGTH_SHORT).show()
                             } catch (_: Exception) {}
-                            // 2026-05-10 : fallback safe (le server cliqué peut être
-                            // ajouté dynamiquement et absent de state.servers → NPE).
-                            // Pas de !! qui crashait sur serveurs ajoutés dynamiquement
-                            // (kick + replacement). Si pas dans state.servers, on
-                            // construit un Video.Server à partir des données Settings.Server.
                             val target = state.servers.find { server.id == it.id }
                                 ?: Video.Server(id = server.id, name = server.name)
                             viewModel.getVideo(target)
@@ -779,24 +943,86 @@ class PlayerTvFragment : Fragment() {
                         binding.settings.refreshChannelVariantList()
 
                         // 2026-05-08 : favoris multi-server (max 5) + skip bannis
+                        // 2026-05-17 v2 : matching canonical (sans URL signée qui
+                        //   change à chaque session Xtream). Format Vegeta :
+                        //   vegeta_stream::N::Quality::URL → on garde N+Quality.
+                        fun canonicalServerId(rawId: String): String {
+                            val parts = rawId.split("::")
+                            return if (parts.size >= 4 && parts[0].endsWith("_stream")) {
+                                "${parts[0]}::${parts[1]}::${parts[2]}"
+                            } else rawId
+                        }
                         val orderedFavIds = IptvFavorites.getFavoritesForChannel(args.id)
-                        val favServer = orderedFavIds.firstNotNullOfOrNull { favId ->
-                            state.servers.firstOrNull { it.id == favId }
+                        val canonicalFavs = orderedFavIds.map { canonicalServerId(it) }
+                        val favServer = canonicalFavs.firstNotNullOfOrNull { favCanonical ->
+                            state.servers.firstOrNull { canonicalServerId(it.id) == favCanonical }
                         }
                         // Skip les bannis — l'user ne veut pas qu'un server grisé soit joué
                         val firstNonBanned = state.servers.firstOrNull { srv ->
                             !IptvBannedServers.isBanned(args.id, srv.id)
                         }
-                        val initialServer = favServer ?: firstNonBanned ?: state.servers.first()
+
+                        // 2026-05-16 : wait up to 3s for pre-extract HEAD scan to
+                        // flag dead servers before initial pick (sinon initial pick
+                        // tombe sur Movix Premium mort = 60s timeout).
+                        if (favServer == null && !attachedFromMiniPlayer) {
+                            val startBrokenCount = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames().size
+                            Log.d("PlayerTvFragment", "Initial-pick: waiting up to 3s for HEAD scan (start broken=$startBrokenCount)")
+                            var waited = 0L
+                            while (waited < 3_000L) {
+                                kotlinx.coroutines.delay(250L)
+                                waited += 250L
+                                val nowBroken = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames().size
+                                if (nowBroken >= startBrokenCount + 2) {
+                                    Log.d("PlayerTvFragment", "Initial-pick: HEAD scan flagged $nowBroken broken (waited=${waited}ms)")
+                                    break
+                                }
+                            }
+                        }
+
+                        // Filter brokens for initial pick
+                        fun ipExtractorCore(name: String): String {
+                            val stripped = name.substringAfter(" — ").substringAfter(" · ").trim()
+                            return stripped.substringBefore(" - ").substringBefore(" (").substringBefore(" [").trim().uppercase()
+                        }
+                        val ipBrokenCores = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames()
+                            .map { ipExtractorCore(it) }.filter { it.isNotBlank() }.toSet()
+                        fun ipIsBroken(srv: Video.Server): Boolean =
+                            ipBrokenCores.isNotEmpty() && ipExtractorCore(srv.name) in ipBrokenCores
+
+                        val firstNonBrokenNonBanned = state.servers.firstOrNull { srv ->
+                            !IptvBannedServers.isBanned(args.id, srv.id) && !ipIsBroken(srv)
+                        }
+                        val initialServer = favServer
+                            ?: firstNonBrokenNonBanned
+                            ?: firstNonBanned
+                            ?: state.servers.first()
                         if (favServer != null) {
                             Log.d("PlayerTvFragment", "Favori prioritaire : ${favServer.name} (${orderedFavIds.size}/${IptvFavorites.MAX_FAVORITES_PER_CHANNEL})")
+                        } else if (firstNonBrokenNonBanned != null) {
+                            Log.d("PlayerTvFragment", "Initial-pick non-broken: ${firstNonBrokenNonBanned.name} (skipped ${ipBrokenCores.size} broken)")
                         }
                         // 2026-05-12 : SKIP le re-fetch quand le player a été transféré depuis le
                         // mini-player. Le player joue déjà — re-fetch + displayVideo() reset le
                         // MediaItem, perd la position, et fini sur "00:05 / 00:05 ENDED".
-                        if (attachedFromMiniPlayer) {
-                            Log.d("PlayerTvFragment", "Skip viewModel.getVideo() — player already running (transferred from mini)")
+                        // 2026-05-17 (user "la chaîne ne reprend pas sur le favori,
+                        //   je dois manuellement re-cliquer le cœur rouge") : si le
+                        //   mini joue un server différent du favori, on force le
+                        //   switch. On lit l'ID du server actuellement joué par le
+                        //   mini via getCurrentPlayingServerId() (pas via le champ
+                        //   currentServer de la fragment qui peut être null).
+                        val miniPlayingId = MiniPlayerController.getCurrentPlayingServerId()
+                        val miniIsOnWrongServer = attachedFromMiniPlayer &&
+                            favServer != null &&
+                            miniPlayingId != null &&
+                            miniPlayingId != favServer.id
+                        if (attachedFromMiniPlayer && !miniIsOnWrongServer) {
+                            currentServer = initialServer
+                            Log.d("PlayerTvFragment", "Skip viewModel.getVideo() — player already running (transferred from mini), currentServer=${initialServer.name}")
                         } else {
+                            if (miniIsOnWrongServer) {
+                                Log.w("PlayerTvFragment", "Mini joue '$miniPlayingId' mais favori = '${favServer?.id}' → force switch sur favori (${favServer?.name})")
+                            }
                             viewModel.getVideo(initialServer)
                         }
 
@@ -815,6 +1041,14 @@ class PlayerTvFragment : Fragment() {
                             // FileNotFoundException and puts the player in ERROR state
                             // before extraction finishes. displayVideo() will set the
                             // real MediaItem when SuccessLoadingVideo arrives.
+                            // 2026-05-16 : marque serveur en cours pour affichage " ⟳".
+                            runCatching {
+                                val activeId = state.server.id
+                                PlayerSettingsView.Settings.Server.list.forEach {
+                                    it.isLoading = (it.id == activeId)
+                                }
+                                binding.settings.refreshServerList()
+                            }
                         }
 
                         is PlayerViewModel.State.SuccessLoadingVideo -> {
@@ -847,7 +1081,7 @@ class PlayerTvFragment : Fragment() {
                                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                                args.id.startsWith("match::") || args.id.startsWith("bxt::")
+                                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                             // Skip-broken pour next : core matching pour zapper aussi
                             // les variantes (Movix — VidMoLy vs VidMoLy).
                             fun extractorCore(name: String): String {
@@ -1017,6 +1251,29 @@ class PlayerTvFragment : Fragment() {
                             Log.d("PlayerTvFragment", "Awaiting more servers — trying newly arrived server: ${server.name}")
                             cancelAwaitMoreServers()
                             viewModel.getVideo(server)
+                        } else {
+                            // 2026-05-17 (user "L'attente du serveur n'a pas l'effet
+                            //   escompté"). Quand un additional server arrive et
+                            //   qu'il matche le favori user (canonical), on switche
+                            //   automatiquement dessus si on joue un autre.
+                            try {
+                                fun canonicalIdAdditional(rawId: String): String {
+                                    val parts = rawId.split("::")
+                                    return if (parts.size >= 4 && parts[0].endsWith("_stream")) {
+                                        "${parts[0]}::${parts[1]}::${parts[2]}"
+                                    } else rawId
+                                }
+                                val favIds = IptvFavorites.getFavoritesForChannel(args.id)
+                                val canonicalFavs = favIds.map { canonicalIdAdditional(it) }
+                                val arrivedIsFav = canonicalFavs.contains(canonicalIdAdditional(server.id))
+                                val currentIsFav = currentServer?.let { cs ->
+                                    canonicalFavs.contains(canonicalIdAdditional(cs.id))
+                                } ?: false
+                                if (arrivedIsFav && !currentIsFav) {
+                                    Log.w("PlayerTvFragment", "Favori ARRIVED progressively (${server.name}) — auto-switch from ${currentServer?.name}")
+                                    viewModel.getVideo(server)
+                                }
+                            } catch (_: Exception) { }
                         }
                     }
 
@@ -1207,6 +1464,18 @@ class PlayerTvFragment : Fragment() {
         override fun onDestroyView() {
             super.onDestroyView()
             hideWebViewOverlay()
+
+            // 2026-05-17 v32 : stop SCOUT serveur
+            scoutJob?.cancel()
+            scoutJob = null
+            // 2026-05-17 v47 : stop periodic forced swap
+            periodicSwapJob?.cancel()
+            periodicSwapJob = null
+
+            // 2026-05-17 : clear DVR cache à la fermeture du player.
+            try {
+                com.streamflixreborn.streamflix.StreamFlixApp.clearLiveCache()
+            } catch (_: Exception) { }
 
             // Cleanup Handler leaks
             if (::progressHandler.isInitialized && ::progressRunnable.isInitialized) {
@@ -1450,6 +1719,22 @@ class PlayerTvFragment : Fragment() {
                 binding.settings.show()
             }
 
+            // 2026-05-16 (user "ça charge à l'infini sans savoir si serveur OK") :
+            // OK/clic sur l'overlay de chargement → cancel extraction + open Settings
+            // pour que l'user puisse changer de serveur sans attendre la fin du timeout.
+            binding.loadingOverlay.setOnClickListener {
+                viewModel.cancelGetVideo()
+                // 2026-05-16 : cancel aussi l'extraction FRAnime en cours (WebView)
+                runCatching {
+                    com.streamflixreborn.streamflix.extractors.FranimeSession.cancelCurrent()
+                }
+                if (binding.loadingOverlay.isVisible) {
+                    binding.loadingOverlay.visibility = View.GONE
+                }
+                // Ouvre direct la liste de serveurs (pas le menu Main).
+                binding.settings.showServers()
+            }
+
             binding.pvPlayer.controller.binding.btnSkipIntro.setOnClickListener {
                 player.seekTo(player.currentPosition + 85000)
                 it.visibility = View.GONE
@@ -1516,10 +1801,12 @@ class PlayerTvFragment : Fragment() {
             // IPTV channel navigation: prev/next channel buttons
             // 2026-05-08 : ajout livehub:: pour TV Hub.
             // 2026-05-10 : ajout vavoo:: pour réactivation Vavoo standalone.
+            // 2026-05-17 v61 : ajout myiptv-live:: pour Mon IPTV.
             val isIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
-                args.id.startsWith("livehub::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                args.id.startsWith("livehub::") || args.id.startsWith("vavoo::") ||
+                args.id.startsWith("myiptv-live::")
             if (isIptvChannel) {
                 setupChannelNavigationButtons(btnPrevious, btnNext)
                 return
@@ -1646,9 +1933,17 @@ class PlayerTvFragment : Fragment() {
                     prevId = provider.getPreviousChannelId(args.id)
                     nextId = provider.getNextChannelId(args.id)
                 }
-                is com.streamflixreborn.streamflix.providers.BoxXtemusProvider -> {
-                    prevId = provider.getPreviousChannelId(args.id)
-                    nextId = provider.getNextChannelId(args.id)
+                is com.streamflixreborn.streamflix.providers.MyIptvProvider -> {
+                    // v61 : Mon IPTV — prev/next channel via cache de classif
+                    if (args.id.startsWith("myiptv-live::")) {
+                        prevId = provider.getPreviousChannelId(args.id)
+                        nextId = provider.getNextChannelId(args.id)
+                    } else {
+                        // VOD / Series : pas de navigation prev/next
+                        btnPrevious.visibility = View.GONE
+                        btnNext.visibility = View.GONE
+                        return
+                    }
                 }
                 else -> {
                     btnPrevious.visibility = View.GONE
@@ -1714,18 +2009,16 @@ class PlayerTvFragment : Fragment() {
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelDisplayName(channelId)
-                is com.streamflixreborn.streamflix.providers.BoxXtemusProvider -> provider.getChannelDisplayName(channelId)
                 else -> null
             } ?: channelId.removePrefix("ch::").removePrefix("sport::")
                 .removePrefix("ola::").removePrefix("vegeta::").removePrefix("livehub::")
-                .removePrefix("vavoo::").removePrefix("bxt::")
+                .removePrefix("vavoo::")
             val channelLogo = when (provider) {
                 is WiTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelPoster(channelId)
-                is com.streamflixreborn.streamflix.providers.BoxXtemusProvider -> provider.getChannelPoster(channelId)
                 else -> null
             }
 
@@ -1775,7 +2068,7 @@ class PlayerTvFragment : Fragment() {
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelDisplayName(channelId)
-                is com.streamflixreborn.streamflix.providers.BoxXtemusProvider -> provider.getChannelDisplayName(channelId)
+                is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getChannelDisplayName(channelId)
                 else -> null
             } ?: channelId
             val channelPoster = when (provider) {
@@ -1784,7 +2077,7 @@ class PlayerTvFragment : Fragment() {
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelPoster(channelId)
-                is com.streamflixreborn.streamflix.providers.BoxXtemusProvider -> provider.getChannelPoster(channelId)
+                is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getChannelPoster(channelId)
                 else -> null
             }
 
@@ -2086,17 +2379,24 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
             // 2026-05-09 : roue de chargement masquée pour IPTV uniquement.
             // keepContentOnPlayerReset reset à false ici — il sera mis à true
             // uniquement juste avant les reloads auto-recovery pour ne pas casser
             // le transfert mini→fullscreen (view fraîche sans frame précédente).
+            // 2026-05-15 (user "vire cette foutue roulette pour Mon IPTV") :
+            // étendu à TOUS les contenus IPTV (live, VOD, séries, Mon IPTV
+            // Stalker) via isIptvChannelContext().
             try {
                 binding.pvPlayer.setShowBuffering(
-                    if (isLiveIptvChannel) androidx.media3.ui.PlayerView.SHOW_BUFFERING_NEVER
+                    if (isIptvChannelContext()) androidx.media3.ui.PlayerView.SHOW_BUFFERING_NEVER
                     else androidx.media3.ui.PlayerView.SHOW_BUFFERING_WHEN_PLAYING
                 )
-                binding.pvPlayer.setKeepContentOnPlayerReset(false)
+                // 2026-05-17 v17 (user "meilleur record suite à ces coupures") :
+                //   true = garde la dernière frame vidéo visible pendant un reset
+                //   (rebuffer, swap MediaItem). Évite l'écran noir flash lors des
+                //   micro coupures Vegeta. Frame freeze < écran noir.
+                binding.pvPlayer.setKeepContentOnPlayerReset(true)
             } catch (_: Exception) {}
             val mediaItemBuilder = MediaItem.Builder()
                 .setUri(video.source.toUri())
@@ -2113,10 +2413,34 @@ class PlayerTvFragment : Fragment() {
                         .setMediaServerId(server.id)
                         .build()
                 )
-            // 2026-05-09 v25 SIMPLIFICATION RADICALE : aucune LiveConfiguration custom.
-            // ExoPlayer utilise les défauts du manifest HLS — comme TiviMate, comme notre
-            // mini player. 200 lignes de "fixes" empilés aujourd'hui causaient les bugs
-            // au lieu de les fixer. Less is more.
+            // 2026-05-17 v7 (user "Y a des attentes qui me paraissent vraiment
+            //   longues / notre flux reprend pas chaque fois que le serveur l'envoie") :
+            //   logs montrent BUFFERING events de 3s quand le buffer ahead atteint 0.
+            //   Cause : manifest HLS Xtream Vegeta refresh slow → quand on lit
+            //   au live edge, on rattrape les chunks dispo → BUFFERING wait.
+            //
+            //   Fix : LiveConfiguration qui :
+            //   1. Maintient targetOffset=45s derrière live edge → buffer safety
+            //   2. Auto-slow 0.95-1.0x basé sur l'offset → ExoPlayer ralentit
+            //      gracieusement quand on s'approche du live edge (pas de saut
+            //      brusque de phase comme un setPlaybackSpeed manuel).
+            //   minOffset=20s = protection contre la position bord de live.
+            val isLiveIpTvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
+            if (isLiveIpTvChannel) {
+                mediaItemBuilder.setLiveConfiguration(
+                    MediaItem.LiveConfiguration.Builder()
+                        .setTargetOffsetMs(45_000)   // 45s derrière live edge
+                        .setMinOffsetMs(20_000)      // pas plus proche que 20s
+                        .setMaxOffsetMs(120_000)     // pas plus loin que 2 min
+                        .setMinPlaybackSpeed(0.95f)  // auto-slow quand près de live
+                        .setMaxPlaybackSpeed(1.0f)   // JAMAIS de speedup (pas de boost)
+                        .build()
+                )
+            }
             val mediaItem = mediaItemBuilder.build()
 
             if (!needsWebViewDs) {
@@ -2164,11 +2488,27 @@ class PlayerTvFragment : Fragment() {
                     || video.type == androidx.media3.common.MimeTypes.APPLICATION_MPD
                 )
                 if (isHls) {
+                    val hlsExtractorFactory = androidx.media3.exoplayer.hls.DefaultHlsExtractorFactory(
+                        androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
+                            androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
+                        true
+                    )
+                    // 2026-05-17 v8 : custom PlaylistTracker avec tolérance 30x
+                    //   targetDuration. Évite PlaylistStuckException prématurée
+                    //   sur les Xtream servers qui ne refresh pas leur manifest.
+                    val playlistTrackerFactory = androidx.media3.exoplayer.hls.playlist.HlsPlaylistTracker.Factory {
+                        dsFactory2, loadPolicy, parserFactory, cmcdConfig ->
+                        androidx.media3.exoplayer.hls.playlist.DefaultHlsPlaylistTracker(
+                            dsFactory2, loadPolicy, parserFactory, cmcdConfig, 30.0
+                        )
+                    }
                     val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(dataSourceFactory)
                         .setAllowChunklessPreparation(true)
+                        .setExtractorFactory(hlsExtractorFactory)
+                        .setPlaylistTrackerFactory(playlistTrackerFactory)
                         .createMediaSource(mediaItem)
                     player.setMediaSource(hlsSource)
-                    Log.d("PlayerDebug", "TV: HlsMediaSource (explicit)")
+                    Log.d("PlayerDebug", "TV: HlsMediaSource (explicit, smoothChunkJoin, stuckTolerance30x)")
                 } else if (isDash) {
                     val dashSource = androidx.media3.exoplayer.dash.DashMediaSource.Factory(dataSourceFactory)
                         .createMediaSource(mediaItem)
@@ -2192,6 +2532,67 @@ class PlayerTvFragment : Fragment() {
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     super.onPlaybackStateChanged(playbackState)
 
+                    // 2026-05-17 v18 (user "jumelage") : swap automatique vers backup
+                    //   si BUFFERING persiste >2s ET qu'on a un backup dans la queue.
+                    if (playbackState == Player.STATE_BUFFERING) {
+                        if (bufferingStartTimestampMs == 0L) bufferingStartTimestampMs = System.currentTimeMillis()
+                        val hasBackup = try { ::player.isInitialized && player.mediaItemCount > 1 && player.hasNextMediaItem() } catch (_: Exception) { false }
+
+                        // 2026-05-17 v26 (user "ligne critique pour que tout se redéclenche en cas d'échec") :
+                        //   WATCHDOG ULTIME — si BUFFERING dure >10s ET tous les swaps
+                        //   ont échoué (pas de backup OU swap récent qui a pas marché),
+                        //   force un FULL RESTART du channel via viewModel.getVideo().
+                        //   Dernière ligne de défense contre les freezes interminables.
+                        val isLiveIpTvForWatchdog = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                            args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
+                        if (isLiveIpTvForWatchdog) {
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                kotlinx.coroutines.delay(10_000L)
+                                if (::player.isInitialized && player.playbackState == Player.STATE_BUFFERING &&
+                                    bufferingStartTimestampMs > 0L &&
+                                    System.currentTimeMillis() - bufferingStartTimestampMs >= 10_000L) {
+                                    val srv = currentServer
+                                    if (srv != null) {
+                                        Log.e("PlayerTvFragment", "WATCHDOG CRITIQUE: BUFFERING >10s sans recovery → FULL RESTART via viewModel.getVideo(${srv.name})")
+                                        backupJumelageAttempted = false  // permet re-add backups après restart
+                                        try {
+                                            viewModel.getVideo(srv)
+                                        } catch (e: Exception) {
+                                            Log.w("PlayerTvFragment", "Watchdog critique getVideo failed: ${e.message}")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2026-05-17 v25 : cooldown anti-double-swap. Si swap récent (<5s),
+                        //   skip ce swap pour laisser le précédent compléter.
+                        val sinceLastSwap = System.currentTimeMillis() - lastSwapTimestampMs
+                        if (hasBackup && sinceLastSwap >= SWAP_COOLDOWN_MS) {
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                kotlinx.coroutines.delay(500L)
+                                if (::player.isInitialized && player.playbackState == Player.STATE_BUFFERING &&
+                                    System.currentTimeMillis() - bufferingStartTimestampMs >= 500L &&
+                                    player.hasNextMediaItem() &&
+                                    System.currentTimeMillis() - lastSwapTimestampMs >= SWAP_COOLDOWN_MS) {
+                                    Log.w("PlayerTvFragment", "JUMELAGE: primary stuck buffering 500ms → swapToNextWithAudioFade")
+                                    try {
+                                        // v52 : cross-fade audio
+                                        swapToNextWithAudioFade(player)
+                                        lastSwapTimestampMs = System.currentTimeMillis()
+                                    } catch (e: Exception) {
+                                        Log.w("PlayerTvFragment", "swapToNextWithAudioFade failed: ${e.message}")
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        bufferingStartTimestampMs = 0L
+                    }
+
                     // 2026-05-05 : watchdog buffering. Annule le timer dès qu'on
                     // sort de BUFFERING (READY, ENDED, IDLE).
                     if (playbackState != Player.STATE_BUFFERING) {
@@ -2204,7 +2605,7 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                         // 2026-05-11 (user) : 2 règles selon état du stream :
                         // (A) Pré-READY (extracteur silencieux) → skip 10s
                         //     (était 30s, baissé 2026-05-12 pour accélérer le fallback
@@ -2293,6 +2694,13 @@ class PlayerTvFragment : Fragment() {
                             // 2026-05-09 v13 : refresh proactif du token Stalker toutes les 3 min,
                             // AVANT qu'il expire. Évite le 403 réactif qui cause un cut de 25s.
                             scheduleProactiveTokenRefresh()
+                            // 2026-05-17 v32 (user "scanner qui détecte avant que la vidéo
+                            //   lise le flux à cet endroit") : SCOUT serveur — sonde HEAD
+                            //   le manifest URL toutes les 10s. Si 509/429 détecté, déclenche
+                            //   l'ajout préventif du backup AVANT que ExoPlayer hit l'erreur.
+                            startServerScout()
+                            // v47 FORCED PERIODIC SWAP désactivé — causait 2x plus de
+                            //   decoder resets = 2x plus de cuts. PREEMPTIVE swap natif suffit.
                         }
                         // 2026-05-11 : VOD aussi flag pour différencier pre/post-READY
                         if (!vodCurrentStreamHasWorked) {
@@ -2314,12 +2722,73 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                         if (isIptv) {
                             val provider = UserPreferences.currentProvider
                             if (provider is WiTvProvider) {
                                 viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
                                     provider.preloadAdjacentChannels(args.id)
+                                }
+                            }
+                        }
+
+                        // 2026-05-17 v31 (user "pré-scan pour réparer avant le bug") :
+                        //   LAZY BACKUP — backup AJOUTÉ uniquement quand buffer drains.
+                        //   AVANT : 2 streams parallèles en permanence → server Xtream
+                        //   rate-limit → HTTP 509 sur PRIMARY → cuts visibles.
+                        //   MAINTENANT : 1 seul stream en permanence → server tranquille
+                        //   → moins de 509. Backup ajouté JUST-IN-TIME comme "scout"
+                        //   quand buffer < 30s, prêt pour le swap si nécessaire.
+                        // 2026-05-17 v31 LAZY BACKUP : on RESET le flag à chaque STATE_READY
+                        //   pour permettre re-évaluation. L'ajout du backup se fait dans le
+                        //   progress handler uniquement quand le buffer commence à drainer.
+                        backupJumelageAttempted = false
+                        if (false && isIptv && !backupJumelageAttempted) {
+                            backupJumelageAttempted = true
+                            val curUri = player.currentMediaItem?.localConfiguration?.uri
+                            val curMime = player.currentMediaItem?.localConfiguration?.mimeType
+                            if (curUri != null) {
+                                viewLifecycleOwner.lifecycleScope.launch(Dispatchers.Main) {
+                                    // Délai pour laisser primary se stabiliser
+                                    kotlinx.coroutines.delay(5_000L)
+                                    try {
+                                        // 2026-05-17 v23 : nettoie d'abord les ancien items pour
+                                        //   éviter accumulation. Garde uniquement l'item actuel.
+                                        if (::player.isInitialized && player.mediaItemCount > 1) {
+                                            // Remove anything other than current
+                                            val curIdx = player.currentMediaItemIndex
+                                            for (i in player.mediaItemCount - 1 downTo 0) {
+                                                if (i != curIdx) {
+                                                    try { player.removeMediaItem(i) } catch (_: Exception) {}
+                                                }
+                                            }
+                                        }
+                                        if (::player.isInitialized && !player.hasNextMediaItem()) {
+                                            // 2026-05-17 v28 (user "2 URLs au lieu de 3") :
+                                            //   2-WAY REDUNDANCY avec MÊME URL :
+                                            //   - Primary : offset 45s (proche live)
+                                            //   - Backup #1 : offset 65s (sécurité +20s)
+                                            //   Moins de charge sur le serveur Xtream → moins de
+                                            //   HTTP 509 Bandwidth Limit Exceeded → moins de cuts.
+                                            val backupItem1 = MediaItem.Builder()
+                                                .setUri(curUri)
+                                                .apply { curMime?.let { setMimeType(it) } }
+                                                .setLiveConfiguration(
+                                                    MediaItem.LiveConfiguration.Builder()
+                                                        .setTargetOffsetMs(65_000)
+                                                        .setMaxOffsetMs(150_000)
+                                                        .setMinOffsetMs(50_000)
+                                                        .setMinPlaybackSpeed(0.93f)
+                                                        .setMaxPlaybackSpeed(1.0f)
+                                                        .build()
+                                                )
+                                                .build()
+                                            player.addMediaItem(backupItem1)
+                                            Log.d("PlayerTvFragment", "JUMELAGE: 1 backup SAME URL ajouté (offset 65s, primary 45s)")
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.w("PlayerTvFragment", "addMediaItem backup SAME URL failed: ${e.message}")
+                                    }
                                 }
                             }
                         }
@@ -2333,67 +2802,89 @@ class PlayerTvFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::") || args.id.startsWith("bxt::")
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
+                    // 2026-05-17 (user "hécatombe / le buf=4 pos=29") : player.prepare()
+                    //   SEUL ne re-fetch PAS l'URL HTTP — ExoPlayer garde la même
+                    //   MediaSource qui connait déjà la "fin" du .ts (durée déclarée).
+                    //   Résultat : STATE_ENDED → prepare → joue 2s du buffer cached
+                    //   → STATE_ENDED → boucle infernale.
+                    //
+                    //   Fix : on REMET le MediaItem from scratch. ExoPlayer ré-ouvre
+                    //   une connexion HTTP fraîche au CDN Xtream → vrai contenu live.
                     if (isLiveIptvStream && (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE)) {
-                        // Don't re-prepare immediately on STATE_IDLE if we never reached
-                        // READY (initial load) — that would loop. Only auto-resume if
-                        // the stream had been playing.
                         if (playbackState == Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
-                        // 2026-05-10 : guard anti-rentrance. Pendant un displayVideo de
-                        // recovery, le player passe par STATE_IDLE qui re-déclenchait ce
-                        // handler → boucle de switches rapides. Si un reload est en cours,
-                        // on ignore les transitions de player du reload lui-même.
                         if (preemptiveReloadInFlight) return
-                        Log.w("PlayerTvFragment", "Live IPTV stuck in $playbackState — FULL RELOAD via displayVideo")
-                        preemptiveReloadInFlight = true
-                        // 2026-05-09 : viewModel.getVideo() ne marche PAS pour relancer
-                        // le même flux car le StateFlow ignore l'émission identique
-                        // (distinctUntilChanged) → displayVideo n'est jamais ré-appelé.
-                        // Solution : appeler displayVideo() directement avec le current
-                        // Video + currentServer. Ça refait toute la chaîne (player reset,
-                        // setMediaItem, prepare) sans passer par le ViewModel.
-                        try {
-                            val cs = currentServer
-                            val cv = currentVideo
-                            if (cs != null && cv != null) {
-                                // Masque les contrôles + active keep_content pour que la
-                                // dernière frame reste figée pendant le re-prepare (au lieu
-                                // d'écran noir).
-                                // 2026-05-10 : keep_content RETIRÉ — causait image figée
-                                // sur l'ancienne frame quand la SurfaceView ne se rafraîchit
-                                // pas après le reset. Mieux vaut un bref flash noir qu'une
-                                // image figée + flux qui continue derrière.
+                        val uri = player.currentMediaItem?.localConfiguration?.uri
+                        if (uri == null) return
+
+                        // 2026-05-17 v22 (user "ça reprend pas après cut") : si on a un
+                        //   backup jumelage en queue, swap au lieu de tout reset. Le
+                        //   reload destructif (clearMediaItems + setMediaItem) écrase
+                        //   le backup et empêche la récupération sans cut.
+                        val hasBackupQueued = try { player.mediaItemCount > 1 && player.hasNextMediaItem() } catch (_: Exception) { false }
+                        val sinceLastSwap = System.currentTimeMillis() - lastSwapTimestampMs
+                        if (hasBackupQueued && sinceLastSwap >= SWAP_COOLDOWN_MS) {
+                            Log.w("PlayerTvFragment", "JUMELAGE: STATE_$playbackState avec backup → swapToNextWithAudioFade (no reset)")
+                            preemptiveReloadInFlight = true
+                            viewLifecycleOwner.lifecycleScope.launch {
                                 try {
-                                    binding.pvPlayer.controller.hide()
-                                } catch (_: Exception) {}
-                                viewLifecycleOwner.lifecycleScope.launch {
-                                    kotlinx.coroutines.delay(50L)
-                                    if (_binding != null) {
-                                        try {
-                                            displayVideo(cv, cs)
-                                        } catch (e: Exception) {
-                                            Log.w("PlayerTvFragment", "displayVideo reload failed: ${e.message}")
-                                        }
-                                    }
-                                    // 2026-05-10 : reset keep_content après 2s pour libérer
-                                    // la surface — sinon l'image reste figée sur la dernière
-                                    // frame même si le nouveau stream est en train de jouer.
-                                    kotlinx.coroutines.delay(2_000L)
-                                    if (_binding != null) {
-                                        try { binding.pvPlayer.setKeepContentOnPlayerReset(false) } catch (_: Exception) {}
-                                    }
-                                    // Cooldown additionnel — laisse le stream se stabiliser.
-                                    kotlinx.coroutines.delay(23_000L)
-                                    preemptiveReloadInFlight = false
+                                    // v52 : cross-fade audio
+                                    swapToNextWithAudioFade(player)
+                                    lastSwapTimestampMs = System.currentTimeMillis()
+                                    backupJumelageAttempted = false  // Re-add backup au prochain READY
+                                } catch (e: Exception) {
+                                    Log.w("PlayerTvFragment", "swapToNextWithAudioFade failed: ${e.message}")
                                 }
-                            } else {
+                                kotlinx.coroutines.delay(8_000L)
                                 preemptiveReloadInFlight = false
-                                player.prepare()
-                                player.playWhenReady = true
+                            }
+                            return
+                        }
+                        // Anti-flap : si >= 3 reloads dans les 15s, on arrête.
+                        val nowFlap = System.currentTimeMillis()
+                        recentReloadTimestamps.removeAll { (nowFlap - it) > RELOAD_FLAP_WINDOW_MS }
+                        if (recentReloadTimestamps.size >= RELOAD_FLAP_THRESHOLD) {
+                            Log.e("PlayerTvFragment", "Reload flap detected (${recentReloadTimestamps.size} reloads in 15s) — STOP recovery loop")
+                            try {
+                                android.widget.Toast.makeText(
+                                    requireContext(),
+                                    "Flux trop instable — change de chaîne",
+                                    android.widget.Toast.LENGTH_LONG,
+                                ).show()
+                            } catch (_: Exception) {}
+                            return
+                        }
+                        recentReloadTimestamps.add(nowFlap)
+                        Log.w("PlayerTvFragment", "Live IPTV $playbackState — full MediaItem reload (fresh HTTP)")
+                        preemptiveReloadInFlight = true
+                        try {
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                try {
+                                    // 2026-05-17 v8 : preserve LiveConfiguration au reload.
+                                    val freshItem = androidx.media3.common.MediaItem.Builder()
+                                        .setUri(uri)
+                                        .setLiveConfiguration(
+                                            MediaItem.LiveConfiguration.Builder()
+                                                .setTargetOffsetMs(45_000)
+                                                .setMinOffsetMs(20_000)
+                                                .setMaxOffsetMs(120_000)
+                                                .setMinPlaybackSpeed(0.95f)
+                                                .setMaxPlaybackSpeed(1.0f)
+                                                .build()
+                                        )
+                                        .build()
+                                    player.clearMediaItems()
+                                    player.setMediaItem(freshItem)
+                                    player.prepare()
+                                    player.playWhenReady = true
+                                } catch (e: Exception) {
+                                    Log.w("PlayerTvFragment", "MediaItem reload failed: ${e.message}")
+                                }
+                                kotlinx.coroutines.delay(5_000L)
+                                preemptiveReloadInFlight = false
                             }
                         } catch (e: Exception) {
                             preemptiveReloadInFlight = false
-                            Log.w("PlayerTvFragment", "Auto-resume failed: ${e.message}")
                         }
                     }
                 }
@@ -2407,6 +2898,147 @@ class PlayerTvFragment : Fragment() {
                             for (i in 0 until group.length) {
                                 if (group.isTrackSelected(i)) {
                                     add(group.getTrackFormat(i).height)
+                                }
+                            }
+                        }
+                    }
+
+                    // 2026-05-17 (user "pourquoi sur un serveur j'ai pas de son") :
+                    //   détection codec audio + log explicite + toast si pas supporté.
+                    //   Causes typiques no-sound : AC3/EAC3/DTS sans HW decoder, ou
+                    //   audio language tag forcé qui ne matche pas la sélection user.
+                    val audioGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+                    if (audioGroups.isNotEmpty()) {
+                        val audioReport = audioGroups.joinToString("|") { g ->
+                            (0 until g.length).joinToString(",") { i ->
+                                val f = g.getTrackFormat(i)
+                                val codec = f.codecs ?: f.sampleMimeType ?: "?"
+                                val sel = if (g.isTrackSelected(i)) "★" else ""
+                                val sup = if (g.isTrackSupported(i)) "" else "[X]"
+                                "$sel$codec${if (f.channelCount > 0) "/${f.channelCount}ch" else ""}${if (f.sampleRate > 0) "/${f.sampleRate}Hz" else ""}$sup"
+                            }
+                        }
+                        Log.d("PlayerAudio", "Audio tracks: $audioReport")
+                        val anyAudioSelected = audioGroups.any { g ->
+                            (0 until g.length).any { i -> g.isTrackSelected(i) }
+                        }
+                        val anyAudioSupported = audioGroups.any { g ->
+                            (0 until g.length).any { i -> g.isTrackSupported(i) }
+                        }
+                        if (anyAudioSupported && !anyAudioSelected) {
+                            // Audio tracks exist and at least one is supported, but NONE selected
+                            // → ExoPlayer's track selector skipped them (often language preference
+                            // mismatch). Force-select the first supported track.
+                            try {
+                                val firstSupportedGroup = audioGroups.first { g ->
+                                    (0 until g.length).any { i -> g.isTrackSupported(i) }
+                                }
+                                val firstSupportedIdx = (0 until firstSupportedGroup.length).first {
+                                    firstSupportedGroup.isTrackSupported(it)
+                                }
+                                val params = player.trackSelectionParameters.buildUpon()
+                                    .setOverrideForType(
+                                        androidx.media3.common.TrackSelectionOverride(
+                                            firstSupportedGroup.mediaTrackGroup,
+                                            firstSupportedIdx,
+                                        )
+                                    )
+                                    .build()
+                                player.trackSelectionParameters = params
+                                Log.w("PlayerAudio", "No audio selected → force-select first supported track ($firstSupportedIdx)")
+                            } catch (e: Exception) {
+                                Log.w("PlayerAudio", "Force-select audio failed: ${e.message}")
+                            }
+                        } else if (!anyAudioSupported) {
+                            val firstFormat = audioGroups.first().getTrackFormat(0)
+                            val codec = firstFormat.codecs ?: firstFormat.sampleMimeType ?: "?"
+                            Log.e("PlayerAudio", "AUCUN track audio supporté ($codec) — pas de son possible")
+                            try {
+                                android.widget.Toast.makeText(
+                                    requireContext(),
+                                    "Audio non supporté ($codec) sur ce serveur — essaie un autre",
+                                    android.widget.Toast.LENGTH_LONG,
+                                ).show()
+                            } catch (_: Exception) {}
+                        }
+                    } else {
+                        // 2026-05-17 v11 : diagnostic complet + smart auto-switch ONE-SHOT
+                        //   par chaîne. Évite le thrashing (1 seul switch tenté).
+                        val allReport = tracks.groups.joinToString("|") { g ->
+                            val typeStr = when (g.type) {
+                                C.TRACK_TYPE_VIDEO -> "VIDEO"
+                                C.TRACK_TYPE_AUDIO -> "AUDIO"
+                                C.TRACK_TYPE_TEXT -> "TEXT"
+                                C.TRACK_TYPE_METADATA -> "META"
+                                else -> "T${g.type}"
+                            }
+                            (0 until g.length).joinToString(",", prefix = "$typeStr[", postfix = "]") { i ->
+                                val f = g.getTrackFormat(i)
+                                val mime = f.sampleMimeType ?: "?"
+                                val codec = f.codecs ?: "?"
+                                "$mime/$codec(ch=${f.channelCount},sr=${f.sampleRate})"
+                            }
+                        }
+                        Log.w("PlayerAudio", "Aucun audio group séparé — diagnostic tracks: $allReport")
+                        // 2026-05-17 v13 : PAS d'auto-switch — causait des cuts longs (20s+)
+                        //   quand le serveur cible était lent. Juste notifier user via toast
+                        //   après 10s de no-audio confirmé. User peut switcher manuellement.
+                        if (!noAudioSwitchScheduled && videoGroups.isNotEmpty()) {
+                            noAudioSwitchScheduled = true
+                            val server = currentServer
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                kotlinx.coroutines.delay(10_000L)
+                                val recheckAudio = player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+                                if (recheckAudio.isEmpty() && server != null && !noAudioToastShown) {
+                                    noAudioToastShown = true
+                                    Log.w("PlayerAudio", "${server.name} confirmed audio-less après 10s — toast user")
+                                    try {
+                                        android.widget.Toast.makeText(
+                                            requireContext(),
+                                            "Pas d'audio sur ${server.name} — change de serveur via le menu",
+                                            android.widget.Toast.LENGTH_LONG,
+                                        ).show()
+                                    } catch (_: Exception) {}
+                                }
+                                noAudioSwitchScheduled = false
+                            }
+                        }
+                    }
+
+                    // 2026-05-15 (user "Aventures croisées ne se lance pas") :
+                    // détection codec vidéo non supporté → HEVC Main 10/HDR10
+                    // (hvc1.2.*) ne déclenche pas onPlayerError car audio OK →
+                    // STATE_READY atteint → spinner éternel sans frame vidéo.
+                    if (videoGroups.isNotEmpty()) {
+                        val anyVideoSupported = videoGroups.any { group ->
+                            (0 until group.length).any { i -> group.isTrackSupported(i) }
+                        }
+                        if (!anyVideoSupported) {
+                            val firstFormat = videoGroups.first().getTrackFormat(0)
+                            val codecLabel = firstFormat.codecs ?: firstFormat.sampleMimeType ?: "?"
+                            val isHdr10 = codecLabel.contains("hvc1.2.", ignoreCase = true) ||
+                                codecLabel.contains("hev1.2.", ignoreCase = true) ||
+                                firstFormat.colorInfo?.colorTransfer == C.COLOR_TRANSFER_ST2084
+                            val toastMsg = when {
+                                isHdr10 -> "Vidéo HEVC HDR10 (10-bit) non supportée par ce device — essaie un autre serveur si dispo"
+                                else -> "Codec vidéo non supporté ($codecLabel) par ce device — essaie un autre serveur si dispo"
+                            }
+                            Log.e("PlayerNetwork", "Aucun track vidéo supporté ($codecLabel) — Toast + auto-skip")
+                            try {
+                                android.widget.Toast.makeText(
+                                    requireContext(), toastMsg, android.widget.Toast.LENGTH_LONG,
+                                ).show()
+                            } catch (_: Exception) {}
+                            val server = currentServer
+                            if (server != null) {
+                                pruneBrokenVariant(server)
+                                val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
+                                if (nextServer != null) {
+                                    Log.d("PlayerNetwork", "Codec unsupported → next server: ${nextServer.name}")
+                                    viewModel.getVideo(nextServer)
+                                } else if (!tryNextChannelVariant(server)) {
+                                    Log.w("PlayerNetwork", "Codec unsupported et aucune source alternative — stop")
+                                    try { player.stop() } catch (_: Exception) {}
                                 }
                             }
                         }
@@ -2513,7 +3145,7 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                         if (player.hasReallyFinished() && !isLiveIptvNoAutoSkip) {
                             if (UserPreferences.autoplay) {
                                 playNextEpisodeAcrossSeasons(autoplay = true)
@@ -2529,6 +3161,46 @@ class PlayerTvFragment : Fragment() {
                     val cause = error.cause?.cause
                     val causeMsg = cause?.message ?: ""
                     val errorCauseMsg = error.cause?.message ?: ""
+
+                    // 2026-05-15 (user "écran noir au lieu de jouer la vidéo") :
+                    // détection codecs propriétaires non supportables (Dolby
+                    // Vision dvhe.*, etc.) — Toast clair + auto-skip vers le
+                    // serveur suivant ou stop si aucune alternative.
+                    val errMsgFull = error.message ?: ""
+                    val isUnsupportedCodec = errMsgFull.contains("NO_EXCEEDS_CAPABILITIES") ||
+                        errMsgFull.contains("NO_UNSUPPORTED_TYPE") ||
+                        errMsgFull.contains("NO_UNSUPPORTED_DRM")
+                    val isDolbyVision = errMsgFull.contains("dolby-vision", ignoreCase = true) ||
+                        errMsgFull.contains("dvhe.", ignoreCase = true) ||
+                        errMsgFull.contains("dvav.", ignoreCase = true) ||
+                        errMsgFull.contains("dvh1.", ignoreCase = true)
+                    if (isUnsupportedCodec || isDolbyVision) {
+                        val server = currentServer
+                        val toastMsg = when {
+                            isDolbyVision -> "Dolby Vision non supporté sur cet appareil — choisis un autre serveur si dispo"
+                            else -> "Format/codec non supporté par ce device — choisis un autre serveur si dispo"
+                        }
+                        Log.e("PlayerNetwork", "Codec non supporté ($errMsgFull) — Toast + auto-skip")
+                        try {
+                            android.widget.Toast.makeText(
+                                requireContext(),
+                                toastMsg,
+                                android.widget.Toast.LENGTH_LONG,
+                            ).show()
+                        } catch (_: Exception) {}
+                        if (server != null) {
+                            pruneBrokenVariant(server)
+                            val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
+                            if (nextServer != null) {
+                                Log.d("PlayerNetwork", "Codec unsupported → next server: ${nextServer.name}")
+                                viewModel.getVideo(nextServer)
+                            } else if (!tryNextChannelVariant(server)) {
+                                Log.w("PlayerNetwork", "Codec unsupported et aucune source alternative — stop")
+                                try { player.stop() } catch (_: Exception) {}
+                            }
+                        }
+                        return
+                    }
 
                     // Fallback 1: if Cronet hit a network error, retry with OkHttp
                     val isCronetNetworkError = causeMsg.contains("ERR_CONNECTION_TIMED_OUT")
@@ -2568,7 +3240,7 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                         if (isLiveIptvNow && iptvCurrentStreamHasWorked) {
                             Log.w("PlayerNetwork", "Connection timeout IPTV sticky (already worked) → re-prepare same server")
                             try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
@@ -2596,7 +3268,7 @@ class PlayerTvFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::") || args.id.startsWith("bxt::")
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                     if (isLiveIptv) {
                         val server = currentServer ?: return
                         val errCodeName = error.errorCodeName
@@ -2608,11 +3280,20 @@ class PlayerTvFragment : Fragment() {
                         // souvent transitoire). User switche manuellement s'il veut.
                         // Switch SEULEMENT si stream n'a jamais marché.
                         val errMsg = (error.cause?.message ?: error.message ?: "").lowercase()
+                        // 2026-05-17 : 500/502/503 ajoutés. Sur Stalker/Xtream
+                        // (Vegeta, Ola), ces erreurs serveur viennent souvent
+                        // d'un token expiré ou gateway upstream HS → un simple
+                        // player.prepare() refait la MÊME URL morte (boucle).
+                        // En les marquant "permanent", on déclenche la fresh
+                        // handshake via refreshServerUrl() qui résout vraiment.
                         val isPermanentHttpError = errMsg.contains("response code: 403") ||
                             errMsg.contains("response code: 404") ||
                             errMsg.contains("response code: 410") ||
                             errMsg.contains("response code: 451") ||
-                            errMsg.contains("response code: 456")
+                            errMsg.contains("response code: 456") ||
+                            errMsg.contains("response code: 500") ||
+                            errMsg.contains("response code: 502") ||
+                            errMsg.contains("response code: 503")
                         val MAX_RETRIES_BEFORE_SWITCH = 3
                         val shouldSwitch = !iptvCurrentStreamHasWorked &&
                             (isPermanentHttpError || iptvRetryCount >= MAX_RETRIES_BEFORE_SWITCH)
@@ -2829,7 +3510,7 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
             if (isLiveIptvStream) {
                 player.seekToDefaultPosition()
             } else if (startPositionMs != null) {
@@ -2870,6 +3551,13 @@ class PlayerTvFragment : Fragment() {
 
             player.prepare()
             player.playWhenReady = shouldPlay
+
+            // 2026-05-17 v4 (user "sauts de phase dans la vidéo") : revert
+            //   0.97x lock — causait des artefacts hardware sur Chromecast
+            //   Amlogic (pitch correction non-1.0x mal supportée). Le vrai fix
+            //   des micro coupures était le watchdog seuil draconien (ligne 3427).
+            //   Sans le reload-loop toutes les 16-22s, la lecture à 1.0x est
+            //   stable et sans cut.
 
             // Signal HomeViewModel that the player is loading — safe to start enrichment now
             EnrichmentTrigger.notifyPlayerReady()
@@ -3049,13 +3737,53 @@ class PlayerTvFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::") || args.id.startsWith("bxt::")
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                     if (!isLiveIptv) {
                         val show = player.currentPosition in 3000..120000
                         showSkipIntroButton(show)
                         updateNextEpisodeOverlay()
+                        // 2026-05-17 v3 : VOD → exo_progress visible (standard),
+                        //   2 custom DefaultTimeBars cachées.
+                        try {
+                            val ctrl = binding.pvPlayer.controller.binding.root
+                            val stdBar = ctrl.findViewById<View>(R.id.exo_progress)
+                            val pri = ctrl.findViewById<View>(R.id.live_primary_progress)
+                            val sec = ctrl.findViewById<View>(R.id.live_secondary_progress)
+                            if (stdBar != null && stdBar.visibility != View.VISIBLE) stdBar.visibility = View.VISIBLE
+                            if (pri != null && pri.visibility != View.GONE) pri.visibility = View.GONE
+                            if (sec != null && sec.visibility != View.GONE) sec.visibility = View.GONE
+                        } catch (_: Exception) { }
                     } else {
                         liveCheckCounter++
+                        // 2026-05-17 v6 : watchdog stuck-BUFFERING. Si la position
+                        //   ne bouge pas pendant >15s et qu'on n'est pas en train
+                        //   de jouer, c'est que les retries internes ont silencieusement
+                        //   foiré. On force un re-fetch via viewModel.getVideo().
+                        val curPos = player.currentPosition
+                        val isStuck = !player.isPlaying && curPos == lastObservedPositionMs && curPos >= 0
+                        if (isStuck) {
+                            stuckBufferingTicks++
+                            if (stuckBufferingTicks >= STUCK_BUFFER_THRESHOLD_TICKS) {
+                                stuckBufferingTicks = 0
+                                val srv = currentServer
+                                if (srv != null && !preemptiveReloadInFlight) {
+                                    Log.w("PlayerTvFragment", "STUCK BUFFERING ${STUCK_BUFFER_THRESHOLD_TICKS}s — force viewModel.getVideo(${srv.name})")
+                                    preemptiveReloadInFlight = true
+                                    viewLifecycleOwner.lifecycleScope.launch {
+                                        try {
+                                            viewModel.getVideo(srv)
+                                        } catch (e: Exception) {
+                                            Log.w("PlayerTvFragment", "Stuck-watchdog force-reload failed: ${e.message}")
+                                        }
+                                        kotlinx.coroutines.delay(8_000L)
+                                        preemptiveReloadInFlight = false
+                                    }
+                                }
+                            }
+                        } else {
+                            stuckBufferingTicks = 0
+                        }
+                        lastObservedPositionMs = curPos
                         val pos = player.currentPosition
                         val buf = player.bufferedPosition
                         val ahead = (buf - pos).coerceAtLeast(0)
@@ -3064,6 +3792,96 @@ class PlayerTvFragment : Fragment() {
                             liveCheckCounter = 0
                             Log.d("PlayerTvFragment", "Live buffer: pos=${pos/1000}s buf=${buf/1000}s ahead=${aheadSec}s")
                         }
+                        // 2026-05-17 v3 (user "barre 1 = chunk en lecture, barre 2
+                        //   = pré-chargé, switch quand barre 1 finit, total 60s
+                        //   respecté") : drive 2 DefaultTimeBars custom.
+                        //   - chunkMs = 30s. Total pair = 60s = 2 chunks.
+                        //   - pairStart = position du début du pair courant
+                        //   - posInPair = 0..60s dans le pair
+                        //   - Barre 1 active si posInPair < 30s, sinon Barre 2 active
+                        //   - L'autre barre montre le buffer pré-chargé (overflow)
+                        //   Quand bar 1 atteint 30s → thumb passe automatiquement
+                        //   sur bar 2 (visuel de "switch"). Quand bar 2 atteint
+                        //   30s → reload (ou reset cycle) → bar 1 reprend.
+                        try {
+                            val ctrl = binding.pvPlayer.controller.binding.root
+                            val stdBar = ctrl.findViewById<View>(R.id.exo_progress)
+                            val pri = ctrl.findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.live_primary_progress)
+                            val sec = ctrl.findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.live_secondary_progress)
+                            // Live IPTV → hide standard, show 2 custom bars
+                            if (stdBar != null && stdBar.visibility != View.GONE) stdBar.visibility = View.GONE
+                            if (pri != null && pri.visibility != View.VISIBLE) pri.visibility = View.VISIBLE
+                            if (sec != null && sec.visibility != View.VISIBLE) sec.visibility = View.VISIBLE
+
+                            if (pri != null && sec != null) {
+                                // 2026-05-17 v7 : tick cumulatif basé sur WALL-CLOCK
+                                //   (pas player.isPlaying) — sinon les BUFFERING gèlent
+                                //   le cycle visuel et le user voit jamais bar 2 → bar 1.
+                                //   Le cycle UI doit avancer en permanence pour montrer
+                                //   "le système est toujours actif".
+                                // 2026-05-17 v30 : revert v19 — pas de slowdown manuel donc
+                                //   le cumul peut être wall-clock fixe à 1s/sec.
+                                liveCumulativePlaybackMs += 1000L
+                                // 2026-05-17 v5 : ahead lissé (anti-trou visuel reload).
+                                smoothedAheadMs = if (ahead > smoothedAheadMs) {
+                                    ahead
+                                } else {
+                                    (smoothedAheadMs - 1000L).coerceAtLeast(ahead).coerceAtLeast(0L)
+                                }
+                                // 2026-05-17 v51 (user "Le truc où j'avais mes barres préchargées
+                                //   full c'était bien ça") :
+                                //   RESTAURE le visualBoost v39 — quand un backup est en queue
+                                //   (mediaItemCount > 1), le buffer est en réalité 60s plus
+                                //   large que ce qu'ExoPlayer voit (parce que le 2e item est
+                                //   déjà bufferisé par PreloadConfiguration). Le boost reflète
+                                //   cette réalité.
+                                val hasBackupQueued = try { player.mediaItemCount > 1 } catch (_: Exception) { false }
+                                val visualBoost = if (hasBackupQueued) 60_000L else 0L
+                                val visualAhead = smoothedAheadMs + visualBoost
+                                val chunkMs = 60_000L
+                                val pairMs = 2 * chunkMs
+                                val cumPos = liveCumulativePlaybackMs
+                                val pairStart = (cumPos / pairMs) * pairMs
+                                val posInPair = cumPos - pairStart
+                                val phaseA = posInPair < chunkMs
+                                // Debug log à chaque transition de phase pour suivre le cycle.
+                                if (posInPair == 0L) {
+                                    Log.d("PlayerTvFragment", "Dual-bar cycle: BAR 1 active (cum=${cumPos/1000}s)")
+                                } else if (posInPair == chunkMs) {
+                                    Log.d("PlayerTvFragment", "Dual-bar cycle: BAR 2 active (cum=${cumPos/1000}s)")
+                                }
+                                if (phaseA) {
+                                    // Bar 1 active (chunk N en lecture, 0→60s)
+                                    pri.setDuration(chunkMs)
+                                    pri.setPosition(posInPair)
+                                    pri.setBufferedPosition((posInPair + visualAhead).coerceAtMost(chunkMs))
+                                    pri.alpha = 1f
+                                    // Bar 2 pré-chargé (chunk N+1 qui attend)
+                                    sec.setDuration(chunkMs)
+                                    sec.setPosition(0)
+                                    val bar1Remaining = chunkMs - posInPair
+                                    sec.setBufferedPosition((visualAhead - bar1Remaining).coerceAtLeast(0L).coerceAtMost(chunkMs))
+                                    sec.alpha = 0.6f
+                                } else {
+                                    // Bar 2 active (chunk N+1 en lecture)
+                                    val bar2Pos = posInPair - chunkMs
+                                    sec.setDuration(chunkMs)
+                                    sec.setPosition(bar2Pos)
+                                    sec.setBufferedPosition((bar2Pos + visualAhead).coerceAtMost(chunkMs))
+                                    sec.alpha = 1f
+                                    // 2026-05-17 (user "on voit pas le chargement
+                                    //   sur la première quand la 2e arrive à la fin")
+                                    //   Bar 1 = prochain chunk (N+2) en pré-chargement.
+                                    //   Position=0 (pas en lecture), buffered = overflow
+                                    //   au-delà de bar 2.
+                                    val bar2Remaining = chunkMs - bar2Pos
+                                    pri.setDuration(chunkMs)
+                                    pri.setPosition(0)
+                                    pri.setBufferedPosition((visualAhead - bar2Remaining).coerceAtLeast(0L).coerceAtMost(chunkMs))
+                                    pri.alpha = 0.6f
+                                }
+                            }
+                        } catch (_: Exception) { }
                         // Détection drain : ahead diminue strictement vs le tick précédent
                         if (lastAheadSec >= 0 && aheadSec < lastAheadSec) {
                             consecutiveDrainTicks++
@@ -3072,30 +3890,196 @@ class PlayerTvFragment : Fragment() {
                         }
                         lastAheadSec = aheadSec
                         if (aheadSec >= 15) bufferEverHealthy = true
-                        // Trigger : 5 ticks consécutifs en drain + ahead<25s
-                        // + iptvCurrentStreamHasWorked + pas déjà un reload en cours
-                        // + bufferEverHealthy (= on a vu >=15s d'avance au moins une fois).
-                        if (consecutiveDrainTicks >= 5 && aheadSec < 25 && bufferEverHealthy &&
-                            iptvCurrentStreamHasWorked && !preemptiveReloadInFlight) {
+
+                        // 2026-05-17 v37 (user "le flux rattrape la barre et ça coupe") :
+                        //   RE-AJOUT du slowdown manuel basé sur ahead. Sans le JUMELAGE
+                        //   swap actif, c'est la seule façon d'empêcher le flux de rattraper
+                        //   le bord du buffer et causer BUFFERING.
+                        //     ahead < 30s → 0.97x
+                        //     ahead < 20s → 0.95x
+                        //     ahead < 12s → 0.85x (drain max ralenti)
+                        //     ahead >= 30s → 1.0x
+                        val isLiveIpTvSlow = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                            args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
+                        // v50 : slowdown manuel RETIRÉ — causait peut-être les retours
+                        //   audio/écran (changements speed fréquents). LiveConfig auto-speed
+                        //   range 0.95-1.0 gère seul, sans à-coups.
+                        // 2026-05-17 v2 (user "toujours ces foutues coupures /
+                        //   répète de ce qui a été dit avant") : le preemptive
+                        //   reload était LA CAUSE des micro coupures. Toutes les
+                        //   16-22s il reloadait l'HLS source (logs prouvent),
+                        //   causant un STATE_BUFFERING → audio buffer non flushé
+                        //   → micro coupure + repeat audio.
+                        //   Maintenant : seuil DRACONIEN. Ne reload QUE si buffer
+                        //   descend sous 10s (vrai danger imminent), pendant
+                        //   10 ticks d'affilée (10s de drain continu). En lecture
+                        //   à 0.97x, le buffer ne devrait JAMAIS drainer
+                        //   naturellement → cette branche ne doit déclencher
+                        //   qu'en cas de vrai problème serveur.
+                        // 2026-05-17 v30 : PRE-FETCH URL SUPPRIMÉ — ne fonctionnait que pour
+                        //   Stalker (rare) et spammait les logs pour Xtream. Le JUMELAGE
+                        //   backup remplace efficacement cette fonctionnalité.
+
+                        // 2026-05-17 v31 LAZY BACKUP : ajoute le backup en queue UNIQUEMENT
+                        //   quand le buffer commence à drainer (ahead < 30s). Évite la
+                        //   contention CPU + le rate-limit 509 du serveur quand 2 streams
+                        //   tournent en parallèle. Backup ajouté JUST-IN-TIME comme scout
+                        //   pour absorber le cut imminent.
+                        val isIptvLazy = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                            args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::")
+                        // v63 (user "rien à l'image ni de son" Mon IPTV Stalker) :
+                        //   myiptv-live:: EXCLU de isIptvLazy car les streams TS
+                        //   Stalker (1 connexion par MAC côté serveur) cassent
+                        //   quand on ajoute un backup MediaItem = 2e connexion.
+                        //   HLS (Vegeta/Ola/Vavoo) reste éligible au JUMELAGE.
+                        val hasBackupAlready = try { ::player.isInitialized && player.mediaItemCount > 1 && player.hasNextMediaItem() } catch (_: Exception) { false }
+                        // v57 (user "encore des retours, meilleur record") :
+                        //   LAZY BACKUP plus agressif. Avant : ahead in 30..40 → ne tirait
+                        //   pas si le buffer ne montait jamais à 30s (typique sur Vegeta[37]
+                        //   serveur lent), donc PREEMPTIVE tombait dans le path CRITIQUE
+                        //   (reload destructif viewModel.getVideo) = écran noir + déjà vu.
+                        //   Maintenant : tire dès que buffer >= 15s et pas de backup, pour
+                        //   garantir que JUMELAGE swapToNextWithAudioFade (smooth path) est
+                        //   toujours disponible quand PREEMPTIVE fire.
+                        if (isIptvLazy && aheadSec >= 15 && !hasBackupAlready &&
+                            !preemptiveReloadInFlight) {
+                            val curUriLazy = player.currentMediaItem?.localConfiguration?.uri
+                            val curMimeLazy = player.currentMediaItem?.localConfiguration?.mimeType
+                            if (curUriLazy != null) {
+                                try {
+                                    // v53 (user "retours sur écran et son comme du déjà vu") :
+                                    //   ALIGNE la LiveConfiguration du backup sur celle du
+                                    //   primary (targetOffsetMs=55s, minOffsetMs=30s,
+                                    //   maxOffsetMs=120s, speed=0.95-1.0). Sinon le backup
+                                    //   démarre 10s en arrière du primary → déjà vu visuel
+                                    //   et audio au swap. Avec offsets alignés, swap =
+                                    //   transition à position équivalente, sans répétition.
+                                    val backupLazy = MediaItem.Builder()
+                                        .setUri(curUriLazy)
+                                        .apply { curMimeLazy?.let { setMimeType(it) } }
+                                        .setLiveConfiguration(
+                                            MediaItem.LiveConfiguration.Builder()
+                                                .setTargetOffsetMs(55_000)
+                                                .setMaxOffsetMs(120_000)
+                                                .setMinOffsetMs(30_000)
+                                                .setMinPlaybackSpeed(0.95f)
+                                                .setMaxPlaybackSpeed(1.0f)
+                                                .build()
+                                        )
+                                        .build()
+                                    player.addMediaItem(backupLazy)
+                                    Log.d("PlayerTvFragment", "LAZY BACKUP ajouté just-in-time — buffer ${aheadSec}s (scout activé)")
+                                } catch (e: Exception) {
+                                    Log.w("PlayerTvFragment", "Lazy backup add failed: ${e.message}")
+                                }
+                            }
+                        }
+
+                        // 2026-05-17 v38 (user "avant ça marchait avec mini cuts, le buffer
+                        //   ne drainait jamais") : REACTIVE le PREEMPTIVE swap. Les cuts
+                        //   étaient acceptés par l'user, l'important c'est que le buffer
+                        //   ne draine pas à 0. Le swap est la solution malgré ses 3s reset.
+                        // 2026-05-17 v46 (user "il devrait repartir avant de se faire manger") :
+                        //   PREEMPTIVE swap MUCH plus tôt. Au lieu d'attendre que le buffer
+                        //   soit critique (12s), on swap dès que ahead<25s + 3 ticks drain.
+                        //   Backup prend le relais quand primary a encore 25s de marge.
+                        // Debug: log conditions when PREEMPTIVE could fire
+                        if (aheadSec < 25 && aheadSec > 0) {
+                            Log.d("PREEMPTIVE_CHECK", "ahead=${aheadSec}s, drainTicks=$consecutiveDrainTicks, bufferEverHealthy=$bufferEverHealthy, preemptiveInFlight=$preemptiveReloadInFlight, mediaItemCount=${try { player.mediaItemCount } catch (_: Exception) { -1 }}, hasNext=${try { player.hasNextMediaItem() } catch (_: Exception) { false }}")
+                        }
+                        // v51: RESTAURE v44 seuils — ahead<12s + 5 ticks (user-validé "good"
+                        //   avec une petite coupure acceptable). Moins agressif que v48
+                        //   pour limiter les decoder resets fréquents.
+                        if (consecutiveDrainTicks >= 5 && aheadSec < 12 && bufferEverHealthy &&
+                            !preemptiveReloadInFlight) {
                             preemptiveReloadInFlight = true
                             consecutiveDrainTicks = 0
                             val cs = currentServer
-                            val cv = currentVideo
-                            if (cs != null && cv != null) {
+                            val cached = prefetchedFreshUrl
+                            // 2026-05-17 v21 (user "ça ne reprend pas après cut") :
+                            //   AVANT le reload destructif, vérifier si on a un backup
+                            //   en queue (jumelage actif). Si oui → swap to next →
+                            //   cut quasi-invisible. PUIS re-add un nouveau backup
+                            //   pour le prochain cycle.
+                            val hasBackup = try { ::player.isInitialized && player.mediaItemCount > 1 && player.hasNextMediaItem() } catch (_: Exception) { false }
+                            val sinceLastSwapPre = System.currentTimeMillis() - lastSwapTimestampMs
+                            val cooldownBlocksSwap = hasBackup && sinceLastSwapPre < SWAP_COOLDOWN_MS
+                            if (cooldownBlocksSwap) {
+                                // 2026-05-17 v28 (user "jumelage pas correct") : si backup
+                                //   existe mais cooldown actif, NE PAS faire de reload
+                                //   destructif. Skip ce cycle pour laisser le précédent
+                                //   swap compléter. Sinon on tue la queue.
+                                Log.d("PlayerTvFragment",
+                                    "PREEMPTIVE skip — cooldown actif (${sinceLastSwapPre}ms < ${SWAP_COOLDOWN_MS}ms), backup en queue préservé")
+                                preemptiveReloadInFlight = false
+                            } else if (hasBackup) {
                                 Log.w("PlayerTvFragment",
-                                    "PREEMPTIVE reload — buffer drain ${aheadSec}s, 5 ticks de baisse continue")
+                                    "PREEMPTIVE swap JUMELAGE — buffer ${aheadSec}s → swapToNextWithAudioFade (backup ready)")
+                                viewLifecycleOwner.lifecycleScope.launch {
+                                    try {
+                                        // v52 : cross-fade audio pour masquer le click sec
+                                        //   du Codec2/AudioSink reset Amlogic. ~400ms total
+                                        //   au lieu d'un cut net.
+                                        swapToNextWithAudioFade(player)
+                                        lastSwapTimestampMs = System.currentTimeMillis()
+                                        backupJumelageAttempted = false
+                                    } catch (e: Exception) {
+                                        Log.w("PlayerTvFragment", "swapToNextWithAudioFade failed: ${e.message}")
+                                    }
+                                    kotlinx.coroutines.delay(10_000L)
+                                    preemptiveReloadInFlight = false
+                                }
+                            } else if (cs != null && cached != null) {
+                                // Utilise l'URL pré-fetchée → cut réduit
+                                Log.w("PlayerTvFragment",
+                                    "PREEMPTIVE reload INSTANT (URL pré-fetchée) — buffer ${aheadSec}s → swap direct")
+                                prefetchedFreshUrl = null
                                 try {
                                     binding.pvPlayer.controller.hide()
                                 } catch (_: Exception) {}
                                 viewLifecycleOwner.lifecycleScope.launch {
                                     try {
-                                        displayVideo(cv, cs)
+                                        val freshItem = MediaItem.Builder()
+                                            .setUri(cached)
+                                            .setLiveConfiguration(
+                                                MediaItem.LiveConfiguration.Builder()
+                                                    .setTargetOffsetMs(45_000)
+                                                    .setMinOffsetMs(20_000)
+                                                    .setMaxOffsetMs(120_000)
+                                                    .setMinPlaybackSpeed(0.95f)
+                                                    .setMaxPlaybackSpeed(1.0f)
+                                                    .build()
+                                            )
+                                            .build()
+                                        player.clearMediaItems()
+                                        player.setMediaItem(freshItem)
+                                        player.prepare()
+                                        player.playWhenReady = true
                                     } catch (e: Exception) {
-                                        Log.w("PlayerTvFragment", "Preemptive displayVideo failed: ${e.message}")
+                                        Log.w("PlayerTvFragment", "Instant swap failed: ${e.message}")
                                     }
-                                    // Cooldown 20s pour pas redéclencher pendant que la
-                                    // nouvelle connexion remplit son buffer.
-                                    kotlinx.coroutines.delay(20_000L)
+                                    kotlinx.coroutines.delay(30_000L)
+                                    preemptiveReloadInFlight = false
+                                }
+                            } else if (cs != null) {
+                                Log.w("PlayerTvFragment",
+                                    "PREEMPTIVE reload (CRITIQUE) — buffer ${aheadSec}s, 10 ticks drain → viewModel.getVideo(${cs.name})")
+                                try {
+                                    binding.pvPlayer.controller.hide()
+                                } catch (_: Exception) {}
+                                viewLifecycleOwner.lifecycleScope.launch {
+                                    try {
+                                        viewModel.getVideo(cs)
+                                    } catch (e: Exception) {
+                                        Log.w("PlayerTvFragment", "Preemptive getVideo failed: ${e.message}")
+                                    }
+                                    kotlinx.coroutines.delay(30_000L)
                                     preemptiveReloadInFlight = false
                                 }
                             } else {
@@ -3109,22 +4093,36 @@ class PlayerTvFragment : Fragment() {
             progressHandler.post(progressRunnable)
         }
 
-        /** 2026-05-09 v3 : best practices HLS live — speed range 0.95-1.05
-         *  (subtil, pas perceptible). Cible 25s derrière live edge. */
+        /** 2026-05-17 (user "tu peux quand même mettre le ralentissement à 97%") :
+         *  Permanent 0.97x pour live IPTV. Empêche la vidéo de rattraper le flux
+         *  (cause des micro coupures perçues comme "boost" au join de chunks).
+         *  À 0.97x, on accumule 1.8s de buffer par minute de lecture → on creuse
+         *  une marge contre les hoquets réseau. Pas de boost > 1.0x → pas de
+         *  resync visible.
+         *  Note : pitch correction par défaut ExoPlayer = audio reste à pitch
+         *  normal (TimeStretchingAudioProcessor). 3% ralenti = inaudible pour
+         *  la voix, imperceptible visuellement. */
         private fun adjustLivePlaybackSpeed() {
+            // 2026-05-17 v2 (user "aucun boost de flux la vidéo fait que de le
+            //   rattraper") : on N'EXIT PLUS si offset=TIME_UNSET. Sans Live-
+            //   Configuration dans PlayerTvFragment, currentLiveOffset est
+            //   souvent UNSET → le précédent gate bloquait le 0.97x. On force
+            //   maintenant 0.97x pour TOUTES les chaînes live IPTV, peu importe
+            //   l'offset connu.
+            val isLiveIpTv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
+            if (!isLiveIpTv) return
             val offset = player.currentLiveOffset
-            if (offset == androidx.media3.common.C.TIME_UNSET) return
-            val targetSpeed = when {
-                offset < 10_000 -> 0.95f      // < 10s : ralenti subtil
-                offset < 20_000 -> 0.98f      // < 20s : ralenti très léger
-                offset > 50_000 -> 1.05f      // > 50s : rattrape
-                offset > 35_000 -> 1.02f      // > 35s : rattrape léger
-                else -> 1.0f                  // 20-35s = cible
-            }
+            // Lock à 0.97x permanent. Si on dérive trop loin de live edge (>120s),
+            // on tolère 0.99x. JAMAIS au-dessus de 1.0x → pas de boost visible.
+            val targetSpeed = if (offset != androidx.media3.common.C.TIME_UNSET && offset > 120_000) 0.99f else 0.97f
             val current = player.playbackParameters.speed
             if (kotlin.math.abs(current - targetSpeed) > 0.005f) {
                 player.setPlaybackSpeed(targetSpeed)
-                Log.d("PlayerLiveOffset", "offset=${offset/1000}s → speed=${targetSpeed}x")
+                Log.d("PlayerLiveOffset", "offset=${if (offset != androidx.media3.common.C.TIME_UNSET) "${offset/1000}s" else "UNSET"} → speed=${targetSpeed}x (anti-boost lock)")
             }
         }
 
@@ -3145,6 +4143,51 @@ class PlayerTvFragment : Fragment() {
         @Volatile private var criticalReloadInFlight = false
         // 2026-05-09 PISTE A : flag pour empêcher plusieurs reloads préemptifs simultanés.
         @Volatile private var preemptiveReloadInFlight = false
+        // 2026-05-17 v4 : compteur cumulatif pour les 2 barres relay. Le player.position
+        //   se reset à 0 quand le .ts finit (durée déclarée 58s) → on ne peut pas
+        //   l'utiliser pour piloter le cycle visuel des 60s. On utilise un compteur
+        //   qui tick +1s par seconde de lecture réelle, indépendant du reload.
+        private var liveCumulativePlaybackMs = 0L
+        // 2026-05-17 v5 : ahead lissé (anti trou visuel pendant reload).
+        private var smoothedAheadMs = 0L
+        // 2026-05-17 v6 (user "flux en pause depuis un moment qui ne reprend pas") :
+        //   watchdog stuck-BUFFERING. Quand ExoPlayer reste en BUFFERING avec
+        //   position figée >15s, les retries internes ont probablement échoué
+        //   silencieusement (ExoPlayer ne fire pas toujours onPlayerError).
+        //   Le watchdog force alors un re-fetch via viewModel.getVideo() qui
+        //   ré-extrait l'URL fraîche du provider (comme un nouveau click chaîne).
+        private var lastObservedPositionMs = -1L
+        private var stuckBufferingTicks = 0
+        private val STUCK_BUFFER_THRESHOLD_TICKS = 8  // 2026-05-17 : 15s→8s (user "boost tout le temps")
+        // 2026-05-17 v9 : flag pour éviter de schedule plusieurs auto-switch audio simultanés
+        @Volatile private var noAudioSwitchScheduled = false
+        // 2026-05-17 v11 : flag ONE-SHOT — n'auto-switch qu'UNE fois par chaîne (anti-thrash)
+        @Volatile private var noAudioAutoSwitchTriedThisChannel = false
+        // 2026-05-17 v12 : set des servers déjà testés et trouvés sans audio (anti-thrash global)
+        private val noAudioTriedServerIds: MutableSet<String> = mutableSetOf()
+        // 2026-05-17 v13 : toast no-audio affiché ? (anti-spam)
+        @Volatile private var noAudioToastShown = false
+        // 2026-05-17 v14 : URL pré-fetchée en background pour swap instant
+        @Volatile private var prefetchedFreshUrl: String? = null
+        @Volatile private var urlPrefetchInFlight: Boolean = false
+        @Volatile private var urlPrefetchAttemptedThisCycle: Boolean = false
+        // 2026-05-17 v18 : flag jumelage backup ONE-SHOT par chaîne
+        @Volatile private var backupJumelageAttempted: Boolean = false
+        // 2026-05-17 v18 : tracking timestamp pour swap automatique sur buffering long
+        @Volatile private var bufferingStartTimestampMs: Long = 0L
+        // 2026-05-17 v25 : cooldown anti-double-swap. Après un swap, on bloque
+        //   tout autre swap pendant 5s pour éviter cascade primary→backup#1→backup#2
+        @Volatile private var lastSwapTimestampMs: Long = 0L
+        private val SWAP_COOLDOWN_MS = 5_000L
+        // 2026-05-17 : anti-flap. Track les timestamps des reload récents. Si on
+        //   reload 3+ fois en 15s, c'est que le serveur est foutu (le .ts re-fini
+        //   instantanément) → on arrête de boucler pour ne pas saturer le CDN.
+        private val recentReloadTimestamps = mutableListOf<Long>()
+        private val RELOAD_FLAP_WINDOW_MS = 15_000L
+        private val RELOAD_FLAP_THRESHOLD = 3
+        // 2026-05-17 : auto-switch chronique retiré (user "ça va juste **** la ****
+        //   et changer de chaîne car l'autre serveur sera HS"). On garde uniquement
+        //   le reload + fresh handshake sur le MÊME serveur.
         // 2026-05-09 v23 : timestamp dernier auto-switch pour éviter le ping-pong cascade.
         @Volatile private var lastAutoSwitchTime = 0L
         // 2026-05-10 : flag anti-rentrance pendant l'auto-switch VOD (Fallback 4).
@@ -3158,6 +4201,115 @@ class PlayerTvFragment : Fragment() {
         // pendant que l'autre joue). Map<serverId, timestamp last failed>.
         private val serverFailedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
         private val SERVER_COOLDOWN_MS = 30_000L
+
+        // 2026-05-17 v32 SCOUT serveur — sonde le manifest URL toutes les 10s en HEAD
+        //   pour détecter 509/429/erreurs AVANT que ExoPlayer y arrive. Si bug détecté,
+        //   ajoute préventivement un backup en queue pour absorber le cut imminent.
+        private var scoutJob: kotlinx.coroutines.Job? = null
+        // 2026-05-17 v47 : swap périodique forcé pour éviter le timeout naturel
+        private var periodicSwapJob: kotlinx.coroutines.Job? = null
+        private val PERIODIC_SWAP_INTERVAL_MS = 45_000L  // toutes les 45s
+
+        private fun startPeriodicForcedSwap() {
+            periodicSwapJob?.cancel()
+            periodicSwapJob = viewLifecycleOwner.lifecycleScope.launch(Dispatchers.Main) {
+                while (currentCoroutineContext().isActive) {
+                    kotlinx.coroutines.delay(PERIODIC_SWAP_INTERVAL_MS)
+                    try {
+                        if (!::player.isInitialized) continue
+                        val hasBackup = player.mediaItemCount > 1 && player.hasNextMediaItem()
+                        val sinceLastSwap = System.currentTimeMillis() - lastSwapTimestampMs
+                        if (hasBackup && sinceLastSwap >= 20_000L) {
+                            Log.w("PlayerTvFragment", "FORCED PERIODIC SWAP (timer 45s, ahead=${((player.bufferedPosition - player.currentPosition) / 1000).toInt()}s) — seekToNextMediaItem")
+                            player.seekToNextMediaItem()
+                            lastSwapTimestampMs = System.currentTimeMillis()
+                            backupJumelageAttempted = false
+                        } else if (!hasBackup) {
+                            Log.d("PlayerTvFragment", "FORCED SWAP skipped: no backup ready")
+                        }
+                    } catch (e: Exception) {
+                        Log.w("PlayerTvFragment", "Periodic swap error: ${e.message}")
+                    }
+                }
+            }
+        }
+        @Volatile private var lastScoutBadResponseMs: Long = 0L
+
+        private fun startServerScout() {
+            scoutJob?.cancel()
+            scoutJob = viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                val client = okhttp3.OkHttpClient.Builder()
+                    .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                    .build()
+                while (currentCoroutineContext().isActive) {
+                    try {
+                        kotlinx.coroutines.delay(10_000L)
+                        val uri = withContext(Dispatchers.Main) {
+                            if (::player.isInitialized) player.currentMediaItem?.localConfiguration?.uri else null
+                        } ?: continue
+                        val request = okhttp3.Request.Builder()
+                            .url(uri.toString())
+                            .head()
+                            .header("User-Agent", com.streamflixreborn.streamflix.utils.NetworkClient.USER_AGENT)
+                            .build()
+                        val resp = try {
+                            client.newCall(request).execute()
+                        } catch (e: Exception) {
+                            Log.d("ServerScout", "Scout request failed: ${e.message}")
+                            null
+                        }
+                        if (resp != null) {
+                            val code = resp.code
+                            resp.close()
+                            if (code == 509 || code == 429 || code in 500..503) {
+                                lastScoutBadResponseMs = System.currentTimeMillis()
+                                Log.w("ServerScout", "⚠️ Serveur en difficulté: HTTP $code → trigger backup préventif")
+                                withContext(Dispatchers.Main) {
+                                    addBackupPreventively()
+                                }
+                            } else if (code == 200) {
+                                // Log seulement si on était en bad récemment
+                                if (System.currentTimeMillis() - lastScoutBadResponseMs < 30_000L) {
+                                    Log.d("ServerScout", "✅ Serveur recovered: HTTP 200")
+                                }
+                            }
+                        }
+                    } catch (_: kotlinx.coroutines.CancellationException) {
+                        break
+                    } catch (e: Exception) {
+                        Log.d("ServerScout", "Scout loop error: ${e.message}")
+                    }
+                }
+            }
+        }
+
+        // Ajoute le backup en queue préventivement (déclenché par scout détectant 509)
+        private fun addBackupPreventively() {
+            try {
+                if (!::player.isInitialized || player.mediaItemCount > 1) return
+                val curUri = player.currentMediaItem?.localConfiguration?.uri ?: return
+                val curMime = player.currentMediaItem?.localConfiguration?.mimeType
+                // v53 : aligne offsets backup sur primary (anti-déjà-vu au swap)
+                val backupItem = MediaItem.Builder()
+                    .setUri(curUri)
+                    .apply { curMime?.let { setMimeType(it) } }
+                    .setLiveConfiguration(
+                        MediaItem.LiveConfiguration.Builder()
+                            .setTargetOffsetMs(55_000)
+                            .setMaxOffsetMs(120_000)
+                            .setMinOffsetMs(30_000)
+                            .setMinPlaybackSpeed(0.95f)
+                            .setMaxPlaybackSpeed(1.0f)
+                            .build()
+                    )
+                    .build()
+                player.addMediaItem(backupItem)
+                Log.d("PlayerTvFragment", "SCOUT: backup préventif ajouté (server en difficulté détecté)")
+            } catch (e: Exception) {
+                Log.w("PlayerTvFragment", "addBackupPreventively failed: ${e.message}")
+            }
+        }
 
         private fun scheduleProactiveTokenRefresh() {
             val server = currentServer ?: return
@@ -3375,26 +4527,43 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
             // 2026-05-09 : retour aux valeurs qui marchaient avant (30s/10s) — sur
             // Tahiti satellite, 15s/3s c'était trop fin et causait des BUFFERING fréquents.
             val loadControl = if (isLiveIptv) {
+                // 2026-05-17 : minBuffer bumpé 30s→60s. User : "avoir genre de
+                // l'avance en constance". Plus de cushion = plus de temps pour
+                // que la LoadErrorHandlingPolicy fasse ses 6 retries (jusqu'à
+                // 15s) sans que le buffer ne se vide. Le manifest sliding
+                // window Xtream limite l'avance pratique à ~60-90s de toute
+                // façon (on ne peut pas pre-fetch au-delà). maxBuffer 300s
+                // (5 min) reste théorique.
+                // 2026-05-17 v17 (user "meilleur record suite à ces coupures") :
+                //   réduire bufferForPlaybackAfterRebufferMs 5s → 1.5s pour
+                //   reprendre 3x plus vite après une coupure. Avec le slowdown
+                //   manuel basé sur ahead (v16), pas de risque de cycle de
+                //   rebuffer (le slowdown maintient le buffer).
                 DefaultLoadControl.Builder()
                     .setBufferDurationsMs(
-                        30_000,    // minBuffer
+                        60_000,    // minBuffer : 60s d'avance minimum requise
                         300_000,   // maxBuffer
-                        10_000,    // playback start
-                        1_000      // rebuffer threshold ultra court
+                        1_000,     // playback start : 1s (au lieu de 2s)
+                        500        // après rebuffer : 500ms (au lieu de 1500ms) = reprend instant
                     )
                     .setPrioritizeTimeOverSizeThresholds(true)
                     .build()
             } else {
+                // v65 (user "la vidéo rattrape le flux" sur films/séries) :
+                //   Bump min de 30→60s pour que la vidéo ne soit jamais en
+                //   train de rattraper le buffer (cause des "rame" perceptibles).
+                //   Max 300→600s (10 min) — VOD peut bufferer largement, le
+                //   serveur a le fichier entier. Rebuffer 3→1s = reprise instantanée.
                 DefaultLoadControl.Builder()
                     .setBufferDurationsMs(
-                        30_000,
-                        if (extraBuffering) 300_000 else 120_000,
-                        1_500,
-                        3_000
+                        60_000,    // min : 60s d'avance (vs 30s) pour cushion confortable
+                        if (extraBuffering) 600_000 else 300_000,
+                        1_000,     // start : 1s (vs 1.5s)
+                        1_500      // rebuffer : 1.5s (vs 3s)
                     )
                     .setPrioritizeTimeOverSizeThresholds(true)
                     .build()
@@ -3403,36 +4572,87 @@ class PlayerTvFragment : Fragment() {
             val baseBuilder = if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1 && !currentSoftwareDecoder) {
                 ExoPlayer.Builder(requireContext())
             } else {
-                // 2026-05-09 v16 : nextlib namespace =
-                // io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
-                // (pas androidx.media3.decoder.ffmpeg). Pour IPTV on utilise
-                // NextRenderersFactory qui enregistre auto FFmpeg AC3/E-AC3/MP2…
-                val renderersFactory = if (isLiveIptv) {
-                    Log.d("PlayerTvFragment", "Using NextRenderersFactory (nextlib FFmpeg) for IPTV")
-                    io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory(requireContext()).apply {
+                // 2026-05-15 (user "fais en sorte qu'elle supporte tous les
+                // formats audio vidéo") : NextRenderersFactory (nextlib FFmpeg)
+                // activé pour TOUS les contenus, pas seulement IPTV live. Apporte
+                // le fallback software pour les codecs audio (AC3/EAC3/DTS/
+                // TrueHD/Vorbis exotique) et certains codecs vidéo (HEVC/AV1)
+                // que le HW ne sait pas décoder.
+                //
+                // IMPORTANT — Chromecast : la vidéo H264 DOIT rester sur le décodeur
+                // hardware Amlogic (sinon écran noir car FFmpeg software H264 trop
+                // lent). Donc MODE_ON par défaut (HW d'abord, FFmpeg fallback
+                // uniquement quand HW refuse). MODE_PREFER seulement si user a
+                // explicitement activé le toggle Settings.
+                val mode = if (currentSoftwareDecoder)
+                    DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+                else
+                    DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+                Log.d("PlayerTvFragment",
+                    "Using NextRenderersFactory (FFmpeg fallback) — mode=${if (currentSoftwareDecoder) "PREFER" else "ON"}, isLiveIptv=$isLiveIptv")
+                val renderersFactory = io.github.anilbeesetti.nextlib.media3ext.ffdecoder
+                    .NextRenderersFactory(requireContext()).apply {
                         setEnableDecoderFallback(true)
-                        // 2026-05-09 v19 : MODE_ON (pas PREFER) — la vidéo H264 reste
-                        // sur le décodeur hardware Amlogic (sinon écran noir car
-                        // FFmpeg software H264 trop lent sur Chromecast). FFmpeg
-                        // sert UNIQUEMENT en fallback audio quand le HW refuse
-                        // (AC3/E-AC3/MP2 non supportés en HW).
-                        setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+                        setExtensionRendererMode(mode)
                     }
-                } else {
-                    DefaultRenderersFactory(requireContext()).apply {
-                        setEnableDecoderFallback(true)
-                        if (currentSoftwareDecoder) {
-                            setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
-                        }
-                    }
-                }
                 ExoPlayer.Builder(requireContext(), renderersFactory)
             }
 
-            return baseBuilder
-                .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+            // 2026-05-17 : LoadErrorHandlingPolicy custom pour retry 403/5xx
+            //   HLS manifest plusieurs fois en INTERNE avec backoff. Ça permet
+            //   à ExoPlayer de récupérer un manifest rate-limited Xtream
+            //   (typique Vegeta) sans fire onPlayerError → pas de cut visible
+            //   tant que la rate-limit window se résout (usuellement 2-5s).
+            //
+            //   Avant : 1 retry → onPlayerError → notre reload → 5s downtime
+            //   Après : 5 retries internes (0.5s, 1s, 2s, 4s, 8s = 15.5s
+            //   total) → si succès, lecture continue sans interruption.
+            val resilientLoadErrorPolicy = object : androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy() {
+                override fun getRetryDelayMsFor(loadErrorInfo: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo): Long {
+                    val ex = loadErrorInfo.exception
+                    if (ex is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) {
+                        val code = ex.responseCode
+                        // 403/500/502/503 sur Xtream = rate-limit souvent transitoire.
+                        if (code == 403 || code == 500 || code == 502 || code == 503 || code == 509 || code == 429) {
+                            val attempt = loadErrorInfo.errorCount
+                            if (attempt < 6) {
+                                // Backoff exponentiel : 500ms, 1s, 2s, 4s, 8s, 16s
+                                val delay = 500L * (1L shl attempt.coerceAtMost(5))
+                                Log.d("PlayerTvFragment", "LoadError retry $attempt/6 for HTTP $code, delay=${delay}ms")
+                                return delay.coerceAtMost(16_000L)
+                            }
+                            Log.w("PlayerTvFragment", "LoadError gave up after 6 attempts on HTTP $code")
+                        }
+                    }
+                    return super.getRetryDelayMsFor(loadErrorInfo)
+                }
+                override fun getMinimumLoadableRetryCount(dataType: Int): Int {
+                    // Bumpé de 3 à 6 pour donner plus de chances aux 403 transitoires.
+                    return 6
+                }
+            }
+            val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+                .setLoadErrorHandlingPolicy(resilientLoadErrorPolicy)
+
+            val builtPlayer = baseBuilder
+                .setMediaSourceFactory(mediaSourceFactory)
                 .setLoadControl(loadControl)
                 .build()
+            // 2026-05-17 v56 (user "retours en arrière de 40s pendant flux chargé") :
+            //   PreloadConfiguration 30s = backup pré-bufferise 30s de contenu OLDER
+            //   que la position live target. Au swap, ExoPlayer joue le buffer existant
+            //   AVANT de demander des données fraîches → déjà-vu visible de 25-40s.
+            //   DÉSACTIVÉ pour live IPTV. Au swap, backup load fresh à live edge
+            //   (target_live - 55s) = aligné avec primary, ZÉRO déjà-vu.
+            //   Le freeze frame overlay v54 + cross-fade audio v52 masquent le
+            //   ~500ms de rebuffer initial du swap.
+            try {
+                builtPlayer.preloadConfiguration = androidx.media3.exoplayer.ExoPlayer.PreloadConfiguration.DEFAULT
+                Log.d("PlayerTvFragment", "v56: PreloadConfiguration disabled (DEFAULT) — anti déjà-vu")
+            } catch (e: Exception) {
+                Log.w("PlayerTvFragment", "PreloadConfiguration not available: ${e.message}")
+            }
+            return builtPlayer
         }
 
         private val isEmulator: Boolean by lazy {
@@ -3714,7 +4934,7 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
             player.setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
@@ -3731,18 +4951,204 @@ class PlayerTvFragment : Fragment() {
             binding.settings.subtitleView = binding.pvPlayer.subtitleView
             binding.settings.onSubtitlesClicked = { viewModel.getSubtitles(args.videoType) }
             MiniPlayerController.clearTransitionFlag()
-            // 2026-05-12 : pour les IPTV Live, le .ts a une métadonnée de durée
-            // (5s pour leopard 3BoxTV, finite pour Xtream) — ExoPlayer end-of-streams
-            // dès qu'il atteint cette durée. REPEAT_MODE_ONE force le re-loop sur
-            // EOF (l'URL re-fetch potentiellement de nouvelles données). Force play
-            // au cas où l'attach aurait pause.
+            // 2026-05-17 (user "frises avec répétition") : REPEAT_MODE_ONE
+            //   ne re-fetch PAS l'URL — ça re-joue le contenu déjà bufferisé
+            //   (= la même séquence vidéo en boucle visible à l'écran). Pire,
+            //   ça avale STATE_ENDED → notre handler player.prepare() ne fire
+            //   jamais → jamais de fresh fetch.
+            //
+            //   Fix : REPEAT_MODE_OFF. ExoPlayer fire STATE_ENDED → notre
+            //   handler (ligne ~2408) appelle player.prepare() → MediaSource
+            //   re-ouvre la connexion HTTP → fresh data du flux live.
             if (isLiveIptvHere) {
-                player.repeatMode = androidx.media3.common.Player.REPEAT_MODE_ONE
+                player.repeatMode = androidx.media3.common.Player.REPEAT_MODE_OFF
             }
             if (!player.playWhenReady) {
                 player.playWhenReady = true
             }
+            // 2026-05-17 : le player transféré est déjà en train de jouer → le
+            // listener onIsPlayingChanged ne fire pas car pas de transition.
+            // On démarre le progress handler manuellement pour activer le
+            // monitoring buffer + preemptive reload sur drain.
+            if (player.isPlaying) {
+                startProgressHandler()
+            }
+            // 2026-05-17 (user "France 2 paused et n'a pas repris") : le
+            // listener principal (defini dans displayVideo) n'est PAS attaché
+            // sur le path transferred-from-mini (displayVideo n'est pas
+            // appelé). Sans listener → pas de onPlayerError → pas de retry,
+            // pas de onPlaybackStateChanged → pas de STATE_ENDED handler.
+            // Quand le flux .ts s'épuise ou que la connexion dropbox, le
+            // player reste figé à STATE_ENDED/IDLE indéfiniment.
+            //
+            // On attache ICI un listener "recovery" minimal qui :
+            //   - sur STATE_ENDED/STATE_IDLE → player.prepare() pour
+            //     re-fetch l'URL live
+            //   - sur STATE_READY → marque iptvCurrentStreamHasWorked
+            //   - sur onPlayerError → délègue à viewModel pour full restart
+            attachTransferRecoveryListener()
             Log.d("PlayerTvFragment", "Transferred player attached — no codec re-init needed (repeat=${player.repeatMode} playWhenReady=${player.playWhenReady})")
+        }
+
+        /** 2026-05-17 : listener minimal de recovery pour le path
+         *  attachTransferredPlayer. Le listener complet de displayVideo() n'est
+         *  pas attaché ici pour éviter un re-init du player (perte de position
+         *  live). Ce listener garde le minimum pour qu'un live IPTV qui
+         *  s'épuise (STATE_ENDED) ou se déconnecte (STATE_IDLE) puisse
+         *  reprendre via player.prepare(). */
+        private fun attachTransferRecoveryListener() {
+            // Remove previous listener (if any) to avoid leaks across restarts.
+            activePlayerListener?.let { try { player.removeListener(it) } catch (_: Exception) {} }
+            val recoveryListener = object : androidx.media3.common.Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    super.onPlaybackStateChanged(playbackState)
+                    val isLiveIptvStream = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                        args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                        args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                        args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
+                    if (!isLiveIptvStream) return
+                    when (playbackState) {
+                        androidx.media3.common.Player.STATE_READY -> {
+                            iptvCurrentStreamHasWorked = true
+                        }
+                        androidx.media3.common.Player.STATE_ENDED,
+                        androidx.media3.common.Player.STATE_IDLE -> {
+                            if (playbackState == androidx.media3.common.Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
+                            if (preemptiveReloadInFlight) return
+                            val uri = player.currentMediaItem?.localConfiguration?.uri
+                            if (uri == null) return
+                            // Anti-flap (cf main listener) : stop si >=3 reloads / 15s
+                            val nowFlap2 = System.currentTimeMillis()
+                            recentReloadTimestamps.removeAll { (nowFlap2 - it) > RELOAD_FLAP_WINDOW_MS }
+                            if (recentReloadTimestamps.size >= RELOAD_FLAP_THRESHOLD) {
+                                Log.e("PlayerTvFragment", "Transfer-recovery: reload flap (${recentReloadTimestamps.size} en 15s) — STOP")
+                                try {
+                                    android.widget.Toast.makeText(
+                                        requireContext(),
+                                        "Flux trop instable — change de chaîne",
+                                        android.widget.Toast.LENGTH_LONG,
+                                    ).show()
+                                } catch (_: Exception) {}
+                                return
+                            }
+                            recentReloadTimestamps.add(nowFlap2)
+                            // 2026-05-17 : full MediaItem reload (vs prepare seul)
+                            // pour forcer ExoPlayer à ré-ouvrir HTTP au CDN.
+                            Log.w("PlayerTvFragment", "Transfer-recovery: Live IPTV $playbackState — full MediaItem reload")
+                            preemptiveReloadInFlight = true
+                            try {
+                                viewLifecycleOwner.lifecycleScope.launch {
+                                    try {
+                                        // 2026-05-17 v8 : preserve LiveConfiguration au reload.
+                                        //   MediaItem.fromUri(uri) seul perd la LiveConfig → player
+                                        //   joue à 1.0x après reload → rattrape flux → cut suivant.
+                                        val freshItem = androidx.media3.common.MediaItem.Builder()
+                                            .setUri(uri)
+                                            .setLiveConfiguration(
+                                                MediaItem.LiveConfiguration.Builder()
+                                                    .setTargetOffsetMs(45_000)
+                                                    .setMinOffsetMs(20_000)
+                                                    .setMaxOffsetMs(120_000)
+                                                    .setMinPlaybackSpeed(0.95f)
+                                                    .setMaxPlaybackSpeed(1.0f)
+                                                    .build()
+                                            )
+                                            .build()
+                                        player.clearMediaItems()
+                                        player.setMediaItem(freshItem)
+                                        player.prepare()
+                                        player.playWhenReady = true
+                                    } catch (e: Exception) {
+                                        Log.w("PlayerTvFragment", "Transfer-recovery MediaItem reload failed: ${e.message}")
+                                    }
+                                    kotlinx.coroutines.delay(5_000L)
+                                    preemptiveReloadInFlight = false
+                                }
+                            } catch (e: Exception) {
+                                preemptiveReloadInFlight = false
+                            }
+                        }
+                    }
+                }
+                override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    binding.pvPlayer.keepScreenOn = isPlaying
+                    if (isPlaying && (!::progressHandler.isInitialized || !::progressRunnable.isInitialized)) {
+                        startProgressHandler()
+                    }
+                }
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    super.onPlayerError(error)
+                    Log.e("PlayerTvFragment", "Transfer-recovery onPlayerError: ", error)
+                    val isLiveIptv = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+                        args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+                        args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+                        args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
+                    if (!isLiveIptv) return
+
+                    // 2026-05-17 : sur 403/4xx/5xx d'un server Stalker (Vegeta/Ola),
+                    // un simple player.prepare() refait la même URL morte (token expiré).
+                    // On doit appeler refreshServerUrl pour obtenir une URL signée
+                    // fraîche, puis viewModel.getVideo pour la jouer.
+                    val errMsg = (error.cause?.message ?: error.message ?: "").lowercase()
+                    val isPermanentHttpError = errMsg.contains("response code: 403") ||
+                        errMsg.contains("response code: 404") ||
+                        errMsg.contains("response code: 410") ||
+                        errMsg.contains("response code: 451") ||
+                        errMsg.contains("response code: 456") ||
+                        errMsg.contains("response code: 500") ||
+                        errMsg.contains("response code: 502") ||
+                        errMsg.contains("response code: 503")
+                    val server = currentServer
+                    val isStalker = server?.id?.startsWith("vegeta_stream::") == true ||
+                        server?.id?.startsWith("ola_stream::") == true
+                    if (isPermanentHttpError && isStalker && server != null) {
+                        Log.w("PlayerTvFragment", "Transfer-recovery: Stalker ${server.name} 403/4xx/5xx → fresh handshake via refreshServerUrl")
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            val newServer = withContext(Dispatchers.IO) {
+                                try {
+                                    when {
+                                        server.id.startsWith("vegeta_stream::") ->
+                                            com.streamflixreborn.streamflix.providers.VegetaTvProvider.refreshServerUrl(server)
+                                        server.id.startsWith("ola_stream::") ->
+                                            com.streamflixreborn.streamflix.providers.OlaTvProvider.refreshServerUrl(server)
+                                        else -> null
+                                    }
+                                } catch (e: Exception) {
+                                    Log.w("PlayerTvFragment", "refreshServerUrl failed: ${e.message}")
+                                    null
+                                }
+                            }
+                            if (newServer != null && _binding != null) {
+                                Log.d("PlayerTvFragment", "Fresh handshake OK — viewModel.getVideo(${newServer.name})")
+                                viewModel.getVideo(newServer)
+                            } else if (_binding != null) {
+                                // Fallback : full MediaItem reload avec la même URL
+                                // (au moins ça relance la lecture sans re-handshake)
+                                try {
+                                    val uri = player.currentMediaItem?.localConfiguration?.uri
+                                    if (uri != null) {
+                                        player.clearMediaItems()
+                                        player.setMediaItem(androidx.media3.common.MediaItem.fromUri(uri))
+                                        player.prepare()
+                                        player.playWhenReady = true
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                        }
+                        return
+                    }
+
+                    // Erreur transitoire : prepare() suffit.
+                    try {
+                        player.prepare()
+                        player.playWhenReady = true
+                    } catch (_: Exception) {}
+                }
+            }
+            player.addListener(recoveryListener)
+            activePlayerListener = recoveryListener
         }
 
         private fun initializePlayer(extraBuffering: Boolean, softwareDecoder: Boolean = currentSoftwareDecoder, videoUrl: String = "") {
@@ -3765,7 +5171,7 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
             player = buildPlayer(extraBuffering).also { player ->
                     player.setAudioAttributes(
                         AudioAttributes.Builder()
@@ -3788,7 +5194,7 @@ class PlayerTvFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::") || args.id.startsWith("bxt::")
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                     if (isLiveIptvCh) {
                         builder.setPreferredAudioMimeTypes(
                             androidx.media3.common.MimeTypes.AUDIO_AAC,
@@ -4524,7 +5930,7 @@ class PlayerTvFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::") || args.id.startsWith("bxt::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
         player = buildPlayer(extraBuffering).also { player ->
                 player.setAudioAttributes(
                     AudioAttributes.Builder()

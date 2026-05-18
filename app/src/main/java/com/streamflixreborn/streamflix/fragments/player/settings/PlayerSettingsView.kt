@@ -1338,6 +1338,9 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
             val name: String,
         ) : Item {
             var isSelected: Boolean = false
+            /** 2026-05-16 : True quand ce serveur est en cours d'extraction.
+             *  Affiché avec un suffixe " ⟳" dans le picker. */
+            @Volatile var isLoading: Boolean = false
             /** True si l'user a click la croix pour bannir ce server. Persisté
              *  dans IptvBannedServers + restauré au prochain ouverture. */
             var isBanned: Boolean = false

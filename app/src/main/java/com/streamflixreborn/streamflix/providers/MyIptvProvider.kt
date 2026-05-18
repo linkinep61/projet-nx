@@ -48,6 +48,14 @@ object MyIptvProvider : Provider, IptvProvider {
     private const val TAG = "MyIptvProvider"
     private const val PAGE_SIZE = 60
 
+    // 2026-05-17 v60 (user "savoir à combien de % on est du chargement") :
+    //   StateFlow public pour le statut de chargement de la source IPTV
+    //   (Stalker, M3U, Xtream). L'UI IptvSourcesActivity le collecte et
+    //   met à jour le loadingText avec le step en cours (chaînes, films,
+    //   séries). Vide quand pas de chargement en cours.
+    val loadingStatus: kotlinx.coroutines.flow.MutableStateFlow<String> =
+        kotlinx.coroutines.flow.MutableStateFlow("")
+
     /** Cache des channels parsées par sourceId. TTL 30min. */
     private const val CACHE_TTL_MS = 30L * 60L * 1000L
     private data class CachedChannels(
@@ -383,6 +391,21 @@ object MyIptvProvider : Provider, IptvProvider {
         }
     }
 
+    /** 2026-05-15 (user "il affiche pas le nombre d'épisodes exactes l'épisode
+     *  est de saison") : pour les séries Stalker (xtream-type="series"), on
+     *  drill-down via StalkerClient.getSeasons() pour récupérer les VRAIES
+     *  saisons et épisodes côté serveur. Avant, on extrayait SXXEXX du nom
+     *  via regex, mais Stalker retourne 1 ENTRÉE PAR SÉRIE (pas par épisode)
+     *  → on tombait sur 1 fake épisode en Saison 1.
+     *
+     *  Helper : extrait l'id numérique de la série depuis le stalker-cmd.
+     *  Retourne null si pas extractible (cmd non standard ou base64 sans id). */
+    private fun extractStalkerSeriesId(cmd: String): String? {
+        val stripped = cmd.removePrefix("series-cmd::").removePrefix("series::")
+        val id = stripped.substringBefore(":")
+        return id.takeIf { it.isNotBlank() && it.all { c -> c.isDigit() } }
+    }
+
     override suspend fun getTvShow(id: String): TvShow = withContext(Dispatchers.IO) {
         // 2026-05-12 : ArtworkRepair iterate sur tous les TvShows en DB, y compris
         // les chaînes Live (id `myiptv-live::`) qui ne sont PAS des séries. On
@@ -398,9 +421,68 @@ object MyIptvProvider : Provider, IptvProvider {
         }
         if (matchingEpisodes.isEmpty()) throw Exception("Série '$showName' introuvable")
 
-        // Toutes les saisons et épisodes regroupés. On essaye d'extraire la
-        // saison via regex SXX du nom de l'épisode. Si absent, on met tout
-        // dans Saison 1.
+        // 2026-05-15 : drill-down Stalker pour vrais saisons/épisodes.
+        val firstItem = matchingEpisodes.first()
+        val firstCh = firstItem.channel
+        val isStalkerSeries = firstCh.options["xtream-type"] == "series" &&
+            firstCh.options.containsKey("stalker-cmd")
+        if (isStalkerSeries) {
+            val seriesId = extractStalkerSeriesId(firstCh.options["stalker-cmd"] ?: "")
+            if (seriesId != null) {
+                Log.d(TAG, "getTvShow Stalker drill-down : $showName seriesId=$seriesId")
+                val seasons = runCatching {
+                    com.streamflixreborn.streamflix.utils.StalkerClient.getSeasons(
+                        portalUrl = firstItem.source.url,
+                        mac = firstItem.source.mac ?: "",
+                        seriesNumericId = seriesId,
+                        userAgent = firstItem.source.userAgent,
+                    )
+                }.getOrElse {
+                    Log.w(TAG, "getTvShow Stalker getSeasons fail: ${it.message}")
+                    emptyList()
+                }
+                if (seasons.isNotEmpty()) {
+                    // 2026-05-15 (user "cliquer Regarder S1 E1 lance pas la lecture
+                    // direct, suivant/précédent puis ça marche") : il faut populer
+                    // season.episodes avec les vrais Episode objects, sinon
+                    // tvShow.episodeToWatch (qui dérive de seasons.flatMap{episodes})
+                    // retourne null → bouton invisible OU avec un mauvais id (qui
+                    // tombe sur handleDirectPlay → tvShow.id passe au player →
+                    // myiptv-show:: ne match aucun case getServers → écran noir).
+                    // Maintenant, chaque Season a sa liste Episode prête à être
+                    // jouée directement.
+                    val seasonObjs = seasons.map { season ->
+                        val episodeObjs = season.episodeNumbers.map { epNum ->
+                            Episode(
+                                id = "myiptv-stalkerep::${firstItem.source.id}::${firstItem.index}::${season.seasonNumber}::$epNum",
+                                number = epNum,
+                                title = "Épisode $epNum",
+                                poster = season.poster ?: firstCh.logo,
+                            )
+                        }
+                        Season(
+                            id = "myiptv-season::${encodeId(showName)}::${season.seasonNumber}",
+                            number = season.seasonNumber,
+                            title = season.name,
+                            episodes = episodeObjs,
+                        )
+                    }
+                    val totalEps = seasons.sumOf { it.episodeNumbers.size }
+                    Log.d(TAG, "getTvShow Stalker '$showName' → ${seasons.size} saisons, $totalEps épisodes (Episode list popule)")
+                    return@withContext TvShow(
+                        id = id,
+                        title = showName,
+                        overview = "$totalEps épisode${if (totalEps > 1) "s" else ""} sur ${seasons.size} saison${if (seasons.size > 1) "s" else ""}",
+                        poster = firstCh.logo,
+                        banner = firstCh.logo,
+                        seasons = seasonObjs,
+                    )
+                }
+            }
+        }
+
+        // Fallback : extraction regex SXXEXX depuis le nom (pour les sources
+        // M3U où chaque épisode = 1 ligne, donc la regex SXXEXX a du sens).
         val seasonPattern = Regex("""[sS](\d{1,2})""")
         val episodes = matchingEpisodes.mapIndexed { idx, item ->
             val seasonNum = seasonPattern.find(item.channel.name)?.groupValues?.get(1)?.toIntOrNull() ?: 1
@@ -436,7 +518,43 @@ object MyIptvProvider : Provider, IptvProvider {
         val matching = allEpisodes.filter {
             IptvClassifier.extractShowName(it.channel.name).equals(showName, ignoreCase = true)
         }
+        if (matching.isEmpty()) return@withContext emptyList()
 
+        // 2026-05-15 : drill-down Stalker pour vrais épisodes (cf getTvShow).
+        val firstItem = matching.first()
+        val firstCh = firstItem.channel
+        val isStalkerSeries = firstCh.options["xtream-type"] == "series" &&
+            firstCh.options.containsKey("stalker-cmd")
+        if (isStalkerSeries) {
+            val seriesId = extractStalkerSeriesId(firstCh.options["stalker-cmd"] ?: "")
+            if (seriesId != null) {
+                val seasons = runCatching {
+                    com.streamflixreborn.streamflix.utils.StalkerClient.getSeasons(
+                        portalUrl = firstItem.source.url,
+                        mac = firstItem.source.mac ?: "",
+                        seriesNumericId = seriesId,
+                        userAgent = firstItem.source.userAgent,
+                    )
+                }.getOrElse { emptyList() }
+                val season = seasons.firstOrNull { it.seasonNumber == seasonNum }
+                if (season != null) {
+                    Log.d(TAG, "getEpisodesBySeason Stalker '$showName' S$seasonNum → ${season.episodeNumbers.size} épisodes")
+                    return@withContext season.episodeNumbers.map { epNum ->
+                        Episode(
+                            // Format: myiptv-stalkerep::sourceId::channelIdx::seasonNum::epNum
+                            // → getServers/getVideo l'identifie et drill-down à nouveau
+                            //   au moment du play pour récupérer le seasonCmd à jour.
+                            id = "myiptv-stalkerep::${firstItem.source.id}::${firstItem.index}::$seasonNum::$epNum",
+                            number = epNum,
+                            title = "Épisode $epNum",
+                            poster = season.poster ?: firstCh.logo,
+                        )
+                    }.sortedBy { it.number }
+                }
+            }
+        }
+
+        // Fallback regex (M3U sources).
         val seasonPattern = Regex("""[sS](\d{1,2})""")
         val epPattern = Regex("""[eE](\d{1,3})""")
         matching.mapIndexed { idx, item ->
@@ -458,6 +576,24 @@ object MyIptvProvider : Provider, IptvProvider {
     // ═══════════════════════════════════════════════════════════════
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        // 2026-05-15 : nouveau format pour les épisodes Stalker drill-down :
+        // myiptv-stalkerep::sourceId::channelIdx::seasonNum::epNum
+        // → encode dans le server id un suffixe ::s<N>::e<N> que getVideo parsera.
+        if (id.startsWith("myiptv-stalkerep::")) {
+            val p = id.removePrefix("myiptv-stalkerep::").split("::")
+            if (p.size != 4) return emptyList()
+            val sourceId = p[0]
+            val channelIdx = p[1].toIntOrNull() ?: return emptyList()
+            val seasonNum = p[2].toIntOrNull() ?: return emptyList()
+            val epNum = p[3].toIntOrNull() ?: return emptyList()
+            val source = IptvSourceStore.getById(sourceId) ?: return emptyList()
+            return listOf(
+                Video.Server(
+                    id = "myiptv-stream::${source.id}::$channelIdx::s$seasonNum::e$epNum",
+                    name = source.name,
+                )
+            )
+        }
         val (sourceId, channelIdx) = when {
             id.startsWith("myiptv-live::") -> {
                 val p = id.removePrefix("myiptv-live::").split("::")
@@ -492,9 +628,13 @@ object MyIptvProvider : Provider, IptvProvider {
 
     override suspend fun getVideo(server: Video.Server): Video {
         val parts = server.id.removePrefix("myiptv-stream::").split("::")
-        if (parts.size != 2) throw Exception("Bad server id: ${server.id}")
+        if (parts.size < 2) throw Exception("Bad server id: ${server.id}")
         val sourceId = parts[0]
         val channelIdx = parts[1].toIntOrNull() ?: throw Exception("Bad channel idx")
+        // 2026-05-15 : support du suffixe ::s<N>::e<N> pour les épisodes Stalker
+        // drill-down. Format attendu : myiptv-stream::sourceId::chIdx::sN::eN
+        val explicitSeasonNum = parts.getOrNull(2)?.takeIf { it.startsWith("s") }?.removePrefix("s")?.toIntOrNull()
+        val explicitEpNum = parts.getOrNull(3)?.takeIf { it.startsWith("e") }?.removePrefix("e")?.toIntOrNull()
         val source = IptvSourceStore.getById(sourceId) ?: throw Exception("Source disparue")
         val channels = loadChannels(source)
         val channel = channels.getOrNull(channelIdx) ?: throw Exception("Chaîne #$channelIdx introuvable")
@@ -506,16 +646,72 @@ object MyIptvProvider : Provider, IptvProvider {
         channel.options["http-referrer"]?.let { headers["Referer"] = it }
 
         // 2026-05-12 : Stalker → résoudre l'URL réelle via create_link au moment du play
+        // 2026-05-14 (user "j'arrive pas à lire mes épisodes de série") : pour
+        // les Séries Stalker (cmd vide ou "series::id"), fetch d'abord les
+        // SAISONS puis joue saison 1 / épisode 1 (v1 — sans picker UI).
         val streamUrl = if (source.type == IptvSource.Type.STALKER && channel.options.containsKey("stalker-cmd")) {
+            val cmd = channel.options["stalker-cmd"] ?: ""
+            val xtreamType = channel.options["xtream-type"] ?: "?"
+            // 2026-05-15 : détection robuste des prefixes — l'ordre de check
+            // compte ! "series-cmd::" doit être checké AVANT "series::" sinon
+            // removePrefix("series::") ne fait rien sur "series-cmd::"
+            val isStalkerSeries = cmd.startsWith("series-cmd::") || cmd.startsWith("series::")
+            val isStalkerVod = cmd.startsWith("vod-cmd::") || cmd.startsWith("vod::")
+            Log.d(TAG, "getVideo Stalker '${channel.name}' : type=$xtreamType cmd=${cmd.take(60)}… (series=$isStalkerSeries, vod=$isStalkerVod)")
             val resolved = withContext(Dispatchers.IO) {
-                com.streamflixreborn.streamflix.utils.StalkerClient.createStreamLink(
-                    portalUrl = source.url,
-                    mac = source.mac ?: "",
-                    cmd = channel.options["stalker-cmd"] ?: channel.url,
-                    userAgent = source.userAgent,
-                )
+                if (isStalkerSeries) {
+                    // 2026-05-15 (user FoxBleu) : extraire l'id numérique en
+                    // strippant les DEUX prefixes possibles. Avant, seul
+                    // "series::" était stripé → "series-cmd::base64..." restait
+                    // et substringBefore(":") retournait "series-cmd" → drill-down KO.
+                    val stripped = cmd.removePrefix("series-cmd::").removePrefix("series::")
+                    val seriesId = stripped.substringBefore(":")
+                    if (seriesId.isBlank() || !seriesId.all { it.isDigit() }) {
+                        Log.w(TAG, "getVideo SERIES : seriesId='$seriesId' invalide (pas un nombre) — drill-down impossible")
+                        return@withContext null
+                    }
+                    Log.d(TAG, "getVideo Stalker SERIES drill-down : seriesId=$seriesId, target S${explicitSeasonNum ?: "?"}E${explicitEpNum ?: "?"}")
+                    val seasons = com.streamflixreborn.streamflix.utils.StalkerClient.getSeasons(
+                        portalUrl = source.url,
+                        mac = source.mac ?: "",
+                        seriesNumericId = seriesId,
+                        userAgent = source.userAgent,
+                    )
+                    if (seasons.isEmpty()) {
+                        Log.w(TAG, "getVideo SERIES : aucune saison Stalker pour seriesId=$seriesId")
+                        return@withContext null
+                    }
+                    // 2026-05-15 (user "il affiche pas le nombre d'épisodes exactes
+                    // l'épisode est de saison") : utiliser le seasonNum + epNum
+                    // EXPLICITES depuis le server.id si présent (route normale
+                    // depuis getEpisodesBySeason → myiptv-stalkerep), sinon
+                    // fallback sur S1E1 (route legacy depuis myiptv-ep ou
+                    // myiptv-show direct).
+                    val season = explicitSeasonNum?.let { sn -> seasons.firstOrNull { it.seasonNumber == sn } }
+                        ?: seasons.first()
+                    val episode = explicitEpNum ?: season.episodeNumbers.firstOrNull() ?: 1
+                    Log.d(TAG, "getVideo SERIES : play saison ${season.seasonNumber} épisode $episode (cmd=${season.cmd.take(40)}…)")
+                    val r = com.streamflixreborn.streamflix.utils.StalkerClient.createStreamLinkSeriesEpisode(
+                        portalUrl = source.url,
+                        mac = source.mac ?: "",
+                        seasonCmd = season.cmd,
+                        episodeNumber = episode,
+                        userAgent = source.userAgent,
+                    )
+                    Log.d(TAG, "getVideo SERIES : createStreamLinkSeriesEpisode → ${r?.take(80) ?: "NULL"}")
+                    r
+                } else {
+                    val r = com.streamflixreborn.streamflix.utils.StalkerClient.createStreamLink(
+                        portalUrl = source.url,
+                        mac = source.mac ?: "",
+                        cmd = cmd.ifBlank { channel.url },
+                        userAgent = source.userAgent,
+                    )
+                    Log.d(TAG, "getVideo ${if (isStalkerVod) "VOD" else "LIVE"} : createStreamLink → ${r?.take(80) ?: "NULL"}")
+                    r
+                }
             }
-            resolved ?: throw Exception("Stalker create_link a échoué pour ${channel.name}")
+            resolved ?: throw Exception("Stalker create_link a échoué pour ${channel.name} (type=$xtreamType, cmd-prefix=${cmd.substringBefore("::").take(20)})")
         } else {
             channel.url
         }
@@ -1070,7 +1266,23 @@ object MyIptvProvider : Provider, IptvProvider {
     fun sanitizeUrlPublic(raw: String): String = sanitizeUrl(raw)
 
     private fun sanitizeUrl(raw: String): String {
-        val trimmed = raw.trim()
+        var trimmed = raw.trim()
+        // 2026-05-14 (user bug "Unable to resolve host http") : strip les
+        // double-prefixes "http://http://" ou "https://https://" (typique
+        // copier-coller depuis form où le user inclut http:// alors que le
+        // form le préfixe déjà). Boucle pour gérer http://http://http://.
+        while (trimmed.startsWith("http://http://", ignoreCase = true)) {
+            trimmed = trimmed.removePrefix("http://")
+        }
+        while (trimmed.startsWith("https://https://", ignoreCase = true)) {
+            trimmed = trimmed.removePrefix("https://")
+        }
+        while (trimmed.startsWith("http://https://", ignoreCase = true)) {
+            trimmed = trimmed.removePrefix("http://")
+        }
+        while (trimmed.startsWith("https://http://", ignoreCase = true)) {
+            trimmed = trimmed.removePrefix("https://")
+        }
         // Si déjà mono-ligne propre, retourner tel quel
         if (!trimmed.contains('\n') && !trimmed.contains('\r')) return trimmed
 
@@ -1104,6 +1316,7 @@ object MyIptvProvider : Provider, IptvProvider {
     }
 
     private suspend fun fetchM3u(source: IptvSource): List<M3uParser.M3uChannel> = withContext(Dispatchers.IO) {
+        loadingStatus.value = "Téléchargement de la playlist M3U…"
         // 2026-05-12 (user "ça marche pas dans l'APK" avec URL https://srv:80) :
         // détecte le mismatch protocole/port. Beaucoup de serveurs IPTV exposent
         // l'URL en `https://srv:80/...` alors que le port 80 parle en HTTP plain.
@@ -1229,15 +1442,22 @@ object MyIptvProvider : Provider, IptvProvider {
         }
         val Stalker = com.streamflixreborn.streamflix.utils.StalkerClient
         val portalUrl = sanitizeUrl(source.url)
+        // v60 : émet status pour l'UI loadingText
+        loadingStatus.value = "Connexion au portail Stalker…"
         // 2026-05-13 (user "Les catégories film et n'apparaissent pas comme elles
         // devraient apparaître") : fetch 3 maps de catégories séparées (ITV/VOD/
         // Series) car Stalker utilise des category_id différents par type.
         val liveGenres = Stalker.getGenres(portalUrl, mac, source.userAgent, source.serial)
+        loadingStatus.value = "Catégories TV chargées (${liveGenres.size})"
         val vodCategories = Stalker.getVodCategories(portalUrl, mac, source.userAgent, source.serial)
+        loadingStatus.value = "Catégories films chargées (${vodCategories.size})"
         val seriesCategories = Stalker.getSeriesCategories(portalUrl, mac, source.userAgent, source.serial)
+        loadingStatus.value = "Catégories séries chargées (${seriesCategories.size})"
         val out = mutableListOf<M3uParser.M3uChannel>()
         // === LIVE TV ===
+        loadingStatus.value = "Téléchargement des chaînes TV…"
         val live = Stalker.getAllChannels(portalUrl, mac, source.userAgent, source.serial)
+        loadingStatus.value = "Chaînes TV : ${live.size}"
         Log.d(TAG, "Stalker ${source.name} live : ${live.size} chaînes")
         live.forEach { sc ->
             val friendlyGroup = sc.group?.let { liveGenres[it] ?: it }
@@ -1250,9 +1470,16 @@ object MyIptvProvider : Provider, IptvProvider {
             )
         }
         // === VOD (films) ===
+        loadingStatus.value = "Téléchargement des films…"
         runCatching {
-            val vod = Stalker.getAllVod(portalUrl, mac, source.userAgent, source.serial)
-            Log.d(TAG, "Stalker ${source.name} VOD : ${vod.size} films")
+            val vodRaw = Stalker.getAllVod(portalUrl, mac, source.userAgent, source.serial)
+            // 2026-05-14 (user "j'ai les jaquettes en double dans le film") :
+            // dédup par cmd (chaque VOD a un cmd unique côté serveur Stalker).
+            // Si la même entrée revient dans plusieurs pages ou catégories,
+            // on la garde une seule fois pour pas avoir 2 fois la jaquette.
+            val vod = vodRaw.distinctBy { it.cmd.ifBlank { it.name } }
+            loadingStatus.value = "Films : ${vod.size}"
+            Log.d(TAG, "Stalker ${source.name} VOD : ${vod.size} films (raw=${vodRaw.size} avant dédup)")
             vod.forEach { sc ->
                 val friendlyGroup = sc.group?.let { vodCategories[it] ?: it } ?: "Films"
                 out += M3uParser.M3uChannel(
@@ -1265,9 +1492,17 @@ object MyIptvProvider : Provider, IptvProvider {
             }
         }.onFailure { Log.w(TAG, "Stalker VOD fetch fail: ${it.message}") }
         // === SERIES ===
+        loadingStatus.value = "Téléchargement des séries…"
         runCatching {
-            val series = Stalker.getAllSeries(portalUrl, mac, source.userAgent, source.serial)
-            Log.d(TAG, "Stalker ${source.name} Series : ${series.size} séries")
+            val seriesRaw = Stalker.getAllSeries(portalUrl, mac, source.userAgent, source.serial)
+            // 2026-05-14 (user "jaquettes en double") : même dédup que VOD.
+            // Pour les séries Stalker cmd est souvent vide → dédup par nom + groupe.
+            val series = seriesRaw.distinctBy {
+                if (it.cmd.isNotBlank()) it.cmd
+                else "${it.name}::${it.group ?: ""}"
+            }
+            loadingStatus.value = "Séries : ${series.size}"
+            Log.d(TAG, "Stalker ${source.name} Series : ${series.size} séries (raw=${seriesRaw.size} avant dédup)")
             series.forEach { sc ->
                 val friendlyGroup = sc.group?.let { seriesCategories[it] ?: it } ?: "Séries"
                 out += M3uParser.M3uChannel(
@@ -1379,4 +1614,64 @@ object MyIptvProvider : Provider, IptvProvider {
     }
     override suspend fun getGenre(id: String, page: Int): Genre = throw UnsupportedOperationException()
     override suspend fun getPeople(id: String, page: Int): People = throw UnsupportedOperationException()
+
+    // ═══════════════════════════════════════════════════════════════
+    //   v61 : Navigation chaîne précédente / suivante (IPTV Live)
+    //   Permet aux boutons prev/next du player de zapper entre les
+    //   chaînes live sans repasser par la grille. Utilise le cache
+    //   de classification (rempli au home/getMovies/getTvShows),
+    //   donc accès O(1) après premier load.
+    // ═══════════════════════════════════════════════════════════════
+
+    /** Retourne la liste ordonnée des IDs `myiptv-live::SOURCEID::IDX`
+     *  pour TOUTES les sources actuellement chargées en cache de
+     *  classification, dans l'ordre où elles s'affichent dans getHome
+     *  (= filterFrOrFallback appliqué).
+     *  Retourne liste vide si aucune source classifiée — l'UI cachera
+     *  alors les boutons. */
+    private fun getOrderedLiveChannelIds(): List<String> {
+        val sources = try { IptvSourceStore.getAll() } catch (_: Exception) { return emptyList() }
+        val out = mutableListOf<String>()
+        for (source in sources) {
+            val classified = classificationCache[source.id] ?: continue
+            val liveItems = classified.byType[IptvClassifier.ContentType.LIVE] ?: continue
+            val filtered = filterFrOrFallback(liveItems)
+            // Filtre par catégorie sélectionnée comme dans getHome
+            val sel = selectedCategoryLive
+            val finalList = if (sel != null) {
+                filtered.filter { (it.channel.group ?: "").trim() == sel }
+            } else filtered
+            finalList.forEach { item ->
+                out.add("myiptv-live::${item.source.id}::${item.index}")
+            }
+        }
+        return out
+    }
+
+    fun getPreviousChannelId(currentId: String): String? {
+        val list = getOrderedLiveChannelIds()
+        val idx = list.indexOf(currentId)
+        return if (idx > 0) list[idx - 1] else null
+    }
+
+    fun getNextChannelId(currentId: String): String? {
+        val list = getOrderedLiveChannelIds()
+        val idx = list.indexOf(currentId)
+        return if (idx in 0 until list.lastIndex) list[idx + 1] else null
+    }
+
+    /** Récupère un ClassifiedItem live à partir d'un id myiptv-live::SOURCE::IDX. */
+    private fun findLiveItem(channelId: String): ClassifiedItem? {
+        val cleaned = channelId.removePrefix("myiptv-live::")
+        val parts = cleaned.split("::")
+        if (parts.size != 2) return null
+        val sourceId = parts[0]
+        val idx = parts[1].toIntOrNull() ?: return null
+        val classified = classificationCache[sourceId] ?: return null
+        val liveItems = classified.byType[IptvClassifier.ContentType.LIVE] ?: return null
+        return liveItems.find { it.index == idx }
+    }
+
+    fun getChannelDisplayName(channelId: String): String? = findLiveItem(channelId)?.channel?.name
+    fun getChannelPoster(channelId: String): String? = findLiveItem(channelId)?.channel?.logo
 }

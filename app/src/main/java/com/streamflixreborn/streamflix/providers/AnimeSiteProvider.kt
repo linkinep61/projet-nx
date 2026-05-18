@@ -61,9 +61,15 @@ object AnimeSiteProvider : Provider {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
     private val client: OkHttpClient by lazy {
+        // 2026-05-16 (user "anime site ne fonctionne plus / met du temps à
+        // répondre / je crois qu'il met encore plus que ça") : timeouts 20s→90s.
+        // animesite.fr (Cloudflare) répond TRÈS lentement par moments. Avec
+        // 20s, getHome() throw SocketTimeoutException → écran d'erreur. 90s
+        // laisse le temps à la réponse même quand le site rame fort.
         OkHttpClient.Builder()
-            .connectTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
+            .connectTimeout(90, TimeUnit.SECONDS)
+            .readTimeout(90, TimeUnit.SECONDS)
+            .writeTimeout(90, TimeUnit.SECONDS)
             .followRedirects(true)
             .build()
     }

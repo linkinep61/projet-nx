@@ -545,6 +545,23 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             true
         }
 
+        // 2026-05-15 : toggle "Garder l'écran toujours allumé"
+        findPreference<SwitchPreference>("KEEP_SCREEN_ON_APP")?.apply {
+            isChecked = UserPreferences.keepScreenOnApp
+            setOnPreferenceChangeListener { _, newValue ->
+                val enabled = newValue as Boolean
+                UserPreferences.keepScreenOnApp = enabled
+                activity?.window?.let { w ->
+                    if (enabled) {
+                        w.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    } else {
+                        w.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    }
+                }
+                true
+            }
+        }
+
         findPreference<SwitchPreference>("UPDATE_CHECK_ENABLED")?.isChecked = UserPreferences.updateCheckEnabled
         findPreference<SwitchPreference>("UPDATE_CHECK_ENABLED")?.setOnPreferenceChangeListener { _, newValue ->
             UserPreferences.updateCheckEnabled = newValue as Boolean

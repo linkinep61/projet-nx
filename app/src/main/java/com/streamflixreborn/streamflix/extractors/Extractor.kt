@@ -184,6 +184,13 @@ abstract class Extractor {
             GoodstreamExtractor(),
             LamovieExtractor(),
             UqloadExtractor(),
+            // 2026-05-14 : ajouts pour DessinAnime (hydrax + 4meplayer)
+            HydraxExtractor(),
+            Player4meExtractor(),
+            // 2026-05-15 : ajout Hoca8 pour chaînes sport/Canal+ Live de LiveTvHub
+            Hoca8Extractor(),
+            // 2026-05-15 : Freeshot pour les ~48 chaînes FR de freeshot.live
+            FreeshotExtractor(),
             MailRuExtractor(),
             MixDropExtractor(),
             SupervideoExtractor(),
@@ -240,6 +247,18 @@ abstract class Extractor {
             // 2026-05-12 : SendVid — utilisé par AnimeSiteProvider (lecteurs 1 VOSTFR + 5 VF).
             // Page embed contient <source src="..mp4"> direct, hash time-limited ~4h.
             SendvidExtractor(),
+            // 2026-05-16 : Smoothpre — host JWPlayer packed JS (pattern VidHide-like)
+            // utilisé par DessinAnime. URL `https://smoothpre.com/embed/<slug>`.
+            // Extracteur dédié plus fiable que l'alias StreamWish (qui forçait un
+            // WebView-redirect inutile sur ce domaine).
+            SmoothpreExtractor(),
+            // 2026-05-16 : FRAnime watch2 resolver — WebView intercepte iframe vers
+            // sibnet/sendvid/filemoon/vidmoly, puis délègue à l'extractor spécifique.
+            FranimeExtractor(),
+            // 2026-05-16 : VK.com video embeds — utilisé par FRAnime (5232 occurrences
+            // sur les 2370 animes du catalogue). Pattern playerParams JS avec qualités
+            // url240/360/480/720/1080 + hls.
+            VkExtractor(),
         )
 
         // ── A: Extraction cache ─────────────────────────────────────────────

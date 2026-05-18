@@ -208,8 +208,6 @@ class HomeMobileFragment : Fragment() {
                     Log.d("HomeMobile", "Same channel, stopping mini player for fullscreen (onResume): ${tvShow.title}")
                     MiniPlayerController.stopAsync()
                     false
-                } else if (tvShow.id.startsWith("bxt::")) {
-                    false
                 } else {
                     Log.d("HomeMobile", "Mini player intercept (onResume): ${tvShow.title}")
                     MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
@@ -279,6 +277,12 @@ class HomeMobileFragment : Fragment() {
                         binding.miniPlayerLoading.visibility = View.GONE
                         Log.e("HomeMobile", "Mini player error: ${state.message}")
                         // Keep the container visible, user can close manually
+                        // 2026-05-14 (user "tu vois pas que la vidéo mouline depuis tout
+                        // à l'heure") : feedback visible pour ne pas laisser le user
+                        // dans le flou.
+                        Toast.makeText(requireContext(),
+                            "Stream indisponible — essaie une autre chaîne",
+                            Toast.LENGTH_LONG).show()
                     }
                 }
             }
@@ -310,8 +314,6 @@ class HomeMobileFragment : Fragment() {
             if (tvShow.id == MiniPlayerController.currentChannelId) {
                 Log.d("HomeMobile", "Same channel, stopping mini player for fullscreen: ${tvShow.title}")
                 MiniPlayerController.stopAsync()
-                false
-            } else if (tvShow.id.startsWith("bxt::")) {
                 false
             } else {
                 Log.d("HomeMobile", "Mini player intercept: ${tvShow.title} (${tvShow.id})")
@@ -524,15 +526,21 @@ class HomeMobileFragment : Fragment() {
             .setTitle("Choisir une catégorie")
             .setItems(displayItems) { _, idx ->
                 provider.selectedCategoryLive = rawNames[idx]
-                // 2026-05-13 (user "quand on clique sur une catégorie il
-                // faut que le Home change") : HomeViewModel skip le network
-                // refresh si HomeCacheStore < 5 min. On invalide le snapshot
-                // pour FORCER un re-calcul avec le nouveau filtre.
                 com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
                     requireContext().applicationContext,
                     provider,
                 )
+                // 2026-05-14 (user "tu cliques une fois il se passe rien") :
+                // appel direct + notif. Le direct trigger getHome immédiatement
+                // sans attendre que le flow ProviderChangeNotifier propage.
+                // Sans ça, latence 1-3s avant que le viewModel ne réagisse.
+                viewModel.getHome()
                 com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                android.widget.Toast.makeText(
+                    requireContext(),
+                    "Chargement…",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
             }
             .setNegativeButton("Annuler", null)
             .show()

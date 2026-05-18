@@ -11,6 +11,7 @@ import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
@@ -103,62 +104,32 @@ class MoviesViewModel(database: AppDatabase) : ViewModel() {
     }
 
 
-    fun getMovies() = viewModelScope.launch(Dispatchers.IO) {
-        _state.emit(State.Loading)
+    /** 2026-05-14 (user "des fois il faut cliquer plusieurs fois pour changer
+     *  de catégorie") : track le job de fetch actuel pour pouvoir le canceler
+     *  AVANT de lancer un nouveau getMovies. Sans ça, un loadMoreMovies en
+     *  cours pouvait terminer APRÈS getMovies et écraser le state avec la
+     *  pagination de l'ancienne catégorie → l'user voyait l'ancienne data
+     *  jusqu'au prochain clic. */
+    @Volatile private var loadJob: Job? = null
 
-        try {
-            val provider = UserPreferences.currentProvider ?: return@launch
-            Log.d("MoviesViewModel", "getMovies: provider=${provider.name}, isFilterable=${provider is FilterableProvider}, languageFilter=$languageFilter")
-            var movies = if (provider is FilterableProvider && languageFilter != "all") {
-                Log.d("MoviesViewModel", "getMovies: using FILTERED with language=$languageFilter")
-                ParentalControlUtils.filterItems(
-                    provider.getFilteredMovies(languageFilter)
-                ).filterIsInstance<Movie>()
-            } else {
-                Log.d("MoviesViewModel", "getMovies: using STANDARD (no filter)")
-                ParentalControlUtils.filterItems(
-                    provider.getMovies()
-                ).filterIsInstance<Movie>()
-            }
-
-            // For type-filterable providers that don't implement FilterableProvider,
-            // apply local serie/film filtering after fetch
-            if (provider.name in typeFilterProviders && provider !is FilterableProvider) {
-                movies = when (languageFilter) {
-                    "serie" -> movies.filter { it.isSeries }
-                    "film" -> movies.filter { !it.isSeries }
-                    else -> movies
-                }
-            }
-
-            Log.d("MoviesViewModel", "getMovies: got ${movies.size} movies")
-            page = 1
-
-            _state.emit(State.SuccessLoading(movies, true))
-        } catch (e: Exception) {
-            Log.e("MoviesViewModel", "getMovies: ", e)
-            _state.emit(State.FailedLoading(e))
-        }
-    }
-
-    fun loadMoreMovies() = viewModelScope.launch(Dispatchers.IO) {
-        val currentState = _state.value
-        if (currentState is State.SuccessLoading) {
-            _state.emit(State.LoadingMore)
-
+    fun getMovies() {
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch(Dispatchers.IO) {
+            _state.emit(State.Loading)
             try {
                 val provider = UserPreferences.currentProvider ?: return@launch
+                Log.d("MoviesViewModel", "getMovies: provider=${provider.name}, isFilterable=${provider is FilterableProvider}, languageFilter=$languageFilter")
                 var movies = if (provider is FilterableProvider && languageFilter != "all") {
+                    Log.d("MoviesViewModel", "getMovies: using FILTERED with language=$languageFilter")
                     ParentalControlUtils.filterItems(
-                        provider.getFilteredMovies(languageFilter, page + 1)
+                        provider.getFilteredMovies(languageFilter)
                     ).filterIsInstance<Movie>()
                 } else {
+                    Log.d("MoviesViewModel", "getMovies: using STANDARD (no filter)")
                     ParentalControlUtils.filterItems(
-                        provider.getMovies(page + 1)
+                        provider.getMovies()
                     ).filterIsInstance<Movie>()
                 }
-
-                // Local type filter for non-FilterableProvider providers
                 if (provider.name in typeFilterProviders && provider !is FilterableProvider) {
                     movies = when (languageFilter) {
                         "serie" -> movies.filter { it.isSeries }
@@ -166,18 +137,57 @@ class MoviesViewModel(database: AppDatabase) : ViewModel() {
                         else -> movies
                     }
                 }
-
-                page += 1
-
-                _state.emit(
-                    State.SuccessLoading(
-                        movies = currentState.movies + movies,
-                        hasMore = movies.isNotEmpty(),
-                    )
-                )
+                Log.d("MoviesViewModel", "getMovies: got ${movies.size} movies")
+                page = 1
+                _state.emit(State.SuccessLoading(movies, true))
             } catch (e: Exception) {
-                Log.e("MoviesViewModel", "loadMoreMovies: ", e)
+                Log.e("MoviesViewModel", "getMovies: ", e)
                 _state.emit(State.FailedLoading(e))
+            }
+        }
+    }
+
+    fun loadMoreMovies() {
+        // Pas de cancel ici — laisse une loadMore en cours finir, mais ne lance
+        // pas un 2e si y a déjà un fetch actif (évite double pagination).
+        if (loadJob?.isActive == true) return
+        loadJob = viewModelScope.launch(Dispatchers.IO) {
+            val currentState = _state.value
+            if (currentState is State.SuccessLoading) {
+                _state.emit(State.LoadingMore)
+                try {
+                    val provider = UserPreferences.currentProvider ?: return@launch
+                    var movies = if (provider is FilterableProvider && languageFilter != "all") {
+                        ParentalControlUtils.filterItems(
+                            provider.getFilteredMovies(languageFilter, page + 1)
+                        ).filterIsInstance<Movie>()
+                    } else {
+                        ParentalControlUtils.filterItems(
+                            provider.getMovies(page + 1)
+                        ).filterIsInstance<Movie>()
+                    }
+                    if (provider.name in typeFilterProviders && provider !is FilterableProvider) {
+                        movies = when (languageFilter) {
+                            "serie" -> movies.filter { it.isSeries }
+                            "film" -> movies.filter { !it.isSeries }
+                            else -> movies
+                        }
+                    }
+                    page += 1
+                    // 2026-05-14 (user "j'ai les jaquettes en double dans le film") :
+                    // dédup par ID quand on concatène les pages. Évite que pagination
+                    // ou race avec une refresh redonne les mêmes items.
+                    val merged = (currentState.movies + movies).distinctBy { it.id.ifBlank { it.title } }
+                    _state.emit(
+                        State.SuccessLoading(
+                            movies = merged,
+                            hasMore = movies.isNotEmpty(),
+                        )
+                    )
+                } catch (e: Exception) {
+                    Log.e("MoviesViewModel", "loadMoreMovies: ", e)
+                    _state.emit(State.FailedLoading(e))
+                }
             }
         }
     }

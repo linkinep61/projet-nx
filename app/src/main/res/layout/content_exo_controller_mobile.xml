@@ -154,16 +154,43 @@
 
     </LinearLayout>
 
-    <androidx.media3.ui.DefaultTimeBar
-        android:id="@+id/exo_progress"
+    <!-- Mobile port v51 : conteneur vertical pour exo_progress (VOD) + dual-bars (live IPTV). -->
+    <LinearLayout
+        android:id="@+id/exo_progress_container"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginStart="8dp"
         android:layout_marginEnd="8dp"
         android:layout_marginBottom="4dp"
+        android:orientation="vertical"
         app:layout_constraintBottom_toTopOf="@id/exo_bottom_bar"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent" />
+        app:layout_constraintStart_toStartOf="parent">
+
+        <androidx.media3.ui.DefaultTimeBar
+            android:id="@+id/exo_progress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <!-- Custom barre 1 (chunk en lecture) — visible pour live IPTV -->
+        <androidx.media3.ui.DefaultTimeBar
+            android:id="@+id/live_primary_progress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:focusable="false"
+            android:visibility="gone"
+            tools:visibility="visible" />
+
+        <!-- Custom barre 2 (chunk pré-chargé) — visible pour live IPTV -->
+        <androidx.media3.ui.DefaultTimeBar
+            android:id="@+id/live_secondary_progress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:focusable="false"
+            android:visibility="gone"
+            tools:visibility="visible" />
+    </LinearLayout>
 
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/exo_bottom_bar"

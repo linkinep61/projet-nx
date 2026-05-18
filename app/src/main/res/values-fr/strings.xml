@@ -272,6 +272,8 @@
     <string name="settings_player_gestures_off">Désactivé</string>
     <string name="settings_keep_screen_on_when_paused">Garder l\'écran allumé en pause</string>
     <string name="settings_keep_screen_on_when_paused_summary">Empêche l\'écran de s\'éteindre lorsque la vidéo est en pause</string>
+    <string name="settings_keep_screen_on_app">Garder l\'écran toujours allumé</string>
+    <string name="settings_keep_screen_on_app_summary">Empêche l\'écran de s\'éteindre pendant la navigation dans l\'app (catalogue, accueil, sélecteur de chaînes…). Peut augmenter la consommation de batterie sur mobile.</string>
     <string name="miscelaneous_title">Divers</string>
     <string name="clear_cache_done">Cache vidé</string>
     <string name="clear_cache_done_409">Cache vidé automatiquement (Erreur HTTP 409)</string>
