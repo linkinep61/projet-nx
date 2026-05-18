@@ -78,7 +78,17 @@ class LiveReconnectingHttpDataSource(
             // Pattern /live/.ts mais avec marqueurs HLS → log pour debug
             Log.v(TAG, "HLS segment (not Xtream) detected, reconnect DISABLED for ${dataSpec.uri}")
         }
-        return wrapped.open(dataSpec)
+        // v64 : si Stalker play.php renvoie 456 (MAC rate-limit), désactive
+        //   reconnect — sinon boucle infinie de retry qui sature le CPU.
+        try {
+            return wrapped.open(dataSpec)
+        } catch (e: androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) {
+            if (e.responseCode == 456 || e.responseCode == 401 || e.responseCode == 402 || e.responseCode == 451) {
+                Log.w(TAG, "Hard fail HTTP ${e.responseCode} on ${dataSpec.uri} — disabling reconnect to prevent CPU saturation")
+                enableReconnect = false
+            }
+            throw e
+        }
     }
 
     override fun read(buffer: ByteArray, offset: Int, readLength: Int): Int {

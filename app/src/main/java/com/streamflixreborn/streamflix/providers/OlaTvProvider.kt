@@ -2086,8 +2086,29 @@ object OlaTvProvider : Provider, IptvProvider {
                 if (dead) Log.d(TAG, "  filtered dead-domain stream: ${stream.label} ($host)")
                 !dead
             }
+
+            // 2026-05-17 v15 : extraire les (cid, label) des favoris pour cette chaîne.
+            //   Le user a marqué un stream variant spécifique → on le met EN PREMIER
+            //   dans le sort. Les favoris OLA sont stockés au format
+            //   "ola_stream::cid::label::url" (URL non stable entre sessions, on garde
+            //   uniquement (cid, label) qui sont la partie canonique).
+            val favoriteKeys: Set<Pair<String, String>> = try {
+                com.streamflixreborn.streamflix.fragments.player.settings.IptvFavorites
+                    .getFavoritesForChannel(id)
+                    .mapNotNull { favId ->
+                        val parts = favId.removePrefix("ola_stream::").split("::", limit = 3)
+                        if (parts.size >= 2) parts[0] to parts[1] else null
+                    }
+                    .toSet()
+            } catch (_: Exception) { emptySet() }
+            if (favoriteKeys.isNotEmpty()) {
+                Log.d(TAG, "getServers '$key': ${favoriteKeys.size} favoris connus, prioritisation activée")
+            }
+
             val sorted = aliveStreams.sortedWith(
-                compareByDescending<OlaStreamRef> { it.url in probeOkCache }  // known-good first
+                // Favori EN PRIORITÉ ABSOLUE (passe avant probeOkCache même)
+                compareByDescending<OlaStreamRef> { (it.cid to it.label) in favoriteKeys }
+                    .thenByDescending { it.url in probeOkCache }              // known-good first
                     .thenBy { it.url in demotedUrls }                         // known-bad last
                     .thenByDescending {                                        // direct > MAC portal
                         val raw = it.url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()

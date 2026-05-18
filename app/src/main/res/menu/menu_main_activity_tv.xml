@@ -28,22 +28,28 @@
         android:icon="@drawable/ic_menu_series"
         android:title="@string/main_menu_tv_shows" />
 
+    <!-- 2026-05-14 (user "les icônes de la barre de gauche ne correspondent pas
+         au provider en général pour les animés tu m'as mis des icônes pour un
+         provider IPTV") : les 3 items IPTV sont invisibles par défaut. Le code
+         Java (updateNavigationVisibility) ne les affiche QUE pour les providers
+         IPTV (Favoris) / MyIptv (Catégories) / MyIptv+Vavoo (Pays-langue). -->
     <item
         android:id="@+id/iptv_favorites"
         android:icon="@drawable/ic_favorite_enable"
-        android:title="@string/main_menu_favorites" />
+        android:title="@string/main_menu_favorites"
+        android:visible="false" />
 
-    <!-- 2026-05-13 (user "mettre les 3 items avec favoris") : groupés avec
-         Favoris pour grouper visuellement les 3 fonctionnalités IPTV. -->
     <item
         android:id="@+id/iptv_categories_menu"
         android:icon="@drawable/ic_categories_filter"
-        android:title="Catégories" />
+        android:title="Catégories"
+        android:visible="false" />
 
     <item
         android:id="@+id/iptv_language_menu"
         android:icon="@drawable/ic_iptv_language"
-        android:title="Pays/langue" />
+        android:title="Pays/langue"
+        android:visible="false" />
 
     <item
         android:id="@id/settings"

@@ -98,6 +98,18 @@ object VavooProvider : Provider, IptvProvider {
     @Volatile private var lastLoadTime = 0L
     private const val CACHE_DURATION = 30 * 60 * 1000L // 30 min
 
+    // 2026-05-17 v59 (user "obligé de zapper et revenir pour que TF1 charge") :
+    //   Le catalogue Vavoo met ~8.5s à charger via mediahubmx-catalog.json.
+    //   Si le user clique vite sur une chaîne dans le menu, getServers() est
+    //   appelé dans une coroutine d'écran qui se fait CANCEL pendant la
+    //   navigation Mini→Fullscreen → catalogue load avorté → channel pas
+    //   résolue → écran noir/BUFFERING infini jusqu'au WATCHDOG.
+    //   FIX : lancer le load dans un applicationScope (GlobalScope) qui
+    //   survit aux changements d'écran. Les callers de getServers/getHome
+    //   await ce job via CompletableDeferred — si caller est cancel,
+    //   le job continue, et le prochain caller récupère le résultat.
+    @Volatile private var ongoingLoad: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+
     /** 2026-05-13 (user "tu peux pas faire comme MyIPTV et choisir la langue") :
      *  filtre pays courant. Default "France" pour back-compat. Mis à jour par
      *  VavooCountrySettings.setCurrent() ou directement via setCountryFilter()
@@ -822,11 +834,28 @@ object VavooProvider : Provider, IptvProvider {
     //  Registry management
     // ═══════════════════════════════════════════
 
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
     private suspend fun ensureRegistry() {
         if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return
+        // v59 : si un load est déjà en cours dans GlobalScope, on l'await
+        //   sans relancer (et sans se faire cancel par l'écran caller).
+        val existing = ongoingLoad
+        if (existing != null && !existing.isCompleted) {
+            try { existing.await() } catch (_: Exception) {}
+            return
+        }
         registryMutex.withLock {
             if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return
-            withContext(Dispatchers.IO) {
+            val existing2 = ongoingLoad
+            if (existing2 != null && !existing2.isCompleted) {
+                try { existing2.await() } catch (_: Exception) {}
+                return
+            }
+            // Crée un Deferred et lance le load dans GlobalScope (survit aux
+            // cancellations de l'écran courant). Le caller awaits le Deferred.
+            val deferred = kotlinx.coroutines.CompletableDeferred<Boolean>()
+            ongoingLoad = deferred
+            kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
                 val t = System.currentTimeMillis()
                 try {
                     val signature = getAddonSignature()
@@ -850,14 +879,35 @@ object VavooProvider : Provider, IptvProvider {
                         cachedOrderedIds = null // invalidate cache, sera recalculé au prochain accès
                         registryLoaded = true
                         lastLoadTime = System.currentTimeMillis()
-                        Log.d(TAG, "✓ Registry loaded: ${channels.size} channels in ${System.currentTimeMillis() - t}ms")
+                        Log.d(TAG, "✓ v59 Registry loaded (GlobalScope): ${channels.size} channels in ${System.currentTimeMillis() - t}ms")
+                        deferred.complete(true)
                     } else {
                         Log.w(TAG, "No FR channels found from any base site")
+                        deferred.complete(false)
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Registry load failed: ${e.message}")
+                    deferred.complete(false)
+                } finally {
+                    ongoingLoad = null
                 }
             }
+            // Await le deferred — si le caller se fait cancel ici, le job
+            //   GlobalScope continue en background et le prochain caller
+            //   trouvera registryLoaded=true (cache hit early-return).
+            try { deferred.await() } catch (_: Exception) {}
+        }
+    }
+
+    // v59 : pré-charge le catalogue Vavoo en background, no-blocking.
+    //   À appeler dès qu'on rentre dans le menu Vavoo TV pour que les
+    //   premiers clics user trouvent le catalogue prêt.
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    fun warmUpRegistry() {
+        if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return
+        if (ongoingLoad?.isCompleted == false) return // already loading
+        kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+            try { ensureRegistry() } catch (_: Exception) {}
         }
     }
 

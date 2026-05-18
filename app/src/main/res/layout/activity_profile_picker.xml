@@ -18,11 +18,15 @@
         app:layout_constraintTop_toTopOf="parent"
         tools:ignore="ContentDescription" />
 
+    <!-- 2026-05-14 (user "sur mobile tu pourrais pas redescendre un peu
+         l'ensemble que ça fasse plus jolie") : title+RV regroupés en chain
+         vertical centré dans l'écran (au lieu de coller en haut avec un grand
+         vide en dessous). Le RV est wrap_content et le chain centre l'ensemble
+         entre top parent et top du bouton "Gérer". -->
     <TextView
         android:id="@+id/tv_profile_picker_title"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginTop="64dp"
         android:layout_marginStart="32dp"
         android:layout_marginEnd="32dp"
         android:gravity="center"
@@ -32,18 +36,19 @@
         android:textStyle="bold"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent" />
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toTopOf="@id/rv_profiles"
+        app:layout_constraintVertical_chainStyle="packed"
+        app:layout_constraintVertical_bias="0.55" />
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rv_profiles"
         android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:layout_marginTop="48dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="40dp"
         android:layout_marginStart="32dp"
         android:layout_marginEnd="32dp"
-        android:layout_marginBottom="32dp"
         android:clipToPadding="false"
-        android:paddingBottom="32dp"
         app:layoutManager="androidx.recyclerview.widget.GridLayoutManager"
         app:spanCount="3"
         app:layout_constraintBottom_toTopOf="@id/btn_manage_profiles"

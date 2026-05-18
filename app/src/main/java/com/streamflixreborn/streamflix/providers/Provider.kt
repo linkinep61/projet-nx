@@ -108,6 +108,17 @@ interface Provider {
             aploufProvider to ProviderSupport(movies = true, tvShows = false),
             FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME),
             FrenchAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
+            // 2026-05-14 : DessinAnime (dessinanime.cc) — provider standalone dessins
+            // animés FR. Next.js + API /api/search propre. Catalogue : classiques
+            // (Dragon Ball, Sailor Moon, Astérix, Tintin, Les Simpson…) + animes
+            // modernes. Hosts vidéo supportés : uqload + sendvid (extractors existants).
+            // 2026-05-16 : DÉSACTIVÉ — serveur dessinanime.cc instable (CF 524 chroniques).
+            // Réactiver quand le serveur sera de nouveau fiable.
+            // DessinAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
+            // 2026-05-16 : FRAnime (franime.fr) — Provider anime FR. Next.js SSR + API
+            // JSON séparée api.franime.fr. Hosts vidéo : sibnet, sendvid (extractors
+            // existants). Series-only (films groupés dans le catalogue anime).
+            FranimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             KidrazProvider to ProviderSupport(movies = true, tvShows = false),
             WiflixProvider to ProviderSupport(movies = true, tvShows = true),
             VoirDramaProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
@@ -130,12 +141,7 @@ interface Provider {
             WiTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             OlaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             VegetaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
-            // 2026-05-11 : 3BoxTV — backup IPTV agrégateur (Google Sheets TSV).
-            // Parser TSV heuristique + logging debug actif. Logo nettoyé.
-            // Si le parser cale sur certaines catégories, on calibrera via les logs.
-            // 2026-05-12 : DÉSACTIVÉ (demande user). Le fichier BoxXtemusProvider.kt
-            // reste en place — pour réactiver, dé-commenter la ligne ci-dessous.
-            // BoxXtemusProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
+            // 2026-05-17 : 3BoxTV/BoxXtemus complètement retiré (fichier supprimé).
             // 2026-05-10 : SportLiveProvider supprimé (demande user). Le
             // fichier .kt physique a été retiré. Pour les chaînes sport, le
             // user passe directement par WiTV/Vegeta/Vavoo qui les listent.

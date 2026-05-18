@@ -52,12 +52,30 @@ object IptvFavoritesStore {
             return vid.lowercase().trim()
         }
 
-        // 2026-05-11 : 3BoxTV — même logique que Vavoo, ID interne opaque.
-        if (channelId.startsWith("bxt::")) {
-            val canonical = com.streamflixreborn.streamflix.providers.BoxXtemusProvider
-                .toCanonicalKey(channelId)
-            if (!canonical.isNullOrBlank()) return canonical
-            return channelId.substringAfterLast("::").lowercase().trim()
+        // 2026-05-17 : 3BoxTV/BoxXtemus retiré du projet — bloc bxt:: supprimé.
+
+        // 2026-05-15 (user "est-ce que les chaînes en favoris vont continuer
+        // apparaître dans TV hub") : les chaînes LiveTvHub nouvellement ajoutées
+        // (bonus bolaloca, freeshot, dailymotion) ont des IDs composites qui
+        // collent au même prefix après le strip de "livehub::". Sans ce
+        // traitement spécifique, "livehub::freeshot::460::tf1" devenait
+        // "freeshot" — toutes les chaînes freeshot partageaient le même favori.
+        // Maintenant : on extrait le slug réel pour matcher cross-provider.
+        if (channelId.startsWith("livehub::freeshot::")) {
+            // Format: livehub::freeshot::<id>::<slug> → slug
+            return channelId.substringAfterLast("::")
+                .replace("-", "")  // "bfm-paris" → "bfmparis" pour matcher curated
+                .lowercase().trim()
+        }
+        if (channelId.startsWith("livehub::bonus::")) {
+            // Format: livehub::bonus::<num> → "bonus<num>" (clé unique par chaîne)
+            return "bonus" + channelId.removePrefix("livehub::bonus::")
+                .substringBefore("::").lowercase().trim()
+        }
+        if (channelId.startsWith("livehub::dailymotion::")) {
+            // Format: livehub::dailymotion::<videoId> → "dm<videoId>"
+            return "dm" + channelId.removePrefix("livehub::dailymotion::")
+                .substringBefore("::").lowercase().trim()
         }
 
         return channelId
@@ -83,7 +101,6 @@ object IptvFavoritesStore {
         "Vegeta TV" -> "vegeta::"
         "TV Hub" -> "livehub::"
         "Vavoo TV" -> "vavoo::"
-        "3BoxTV" -> "bxt::"
         else -> ""
     }
 

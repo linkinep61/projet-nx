@@ -71,6 +71,14 @@
             android:theme="@style/AppTheme.Tv" />
 
         <activity
+            android:name=".activities.tools.FranimeCaptureActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:theme="@style/AppTheme.Tv" />
+
+        <activity
             android:name=".activities.tools.PapadustreamCaptchaActivity"
             android:exported="false"
             android:hardwareAccelerated="true"

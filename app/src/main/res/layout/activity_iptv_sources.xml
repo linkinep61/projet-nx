@@ -6,17 +6,22 @@
     android:layout_height="match_parent"
     android:background="#181818">
 
+    <!-- 2026-05-14 (user "l'écriture est pas comme il faudrait à gauche") :
+         retiré marginEnd=180dp qui rendait la largeur dispo négative sur mobile.
+         marginTop=80dp pour descendre l'ensemble du haut (statut bar + souffle). -->
     <TextView
         android:id="@+id/tv_iptv_sources_title"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginTop="32dp"
+        android:layout_marginTop="80dp"
         android:layout_marginStart="32dp"
-        android:layout_marginEnd="180dp"
+        android:layout_marginEnd="12dp"
         android:text="Mes sources IPTV"
         android:textColor="#FFFFFF"
         android:textSize="22sp"
         android:textStyle="bold"
+        android:maxLines="1"
+        android:ellipsize="end"
         app:layout_constraintEnd_toStartOf="@id/btn_home_loaded"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
@@ -28,7 +33,7 @@
         android:id="@+id/btn_home_loaded"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="24dp"
+        android:layout_marginTop="72dp"
         android:layout_marginEnd="32dp"
         android:paddingStart="16dp"
         android:paddingEnd="16dp"

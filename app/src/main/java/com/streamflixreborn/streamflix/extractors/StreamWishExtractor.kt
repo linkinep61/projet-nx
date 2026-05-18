@@ -109,7 +109,8 @@ open class StreamWishExtractor : Extractor() {
         "https://streamwish.live",
         "https://streamwish.me",
         "https://hgcloud.to",
-        "https://smoothpre.com",
+        // 2026-05-16 : smoothpre.com retiré — SmoothpreExtractor dédié plus fiable
+        // (pas de WebView-redirect, regex JWPlayer direct cf VidHide pattern).
     )
 
     protected var referer = ""

@@ -108,25 +108,12 @@ class MoviesTvFragment : Fragment() {
     }
 
 
-    /** 2026-05-13 (user "il n'y a pas l'icône catégorie dans film et dans série") :
-     *  initialise les 2 boutons IPTV — catégories + filtre langue. Visibles
-     *  uniquement sur Mon IPTV. Délègue aux helpers publics de MainTvActivity. */
+    /** 2026-05-14 (user "j'ai deux icônes en haut en trop car ils sont dans la
+     *  barre de gauche") : les boutons IPTV sont maintenant dans la sidebar
+     *  nav_main (items iptv_categories_menu + iptv_language_menu sur TV). Le
+     *  LinearLayout en haut est cachéen permanence pour pas faire doublon. */
     private fun initializeIptvActions() {
-        val isIptv = UserPreferences.currentProvider is
-            com.streamflixreborn.streamflix.providers.MyIptvProvider
-        if (!isIptv) {
-            binding.llIptvActions.visibility = View.GONE
-            return
-        }
-        binding.llIptvActions.visibility = View.VISIBLE
-        binding.ivIptvCategories.setOnClickListener {
-            (requireActivity() as? com.streamflixreborn.streamflix.activities.main.MainTvActivity)
-                ?.showIptvCategoryPickerPublic(R.id.movies)
-        }
-        binding.ivIptvLanguage.setOnClickListener {
-            (requireActivity() as? com.streamflixreborn.streamflix.activities.main.MainTvActivity)
-                ?.showIptvLanguageFilterPicker()
-        }
+        binding.llIptvActions.visibility = View.GONE
     }
 
     private fun initializeLanguageTabs() {

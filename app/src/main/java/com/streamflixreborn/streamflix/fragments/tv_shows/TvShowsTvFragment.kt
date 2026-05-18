@@ -163,8 +163,6 @@ class TvShowsTvFragment : Fragment() {
                     MiniPlayerController.transitioningToFullscreen = true
                     if (_binding != null) { binding.miniPlayerView.player = null }
                     false
-                } else if (tvShow.id.startsWith("bxt::")) {
-                    false
                 } else {
                     Log.d("TvShowsTv", "Mini player intercept (onResume): ${tvShow.title}")
                     MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
@@ -175,25 +173,11 @@ class TvShowsTvFragment : Fragment() {
     }
 
 
-    /** 2026-05-13 (user "il n'y a pas l'icône catégorie dans film et dans série") :
-     *  initialise les 2 boutons IPTV — catégories + filtre langue. Visibles
-     *  uniquement sur Mon IPTV. */
+    /** 2026-05-14 (user "j'ai deux icônes en haut en trop car ils sont dans la
+     *  barre de gauche") : les boutons IPTV sont dans la sidebar nav_main. Le
+     *  LinearLayout en haut est caché en permanence pour pas faire doublon. */
     private fun initializeIptvActions() {
-        val isIptv = UserPreferences.currentProvider is
-            com.streamflixreborn.streamflix.providers.MyIptvProvider
-        if (!isIptv) {
-            binding.llIptvActions.visibility = View.GONE
-            return
-        }
-        binding.llIptvActions.visibility = View.VISIBLE
-        binding.ivIptvCategories.setOnClickListener {
-            (requireActivity() as? com.streamflixreborn.streamflix.activities.main.MainTvActivity)
-                ?.showIptvCategoryPickerPublic(R.id.tv_shows)
-        }
-        binding.ivIptvLanguage.setOnClickListener {
-            (requireActivity() as? com.streamflixreborn.streamflix.activities.main.MainTvActivity)
-                ?.showIptvLanguageFilterPicker()
-        }
+        binding.llIptvActions.visibility = View.GONE
     }
 
     private fun initializeLanguageTabs() {
@@ -315,6 +299,11 @@ class TvShowsTvFragment : Fragment() {
                     is MiniPlayerController.State.Error -> {
                         binding.miniPlayerLoading.visibility = View.GONE
                         Log.e("TvShowsTv", "Mini player error: ${state.message}")
+                        // 2026-05-14 (user "tu vois pas que la vidéo mouline depuis tout
+                        // à l'heure") : feedback visible.
+                        Toast.makeText(requireContext(),
+                            "Stream indisponible — essaie une autre chaîne",
+                            Toast.LENGTH_LONG).show()
                     }
                 }
             }
@@ -333,8 +322,6 @@ class TvShowsTvFragment : Fragment() {
                 Log.d("TvShowsTv", "Same channel, flagging for transfer: ${tvShow.title}")
                 MiniPlayerController.transitioningToFullscreen = true
                 if (_binding != null) { binding.miniPlayerView.player = null }
-                false
-            } else if (tvShow.id.startsWith("bxt::")) {
                 false
             } else {
                 Log.d("TvShowsTv", "Mini player intercept: ${tvShow.title} (${tvShow.id})")

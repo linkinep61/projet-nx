@@ -24,6 +24,19 @@
         app:show_timeout="2000"
         app:surface_type="texture_view" />
 
+    <!-- Mobile port v54 : overlay freeze frame pendant les swaps live IPTV.
+         Mêmes constraints que pv_player. visibility=gone par défaut. -->
+    <ImageView
+        android:id="@+id/swap_freeze_overlay"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:scaleType="fitCenter"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="@+id/pv_player"
+        app:layout_constraintEnd_toEndOf="@+id/pv_player"
+        app:layout_constraintStart_toStartOf="@+id/pv_player"
+        app:layout_constraintTop_toTopOf="@+id/pv_player" />
+
     <com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsMobileView
         android:id="@+id/settings"
         android:layout_width="300dp"
@@ -75,6 +88,21 @@
                 android:text="Chargement…"
                 android:textColor="#FFFFFF"
                 android:textSize="16sp" />
+
+            <!-- 2026-05-16 : hint clickable. Si l'extracteur galère, user
+                 peut tap pour annuler + choisir un autre lecteur. -->
+            <TextView
+                android:id="@+id/loading_overlay_hint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:background="#33FFFFFF"
+                android:paddingHorizontal="20dp"
+                android:paddingVertical="10dp"
+                android:text="Toucher pour changer de serveur"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:textStyle="italic" />
         </LinearLayout>
 
         <!-- Barre de progression fictive en bas qui s'anime de 0 à 95% sur 5s

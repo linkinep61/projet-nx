@@ -11,6 +11,7 @@ import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
@@ -104,62 +105,30 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
     }
 
 
-    fun getTvShows() = viewModelScope.launch(Dispatchers.IO) {
-        _state.emit(State.Loading)
+    /** 2026-05-14 (user "des fois il faut cliquer plusieurs fois pour changer
+     *  de catégorie") : track le job de fetch actuel pour pouvoir le canceler
+     *  AVANT de lancer un nouveau getTvShows. Sans ça, un loadMoreTvShows en
+     *  cours pouvait terminer APRÈS getTvShows et écraser le state. */
+    @Volatile private var loadJob: Job? = null
 
-        try {
-            val provider = UserPreferences.currentProvider ?: return@launch
-            Log.d("TvShowsViewModel", "getTvShows: provider=${provider.name}, isFilterable=${provider is FilterableProvider}, languageFilter=$languageFilter")
-            var tvShows = if (provider is FilterableProvider && languageFilter != "all") {
-                Log.d("TvShowsViewModel", "getTvShows: using FILTERED with language=$languageFilter")
-                ParentalControlUtils.filterItems(
-                    provider.getFilteredTvShows(languageFilter)
-                ).filterIsInstance<TvShow>()
-            } else {
-                Log.d("TvShowsViewModel", "getTvShows: using STANDARD (no filter)")
-                ParentalControlUtils.filterItems(
-                    provider.getTvShows()
-                ).filterIsInstance<TvShow>()
-            }
-
-            // For type-filterable providers that don't implement FilterableProvider,
-            // apply local serie/film filtering after fetch
-            if (provider.name in typeFilterProviders && provider !is FilterableProvider) {
-                tvShows = when (languageFilter) {
-                    "serie" -> tvShows.filter { !it.isMovie }
-                    "film" -> tvShows.filter { it.isMovie }
-                    else -> tvShows
-                }
-            }
-
-            Log.d("TvShowsViewModel", "getTvShows: got ${tvShows.size} tvShows")
-            page = 1
-
-            _state.emit(State.SuccessLoading(tvShows, true))
-        } catch (e: Exception) {
-            Log.e("TvShowsViewModel", "getTvShows: ", e)
-            _state.emit(State.FailedLoading(e))
-        }
-    }
-
-    fun loadMoreTvShows() = viewModelScope.launch(Dispatchers.IO) {
-        val currentState = _state.value
-        if (currentState is State.SuccessLoading) {
-            _state.emit(State.LoadingMore)
-
+    fun getTvShows() {
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch(Dispatchers.IO) {
+            _state.emit(State.Loading)
             try {
                 val provider = UserPreferences.currentProvider ?: return@launch
+                Log.d("TvShowsViewModel", "getTvShows: provider=${provider.name}, isFilterable=${provider is FilterableProvider}, languageFilter=$languageFilter")
                 var tvShows = if (provider is FilterableProvider && languageFilter != "all") {
+                    Log.d("TvShowsViewModel", "getTvShows: using FILTERED with language=$languageFilter")
                     ParentalControlUtils.filterItems(
-                        provider.getFilteredTvShows(languageFilter, page + 1)
+                        provider.getFilteredTvShows(languageFilter)
                     ).filterIsInstance<TvShow>()
                 } else {
+                    Log.d("TvShowsViewModel", "getTvShows: using STANDARD (no filter)")
                     ParentalControlUtils.filterItems(
-                        provider.getTvShows(page + 1)
+                        provider.getTvShows()
                     ).filterIsInstance<TvShow>()
                 }
-
-                // Local type filter for non-FilterableProvider providers
                 if (provider.name in typeFilterProviders && provider !is FilterableProvider) {
                     tvShows = when (languageFilter) {
                         "serie" -> tvShows.filter { !it.isMovie }
@@ -167,18 +136,53 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
                         else -> tvShows
                     }
                 }
-
-                page += 1
-
-                _state.emit(
-                    State.SuccessLoading(
-                        tvShows = currentState.tvShows + tvShows,
-                        hasMore = tvShows.isNotEmpty(),
-                    )
-                )
+                Log.d("TvShowsViewModel", "getTvShows: got ${tvShows.size} tvShows")
+                page = 1
+                _state.emit(State.SuccessLoading(tvShows, true))
             } catch (e: Exception) {
-                Log.e("TvShowsViewModel", "loadMoreTvShows: ", e)
+                Log.e("TvShowsViewModel", "getTvShows: ", e)
                 _state.emit(State.FailedLoading(e))
+            }
+        }
+    }
+
+    fun loadMoreTvShows() {
+        if (loadJob?.isActive == true) return
+        loadJob = viewModelScope.launch(Dispatchers.IO) {
+            val currentState = _state.value
+            if (currentState is State.SuccessLoading) {
+                _state.emit(State.LoadingMore)
+                try {
+                    val provider = UserPreferences.currentProvider ?: return@launch
+                    var tvShows = if (provider is FilterableProvider && languageFilter != "all") {
+                        ParentalControlUtils.filterItems(
+                            provider.getFilteredTvShows(languageFilter, page + 1)
+                        ).filterIsInstance<TvShow>()
+                    } else {
+                        ParentalControlUtils.filterItems(
+                            provider.getTvShows(page + 1)
+                        ).filterIsInstance<TvShow>()
+                    }
+                    if (provider.name in typeFilterProviders && provider !is FilterableProvider) {
+                        tvShows = when (languageFilter) {
+                            "serie" -> tvShows.filter { !it.isMovie }
+                            "film" -> tvShows.filter { it.isMovie }
+                            else -> tvShows
+                        }
+                    }
+                    page += 1
+                    // 2026-05-14 (user "jaquettes en double") : dédup par ID.
+                    val merged = (currentState.tvShows + tvShows).distinctBy { it.id.ifBlank { it.title } }
+                    _state.emit(
+                        State.SuccessLoading(
+                            tvShows = merged,
+                            hasMore = tvShows.isNotEmpty(),
+                        )
+                    )
+                } catch (e: Exception) {
+                    Log.e("TvShowsViewModel", "loadMoreTvShows: ", e)
+                    _state.emit(State.FailedLoading(e))
+                }
             }
         }
     }

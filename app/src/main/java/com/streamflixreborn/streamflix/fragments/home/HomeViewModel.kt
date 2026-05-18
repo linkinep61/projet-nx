@@ -380,14 +380,43 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         }.awaitAll()
     }
 
+    /** 2026-05-16 : provider en cours de chargement, set DÈS le launch (pas
+     *  depuis getHomeInternal qui peut être schedulé après plusieurs calls).
+     *  Sans ça, le check `currentProvider == newProvider` retourne false la
+     *  1ère fois parce que getHomeInternal n'a pas encore set currentProvider. */
+    @Volatile
+    private var currentlyLoadingProvider: String? = null
+
     fun getHome() {
         // Cancel any previous getHome() — without this, init + ProviderChangeNotifier
         // can race and launch 2-4 concurrent enrichments that each rebuild the
         // home with different category labels at the same row, causing the UI
         // to flicker between "Séries Récentes" and "Films Récents" indefinitely.
+        //
+        // 2026-05-16 (user "dessin animé page noire pas de chargement, autres
+        // providers instantanés") : sur DessinAnime le getHome() prend ~30-50s
+        // (Cloudflare lent). Si init + ProviderChangeNotifier firent 2-3 events
+        // dans cette fenêtre, on cancel-relance en boucle et l'user ne voit
+        // JAMAIS le résultat. Fix : si un job est déjà actif pour le MÊME
+        // provider, on ne le cancel pas — on le laisse finir.
+        val newProviderKey = UserPreferences.currentProvider?.name
+        val activeJob = homeJob
+        if (activeJob != null && activeJob.isActive && currentlyLoadingProvider == newProviderKey) {
+            android.util.Log.d("HomeViewModel", "getHome() skip — job déjà actif pour $newProviderKey")
+            return
+        }
+        currentlyLoadingProvider = newProviderKey
         homeJob?.cancel()
         homeJob = viewModelScope.launch(Dispatchers.IO) {
-            getHomeInternal()
+            try {
+                getHomeInternal()
+            } finally {
+                // Reset uniquement si on est encore le "currently loading"
+                // — sinon un autre call concurrent a déjà repris.
+                if (currentlyLoadingProvider == newProviderKey) {
+                    currentlyLoadingProvider = null
+                }
+            }
         }
     }
 

@@ -242,9 +242,6 @@ class HomeTvFragment : Fragment() {
                     MiniPlayerController.transitioningToFullscreen = true
                     if (_binding != null) { binding.miniPlayerView.player = null }
                     false
-                } else if (tvShow.id.startsWith("bxt::")) {
-                    // 2026-05-12 : bxt:: skip mini → direct fullscreen
-                    false
                 } else {
                     Log.d("HomeTv", "Mini player intercept (onResume): ${tvShow.title}")
                     MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
@@ -300,6 +297,12 @@ class HomeTvFragment : Fragment() {
                     is MiniPlayerController.State.Error -> {
                         binding.miniPlayerLoading.visibility = View.GONE
                         Log.e("HomeTv", "Mini player error: ${state.message}")
+                        // 2026-05-14 (user "tu vois pas que la vidéo mouline depuis tout
+                        // à l'heure") : feedback visible pour ne pas laisser le user
+                        // dans le flou.
+                        Toast.makeText(requireContext(),
+                            "Stream indisponible — essaie une autre chaîne",
+                            Toast.LENGTH_LONG).show()
                     }
                 }
             }
@@ -318,9 +321,6 @@ class HomeTvFragment : Fragment() {
                 Log.d("HomeTv", "Same channel clicked, flagging for transfer: ${tvShow.title}")
                 MiniPlayerController.transitioningToFullscreen = true
                 if (_binding != null) { binding.miniPlayerView.player = null }
-                false
-            } else if (tvShow.id.startsWith("bxt::")) {
-                // 2026-05-12 : bxt:: skip mini → direct fullscreen
                 false
             } else {
                 Log.d("HomeTv", "Mini player intercept: ${tvShow.title} (${tvShow.id})")

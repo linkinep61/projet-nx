@@ -121,6 +121,12 @@ object UserPreferences {
             runCatching {
                 ArtworkRepairScheduler.schedule(StreamFlixApp.instance, value)
             }
+            // 2026-05-17 (user "fermeture du provider doit être vidé") : clear
+            //   le cache DVR sur changement de provider — segments précédents
+            //   inutiles + risque de servir du contenu obsolète.
+            try {
+                StreamFlixApp.clearLiveCache()
+            } catch (_: Exception) { }
             // Notify all ViewModels that the provider has changed
             ProviderChangeNotifier.notifyProviderChanged()
         }
@@ -224,6 +230,18 @@ object UserPreferences {
             Key.AUTOPLAY.setBoolean(value)
         }
 
+    // 2026-05-15 (user "je voudrais ajouter une option sur l'application pour
+    // éviter que les écrans mettre en veille tous les 5 minutes") : flag global
+    // pour garder l'écran allumé pendant l'utilisation de l'app (navigation
+    // home / picker / catalogue / etc.). N'affecte PAS la lecture vidéo
+    // (le player gère son propre FLAG_KEEP_SCREEN_ON). Default OFF pour ne pas
+    // drainer la batterie sur mobile par surprise.
+    var keepScreenOnApp: Boolean
+        get() = Key.KEEP_SCREEN_ON_APP.getBoolean() ?: false
+        set(value) {
+            Key.KEEP_SCREEN_ON_APP.setBoolean(value)
+        }
+
     var keepScreenOnWhenPaused: Boolean
         get() = Key.KEEP_SCREEN_ON_WHEN_PAUSED.getBoolean() ?: false
         set(value) {
@@ -258,6 +276,16 @@ object UserPreferences {
         get() = Key.SERVER_AUTO_SUBTITLES_DISABLED.getBoolean() ?: true
         set(value) {
             Key.SERVER_AUTO_SUBTITLES_DISABLED.setBoolean(value)
+        }
+
+    // 2026-05-15 (user "ajoute le sub anglais pour ceux qui veulent dans Open
+    // subtitles, censé être activable sur tous les providers") : flag global
+    // pour récupérer ÉGALEMENT les subs anglais (en plus du FR par défaut).
+    // Default = false pour préserver le comportement actuel.
+    var enableEnglishSubtitles: Boolean
+        get() = Key.ENABLE_ENGLISH_SUBTITLES.getBoolean() ?: false
+        set(value) {
+            Key.ENABLE_ENGLISH_SUBTITLES.setBoolean(value)
         }
 
     var selectedTheme: String
@@ -601,6 +629,7 @@ object UserPreferences {
         AUTOPLAY,
         PROVIDER_CACHE,
         KEEP_SCREEN_ON_WHEN_PAUSED,
+        KEEP_SCREEN_ON_APP,
         PLAYER_GESTURES,
         IMMERSIVE_MODE,
         TMDB_API_KEY,
@@ -608,6 +637,7 @@ object UserPreferences {
         FORCE_EXTRA_BUFFERING,
         AUTOPLAY_BUFFER,
         SERVER_AUTO_SUBTITLES_DISABLED,
+        ENABLE_ENGLISH_SUBTITLES,
         ENABLE_TMDB,
         PARENTAL_CONTROL_PIN,
         PARENTAL_CONTROL_ADMIN_PIN,

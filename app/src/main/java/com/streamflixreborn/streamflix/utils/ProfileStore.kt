@@ -25,6 +25,17 @@ object ProfileStore {
     private const val KEY_PROFILES_JSON = "profiles_json"
     private const val KEY_CURRENT_PROFILE_ID = "current_profile_id"
     private const val KEY_PROFILES_BOOTSTRAPPED = "profiles_bootstrapped"
+    /** 2026-05-17 : timestamp de dernière activité utilisateur. Sert à
+     *  distinguer un vrai cold start (app fermée depuis longtemps → ouvrir le
+     *  ProfilePicker) d'une recréation de process Android (low-memory ou TV
+     *  background-kill → garder le profil actif). */
+    private const val KEY_LAST_ACTIVE_TIMESTAMP = "profile_last_active_ts"
+
+    /** Durée au-delà de laquelle on considère que c'est un vrai cold start
+     *  (et donc qu'on ouvre le ProfilePicker). 30 minutes = compromis :
+     *  process recreation Chromecast OK, mais "j'ouvre l'app le lendemain"
+     *  re-passe par le picker. */
+    private const val ACTIVE_SESSION_WINDOW_MS = 30L * 60L * 1000L
 
     private lateinit var prefs: SharedPreferences
 
@@ -117,6 +128,24 @@ object ProfileStore {
     }
 
     fun getCurrentProfile(): Profile? = getCurrentProfileId()?.let { getById(it) }
+
+    /** 2026-05-17 : retourne true si la dernière session est récente (< 30 min).
+     *  Quand true, StreamFlixApp.onCreate NE doit PAS clear le profil — c'est
+     *  juste une recréation de process Android, pas un vrai cold start.
+     *  Quand false (ou pas de timestamp), c'est un vrai cold start → on clear. */
+    fun isRecentlyActive(): Boolean {
+        val last = prefs.getLong(KEY_LAST_ACTIVE_TIMESTAMP, 0L)
+        if (last <= 0L) return false
+        val age = System.currentTimeMillis() - last
+        return age in 0..ACTIVE_SESSION_WINDOW_MS
+    }
+
+    /** Marque la session comme active (appelé depuis Activity.onResume).
+     *  Mis à jour à chaque interaction utilisateur → permet de détecter
+     *  qu'un process kill/recreate récent ≠ vrai cold start. */
+    fun touchLastActiveTimestamp() {
+        prefs.edit().putLong(KEY_LAST_ACTIVE_TIMESTAMP, System.currentTimeMillis()).apply()
+    }
 
     /** Génère un id stable pour un nouveau profil — basé sur timestamp + suffix
      *  random pour éviter les collisions sur création rapide. */

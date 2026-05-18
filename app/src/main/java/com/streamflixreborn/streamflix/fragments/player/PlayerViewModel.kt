@@ -193,11 +193,21 @@ class PlayerViewModel(
     private fun preExtractTopServersInBackground(servers: List<Video.Server>) {
         preExtractJob?.cancel()
         if (servers.isEmpty()) return
-        val toExtract = servers.take(PRE_EXTRACT_TOP_N)
+        // v69 (user "FRAnime galère à chaque serveur") :
+        //   FRAnime utilise un mutex global dans FranimeSession (WebView
+        //   single-thread). Pré-extraire 4 servers en parallèle = file
+        //   d'attente de 4 × 5s = 20s sérialisés. Pour FRAnime, on limite
+        //   à 1 (le premier) → l'extract demandé par le user passe instant
+        //   au lieu de queuer derrière 3 autres pré-extracts.
+        val providerName = UserPreferences.currentProvider?.name.orEmpty()
+        val isFranime = providerName.equals("FRAnime", ignoreCase = true) ||
+            providerName.contains("Franime", ignoreCase = true)
+        val effectiveTopN = if (isFranime) 1 else PRE_EXTRACT_TOP_N
+        val toExtract = servers.take(effectiveTopN)
         // 2026-05-12 : skip IPTV — chaînes live, pas pertinent
         val providerNameForHead = UserPreferences.currentProvider?.name.orEmpty()
         val isIptvProvider = providerNameForHead in setOf(
-            "WiTv", "OlaTv", "VegetaTv", "Vavoo", "3BoxTV", "LiveTvHub", "SportLive"
+            "WiTv", "OlaTv", "VegetaTv", "Vavoo", "LiveTvHub", "SportLive"
         )
         preExtractJob = viewModelScope.launch(Dispatchers.IO) {
             // 2026-05-12 : SCAN HEAD léger sur TOUS les servers en background.
@@ -274,7 +284,7 @@ class PlayerViewModel(
                             // (typiquement 1-2 par chaîne), donc l'optim apporte rien.
                             val providerName = UserPreferences.currentProvider?.name.orEmpty()
                             val isIptv = providerName in setOf(
-                                "WiTv", "OlaTv", "VegetaTv", "Vavoo", "3BoxTV", "LiveTvHub", "SportLive"
+                                "WiTv", "OlaTv", "VegetaTv", "Vavoo", "LiveTvHub", "SportLive"
                             )
                             val needsHeadCheck = !isIptv &&
                                 streamUrl.startsWith("http", ignoreCase = true) &&
@@ -503,11 +513,34 @@ class PlayerViewModel(
         }
     }
 
-    fun getVideo(server: Video.Server) = viewModelScope.launch(Dispatchers.IO) {
+    // 2026-05-16 (user "ça charge à l'infini sans savoir si serveur OK") :
+    // référence du Job d'extraction courant, pour permettre au fragment de
+    // l'annuler quand l'user tap le loading overlay.
+    private var getVideoJob: kotlinx.coroutines.Job? = null
+
+    /** Annule l'extraction vidéo en cours (si une). Appelé par le fragment
+     *  quand l'user tap l'overlay de chargement pour changer de serveur. */
+    fun cancelGetVideo() {
+        getVideoJob?.cancel()
+        getVideoJob = null
+    }
+
+    fun getVideo(server: Video.Server): kotlinx.coroutines.Job {
+        getVideoJob?.cancel()
+        val job = viewModelScope.launch(Dispatchers.IO) {
         Log.d("PlayerViewModel", "Inizio estrazione video dal server: ${server.name}")
         _state.emit(State.LoadingVideo(server))
         try {
-            val video = (UserPreferences.currentProvider ?: return@launch).getVideo(server)
+            // 2026-05-16 : timeout global 60s sur l'extraction. Sans ça,
+            // certains extracteurs (Movix Premium HD via voe.sx mort, etc.)
+            // peuvent hang sans throw → l'app reste en LoadingVideo ad vitam,
+            // pas de FailedLoadingVideo emit → pas d'auto-fallback. User
+            // signale "ça tourne dans le vide et ne bascule pas auto". Avec
+            // timeout, l'extraction throw → FailedLoadingVideo → fallback.
+            val provider = UserPreferences.currentProvider ?: return@launch
+            val video = kotlinx.coroutines.withTimeoutOrNull(60_000L) {
+                provider.getVideo(server)
+            } ?: throw Exception("Extraction timeout (60s) — server unresponsive")
             if (video.source.isEmpty()) throw Exception("No source found")
 
             // LOGICA SOTTOTITOLI GLOBALE: 
@@ -545,6 +578,9 @@ class PlayerViewModel(
             if (errorType == "dead-content") sessionDeadContentCount++
             _state.emit(State.FailedLoadingVideo(e, server))
         }
+        }
+        getVideoJob = job
+        return job
     }
 
     /** Capture l'ID du film/épisode courant à partir du videoType. */
@@ -592,15 +628,19 @@ class PlayerViewModel(
         launch {
             try {
                 Log.d("PlayerViewModel", "Inizio ricerca OpenSubtitles")
-                // App-wide policy: French subtitles only. ISO 639-2/B code "fre".
+                // 2026-05-15 (user "ajoute le sub anglais pour ceux qui veulent
+                // dans OpenSubtitles, censé être activable sur tous les providers") :
+                // si UserPreferences.enableEnglishSubtitles est ON, on récupère
+                // aussi les subs anglais en parallèle (en plus du FR par défaut).
                 val frenchOnly = "fre"
+                val includeEnglish = com.streamflixreborn.streamflix.utils.UserPreferences.enableEnglishSubtitles
                 // 2026-05-04 : on PASSE TOUJOURS imdb_id quand le provider le
                 // fournit. Sans ça la recherche tombait en mode "query texte"
                 // et matchait "Fear City: New York Vs The Mafia S01E03" pour
                 // "New York 911 S01E03" (tous deux contiennent "New York")
                 // -> sous-titre dingue d'une autre série, donc "désynchronisé".
                 // Tri : downloads DESC (le plus téléchargé = le mieux synchro).
-                val subtitles = when (videoType) {
+                val frenchSubtitles = when (videoType) {
                     is Video.Type.Episode -> {
                         OpenSubtitles.search(
                             imdbId = videoType.tvShow.imdbId,
@@ -617,9 +657,32 @@ class PlayerViewModel(
                             subLanguageId = frenchOnly,
                         )
                     }
-                }.sortedByDescending { it.subDownloadsCnt }
-                
-                Log.d("PlayerViewModel", "Ricerca OpenSubtitles completata: ${subtitles.size} risultati")
+                }
+                val englishSubtitles = if (includeEnglish) {
+                    when (videoType) {
+                        is Video.Type.Episode -> {
+                            OpenSubtitles.search(
+                                imdbId = videoType.tvShow.imdbId,
+                                query = if (videoType.tvShow.imdbId.isNullOrBlank()) videoType.tvShow.title else null,
+                                season = videoType.season.number,
+                                episode = videoType.number,
+                                subLanguageId = "eng",
+                            )
+                        }
+                        is Video.Type.Movie -> {
+                            OpenSubtitles.search(
+                                imdbId = videoType.imdbId,
+                                query = if (videoType.imdbId.isNullOrBlank()) videoType.title else null,
+                                subLanguageId = "eng",
+                            )
+                        }
+                    }
+                } else emptyList()
+                // FR en premier, puis EN après — tri downloads DESC dans chaque groupe.
+                val subtitles = (frenchSubtitles.sortedByDescending { it.subDownloadsCnt } +
+                    englishSubtitles.sortedByDescending { it.subDownloadsCnt })
+
+                Log.d("PlayerViewModel", "OpenSubtitles: FR=${frenchSubtitles.size}, EN=${englishSubtitles.size}")
                 _subtitleState.emit(SubtitleState.SuccessOpenSubtitles(subtitles))
             } catch (e: Exception) {
                 Log.e("PlayerViewModel", "Errore OpenSubtitles: ", e)

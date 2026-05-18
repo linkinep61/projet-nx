@@ -37,6 +37,27 @@
         app:layout_constraintTop_toTopOf="parent"
         tools:visibility="visible" />
 
+    <!-- 2026-05-17 : la 2e seek bar de chargement est maintenant intégrée
+         dans le controller player (content_exo_controller_tv.xml) — pas
+         d'overlay décoratif ici. -->
+
+    <!-- 2026-05-17 v54 (user "écran noir d'1s au swap") :
+         Overlay de freeze frame. Pendant le swap (Codec2 flush Amlogic),
+         on PixelCopy la dernière frame du SurfaceView dans cet ImageView
+         qu'on affiche par-dessus le player. Le décodeur peut donc reset
+         tranquillement sans que l'écran devienne noir. On le cache dès
+         que le player retourne STATE_READY. -->
+    <ImageView
+        android:id="@+id/swap_freeze_overlay"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:scaleType="fitCenter"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="@+id/pv_player"
+        app:layout_constraintEnd_toEndOf="@+id/pv_player"
+        app:layout_constraintStart_toStartOf="@+id/pv_player"
+        app:layout_constraintTop_toTopOf="@+id/pv_player" />
+
     <!-- 2026-05-11 : Overlay de chargement pendant la recherche servers + extraction
          pour TOUS les providers SAUF IPTV. Visible pendant LoadingServers/Video,
          hidden dès que ExoPlayer STATE_READY ou SuccessLoadingVideo. -->
@@ -45,8 +66,9 @@
         android:layout_width="0dp"
         android:layout_height="0dp"
         android:background="#B3000000"
-        android:clickable="false"
-        android:focusable="false"
+        android:clickable="true"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
         android:visibility="gone"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
@@ -77,6 +99,20 @@
                 android:text="Chargement…"
                 android:textColor="#FFFFFF"
                 android:textSize="20sp" />
+
+            <!-- 2026-05-16 : hint clickable (TV : Bouton OK pour cancel). -->
+            <TextView
+                android:id="@+id/loading_overlay_hint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="28dp"
+                android:background="#33FFFFFF"
+                android:paddingHorizontal="24dp"
+                android:paddingVertical="12dp"
+                android:text="Appuyer sur OK pour changer de serveur"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp"
+                android:textStyle="italic" />
         </LinearLayout>
 
         <ProgressBar

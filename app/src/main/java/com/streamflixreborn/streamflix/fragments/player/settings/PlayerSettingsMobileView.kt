@@ -103,6 +103,13 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
         displaySettings(Setting.MAIN)
     }
 
+    /** 2026-05-16 : ouvre direct sur la liste de serveurs (pour le picker
+     *  auto-affiché pendant le chargement / au tap sur l'overlay). */
+    fun showServers() {
+        this.visibility = View.VISIBLE
+        displaySettings(Setting.SERVERS)
+    }
+
     private fun displaySettings(setting: Setting) {
         currentSettings = setting
 
@@ -737,7 +744,10 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                         }
                         prefix + item.name
                     }
-                    is Settings.Server -> item.name
+                    is Settings.Server -> {
+                        // 2026-05-16 : suffixe ⟳ pendant le chargement
+                        if (item.isLoading) "${item.name} ⟳" else item.name
+                    }
                     else -> ""
                 }
 

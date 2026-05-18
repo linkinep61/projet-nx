@@ -227,6 +227,145 @@ object LiveTvHubProvider : Provider, IptvProvider {
         "Généraliste", "Cinéma", "Canal+ Live", "Info", "Sport", "Musique", "Documentaire", "Enfants",
     )
 
+    // ═══════════════════════════════════════════════════════════════
+    //  2026-05-15 (user "Je te propose des liens URL direct de chaînes
+    //  à intégrer") : chaînes bonus avec URLs directes en provenance des
+    //  mirrors bolaloca/cartelive/embedme + Dailymotion.
+    //
+    //  3 mirrors par chaîne pour fallback :
+    //    - https://bolaloca.my/player/2/<id>
+    //    - https://cartelive.club/player/2/<id>
+    //    - https://embedme.click/player/2/<id>
+    //
+    //  Extracteur : Hoca8Extractor (WebView, intercepte le m3u8 chargé par
+    //  l'iframe interne hoca8.com/footy.php?live=<feed>).
+    //
+    //  Note : Ligue1+ ne fonctionne que pendant un match.
+    // ═══════════════════════════════════════════════════════════════
+    private data class BonusChannel(
+        val displayName: String,
+        val id: Int,                  // numéro chaîne dans le système bolaloca (1-48)
+        val category: String,
+        val logoKey: String? = null,  // clé pour manualLogoMap si applicable
+    )
+
+    private val bonusChannels: List<BonusChannel> = listOf(
+        // ─── BeinSport (1-10) ───
+        BonusChannel("beIN Sports 1", 1, "Sport"),
+        BonusChannel("beIN Sports 2", 2, "Sport"),
+        BonusChannel("beIN Sports 3", 3, "Sport"),
+        BonusChannel("beIN Sports MAX 4", 4, "Sport"),
+        BonusChannel("beIN Sports MAX 5", 5, "Sport"),
+        BonusChannel("beIN Sports MAX 6", 6, "Sport"),
+        BonusChannel("beIN Sports MAX 7", 7, "Sport"),
+        BonusChannel("beIN Sports MAX 8", 8, "Sport"),
+        BonusChannel("beIN Sports MAX 9", 9, "Sport"),
+        BonusChannel("beIN Sports MAX 10", 10, "Sport"),
+        // ─── Canal+ (11-14) ───
+        BonusChannel("Canal+", 11, "Cinéma", "canal"),
+        BonusChannel("Canal+ Foot", 12, "Sport"),
+        BonusChannel("Canal+ Sport", 13, "Sport"),
+        BonusChannel("Canal+ Sport 360", 14, "Sport"),
+        // ─── Sport (15-19) ───
+        // 2026-05-15 : audit batch — supprimé Ligue 1+ 1/4/5/6 (B18, B20-B22) →
+        // ne diffusent que pendant les matchs, retournent timeout 99% du temps.
+        BonusChannel("Eurosport 1", 15, "Sport"),
+        BonusChannel("Eurosport 2", 16, "Sport"),
+        BonusChannel("RMC Sport 1", 17, "Sport"),
+        BonusChannel("Automoto", 19, "Sport"),
+    ) + (2..9).map { n ->
+        // ─── Canal+ Live 2-9 (ids 32-39) ───
+        // 2026-05-15 : audit batch — supprimé Canal+ Live 1 (B31) et Canal+ Live
+        // 10-18 (B40-B48) → tous TIMEOUT (chaînes mortes côté serveur bolaloca).
+        // Ne reste que les 8 qui répondent réellement.
+        BonusChannel("Canal+ Live $n", 30 + n, "Canal+ Live")
+    }
+
+    /** ID Dailymotion pour Sport en France. Pas d'extraction WebView nécessaire
+     *  — DailymotionExtractor gère déjà. */
+    private const val DAILYMOTION_SPORT_EN_FRANCE_ID = "x8sayn8"
+
+    // ═══════════════════════════════════════════════════════════════
+    //  2026-05-15 (user "intègre freeshot.live") : 48 chaînes FR
+    //  scrapées depuis freeshot.live/live-tv/france. Chaque chaîne pointe
+    //  vers sa page freeshot, et FreeshotExtractor (WebView) suit le chain
+    //  d'iframes pour récupérer le m3u8.
+    // ═══════════════════════════════════════════════════════════════
+    private data class FreeshotChannel(
+        val displayName: String,
+        val slug: String,
+        val id: String,
+        val category: String,
+    )
+
+    // 2026-05-15 (user "supprime ce qui ne sert à rien") : liste vidée après
+    // audit batch — TOUTES les 48 chaînes freeshot ont échoué (Cloudflare anti-bot
+    // bloque freeshot.live au niveau TLS, ERR_CONNECTION_CLOSED côté WebView et
+    // SSLHandshakeException côté OkHttp). La liste reste DÉCLARÉE (vide) pour ne
+    // pas casser le routing getTvShow/getServers/getVideo qui regarde le préfixe
+    // `livehub::freeshot::` au cas où des users ont des favoris stockés. Le code
+    // de rendering itère sur liste vide donc rien ne s'affiche, propre.
+    private val freeshotChannels: List<FreeshotChannel> = emptyList()
+
+    private fun freeshotToTvShow(c: FreeshotChannel): TvShow {
+        // Réutilise les logos officiels via la même map que les autres providers,
+        // sinon fallback avatar avec initiales.
+        val logoKey = when {
+            c.slug == "tf1" -> "tf1"
+            c.slug == "france-2" -> "france2"
+            c.slug == "france-3" -> "france3"
+            c.slug == "france-4" -> "france4"
+            c.slug == "france-5" -> "france5"
+            c.slug == "m6" -> "m6"
+            c.slug == "bfmtv" -> "bfmtv"
+            c.slug == "bfm-business" -> "bfmbusiness"
+            c.slug == "cnews" -> "cnews"
+            c.slug == "france-info" -> "franceinfo"
+            c.slug == "france-24" -> "france24"
+            c.slug == "canal-fr" -> "canal"
+            c.slug == "canal-docs-fr" -> "canalcinema"
+            else -> null
+        }
+        val logoUrl = logoKey?.let { manualLogoMap[it] }
+            ?: "https://ui-avatars.com/api/?name=${java.net.URLEncoder.encode(c.displayName.take(3), "UTF-8")}&background=0EA5E9&color=fff&size=512&bold=true&format=png"
+        return TvShow(
+            id = "livehub::freeshot::${c.id}::${c.slug}",
+            title = c.displayName,
+            overview = "Chaîne TV — diffusée via freeshot.live.",
+            quality = "Live",
+            poster = logoUrl,
+            banner = logoUrl,
+            providerName = name,
+        )
+    }
+
+    private fun bonusToTvShow(c: BonusChannel): TvShow {
+        val logoUrl = c.logoKey?.let { manualLogoMap[it] }
+            ?: "https://ui-avatars.com/api/?name=${java.net.URLEncoder.encode(c.displayName, "UTF-8")}&background=DC2626&color=fff&size=512&bold=true&format=png"
+        return TvShow(
+            id = "livehub::bonus::${c.id}",
+            title = c.displayName,
+            overview = "Chaîne TV — 3 sources mirrors (bolaloca/cartelive/embedme).",
+            quality = "Live",
+            poster = logoUrl,
+            banner = logoUrl,
+            providerName = name,
+        )
+    }
+
+    private fun dailymotionChannelToTvShow(): TvShow {
+        val logo = "https://ui-avatars.com/api/?name=SF&background=0EA5E9&color=fff&size=512&bold=true&format=png"
+        return TvShow(
+            id = "livehub::dailymotion::$DAILYMOTION_SPORT_EN_FRANCE_ID",
+            title = "Sport en France",
+            overview = "Sport en France — diffusion Dailymotion.",
+            quality = "Live",
+            poster = logo,
+            banner = logo,
+            providerName = name,
+        )
+    }
+
     private val channelById: Map<String, HubChannel> by lazy {
         channels.associateBy { "livehub::${it.witvKey}" }
     }
@@ -347,6 +486,81 @@ object LiveTvHubProvider : Provider, IptvProvider {
             sections.add(Category(name = cat, list = list.map { channelToTvShow(it) }))
         }
 
+        // 2026-05-15 : sections BONUS (chaînes mirror bolaloca/cartelive/embedme
+        // + Dailymotion Sport en France). Visibles pour tous les users, pas
+        // besoin de favoris.
+        val bonusBanned = { id: String ->
+            com.streamflixreborn.streamflix.fragments.player.settings
+                .IptvBannedChannels.isBanned(id)
+        }
+        val bonusByCat = bonusChannels
+            .filterNot { bonusBanned("livehub::bonus::${it.id}") }
+            .groupBy { it.category }
+        // Sport bonus : on append à la section Sport existante OU on crée si absente.
+        val sportBonus = bonusByCat["Sport"].orEmpty().map { bonusToTvShow(it) }
+        if (sportBonus.isNotEmpty()) {
+            val existingIdx = sections.indexOfFirst { it.name == "Sport" }
+            if (existingIdx >= 0) {
+                val merged = sections[existingIdx].list + sportBonus
+                sections[existingIdx] = Category(name = "Sport", list = merged)
+            } else {
+                sections.add(Category(name = "Sport", list = sportBonus))
+            }
+        }
+        // Dailymotion Sport en France dans Sport
+        val dmShow = dailymotionChannelToTvShow()
+        if (!bonusBanned(dmShow.id)) {
+            val existingIdx = sections.indexOfFirst { it.name == "Sport" }
+            if (existingIdx >= 0) {
+                sections[existingIdx] = Category(
+                    name = "Sport",
+                    list = sections[existingIdx].list + dmShow,
+                )
+            } else {
+                sections.add(Category(name = "Sport", list = listOf(dmShow)))
+            }
+        }
+        // Cinéma bonus (Canal+ standalone)
+        val cinemaBonus = bonusByCat["Cinéma"].orEmpty().map { bonusToTvShow(it) }
+        if (cinemaBonus.isNotEmpty()) {
+            val existingIdx = sections.indexOfFirst { it.name == "Cinéma" }
+            if (existingIdx >= 0) {
+                sections[existingIdx] = Category(
+                    name = "Cinéma",
+                    list = sections[existingIdx].list + cinemaBonus,
+                )
+            } else {
+                sections.add(Category(name = "Cinéma", list = cinemaBonus))
+            }
+        }
+        // Canal+ Live : section dédiée (1-18). Inséré APRÈS Cinéma, AVANT Info.
+        val canalPlusLive = bonusByCat["Canal+ Live"].orEmpty().map { bonusToTvShow(it) }
+        if (canalPlusLive.isNotEmpty()) {
+            val insertAt = sections.indexOfFirst { it.name == "Info" }
+                .takeIf { it >= 0 } ?: sections.size
+            sections.add(insertAt, Category(name = "Canal+ Live", list = canalPlusLive))
+        }
+
+        // 2026-05-15 : 48 chaînes freeshot.live (TF1, M6, BFM*, CANAL+ FR/DOCS,
+        // DAZN, Eurosport, France 2-5, L'Equipe Live, CNews, etc.) merged dans
+        // les catégories existantes.
+        val freeshotBanned = { id: String -> bonusBanned(id) }
+        val freeshotByCat = freeshotChannels
+            .filterNot { freeshotBanned("livehub::freeshot::${it.id}::${it.slug}") }
+            .groupBy { it.category }
+        for ((cat, list) in freeshotByCat) {
+            val tvShows = list.map { freeshotToTvShow(it) }
+            val existingIdx = sections.indexOfFirst { it.name == cat }
+            if (existingIdx >= 0) {
+                sections[existingIdx] = Category(
+                    name = cat,
+                    list = sections[existingIdx].list + tvShows,
+                )
+            } else {
+                sections.add(Category(name = cat, list = tvShows))
+            }
+        }
+
         // 2026-05-08 : section "✕ Chaînes bannies" EN BAS du home.
         try {
             val banned = channels.filter {
@@ -380,6 +594,29 @@ object LiveTvHubProvider : Provider, IptvProvider {
         throw UnsupportedOperationException("LiveTvHub n'a pas de films")
 
     override suspend fun getTvShow(id: String): TvShow {
+        // 2026-05-15 : gestion bonus channels (bolaloca + dailymotion + freeshot)
+        val bonusShow = when {
+            id.startsWith("livehub::bonus::") -> {
+                val num = id.removePrefix("livehub::bonus::").toIntOrNull()
+                bonusChannels.firstOrNull { it.id == num }?.let { bonusToTvShow(it) }
+            }
+            id.startsWith("livehub::dailymotion::") -> dailymotionChannelToTvShow()
+            id.startsWith("livehub::freeshot::") -> {
+                val fid = id.removePrefix("livehub::freeshot::").substringBefore("::")
+                freeshotChannels.firstOrNull { it.id == fid }?.let { freeshotToTvShow(it) }
+            }
+            else -> null
+        }
+        if (bonusShow != null) {
+            return bonusShow.copy(
+                seasons = listOf(
+                    Season(id = id, number = 1, title = "En Direct",
+                        episodes = listOf(Episode(id = id, number = 1,
+                            title = "Regarder en Direct", poster = bonusShow.poster)))
+                )
+            )
+        }
+
         val c = channelById[id] ?: throw IllegalArgumentException("Channel inconnue: $id")
         val tvShow = channelToTvShow(c)
         return tvShow.copy(
@@ -414,6 +651,57 @@ object LiveTvHubProvider : Provider, IptvProvider {
      *  "canalplus", mais le Hub cherchait sous "canal" (witvKey) → fallback
      *  déclenché à tort, l'user voyait toute la liste agrégée. */
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        // 2026-05-15 : bonus channels — 3 mirrors par chaîne pour bolaloca
+        if (id.startsWith("livehub::bonus::")) {
+            val num = id.removePrefix("livehub::bonus::").toIntOrNull() ?: return emptyList()
+            val name = bonusChannels.firstOrNull { it.id == num }?.displayName ?: "Chaîne $num"
+            return listOf(
+                Video.Server(
+                    id = "livehub::bonus::$num::bolaloca",
+                    name = "bolaloca",
+                    src = "https://bolaloca.my/player/2/$num",
+                ),
+                Video.Server(
+                    id = "livehub::bonus::$num::cartelive",
+                    name = "cartelive",
+                    src = "https://cartelive.club/player/2/$num",
+                ),
+                Video.Server(
+                    id = "livehub::bonus::$num::embedme",
+                    name = "embedme",
+                    src = "https://embedme.click/player/2/$num",
+                ),
+            )
+        }
+        // Dailymotion Sport en France
+        if (id.startsWith("livehub::dailymotion::")) {
+            val dmId = id.removePrefix("livehub::dailymotion::")
+            return listOf(
+                Video.Server(
+                    id = "livehub::dailymotion::$dmId",
+                    name = "Dailymotion",
+                    src = "https://geo.dailymotion.com/player.html?video=$dmId",
+                ),
+            )
+        }
+        // 2026-05-15 : Freeshot channels — 1 server par chaîne, l'URL pointe
+        // vers la page freeshot et FreeshotExtractor (WebView) suit le chain
+        // d'iframes pour récupérer le m3u8.
+        // Note 2026-05-15 : freeshot.live est bloqué par Cloudflare (ERR_CONNECTION_CLOSED
+        // côté WebView, SSLHandshakeException côté OkHttp). Source non fiable.
+        if (id.startsWith("livehub::freeshot::")) {
+            val parts = id.removePrefix("livehub::freeshot::").split("::")
+            if (parts.size != 2) return emptyList()
+            val (fsId, slug) = parts
+            return listOf(
+                Video.Server(
+                    id = "livehub::freeshot::$fsId::$slug",
+                    name = "Freeshot",
+                    src = "https://www.freeshot.live/live-tv/$slug/$fsId",
+                ),
+            )
+        }
+
         val c = channelById[id] ?: return emptyList()
 
         // 1. Favoris ❤ d'abord (cross-provider via IptvFavorites).
@@ -471,6 +759,13 @@ object LiveTvHubProvider : Provider, IptvProvider {
     /** getVideo : délègue au provider d'origine selon le prefix de l'id.
      *  Couvre tous les providers IPTV via IptvCrossDelegate. */
     override suspend fun getVideo(server: Video.Server): Video {
+        // 2026-05-15 : bonus channels — délègue à Extractor.extract qui route
+        // vers Hoca8Extractor (bolaloca/cartelive/embedme) ou DailymotionExtractor.
+        if (server.id.startsWith("livehub::bonus::") ||
+            server.id.startsWith("livehub::dailymotion::") ||
+            server.id.startsWith("livehub::freeshot::")) {
+            return com.streamflixreborn.streamflix.extractors.Extractor.extract(server.src, server)
+        }
         return IptvCrossDelegate.delegateGetVideo(server)
             ?: WiTvProvider.getVideo(server)  // fallback si format inconnu
     }

@@ -437,8 +437,19 @@ class PlayerMobileFragment : Fragment() {
         if (::player.isInitialized) {
             binding.pvPlayer.useController = true
             // Resume playback after returning from bypass or any pause
-            if (!player.isPlaying) {
-                player.play()
+            // 2026-05-16 : wrap try-catch — AbstractMethodError sur l'ancien
+            // Player.Listener.onPlayerStateChanged(bool,int) d'une lib qui
+            // n'a pas été recompilée avec Media3 1.8. Le crash bloque l'app
+            // au resume sinon. Le play() lui-même réussit, seul le listener
+            // crash → on swallow l'erreur.
+            try {
+                if (!player.isPlaying) {
+                    player.play()
+                }
+            } catch (e: AbstractMethodError) {
+                Log.w("PlayerMobile", "AbstractMethodError on player.play (lib mismatch): ${e.message}")
+            } catch (e: Exception) {
+                Log.w("PlayerMobile", "Error on player.play: ${e.message}")
             }
         }
         
@@ -456,9 +467,23 @@ class PlayerMobileFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // 2026-05-15 (user "vire cette foutue roulette pour Mon IPTV") : force
+        // GONE de tout overlay loading dès l'init pour les contenus IPTV. Belt-
+        // and-suspenders : showLoadingOverlay() est déjà no-op pour ces ids
+        // (isIptvChannelContext), mais si l'overlay a été laissé VISIBLE par
+        // un précédent passage (transition mini→full, reconfig, etc.), force
+        // l'invisible pour éviter le spinner fantôme.
+        if (isIptvChannelContext()) {
+            try {
+                binding.loadingOverlay.visibility = View.GONE
+                binding.pvPlayer.setShowBuffering(androidx.media3.ui.PlayerView.SHOW_BUFFERING_NEVER)
+            } catch (_: Exception) {}
+        }
+
         // 2026-05-09 v17 : pose tout de suite la channelKey IPTV partagée pour
         // que le picker (favoris/coche) marche dès la 1re ouverture.
         run {
+            // Détection contexte IPTV pour activer favoris/picker etc.
             val isIptvCtx = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
@@ -466,6 +491,7 @@ class PlayerMobileFragment : Fragment() {
                 args.id.startsWith("livehub::") ||
                 args.id.startsWith("sportlive::") ||
                 args.id.startsWith("match::") ||
+                args.id.startsWith("vavoo::") ||
                 args.id.startsWith("myiptv-live::") ||
                 args.id.startsWith("myiptv::")
             com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsView
@@ -604,6 +630,22 @@ class PlayerMobileFragment : Fragment() {
                                 // dynamiquement (kick + replacement).
                                 val target = state.servers.find { server.id == it.id }
                                     ?: Video.Server(id = server.id, name = server.name)
+                                // 2026-05-16 : stop player avant nouvelle extraction
+                                // pour pas qu'il continue à jouer l'ancien stream.
+                                runCatching {
+                                    if (::player.isInitialized) {
+                                        player.pause(); player.stop()
+                                    }
+                                }
+                                // 2026-05-16 : marque le serveur sélectionné comme
+                                // "en cours de chargement" pour qu'il s'affiche
+                                // avec le suffixe " ⟳" dans le picker.
+                                runCatching {
+                                    PlayerSettingsView.Settings.Server.list.forEach {
+                                        it.isLoading = (it.id == server.id)
+                                    }
+                                    binding.settings.refreshServerList()
+                                }
                                 viewModel.getVideo(target)
                             }
 
@@ -670,11 +712,54 @@ class PlayerMobileFragment : Fragment() {
                             val firstNonBanned = state.servers.firstOrNull { srv ->
                                 !IptvBannedServers.isBanned(currentChannelKey, srv.id)
                             }
-                            val initialServer = matchedMiniServer ?: favServer ?: firstNonBanned ?: state.servers.first()
+
+                            // 2026-05-16 : si pas de mini/favori (= auto-pick), attendre
+                            // max 3s que le pre-extract HEAD scan ait flagué les morts.
+                            // Sinon le initial pick tombe sur Movix Premium mort → 60s
+                            // timeout avant fallback. Avec ce délai, on évite ça.
+                            // Early exit dès que ≥2 servers sont flagués broken (HEAD scan
+                            // a fait son job) OU dès qu'un pre-extract cache HIT existe.
+                            if (matchedMiniServer == null && favServer == null) {
+                                val startBrokenCount = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames().size
+                                Log.d("PlayerMobileFragment", "Initial-pick: waiting up to 3s for HEAD scan (start broken=$startBrokenCount)")
+                                var waited = 0L
+                                while (waited < 3_000L) {
+                                    kotlinx.coroutines.delay(250L)
+                                    waited += 250L
+                                    val nowBroken = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames().size
+                                    if (nowBroken >= startBrokenCount + 2) {
+                                        Log.d("PlayerMobileFragment", "Initial-pick: HEAD scan flagged $nowBroken broken, proceeding (waited=${waited}ms)")
+                                        break
+                                    }
+                                }
+                            }
+
+                            // Compute broken set for initial-pick filtering (same logic
+                            // que nextAutoFallbackServer).
+                            fun ipExtractorCore(name: String): String {
+                                val stripped = name.substringAfter(" — ").substringAfter(" · ").trim()
+                                return stripped.substringBefore(" - ").substringBefore(" (").substringBefore(" [").trim().uppercase()
+                            }
+                            val ipBrokenCores = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames()
+                                .map { ipExtractorCore(it) }.filter { it.isNotBlank() }.toSet()
+                            fun ipIsBroken(srv: Video.Server): Boolean =
+                                ipBrokenCores.isNotEmpty() && ipExtractorCore(srv.name) in ipBrokenCores
+
+                            // Initial server preferred non-broken, non-banned.
+                            val firstNonBrokenNonBanned = state.servers.firstOrNull { srv ->
+                                !IptvBannedServers.isBanned(currentChannelKey, srv.id) && !ipIsBroken(srv)
+                            }
+                            val initialServer = matchedMiniServer
+                                ?: favServer
+                                ?: firstNonBrokenNonBanned
+                                ?: firstNonBanned
+                                ?: state.servers.first()
                             if (matchedMiniServer != null) {
                                 Log.d("PlayerMobileFragment", "Mini→fullscreen : reprise sur ${matchedMiniServer.name}")
                             } else if (favServer != null) {
                                 Log.d("PlayerMobileFragment", "Favori prioritaire : ${favServer.name} (${orderedFavIds.size}/${IptvFavorites.MAX_FAVORITES_PER_CHANNEL})")
+                            } else if (firstNonBrokenNonBanned != null) {
+                                Log.d("PlayerMobileFragment", "Initial-pick non-broken: ${firstNonBrokenNonBanned.name} (skipped ${ipBrokenCores.size} broken)")
                             }
                             viewModel.getVideo(initialServer)
                         }
@@ -696,6 +781,15 @@ class PlayerMobileFragment : Fragment() {
                         // before extraction finishes. displayVideo() will set the
                         // real MediaItem when SuccessLoadingVideo arrives.
                         schedulePatienceMessages()
+                        // 2026-05-16 : marque le serveur en cours d'extraction
+                        // pour qu'il affiche " ⟳" dans le picker auto-ouvert.
+                        runCatching {
+                            val activeId = state.server.id
+                            PlayerSettingsView.Settings.Server.list.forEach {
+                                it.isLoading = (it.id == activeId)
+                            }
+                            binding.settings.refreshServerList()
+                        }
                     }
 
                     is PlayerViewModel.State.SuccessLoadingVideo -> {
@@ -730,7 +824,7 @@ class PlayerMobileFragment : Fragment() {
                             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                         // 2026-05-09 : nextAutoFallbackServer skip VOSTFR/VO si on
                         // était en VF — évite de jouer du sub contre la volonté user.
                         val nextServer = if (isLiveIptv) null
@@ -1248,6 +1342,23 @@ class PlayerMobileFragment : Fragment() {
             binding.settings.show()
         }
 
+        // 2026-05-16 (user "ça charge à l'infini sans savoir si serveur OK") :
+        // tap sur le loading overlay → cancel extraction en cours + open Settings
+        // (server picker) pour que l'user puisse changer de serveur sans attendre.
+        binding.loadingOverlay.setOnClickListener {
+            viewModel.cancelGetVideo()
+            // 2026-05-16 : cancel aussi l'extraction FRAnime en cours (WebView)
+            // pour pas qu'elle continue à charger inutilement en background.
+            runCatching {
+                com.streamflixreborn.streamflix.extractors.FranimeSession.cancelCurrent()
+            }
+            cancelPatienceMessages()
+            hideLoadingOverlay()
+            // 2026-05-16 : ouvre direct la liste de serveurs (pas le menu Main)
+            // pour que l'user puisse cliquer un autre serveur sans navigation.
+            binding.settings.showServers()
+        }
+
         binding.settings.setOnLocalSubtitlesClickedListener {
             isIgnoringPip = true
             pickLocalSubtitle.launch(
@@ -1339,7 +1450,7 @@ class PlayerMobileFragment : Fragment() {
         val isIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
-            args.id.startsWith("livehub::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+            args.id.startsWith("livehub::") || args.id.startsWith("vavoo::")
         if (isIptvChannel) {
             setupChannelNavigationButtons(btnPrevious, btnNext)
             return
@@ -1454,12 +1565,6 @@ class PlayerMobileFragment : Fragment() {
                 resolvePoster = { provider.getChannelPoster(it) }
             }
             is com.streamflixreborn.streamflix.providers.VavooProvider -> {
-                prevId = provider.getPreviousChannelId(args.id)
-                nextId = provider.getNextChannelId(args.id)
-                resolveDisplayName = { provider.getChannelDisplayName(it) }
-                resolvePoster = { provider.getChannelPoster(it) }
-            }
-            is com.streamflixreborn.streamflix.providers.BoxXtemusProvider -> {
                 prevId = provider.getPreviousChannelId(args.id)
                 nextId = provider.getNextChannelId(args.id)
                 resolveDisplayName = { provider.getChannelDisplayName(it) }
@@ -1677,7 +1782,11 @@ class PlayerMobileFragment : Fragment() {
      */
     /** True si on est sur une chaîne IPTV — pour skip le loading overlay
      *  (le buffer ExoPlayer gère déjà le chargement) qui bloque l'accès
-     *  au menu Settings sur ces providers. */
+     *  au menu Settings sur ces providers.
+     *  2026-05-15 (user "la roulette ne devrait pas y être pour les séries IPTV") :
+     *  ajout des prefixes `myiptv-*` (Mon IPTV / Stalker / Xtream custom) qui
+     *  étaient oubliés → le 1er clic sur série/film bloquait l'overlay pendant
+     *  la résolution Stalker handshake+create_link (3-5s). */
     private fun isIptvChannelContext(): Boolean {
         val id = args.id
         return id.startsWith("ch::") || id.startsWith("sport::") ||
@@ -1685,7 +1794,123 @@ class PlayerMobileFragment : Fragment() {
             id.startsWith("vegeta::") || id.startsWith("vegeta_ep::") ||
             id.startsWith("livehub::") || id.startsWith("movixlivetv::") ||
             id.startsWith("sportlive::") || id.startsWith("match::") ||
-            id.startsWith("bxt::")
+            id.startsWith("vavoo::") ||
+            id.startsWith("myiptv::") || id.startsWith("myiptv-live::") ||
+            id.startsWith("myiptv-movie::") || id.startsWith("myiptv-ep::") ||
+            id.startsWith("myiptv-show::") || id.startsWith("myiptv-season::") ||
+            id.startsWith("myiptv-stalkerep::")
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Mobile port v52 + v54 + v58 : anti-cut live IPTV
+    //  (cross-fade audio + freeze frame + backup post-swap)
+    //  Aligné avec PlayerTvFragment.
+    // ═══════════════════════════════════════════════════════════════
+
+    private fun buildLiveBackupItem(player: androidx.media3.exoplayer.ExoPlayer): MediaItem? {
+        return try {
+            val curUri = player.currentMediaItem?.localConfiguration?.uri ?: return null
+            val curMime = player.currentMediaItem?.localConfiguration?.mimeType
+            MediaItem.Builder()
+                .setUri(curUri)
+                .apply { curMime?.let { setMimeType(it) } }
+                .setLiveConfiguration(
+                    MediaItem.LiveConfiguration.Builder()
+                        .setTargetOffsetMs(55_000)
+                        .setMaxOffsetMs(120_000)
+                        .setMinOffsetMs(30_000)
+                        .setMinPlaybackSpeed(0.95f)
+                        .setMaxPlaybackSpeed(1.0f)
+                        .build()
+                )
+                .build()
+        } catch (_: Exception) { null }
+    }
+
+    // Mobile utilise TextureView (vs SurfaceView TV). TextureView.getBitmap()
+    //   est plus simple et synchrone (pas besoin de PixelCopy async).
+    private fun captureLastFrameToOverlay() {
+        try {
+            if (_binding == null) return
+            val pv = binding.pvPlayer
+            val overlay = try { binding.root.findViewById<android.widget.ImageView>(R.id.swap_freeze_overlay) } catch (_: Exception) { null } ?: return
+            val textureView = findTextureView(pv) ?: return
+            val bmp = textureView.bitmap ?: return
+            overlay.setImageBitmap(bmp)
+            overlay.visibility = View.VISIBLE
+            overlay.alpha = 1f
+        } catch (e: Exception) {
+            android.util.Log.w("PlayerMobileFragment", "captureLastFrameToOverlay: ${e.message}")
+        }
+    }
+
+    private fun findTextureView(root: View): android.view.TextureView? {
+        if (root is android.view.TextureView) return root
+        if (root is android.view.ViewGroup) {
+            for (i in 0 until root.childCount) {
+                val found = findTextureView(root.getChildAt(i))
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
+    private fun hideFreezeOverlay() {
+        try {
+            if (_binding == null) return
+            val overlay = binding.root.findViewById<android.widget.ImageView>(R.id.swap_freeze_overlay) ?: return
+            overlay.visibility = View.GONE
+            overlay.setImageBitmap(null)
+        } catch (_: Exception) {}
+    }
+
+    private suspend fun swapToNextWithAudioFade(player: androidx.media3.exoplayer.ExoPlayer) {
+        val savedVolume = try { player.volume } catch (_: Exception) { 1f }
+        try {
+            withContext(Dispatchers.Main) { captureLastFrameToOverlay() }
+            for (i in 9 downTo 0) {
+                player.volume = savedVolume * (i / 10f)
+                kotlinx.coroutines.delay(15L)
+            }
+            player.seekToNextMediaItem()
+            try {
+                val nextBackup = buildLiveBackupItem(player)
+                if (nextBackup != null) {
+                    player.addMediaItem(nextBackup)
+                    android.util.Log.d("PlayerMobileFragment", "v58: backup re-ajouté post-swap")
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("PlayerMobileFragment", "v58 re-add backup failed: ${e.message}")
+            }
+            kotlinx.coroutines.delay(80L)
+            for (i in 1..12) {
+                player.volume = savedVolume * (i / 12f)
+                kotlinx.coroutines.delay(20L)
+            }
+            player.volume = savedVolume
+            val deadline = System.currentTimeMillis() + 2_000L
+            while (System.currentTimeMillis() < deadline) {
+                try {
+                    if (player.playbackState == androidx.media3.common.Player.STATE_READY &&
+                        player.isPlaying) break
+                } catch (_: Exception) {}
+                kotlinx.coroutines.delay(40L)
+            }
+            try {
+                val overlay = binding.root.findViewById<android.widget.ImageView>(R.id.swap_freeze_overlay)
+                if (overlay != null && overlay.visibility == View.VISIBLE) {
+                    for (a in 10 downTo 0) {
+                        overlay.alpha = a / 10f
+                        kotlinx.coroutines.delay(20L)
+                    }
+                }
+            } catch (_: Exception) {}
+            hideFreezeOverlay()
+        } catch (e: Exception) {
+            try { player.volume = savedVolume } catch (_: Exception) {}
+            hideFreezeOverlay()
+            android.util.Log.w("PlayerMobileFragment", "swapToNextWithAudioFade: ${e.message}")
+        }
     }
 
     private fun showLoadingOverlay() {
@@ -1718,6 +1943,11 @@ class PlayerMobileFragment : Fragment() {
                     interpolator = android.view.animation.DecelerateInterpolator()
                     start()
                 }
+            // 2026-05-16 : pendant le chargement, on affiche aussi le picker
+            // de serveurs DIRECTEMENT (pas le menu Main) — comme ça l'user
+            // voit l'état (chargement du serveur courant) ET peut cliquer un
+            // autre serveur sans étape intermédiaire.
+            runCatching { binding.settings.showServers() }
         }
         loadingShowRunnable = runnable
         loadingShowHandler.postDelayed(runnable, LOADING_OVERLAY_SHOW_DELAY_MS)
@@ -1736,6 +1966,13 @@ class PlayerMobileFragment : Fragment() {
         if (binding.loadingOverlay.isVisible) {
             binding.loadingOverlayBar.progress = 100
             binding.loadingOverlay.visibility = View.GONE
+        }
+        // 2026-05-16 : ferme aussi le picker serveurs auto-ouvert pendant
+        // le chargement — l'épisode a démarré, on revient au player propre.
+        runCatching {
+            PlayerSettingsView.Settings.Server.list.forEach { it.isLoading = false }
+            binding.settings.refreshServerList()
+            binding.settings.hide()
         }
     }
 
@@ -1812,7 +2049,7 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
         if (isLiveIptv) {
             handleLiveRecord(server)
             return
@@ -2189,13 +2426,17 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
         // 2026-05-09 : roue de chargement masquée pour IPTV uniquement.
+        // 2026-05-15 (user "vire cette foutue roulette pour Mon IPTV") :
+        // étendu à TOUS les contenus IPTV (live, VOD, séries, Mon IPTV Stalker)
+        // via isIptvChannelContext() — myiptv-stalkerep:: inclus. TiviMate-style :
+        // pas de spinner overlay, juste le buffer ExoPlayer interne sans UI.
         // keepContentOnPlayerReset reset à false — sera mis à true uniquement
         // juste avant les reloads auto-recovery (sinon casse mini→fullscreen).
         try {
             binding.pvPlayer.setShowBuffering(
-                if (isLiveIptvChannel) androidx.media3.ui.PlayerView.SHOW_BUFFERING_NEVER
+                if (isIptvChannelContext()) androidx.media3.ui.PlayerView.SHOW_BUFFERING_NEVER
                 else androidx.media3.ui.PlayerView.SHOW_BUFFERING_WHEN_PLAYING
             )
             binding.pvPlayer.setKeepContentOnPlayerReset(false)
@@ -2389,6 +2630,53 @@ class PlayerMobileFragment : Fragment() {
         // displayVideo() call leaks a listener and onPlayerError fires multiple times.
         activePlayerListener?.let { try { player.removeListener(it) } catch (_: Exception) {} }
         val newListener = object : Player.Listener {
+            // 2026-05-15 (user "Aventures croisées ne se lance pas, écran noir") :
+            // détection des codecs vidéo non supportés via onTracksChanged. Cas
+            // HEVC Main 10 / HDR10 (hvc1.2.4.L120.90) où onPlayerError n'est PAS
+            // déclenché parce que l'audio joue OK et que le player atteint
+            // STATE_READY. Sans ce check, l'utilisateur reste sur un spinner
+            // éternel sans savoir pourquoi.
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                super.onTracksChanged(tracks)
+                val videoGroups = tracks.groups.filter {
+                    it.type == androidx.media3.common.C.TRACK_TYPE_VIDEO
+                }
+                if (videoGroups.isEmpty()) return  // audio-only legit
+                // Y a-t-il AU MOINS un track vidéo supporté par les décodeurs ?
+                val anyVideoSupported = videoGroups.any { group ->
+                    (0 until group.length).any { i -> group.isTrackSupported(i) }
+                }
+                if (!anyVideoSupported) {
+                    val firstFormat = videoGroups.first().getTrackFormat(0)
+                    val codecLabel = firstFormat.codecs ?: firstFormat.sampleMimeType ?: "?"
+                    val isHdr10 = codecLabel.contains("hvc1.2.", ignoreCase = true) ||
+                        codecLabel.contains("hev1.2.", ignoreCase = true) ||
+                        firstFormat.colorInfo?.colorTransfer == androidx.media3.common.C.COLOR_TRANSFER_ST2084
+                    val toastMsg = when {
+                        isHdr10 -> "Vidéo HEVC HDR10 (10-bit) non supportée par ce device — essaie un autre serveur si dispo"
+                        else -> "Codec vidéo non supporté ($codecLabel) par ce device — essaie un autre serveur si dispo"
+                    }
+                    Log.e("PlayerNetwork", "Aucun track vidéo supporté ($codecLabel) — Toast + auto-skip")
+                    try {
+                        android.widget.Toast.makeText(
+                            requireContext(), toastMsg, android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                    } catch (_: Exception) {}
+                    val server = currentServer
+                    if (server != null) {
+                        pruneBrokenVariant(server)
+                        val nextServer = nextAutoFallbackServer(servers, server)
+                        if (nextServer != null) {
+                            Log.d("PlayerNetwork", "Codec unsupported → next server: ${nextServer.name}")
+                            viewModel.getVideo(nextServer)
+                        } else if (!tryNextChannelVariant(server)) {
+                            Log.w("PlayerNetwork", "Codec unsupported et aucune source alternative — stop")
+                            try { player.stop() } catch (_: Exception) {}
+                        }
+                    }
+                }
+            }
+
             override fun onPlaybackStateChanged(playbackState: Int) {
                 super.onPlaybackStateChanged(playbackState)
                 val stateName = when (playbackState) {
@@ -2409,7 +2697,7 @@ class PlayerMobileFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                     // 2026-05-11 (user) : 2 règles selon état du stream :
                     //
                     // (A) PRÉ-READY (épisode jamais lancé, extracteur silencieux) :
@@ -2502,41 +2790,37 @@ class PlayerMobileFragment : Fragment() {
                     args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                     args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                     args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                    args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                    args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
+                // 2026-05-16 : pour les chaînes IPTV live, certaines playlists HLS
+                // contiennent `#EXT-X-ENDLIST` ou ont une durée fixe courte (ex: 5s)
+                // → ExoPlayer pense que c'est une VOD courte → STATE_ENDED après 5s.
+                // Le reload doit ÊTRE LÉGER (just player.prepare() = re-fetch la
+                // playlist qui a de nouveaux segments). Surtout PAS displayVideo()
+                // qui recrée le MediaItem (= reset complet = coupe le rendu).
+                // STATE_IDLE = blip réseau transient (même traitement).
                 if (isLiveIptvStream && (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE)) {
                     if (playbackState == Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
-                    // 2026-05-10 : guard anti-rentrance (cf PlayerTvFragment).
                     if (preemptiveReloadInFlight) return
-                    Log.w("PlayerMobileFragment", "Live IPTV stuck in $playbackState — FULL RELOAD via displayVideo")
+                    Log.w("PlayerMobileFragment", "Live IPTV $playbackState — refresh playlist via player.prepare()")
                     preemptiveReloadInFlight = true
                     try {
-                        val cs = currentServer
-                        val cv = currentVideo
-                        if (cs != null && cv != null) {
-                            // 2026-05-10 : keep_content retiré (cf PlayerTvFragment).
+                        viewLifecycleOwner.lifecycleScope.launch {
                             try {
-                                binding.pvPlayer.controller.hide()
-                            } catch (_: Exception) {}
-                            viewLifecycleOwner.lifecycleScope.launch {
-                                kotlinx.coroutines.delay(50L)
-                                if (_binding != null) {
-                                    try {
-                                        displayVideo(cv, cs)
-                                    } catch (e: Exception) {
-                                        Log.w("PlayerMobileFragment", "displayVideo reload failed: ${e.message}")
-                                    }
-                                }
-                                kotlinx.coroutines.delay(25_000L)
-                                preemptiveReloadInFlight = false
+                                // JUST prepare() — refresh la playlist HLS et reprend
+                                // au bord du nouveau contenu disponible. PAS de seek,
+                                // PAS de displayVideo, PAS de setMediaItem.
+                                player.prepare()
+                                player.playWhenReady = true
+                            } catch (e: Exception) {
+                                Log.w("PlayerMobileFragment", "prepare() refresh failed: ${e.message}")
                             }
-                        } else {
+                            // Cool-down court — si la playlist est vraiment cassée
+                            // (ENDLIST fixe), on retentera vite. Pas de 25s d'avant.
+                            kotlinx.coroutines.delay(3_000L)
                             preemptiveReloadInFlight = false
-                            player.prepare()
-                            player.playWhenReady = true
                         }
                     } catch (e: Exception) {
                         preemptiveReloadInFlight = false
-                        Log.w("PlayerMobileFragment", "Auto-resume failed: ${e.message}")
                     }
                 }
             }
@@ -2632,7 +2916,7 @@ class PlayerMobileFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                     if (player.hasReallyFinished() && !isLiveIptvNoAutoSkip) {
                         if (UserPreferences.autoplay) {
                             playNextEpisodeAcrossSeasons(autoplay = true)
@@ -2652,6 +2936,48 @@ class PlayerMobileFragment : Fragment() {
                 val cause = error.cause?.cause
                 val causeMsg = cause?.message ?: ""
                 val errorCauseMsg = error.cause?.message ?: ""
+
+                // 2026-05-15 (user "écran noir au lieu de jouer la vidéo") :
+                // détection explicite des codecs propriétaires non supportables
+                // (Dolby Vision dvhe.*, AV1 sur vieux device, HDR10+ sur device
+                // SDR, etc.). Sans ce check, l'user voit BUFFERING infini sans
+                // savoir pourquoi. Maintenant on affiche un Toast clair + on
+                // stoppe le sticky-retry qui boucle sans espoir.
+                val errMsgFull = error.message ?: ""
+                val isUnsupportedCodec = errMsgFull.contains("NO_EXCEEDS_CAPABILITIES") ||
+                    errMsgFull.contains("NO_UNSUPPORTED_TYPE") ||
+                    errMsgFull.contains("NO_UNSUPPORTED_DRM")
+                val isDolbyVision = errMsgFull.contains("dolby-vision", ignoreCase = true) ||
+                    errMsgFull.contains("dvhe.", ignoreCase = true) ||
+                    errMsgFull.contains("dvav.", ignoreCase = true) ||
+                    errMsgFull.contains("dvh1.", ignoreCase = true)
+                if (isUnsupportedCodec || isDolbyVision) {
+                    val server = currentServer
+                    val toastMsg = when {
+                        isDolbyVision -> "Dolby Vision non supporté sur cet appareil — choisis un autre serveur si dispo"
+                        else -> "Format/codec non supporté par ce device — choisis un autre serveur si dispo"
+                    }
+                    Log.e("PlayerNetwork", "Codec non supporté ($errMsgFull) — Toast + auto-skip")
+                    try {
+                        android.widget.Toast.makeText(
+                            requireContext(),
+                            toastMsg,
+                            android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                    } catch (_: Exception) {}
+                    if (server != null) {
+                        pruneBrokenVariant(server)
+                        val nextServer = nextAutoFallbackServer(servers, server)
+                        if (nextServer != null) {
+                            Log.d("PlayerNetwork", "Codec unsupported → next server: ${nextServer.name}")
+                            viewModel.getVideo(nextServer)
+                        } else if (!tryNextChannelVariant(server)) {
+                            Log.w("PlayerNetwork", "Codec unsupported et aucune source alternative — stop")
+                            try { player.stop() } catch (_: Exception) {}
+                        }
+                    }
+                    return
+                }
 
                 // Fallback 0: Cronet network errors (NOT 403) → retry with DefaultHttp
                 val is403 = errorCauseMsg.contains("403") || causeMsg.contains("403")
@@ -2709,7 +3035,7 @@ class PlayerMobileFragment : Fragment() {
                         args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                         args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                         args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                        args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                     if (isLiveIptvNow && iptvCurrentStreamHasWorked) {
                         Log.w("PlayerNetwork", "Connection timeout IPTV sticky (already worked) → re-prepare same server")
                         try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
@@ -2736,7 +3062,7 @@ class PlayerMobileFragment : Fragment() {
                     args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                     args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                     args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                    args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                    args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                 if (isLiveIptv) {
                     val server = currentServer ?: return
                     val errCodeName = error.errorCodeName
@@ -2744,11 +3070,16 @@ class PlayerMobileFragment : Fragment() {
 
                     // 2026-05-09 v3 : STICKY ABSOLU si stream a marché.
                     val errMsg = (error.cause?.message ?: error.message ?: "").lowercase()
+                    // 2026-05-17 : 500/502/503 ajoutés (parité TV) — Stalker/Xtream
+                    // token expiré donne souvent 5xx → fresh handshake résout.
                     val isPermanentHttpError = errMsg.contains("response code: 403") ||
                         errMsg.contains("response code: 404") ||
                         errMsg.contains("response code: 410") ||
                         errMsg.contains("response code: 451") ||
-                        errMsg.contains("response code: 456")
+                        errMsg.contains("response code: 456") ||
+                        errMsg.contains("response code: 500") ||
+                        errMsg.contains("response code: 502") ||
+                        errMsg.contains("response code: 503")
                     val MAX_RETRIES_BEFORE_SWITCH = 3
                     val shouldSwitch = !iptvCurrentStreamHasWorked &&
                         (isPermanentHttpError || iptvRetryCount >= MAX_RETRIES_BEFORE_SWITCH)
@@ -2905,7 +3236,7 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
         if (isLiveIptvStream) {
             player.seekToDefaultPosition()
         } else if (currentPosition == 0L) {
@@ -3151,7 +3482,7 @@ class PlayerMobileFragment : Fragment() {
                     args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                     args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                     args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                    args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                    args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                 if (!isLiveIptv) {
                     val show = player.currentPosition in 3000..120000
                     showSkipIntroButton(show)
@@ -3166,6 +3497,49 @@ class PlayerMobileFragment : Fragment() {
                         liveCheckCounter = 0
                         Log.d("PlayerMobileFragment", "Live buffer: pos=${pos/1000}s buf=${buf/1000}s ahead=${aheadSec}s")
                     }
+                    // Mobile port v51 : dual-bar visuel — barre 1 (lecture) + barre 2 (pré-chargé).
+                    //   Cycle wall-clock 60s. visualBoost +60s quand backup en queue (bars pleines).
+                    try {
+                        val ctrl = binding.pvPlayer.controller.binding.root
+                        val stdBar = ctrl.findViewById<View>(R.id.exo_progress)
+                        val pri = ctrl.findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.live_primary_progress)
+                        val sec = ctrl.findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.live_secondary_progress)
+                        if (stdBar != null && stdBar.visibility != View.GONE) stdBar.visibility = View.GONE
+                        if (pri != null && pri.visibility != View.VISIBLE) pri.visibility = View.VISIBLE
+                        if (sec != null && sec.visibility != View.VISIBLE) sec.visibility = View.VISIBLE
+                        if (pri != null && sec != null) {
+                            liveCumulativePlaybackMs += 1000L
+                            smoothedAheadMs = if (ahead > smoothedAheadMs) ahead
+                                else (smoothedAheadMs - 1000L).coerceAtLeast(ahead).coerceAtLeast(0L)
+                            val hasBackupQueued = try { player.mediaItemCount > 1 } catch (_: Exception) { false }
+                            val visualBoost = if (hasBackupQueued) 60_000L else 0L
+                            val visualAhead = smoothedAheadMs + visualBoost
+                            val chunkMs = 60_000L
+                            val pairMs = 2 * chunkMs
+                            val cumPos = liveCumulativePlaybackMs
+                            val pairStart = (cumPos / pairMs) * pairMs
+                            val posInPair = cumPos - pairStart
+                            val phaseA = posInPair < chunkMs
+                            if (phaseA) {
+                                pri.setDuration(chunkMs); pri.setPosition(posInPair)
+                                pri.setBufferedPosition((posInPair + visualAhead).coerceAtMost(chunkMs))
+                                pri.alpha = 1f
+                                sec.setDuration(chunkMs); sec.setPosition(0)
+                                val bar1Remaining = chunkMs - posInPair
+                                sec.setBufferedPosition((visualAhead - bar1Remaining).coerceAtLeast(0L).coerceAtMost(chunkMs))
+                                sec.alpha = 0.6f
+                            } else {
+                                val bar2Pos = posInPair - chunkMs
+                                sec.setDuration(chunkMs); sec.setPosition(bar2Pos)
+                                sec.setBufferedPosition((bar2Pos + visualAhead).coerceAtMost(chunkMs))
+                                sec.alpha = 1f
+                                val bar2Remaining = chunkMs - bar2Pos
+                                pri.setDuration(chunkMs); pri.setPosition(0)
+                                pri.setBufferedPosition((visualAhead - bar2Remaining).coerceAtLeast(0L).coerceAtMost(chunkMs))
+                                pri.alpha = 0.6f
+                            }
+                        }
+                    } catch (_: Exception) {}
                     // PISTE A : détection drain buffer (5 ticks consécutifs en baisse + ahead<25s)
                     if (lastAheadSec >= 0 && aheadSec < lastAheadSec) {
                         consecutiveDrainTicks++
@@ -3174,15 +3548,38 @@ class PlayerMobileFragment : Fragment() {
                     }
                     lastAheadSec = aheadSec
                     if (aheadSec >= 15) bufferEverHealthy = true
-                    if (consecutiveDrainTicks >= 5 && aheadSec < 25 && bufferEverHealthy &&
+                    // v72c HOTFIX (user "lecture ne fonctionne plus sur mobile") :
+                    //   LAZY BACKUP DÉSACTIVÉ — Mobile utilise ProgressiveMediaSource
+                    //   pour les streams live IPTV (vs HlsMediaSource TV). Ajouter un
+                    //   2e MediaItem = ouvrir 2e connexion HTTP → serveur Vegeta renvoie
+                    //   HTTP 444 (kicked) → playback meurt.
+                    //   Conséquence : pas de swap doux possible sur Mobile (pas de backup
+                    //   en queue), PREEMPTIVE fallback sur displayVideo destructif.
+                    //   Le visual dual-bar fonctionne quand même (boost +60s reste à 0).
+                    if (consecutiveDrainTicks >= 5 && aheadSec < 12 && bufferEverHealthy &&
                         iptvCurrentStreamHasWorked && !preemptiveReloadInFlight) {
                         preemptiveReloadInFlight = true
                         consecutiveDrainTicks = 0
                         val cs = currentServer
                         val cv = currentVideo
-                        if (cs != null && cv != null) {
+                        val hasBackup = try { player.mediaItemCount > 1 && player.hasNextMediaItem() } catch (_: Exception) { false }
+                        if (hasBackup) {
+                            // Mobile port v52+v54+v58 : smooth swap au lieu de reload destructif
                             Log.w("PlayerMobileFragment",
-                                "PREEMPTIVE reload — buffer drain ${aheadSec}s, 5 ticks de baisse continue")
+                                "PREEMPTIVE swap JUMELAGE — buffer ${aheadSec}s → swapToNextWithAudioFade")
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                try {
+                                    swapToNextWithAudioFade(player)
+                                } catch (e: Exception) {
+                                    Log.w("PlayerMobileFragment", "swapToNextWithAudioFade failed: ${e.message}")
+                                }
+                                kotlinx.coroutines.delay(10_000L)
+                                preemptiveReloadInFlight = false
+                            }
+                        } else if (cs != null && cv != null) {
+                            // Fallback path destructif (pas de backup en queue — myiptv-live, ou démarrage)
+                            Log.w("PlayerMobileFragment",
+                                "PREEMPTIVE reload (CRITIQUE) — buffer ${aheadSec}s, pas de backup → displayVideo")
                             try {
                                 binding.pvPlayer.controller.hide()
                             } catch (_: Exception) {}
@@ -3239,6 +3636,9 @@ class PlayerMobileFragment : Fragment() {
     @Volatile private var emergencyRefreshInFlight = false
     // 2026-05-09 PISTE A : flag anti-reload-en-rafale pour le préemptif drain.
     @Volatile private var preemptiveReloadInFlight = false
+    // Mobile port v51 : state pour dual-bar visuel live IPTV (1:1 avec TV)
+    @Volatile private var smoothedAheadMs: Long = 0L
+    @Volatile private var liveCumulativePlaybackMs: Long = 0L
     @Volatile private var lastAutoSwitchTime = 0L
 
     private fun scheduleProactiveTokenRefresh() {
@@ -3400,7 +3800,7 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
         // Per user request: precharge as much as possible so the live stream
         // never cuts. Bigger buffer windows + longer rebuffer threshold.
         // 2026-05-09 v11 : recovery ULTRA RAPIDE après cut (1s).
@@ -3415,12 +3815,15 @@ class PlayerMobileFragment : Fragment() {
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build()
         } else {
+            // v65 (aligned with PlayerTvFragment) : bump VOD buffer.
+            //   min 30→60s, max 120→300s (600 extra), start 1.5→1s, rebuffer 3→1.5s.
+            //   Films/séries n'arrivent plus en bout de buffer = moins de "rame".
             DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
-                    30_000,
-                    if (extraBuffering) 300_000 else 120_000,
-                    1_500,
-                    3_000
+                    60_000,
+                    if (extraBuffering) 600_000 else 300_000,
+                    1_000,
+                    1_500
                 )
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build()
@@ -3429,23 +3832,36 @@ class PlayerMobileFragment : Fragment() {
         val baseBuilder = if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1 && !currentSoftwareDecoder) {
             ExoPlayer.Builder(requireContext())
         } else {
-            // 2026-05-09 v16 : NextRenderersFactory pour IPTV (nextlib FFmpeg)
-            val renderersFactory = if (isLiveIptv) {
-                Log.d("PlayerMobileFragment", "Using NextRenderersFactory (nextlib FFmpeg) for IPTV")
-                io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory(requireContext()).apply {
+            // 2026-05-15 (user "fais en sorte qu'elle supporte tous les formats
+            // audio vidéo") : NextRenderersFactory (nextlib FFmpeg) activé pour
+            // TOUS les contenus, pas juste IPTV live. Cela apporte le fallback
+            // software pour les codecs audio (AC3/EAC3/DTS/TrueHD/Vorbis exotique)
+            // et certains codecs vidéo (HEVC/AV1) que le hardware ne sait pas
+            // décoder. Avant, seule la branche IPTV live l'utilisait → tout le
+            // reste (Mon IPTV VOD/Séries, Movix, Wiflix, etc.) tombait sur
+            // DefaultRenderersFactory sans fallback FFmpeg.
+            //
+            // Mode :
+            // - PREFER si user a explicitement activé software decoder (toggle Settings)
+            //   → utilise FFmpeg même si hardware dispo (utile sur émulateur)
+            // - ON sinon → hardware d'abord, FFmpeg en fallback uniquement quand
+            //   le hardware refuse le codec. Comportement par défaut, pas de
+            //   coût visible sur les contenus standards.
+            //
+            // Note : Dolby Vision (dvhe.*) reste NON SUPPORTÉ — c'est un format
+            // propriétaire licencié, ni FFmpeg ni les codecs Android open-source
+            // ne savent le décoder. Cf onPlayerError pour le handling spécifique.
+            val mode = if (currentSoftwareDecoder)
+                DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+            else
+                DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+            Log.d("PlayerMobileFragment",
+                "Using NextRenderersFactory (FFmpeg fallback) — mode=${if (currentSoftwareDecoder) "PREFER" else "ON"}, isLiveIptv=$isLiveIptv")
+            val renderersFactory = io.github.anilbeesetti.nextlib.media3ext.ffdecoder
+                .NextRenderersFactory(requireContext()).apply {
                     setEnableDecoderFallback(true)
-                    // 2026-05-09 v19 : MODE_ON (pas PREFER) — vidéo H264 sur HW,
-                    // FFmpeg uniquement en fallback audio.
-                    setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+                    setExtensionRendererMode(mode)
                 }
-            } else {
-                DefaultRenderersFactory(requireContext()).apply {
-                    setEnableDecoderFallback(true)
-                    if (currentSoftwareDecoder) {
-                        setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
-                    }
-                }
-            }
             ExoPlayer.Builder(requireContext(), renderersFactory)
         }
 
@@ -3747,7 +4163,7 @@ class PlayerMobileFragment : Fragment() {
             args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
         player = buildPlayer(extraBuffering).also { player ->
                 player.setAudioAttributes(
                     AudioAttributes.Builder()
@@ -3769,7 +4185,7 @@ class PlayerMobileFragment : Fragment() {
                     args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                     args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                     args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
-                    args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("bxt::")
+                    args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                 if (isLiveIptvCh) {
                     tsBuilder.setPreferredAudioMimeTypes(
                         androidx.media3.common.MimeTypes.AUDIO_AAC,
