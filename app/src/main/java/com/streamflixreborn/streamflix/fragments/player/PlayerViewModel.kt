@@ -193,16 +193,18 @@ class PlayerViewModel(
     private fun preExtractTopServersInBackground(servers: List<Video.Server>) {
         preExtractJob?.cancel()
         if (servers.isEmpty()) return
-        // v69 (user "FRAnime galère à chaque serveur") :
-        //   FRAnime utilise un mutex global dans FranimeSession (WebView
-        //   single-thread). Pré-extraire 4 servers en parallèle = file
-        //   d'attente de 4 × 5s = 20s sérialisés. Pour FRAnime, on limite
-        //   à 1 (le premier) → l'extract demandé par le user passe instant
-        //   au lieu de queuer derrière 3 autres pré-extracts.
+        // v69 + v74 (user "FRAnime galère à chaque serveur") :
+        //   FranimeSession utilise un mutex global (WebView single-thread).
+        //   Pré-extraire 4 servers en parallèle = file d'attente de 4 × 5s.
+        //   v74 : détection par URL — match franime.fr peu importe le provider
+        //   actif. Avant v74 on checkait juste UserPreferences.currentProvider
+        //   name == "FRAnime", ce qui ratait quand AnimeSama provider servait
+        //   des URLs franime.fr. Maintenant on regarde les server.src.
         val providerName = UserPreferences.currentProvider?.name.orEmpty()
-        val isFranime = providerName.equals("FRAnime", ignoreCase = true) ||
+        val usesFranimeSession = servers.firstOrNull()?.src?.contains("franime.fr", ignoreCase = true) == true ||
+            providerName.equals("FRAnime", ignoreCase = true) ||
             providerName.contains("Franime", ignoreCase = true)
-        val effectiveTopN = if (isFranime) 1 else PRE_EXTRACT_TOP_N
+        val effectiveTopN = if (usesFranimeSession) 1 else PRE_EXTRACT_TOP_N
         val toExtract = servers.take(effectiveTopN)
         // 2026-05-12 : skip IPTV — chaînes live, pas pertinent
         val providerNameForHead = UserPreferences.currentProvider?.name.orEmpty()
