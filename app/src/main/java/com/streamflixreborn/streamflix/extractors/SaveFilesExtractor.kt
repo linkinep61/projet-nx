@@ -262,8 +262,14 @@ class SaveFilesExtractor : Extractor() {
 
                     cont.invokeOnCancellation {
                         resolved = true
-                        webView.stopLoading()
-                        webView.destroy()
+                        // v73 (crash AnimeSama Chainsaw) : WebView méthodes doivent
+                        //   être appelées sur le main thread. invokeOnCancellation
+                        //   peut s'exécuter depuis n'importe quel thread (notamment
+                        //   DefaultExecutor lors d'un timeout) → crash. Force Main.
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            try { webView.stopLoading() } catch (_: Exception) {}
+                            try { webView.destroy() } catch (_: Exception) {}
+                        }
                     }
                 }
             }

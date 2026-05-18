@@ -53,8 +53,11 @@ class VidLinkExtractor : Extractor() {
                 timeoutHandler.postDelayed(timeoutRunnable, 30000) // 30 seconds timeout
 
                 continuation.invokeOnCancellation {
-                    webView.stopLoading()
-                    webView.destroy()
+                    // v73 : WebView méthodes sur Main thread
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        try { webView.stopLoading() } catch (_: Exception) {}
+                        try { webView.destroy() } catch (_: Exception) {}
+                    }
                 }
 
                 webView.webViewClient = object : WebViewClient() {
