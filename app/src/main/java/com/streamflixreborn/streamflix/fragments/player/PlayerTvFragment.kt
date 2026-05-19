@@ -2607,16 +2607,18 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
                             args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                         // 2026-05-11 (user) : 2 règles selon état du stream :
-                        // (A) Pré-READY (extracteur silencieux) → skip 10s
-                        //     (était 30s, baissé 2026-05-12 pour accélérer le fallback
-                        //     quand plein de serveurs morts en série. Le HEAD check
-                        //     pre-extract filtre déjà beaucoup en amont.)
+                        // (A) Pré-READY (extracteur silencieux) → skip 20s
+                        //     (était 10s, repassé à 20s 2026-05-18 — sur Chromecast
+                        //     les serveurs internationaux type Sibnet (Russie) depuis
+                        //     Tahiti mettent souvent 12-15s à démarrer le streaming,
+                        //     et étaient marqués broken à tort. 20s = compromis entre
+                        //     vrai-mort et juste-lent.)
                         // (B) Post-READY (coupure réseau) → 15s super-buffer same server
                         if (!isLiveIptv && bufferingWatchdog == null) {
                             val initialPosition = player.currentPosition
                             bufferingWatchdog = viewLifecycleOwner.lifecycleScope.launch {
                                 if (!vodCurrentStreamHasWorked) {
-                                    kotlinx.coroutines.delay(10_000L)
+                                    kotlinx.coroutines.delay(20_000L)
                                     if (player.playbackState == Player.STATE_BUFFERING &&
                                         player.currentPosition == initialPosition &&
                                         !vodCurrentStreamHasWorked) {
@@ -2641,7 +2643,7 @@ class PlayerTvFragment : Fragment() {
                                                 ?: servers.getOrNull(currentIdx + 1)  // fallback brut si plus aucun sain
                                         } else null
                                         Log.w("PlayerNetwork",
-                                            "Pre-READY 10s freeze on ${server?.name} → skip to ${nextServer?.name} (skipping broken)")
+                                            "Pre-READY 20s freeze on ${server?.name} → skip to ${nextServer?.name} (skipping broken)")
                                         if (server != null) {
                                             pruneBrokenVariant(server)
                                             // 2026-05-12 : flag instantanément le serveur broken

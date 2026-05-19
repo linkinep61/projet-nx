@@ -18,6 +18,7 @@ import com.streamflixreborn.streamflix.utils.NetworkClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
@@ -87,6 +88,11 @@ object FranimeProvider : Provider {
     // Int.MAX_VALUE (ex: 2,864,154,715) → overflow donnait des anime_id négatifs
     // dans l'URL (anime_id=-1430812581) → 404 garanti.
     @Volatile private var catalogueIndex: Map<Long, JSONObject>? = null  // id → anime
+    // 2026-05-18 : mutex pour SÉRIALISER les calls à loadCatalogue.
+    //   Sans ça, 3-4 threads parallèles (preExtract, getHome, search…) parsaient
+    //   chacun ~6MB de JSON → OOM sur Chromecast (heap 384MB).
+    //   Maintenant : un seul parse, les autres attendent + récupèrent le cache.
+    private val loadCatalogueMutex = kotlinx.coroutines.sync.Mutex()
 
     fun init(context: Context) {
         // 2026-05-16 v9 : pre-warm DÉSACTIVÉ — le catalogue 3MB causait OOM
@@ -102,7 +108,18 @@ object FranimeProvider : Provider {
     }
 
     private suspend fun loadCatalogue(): List<JSONObject> {
+        // Fast-path : si déjà en mémoire, retourner immédiatement (no mutex).
         catalogue?.let { return it }
+        // Sinon, serialize : un seul thread à la fois lit/parse le catalogue.
+        //   Les autres attendent et récupèrent le résultat depuis le memory cache.
+        return loadCatalogueMutex.withLock {
+            // Re-check après acquisition du lock (autre thread a peut-être chargé).
+            catalogue?.let { return@withLock it }
+            doLoadCatalogue()
+        }
+    }
+
+    private suspend fun doLoadCatalogue(): List<JSONObject> {
         // 1) Disk cache via fichier (PAS SharedPreferences — 3MB en prefs
         //    garde la string en mémoire pour tout le cycle de vie de l'app).
         val now = System.currentTimeMillis()
@@ -315,18 +332,49 @@ object FranimeProvider : Provider {
     // ── SEARCH ───────────────────────────────────────────────────────────
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
-        if (query.isBlank() || page > 1) return emptyList()
+        // 2026-05-18 v81 : empty query → expose genre picker (anime FR).
+        //   Pagination interne 60/page pour les query non-vides.
+        if (query.isBlank()) {
+            if (page > 1) return emptyList()
+            return listOf(
+                Genre(id = "action", name = "Action"),
+                Genre(id = "aventure", name = "Aventure"),
+                Genre(id = "comedie", name = "Comédie"),
+                Genre(id = "drame", name = "Drame"),
+                Genre(id = "ecchi", name = "Ecchi"),
+                Genre(id = "fantastique", name = "Fantastique"),
+                Genre(id = "horreur", name = "Horreur"),
+                Genre(id = "isekai", name = "Isekai"),
+                Genre(id = "mecha", name = "Mecha"),
+                Genre(id = "musique", name = "Musique"),
+                Genre(id = "mystere", name = "Mystère"),
+                Genre(id = "psychologique", name = "Psychologique"),
+                Genre(id = "romance", name = "Romance"),
+                Genre(id = "school-life", name = "Tranches de vie"),
+                Genre(id = "science-fiction", name = "Science-Fiction"),
+                Genre(id = "seinen", name = "Seinen"),
+                Genre(id = "shonen", name = "Shōnen"),
+                Genre(id = "shojo", name = "Shōjo"),
+                Genre(id = "sport", name = "Sport"),
+                Genre(id = "surnaturel", name = "Surnaturel"),
+            )
+        }
         val all = loadCatalogue()
         if (all.isEmpty()) return emptyList()
         val q = query.lowercase().trim()
-        val results = all.filter { a ->
+        val filtered = all.filter { a ->
             a.bestTitle().lowercase().contains(q) ||
                     a.optString("titleO").lowercase().contains(q) ||
                     a.optJSONObject("titles")?.let { titles ->
                         titles.keys().asSequence().any { titles.optString(it).lowercase().contains(q) }
                     } == true
-        }.take(60).map { it.toItem() }
-        Log.d(TAG, "search('$query') → ${results.size} results")
+        }
+        // Pagination interne 60/page
+        val pageSize = 60
+        val start = (page - 1) * pageSize
+        if (start >= filtered.size) return emptyList()
+        val results = filtered.drop(start).take(pageSize).map { it.toItem() }
+        Log.d(TAG, "search('$query', page=$page) → ${results.size} results (total=${filtered.size})")
         return results
     }
 
@@ -527,10 +575,66 @@ object FranimeProvider : Provider {
         return Extractor.extract(server.src, server)
     }
 
-    // ── GENRE / PEOPLE (non supportés) ──────────────────────────────────
+    // ── GENRE / PEOPLE ──────────────────────────────────────────────────
 
-    override suspend fun getGenre(id: String, page: Int): Genre =
-        Genre(id = id, name = id, shows = emptyList())
+    // 2026-05-18 : map des slugs exposés dans search() empty vers les tokens
+    //   à matcher dans le champ "themes" de chaque anime. Match permissif :
+    //   case-insensitive + tolérance accents (â→a, é→e, etc.).
+    private val genreSlugAliases = mapOf(
+        "action" to listOf("action"),
+        "aventure" to listOf("aventure", "adventure"),
+        "comedie" to listOf("comedie", "comédie", "comedy"),
+        "drame" to listOf("drame", "drama"),
+        "ecchi" to listOf("ecchi"),
+        "fantastique" to listOf("fantastique", "fantasy", "fantaisie"),
+        "horreur" to listOf("horreur", "horror"),
+        "isekai" to listOf("isekai"),
+        "mecha" to listOf("mecha"),
+        "musique" to listOf("musique", "music"),
+        "mystere" to listOf("mystere", "mystère", "mystery"),
+        "psychologique" to listOf("psychologique", "psychological"),
+        "romance" to listOf("romance"),
+        "school-life" to listOf("school", "tranche de vie", "tranches de vie", "slice of life", "school life"),
+        "science-fiction" to listOf("science-fiction", "sci-fi", "scifi", "science fiction"),
+        "seinen" to listOf("seinen"),
+        "shonen" to listOf("shonen", "shōnen", "shonen"),
+        "shojo" to listOf("shojo", "shōjo", "shoujo"),
+        "sport" to listOf("sport", "sports"),
+        "surnaturel" to listOf("surnaturel", "supernatural"),
+    )
+
+    private fun normalizeText(s: String): String = s.lowercase()
+        .replace('à', 'a').replace('â', 'a').replace('ä', 'a')
+        .replace('é', 'e').replace('è', 'e').replace('ê', 'e').replace('ë', 'e')
+        .replace('î', 'i').replace('ï', 'i')
+        .replace('ô', 'o').replace('ö', 'o').replace('ō', 'o')
+        .replace('ù', 'u').replace('û', 'u').replace('ü', 'u')
+        .replace('ç', 'c')
+
+    override suspend fun getGenre(id: String, page: Int): Genre {
+        val all = loadCatalogue()
+        val tokens = genreSlugAliases[id]?.map { normalizeText(it) } ?: listOf(normalizeText(id))
+        val matching = all.filter { a ->
+            // Vérifier dans themes ET genres (parfois l'un, parfois l'autre selon l'item)
+            val themesArr = a.optJSONArray("themes")
+            val genresArr = a.optJSONArray("genres")
+            val pool = mutableListOf<String>()
+            if (themesArr != null) for (i in 0 until themesArr.length()) pool.add(themesArr.optString(i))
+            if (genresArr != null) for (i in 0 until genresArr.length()) pool.add(genresArr.optString(i))
+            pool.any { item ->
+                val n = normalizeText(item)
+                tokens.any { tok -> n.contains(tok) }
+            }
+        }
+        val pageSize = 60
+        val start = (page - 1) * pageSize
+        val pageItems = if (start >= matching.size) emptyList()
+            else matching.drop(start).take(pageSize)
+        // toItem retourne Movie ou TvShow ; tous deux implémentent Show.
+        val shows = pageItems.mapNotNull { it.toItem() as? com.streamflixreborn.streamflix.models.Show }
+        Log.d(TAG, "getGenre($id, page=$page) → ${shows.size} matches (total=${matching.size})")
+        return Genre(id = id, name = id, shows = shows)
+    }
 
     override suspend fun getPeople(id: String, page: Int): People =
         People(id = id, name = id)

@@ -528,7 +528,11 @@ class PlayerViewModel(
     }
 
     fun getVideo(server: Video.Server): kotlinx.coroutines.Job {
+        // 2026-05-18 : anti-cascade. Cancel previous getVideo AND any pre-extract
+        //   job running en background, sinon plusieurs extractions WebView en
+        //   parallèle saturent CPU + mémoire et le player tourne dans le vide.
         getVideoJob?.cancel()
+        preExtractJob?.cancel()
         val job = viewModelScope.launch(Dispatchers.IO) {
         Log.d("PlayerViewModel", "Inizio estrazione video dal server: ${server.name}")
         _state.emit(State.LoadingVideo(server))
@@ -568,6 +572,13 @@ class PlayerViewModel(
             recordSessionFilmId()
             unmarkCurrentFilmAsEmpty()
             _state.emit(State.SuccessLoadingVideo(video, server))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // 2026-05-18 : NE PAS émettre FailedLoadingVideo en cas
+            //   d'annulation propre (par un getVideo suivant qui cancel le
+            //   précédent). Sinon : cascade infinie — chaque cancel déclenche
+            //   un fallback vers next server qui re-cancel l'actuel etc.
+            Log.d("PlayerViewModel", "getVideo cancelled (${server.name}), no fallback emitted")
+            throw e
         } catch (e: Exception) {
             Log.e("PlayerViewModel", "Errore estrazione video: ", e)
             // Tracking session : compte ce fail, et si dead-content, augmente

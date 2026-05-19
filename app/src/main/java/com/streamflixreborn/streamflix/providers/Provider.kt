@@ -131,6 +131,11 @@ interface Provider {
             // 2026-05-05: Moviebox (themoviebox.org/aoneroom) — niche K-Dramas + animes + films Hollywood VF.
             // v1: catalogue uniquement (search/browse). Extraction streams TODO v2.
             MovieboxProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
+            // 2026-05-18 : AllMovieLand SUPPRIMÉ. Catalog principalement Bollywood
+            // (pas l'usage anime voulu) + serveur Cloudflare-protected qui exige un
+            // bypass WebView fragile. User : "supprime ce provider, on fera jamais
+            // ce qu'on veut avec".
+            // AllMovieLandProvider to ProviderSupport(movies = true, tvShows = false, group = ProviderGroup.ANIME, enrichHome = false),
             // ═══════════════════════════════════════════════════════════════
             //  IPTV providers — Vavoo EN TÊTE (catalogue le plus large + stable)
             // ═══════════════════════════════════════════════════════════════

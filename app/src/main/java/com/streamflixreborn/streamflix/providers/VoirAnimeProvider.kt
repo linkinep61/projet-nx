@@ -209,25 +209,27 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
         if (query.isEmpty()) {
+            // 2026-05-18 v81 : noms en FR. Ids restent en anglais car le site
+            //   VoirAnime utilise les slugs anglais dans ses URLs de catégorie.
             return listOf(
                 Genre(id = "action", name = "Action"),
-                Genre(id = "adventure", name = "Adventure"),
-                Genre(id = "chinese", name = "Chinese"),
-                Genre(id = "comedy", name = "Comedy"),
-                Genre(id = "drama", name = "Drama"),
+                Genre(id = "adventure", name = "Aventure"),
+                Genre(id = "chinese", name = "Chinois"),
+                Genre(id = "comedy", name = "Comédie"),
+                Genre(id = "drama", name = "Drame"),
                 Genre(id = "ecchi", name = "Ecchi"),
-                Genre(id = "fantasy", name = "Fantasy"),
-                Genre(id = "horror", name = "Horror"),
-                Genre(id = "mahou-shoujo", name = "Mahou Shoujo"),
+                Genre(id = "fantasy", name = "Fantastique"),
+                Genre(id = "horror", name = "Horreur"),
+                Genre(id = "mahou-shoujo", name = "Mahou Shōjo"),
                 Genre(id = "mecha", name = "Mecha"),
-                Genre(id = "music", name = "Music"),
-                Genre(id = "mystery", name = "Mystery"),
-                Genre(id = "psychological", name = "Psychological"),
+                Genre(id = "music", name = "Musique"),
+                Genre(id = "mystery", name = "Mystère"),
+                Genre(id = "psychological", name = "Psychologique"),
                 Genre(id = "romance", name = "Romance"),
-                Genre(id = "sci-fi", name = "Sci-Fi"),
-                Genre(id = "slice-of-life", name = "Slice of Life"),
-                Genre(id = "sports", name = "Sports"),
-                Genre(id = "supernatural", name = "Supernatural"),
+                Genre(id = "sci-fi", name = "Science-Fiction"),
+                Genre(id = "slice-of-life", name = "Tranches de vie"),
+                Genre(id = "sports", name = "Sport"),
+                Genre(id = "supernatural", name = "Surnaturel"),
                 Genre(id = "thriller", name = "Thriller"),
             )
         }

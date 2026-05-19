@@ -76,9 +76,11 @@ object UserPreferences {
     }
 
 
-    // Flag pour la recherche globale de genres (set par SearchFragment, lu par GenreViewHolder)
+    // Flag pour la recherche globale (toggle dans SearchFragment).
+    // 2026-05-18 : default = true pour activer la recherche globale sur tous les
+    //   providers du même language. L'utilisateur peut désactiver via le toggle.
     @Volatile
-    var isGlobalSearchEnabled: Boolean = false
+    var isGlobalSearchEnabled: Boolean = true
 
     /** 2026-05-13 (user "à l'ouverture d'un profil pas par maman c'est Mon IPTV
      *  qui s'ouvre au lieu du home fournisseur") : currentProvider est

@@ -167,8 +167,13 @@ class SearchTvFragment : Fragment() {
         hideKeyboard()
 
         if (isGlobalSearchChecked) {
-            val currentLanguage = UserPreferences.currentProvider?.language ?: "es"
-            viewModel.searchGlobal(query, currentLanguage)
+            // 2026-05-18 : on passe le group du provider courant pour que
+            //   searchGlobal sépare IPTV vs FILMS/Séries/Anime.
+            val currentProvider = UserPreferences.currentProvider
+            val currentLanguage = currentProvider?.language ?: "es"
+            val group = currentProvider?.let { Provider.getGroup(it) }
+                ?: Provider.Companion.ProviderGroup.FILMS_SERIES
+            viewModel.searchGlobal(query, currentLanguage, group)
         } else {
             viewModel.search(query)
         }
@@ -178,6 +183,13 @@ class SearchTvFragment : Fragment() {
     private fun initializeSearch() {
         binding.llGlobalSearch.nextFocusUpId = binding.etSearch.id
         binding.vgvSearch.nextFocusUpId = binding.llGlobalSearch.id
+
+        // 2026-05-18 : restore saved state (default=true → recherche globale active
+        //   d'office sur tous les providers du même language).
+        isGlobalSearchChecked = UserPreferences.isGlobalSearchEnabled
+        binding.ivGlobalSearchSwitch.setImageResource(
+            if (isGlobalSearchChecked) R.drawable.ic_switch_on else R.drawable.ic_switch_off
+        )
 
         binding.llGlobalSearch.setOnClickListener {
             isGlobalSearchChecked = !isGlobalSearchChecked

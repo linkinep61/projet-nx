@@ -497,10 +497,11 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     }
 
     override suspend fun getGenre(id: String, page: Int): Genre {
-        if (page > 1) return Genre(id, id, emptyList())
+        // 2026-05-18 : pagination interne — l'API search FrenchManga ne pagine pas,
+        //   on récupère tout et on slice côté client (60 items/page).
         initializeService()
         val results = service.search(query = id)
-        val shows = results.select("div.search-item").mapNotNull {
+        val allShows = results.select("div.search-item").mapNotNull {
             val itemId = it.attr("onclick").substringAfter("/").substringBefore("'")
             if (itemId.isEmpty()) return@mapNotNull null
             val title = it.selectFirst("div.search-title")?.text()?.replace("\\'", "'") ?: ""
@@ -511,6 +512,9 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             else
                 Movie(id = itemId, title = title, poster = poster)
         }
+        val pageSize = 60
+        val start = (page - 1) * pageSize
+        val shows = if (start >= allShows.size) emptyList() else allShows.drop(start).take(pageSize)
         return Genre(id = id, name = id, shows = shows)
     }
 

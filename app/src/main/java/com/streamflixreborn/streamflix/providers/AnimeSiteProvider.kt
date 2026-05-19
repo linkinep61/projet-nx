@@ -107,8 +107,13 @@ object AnimeSiteProvider : Provider {
         val seen = mutableSetOf<String>()
         document.select("a[href]").forEach { a ->
             val href = a.attr("href")
-            // Match /{numeric_id}-{slug} (pas /play/...)
-            val m = Regex("""^/(\d{7})-([a-z0-9\-]+)$""").find(href) ?: return@forEach
+            // v81 : regex plus permissive — match /{5-8 digit id}-{slug} avec
+            //   ou sans prefix (anime/, series/, search/), trailing slash optionnel.
+            //   La home utilise /1234567-slug, mais d'autres pages (search, genre)
+            //   peuvent insérer un préfixe ou avoir un id plus court.
+            val m = Regex("""(?:^|/)(\d{5,8})-([a-z0-9\-]+)/?$""").find(href) ?: return@forEach
+            // Skip /play/... explicitement
+            if (href.contains("/play/")) return@forEach
             val slug = m.groupValues[2]
             if (!seen.add(slug)) return@forEach
             val id = "${m.groupValues[1]}-$slug"
@@ -166,17 +171,79 @@ object AnimeSiteProvider : Provider {
     // ───────── SEARCH ─────────
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
-        if (query.isBlank()) return emptyList()
-        // AnimeSite a une page /search/{query} qui retourne du HTML serveur-rendered.
-        val encoded = java.net.URLEncoder.encode(query, "UTF-8")
-        val url = "${baseUrl}search/$encoded"
+        // 2026-05-18 v81 : empty query → expose genre picker (anime FR).
+        //   Le site n'a pas d'URL de catégorie par genre, donc getGenre()
+        //   doit filtrer le catalogue par tag. Pour l'instant on liste les
+        //   genres anime classiques, click → on tente de filtrer côté search.
+        if (query.isBlank()) {
+            if (page > 1) return emptyList()
+            return listOf(
+                Genre(id = "action", name = "Action"),
+                Genre(id = "aventure", name = "Aventure"),
+                Genre(id = "comedie", name = "Comédie"),
+                Genre(id = "drame", name = "Drame"),
+                Genre(id = "fantastique", name = "Fantastique"),
+                Genre(id = "horreur", name = "Horreur"),
+                Genre(id = "isekai", name = "Isekai"),
+                Genre(id = "mecha", name = "Mecha"),
+                Genre(id = "mystere", name = "Mystère"),
+                Genre(id = "romance", name = "Romance"),
+                Genre(id = "school-life", name = "Tranches de vie"),
+                Genre(id = "science-fiction", name = "Science-Fiction"),
+                Genre(id = "seinen", name = "Seinen"),
+                Genre(id = "shonen", name = "Shōnen"),
+                Genre(id = "shojo", name = "Shōjo"),
+                Genre(id = "sport", name = "Sport"),
+                Genre(id = "surnaturel", name = "Surnaturel"),
+            )
+        }
+        // v81 : AnimeSite est un Next.js SPA — la search côté serveur retourne
+        //   un shell vide (308 chars). On charge le catalogue complet via
+        //   /series/all et on filtre côté client par titre.
+        //   Cache léger : on retient le doc 5min pour ne pas re-DL à chaque query.
+        val q = query.lowercase().trim()
         return try {
-            val document = fetchDocument(url)
-            parseAnimeLinks(document).map { it as AppAdapter.Item }
+            val catalogDoc = getCatalogDocument()
+            val all = parseAnimeLinks(catalogDoc)
+            val filtered = all.filter { it.title.lowercase().contains(q) }
+            Log.d(TAG, "search '$query' from catalog (${all.size} items) → ${filtered.size} matches")
+            filtered.map { it as AppAdapter.Item }
         } catch (e: Exception) {
             Log.w(TAG, "search failed for '$query': ${e.message}")
             emptyList()
         }
+    }
+
+    // 2026-05-18 v81 : cache du catalogue /series/all (5min) pour filter
+    //   localement les recherches sans re-DL à chaque query.
+    @Volatile private var cachedCatalog: Document? = null
+    @Volatile private var cachedCatalogAt: Long = 0
+    private val CATALOG_TTL_MS = 5 * 60 * 1000L
+    private suspend fun getCatalogDocument(): Document {
+        val now = System.currentTimeMillis()
+        val cached = cachedCatalog
+        if (cached != null && (now - cachedCatalogAt) < CATALOG_TTL_MS) return cached
+        // v81 : on charge home + /series/all et on garde celui qui a le plus
+        //   d'items parsables (regex anchors anime).
+        val urls = listOf(baseUrl, "${baseUrl}series/all", "${baseUrl}series/")
+        var best: Document? = null
+        var bestCount = 0
+        for (url in urls) {
+            try {
+                val doc = fetchDocument(url)
+                val count = parseAnimeLinks(doc).size
+                Log.d(TAG, "catalog url=$url html=${doc.text().length} chars items=$count")
+                if (count > bestCount) {
+                    best = doc; bestCount = count
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "catalog fetch failed for $url: ${e.message}")
+            }
+        }
+        if (best == null) throw Exception("AnimeSite catalog unreachable")
+        cachedCatalog = best
+        cachedCatalogAt = now
+        return best
     }
 
     // ───────── BROWSE ─────────

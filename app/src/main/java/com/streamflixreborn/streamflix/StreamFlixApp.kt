@@ -259,6 +259,7 @@ class StreamFlixApp : Application() {
                 Log.w("StreamFlixApp", "Codec warmup failed: ${e.message}")
             }
         }
+
     }
 
     /**
@@ -307,6 +308,29 @@ class StreamFlixApp : Application() {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
+        Log.d("StreamFlixApp", "onTrimMemory(level=$level)")
+        // 2026-05-18 : libérer Glide cache mémoire agressivement quand le
+        //   système signale memory pressure. Sur Chromecast (384MB heap) c'est
+        //   souvent déclenché — sans ça l'app OOMait après plusieurs sessions.
+        try {
+            when {
+                level >= TRIM_MEMORY_RUNNING_CRITICAL -> {
+                    // Critique → drop tout le cache mémoire
+                    com.bumptech.glide.Glide.get(this).clearMemory()
+                }
+                level >= TRIM_MEMORY_RUNNING_LOW -> {
+                    // Faible → trim partiel
+                    com.bumptech.glide.Glide.get(this).trimMemory(level)
+                }
+                level == TRIM_MEMORY_UI_HIDDEN -> {
+                    // App en background → drop cache mémoire (les images restent
+                    // sur disque, rechargées si on revient)
+                    com.bumptech.glide.Glide.get(this).clearMemory()
+                }
+            }
+        } catch (e: Throwable) {
+            Log.w("StreamFlixApp", "Glide trim failed: ${e.message}")
+        }
         if (level >= TRIM_MEMORY_RUNNING_LOW) {
             CacheUtils.clearAppCache(this)
         }

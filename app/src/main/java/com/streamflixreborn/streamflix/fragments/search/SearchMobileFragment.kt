@@ -139,6 +139,10 @@ class SearchMobileFragment : Fragment() {
     }
 
     private fun initializeSearch() {
+        // 2026-05-18 : restore saved state au démarrage (default=true →
+        //   recherche globale active d'office sur tous les providers du même language).
+        binding.swGlobalSearch.isChecked = UserPreferences.isGlobalSearchEnabled
+
         // Sync global search toggle with UserPreferences
         binding.swGlobalSearch.setOnCheckedChangeListener { _, isChecked ->
             UserPreferences.isGlobalSearchEnabled = isChecked
@@ -156,13 +160,13 @@ class SearchMobileFragment : Fragment() {
                     hideKeyboard()
 
                     if (binding.swGlobalSearch.isChecked) {
-                        val currentLanguage = UserPreferences.currentProvider?.language ?: "fr"
+                        // 2026-05-18 : passe le group du provider courant. La recherche
+                        //   globale partition IPTV vs FILMS/Séries/Anime — on cherche
+                        //   uniquement dans le bon côté.
                         val currentProvider = UserPreferences.currentProvider
-                        val group = if (currentProvider != null) {
-                            Provider.getGroup(currentProvider)
-                        } else {
-                            Provider.Companion.ProviderGroup.FILMS_SERIES
-                        }
+                        val currentLanguage = currentProvider?.language ?: "fr"
+                        val group = currentProvider?.let { Provider.getGroup(it) }
+                            ?: Provider.Companion.ProviderGroup.FILMS_SERIES
                         viewModel.searchGlobal(query, currentLanguage, group)
                     } else {
                         viewModel.search(query)
