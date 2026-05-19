@@ -216,14 +216,19 @@ object KidrazProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         val folder = apiBase.removePrefix("/").substringBefore("/")
         val pr = homePath.substringAfterLast("/")
 
-        val response = service.search(
-            "$apiBase/api_search.php",
-            query = query,
-            offset = (page - 1) * 20,
-            limit = 20,
-            folder = folder,
-            pr = pr
-        )
+        val response = try {
+            service.search(
+                "$apiBase/api_search.php",
+                query = query,
+                offset = (page - 1) * 20,
+                limit = 20,
+                folder = folder,
+                pr = pr
+            )
+        } catch (e: Exception) {
+            android.util.Log.w("Kidraz", "search API failed for '$query': ${e.message}")
+            FilmResponse(films = emptyList())
+        }
 
         response.films.map { film ->
             val titleMatch = Regex("^(.*?)\\s*\\((\\d{4})\\)\\s*$").find(film.title.trim())

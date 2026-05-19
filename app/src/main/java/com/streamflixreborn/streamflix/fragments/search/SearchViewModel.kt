@@ -154,18 +154,21 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
     }
 
     // FUNCIÓN DE BÚSQUEDA GLOBAL AÑADIDA
+    // 2026-05-18 : binary partition IPTV vs non-IPTV — quand on est sur un
+    //   provider IPTV, on cherche QUE dans les IPTV ; sinon, dans tout le reste
+    //   (FILMS_SERIES + ANIME mélangés). Aucun mélange entre IPTV et film/série.
     fun searchGlobal(query: String, currentLanguage: String, group: Provider.Companion.ProviderGroup? = null) = viewModelScope.launch(Dispatchers.IO) {
         _state.emit(State.GlobalSearching)
 
-        // Filtrer par groupe (si spécifié) ET par langue
-        val targetProviders = if (group != null) {
-            Provider.getProvidersByGroup(group)
-                .filter { it.language == currentLanguage }
-        } else {
-            Provider.providers.keys
-                .filter { it.language == currentLanguage }
-                .toList()
-        }
+        val isIptvScope = group == Provider.Companion.ProviderGroup.IPTV
+        val targetProviders = Provider.providers.keys
+            .filter { it.language == currentLanguage }
+            .filter { p ->
+                val pIsIptv = Provider.getGroup(p) == Provider.Companion.ProviderGroup.IPTV
+                if (isIptvScope) pIsIptv else !pIsIptv
+            }
+            .toList()
+        Log.d("SearchViewModel", "searchGlobal scope=${if (isIptvScope) "IPTV" else "Films/Séries+Anime"} targets=${targetProviders.size}")
 
         if (targetProviders.isEmpty()) {
             _state.emit(State.SuccessGlobalSearching(emptyList()))

@@ -50,7 +50,10 @@
     <!-- 2026-05-09 : Overlay de chargement pendant la recherche servers + extraction.
          Visible pendant State.LoadingServers + LoadingVideo, hidden dès que
          ExoPlayer fire STATE_READY (premier frame prêt). Sans ça l'écran restait
-         juste noir et l'user pensait que rien ne se passait. -->
+         juste noir et l'user pensait que rien ne se passait.
+         2026-05-18 : end=@id/settings au lieu de parent — sinon l'overlay
+         clickable=true couvrait aussi la liste serveurs à droite, empêchant
+         l'user de la cliquer pendant le loading. -->
     <FrameLayout
         android:id="@+id/loading_overlay"
         android:layout_width="0dp"
@@ -60,7 +63,7 @@
         android:focusable="true"
         android:visibility="gone"
         app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/settings"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
         tools:visibility="visible">

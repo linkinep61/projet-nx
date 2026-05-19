@@ -17,18 +17,27 @@ class VideoSibNetExtractor : Extractor() {
     override val mainUrl = "https://video.sibnet.ru/"
 
     override suspend fun extract(link: String): Video {
+        android.util.Log.d("VideoSibNet", "extract() link=$link")
         val service = Service.build(mainUrl)
 
         val document = service.get(link, mainUrl)
+        android.util.Log.d("VideoSibNet", "HTML loaded, len=${document.html().length}, scripts=${document.select("script").size}")
 
-        val relativeVideoUrl = extractVideoUrl(document)
-            ?: throw Exception("Could not find video source in the webpage")
+        val relativeVideoUrl = extractVideoUrl(document) ?: run {
+            // Dump a snippet for diagnosis
+            val htmlSnippet = document.html().take(600).replace("\n", " ")
+            android.util.Log.w("VideoSibNet", "No video URL in HTML. Snippet: $htmlSnippet")
+            throw Exception("Could not find video source in the webpage")
+        }
+        android.util.Log.d("VideoSibNet", "Extracted relative URL: $relativeVideoUrl")
 
         val absoluteVideoUrl = when {
             relativeVideoUrl.startsWith("http") -> relativeVideoUrl
+            relativeVideoUrl.startsWith("//") -> "https:$relativeVideoUrl"
             relativeVideoUrl.startsWith("/") -> mainUrl.trimEnd('/') + relativeVideoUrl
             else -> mainUrl.trimEnd('/') + "/" + relativeVideoUrl
         }
+        android.util.Log.d("VideoSibNet", "Final URL: $absoluteVideoUrl")
 
         return Video(
             source = absoluteVideoUrl,

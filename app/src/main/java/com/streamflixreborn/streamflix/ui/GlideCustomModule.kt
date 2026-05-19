@@ -37,11 +37,16 @@ class GlideCustomModule : AppGlideModule() {
         // Disk cache: 150MB max
         builder.setDiskCache(InternalCacheDiskCacheFactory(context, "glide_cache", DISK_CACHE_SIZE))
 
-        // Memory cache: 1/6 of available app memory (capped, proportional to device RAM)
+        // 2026-05-18 : memory cache plus agressif sur low-heap (Chromecast 384MB
+        //   tombait en OOM avec 64MB de cache Glide + posters accumulés).
+        //   TV / leanback : cap à 24MB. Mobile : cap à 48MB.
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val appMemory = activityManager.memoryClass * 1024L * 1024L
-        val memoryCacheSize = (appMemory / 6).coerceIn(8L * 1024 * 1024, 64L * 1024 * 1024)
+        val isTv = context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
+        val maxCache = if (isTv) 24L * 1024 * 1024 else 48L * 1024 * 1024
+        val memoryCacheSize = (appMemory / 12).coerceIn(8L * 1024 * 1024, maxCache)
         builder.setMemoryCache(LruResourceCache(memoryCacheSize))
+        android.util.Log.d("GlideCustom", "Memory cache=${memoryCacheSize / 1024 / 1024}MB (isTv=$isTv, heap=${appMemory / 1024 / 1024}MB)")
 
         // Default to RGB_565 for lower memory usage
         builder.setDefaultRequestOptions(

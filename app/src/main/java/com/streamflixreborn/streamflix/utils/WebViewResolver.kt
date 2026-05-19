@@ -46,10 +46,15 @@ class WebViewResolver(private val context: Context) {
         "Just a moment...", "cf-browser-verification", "challenge-running", "Checking your browser", "cloudflare"
     )
 
-    suspend fun get(url: String, headers: Map<String, String> = emptyMap()): String = mutex.withLock {
-        Log.d(TAG, "[WebView] Fetching: $url (IsTV: $isTv)")
+    /** Si silent=true, désactive le dialog "challenge visible" — pour les
+     *  providers qui veulent un fallback discret sans interaction user. */
+    private var silentMode: Boolean = false
+
+    suspend fun get(url: String, headers: Map<String, String> = emptyMap(), silent: Boolean = false): String = mutex.withLock {
+        Log.d(TAG, "[WebView] Fetching: $url (IsTV: $isTv, silent=$silent)")
         pollingCount = 0
-        val result = withTimeoutOrNull(120000) {
+        silentMode = silent
+        val result = withTimeoutOrNull(if (silent) 30000 else 120000) {
             suspendCancellableCoroutine { continuation ->
                 mainHandler.post { setupWebView(url, headers, continuation) }
                 continuation.invokeOnCancellation { cleanup() }
@@ -125,8 +130,16 @@ class WebViewResolver(private val context: Context) {
                 return@evaluateJavascript
             }
 
-            // Se dopo 2 polling (circa 3-4 secondi) non c'è contenuto, mostriamo il dialog per sbloccare
-            if (dialog == null && pollingCount >= 2 && !hasContent) {
+            // Se dopo 2 polling (circa 3-4 secondi) non c'è contenuto, mostriamo il dialog per sbloccare.
+            //   Sauf en mode silent (background catalog scraping) — fail-fast.
+            if (silentMode && pollingCount >= 3 && !hasContent) {
+                Log.d(TAG, "[WebView] Silent mode + no content after 3 polls → fail silently")
+                cookieManager.flush()
+                if (continuation.isActive) continuation.resume("<html><!-- silent fail --></html>")
+                cleanup()
+                return@evaluateJavascript
+            }
+            if (!silentMode && dialog == null && pollingCount >= 2 && !hasContent) {
                 Log.d(TAG, "[WebView] Content not found, forcing Visible Challenge UI")
                 showVisibleChallenge(continuation)
             }

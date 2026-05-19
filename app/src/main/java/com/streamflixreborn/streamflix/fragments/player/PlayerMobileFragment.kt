@@ -2713,18 +2713,19 @@ class PlayerMobileFragment : Fragment() {
                         val initialPosition = player.currentPosition
                         bufferingWatchdog = viewLifecycleOwner.lifecycleScope.launch {
                             if (!vodCurrentStreamHasWorked) {
-                                // (A) Pré-READY : 10s puis skip server
-                                // 2026-05-12 : baissé de 30s→10s pour accélérer
-                                // le fallback en série quand plein de serveurs morts.
-                                // Le HEAD check pre-extract filtre déjà en amont.
-                                kotlinx.coroutines.delay(10_000L)
+                                // (A) Pré-READY : 20s puis skip server
+                                // 2026-05-18 : repassé 10s→20s — sur connexions
+                                //   internationales lentes (Sibnet Russie depuis
+                                //   Tahiti), 10s était trop court → serveur valide
+                                //   marqué broken à tort. 20s = compromis.
+                                kotlinx.coroutines.delay(20_000L)
                                 if (player.playbackState == Player.STATE_BUFFERING &&
                                     player.currentPosition == initialPosition &&
                                     !vodCurrentStreamHasWorked) {
                                     val server = currentServer
                                     val nextServer = nextAutoFallbackServer(servers, server)
                                     Log.w("PlayerNetwork",
-                                        "Pre-READY 10s freeze on ${server?.name} → skip to ${nextServer?.name}")
+                                        "Pre-READY 20s freeze on ${server?.name} → skip to ${nextServer?.name}")
                                     if (server != null) {
                                         pruneBrokenVariant(server)
                                         // 2026-05-12 : flag instantanément le serveur broken
