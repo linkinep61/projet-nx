@@ -26,7 +26,14 @@ object IptvSourceStore {
             "${BuildConfig.APPLICATION_ID}.preferences",
             Context.MODE_PRIVATE,
         )
-        seedDefaultSourceIfEmpty()
+        // 2026-05-18 (user "Mon IPTV crash au démarrage chez plusieurs personnes
+        //   à cause de l'addition des sources qui devrait pas avoir lieu") :
+        //   auto-seed retiré. L'auto-seed ajoutait IPTV-Org FR + set last_id →
+        //   tryAutoRestoreIptvSession bootait Mon IPTV au démarrage → fetch
+        //   d'un M3U 5000 chaînes → crash mémoire sur low-end devices.
+        //   L'utilisateur ajoute désormais ses sources manuellement via le
+        //   tableau IptvSourcesActivity.
+        // seedDefaultSourceIfEmpty()
     }
 
     /** 2026-05-13 (user "mets une source en permanence sur ce provider, comme ça
@@ -77,6 +84,30 @@ object IptvSourceStore {
     }
 
     fun getById(id: String): IptvSource? = getAll().firstOrNull { it.id == id }
+
+    /** 2026-05-19 v85c (user "quand on rouvre la source la dernière source
+     *  utilisée se charge normalement") : renvoie UNIQUEMENT la dernière
+     *  source active (lue depuis SharedPreferences "iptv_last_source/last_id")
+     *  si elle existe encore dans le store. Sinon renvoie toutes les sources
+     *  (fallback first-launch / si l'user a supprimé la dernière source).
+     *  Permet à MyIptvProvider d'afficher uniquement le contenu de la source
+     *  que l'user a active, pas le mélange de toutes les sources cumulées. */
+    fun getActiveOrAll(): List<IptvSource> {
+        return try {
+            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
+            val lastId = ctx.getSharedPreferences("iptv_last_source", Context.MODE_PRIVATE)
+                .getString("last_id", null)
+            if (lastId != null) {
+                val all = getAll()
+                val active = all.firstOrNull { it.id == lastId }
+                if (active != null) listOf(active) else all
+            } else {
+                getAll()
+            }
+        } catch (_: Throwable) {
+            getAll()
+        }
+    }
 
     fun upsert(source: IptvSource) {
         val list = getAll().toMutableList()

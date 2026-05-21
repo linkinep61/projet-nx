@@ -223,6 +223,12 @@
         <PreferenceCategory android:title="Affichage">
 
             <SwitchPreference
+                android:key="KEEP_SCREEN_ON_WHEN_PAUSED"
+                android:title="@string/settings_keep_screen_on_when_paused"
+                android:summary="@string/settings_keep_screen_on_when_paused_summary"
+                android:defaultValue="false" />
+
+            <SwitchPreference
                 android:key="KEEP_SCREEN_ON_APP"
                 android:title="@string/settings_keep_screen_on_app"
                 android:summary="@string/settings_keep_screen_on_app_summary"
@@ -401,6 +407,12 @@
             android:title="@string/settings_update_check"
             android:summary="@string/settings_update_check_summary"
             android:defaultValue="true" />
+
+        <Preference
+            android:icon="@drawable/ic_favorite_enable"
+            android:key="p_settings_kofi"
+            android:title="Soutenir le projet"
+            android:summary="Offrez un café au développeur sur Ko-fi" />
 
         <Preference
             android:icon="@drawable/ic_settings_about"

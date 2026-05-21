@@ -181,9 +181,12 @@ fun ImageView.loadMovieBanner(
     movie: Movie,
     configure: RequestBuilder<Drawable>.() -> RequestBuilder<Drawable> = { this },
 ) {
-    loadRecoverableArtwork(movie.banner, configure, memoryOptions = BANNER_OPTIONS, onRepair = { staleUrl, onUpdated ->
+    // Fallback poster si pas de banner (certains providers n'ont pas de backdrop)
+    val bannerUrl = movie.banner.takeUnless { it.isNullOrBlank() } ?: movie.poster
+    loadRecoverableArtwork(bannerUrl, configure, memoryOptions = BANNER_OPTIONS, onRepair = { staleUrl, onUpdated ->
         ArtworkRepairCoordinator.repairMovieArtwork(this, movie, staleUrl) { refreshedMovie ->
-            val refreshedUrl = refreshedMovie.banner
+            val refreshedUrl = refreshedMovie.banner.takeUnless { it.isNullOrBlank() }
+                ?: refreshedMovie.poster
             if (!refreshedUrl.isNullOrBlank() && refreshedUrl != staleUrl) {
                 onUpdated(refreshedUrl)
             }
@@ -209,9 +212,15 @@ fun ImageView.loadTvShowBanner(
     tvShow: TvShow,
     configure: RequestBuilder<Drawable>.() -> RequestBuilder<Drawable> = { this },
 ) {
-    loadRecoverableArtwork(tvShow.banner, configure, memoryOptions = BANNER_OPTIONS, onRepair = { staleUrl, onUpdated ->
+    // Fallback : poster dernière saison > poster série si pas de banner
+    val bannerUrl = tvShow.banner.takeUnless { it.isNullOrBlank() }
+        ?: tvShow.seasons.lastOrNull()?.poster?.takeUnless { it.isNullOrBlank() }
+        ?: tvShow.poster
+    loadRecoverableArtwork(bannerUrl, configure, memoryOptions = BANNER_OPTIONS, onRepair = { staleUrl, onUpdated ->
         ArtworkRepairCoordinator.repairTvShowArtwork(this, tvShow, staleUrl) { refreshedTvShow ->
-            val refreshedUrl = refreshedTvShow.banner
+            val refreshedUrl = refreshedTvShow.banner.takeUnless { it.isNullOrBlank() }
+                ?: refreshedTvShow.seasons.lastOrNull()?.poster?.takeUnless { it.isNullOrBlank() }
+                ?: refreshedTvShow.poster
             if (!refreshedUrl.isNullOrBlank() && refreshedUrl != staleUrl) {
                 onUpdated(refreshedUrl)
             }

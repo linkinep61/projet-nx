@@ -86,6 +86,11 @@
         android:label="fragment_iptv_favorites_mobile"
         tools:layout="@layout/fragment_tv_shows_mobile" />
     <fragment
+        android:id="@+id/global_favorites"
+        android:name="com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment"
+        android:label="fragment_global_favorites_mobile"
+        tools:layout="@layout/fragment_tv_shows_mobile" />
+    <fragment
         android:id="@+id/movie"
         android:name="com.streamflixreborn.streamflix.fragments.movie.MovieMobileFragment"
         android:label="fragment_movie_mobile"

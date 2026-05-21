@@ -122,7 +122,17 @@ open class ExtractorStatsMobileFragment : Fragment() {
         val sb = StringBuilder()
         sb.append("📊 Rapport extracteurs — Streamflix v${BuildConfig.VERSION_NAME}\n")
         sb.append("Build: ${BuildConfig.VERSION_CODE}\n")
-        sb.append("Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} (Android ${android.os.Build.VERSION.RELEASE})\n\n")
+        sb.append("Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} (Android ${android.os.Build.VERSION.RELEASE})\n")
+        // 2026-05-18 : ajout Cronet status — utile pour diagnostiquer si le
+        //   bypass Cloudflare est opérationnel sur ce device. Sans Cronet,
+        //   beaucoup d'extracteurs tombent en fallback OkHttp et peuvent
+        //   échouer là où ils passent normalement.
+        val cronetOk = try {
+            com.streamflixreborn.streamflix.StreamFlixApp.getCronetEngine(
+                requireContext().applicationContext
+            ) != null
+        } catch (_: Throwable) { false }
+        sb.append("Cronet: ${if (cronetOk) "OK" else "indisponible (fallback OkHttp)"}\n\n")
         if (data.isEmpty()) {
             sb.append("Aucun échec enregistré.")
         } else {
@@ -148,6 +158,22 @@ open class ExtractorStatsMobileFragment : Fragment() {
                 sb.append("\n")
             }
         }
+        // 2026-05-18 : trace du dernier crash (30 dernières lignes max) si dispo.
+        //   last_crash.txt est écrit par l'UncaughtExceptionHandler installé dans
+        //   StreamFlixApp.onCreate. Aide à corréler un bug user-reporté avec un
+        //   crash récent même si l'user n'a pas pensé à le dire.
+        try {
+            val ctx = requireContext()
+            val crashFile = java.io.File(ctx.getExternalFilesDir(null), "last_crash.txt")
+            val file = if (crashFile.exists()) crashFile
+                else java.io.File(ctx.cacheDir, "last_crash.txt").takeIf { it.exists() }
+            if (file != null && file.length() > 0) {
+                val lines = file.readLines()
+                val tail = lines.takeLast(30)
+                sb.append("\n— Last crash trace (${lines.size} lines, showing last ${tail.size}) —\n")
+                tail.forEach { sb.append(it).append("\n") }
+            }
+        } catch (_: Throwable) {}
         return sb.toString()
     }
 

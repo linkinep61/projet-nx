@@ -468,6 +468,11 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             true
         }
 
+        findPreference<Preference>("p_settings_kofi")?.setOnPreferenceClickListener {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://ko-fi.com/nanico")))
+            true
+        }
+
         findPreference<Preference>("p_settings_extractor_stats")?.setOnPreferenceClickListener {
             androidx.navigation.fragment.NavHostFragment.findNavController(this)
                 .navigate(com.streamflixreborn.streamflix.R.id.fragment_extractor_stats_tv)
@@ -484,6 +489,15 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             isChecked = UserPreferences.forceExtraBuffering
             setOnPreferenceChangeListener { _, newValue ->
                 UserPreferences.forceExtraBuffering = newValue as Boolean
+                true
+            }
+        }
+
+        // 2026-05-20 : toggle "Garder l'écran allumé en pause" (parité mobile)
+        findPreference<SwitchPreference>("KEEP_SCREEN_ON_WHEN_PAUSED")?.apply {
+            isChecked = UserPreferences.keepScreenOnWhenPaused
+            setOnPreferenceChangeListener { _, newValue ->
+                UserPreferences.keepScreenOnWhenPaused = newValue as Boolean
                 true
             }
         }

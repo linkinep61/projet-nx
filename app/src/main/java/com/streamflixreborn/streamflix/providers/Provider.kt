@@ -112,9 +112,9 @@ interface Provider {
             // animés FR. Next.js + API /api/search propre. Catalogue : classiques
             // (Dragon Ball, Sailor Moon, Astérix, Tintin, Les Simpson…) + animes
             // modernes. Hosts vidéo supportés : uqload + sendvid (extractors existants).
-            // 2026-05-16 : DÉSACTIVÉ — serveur dessinanime.cc instable (CF 524 chroniques).
-            // Réactiver quand le serveur sera de nouveau fiable.
-            // DessinAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
+            // 2026-05-18 v84 : RÉACTIVÉ — site re-opérationnel (user confirmé).
+            //   API /api/search propre + iframe direct uqload/sendvid/minochinos.
+            DessinAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             // 2026-05-16 : FRAnime (franime.fr) — Provider anime FR. Next.js SSR + API
             // JSON séparée api.franime.fr. Hosts vidéo : sibnet, sendvid (extractors
             // existants). Series-only (films groupés dans le catalogue anime).

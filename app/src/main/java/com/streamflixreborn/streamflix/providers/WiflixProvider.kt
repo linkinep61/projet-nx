@@ -54,7 +54,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     // sur ces redirects → 403/contenu invalide → provider cassé.
     // flemmix.prof est le site principal officiel (icône 🚨 sur wiflix-adresses.fun)
     // et héberge le vrai contenu Wiflix (template `flemmixnew` reconnu par le code).
-    override val defaultBaseUrl: String = "https://flemmix.prof/"
+    override val defaultBaseUrl: String = "https://flemmix.win/"  // v86 2026-05-20 : flemmix.prof mort, nouveau domaine actif = flemmix.win (cf wiflix-adresses.fun)
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
@@ -74,6 +74,12 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     // Cloudflare bypass via WebViewResolver (same pattern as Cine24hProvider)
     private var webViewResolver: WebViewResolver? = null
     private const val TAG = "WiflixBypass"
+
+    // Si Cloudflare a bloqué un appel Retrofit récemment, on skip Retrofit
+    // et on va direct au getDocument (OkHttp+cookies ou WebView bypass).
+    // Reset quand getDocument réussit (les cookies CF sont alors injectés).
+    @Volatile
+    private var cloudflareActive = false
 
     // In-memory document cache to avoid redundant Cloudflare bypasses.
     // Key = URL, Value = (Document, timestampMs)
@@ -114,12 +120,36 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     )
 
     /**
+     * Fast Cloudflare detection on a parsed Document WITHOUT re-serializing
+     * the entire DOM to string (which is very expensive on large pages).
+     * Checks title + a few lightweight selectors instead.
+     */
+    private fun isCloudflareChallenge(doc: Document): Boolean {
+        val title = doc.title()
+        if (title.contains("Just a moment", ignoreCase = true) ||
+            title.contains("Checking your browser", ignoreCase = true)) return true
+        if (doc.selectFirst("#challenge-running") != null) return true
+        if (doc.selectFirst(".cf-browser-verification") != null) return true
+        if (doc.selectFirst("[name=cf-turnstile-response]") != null) return true
+        return false
+    }
+
+    // Shared OkHttpClient for getDocument() — avoids creating a new client per call
+    private val bypassClient: OkHttpClient by lazy {
+        NetworkClient.default.newBuilder()
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .writeTimeout(8, TimeUnit.SECONDS)
+            .build()
+    }
+
+    /**
      * Fetches a document with automatic Cloudflare bypass.
      * First checks the in-memory cache. Then tries OkHttp (with cookies
      * from previous WebView bypasses). If Cloudflare is still detected,
      * falls back to WebViewResolver which opens a real WebView.
      */
-    private suspend fun getDocument(url: String): Document {
+    private suspend fun getDocument(url: String, silentBypass: Boolean = true): Document {
         // Check cache first
         getCachedDocument(url)?.let {
             Log.d(TAG, "[Provider] Cache HIT for $url")
@@ -127,28 +157,24 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
 
         try {
-            val client = NetworkClient.default.newBuilder()
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(15, TimeUnit.SECONDS)
-                .writeTimeout(10, TimeUnit.SECONDS)
-                .build()
-
             val request = Request.Builder()
                 .url(url)
                 .header("Referer", baseUrl)
                 .header("User-Agent", NetworkClient.USER_AGENT)
                 .build()
 
-            val response = client.newCall(request).execute()
+            val response = bypassClient.newCall(request).execute()
 
             if (response.isSuccessful) {
                 val html = response.body?.string() ?: ""
                 if (challengeKeywords.none { html.contains(it, ignoreCase = true) }) {
                     val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
                     cacheDocument(url, doc)
+                    cloudflareActive = false
                     return doc
                 }
                 Log.d(TAG, "[Provider] Cloudflare challenge detected in HTML for $url")
+                cloudflareActive = true
             } else {
                 Log.d(TAG, "[Provider] HTTP ${response.code} for $url")
             }
@@ -157,10 +183,12 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
 
         // OkHttp failed or Cloudflare detected -> use WebView bypass
-        Log.d(TAG, "[Provider] Launching WebView Bypass for $url")
-        val html = getResolver().get(url)
+        Log.d(TAG, "[Provider] Launching WebView Bypass for $url (silent=$silentBypass)")
+        val html = getResolver().get(url, silent = silentBypass)
         val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
         cacheDocument(url, doc)
+        // WebView bypass a injecté les cookies CF → Retrofit devrait marcher maintenant
+        cloudflareActive = false
         return doc
     }
 
@@ -183,15 +211,15 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         val document = try {
             val doc = service.getHome()
-            val html = doc.html()
-            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) {
+            if (isCloudflareChallenge(doc)) {
                 Log.d(TAG, "[getHome] Cloudflare challenge in Retrofit response, using bypass")
-                getDocument(baseUrl)
+                cloudflareActive = true
+                getDocument(baseUrl, silentBypass = false)
             } else doc
         } catch (e: Exception) {
             Log.d(TAG, "[getHome] Retrofit failed: ${e.message}, using bypass")
             try {
-                getDocument(baseUrl)
+                getDocument(baseUrl, silentBypass = false)
             } catch (e2: Exception) {
                 Log.e(TAG, "[getHome] bypass also failed: ${e2.message}")
                 return emptyList()
@@ -356,8 +384,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         if (query.isEmpty()) {
             val document = try {
                 val doc = service.getHome()
-                val html = doc.html()
-                if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument(baseUrl) else doc
+                if (isCloudflareChallenge(doc)) getDocument(baseUrl) else doc
             } catch (e: Exception) { getDocument(baseUrl) }
 
             val genres = document.select("div.side-b").getOrNull(1)?.select("ul li")?.map {
@@ -387,8 +414,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 searchStart = page,
                 resultFrom = 1 + 20 * (page - 1)
             )
-            val html = doc.html()
-            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) {
+            if (isCloudflareChallenge(doc)) {
                 getDocument("${baseUrl}index.php?do=search&subaction=search&story=$query&search_start=$page&result_from=${1 + 20 * (page - 1)}")
             } else doc
         } catch (e: Exception) {
@@ -444,8 +470,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         initializeService()
         val document = try {
             val doc = service.getMovies(page)
-            val html = doc.html()
-            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}film-en-streaming/page/$page") else doc
+            if (isCloudflareChallenge(doc)) getDocument("${baseUrl}film-en-streaming/page/$page") else doc
         } catch (e: Exception) { getDocument("${baseUrl}film-en-streaming/page/$page") }
 
         val movies = document.select("div.mov").map {
@@ -468,8 +493,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         initializeService()
         val document = try {
             val doc = service.getTvShows(page)
-            val html = doc.html()
-            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}serie-en-streaming/page/$page") else doc
+            if (isCloudflareChallenge(doc)) getDocument("${baseUrl}serie-en-streaming/page/$page") else doc
         } catch (e: Exception) { getDocument("${baseUrl}serie-en-streaming/page/$page") }
 
         val tvShows = document.select("div.mov").map {
@@ -491,11 +515,16 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun getMovie(id: String): Movie {
         initializeService()
-        val document = try {
+        val url = "${baseUrl}film-en-streaming/$id"
+        val document = if (cloudflareActive) {
+            getDocument(url)
+        } else try {
             val doc = service.getMovie(id)
-            val html = doc.html()
-            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}film-en-streaming/$id") else doc
-        } catch (e: Exception) { getDocument("${baseUrl}film-en-streaming/$id") }
+            if (isCloudflareChallenge(doc)) {
+                cloudflareActive = true
+                getDocument(url)
+            } else doc
+        } catch (e: Exception) { getDocument(url) }
 
         val movie = Movie(
             id = id,
@@ -604,11 +633,16 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override suspend fun getTvShow(id: String): TvShow {
         initializeService()
-        val document = try {
+        val url = "${baseUrl}serie-en-streaming/$id"
+        val document = if (cloudflareActive) {
+            getDocument(url)
+        } else try {
             val doc = service.getTvShow(id)
-            val html = doc.html()
-            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}serie-en-streaming/$id") else doc
-        } catch (e: Exception) { getDocument("${baseUrl}serie-en-streaming/$id") }
+            if (isCloudflareChallenge(doc)) {
+                cloudflareActive = true
+                getDocument(url)
+            } else doc
+        } catch (e: Exception) { getDocument(url) }
         val title = document.selectFirst("header.full-title h1")
             ?.text()
             ?: ""
@@ -725,8 +759,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         val document = try {
             val doc = service.getTvShow(tvShowId)
-            val html = doc.html()
-            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}serie-en-streaming/$tvShowId") else doc
+            if (isCloudflareChallenge(doc)) getDocument("${baseUrl}serie-en-streaming/$tvShowId") else doc
         } catch (e: Exception) { getDocument("${baseUrl}serie-en-streaming/$tvShowId") }
 
         // Use the show poster as episode thumbnail
@@ -749,8 +782,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         initializeService()
         val document = try {
             val doc = service.getGenre(id, page)
-            val html = doc.html()
-            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}film-en-streaming/$id/page/$page") else doc
+            if (isCloudflareChallenge(doc)) getDocument("${baseUrl}film-en-streaming/$id/page/$page") else doc
         } catch (e: Exception) { getDocument("${baseUrl}film-en-streaming/$id/page/$page") }
 
         val genre = Genre(
@@ -778,8 +810,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         initializeService()
         val document = try {
             val doc = service.getPeople(id, page)
-            val html = doc.html()
-            if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}xfsearch/acteurs/$id/page/$page") else doc
+            if (isCloudflareChallenge(doc)) getDocument("${baseUrl}xfsearch/acteurs/$id/page/$page") else doc
         } catch (e: HttpException) {
             when (e.code()) {
                 404 -> return People(id, "")
@@ -836,8 +867,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
                 val document = try {
                     val doc = service.getTvShow(tvShowId)
-                    val html = doc.html()
-                    if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}serie-en-streaming/$tvShowId") else doc
+                    if (isCloudflareChallenge(doc)) getDocument("${baseUrl}serie-en-streaming/$tvShowId") else doc
                 } catch (e: Exception) { getDocument("${baseUrl}serie-en-streaming/$tvShowId") }
 
                 document.select("div.$rel a").
@@ -865,8 +895,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             is Video.Type.Movie -> {
                 val document = try {
                     val doc = service.getMovie(id)
-                    val html = doc.html()
-                    if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) getDocument("${baseUrl}film-en-streaming/$id") else doc
+                    if (isCloudflareChallenge(doc)) getDocument("${baseUrl}film-en-streaming/$id") else doc
                 } catch (e: Exception) { getDocument("${baseUrl}film-en-streaming/$id") }
 
                 document.select("div.tabs-sel a").
@@ -940,18 +969,39 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     val document = addressService.getHome()
 
                     // Cerchiamo l'URL tra i vari elementi che solitamente contengono il link attivo
-                    val newUrl = document.select("div.alert-success a, div.alert-info a, a.btn-success, div.entry-content a")
-                        .map { it.attr("href").trim() }
-                        .firstOrNull { link ->
-                            // Escludiamo i link interni, i social e il portale stesso
-                            link.startsWith("http") && 
-                            !link.contains("wiflix-adresses") && 
-                            !link.contains("facebook") && 
+                    // v86b 2026-05-20 : auto-redirection ROBUSTE — ne depend plus de classes CSS
+                    //   precises (qui changent a chaque refonte de la page d'adresses).
+                    //   On prend TOUS les <a href>, on exclut le portail, les reseaux
+                    //   sociaux, le sous-site anime, et les domaines marques
+                    //   "bloque"/"faux"/"frauduleux". Parmi les candidats restants
+                    //   (= domaines actifs cliquables) on prefere featured/active/
+                    //   principal/actif, sinon le premier du DOM. Survit aux refontes.
+                    val candidates = document.select("a[href]")
+                        .map { el ->
+                            val href = el.attr("href").trim()
+                            val ctx = (el.className() + " " + el.text() + " " +
+                                (el.parent()?.className() ?: "")).lowercase()
+                            Pair(href, ctx)
+                        }
+                        .filter { (link, ctx) ->
+                            link.startsWith("http") &&
+                            !link.contains("wiflix-adresses") &&
+                            !link.contains("french-anime") &&
+                            !link.contains("facebook") &&
                             !link.contains("twitter") &&
                             !link.contains("t.me") &&
                             !link.contains("instagram") &&
-                            !link.contains("pinterest")
+                            !link.contains("pinterest") &&
+                            !link.contains("youtube") &&
+                            !ctx.contains("bloqu") &&
+                            !ctx.contains("faux") &&
+                            !ctx.contains("frauduleux")
                         }
+                    val newUrl = (candidates.firstOrNull { (_, ctx) ->
+                            ctx.contains("featured") || ctx.contains("active") ||
+                            ctx.contains("principal") || ctx.contains("actif")
+                        } ?: candidates.firstOrNull())
+                        ?.first
                         ?.replace("http://", "https://")
 
                     if (!newUrl.isNullOrEmpty()) {
@@ -991,8 +1041,8 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             // that Cloudflare expects.  This means after a single WebView
             // bypass, subsequent Retrofit calls succeed with the cf_clearance cookie.
             private val client = NetworkClient.default.newBuilder()
-                .readTimeout(30, TimeUnit.SECONDS)
-                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(10, TimeUnit.SECONDS)
+                .connectTimeout(8, TimeUnit.SECONDS)
                 // Preserve POST method & body on redirects (site may change domain)
                 .followRedirects(false)
                 .addInterceptor { chain ->

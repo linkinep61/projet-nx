@@ -77,11 +77,16 @@ class StreamFlixApp : Application() {
                 _liveCache ?: try {
                     val cacheDir = java.io.File(context.cacheDir, "live_dvr_cache")
                     cacheDir.mkdirs()
-                    val evictor = androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor(100L * 1024 * 1024) // 100 MB
+                    // 2026-05-20 (optim mémoire/stockage) : 100 Mo c'est trop pour la
+                    //   Chromecast (384 Mo RAM + peu de stockage). 40 Mo sur TV =
+                    //   toujours ~3-5 min de live HD, largement assez pour le DVR.
+                    val isTv = context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
+                    val cacheBytes = if (isTv) 40L * 1024 * 1024 else 100L * 1024 * 1024
+                    val evictor = androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor(cacheBytes)
                     val databaseProvider = androidx.media3.database.StandaloneDatabaseProvider(context.applicationContext)
                     androidx.media3.datasource.cache.SimpleCache(cacheDir, evictor, databaseProvider).also {
                         _liveCache = it
-                        Log.d("StreamFlixApp", "Live DVR SimpleCache initialized (100 MB at $cacheDir)")
+                        Log.d("StreamFlixApp", "Live DVR SimpleCache initialized (${cacheBytes / 1024 / 1024} MB at $cacheDir, isTv=$isTv)")
                     }
                 } catch (e: Exception) {
                     Log.w("StreamFlixApp", "Live cache init failed: ${e.message}")
@@ -118,6 +123,33 @@ class StreamFlixApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+
+        // 2026-05-18 : UncaughtExceptionHandler — sauvegarde le stack trace
+        //   dans last_crash.txt (lu par CrashActivity + buildBugReport).
+        //   Sans ça, le fichier n'était jamais écrit, donc le rapport bug
+        //   ne pouvait pas inclure la cause d'un crash récent.
+        try {
+            val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+            Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+                try {
+                    val sw = java.io.StringWriter()
+                    sw.append("Crash at ${java.util.Date()}\n")
+                    sw.append("Thread: ${thread.name}\n")
+                    sw.append("Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} (Android ${android.os.Build.VERSION.RELEASE})\n")
+                    sw.append("App: v${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})\n\n")
+                    throwable.printStackTrace(java.io.PrintWriter(sw))
+                    val crashFile = java.io.File(getExternalFilesDir(null), "last_crash.txt")
+                    crashFile.writeText(sw.toString())
+                } catch (_: Throwable) {
+                    try {
+                        val sw = java.io.StringWriter()
+                        throwable.printStackTrace(java.io.PrintWriter(sw))
+                        java.io.File(cacheDir, "last_crash.txt").writeText(sw.toString())
+                    } catch (_: Throwable) {}
+                }
+                previousHandler?.uncaughtException(thread, throwable)
+            }
+        } catch (_: Throwable) {}
 
         // 2026-05-17 (user "ça peut faire cracher l'application au démarrage
         //   sinon") : clear le cache DVR au démarrage de l'app. Évite d'hériter

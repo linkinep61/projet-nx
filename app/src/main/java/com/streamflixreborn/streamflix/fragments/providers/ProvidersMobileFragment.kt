@@ -64,6 +64,11 @@ class ProvidersMobileFragment : Fragment() {
             findNavController().navigate(R.id.downloads)
         }
 
+        // 2026-05-20 : cœur favoris global — favoris de tous les providers (sauf TV)
+        binding.ivGlobalFavorites.setOnClickListener {
+            findNavController().navigate(R.id.global_favorites)
+        }
+
         // 2026-05-08 : raccourci Paramètres depuis le Home Fournisseur
         // (utile pour accéder rapidement à l'onglet "Extracteurs", au choix
         // du provider par défaut, etc. sans passer par le menu hamburger).

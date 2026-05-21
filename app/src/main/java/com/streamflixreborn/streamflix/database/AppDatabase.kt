@@ -120,6 +120,18 @@ abstract class AppDatabase : RoomDatabase() {
             return buildDatabase(profileId, providerName, context)
         }
 
+        /** 2026-05-20 : true si le fichier DB du provider existe déjà (= provider
+         *  déjà parcouru). Permet au "cœur favoris global" de n'ouvrir QUE les
+         *  bases existantes au lieu d'en créer 30 vides. */
+        fun providerDbExists(providerName: String, context: Context): Boolean {
+            val profileId = ProfileManager.currentProfileIdOrDefault()
+            return try {
+                context.getDatabasePath(buildDbFileName(profileId, providerName)).exists()
+            } catch (_: Exception) {
+                false
+            }
+        }
+
         /** Renomme les anciens DBs `{provider}.db` → `default_{provider}.db`
          *  pour qu'ils soient utilisés par le profil "default" auto-créé.
          *  Idempotent : si déjà migré, no-op. */

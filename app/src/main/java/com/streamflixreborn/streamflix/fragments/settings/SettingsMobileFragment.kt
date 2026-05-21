@@ -487,6 +487,11 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             true
         }
 
+        findPreference<Preference>("p_settings_kofi")?.setOnPreferenceClickListener {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://ko-fi.com/nanico")))
+            true
+        }
+
         findPreference<Preference>("p_settings_extractor_stats")?.setOnPreferenceClickListener {
             findNavController().navigate(R.id.fragment_extractor_stats_mobile)
             true

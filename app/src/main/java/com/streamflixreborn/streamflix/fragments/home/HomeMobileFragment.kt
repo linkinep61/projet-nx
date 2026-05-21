@@ -58,6 +58,7 @@ class HomeMobileFragment : Fragment() {
 
     private val appAdapter = AppAdapter()
     private var shouldScrollToTop: Boolean = true
+    private var homeLayoutState: android.os.Parcelable? = null  // v91 : position verticale du Home
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -71,13 +72,15 @@ class HomeMobileFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        shouldScrollToTop = true
+        // v91 : ne PAS forcer le scroll en haut ici (sinon retour depuis un detail
+        //   remonte tout en haut). shouldScrollToTop reste a sa valeur (true au 1er
+        //   load via le defaut du champ ; remis a true uniquement sur provider/filtre).
         initializeHome()
         initializeMiniPlayer()
 
         // Lightweight refresh when provider changes
         viewLifecycleOwner.lifecycleScope.launch {
-            com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.providerChangeFlow.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { viewModel.getHome() }
+            com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.providerChangeFlow.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { shouldScrollToTop = true; viewModel.getHome() }
         }
 
         // Initial load
@@ -122,6 +125,12 @@ class HomeMobileFragment : Fragment() {
                         }
                     }
                     is HomeViewModel.State.FailedLoading -> {
+                        // Pas de toast ni UI retry si aucun provider sélectionné (retour sur écran providers)
+                        if (state.error.message == "No provider selected") {
+                            binding.isLoading.root.visibility = View.GONE
+                            return@collect
+                        }
+
                         val code = (state.error as? retrofit2.HttpException)?.code()
                         if (code == 409 && !hasAutoCleared409) {
                             hasAutoCleared409 = true
@@ -158,6 +167,8 @@ class HomeMobileFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
         appAdapter.onSaveInstanceState(binding.rvHome)
+        // v91 : sauve la position verticale du Home pour la restaurer au retour.
+        homeLayoutState = binding.rvHome.layoutManager?.onSaveInstanceState()
         // Don't clear onIptvChannelClick — the new fragment's onViewCreated sets it,
         // but this onDestroyView can fire AFTER, causing a race condition.
         // Don't release the player — it survives view recreation (e.g. rotation)
@@ -428,6 +439,28 @@ class HomeMobileFragment : Fragment() {
     }
 
     private fun initializeHome() {
+        // Callback carrousel → fond d'écran global avec crossfade.
+        // Tous les providers qui ont un carrousel (FEATURED category) en bénéficient.
+        // Un seul backdrop en mémoire à la fois (celui du carrousel courant).
+        appAdapter.onSwiperPageChanged = { bannerUrl ->
+            if (_binding != null && isAdded) {
+                val target = binding.ivHomeBackground
+                if (bannerUrl.isNullOrBlank()) {
+                    target.visibility = View.GONE
+                    target.setImageDrawable(null)
+                } else {
+                    target.visibility = View.VISIBLE
+                    Glide.with(this)
+                        .load(bannerUrl)
+                        .override(800, 450)
+                        .format(com.bumptech.glide.load.DecodeFormat.PREFER_RGB_565)
+                        .centerCrop()
+                        .transition(com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions.withCrossFade(600))
+                        .into(target)
+                }
+            }
+        }
+
         binding.rvHome.apply {
             setHasFixedSize(true)
             adapter = appAdapter.apply {
@@ -492,7 +525,9 @@ class HomeMobileFragment : Fragment() {
             binding.ivIptvLanguage.visibility = View.GONE
         }
 
-        // Hide background ImageView on mobile — wallpaper is at activity level
+        // Le fond d'écran global est piloté par le carrousel (onSwiperPageChanged).
+        // Visible uniquement si le provider a un carrousel (FEATURED category).
+        // Sinon reste GONE pour ne pas consommer de mémoire.
         binding.ivHomeBackground.visibility = View.GONE
     }
 
@@ -647,7 +682,13 @@ class HomeMobileFragment : Fragment() {
 
         if (shouldScrollToTop) {
             shouldScrollToTop = false
+            homeLayoutState = null
             binding.rvHome.post { binding.rvHome.scrollToPosition(0) }
+        } else if (homeLayoutState != null) {
+            // v91 : restaure la position verticale du Home apres retour depuis un detail
+            val st = homeLayoutState
+            homeLayoutState = null
+            binding.rvHome.post { binding.rvHome.layoutManager?.onRestoreInstanceState(st) }
         }
     }
 }

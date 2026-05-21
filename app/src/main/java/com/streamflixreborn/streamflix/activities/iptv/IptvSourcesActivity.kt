@@ -162,6 +162,11 @@ class IptvSourcesActivity : FragmentActivity() {
         com.streamflixreborn.streamflix.utils.MiniPlayerController.stop()
         com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider =
             com.streamflixreborn.streamflix.providers.MyIptvProvider
+        // 2026-05-19 v85b (user "à partir du moment où on change de source il faut
+        //   faire un petit lavage qu'on retourne pas sur les anciennes qui étaient
+        //   sur une autre source") : vide tout ce qui n'est PAS la source qu'on
+        //   active. Si on re-clique la même, rien n'est purgé (cache préservé).
+        com.streamflixreborn.streamflix.providers.MyIptvProvider.clearChannelsExcept(source.id)
         // 2026-05-12 (user "il peut pas garder en cash") : ne PAS invalider le cache
         // à chaque clic — sinon retéléchargement systématique de la M3U (60-120s).
         // L'utilisateur peut forcer un refresh via long-press → "Forcer le refresh".

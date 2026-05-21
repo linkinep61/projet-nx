@@ -1,12 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
-<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- 2026-05-20 : item de la palette d'avatars. Conteneur focusable (D-pad TV +
+     tap mobile) avec emoji systeme (fallback) + image Fluent 3D par-dessus. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/fl_emoji_item"
     android:layout_width="64dp"
     android:layout_height="64dp"
     android:layout_margin="4dp"
-    android:gravity="center"
-    android:textSize="32sp"
     android:clickable="true"
     android:focusable="true"
-    android:background="@drawable/bg_profile_avatar_tv"
-    tools:text="🎬" />
+    android:background="@drawable/bg_profile_avatar_tv">
+
+    <TextView
+        android:id="@+id/tv_emoji"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:textSize="32sp"
+        tools:text="🎬" />
+
+    <ImageView
+        android:id="@+id/iv_emoji"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:padding="8dp"
+        android:scaleType="fitCenter"
+        android:visibility="gone"
+        tools:ignore="ContentDescription" />
+
+</FrameLayout>

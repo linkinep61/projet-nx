@@ -343,7 +343,10 @@ class MovieViewHolder(
                 }
             }
             setOnLongClickListener {
-                if (isDramaOrAnimeProvider()) {
+                val cf = context.toActivity()?.getCurrentFragment()
+                if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
+                    cf.removeFavorite(movie.id, true)
+                } else if (isDramaOrAnimeProvider()) {
                     ShowOptionsMobileDialog(context, TvShow(id = movie.id, title = movie.title, poster = movie.poster, banner = movie.banner)).show()
                 } else {
                     ShowOptionsMobileDialog(context, movie).show()
@@ -438,7 +441,10 @@ class MovieViewHolder(
 
 
             setOnLongClickListener {
-                if (isDramaOrAnimeProvider()) {
+                val cf = context.toActivity()?.getCurrentFragment()
+                if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
+                    cf.removeFavorite(movie.id, true)
+                } else if (isDramaOrAnimeProvider()) {
                     ShowOptionsTvDialog(context, TvShow(id = movie.id, title = movie.title, poster = movie.poster, banner = movie.banner)).show()
                 } else {
                     ShowOptionsTvDialog(context, movie).show()
@@ -453,15 +459,8 @@ class MovieViewHolder(
                 binding.root.startAnimation(animation)
                 animation.fillAfter = true
 
-                when (val fragment = context.toActivity()?.getCurrentFragment()) {
-                    is HomeTvFragment -> {
-                        if (hasFocus) {
-                            fragment.pinBackground(movie.banner)
-                        } else {
-                            fragment.releasePinnedBackground()
-                        }
-                    }
-                }
+                // Fond d'écran carrousel uniquement — plus de pinBackground par item
+                // pour économiser la mémoire (le carrousel gère le fond)
             }
         }
 
@@ -497,7 +496,11 @@ class MovieViewHolder(
         binding.root.apply {
             setOnClickListener {
                 checkProviderAndRun {
-                    if (isDramaOrAnimeProvider()) {
+                    if (context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
+                        // Favori global : bascule sur le provider d'origine puis ouvre la fiche
+                        com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin(movie.id)
+                        findNavController().navigate(R.id.action_global_movie, android.os.Bundle().apply { putString("id", movie.id) })
+                    } else if (isDramaOrAnimeProvider()) {
                         when (context.toActivity()?.getCurrentFragment()) {
                             is GenreMobileFragment -> findNavController().navigate(GenreMobileFragmentDirections.actionGenreToTvShow(id = movie.id, poster = movie.poster))
                             is MoviesMobileFragment -> findNavController().navigate(MoviesMobileFragmentDirections.actionMoviesToTvShow(id = movie.id, poster = movie.poster))
@@ -515,7 +518,10 @@ class MovieViewHolder(
                 }
             }
             setOnLongClickListener {
-                if (isDramaOrAnimeProvider()) {
+                val cf = context.toActivity()?.getCurrentFragment()
+                if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
+                    cf.removeFavorite(movie.id, true)
+                } else if (isDramaOrAnimeProvider()) {
                     ShowOptionsMobileDialog(context, TvShow(id = movie.id, title = movie.title, poster = movie.poster, banner = movie.banner)).show()
                 } else {
                     ShowOptionsMobileDialog(context, movie).show()
@@ -561,7 +567,10 @@ class MovieViewHolder(
             isFocusable = true
             setOnClickListener {
                 checkProviderAndRun {
-                    if (isDramaOrAnimeProvider()) {
+                    if (context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
+                        com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin(movie.id)
+                        findNavController().navigate(R.id.action_global_movie, android.os.Bundle().apply { putString("id", movie.id) })
+                    } else if (isDramaOrAnimeProvider()) {
                         when (context.toActivity()?.getCurrentFragment()) {
                             is HomeTvFragment -> findNavController().navigate(HomeTvFragmentDirections.actionHomeToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
                             is MoviesTvFragment -> findNavController().navigate(MoviesTvFragmentDirections.actionMoviesToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
@@ -582,7 +591,10 @@ class MovieViewHolder(
             }
 
             setOnLongClickListener {
-                if (isDramaOrAnimeProvider()) {
+                val cf = context.toActivity()?.getCurrentFragment()
+                if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
+                    cf.removeFavorite(movie.id, true)
+                } else if (isDramaOrAnimeProvider()) {
                     ShowOptionsTvDialog(context, TvShow(id = movie.id, title = movie.title, poster = movie.poster, banner = movie.banner)).show()
                 } else {
                     ShowOptionsTvDialog(context, movie).show()

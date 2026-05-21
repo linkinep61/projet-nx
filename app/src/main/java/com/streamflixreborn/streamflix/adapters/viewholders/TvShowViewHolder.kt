@@ -24,7 +24,6 @@ import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.database.AppDatabase
 import com.streamflixreborn.streamflix.databinding.*
-import com.streamflixreborn.streamflix.fragments.home.HomeTvFragment
 import com.streamflixreborn.streamflix.fragments.home.HomeTvFragmentDirections
 import androidx.core.content.ContextCompat
 import androidx.preference.PreferenceManager
@@ -446,6 +445,9 @@ class TvShowViewHolder(
         binding.root.apply {
             setOnClickListener {
                 checkProviderAndRun {
+                    if (context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
+                        com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin(tvShow.id)
+                    }
                     if (isIptvProvider()) {
                         handleDirectPlay(findNavController())
                     } else {
@@ -454,7 +456,10 @@ class TvShowViewHolder(
                 }
             }
             setOnLongClickListener {
-                if (!handleIptvFavoriteLongPress()) {
+                val cf = context.toActivity()?.getCurrentFragment()
+                if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
+                    cf.removeFavorite(tvShow.id, false)
+                } else if (!handleIptvFavoriteLongPress()) {
                     ShowOptionsTvDialog(context, tvShow).show()
                 }
                 true
@@ -463,13 +468,8 @@ class TvShowViewHolder(
                 val animation = if (hasFocus) AnimationUtils.loadAnimation(context, R.anim.zoom_in) else AnimationUtils.loadAnimation(context, R.anim.zoom_out)
                 startAnimation(animation)
                 animation.fillAfter = true
-                (context.toActivity()?.getCurrentFragment() as? HomeTvFragment)?.let { fragment ->
-                    if (hasFocus) {
-                        fragment.pinBackground(tvShow.banner)
-                    } else {
-                        fragment.releasePinnedBackground()
-                    }
-                }
+                // Fond d'écran carrousel uniquement — plus de pinBackground par item
+                // pour économiser la mémoire (le carrousel gère le fond)
             }
         }
         setPoster(binding.ivTvShowPoster)
@@ -494,6 +494,9 @@ class TvShowViewHolder(
     private fun displayGridMobileItem(binding: ItemTvShowGridMobileBinding) {
         binding.root.setOnClickListener {
             checkProviderAndRun {
+                if (context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
+                    com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin(tvShow.id)
+                }
                 if (isIptvProvider()) {
                     handleDirectPlay(binding.root.findNavController())
                 } else {
@@ -502,7 +505,10 @@ class TvShowViewHolder(
             }
         }
         binding.root.setOnLongClickListener {
-            if (!handleIptvFavoriteLongPress()) {
+            val cf = context.toActivity()?.getCurrentFragment()
+            if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
+                cf.removeFavorite(tvShow.id, false)
+            } else if (!handleIptvFavoriteLongPress()) {
                 ShowOptionsMobileDialog(context, tvShow).show()
             }
             true
@@ -530,6 +536,9 @@ class TvShowViewHolder(
         binding.root.apply {
             setOnClickListener {
                 checkProviderAndRun {
+                    if (context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
+                        com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin(tvShow.id)
+                    }
                     if (isIptvProvider()) {
                         handleDirectPlay(findNavController())
                     } else {
@@ -538,7 +547,10 @@ class TvShowViewHolder(
                 }
             }
             setOnLongClickListener {
-                if (!handleIptvFavoriteLongPress()) {
+                val cf = context.toActivity()?.getCurrentFragment()
+                if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
+                    cf.removeFavorite(tvShow.id, false)
+                } else if (!handleIptvFavoriteLongPress()) {
                     ShowOptionsTvDialog(context, tvShow).show()
                 }
                 true

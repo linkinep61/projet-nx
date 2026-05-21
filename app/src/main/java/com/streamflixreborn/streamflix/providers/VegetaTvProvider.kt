@@ -90,6 +90,17 @@ object VegetaTvProvider : Provider, IptvProvider {
     private val registryLock = Any()
     private val registryMutex = Mutex()
     @Volatile private var registryLoaded = false
+
+    /** 2026-05-18 v85 : vide le cache catalogue (anti-OOM). */
+    fun clearCache() {
+        try {
+            registryLoaded = false
+            lastLoadTime = 0L
+            vegetaServers = emptyList()
+            phase3Done = false
+            android.util.Log.d(TAG, "clearCache: VegetaTV registry vidé")
+        } catch (_: Throwable) {}
+    }
     @Volatile private var lastLoadTime = 0L
     private const val CACHE_DURATION = 30 * 60 * 1000L // 30 min
 

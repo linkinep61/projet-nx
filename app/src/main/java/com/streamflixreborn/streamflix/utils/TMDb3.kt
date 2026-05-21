@@ -976,9 +976,7 @@ object TMDb3 {
                         val original = chain.request()
                         val requestBuilder = original.newBuilder()
                             // TMDB renvoie tjs du JSON ; on neutralise le
-                            // "Accept: text/html..." par défaut du NetworkClient
-                            // pour qu'aucun proxy / CDN ne s'amuse a négocier
-                            // un autre type de contenu.
+                            // "Accept: text/html..." par defaut du NetworkClient.
                             .header("Accept", "application/json")
                             .url(
                                 original.url.newBuilder()

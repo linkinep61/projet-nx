@@ -57,6 +57,12 @@ class MainTvActivity : FragmentActivity() {
      *  - LEFT depuis tile → focus sur le menu courant de la sidebar
      *  - UP depuis tile → focus sur iv_iptv_categories si visible (Mon IPTV) */
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        // Abyss/Hydrax overlay: route remote keys to the WebView cursor
+        // (the overlay never receives key focus on TV).
+        if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+            val pf = getCurrentFragment() as? PlayerTvFragment
+            if (pf != null && pf.handleOverlayKey(event.keyCode, event.repeatCount)) return true
+        }
         // === LEFT/UP override pour Mon IPTV (ou tout provider) sur les tiles ===
         if (event.action == android.view.KeyEvent.ACTION_DOWN && (
             event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT ||

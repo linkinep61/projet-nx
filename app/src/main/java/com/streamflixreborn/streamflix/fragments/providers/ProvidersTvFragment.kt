@@ -66,6 +66,12 @@ class ProvidersTvFragment : Fragment() {
             findNavController().navigate(R.id.settings)
         }
 
+        // 2026-05-20 : cœur favoris global — favoris de tous les providers (sauf TV)
+        binding.btnGlobalFavorites.setOnClickListener {
+            findNavController().navigate(R.id.global_favorites)
+        }
+        binding.btnGlobalFavorites.requestFocus()
+
         // 2026-05-12 : bouton "Changer de profil" symétrique du mobile.
         // Clear le profil actif + relance ProfilePickerTvActivity en task neuve.
         binding.btnProvidersProfileSwitch.setOnClickListener {

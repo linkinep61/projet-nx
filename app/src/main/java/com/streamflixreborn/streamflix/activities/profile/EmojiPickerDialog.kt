@@ -4,6 +4,7 @@ import android.content.Context
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.recyclerview.widget.GridLayoutManager
@@ -27,7 +28,8 @@ object EmojiPickerDialog {
         rv.layoutManager = GridLayoutManager(context, 6)
 
         var dialogRef: AlertDialog? = null
-        rv.adapter = Adapter(ProfileEmojis.list, currentEmoji) { picked ->
+        // 2026-05-20 : set COMPLET Fluent (~1581) au lieu des 67 curés.
+        rv.adapter = Adapter(FluentAvatars.list(context), currentEmoji) { picked ->
             onPick(picked)
             dialogRef?.dismiss()
         }
@@ -53,19 +55,23 @@ object EmojiPickerDialog {
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
             val v = LayoutInflater.from(parent.context)
-                .inflate(R.layout.item_emoji_picker, parent, false) as TextView
+                .inflate(R.layout.item_emoji_picker, parent, false)
             return VH(v)
         }
 
         override fun onBindViewHolder(holder: VH, position: Int) {
             val emoji = emojis[position]
-            holder.text.text = emoji
-            holder.text.isSelected = emoji == currentEmoji
-            holder.text.setOnClickListener { onClick(emoji) }
+            // 2026-05-20 : rendu Fluent 3D (image) avec fallback emoji systeme.
+            ProfileEmojiArt.bind(emoji, holder.image, holder.text)
+            holder.itemView.isSelected = emoji == currentEmoji
+            holder.itemView.setOnClickListener { onClick(emoji) }
         }
 
         override fun getItemCount(): Int = emojis.size
 
-        class VH(val text: TextView) : RecyclerView.ViewHolder(text)
+        class VH(itemView: View) : RecyclerView.ViewHolder(itemView) {
+            val text: TextView = itemView.findViewById(R.id.tv_emoji)
+            val image: ImageView = itemView.findViewById(R.id.iv_emoji)
+        }
     }
 }

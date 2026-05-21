@@ -14,7 +14,6 @@ import com.streamflixreborn.streamflix.databinding.ItemEpisodeContinueWatchingTv
 import com.streamflixreborn.streamflix.databinding.ItemEpisodeMobileBinding
 import com.streamflixreborn.streamflix.databinding.ItemEpisodeTvBinding
 import com.streamflixreborn.streamflix.fragments.home.HomeMobileFragmentDirections
-import com.streamflixreborn.streamflix.fragments.home.HomeTvFragment
 import com.streamflixreborn.streamflix.fragments.home.HomeTvFragmentDirections
 import com.streamflixreborn.streamflix.fragments.season.SeasonMobileFragmentDirections
 import com.streamflixreborn.streamflix.fragments.season.SeasonTvFragmentDirections
@@ -27,10 +26,8 @@ import com.streamflixreborn.streamflix.ui.ShowOptionsTvDialog
 import com.streamflixreborn.streamflix.utils.EpisodeManager
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.format
-import com.streamflixreborn.streamflix.utils.getCurrentFragment
 import com.streamflixreborn.streamflix.utils.loadTvShowCardArtwork
 import com.streamflixreborn.streamflix.utils.loadTvShowPoster
-import com.streamflixreborn.streamflix.utils.toActivity
 
 class EpisodeViewHolder(
     private val _binding: ViewBinding
@@ -500,15 +497,8 @@ class EpisodeViewHolder(
                 binding.root.startAnimation(animation)
                 animation.fillAfter = true
 
-                when (val fragment = context.toActivity()?.getCurrentFragment()) {
-                    is HomeTvFragment -> {
-                        if (hasFocus) {
-                            fragment.pinBackground(episode.tvShow?.banner)
-                        } else {
-                            fragment.releasePinnedBackground()
-                        }
-                    }
-                }
+                // Fond d'écran carrousel uniquement — plus de pinBackground par item
+                // pour économiser la mémoire (le carrousel gère le fond)
             }
         }
 

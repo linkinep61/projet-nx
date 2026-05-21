@@ -66,6 +66,11 @@ data class Video(
         val id: String,
         val name: String,
         val src: String = "",
+        /** Miroirs alternatifs (meme host, ex plusieurs liens Uqload pour le
+         *  meme film). src reste l'URL principale (1 seule, valide) pour le
+         *  pre-extract/HEAD/cache ; getVideo essaie src puis ces miroirs jusqu'au
+         *  premier vivant. Vide = pas de miroir, comportement classique. */
+        val mirrors: List<String> = emptyList(),
     ) : Serializable {
         var video: Video? = null
     }
