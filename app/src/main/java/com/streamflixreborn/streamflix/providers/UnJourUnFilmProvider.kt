@@ -715,8 +715,10 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             val seasonDocument = service.getSeason(seasonId)
             // j1fEpsData is in base64-encoded data URL scripts, decode them
             val decodedScripts = extractDecodedScripts(seasonDocument)
-            val html = seasonDocument.html()
-            val searchText = decodedScripts.ifEmpty { html }
+            val inlineJs = if (decodedScripts.isEmpty()) {
+                seasonDocument.select("script:not([src])").joinToString("\n") { it.data() }
+            } else ""
+            val searchText = decodedScripts.ifEmpty { inlineJs }
 
             // Try parsing j1fEpsData from the page's JavaScript
             val epsDataRegex = Regex("""j1fEpsData\s*=\s*(\[.*?]);\s*""", RegexOption.DOT_MATCHES_ALL)
@@ -954,7 +956,10 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
                 val seasonDocument = service.getSeason(seasonSlug)
                 val decodedScripts = extractDecodedScripts(seasonDocument)
-                val seasonHtml = decodedScripts.ifEmpty { seasonDocument.html() }
+                val seasonInlineJs = if (decodedScripts.isEmpty()) {
+                    seasonDocument.select("script:not([src])").joinToString("\n") { it.data() }
+                } else ""
+                val seasonHtml = decodedScripts.ifEmpty { seasonInlineJs }
 
                 val epsDataRegex = Regex("""j1fEpsData\s*=\s*(\[.*?]);\s*""", RegexOption.DOT_MATCHES_ALL)
                 val epsMatch = epsDataRegex.find(seasonHtml)
@@ -1021,10 +1026,13 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
 
         // Try to extract J1F_SRV servers from the page
-        // Data is in base64-encoded data URL scripts
+        // Data is in base64-encoded data URL scripts first, then inline <script> tags.
+        // Avoid document.html() which re-serializes the entire DOM — expensive.
         val decodedMovieScripts = extractDecodedScripts(document)
-        val rawHtml = document.html()
-        val jsContent = decodedMovieScripts.ifEmpty { rawHtml }
+        val inlineScripts by lazy {
+            document.select("script:not([src])").joinToString("\n") { it.data() }
+        }
+        val jsContent = decodedMovieScripts.ifEmpty { inlineScripts }
         val srvRegex = Regex("""J1F_SRV\s*=\s*(\[.*?]);""", RegexOption.DOT_MATCHES_ALL)
         val match = srvRegex.find(jsContent)
 
@@ -1067,7 +1075,12 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         // Legacy DooPlay AJAX fallback (post-ID probe, max 10 requests)
         if (servers.isEmpty() && apiUrl.isEmpty() && onregardeUrl.isEmpty()) {
-            val postIdMatch = Regex("""postid-(\d+)""").find(rawHtml)
+            // Extract WordPress post ID from body/article class (e.g. "postid-12345")
+            // without re-serializing the DOM via document.html().
+            val bodyClasses = document.body().className() + " " +
+                (document.selectFirst("article[id]")?.className() ?: "")
+            val postIdMatch = Regex("""postid-(\d+)""").find(bodyClasses)
+                ?: Regex("""post-(\d+)""").find(bodyClasses)
             val postId = postIdMatch?.groupValues?.get(1) ?: ""
             val isEpisode = videoType is Video.Type.Episode
 
@@ -1172,8 +1185,17 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 try {
                     val document = addressService.getHome()
 
-                    val newUrl = document.html().substringAfter("window.location.href = \"").substringBefore("\"")
-                        .trim()
+                    // Try inline scripts first (fast), fallback to full HTML serialization.
+                    // onChangeUrl is called once at startup so the fallback cost is acceptable.
+                    val newUrl = (document.select("script").asSequence()
+                        .map { it.data() }
+                        .firstOrNull { it.contains("window.location.href") }
+                        ?.substringAfter("window.location.href = \"")
+                        ?.substringBefore("\"")
+                        ?.trim()
+                        ?.takeIf { it.startsWith("http") }
+                        ?: document.html().substringAfter("window.location.href = \"").substringBefore("\"").trim()
+                    )
                     if (!newUrl.isNullOrEmpty() && newUrl.startsWith("http")) {
                         val newIcon = document.selectFirst("link[rel=apple-touch-icon]")
                             ?.attr("href")
@@ -1251,7 +1273,12 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private interface Service {
 
         companion object {
-            private val client = NetworkClient.default
+            // Dedicated client with shorter timeouts — 1Jour1Film site responds
+            // quickly, no need for 30s global default.
+            private val client = NetworkClient.default.newBuilder()
+                .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
 
             fun buildAddressFetcher(): Service {
                 val addressRetrofit = Retrofit.Builder()

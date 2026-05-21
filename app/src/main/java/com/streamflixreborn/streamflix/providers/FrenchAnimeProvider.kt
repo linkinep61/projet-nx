@@ -51,6 +51,17 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
 
     private var service = FrenchAnimeService.build()
 
+    // Client OkHttp partagé pour searchDirect — évite de recréer un client à chaque appel
+    private val searchClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .dns(DnsResolver.doh)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+    }
+
     // Flag to track if more search results are available. Set to false when API returns fewer items than requested.
     // This prevents querying non-existent pages that could return random/incorrect results.
     private var hasMore = true
@@ -327,8 +338,12 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
         return tvShows
     }
 
-    override suspend fun getMovie(id: String): Movie {
-        val document = service.getMovie(id)
+    override suspend fun getMovie(id: String): Movie = withContext(Dispatchers.IO) {
+        // Lancer page + recherche en parallèle pour réduire la latence
+        val documentDeferred = async { service.getMovie(id) }
+
+        // On a besoin du titre pour la recherche, donc on attend le document d'abord
+        val document = documentDeferred.await()
 
         val isFrench = document.selectFirst("ul.mov-list li:contains(Version) .mov-desc span")
             ?.text().isFrench()
@@ -336,27 +351,24 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
         val rawTitle = document.selectFirst("header.full-title h1")?.text() ?: ""
         val title = rawTitle.toTitle(isFrench)
 
-        // ── Search for similar/related films ──
-        // Extract franchise name: strip "film/movie" suffixes, then also try cutting at " : " or " - "
+        // ── Search for similar/related films (async) ──
         val baseTitle = rawTitle
             .replace(Regex("""(?i)\s*(film|movie|le film|the movie).*"""), "")
             .replace("FRENCH", "").replace("VOSTFR", "")
             .trim()
 
-        // Also extract shorter franchise name (before first " : " or " - ")
-        // e.g. "Naruto Shippuden : The Last" → "Naruto Shippuden"
         val franchiseName = baseTitle
             .split(Regex("""\s*[:]\s*|\s+[-–—]\s+"""))
             .firstOrNull()?.trim()
             ?.takeIf { it.length >= 3 } ?: baseTitle
 
-        // Use the shorter franchise name for search (catches more related films)
         val movieSearchQuery = franchiseName
             .replace(Regex("""[:\-–—·''""\[\]()!?,;]"""), " ")
             .replace(Regex("""\s+"""), " ").trim()
 
-        val relatedFilms = mutableListOf<Show>()
-        if (movieSearchQuery.length >= 3) {
+        // Lancer la recherche de recommandations en parallèle du parsing
+        val relatedDeferred = async {
+            if (movieSearchQuery.length < 3) return@async emptyList<Show>()
             try {
                 val searchDoc = searchDirect(movieSearchQuery, 1)
                 val searchBase = franchiseName.normalizeForCompare()
@@ -364,16 +376,14 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
                     val a = mov.selectFirst("a.mov-t") ?: return@mapNotNull null
                     val link = a.attr("href")
                     val resultId = link.substringAfterLast("/").substringBefore(".html")
-                    if (resultId == id) return@mapNotNull null // Skip self
+                    if (resultId == id) return@mapNotNull null
                     val resultTitle = a.text()
                     val resultPoster = mov.selectFirst(".mov-i img")?.attr("src")?.toUrl()
 
-                    // Check if this result belongs to the same franchise
                     val resultBase = resultTitle
                         .replace(Regex("""(?i)\s*(film|movie|le film|the movie|saison).*"""), "")
                         .replace("FRENCH", "").replace("VOSTFR", "")
                         .normalizeForCompare()
-                    // Also try franchise-level match (before " : " or " - ")
                     val resultFranchise = resultBase
                         .split(Regex("""\s*[:]\s*|\s+[-–—]\s+"""))
                         .firstOrNull()?.trim() ?: resultBase
@@ -381,11 +391,13 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
                     if (titlesFuzzyMatch(resultBase, searchBase) || titlesFuzzyMatch(resultFranchise, searchBase)) {
                         Movie(id = resultId, title = resultTitle.toTitle(isFrench), poster = resultPoster)
                     } else null
-                }.let { relatedFilms.addAll(it) }
-            } catch (_: Exception) {}
+                }
+            } catch (_: Exception) { emptyList() }
         }
 
-        val movie = Movie(
+        val relatedFilms = relatedDeferred.await()
+
+        Movie(
             id = id,
             title = title,
             overview = document.selectFirst("span[itemprop='description']")?.text() ?: "",
@@ -415,11 +427,9 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
                 .toPeople(),
             recommendations = relatedFilms,
         )
-
-        return movie
     }
 
-    override suspend fun getTvShow(id: String): TvShow {
+    override suspend fun getTvShow(id: String): TvShow = withContext(Dispatchers.IO) {
         val document = service.getTvShow(id)
 
         val isFrench = document.selectFirst("ul.mov-list li:contains(Version) .mov-desc span")
@@ -430,119 +440,150 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
         val poster = document.selectFirst("div.mov-img img[itemprop=thumbnailUrl]")?.attr("src")
             ?.toUrl()
 
-        // ── Search for all seasons of this show ──
-        // Strip "Saison XX", "FRENCH", "VOSTFR" from title to get the base name
         val baseTitle = rawTitle
             .replace(Regex("""[Ss]aison\s*\d+"""), "")
             .replace("FRENCH", "").replace("VOSTFR", "")
             .trim()
 
-        // Clean query for the search API: remove special chars that break the search engine
         val searchQuery = baseTitle
             .replace(Regex("""[:\-–—·''""\[\]()!?,;]"""), " ")
             .replace(Regex("""\s+"""), " ")
             .trim()
 
-        val seasons = mutableListOf<Season>()
-        if (searchQuery.isNotEmpty()) {
+        // ── Recherche saisons + recommandations en parallèle ──
+        val franchiseName = baseTitle
+            .split(Regex("""\s*[:]\s*|\s+[-–—]\s+"""))
+            .firstOrNull()?.trim()
+            ?.takeIf { it.length >= 3 } ?: baseTitle
+        val recoQuery = franchiseName
+            .replace(Regex("""[:\-–—·''""\[\]()!?,;]"""), " ")
+            .replace(Regex("""\s+"""), " ").trim()
+
+        // UNE SEULE recherche — saisons + recos extraites du même résultat
+        // (la query saisons et recos est quasi identique, inutile de doubler)
+        val seasonsAndRecos = async {
+            val seasons = mutableListOf<Season>()
+            val recommendations = mutableListOf<Show>()
+            if (searchQuery.isEmpty()) return@async Pair(seasons, recommendations)
+
             try {
                 val searchDoc = searchDirect(searchQuery, 1)
                 val searchBase = baseTitle.normalizeForCompare()
-                // Collect alternate names from search results (different titles for same franchise)
                 val alternateNames = mutableSetOf<String>()
 
-                val searchResults = searchDoc.select("div.mov").mapNotNull { mov ->
-                    val a = mov.selectFirst("a.mov-t") ?: return@mapNotNull null
+                searchDoc.select("div.mov").forEach { mov ->
+                    val a = mov.selectFirst("a.mov-t") ?: return@forEach
                     val link = a.attr("href")
                     val resultId = link.substringAfterLast("/").substringBefore(".html")
                     val resultTitle = a.text()
                     val resultPoster = mov.selectFirst(".mov-i img")?.attr("src")?.toUrl()
                     val isTvShow = mov.selectFirst(".block-ep") != null
-                    if (!isTvShow) return@mapNotNull null
-
-                    val saisonText = mov.selectFirst(".block-sai")?.text() ?: ""
-                    val seasonNumber = Regex("""[Ss]aison\s*(\d+)""").find(saisonText)
-                        ?.groupValues?.get(1)?.toIntOrNull()
-                        ?: Regex("""[Ss]aison\s*(\d+)""").find(resultTitle)
-                            ?.groupValues?.get(1)?.toIntOrNull()
-                        ?: 1
 
                     val resultBase = resultTitle
                         .replace(Regex("""[Ss]aison\s*\d+"""), "")
                         .replace("FRENCH", "").replace("VOSTFR", "")
                         .normalizeForCompare()
 
-                    if (titlesFuzzyMatch(resultBase, searchBase)) {
-                        Season(
-                            id = resultId,
-                            number = seasonNumber,
-                            title = "Saison $seasonNumber",
-                            poster = resultPoster ?: poster,
-                        )
-                    } else {
-                        // This result didn't match but the search engine returned it
-                        // → likely an alternate name for the same franchise (e.g. Japanese vs English)
-                        val altName = resultTitle
-                            .replace(Regex("""[Ss]aison\s*\d+"""), "")
-                            .replace("FRENCH", "").replace("VOSTFR", "")
-                            .trim()
-                        if (altName.isNotEmpty() && !titlesFuzzyMatch(altName.normalizeForCompare(), searchBase)) {
-                            alternateNames.add(altName)
-                        }
-                        null
-                    }
-                }
-                seasons.addAll(searchResults)
-
-                // ── Second pass: search with alternate names to find missing seasons ──
-                // e.g. "The Rising of the Shield Hero" → also search "Tate no Yuusha no Nariagari"
-                for (altName in alternateNames) {
-                    try {
-                        val altQuery = altName
-                            .replace(Regex("""[:\-–—·''""\[\]()!?,;]"""), " ")
-                            .replace(Regex("""\s+"""), " ").trim()
-                        if (altQuery.isBlank()) continue
-                        val altDoc = searchDirect(altQuery, 1)
-                        val altBase = altName.normalizeForCompare()
-                        altDoc.select("div.mov").mapNotNull { mov ->
-                            val a = mov.selectFirst("a.mov-t") ?: return@mapNotNull null
-                            val link = a.attr("href")
-                            val resultId = link.substringAfterLast("/").substringBefore(".html")
-                            val resultTitle = a.text()
-                            val resultPoster = mov.selectFirst(".mov-i img")?.attr("src")?.toUrl()
-                            val isTvShow = mov.selectFirst(".block-ep") != null
-                            if (!isTvShow) return@mapNotNull null
-
-                            val saisonText = mov.selectFirst(".block-sai")?.text() ?: ""
-                            val seasonNumber = Regex("""[Ss]aison\s*(\d+)""").find(saisonText)
+                    if (isTvShow) {
+                        val saisonText = mov.selectFirst(".block-sai")?.text() ?: ""
+                        val seasonNumber = Regex("""[Ss]aison\s*(\d+)""").find(saisonText)
+                            ?.groupValues?.get(1)?.toIntOrNull()
+                            ?: Regex("""[Ss]aison\s*(\d+)""").find(resultTitle)
                                 ?.groupValues?.get(1)?.toIntOrNull()
-                                ?: Regex("""[Ss]aison\s*(\d+)""").find(resultTitle)
-                                    ?.groupValues?.get(1)?.toIntOrNull()
-                                ?: 1
+                            ?: 1
 
-                            val resultBase = resultTitle
+                        if (titlesFuzzyMatch(resultBase, searchBase)) {
+                            seasons.add(Season(
+                                id = resultId,
+                                number = seasonNumber,
+                                title = "Saison $seasonNumber",
+                                poster = resultPoster ?: poster,
+                            ))
+                        } else {
+                            val altName = resultTitle
                                 .replace(Regex("""[Ss]aison\s*\d+"""), "")
                                 .replace("FRENCH", "").replace("VOSTFR", "")
-                                .normalizeForCompare()
+                                .trim()
+                            if (altName.isNotEmpty() && !titlesFuzzyMatch(altName.normalizeForCompare(), searchBase)) {
+                                alternateNames.add(altName)
+                            }
+                        }
+                    }
 
-                            if (titlesFuzzyMatch(resultBase, altBase) || titlesFuzzyMatch(resultBase, searchBase)) {
-                                Season(
-                                    id = resultId,
-                                    number = seasonNumber,
-                                    title = "Saison $seasonNumber",
-                                    poster = resultPoster ?: poster,
-                                )
-                            } else null
-                        }.let { seasons.addAll(it) }
-                    } catch (_: Exception) {}
+                    // Recommandations (films et séries liés, excluant self)
+                    if (resultId != id) {
+                        val resultFranchise = resultBase
+                            .replace(Regex("""(?i)\s*(film|movie|le film|the movie|saison).*"""), "")
+                            .normalizeForCompare()
+                            .split(Regex("""\s*[:]\s*|\s+[-–—]\s+"""))
+                            .firstOrNull()?.trim() ?: resultBase
+                        val recoBase = franchiseName.normalizeForCompare()
+
+                        if (titlesFuzzyMatch(resultBase, recoBase) || titlesFuzzyMatch(resultFranchise, recoBase)) {
+                            recommendations.add(
+                                TvShow(id = resultId, title = resultTitle.toTitle(isFrench), poster = resultPoster)
+                            )
+                        }
+                    }
                 }
 
-                // Deduplicate by season number and sort
+                // Second pass avec noms alternatifs en parallèle
+                if (alternateNames.isNotEmpty()) {
+                    val altResults = alternateNames.map { altName ->
+                        async {
+                            try {
+                                val altQuery = altName
+                                    .replace(Regex("""[:\-–—·''""\[\]()!?,;]"""), " ")
+                                    .replace(Regex("""\s+"""), " ").trim()
+                                if (altQuery.isBlank()) return@async emptyList<Season>()
+                                val altDoc = searchDirect(altQuery, 1)
+                                val altBase = altName.normalizeForCompare()
+                                altDoc.select("div.mov").mapNotNull { mov ->
+                                    val a2 = mov.selectFirst("a.mov-t") ?: return@mapNotNull null
+                                    val link2 = a2.attr("href")
+                                    val resultId2 = link2.substringAfterLast("/").substringBefore(".html")
+                                    val resultTitle2 = a2.text()
+                                    val resultPoster2 = mov.selectFirst(".mov-i img")?.attr("src")?.toUrl()
+                                    val isTvShow2 = mov.selectFirst(".block-ep") != null
+                                    if (!isTvShow2) return@mapNotNull null
+
+                                    val saisonText2 = mov.selectFirst(".block-sai")?.text() ?: ""
+                                    val seasonNumber2 = Regex("""[Ss]aison\s*(\d+)""").find(saisonText2)
+                                        ?.groupValues?.get(1)?.toIntOrNull()
+                                        ?: Regex("""[Ss]aison\s*(\d+)""").find(resultTitle2)
+                                            ?.groupValues?.get(1)?.toIntOrNull()
+                                        ?: 1
+
+                                    val resultBase2 = resultTitle2
+                                        .replace(Regex("""[Ss]aison\s*\d+"""), "")
+                                        .replace("FRENCH", "").replace("VOSTFR", "")
+                                        .normalizeForCompare()
+
+                                    if (titlesFuzzyMatch(resultBase2, altBase) || titlesFuzzyMatch(resultBase2, searchBase)) {
+                                        Season(
+                                            id = resultId2,
+                                            number = seasonNumber2,
+                                            title = "Saison $seasonNumber2",
+                                            poster = resultPoster2 ?: poster,
+                                        )
+                                    } else null
+                                }
+                            } catch (_: Exception) { emptyList() }
+                        }
+                    }
+                    altResults.forEach { seasons.addAll(it.await()) }
+                }
+
+                // Dedup + sort
                 val deduped = seasons.distinctBy { it.number }.sortedBy { it.number }
                 seasons.clear()
                 seasons.addAll(deduped)
             } catch (_: Exception) {}
+
+            Pair(seasons, recommendations)
         }
+
+        val (seasons, recommendations) = seasonsAndRecos.await()
 
         // Fallback: if search found nothing, use current page as single season
         if (seasons.isEmpty()) {
@@ -556,44 +597,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
             ))
         }
 
-        // ── Search for related content (recommendations) ──
-        val franchiseName = baseTitle
-            .split(Regex("""\s*[:]\s*|\s+[-–—]\s+"""))
-            .firstOrNull()?.trim()
-            ?.takeIf { it.length >= 3 } ?: baseTitle
-        val recoQuery = franchiseName
-            .replace(Regex("""[:\-–—·''""\[\]()!?,;]"""), " ")
-            .replace(Regex("""\s+"""), " ").trim()
-
-        val recommendations = mutableListOf<Show>()
-        if (recoQuery.length >= 3) {
-            try {
-                val recoDoc = searchDirect(recoQuery, 1)
-                val recoBase = franchiseName.normalizeForCompare()
-                recoDoc.select("div.mov").mapNotNull { mov ->
-                    val a = mov.selectFirst("a.mov-t") ?: return@mapNotNull null
-                    val link = a.attr("href")
-                    val resultId = link.substringAfterLast("/").substringBefore(".html")
-                    if (resultId == id) return@mapNotNull null
-                    val resultTitle = a.text()
-                    val resultPoster = mov.selectFirst(".mov-i img")?.attr("src")?.toUrl()
-
-                    val resultBase = resultTitle
-                        .replace(Regex("""(?i)\s*(film|movie|le film|the movie|saison).*"""), "")
-                        .replace("FRENCH", "").replace("VOSTFR", "")
-                        .normalizeForCompare()
-                    val resultFranchise = resultBase
-                        .split(Regex("""\s*[:]\s*|\s+[-–—]\s+"""))
-                        .firstOrNull()?.trim() ?: resultBase
-
-                    if (titlesFuzzyMatch(resultBase, recoBase) || titlesFuzzyMatch(resultFranchise, recoBase)) {
-                        TvShow(id = resultId, title = resultTitle.toTitle(isFrench), poster = resultPoster)
-                    } else null
-                }.let { recommendations.addAll(it) }
-            } catch (_: Exception) {}
-        }
-
-        val tvShow = TvShow(
+        TvShow(
             id = id,
             title = title,
             overview = document.selectFirst("span[itemprop=description]")?.text(),
@@ -623,8 +627,6 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
                 .toPeople(),
             recommendations = recommendations,
         )
-
-        return tvShow
     }
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
@@ -965,36 +967,10 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
             .add("full_search", "0")
             .build()
 
-        val searchClient = okhttp3.OkHttpClient.Builder()
-            .dns(DnsResolver.doh)
-            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .build()
+        val url = baseUrl
 
-        var url = baseUrl
-        var redirects = 0
-        var response: okhttp3.Response? = null
-
-        // First, follow any GET redirects to find the real base URL
-        var probeReq = okhttp3.Request.Builder().url(url).head().build()
-        var probeResp = searchClient.newCall(probeReq).execute()
-        while (probeResp.isRedirect && redirects < 5) {
-            val location = probeResp.header("Location") ?: break
-            val newUrl = probeReq.url.resolve(location)?.toString() ?: break
-            android.util.Log.d("FrenchAnime", "searchDirect: redirect $url -> $newUrl")
-            probeResp.close()
-            url = newUrl
-            probeReq = okhttp3.Request.Builder().url(url).head().build()
-            probeResp = searchClient.newCall(probeReq).execute()
-            redirects++
-        }
-        probeResp.close()
-
-        android.util.Log.d("FrenchAnime", "searchDirect: resolved base URL = $url")
-
-        // Now POST to the resolved URL
+        // POST direct — le service Retrofit gère déjà les redirects domaine,
+        // pas besoin du HEAD probe qui ajoutait 1-2s de latence
         val request = okhttp3.Request.Builder()
             .url(url)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36")
@@ -1003,15 +979,14 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
             .post(formBody)
             .build()
 
-        response = searchClient.newCall(request).execute()
+        var response = searchClient.newCall(request).execute()
 
         // Follow POST redirects preserving the body
         var postRedirects = 0
-        while (response!!.isRedirect && postRedirects < 3) {
-            val location = response!!.header("Location") ?: break
+        while (response.isRedirect && postRedirects < 3) {
+            val location = response.header("Location") ?: break
             val newUrl = request.url.resolve(location)?.toString() ?: break
-            android.util.Log.d("FrenchAnime", "searchDirect: POST redirect -> $newUrl")
-            response!!.close()
+            response.close()
             val redirectReq = okhttp3.Request.Builder()
                 .url(newUrl)
                 .header("User-Agent", "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36")
@@ -1022,9 +997,8 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
             postRedirects++
         }
 
-        val html = response!!.body?.string() ?: ""
-        response!!.close()
-        android.util.Log.d("FrenchAnime", "searchDirect: response ${html.length} bytes, code=${response!!.code}")
+        val html = response.body?.string() ?: ""
+        response.close()
         org.jsoup.Jsoup.parse(html, url)
     }
 

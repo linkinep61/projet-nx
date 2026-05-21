@@ -136,6 +136,12 @@ class HomeTvFragment : Fragment() {
                         binding.isLoading.root.visibility = View.GONE
                     }
                     is HomeViewModel.State.FailedLoading -> {
+                        // Pas de toast ni UI retry si aucun provider sélectionné (retour sur écran providers)
+                        if (state.error.message == "No provider selected") {
+                            binding.isLoading.root.visibility = View.GONE
+                            return@collect
+                        }
+
                         val code = (state.error as? retrofit2.HttpException)?.code()
                         if (code == 409 && !hasAutoCleared409) {
                             hasAutoCleared409 = true

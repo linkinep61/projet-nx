@@ -44,13 +44,13 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
     @Volatile var skipBackupsForBackupCall: Boolean = false
 
     override val name = "Movix"
-    override val defaultBaseUrl: String = "https://api.movix.cash/"
+    override val defaultBaseUrl: String = "https://api.movix.tax/"  // v89 2026-05-20 : movix.cash mort, domaine actif = movix.tax
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
             return cacheURL.ifEmpty { field }
         }
-    override val defaultPortalUrl: String = "https://movix.cash/"
+    override val defaultPortalUrl: String = "https://movix.tax/"
     override val portalUrl: String = defaultPortalUrl
         get() {
             val cachePortalURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_PORTAL_URL)
@@ -809,6 +809,18 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
         val html = client.newCall(htmlRequest).execute().use { response ->
             if (!response.isSuccessful) return null
             response.body?.string() ?: return null
+        }
+
+        // v89 2026-05-20 : parser ROBUSTE depuis le <title> (ex: "Movix ... | movix.tax").
+        //   Le bundle JS change de format souvent (ancien pattern blocked:!1 mort) ;
+        //   le <title> de la page d'adresses contient le domaine actif de maniere stable.
+        val titleBlock = Regex("""<title>([^<]*)</title>""", RegexOption.IGNORE_CASE).find(html)?.groupValues?.get(1)
+        if (titleBlock != null) {
+            val titleDomain = Regex("""movix\.[a-z]{2,}""").findAll(titleBlock).lastOrNull()?.value
+            if (!titleDomain.isNullOrBlank()) {
+                Log.d("MovixProvider", "Active domain from <title>: $titleDomain")
+                return "https://$titleDomain"
+            }
         }
 
         // Extract JS bundle path: <script ... src="/assets/index-XXXX.js">

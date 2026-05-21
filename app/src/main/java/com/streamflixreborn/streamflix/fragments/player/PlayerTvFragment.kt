@@ -271,6 +271,12 @@ class PlayerTvFragment : Fragment() {
     // et le player reste bloqué indéfiniment.
     private var bufferingWatchdog: kotlinx.coroutines.Job? = null
     private val BUFFERING_TIMEOUT_MS = 10_000L
+    // 2026-05-20 : le player TRANSFÉRÉ depuis le mini-player (IPTV) utilise
+    //   recoveryListener qui ne gérait QUE onPlayerError — un stall silencieux en
+    //   BUFFERING (ex Vavoo edge lent) restait figé sans reprise. Ce flag protège
+    //   une boucle de reprise LÉGÈRE (seek live + prepare(), PAS de rebuild player
+    //   pour éviter le crash MediaCodec historique).
+    @Volatile private var transferLiveRecoveryActive: Boolean = false
     private var usingCronet = false
     /** Shared bounded executor for Cronet — avoids unbounded newCachedThreadPool */
     private val cronetExecutor = java.util.concurrent.Executors.newFixedThreadPool(4)
@@ -280,6 +286,22 @@ class PlayerTvFragment : Fragment() {
     // ── WebView overlay with virtual cursor (Netu anti-bot bypass on TV) ──
     private var webViewOverlay: FrameLayout? = null
     private var overlayWebView: WebView? = null
+    private var overlayIsAbyss = false
+    private var abyssBar: android.widget.LinearLayout? = null
+    private var abyssButtons: List<android.widget.TextView> = emptyList()
+    private var abyssSeek: android.widget.ProgressBar? = null
+    private var abyssTime: android.widget.TextView? = null
+    private var abyssRow = 0
+    private var abyssBtnIndex = 0
+    private var abyssPosSec = 0
+    private var abyssDurSec = 0
+    private val abyssHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var abyssHideRunnable: Runnable? = null
+    private var abyssPollRunnable: Runnable? = null
+    private var abyssQualityMode = false
+    private var abyssQualityMenu: android.widget.LinearLayout? = null
+    private var abyssQualityLabels: MutableList<android.widget.TextView> = mutableListOf()
+    private var abyssQualityIndex = 0
     private var virtualCursorView: View? = null
     private var cursorX = 0f
     private var cursorY = 0f
@@ -519,6 +541,12 @@ class PlayerTvFragment : Fragment() {
                 kotlinx.coroutines.delay(15L)
             }
             player.seekToNextMediaItem()
+            // 2026-05-20 (user "retours sur écran avec son et image qui se
+            //   répètent") : après swap, le backup est à une position PLUS
+            //   ANCIENNE → replay de contenu déjà vu. seekToDefaultPosition
+            //   force le saut au live edge (targetOffset derrière).
+            player.seekToDefaultPosition()
+            android.util.Log.d("PlayerTvFragment", "seekToDefaultPosition après swap (anti-replay)")
             // v58 : re-ajoute IMMÉDIATEMENT un backup pour que hasNext reste true
             //   en permanence → tout swap futur passe par la smooth path JUMELAGE,
             //   jamais par le path CRITIQUE destructif viewModel.getVideo.
@@ -681,6 +709,9 @@ class PlayerTvFragment : Fragment() {
                 binding.pvPlayer.controllerShowTimeoutMs = 5000
                 binding.pvPlayer.controllerHideOnTouch = true
                 binding.pvPlayer.controllerAutoShow = true
+                binding.pvPlayer.setControllerVisibilityListener(
+                    androidx.media3.ui.PlayerView.ControllerVisibilityListener { vis -> if (vis == View.VISIBLE) wireCenterFocus() }
+                )
             }
             // 2026-05-17 : la 2e seek bar (live_secondary_progress) est dans
             //   le controller player donc sa visibilité suit automatiquement
@@ -2531,6 +2562,7 @@ class PlayerTvFragment : Fragment() {
             val newListener = object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     super.onPlaybackStateChanged(playbackState)
+                    wireCenterFocus()
 
                     // 2026-05-17 v18 (user "jumelage") : swap automatique vers backup
                     //   si BUFFERING persiste >2s ET qu'on a un backup dans la queue.
@@ -3053,7 +3085,8 @@ class PlayerTvFragment : Fragment() {
                 }
 
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
-                    binding.pvPlayer.keepScreenOn = isPlaying
+                    // 2026-05-20 : respecter keepScreenOnWhenPaused (parité mobile)
+                    binding.pvPlayer.keepScreenOn = isPlaying || UserPreferences.keepScreenOnWhenPaused
 
                     if (isPlaying) {
                         startProgressHandler()
@@ -4224,6 +4257,8 @@ class PlayerTvFragment : Fragment() {
                         if (hasBackup && sinceLastSwap >= 20_000L) {
                             Log.w("PlayerTvFragment", "FORCED PERIODIC SWAP (timer 45s, ahead=${((player.bufferedPosition - player.currentPosition) / 1000).toInt()}s) — seekToNextMediaItem")
                             player.seekToNextMediaItem()
+                            // 2026-05-20 : anti-replay, saut au live edge après swap
+                            player.seekToDefaultPosition()
                             lastSwapTimestampMs = System.currentTimeMillis()
                             backupJumelageAttempted = false
                         } else if (!hasBackup) {
@@ -4465,6 +4500,17 @@ class PlayerTvFragment : Fragment() {
             else NEXT_EPISODE_OVERLAY_ALPHA_UNFOCUSED
     }
 
+    private fun wireCenterFocus() {
+        if (_binding == null) return
+        val cb = binding.pvPlayer.controller.binding
+        val order = listOf(cb.btnCustomPrev, cb.exoReplay, cb.exoPlayPause, cb.btnCustomNext, cb.exoSettings)
+        val noMedia = !(::player.isInitialized) || player.currentMediaItem == null || player.playbackState == Player.STATE_IDLE
+        val usable = order.filter { it.isVisible && it.isFocusable && it.isEnabled && !(noMedia && it === cb.exoPlayPause) }
+        for (i in usable.indices) {
+            usable[i].nextFocusLeftId = if (i > 0) usable[i - 1].id else usable[i].id
+            usable[i].nextFocusRightId = if (i < usable.size - 1) usable[i + 1].id else usable[i].id
+        }
+    }
     private fun updateNextEpisodeOverlayFocusBindings(overlayVisible: Boolean) {
         val controllerBinding = binding.pvPlayer.controller.binding
         val overlayActionId = binding.btnNextEpisodeAction.id
@@ -4712,9 +4758,23 @@ class PlayerTvFragment : Fragment() {
             // sur certains réseaux (Tahiti satellite). Cronet utilise le stack
             // réseau Chromium (HTTP/3 QUIC, ECH, retry logic spécifique) qui
             // arrive à se connecter là où OkHttp échoue.
+            // 2026-05-20 : parité PlayerMobileFragment. Uqload (strm*.uqload.is) +
+            //   Hydrax (abyssa.cc / abysscdn) signent leur token sur le JA3 Chrome
+            //   du fetch d'extraction (Cronet). Le DefaultHttpDataSource (TLS
+            //   Android) -> 403 sur strm5.uqload.is. Sur la Chromecast surtout, le
+            //   TLS systeme est rejete. Donc on rejoue le stream via Cronet.
             return url.contains("vidzy.live", ignoreCase = true)
                 || url.contains("cfglobalcdn.com", ignoreCase = true)
                 || url.contains("anime-sama.", ignoreCase = true)
+                || url.contains("uqload.is", ignoreCase = true)
+                || url.contains("uqload.cx", ignoreCase = true)
+                || url.contains("uqload.co", ignoreCase = true)
+                || url.contains("uqload.to", ignoreCase = true)
+                || url.contains("uqload.net", ignoreCase = true)
+                || url.contains("strm5.uqload", ignoreCase = true)
+                || url.contains("strm.uqload", ignoreCase = true)
+                || url.contains("abyssa", ignoreCase = true)
+                || url.contains("abysscdn", ignoreCase = true)
         }
 
         private fun needsDoH(url: String): Boolean {
@@ -4765,11 +4825,20 @@ class PlayerTvFragment : Fragment() {
             return try {
                 val cronetEngine = com.streamflixreborn.streamflix.StreamFlixApp.getCronetEngine(requireContext())
                     ?: throw IllegalStateException("CronetEngine not available")
-                Log.d("PlayerNetwork", "Using CronetDataSource for vidzy.live (Chrome network stack)")
+                Log.d("PlayerNetwork", "Using CronetDataSource (Chrome network stack) for: ${videoUrl.take(80)}")
                 usingCronet = true
                 usingDoH = false
+                // 2026-05-20 : parité mobile. Uqload + Hydrax exigent EXACTEMENT le
+                //   meme UA desktop Chrome 148 que le fetch d'extraction, sinon 403.
+                val cronetUa = if (videoUrl.contains("uqload", ignoreCase = true) ||
+                                   videoUrl.contains("abyssa", ignoreCase = true) ||
+                                   videoUrl.contains("abysscdn", ignoreCase = true)) {
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+                } else {
+                    NetworkClient.USER_AGENT
+                }
                 CronetDataSource.Factory(cronetEngine as CronetEngine, cronetExecutor)
-                    .setUserAgent(NetworkClient.USER_AGENT)
+                    .setUserAgent(cronetUa)
                     .setConnectionTimeoutMs(30_000)
                     .setReadTimeoutMs(30_000)
             } catch (e: Exception) {
@@ -5014,6 +5083,42 @@ class PlayerTvFragment : Fragment() {
                         androidx.media3.common.Player.STATE_READY -> {
                             iptvCurrentStreamHasWorked = true
                         }
+                        androidx.media3.common.Player.STATE_BUFFERING -> {
+                            // 2026-05-20 : stall live SILENCIEUX (BUFFERING, pas d'erreur
+                            //   ni ENDED — ex Vavoo edge lent au démarrage). Le player
+                            //   transféré restait figé. Reprise LÉGÈRE périodique (seek
+                            //   live edge + prepare(), PAS de rebuild → pas de crash
+                            //   MediaCodec), bornée par anti-empilement + anti-flap.
+                            if (!transferLiveRecoveryActive) {
+                                transferLiveRecoveryActive = true
+                                viewLifecycleOwner.lifecycleScope.launch {
+                                    try {
+                                        while (_binding != null && ::player.isInitialized &&
+                                            player.playbackState == androidx.media3.common.Player.STATE_BUFFERING) {
+                                            kotlinx.coroutines.delay(12_000L)
+                                            if (_binding == null || !::player.isInitialized) break
+                                            if (player.playbackState != androidx.media3.common.Player.STATE_BUFFERING) break
+                                            if (preemptiveReloadInFlight) continue
+                                            val nowFlapB = System.currentTimeMillis()
+                                            recentReloadTimestamps.removeAll { (nowFlapB - it) > RELOAD_FLAP_WINDOW_MS }
+                                            if (recentReloadTimestamps.size >= RELOAD_FLAP_THRESHOLD) {
+                                                Log.e("PlayerTvFragment", "Transfer-recovery BUFFERING: reload flap — STOP")
+                                                break
+                                            }
+                                            recentReloadTimestamps.add(nowFlapB)
+                                            Log.w("PlayerTvFragment", "Transfer-recovery: live BUFFERING >12s → seek live edge + prepare()")
+                                            try {
+                                                player.seekToDefaultPosition()
+                                                player.prepare()
+                                                player.playWhenReady = true
+                                            } catch (_: Exception) {}
+                                        }
+                                    } finally {
+                                        transferLiveRecoveryActive = false
+                                    }
+                                }
+                            }
+                        }
                         androidx.media3.common.Player.STATE_ENDED,
                         androidx.media3.common.Player.STATE_IDLE -> {
                             if (playbackState == androidx.media3.common.Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
@@ -5074,7 +5179,8 @@ class PlayerTvFragment : Fragment() {
                     }
                 }
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
-                    binding.pvPlayer.keepScreenOn = isPlaying
+                    // 2026-05-20 : respecter keepScreenOnWhenPaused (parité mobile)
+                    binding.pvPlayer.keepScreenOn = isPlaying || UserPreferences.keepScreenOnWhenPaused
                     if (isPlaying && (!::progressHandler.isInitialized || !::progressRunnable.isInitialized)) {
                         startProgressHandler()
                     }
@@ -5238,6 +5344,7 @@ class PlayerTvFragment : Fragment() {
                 )
                 setBackgroundColor(Color.BLACK)
                 elevation = 30f
+                descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                 isFocusable = true
                 isFocusableInTouchMode = true
             }
@@ -5265,12 +5372,44 @@ class PlayerTvFragment : Fragment() {
 
             // Detect if this is a DaddyLive/bolaloca embed
             val isDaddyLiveEmbed = embedUrl.contains("bolaloca")
+            val isAbyssEmbed = embedUrl.contains("abyss")
+            overlayIsAbyss = isAbyssEmbed
+            val abyssNavAllow = listOf(
+                "abysscdn.com", "abyss.to", "abyssa.cc", "abyssplayer.com", "hydrax.net",
+                "iamcdn.net", "googleapis.com", "jwpcdn.com", "jsdelivr.net",
+                "cloudflare.com", "dessinanime.cc"
+            )
+            val abyssAdHosts = listOf(
+                "aliexpress", "decafeligibly", "googlesyndication", "doubleclick",
+                "popads", "popunder", "popcash", "propellerads", "exoclick",
+                "juicyads", "trafficjunky", "clickadu", "adsterra", "hilltopads",
+                "histats", "googletagmanager", "google-analytics", "morphify"
+            )
 
             wv.webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(
+                    view: WebView?, request: WebResourceRequest?
+                ): Boolean {
+                    if (!isAbyssEmbed) return false
+                    val navHost = request?.url?.host ?: return false
+                    val allowed = abyssNavAllow.any { navHost == it || navHost.endsWith(".$it") }
+                    if (!allowed) { Log.d("PlayerTV", "Abyss NAV BLOCKED: $navHost"); return true }
+                    return false
+                }
                 override fun shouldInterceptRequest(
                     view: WebView?, request: WebResourceRequest?
                 ): WebResourceResponse? {
                     val url = request?.url?.toString() ?: return null
+
+                    // Abyss/Hydrax: player dedie sans pub
+                    if (isAbyssEmbed) {
+                        val ah = request?.url?.host ?: ""
+                        if (abyssAdHosts.any { ah.contains(it, ignoreCase = true) }) {
+                            Log.d("PlayerTV", "Abyss AD BLOCKED: $ah")
+                            return WebResourceResponse("text/plain", "UTF-8",
+                                java.io.ByteArrayInputStream("".toByteArray()))
+                        }
+                    }
 
                     // ── DaddyLive: block ads + popups ──
                     if (isDaddyLiveEmbed) {
@@ -5384,6 +5523,14 @@ class PlayerTvFragment : Fragment() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     Log.d("PlayerTV", "Overlay WebView loaded: ${url?.take(80)}")
+                    if (isAbyssEmbed) {
+                        val tgt = overlayWebView
+                        val ovw = webViewOverlay
+                        if (tgt != null && ovw != null) {
+                            view?.postDelayed({ if (webViewOverlay != null) dispatchClickToWebView(tgt, ovw.width / 2f, ovw.height / 2f) }, 4000L)
+                            view?.postDelayed({ if (webViewOverlay != null) dispatchClickToWebView(tgt, ovw.width / 2f, ovw.height / 2f) }, 7000L)
+                        }
+                    }
 
                     // ── DaddyLive: inject anti-popup/ad JS ──
                     if (isDaddyLiveEmbed) {
@@ -5413,7 +5560,7 @@ class PlayerTvFragment : Fragment() {
 
             // ── Hint text ──
             val hint = TextView(ctx).apply {
-                text = if (isDaddyLiveEmbed) "Chargement du flux DaddyLive..." else "Utilisez les flèches pour déplacer, OK pour cliquer"
+                text = if (isDaddyLiveEmbed) "Chargement du flux DaddyLive..." else if (isAbyssEmbed) "OK = lecture/pause     gauche/droite = -10s / +10s" else "Utilisez les flèches pour déplacer, OK pour cliquer"
                 setTextColor(Color.WHITE)
                 textSize = 14f
                 setShadowLayer(4f, 0f, 0f, Color.BLACK)
@@ -5428,6 +5575,48 @@ class PlayerTvFragment : Fragment() {
 
             overlay.addView(wv)
             overlay.addView(cursor)
+            if (isAbyssEmbed) cursor.visibility = View.GONE
+            if (isAbyssEmbed) {
+                val container = android.widget.LinearLayout(ctx).apply {
+                    orientation = android.widget.LinearLayout.VERTICAL
+                    setBackgroundColor(Color.parseColor("#CC000000"))
+                    elevation = 40f
+                    setPadding(60, 24, 60, 36)
+                    layoutParams = FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        Gravity.BOTTOM
+                    )
+                }
+                val seek = android.widget.ProgressBar(ctx, null, android.R.attr.progressBarStyleHorizontal).apply {
+                    max = 1000; progress = 0
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
+                }
+                val time = android.widget.TextView(ctx).apply {
+                    text = "00:00 / 00:00"; setTextColor(Color.WHITE); textSize = 14f
+                    setPadding(0, 10, 0, 10)
+                }
+                val row = android.widget.LinearLayout(ctx).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_HORIZONTAL
+                }
+                val labels = listOf("Lecture / Pause", "-10s", "+10s", "Qualite", "Serveur")
+                val btns = labels.map { lbl ->
+                    android.widget.TextView(ctx).apply {
+                        text = lbl; setTextColor(Color.WHITE); textSize = 18f
+                        setPadding(44, 20, 44, 20)
+                    }
+                }
+                btns.forEach { row.addView(it) }
+                container.addView(seek); container.addView(time); container.addView(row)
+                overlay.addView(container)
+                abyssBar = container; abyssButtons = btns; abyssSeek = seek; abyssTime = time
+                abyssRow = 0; abyssBtnIndex = 0
+                updateAbyssSelection(); showAbyssBar()
+            }
             overlay.addView(hint)
             rootView.addView(overlay)
 
@@ -5500,7 +5689,7 @@ class PlayerTvFragment : Fragment() {
                             referrerpolicy="origin"></iframe>
                     </body></html>
                 """.trimIndent()
-                val baseHost = "https://frembed.cyou/"
+                val baseHost = if (isAbyssEmbed) "https://abysscdn.com/" else "https://frembed.cyou/"
                 Log.d("PlayerTV", "Loading iframe wrapper for: ${embedUrl.take(100)} (base=$baseHost)")
                 wv.loadDataWithBaseURL(baseHost, iframeWrapper, "text/html", "UTF-8", null)
             }
@@ -5519,7 +5708,17 @@ class PlayerTvFragment : Fragment() {
             virtualCursorView = null
             pendingWebViewVideo = null
             pendingWebViewServer = null
-
+            overlayIsAbyss = false
+            abyssHideRunnable?.let { abyssHandler.removeCallbacks(it) }
+            abyssPollRunnable?.let { abyssHandler.removeCallbacks(it) }
+            abyssPollRunnable = null
+            abyssBar = null
+            abyssButtons = emptyList()
+            abyssSeek = null
+            abyssTime = null
+            abyssQualityMenu = null
+            abyssQualityLabels = mutableListOf()
+            abyssQualityMode = false
             wv?.let {
                 try { it.stopLoading(); it.destroy() } catch (_: Exception) {}
             }
@@ -5532,6 +5731,208 @@ class PlayerTvFragment : Fragment() {
             cursor.translationY = cursorY - cursor.height / 2f
         }
 
+        /** Routed from MainTvActivity.dispatchKeyEvent so the remote drives the
+         *  WebView overlay cursor (the overlay never gets key focus on TV). */
+        fun handleOverlayKey(keyCode: Int, repeatCount: Int): Boolean {
+            val overlay = webViewOverlay ?: return false
+            val wv = overlayWebView ?: return false
+            if (overlayIsAbyss) {
+                showAbyssBar()
+                if (abyssQualityMode) {
+                    when (keyCode) {
+                        KeyEvent.KEYCODE_DPAD_UP -> { abyssQualityIndex = (abyssQualityIndex - 1).coerceAtLeast(0); updateAbyssQualityHighlight(); return true }
+                        KeyEvent.KEYCODE_DPAD_DOWN -> { abyssQualityIndex = (abyssQualityIndex + 1).coerceAtMost(abyssQualityLabels.size - 1); updateAbyssQualityHighlight(); return true }
+                        KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { applyAbyssQuality(); return true }
+                        KeyEvent.KEYCODE_BACK -> { hideAbyssQualityMenu(); return true }
+                        else -> return true
+                    }
+                }
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_UP -> { abyssRow = 0; updateAbyssSelection(); return true }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> { abyssRow = 1; updateAbyssSelection(); return true }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        if (abyssRow == 0) abyssSeekBy(-1, repeatCount)
+                        else { abyssBtnIndex = (abyssBtnIndex - 1).coerceAtLeast(0); updateAbyssSelection() }
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        if (abyssRow == 0) abyssSeekBy(1, repeatCount)
+                        else { abyssBtnIndex = (abyssBtnIndex + 1).coerceAtMost(abyssButtons.size - 1); updateAbyssSelection() }
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                        triggerAbyssAction(if (abyssRow == 0) 0 else abyssBtnIndex); return true
+                    }
+                    else -> return false
+                }
+            }
+            val cursor = virtualCursorView ?: return false
+            val speed = when {
+                repeatCount > 30 -> CURSOR_STEP * 5f
+                repeatCount > 15 -> CURSOR_STEP * 3f
+                repeatCount > 5 -> CURSOR_STEP * 2f
+                else -> CURSOR_STEP
+            }
+            return when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> { cursorY = (cursorY - speed).coerceAtLeast(0f); updateCursorPosition(cursor); true }
+                KeyEvent.KEYCODE_DPAD_DOWN -> { cursorY = (cursorY + speed).coerceAtMost(overlay.height.toFloat()); updateCursorPosition(cursor); true }
+                KeyEvent.KEYCODE_DPAD_LEFT -> { cursorX = (cursorX - speed).coerceAtLeast(0f); updateCursorPosition(cursor); true }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> { cursorX = (cursorX + speed).coerceAtMost(overlay.width.toFloat()); updateCursorPosition(cursor); true }
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { dispatchClickToWebView(wv, cursorX, cursorY); true }
+                else -> false
+            }
+        }
+
+        private fun updateAbyssSelection() {
+            val hl = Color.parseColor("#E50914")
+            abyssSeek?.progressTintList = android.content.res.ColorStateList.valueOf(if (abyssRow == 0) hl else Color.LTGRAY)
+            abyssButtons.forEachIndexed { i, tv ->
+                tv.setBackgroundColor(if (abyssRow == 1 && i == abyssBtnIndex) hl else Color.TRANSPARENT)
+            }
+        }
+        private fun showAbyssBar() {
+            abyssBar?.visibility = View.VISIBLE
+            abyssHideRunnable?.let { abyssHandler.removeCallbacks(it) }
+            val r = Runnable { abyssBar?.visibility = View.GONE }
+            abyssHideRunnable = r
+            abyssHandler.postDelayed(r, 5000L)
+            startAbyssPoll()
+        }
+        private fun startAbyssPoll() {
+            if (abyssPollRunnable != null) return
+            val poll = object : Runnable {
+                override fun run() {
+                    val wv = overlayWebView ?: return
+                    wv.evaluateJavascript(
+                        "(function(){try{var w=document.querySelector('iframe').contentWindow;var p=(w.jwplayer&&w.jwplayer());if(p&&p.getPosition){return Math.floor(p.getPosition())+'/'+Math.floor(p.getDuration()||0);}var v=w.document.querySelector('video');if(v)return Math.floor(v.currentTime||0)+'/'+Math.floor(v.duration||0);return '0/0';}catch(e){return '0/0';}})();"
+                    ) { res ->
+                        try {
+                            val s = res.trim('"')
+                            val parts = s.split('/')
+                            if (parts.size == 2) {
+                                abyssPosSec = parts[0].toFloatOrNull()?.toInt() ?: abyssPosSec
+                                abyssDurSec = parts[1].toFloatOrNull()?.toInt() ?: abyssDurSec
+                                updateAbyssProgress()
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    abyssHandler.postDelayed(this, 1000L)
+                }
+            }
+            abyssPollRunnable = poll
+            abyssHandler.post(poll)
+        }
+        private fun updateAbyssProgress() {
+            val dur = abyssDurSec.coerceAtLeast(1)
+            abyssSeek?.progress = (abyssPosSec.toLong() * 1000L / dur).toInt().coerceIn(0, 1000)
+            abyssTime?.text = fmtTime(abyssPosSec) + " / " + fmtTime(abyssDurSec)
+        }
+        private fun fmtTime(sec: Int): String {
+            val s = sec.coerceAtLeast(0)
+            val h = s / 3600; val m = (s % 3600) / 60; val ss = s % 60
+            return if (h > 0) String.format("%d:%02d:%02d", h, m, ss) else String.format("%02d:%02d", m, ss)
+        }
+        private fun abyssSeekBy(dir: Int, repeatCount: Int) {
+            val dur = abyssDurSec.coerceAtLeast(1)
+            val stepSec = when {
+                repeatCount > 20 -> maxOf(120, dur / 15)
+                repeatCount > 8 -> maxOf(45, dur / 40)
+                else -> 15
+            }
+            val target = (abyssPosSec + dir * stepSec).coerceIn(0, dur)
+            abyssPosSec = target
+            updateAbyssProgress()
+            overlayWebView?.evaluateJavascript(
+                "(function(){try{var w=document.querySelector('iframe').contentWindow;var p=(w.jwplayer&&w.jwplayer());if(p&&p.seek){p.seek(" + target + ");return;}var v=w.document.querySelector('video');if(v)v.currentTime=" + target + ";}catch(e){}})();",
+                null
+            )
+        }
+        private fun triggerAbyssAction(index: Int) {
+            val wv = overlayWebView ?: return
+            if (index == 3) { showAbyssQualityMenu(); return }
+            if (index == 4) { hideWebViewOverlay(); try { binding.settings.showServers() } catch (_: Exception) {}; return }
+            val js = when (index) {
+                1 -> "(function(){try{var w=document.querySelector('iframe').contentWindow;var p=(w.jwplayer&&w.jwplayer());if(p&&p.seek){p.seek(Math.max(0,(p.getPosition()||0)-10));return;}var v=w.document.querySelector('video');if(v)v.currentTime=Math.max(0,v.currentTime-10);}catch(e){}})();"
+                2 -> "(function(){try{var w=document.querySelector('iframe').contentWindow;var p=(w.jwplayer&&w.jwplayer());if(p&&p.seek){p.seek((p.getPosition()||0)+10);return;}var v=w.document.querySelector('video');if(v)v.currentTime=v.currentTime+10;}catch(e){}})();"
+                3 -> "(function(){try{var w=document.querySelector('iframe').contentWindow;var p=(w.jwplayer&&w.jwplayer());if(p&&p.getQualityLevels){var lv=p.getQualityLevels();if(lv&&lv.length>1){var n=(((p.getCurrentQuality()||0)+1)%lv.length);p.setCurrentQuality(n);}}}catch(e){}})();"
+                else -> "(function(){try{var w=document.querySelector('iframe').contentWindow;var p=(w.jwplayer&&w.jwplayer());if(p&&p.getState){if(p.getState()==='playing')p.pause();else p.play();return;}var v=w.document.querySelector('video');if(v){if(v.paused)v.play();else v.pause();}}catch(e){}})();"
+            }
+            wv.evaluateJavascript(js, null)
+        }
+        private fun showAbyssQualityMenu() {
+            val wv = overlayWebView ?: return
+            wv.evaluateJavascript(
+                "(function(){try{var w=document.querySelector('iframe').contentWindow;var p=(w.jwplayer&&w.jwplayer());if(p&&p.getQualityLevels){var lv=p.getQualityLevels();var cur=p.getCurrentQuality();return cur+';'+lv.map(function(x){return x.label;}).join('|');}}catch(e){}return '';})();"
+            ) { res ->
+                try {
+                    val s = res.trim('"')
+                    if (s.contains(';')) {
+                        val cur = s.substringBefore(';').toIntOrNull() ?: 0
+                        val labels = s.substringAfter(';').split('|').filter { it.isNotBlank() }
+                        if (labels.isNotEmpty()) buildAbyssQualityMenu(labels, cur)
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+        private fun buildAbyssQualityMenu(labels: List<String>, current: Int) {
+            val overlay = webViewOverlay ?: return
+            val ctx = requireContext()
+            hideAbyssQualityMenu()
+            val menu = android.widget.LinearLayout(ctx).apply {
+                orientation = android.widget.LinearLayout.VERTICAL
+                setBackgroundColor(Color.parseColor("#EE111111"))
+                elevation = 50f
+                setPadding(40, 24, 40, 24)
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER
+                )
+            }
+            val title = android.widget.TextView(ctx).apply {
+                text = "Qualite"; setTextColor(Color.parseColor("#AAAAAA")); textSize = 14f; setPadding(24, 8, 24, 16)
+            }
+            menu.addView(title)
+            val tvs = labels.map { lbl ->
+                android.widget.TextView(ctx).apply {
+                    text = lbl; setTextColor(Color.WHITE); textSize = 20f; setPadding(48, 18, 48, 18)
+                }
+            }
+            tvs.forEach { menu.addView(it) }
+            overlay.addView(menu)
+            abyssQualityMenu = menu
+            abyssQualityLabels = tvs.toMutableList()
+            abyssQualityIndex = current.coerceIn(0, labels.size - 1)
+            abyssQualityMode = true
+            updateAbyssQualityHighlight()
+            showAbyssBar()
+        }
+        private fun updateAbyssQualityHighlight() {
+            abyssQualityLabels.forEachIndexed { i, tv ->
+                tv.setBackgroundColor(if (i == abyssQualityIndex) Color.parseColor("#E50914") else Color.TRANSPARENT)
+            }
+        }
+        private fun hideAbyssQualityMenu() {
+            abyssQualityMenu?.let { webViewOverlay?.removeView(it) }
+            abyssQualityMenu = null
+            abyssQualityLabels = mutableListOf()
+            abyssQualityMode = false
+        }
+        private fun applyAbyssQuality() {
+            val idx = abyssQualityIndex
+            val wv = overlayWebView
+            val ovw = webViewOverlay
+            wv?.evaluateJavascript(
+                "(function(){try{var w=document.querySelector('iframe').contentWindow;var p=(w.jwplayer&&w.jwplayer());if(p&&p.setCurrentQuality){p.setCurrentQuality(" + idx + ");setTimeout(function(){try{p.play(true);}catch(e){}},500);}}catch(e){}})();",
+                null
+            )
+            hideAbyssQualityMenu()
+            // Apres switch qualite le decodeur est detruit : il faut un vrai geste
+            // pour relancer (sinon reste bloque sur chargement).
+            if (wv != null && ovw != null) {
+                wv.postDelayed({ dispatchClickToWebView(wv, ovw.width / 2f, ovw.height / 2f) }, 1500L)
+            }
+        }
         private fun dispatchClickToWebView(wv: WebView, x: Float, y: Float) {
             val downTime = SystemClock.uptimeMillis()
             val downEvent = MotionEvent.obtain(
@@ -5545,6 +5946,16 @@ class PlayerTvFragment : Fragment() {
             downEvent.recycle()
             upEvent.recycle()
             Log.d("PlayerTV", "Virtual click dispatched at ($x, $y)")
+        }
+
+        private fun dispatchHoverToWebView(wv: WebView, x: Float, y: Float) {
+            try {
+                val t = SystemClock.uptimeMillis()
+                val ev = MotionEvent.obtain(t, t, MotionEvent.ACTION_HOVER_MOVE, x, y, 0)
+                ev.source = android.view.InputDevice.SOURCE_MOUSE
+                wv.dispatchGenericMotionEvent(ev)
+                ev.recycle()
+            } catch (_: Throwable) {}
         }
 
         private fun createCursorDrawable(ctx: android.content.Context): android.graphics.drawable.Drawable {

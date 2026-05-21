@@ -77,10 +77,9 @@ object UserPreferences {
 
 
     // Flag pour la recherche globale (toggle dans SearchFragment).
-    // 2026-05-18 : default = true pour activer la recherche globale sur tous les
-    //   providers du même language. L'utilisateur peut désactiver via le toggle.
+    // 2026-05-20 : default = false — c'est à l'utilisateur de l'activer.
     @Volatile
-    var isGlobalSearchEnabled: Boolean = true
+    var isGlobalSearchEnabled: Boolean = false
 
     /** 2026-05-13 (user "à l'ouverture d'un profil pas par maman c'est Mon IPTV
      *  qui s'ouvre au lieu du home fournisseur") : currentProvider est
@@ -107,6 +106,22 @@ object UserPreferences {
             return Provider.providers.keys.find { it.name == providerName }
         }
         set(value) {
+            // 2026-05-19 v85c (user "il faut faire en sorte que la fermeture
+            //   de ce provider qu'il y ait vraiment un lavage de fée") :
+            //   quand on QUITTE Mon IPTV (vers un autre provider), purge
+            //   tout le state mémoire de MyIptvProvider — cache parsé,
+            //   classificationCache, filtres user. Le cache DISQUE
+            //   (.tsv + .classif3) reste pour permettre une réouverture
+            //   rapide. Évite que des chaînes d'une session précédente
+            //   réapparaissent quand on retourne sur Mon IPTV plus tard.
+            try {
+                val previous = currentProvider
+                val previousIsMyIptv = previous is com.streamflixreborn.streamflix.providers.MyIptvProvider
+                val nextIsMyIptv = value is com.streamflixreborn.streamflix.providers.MyIptvProvider
+                if (previousIsMyIptv && !nextIsMyIptv) {
+                    com.streamflixreborn.streamflix.providers.MyIptvProvider.clearCache()
+                }
+            } catch (_: Throwable) {}
             // CRITICO: Resetta l'istanza del database prima di cambiare provider
             // per forzare la creazione di un nuovo database file corretto.
             AppDatabase.resetInstance()

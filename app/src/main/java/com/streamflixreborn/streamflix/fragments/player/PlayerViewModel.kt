@@ -292,7 +292,16 @@ class PlayerViewModel(
                                 streamUrl.startsWith("http", ignoreCase = true) &&
                                 !streamUrl.startsWith("data:") &&
                                 !streamUrl.contains("luluvdo", ignoreCase = true) &&
-                                !streamUrl.contains("cfglobalcdn", ignoreCase = true)
+                                !streamUrl.contains("cfglobalcdn", ignoreCase = true) &&
+                                // 2026-05-19 v85f : Uqload (strm*.uqload.is) refuse HEAD
+                                //   categoriquement (403) meme avec les bons headers, mais
+                                //   le GET marche. Skip sinon pre-extract flag tous les
+                                //   serveurs Uqload broken alors qu'ils fonctionnent.
+                                !streamUrl.contains("uqload", ignoreCase = true) &&
+                                // 2026-05-19 v85f : Hydrax (hls.abyssa.cc / abysscdn) —
+                                //   meme probleme, HEAD souvent refuse alors que GET passe.
+                                !streamUrl.contains("abyssa", ignoreCase = true) &&
+                                !streamUrl.contains("abysscdn", ignoreCase = true)
                             val headOk = if (!needsHeadCheck) true else {
                                 runCatching {
                                     withTimeoutOrNull(3_000L) {

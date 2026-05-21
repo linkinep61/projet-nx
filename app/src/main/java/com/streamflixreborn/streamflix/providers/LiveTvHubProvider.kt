@@ -818,4 +818,9 @@ object LiveTvHubProvider : Provider, IptvProvider {
         val c = channelById[channelId] ?: return null
         return logoUrlFor(c.witvKey, c.displayName)
     }
+
+    /** 2026-05-18 v85 : LiveTvHub agrège WiTV/Ola/Vegeta, le clear est délégué à eux. */
+    fun clearCache() {
+        // no-op : pas de cache propre (forward via WiTV/Ola/Vegeta).
+    }
 }

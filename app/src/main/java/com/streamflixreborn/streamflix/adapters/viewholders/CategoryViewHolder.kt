@@ -80,7 +80,8 @@ class CategoryViewHolder(
     fun bind(
         category: Category,
         onMovieClick: ((Movie) -> Unit)? = null,
-        onTvShowClick: ((TvShow) -> Unit)? = null
+        onTvShowClick: ((TvShow) -> Unit)? = null,
+        onSwiperPageChanged: ((bannerUrl: String?) -> Unit)? = null
     ) {
         cleanup() // cancel pending handlers & unregister old callbacks
         this.category = category
@@ -88,7 +89,7 @@ class CategoryViewHolder(
         when (_binding) {
             is ItemCategoryMobileBinding -> displayMobileItem(_binding, onMovieClick, onTvShowClick)
             is ItemCategoryTvBinding -> displayTvItem(_binding, onMovieClick, onTvShowClick)
-            is ContentCategorySwiperMobileBinding -> displayMobileSwiper(_binding, onMovieClick, onTvShowClick)
+            is ContentCategorySwiperMobileBinding -> displayMobileSwiper(_binding, onMovieClick, onTvShowClick, onSwiperPageChanged)
             is ContentCategorySwiperTvBinding -> displayTvSwiper(_binding)
         }
     }
@@ -143,7 +144,8 @@ class CategoryViewHolder(
     private fun displayMobileSwiper(
         binding: ContentCategorySwiperMobileBinding,
         onMovieClick: ((Movie) -> Unit)?,
-        onTvShowClick: ((TvShow) -> Unit)?
+        onTvShowClick: ((TvShow) -> Unit)?,
+        onSwiperPageChanged: ((bannerUrl: String?) -> Unit)? = null
     ) {
         binding.tvCategoryTitle.text = category.name
         val handler = Handler(Looper.getMainLooper())
@@ -166,6 +168,11 @@ class CategoryViewHolder(
                 post { (adapter as AppAdapter).submitList(items) }
             }
         }
+
+        // Notifier le fond d'écran global avec le premier item du carrousel
+        val firstBanner = (category.list.firstOrNull() as? Movie)?.banner
+            ?: (category.list.firstOrNull() as? TvShow)?.banner
+        onSwiperPageChanged?.invoke(firstBanner)
 
         binding.llDotsIndicator.apply {
             removeAllViews()
@@ -190,6 +197,15 @@ class CategoryViewHolder(
                 binding.llDotsIndicator.children.forEachIndexed { index, view ->
                     view.isSelected = (indicatorPosition == index)
                 }
+
+                // Notifier le fond d'écran global du home avec le backdrop de l'item courant
+                val currentShow = items.getOrNull(position)
+                val bannerUrl = when (currentShow) {
+                    is Movie -> currentShow.banner
+                    is TvShow -> currentShow.banner
+                    else -> null
+                }
+                onSwiperPageChanged?.invoke(bannerUrl)
 
                 handler.removeCallbacksAndMessages(null)
                 handler.postDelayed(8_000) {

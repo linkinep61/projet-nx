@@ -96,6 +96,18 @@ object VavooProvider : Provider, IptvProvider {
     private val registryMutex = Mutex()
     @Volatile private var registryLoaded = false
     @Volatile private var lastLoadTime = 0L
+
+    /** 2026-05-18 v85 : vide le cache catalogue (4063 ch en heap = OOM-prone).
+     *  Appelé par IptvCacheManager au switch provider + onTrimMemory. */
+    fun clearCache() {
+        synchronized(registryLock) {
+            channelRegistry.clear()
+            registryLoaded = false
+            lastLoadTime = 0L
+            cachedOrderedIds = null
+            android.util.Log.d(TAG, "clearCache: Vavoo registry vidé")
+        }
+    }
     private const val CACHE_DURATION = 30 * 60 * 1000L // 30 min
 
     // 2026-05-17 v59 (user "obligé de zapper et revenir pour que TF1 charge") :
@@ -830,6 +842,56 @@ object VavooProvider : Provider, IptvProvider {
         throw Exception("Unable to resolve stream for '${channel.name}'")
     }
 
+    /**
+     * 2026-05-20 (user "sur Vavoo TF1 le m3u8 charge mais l'image se fige") :
+     *   l'edge CDN Vavoo cale parfois la livraison des segments sur connexion
+     *   satellite, et le player n'avait qu'1 SEUL serveur ("All 1 servers
+     *   exhausted"). On résout via PLUSIEURS bases en parallèle et on garde les
+     *   edges DISTINCTS (dédup par host) → le watchdog du player peut basculer
+     *   sur un autre edge au lieu de re-résoudre le même lent. Si Vavoo ne donne
+     *   qu'1 host, on retombe sur le comportement d'origine (aucune régression).
+     */
+    private suspend fun resolveStreamUrlsMulti(channel: VavooChannel, max: Int = 3): List<String> =
+        withContext(Dispatchers.IO) {
+            val signature = getAddonSignature()
+            val headers = catalogHeaders(signature)
+            val seenHosts = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+            val ordered = java.util.Collections.synchronizedList(mutableListOf<String>())
+            coroutineScope {
+                BASE_SITES.map { base ->
+                    async {
+                        try {
+                            val resolveUrl = "${base.trimEnd('/')}/mediahubmx-resolve.json"
+                            val body = JSONObject().apply {
+                                put("language", "fr")
+                                put("region", "US")
+                                put("url", channel.url)
+                                put("clientVersion", CLIENT_VERSION)
+                            }
+                            val text = postJson(resolveUrl, body, headers)
+                            val streamUrl = if (text.trimStart().startsWith("[")) {
+                                val arr = JSONArray(text)
+                                if (arr.length() > 0) arr.getJSONObject(0).optString("url", "") else ""
+                            } else {
+                                val json = JSONObject(text)
+                                json.optString("url", json.optString("streamUrl", ""))
+                            }
+                            if (streamUrl.isNotBlank()) {
+                                val host = try { java.net.URI(streamUrl).host ?: streamUrl } catch (_: Exception) { streamUrl }
+                                if (seenHosts.add(host)) {
+                                    synchronized(ordered) { ordered.add(streamUrl) }
+                                    Log.d(TAG, "✓ edge '${channel.name}' via $base host=$host")
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "resolveMulti via $base KO: ${e.message}")
+                        }
+                    }
+                }.awaitAll()
+            }
+            synchronized(ordered) { ordered.take(max).toList() }
+        }
+
     // ═══════════════════════════════════════════
     //  Registry management
     // ═══════════════════════════════════════════
@@ -1090,9 +1152,17 @@ object VavooProvider : Provider, IptvProvider {
         }
 
         if (ch != null) {
-            // Resolve on-demand — direct m3u8
-            val streamUrl = withContext(Dispatchers.IO) { resolveStreamUrl(ch) }
-            listOf(Video.Server("m3u8::$streamUrl", "Vavoo"))
+            // Resolve on-demand — plusieurs edges distincts pour fallback anti-freeze
+            val urls = resolveStreamUrlsMulti(ch, 3)
+            if (urls.isEmpty()) {
+                // fallback comportement d'origine (1 résolution séquentielle)
+                val streamUrl = withContext(Dispatchers.IO) { resolveStreamUrl(ch) }
+                listOf(Video.Server("m3u8::$streamUrl", "Vavoo"))
+            } else {
+                urls.mapIndexed { i, u ->
+                    Video.Server("m3u8::$u", if (urls.size > 1) "Vavoo ${i + 1}" else "Vavoo")
+                }
+            }
         } else {
             Log.w(TAG, "Channel not found: $vavooId")
             emptyList()

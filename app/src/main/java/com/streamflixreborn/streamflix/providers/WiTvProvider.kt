@@ -150,6 +150,18 @@ object WiTvProvider : Provider, IptvProvider {
     @Volatile private var lastLoadTime = 0L
     private val registryMutex = Mutex()  // prevent concurrent ensureRegistry() calls
     @Volatile private var registryLoaded = false
+
+    /** 2026-05-18 v85 : vide le cache catalogue (anti-OOM). */
+    fun clearCache() {
+        try {
+            registryLoaded = false
+            lastLoadTime = 0L
+            phase2Done = false
+            olaTvServerMap = emptyMap()
+            olaTvFrScanDone = false
+            android.util.Log.d(TAG, "clearCache: WiTV registry vidé")
+        } catch (_: Throwable) {}
+    }
     @Volatile private var phase2Done = false  // true once enrichment sources (OTF, OLA TV) finish
     private const val CACHE_DURATION = 30 * 60 * 1000L // 30 min
 

@@ -53,7 +53,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             return cachePortalURL.ifEmpty { field }
         }
 
-    override val defaultBaseUrl: String = "https://fs03.lol/"
+    override val defaultBaseUrl: String = "https://fs17.lol/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
@@ -83,7 +83,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private object Endpoints {
         const val FILM_AJAX_JSON = "engine/ajax/film_api.php"
         const val SERIE_AJAX_JSON = "engine/ajax/sx.php"
-        const val DEFAULT_REFERER = "https://fs03.lol/"
+        const val DEFAULT_REFERER = "https://fs17.lol/"
         const val DLE_SKIN_COOKIE = "dle_skin=VFV1"
     }
 
@@ -1616,7 +1616,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         suspend fun getFilmAjaxJson(
             @Query("id") newsId: String,
             @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("Referer") referer: String = "https://fs03.lol/"
+            @Header("Referer") referer: String = "https://fs17.lol/"
         ): okhttp3.ResponseBody
 
         // 2026-05-04 : nouveau endpoint AJAX qui retourne les épisodes d'une
@@ -1630,7 +1630,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         suspend fun getSerieAjaxJson(
             @Query("p") newsId: String,
             @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("Referer") referer: String = "https://fs03.lol/"
+            @Header("Referer") referer: String = "https://fs17.lol/"
         ): okhttp3.ResponseBody
 
         // Legacy detail pages (slug-based, kept for backwards compatibility)
@@ -1675,13 +1675,13 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         suspend fun getAjaxJsonByUrl(
             @Url url: String,
             @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("Referer") referer: String = "https://fs03.lol/"
+            @Header("Referer") referer: String = "https://fs17.lol/"
         ): okhttp3.ResponseBody
 
         @GET
         suspend fun getRawText(
             @Url url: String,
-            @Header("Referer") referer: String = "https://fs03.lol/"
+            @Header("Referer") referer: String = "https://fs17.lol/"
         ): okhttp3.ResponseBody
     }
 }

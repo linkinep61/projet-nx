@@ -1873,6 +1873,12 @@ class PlayerMobileFragment : Fragment() {
                 kotlinx.coroutines.delay(15L)
             }
             player.seekToNextMediaItem()
+            // 2026-05-20 (user "retours sur écran avec son et image qui se
+            //   répètent") : après swap, le backup est à une position PLUS
+            //   ANCIENNE → replay de contenu déjà vu. seekToDefaultPosition
+            //   force le saut au live edge (targetOffset derrière).
+            player.seekToDefaultPosition()
+            android.util.Log.d("PlayerMobileFragment", "seekToDefaultPosition après swap (anti-replay)")
             try {
                 val nextBackup = buildLiveBackupItem(player)
                 if (nextBackup != null) {
@@ -2411,9 +2417,37 @@ class PlayerMobileFragment : Fragment() {
         val currentPosition = player.currentPosition
 
         if (!needsWebViewDs) {
+            // 2026-05-19 v85g (user "il faut que tu repare les deux extracteurs") :
+            //   DefaultHttpDataSource IGNORE "User-Agent" dans setDefaultRequestProperties
+            //   et utilise toujours celui du factory (setUserAgent()). Quand un
+            //   extracteur fournit un UA specifique (Uqload exige Chrome Mobile),
+            //   il fallait que cet UA passe — sinon serveur 403. On recree donc
+            //   le factory avec le bon setUserAgent() si video.headers en contient un.
+            val videoUa = video.headers?.get("User-Agent")
+            val sourceHost = try { java.net.URL(video.source).host.lowercase() } catch (_: Throwable) { "" }
+            // 2026-05-19 v85h : hosts qui font du JA3/TLS fingerprinting strict
+            //   (DefaultHttpDataSource utilise HttpURLConnection avec un TLS
+            //   fingerprint Java identifiable -> 403). Route ces hosts via
+            // 2026-05-19 v85k : uqload + abyssa passent par Cronet (TLS Chrome
+            //   bypass JA3) — voir needsCronet(). Pas besoin de branche OkHttp ici.
+            if (!videoUa.isNullOrBlank() && videoUa != NetworkClient.USER_AGENT &&
+                !(sourceHost.contains("uqload") || sourceHost.contains("abyssa") || sourceHost.contains("abysscdn"))) {
+                try {
+                    val customFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                        .setUserAgent(videoUa)
+                        .setConnectTimeoutMs(15_000)
+                        .setReadTimeoutMs(30_000)
+                        .setAllowCrossProtocolRedirects(true)
+                    httpDataSource = com.streamflixreborn.streamflix.utils.LiveReconnectingHttpDataSource.Factory(customFactory)
+                    Log.d("PlayerNetwork", "Custom UA from extractor: $videoUa -> factory rebuilt")
+                    dataSourceFactory = androidx.media3.datasource.DefaultDataSource.Factory(requireContext(), httpDataSource)
+                } catch (e: Exception) {
+                    Log.w("PlayerNetwork", "Failed to rebuild factory with custom UA: ${e.message}")
+                }
+            }
             httpDataSource.setDefaultRequestProperties(
                 mapOf(
-                    "User-Agent" to NetworkClient.USER_AGENT,
+                    "User-Agent" to (videoUa ?: NetworkClient.USER_AGENT),
                 ) + (video.headers ?: emptyMap())
             )
         }
@@ -2457,16 +2491,17 @@ class PlayerMobileFragment : Fragment() {
                     .build()
             )
         if (isLiveIptvChannel) {
-            // 2026-05-09 v19 : cible 30s derrière live edge (safe partout).
-            // Évite BEHIND_LIVE_WINDOW sur flux M3U courts. ExoPlayer ajuste
-            // vitesse ±3% imperceptible pour maintenir offset.
+            // 2026-05-20 (parité PlayerTvFragment) : aligné sur TV — cible 45s
+            //   derrière live edge (cushion plus large), et surtout JAMAIS de
+            //   speedup (max 1.0 au lieu de 1.03). Le 1.03× faisait rattraper le
+            //   live edge → vidait le buffer → coupures. min 20s / max 120s.
             mediaItemBuilder.setLiveConfiguration(
                 MediaItem.LiveConfiguration.Builder()
-                    .setTargetOffsetMs(30_000L)
-                    .setMinOffsetMs(10_000L)
-                    .setMaxOffsetMs(90_000L)
-                    .setMinPlaybackSpeed(0.97f)
-                    .setMaxPlaybackSpeed(1.03f)
+                    .setTargetOffsetMs(45_000L)
+                    .setMinOffsetMs(20_000L)
+                    .setMaxOffsetMs(120_000L)
+                    .setMinPlaybackSpeed(0.95f)
+                    .setMaxPlaybackSpeed(1.0f)
                     .build()
             )
         }
@@ -2757,8 +2792,43 @@ class PlayerMobileFragment : Fragment() {
                             bufferingWatchdog = null
                         }
                     }
-                    // 2026-05-10 : BUFFERING watchdog IPTV désactivé (cf PlayerTvFragment).
-                    // Crash natif MediaCodec sur Chromecast à cause de l'empilement de reloads.
+                    // 2026-05-10 : ancien BUFFERING watchdog IPTV (rebuild player) désactivé
+                    //   — crash natif MediaCodec sur empilement de reloads.
+                    // 2026-05-20 (parité PlayerTvFragment) : reprise LÉGÈRE d'un stall live
+                    //   SILENCIEUX (BUFFERING sans erreur, ex Vavoo edge lent au démarrage) :
+                    //   seek live edge + prepare() toutes les 12s tant que ça stalle, PAS de
+                    //   rebuild player (donc pas de crash), bornée par anti-empilement +
+                    //   anti-flap. Sans ça le flux restait figé indéfiniment.
+                    if (isLiveIptv && !transferLiveRecoveryActive) {
+                        transferLiveRecoveryActive = true
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            try {
+                                while (_binding != null &&
+                                    (try { player.playbackState == Player.STATE_BUFFERING } catch (_: Exception) { false })) {
+                                    kotlinx.coroutines.delay(12_000L)
+                                    if (_binding == null) break
+                                    val stillBuffering = try { player.playbackState == Player.STATE_BUFFERING } catch (_: Exception) { false }
+                                    if (!stillBuffering) break
+                                    if (preemptiveReloadInFlight) continue
+                                    val nowFlapB = System.currentTimeMillis()
+                                    recentReloadTimestamps.removeAll { (nowFlapB - it) > RELOAD_FLAP_WINDOW_MS }
+                                    if (recentReloadTimestamps.size >= RELOAD_FLAP_THRESHOLD) {
+                                        Log.e("PlayerMobileFragment", "Live BUFFERING: reload flap — STOP")
+                                        break
+                                    }
+                                    recentReloadTimestamps.add(nowFlapB)
+                                    Log.w("PlayerMobileFragment", "Live BUFFERING >12s → seek live edge + prepare()")
+                                    try {
+                                        player.seekToDefaultPosition()
+                                        player.prepare()
+                                        player.playWhenReady = true
+                                    } catch (_: Exception) {}
+                                }
+                            } finally {
+                                transferLiveRecoveryActive = false
+                            }
+                        }
+                    }
                 }
 
                 // Once we actually reach READY, restore the normal 2s auto-hide
@@ -2802,6 +2872,15 @@ class PlayerMobileFragment : Fragment() {
                 if (isLiveIptvStream && (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE)) {
                     if (playbackState == Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
                     if (preemptiveReloadInFlight) return
+                    // 2026-05-20 (parité TV) : anti-flap — stop si >=3 reloads en 15s
+                    //   (flux trop instable) pour ne pas empiler les prepare().
+                    val nowFlapE = System.currentTimeMillis()
+                    recentReloadTimestamps.removeAll { (nowFlapE - it) > RELOAD_FLAP_WINDOW_MS }
+                    if (recentReloadTimestamps.size >= RELOAD_FLAP_THRESHOLD) {
+                        Log.e("PlayerMobileFragment", "Live ENDED/IDLE reload flap (${recentReloadTimestamps.size} en 15s) — STOP")
+                        return
+                    }
+                    recentReloadTimestamps.add(nowFlapE)
                     Log.w("PlayerMobileFragment", "Live IPTV $playbackState — refresh playlist via player.prepare()")
                     preemptiveReloadInFlight = true
                     try {
@@ -3637,6 +3716,13 @@ class PlayerMobileFragment : Fragment() {
     @Volatile private var emergencyRefreshInFlight = false
     // 2026-05-09 PISTE A : flag anti-reload-en-rafale pour le préemptif drain.
     @Volatile private var preemptiveReloadInFlight = false
+    // 2026-05-20 (parité PlayerTvFragment) : reprise live BUFFERING silencieux +
+    //   anti-flap partagé (stop si trop de reloads en peu de temps → évite le
+    //   crash MediaCodec sur empilement de reloads).
+    @Volatile private var transferLiveRecoveryActive: Boolean = false
+    private val recentReloadTimestamps = ArrayDeque<Long>()
+    private val RELOAD_FLAP_THRESHOLD = 3
+    private val RELOAD_FLAP_WINDOW_MS = 15_000L
     // Mobile port v51 : state pour dual-bar visuel live IPTV (1:1 avec TV)
     @Volatile private var smoothedAheadMs: Long = 0L
     @Volatile private var liveCumulativePlaybackMs: Long = 0L
@@ -3806,12 +3892,16 @@ class PlayerMobileFragment : Fragment() {
         // never cuts. Bigger buffer windows + longer rebuffer threshold.
         // 2026-05-09 v11 : recovery ULTRA RAPIDE après cut (1s).
         val loadControl = if (isLiveIptv) {
+            // 2026-05-20 (parité PlayerTvFragment) : aligné sur les valeurs TV
+            //   tunées — min 30→60s (plus d'avance, moins de cuts), start 10→1s
+            //   (démarrage 10× plus rapide), rebuffer 1000→500ms (reprise 2× plus
+            //   vite). L'ancien 30s/10s était périmé côté mobile.
             DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
-                    30_000,
+                    60_000,
                     300_000,
-                    10_000,
-                    1_000  // rebuffer threshold ultra court
+                    1_000,
+                    500
                 )
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build()
@@ -3899,12 +3989,26 @@ class PlayerMobileFragment : Fragment() {
 
     private fun needsCronet(url: String): Boolean {
         // Cronet uses Chrome's TLS stack (JA3 fingerprint matches real browsers)
-        // These CDNs reject non-Chromium TLS fingerprints (OkHttp → 404)
-        // anime-sama.fr : DoH résout mais TCP/TLS échoue sur certains réseaux ;
-        // Cronet (HTTP/3, ECH) débloque ces cas.
+        // These CDNs reject non-Chromium TLS fingerprints (OkHttp → 404/403)
+        // 2026-05-19 v85k : Uqload (strm*.uqload.is) + Hydrax (abyssa.cc/abysscdn)
+        //   font du JA3 fingerprinting strict. Test bash curl = 200 OK depuis meme IP
+        //   source que telephone (202.90.76.81). Mais OkHttp Android = 403. Donc TLS
+        //   fingerprint Android Conscrypt detecte et blacklisted. Cronet (Chromium TLS)
+        //   bypass car identique a un vrai Chrome.
         return url.contains("vidzy.live", ignoreCase = true)
             || url.contains("cfglobalcdn.com", ignoreCase = true)
             || url.contains("anime-sama.", ignoreCase = true)
+            || url.contains("uqload.is", ignoreCase = true)
+            || url.contains("uqload.cx", ignoreCase = true)
+            || url.contains("uqload.co", ignoreCase = true)
+            || url.contains("uqload.to", ignoreCase = true)
+            || url.contains("uqload.net", ignoreCase = true)
+            || url.contains("strm5.uqload", ignoreCase = true)
+            || url.contains("strm.uqload", ignoreCase = true)
+            // 2026-05-20 (parité TV) : substrings élargies (abyssa / abysscdn) pour
+            //   couvrir tous les TLD Hydrax (.cc/.io/.net…), comme PlayerTvFragment.
+            || url.contains("abyssa", ignoreCase = true)
+            || url.contains("abysscdn", ignoreCase = true)
     }
 
     private fun needsDoH(url: String): Boolean {
@@ -3930,8 +4034,44 @@ class PlayerMobileFragment : Fragment() {
             || url.contains("anime-sama.", ignoreCase = true)
     }
 
+    // 2026-05-20 (parité PlayerTvFragment) : détection émulateur (BlueStacks inclus)
+    //   pour basculer Cronet → OkHttp/DoH quand Cronet ne joint pas les CDN.
+    private val isEmulator: Boolean by lazy {
+        val buildCheck = (android.os.Build.FINGERPRINT.contains("generic", ignoreCase = true)
+                || android.os.Build.MODEL.contains("Emulator", ignoreCase = true)
+                || android.os.Build.MODEL.contains("Android SDK", ignoreCase = true)
+                || android.os.Build.MANUFACTURER.contains("BlueStacks", ignoreCase = true)
+                || android.os.Build.BOARD.contains("goldfish", ignoreCase = true)
+                || android.os.Build.HARDWARE.contains("ranchu", ignoreCase = true)
+                || android.os.Build.PRODUCT.contains("sdk", ignoreCase = true)
+                || android.os.Build.PRODUCT.contains("vbox", ignoreCase = true))
+        if (buildCheck) return@lazy true
+        val blueStacksPackages = listOf(
+            "com.bluestacks.BstCommandProcessor",
+            "com.bluestacks.settings",
+            "com.bluestacks.home",
+            "com.bluestacks.appmart"
+        )
+        val pm = try { requireContext().packageManager } catch (_: Exception) { null }
+        val isBlueStacks = pm != null && blueStacksPackages.any { pkg ->
+            try { pm.getPackageInfo(pkg, 0); true } catch (_: Exception) { false }
+        }
+        val bstVersion = try {
+            @Suppress("PrivateApi")
+            val clazz = Class.forName("android.os.SystemProperties")
+            val get = clazz.getMethod("get", String::class.java, String::class.java)
+            (get.invoke(null, "ro.bst.version", "") as? String)?.isNotEmpty() == true
+        } catch (_: Exception) { false }
+        isBlueStacks || bstVersion
+    }
+
     private fun needsBrowserOkHttp(url: String): Boolean {
-        return false // luluvdo/tnmr.org now handled by Cronet
+        // v85s 2026-05-20: TOUT passe par Cronet pour Uqload maintenant (extract + play
+        // memes Chromium TLS = token strm5 issued + accepted)
+        //   l'embed. UqloadExtractor utilise OkHttp ; donc le player DOIT aussi utiliser
+        //   OkHttp (avec la MEME instance, partage via UqloadExtractor.sharedOkHttpClient)
+        //   pour que les fingerprints matchent. Sinon 403 sur master.m3u8.
+        return false
     }
 
     /**
@@ -3949,10 +4089,16 @@ class PlayerMobileFragment : Fragment() {
             }
             if (needsBrowserOkHttp(videoUrl)) {
                 Log.d("PlayerNetwork", "URL needs browser OkHttp ($videoUrl)")
-                return createBrowserOkHttpDataSourceFactory()
+                return createBrowserOkHttpDataSourceFactory(videoUrl)
             }
             Log.d("PlayerNetwork", "URL does not need Cronet ($videoUrl), using DefaultHttp")
             return createDefaultHttpDataSourceFactory()
+        }
+        // 2026-05-20 (parité PlayerTvFragment) : sur émulateur (ex BlueStacks),
+        //   Cronet n'atteint souvent pas les CDN → fallback OkHttp/DoH.
+        if (isEmulator) {
+            Log.d("PlayerNetwork", "Emulator detected (${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}), using fallback")
+            return if (needsDoH(videoUrl)) createDoHOkHttpDataSourceFactory() else createDefaultHttpDataSourceFactory()
         }
         // Use pre-initialized engine from Play Services, or build one on-demand
         val engine = cronetEngine ?: try {
@@ -3975,8 +4121,18 @@ class PlayerMobileFragment : Fragment() {
         usingCronet = true
         usingDoH = false
         usingBrowserOkHttp = false
+        // 2026-05-19 v85k : Uqload + Hydrax exigent EXACTEMENT Chrome 131 Pixel 8.
+        //   Le default Chrome 116 donne 403. Override pour ces hosts.
+        val cronetUa = if (videoUrl.contains("uqload", ignoreCase = true) ||
+                           videoUrl.contains("abyssa", ignoreCase = true) ||
+                           videoUrl.contains("abysscdn", ignoreCase = true)) {
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"  // v85x desktop UA match PC Chrome
+        } else {
+            NetworkClient.USER_AGENT
+        }
+        Log.d("PlayerNetwork", "v85k Cronet UA = $cronetUa")
         return CronetDataSource.Factory(engine, cronetExecutor)
-            .setUserAgent(NetworkClient.USER_AGENT)
+            .setUserAgent(cronetUa)
             .setConnectionTimeoutMs(30_000)
             .setReadTimeoutMs(30_000)
     }
@@ -4118,21 +4274,38 @@ class PlayerMobileFragment : Fragment() {
      * (which would add Upgrade-Insecure-Requests and Sec-Fetch-Dest:document that conflict
      * with the media-fetch headers the player sets via setDefaultRequestProperties).
      */
-    private fun createBrowserOkHttpDataSourceFactory(): HttpDataSource.Factory {
+    private fun createBrowserOkHttpDataSourceFactory(videoUrl: String = ""): HttpDataSource.Factory {
         usingCronet = false
         usingDoH = false
         usingBrowserOkHttp = true
-        val cleanClient = OkHttpClient.Builder()
-            .dns(DnsResolver.doh)
-            .cookieJar(NetworkClient.cookieJar)
-            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-            .followRedirects(true)
-            .followSslRedirects(true)
-            .build()
-        Log.d("PlayerNetwork", "Using clean OkHttpDataSource (DoH + cookies, no interceptor)")
-        return OkHttpDataSource.Factory(cleanClient)
-            .setUserAgent(NetworkClient.USER_AGENT)
+        // v85r 2026-05-20 : Pour Uqload, reutiliser EXACTEMENT le sharedOkHttpClient de
+        //   UqloadExtractor. Le token signe par strm5.uqload.is est bound au TLS
+        //   fingerprint du client OkHttp qui a fetch l'embed. Si on cree un nouveau
+        //   client (meme avec la meme config) la TLS handshake peut produire un
+        //   ClientHello legerement different (cipher suite order, ALPN, GREASE) et
+        //   le serveur renvoie 403. Donc on utilise la MEME instance.
+        val isUqload = videoUrl.contains("uqload", ignoreCase = true)
+        val client = if (isUqload) {
+            Log.d("PlayerNetwork", "Using SHARED UqloadExtractor.sharedOkHttpClient (TLS fingerprint match)")
+            com.streamflixreborn.streamflix.extractors.UqloadExtractor.sharedOkHttpClient
+        } else {
+            OkHttpClient.Builder()
+                .dns(DnsResolver.doh)
+                .cookieJar(NetworkClient.cookieJar)
+                .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .build()
+        }
+        val ua = if (isUqload) {
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"  // v85x desktop UA match PC Chrome
+        } else {
+            NetworkClient.USER_AGENT
+        }
+        Log.d("PlayerNetwork", "Using clean OkHttpDataSource (DoH + cookies, no interceptor), ua=${ua.take(50)}")
+        return OkHttpDataSource.Factory(client)
+            .setUserAgent(ua)
     }
 
     private fun createDefaultHttpDataSourceFactory(): HttpDataSource.Factory {
@@ -4254,12 +4427,46 @@ class PlayerMobileFragment : Fragment() {
 
         // Detect if this is a DaddyLive/bolaloca embed
         val isDaddyLiveEmbed = embedUrl.contains("bolaloca")
+        // v88 : abyss/Hydrax joue DANS la WebView overlay (pas d'interception m3u8,
+        //   car le stream abyss a un binding TLS qui casse hors WebView). La WebView
+        //   visible/interactive EST le player ; l'utilisateur tape play.
+        val isAbyssEmbed = embedUrl.contains("abyss")
+        val abyssNavAllow = listOf(
+            "abysscdn.com", "abyss.to", "abyssa.cc", "abyssplayer.com", "hydrax.net",
+            "iamcdn.net", "googleapis.com", "jwpcdn.com", "jsdelivr.net",
+            "cloudflare.com", "dessinanime.cc", "morphify.net"
+        )
+        val abyssAdHosts = listOf(
+            "aliexpress", "decafeligibly", "googlesyndication", "doubleclick",
+            "popads", "popunder", "popcash", "propellerads", "exoclick",
+            "juicyads", "trafficjunky", "clickadu", "adsterra", "hilltopads",
+            "histats", "googletagmanager", "google-analytics"
+        )
 
         wv.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(
+                view: WebView?, request: WebResourceRequest?
+            ): Boolean {
+                if (!isAbyssEmbed) return false
+                val navHost = request?.url?.host ?: return false
+                val allowed = abyssNavAllow.any { navHost == it || navHost.endsWith(".$it") }
+                if (!allowed) { Log.d("PlayerMobile", "Abyss NAV BLOCKED: $navHost"); return true }
+                return false
+            }
             override fun shouldInterceptRequest(
                 view: WebView?, request: WebResourceRequest?
             ): WebResourceResponse? {
                 val url = request?.url?.toString() ?: return null
+
+                // Abyss/Hydrax: player dedie sans pub
+                if (isAbyssEmbed) {
+                    val ah = request?.url?.host ?: ""
+                    if (abyssAdHosts.any { ah.contains(it, ignoreCase = true) }) {
+                        Log.d("PlayerMobile", "Abyss AD BLOCKED: $ah")
+                        return WebResourceResponse("text/plain", "UTF-8",
+                            java.io.ByteArrayInputStream("".toByteArray()))
+                    }
+                }
 
                 // ── DaddyLive: block ads + popups ──
                 if (isDaddyLiveEmbed) {
@@ -4418,7 +4625,7 @@ class PlayerMobileFragment : Fragment() {
             wv.loadUrl(embedUrl)
         } else {
             // Other embeds: use iframe wrapper (page expects to be in an iframe)
-            val baseHost = "https://frembed.cyou/"
+            val baseHost = if (isAbyssEmbed) "https://dessinanime.cc/" else "https://frembed.cyou/"
             val iframeWrapper = """
                 <!DOCTYPE html>
                 <html><head>

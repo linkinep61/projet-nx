@@ -34,6 +34,17 @@
             android:shadowRadius="6"
             tools:text="🎬" />
 
+        <!-- 2026-05-20 : avatar Fluent 3D (image, par-dessus l'emoji systeme de
+             fallback). Transparent, pas de fond, le wallpaper reste visible. -->
+        <ImageView
+            android:id="@+id/iv_profile_emoji"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:padding="26dp"
+            android:scaleType="fitCenter"
+            android:visibility="gone"
+            tools:ignore="ContentDescription" />
+
         <ImageView
             android:id="@+id/iv_profile_lock"
             android:layout_width="32dp"

@@ -110,11 +110,11 @@ class ProfilePickerActivity : FragmentActivity() {
         // Bouton qui ouvre EmojiPickerDialog (cohérent mobile + TV).
         var pickedEmoji = "🎬"
         val emojiButton = android.widget.Button(this).apply {
-            text = "Avatar : $pickedEmoji"
+            text = "Avatar : ${ProfileEmojiArt.displayName(pickedEmoji)}"
             setOnClickListener {
                 EmojiPickerDialog.show(this@ProfilePickerActivity, pickedEmoji) { e ->
                     pickedEmoji = e
-                    text = "Avatar : $e"
+                    text = "Avatar : ${ProfileEmojiArt.displayName(e)}"
                 }
             }
         }
@@ -152,7 +152,7 @@ class ProfilePickerActivity : FragmentActivity() {
      *  par clic long. Une vraie UI riche viendra en Phase 2. */
     private fun openManagementDialog() {
         val profiles = ProfileStore.getAll()
-        val items = profiles.map { "${it.emoji} ${it.name}${if (it.isAdmin) " (admin)" else ""}" }.toTypedArray()
+        val items = profiles.map { "${ProfileEmojiArt.displayName(it.emoji)} — ${it.name}${if (it.isAdmin) " (admin)" else ""}" }.toTypedArray()
         AlertDialog.Builder(this)
             .setTitle("Gérer les profils")
             .setItems(items) { _, idx ->
@@ -167,7 +167,7 @@ class ProfilePickerActivity : FragmentActivity() {
         if (profile.pinHash != null) options += "Supprimer PIN" else options += "Définir un PIN"
         options += "Supprimer ce profil"
         AlertDialog.Builder(this)
-            .setTitle("${profile.emoji} ${profile.name}")
+            .setTitle("${ProfileEmojiArt.displayName(profile.emoji)} — ${profile.name}")
             .setItems(options.toTypedArray()) { _, idx ->
                 when (options[idx]) {
                     "Renommer" -> editText(profile, "Renommer", profile.name) { value ->

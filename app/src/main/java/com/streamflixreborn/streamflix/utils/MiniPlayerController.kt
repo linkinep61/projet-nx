@@ -228,6 +228,14 @@ object MiniPlayerController {
                                 Log.w(TAG, "JUMELAGE: primary stuck buffering ${BUFFERING_SWAP_THRESHOLD_MS}ms → swap vers backup")
                                 try {
                                     p2.seekToNextMediaItem()
+                                    // 2026-05-20 (user "retours sur écran avec son et image
+                                    //   qui se répètent") : après le swap, le backup a été
+                                    //   pré-bufferisé à une position PLUS ANCIENNE que le
+                                    //   primary → l'user revoit du contenu déjà joué.
+                                    //   seekToDefaultPosition force un saut au live edge
+                                    //   (targetOffset derrière) → élimine le replay.
+                                    p2.seekToDefaultPosition()
+                                    Log.d(TAG, "JUMELAGE: seekToDefaultPosition après swap (anti-replay)")
                                 } catch (e: Exception) {
                                     Log.w(TAG, "seekToNextMediaItem failed: ${e.message}")
                                 }
@@ -1032,8 +1040,19 @@ object MiniPlayerController {
         player = null
         if (p != null) {
             try { p.removeListener(playerListener) } catch (_: Exception) {}
+            // 2026-05-20 : couper IMMÉDIATEMENT la lecture et les connexions HTTP
+            // pour libérer les sessions CDN (Vavoo, etc.) AVANT que le fullscreen
+            // player ne tente de résoudre de nouveaux streams. Sans ça, l'ancien
+            // player garde les connexions pendant 3s → conflit de session CDN.
+            try {
+                p.stop()
+                p.clearMediaItems()
+                Log.d(TAG, "stopAsync: playback stopped + media cleared immediately")
+            } catch (e: Exception) {
+                Log.w(TAG, "stopAsync: error stopping playback: ${e.message}")
+            }
         }
-        // Store for deferred release — don't touch ExoPlayer at all now
+        // Store for deferred release
         detachedPlayer = p
         currentChannelId = null
         currentChannelName = null

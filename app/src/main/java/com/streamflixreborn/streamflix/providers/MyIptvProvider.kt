@@ -64,6 +64,47 @@ object MyIptvProvider : Provider, IptvProvider {
     )
     private val cache = java.util.concurrent.ConcurrentHashMap<String, CachedChannels>()
 
+    /** 2026-05-18 v85 : vide le cache parsé + classification (anti-OOM).
+     *  Aussi appelé par IptvCacheManager quand on switch de provider IPTV. */
+    fun clearCache() {
+        try {
+            val count = cache.size
+            val classifCount = classificationCache.size
+            cache.clear()
+            classificationCache.clear()
+            // Reset filtres user (sinon on garde un filtre catégorie qui ne match plus la nouvelle source)
+            selectedCategoryLive = null
+            selectedCategoryMovie = null
+            selectedCategorySeries = null
+            android.util.Log.d(TAG, "clearCache: MyIPTV vidé ($count parsed + $classifCount classified)")
+        } catch (_: Throwable) {}
+    }
+
+    /** 2026-05-19 v85b (user "à partir du moment où on change de source il faut
+     *  faire un petit lavage qu'on retourne pas sur les anciennes qui étaient
+     *  sur une autre source") : vide TOUTES les sources sauf [activeSourceId].
+     *  Appelé par IptvSourcesActivity au moment où l'user clique une nouvelle
+     *  source dans le tableau — garantit que les chaînes/films/séries de la
+     *  source précédente n'apparaissent plus dans les rails Home/Catalogue
+     *  pendant et après la transition. */
+    fun clearChannelsExcept(activeSourceId: String) {
+        try {
+            val toRemove = cache.keys.filter { it != activeSourceId }
+            val toRemoveClassif = classificationCache.keys.filter { it != activeSourceId }
+            toRemove.forEach { cache.remove(it) }
+            toRemoveClassif.forEach { classificationCache.remove(it) }
+            selectedCategoryLive = null
+            selectedCategoryMovie = null
+            selectedCategorySeries = null
+            android.util.Log.d(
+                TAG,
+                "clearChannelsExcept($activeSourceId): purge ${toRemove.size} parsed + ${toRemoveClassif.size} classified"
+            )
+        } catch (t: Throwable) {
+            android.util.Log.w(TAG, "clearChannelsExcept failed: ${t.message}")
+        }
+    }
+
     /** 2026-05-12 : cache classification (très lourd : 176k regex/source).
      *  Clé = sourceId. Valeur = list classifiés. Invalidé en même temps que cache. */
     private data class CachedClassification(
@@ -242,7 +283,7 @@ object MyIptvProvider : Provider, IptvProvider {
     // ═══════════════════════════════════════════════════════════════
 
     override suspend fun getHome(): List<Category> = withContext(Dispatchers.IO) {
-        val sources = IptvSourceStore.getAll()
+        val sources = IptvSourceStore.getActiveOrAll()
         if (sources.isEmpty()) {
             return@withContext listOf(Category(
                 name = "Aucune source IPTV — va dans Paramètres → Paramètres du fournisseur → Mon IPTV pour en ajouter une",
@@ -322,7 +363,7 @@ object MyIptvProvider : Provider, IptvProvider {
     // ═══════════════════════════════════════════════════════════════
 
     override suspend fun getMovies(page: Int): List<Movie> = withContext(Dispatchers.IO) {
-        val sources = IptvSourceStore.getAll()
+        val sources = IptvSourceStore.getActiveOrAll()
         val (allMovies, _) = collectByType(sources, IptvClassifier.ContentType.MOVIE)
         // 2026-05-13 (user "quand on change de catégorie le home ne change pas") :
         // applique le filtre selectedCategoryMovie. Sans ça, le picker change le
@@ -364,7 +405,7 @@ object MyIptvProvider : Provider, IptvProvider {
     // ═══════════════════════════════════════════════════════════════
 
     override suspend fun getTvShows(page: Int): List<TvShow> = withContext(Dispatchers.IO) {
-        val sources = IptvSourceStore.getAll()
+        val sources = IptvSourceStore.getActiveOrAll()
         val (allEpisodes, _) = collectByType(sources, IptvClassifier.ContentType.SERIES)
         // 2026-05-13 (user "quand on change de catégorie le home ne change pas") :
         // applique le filtre selectedCategorySeries avant le groupage par show.
@@ -414,7 +455,7 @@ object MyIptvProvider : Provider, IptvProvider {
             return@withContext TvShow(id = id, title = "Live")
         }
         val showName = decodeId(id.removePrefix("myiptv-show::"))
-        val sources = IptvSourceStore.getAll()
+        val sources = IptvSourceStore.getActiveOrAll()
         val (allEpisodes, _) = collectByType(sources, IptvClassifier.ContentType.SERIES)
         val matchingEpisodes = allEpisodes.filter {
             IptvClassifier.extractShowName(it.channel.name).equals(showName, ignoreCase = true)
@@ -513,7 +554,7 @@ object MyIptvProvider : Provider, IptvProvider {
         val showName = decodeId(parts[0])
         val seasonNum = parts[1].toIntOrNull() ?: return@withContext emptyList()
 
-        val sources = IptvSourceStore.getAll()
+        val sources = IptvSourceStore.getActiveOrAll()
         val (allEpisodes, _) = collectByType(sources, IptvClassifier.ContentType.SERIES)
         val matching = allEpisodes.filter {
             IptvClassifier.extractShowName(it.channel.name).equals(showName, ignoreCase = true)
@@ -1570,7 +1611,7 @@ object MyIptvProvider : Provider, IptvProvider {
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> = withContext(Dispatchers.IO) {
         val q = query.trim().lowercase()
         if (q.isEmpty()) return@withContext emptyList()
-        val sources = IptvSourceStore.getAll()
+        val sources = IptvSourceStore.getActiveOrAll()
         if (sources.isEmpty()) return@withContext emptyList()
         // Force la classification sur toutes les sources si pas en cache
         val (liveItems, _) = collectByType(sources, IptvClassifier.ContentType.LIVE)
@@ -1630,7 +1671,7 @@ object MyIptvProvider : Provider, IptvProvider {
      *  Retourne liste vide si aucune source classifiée — l'UI cachera
      *  alors les boutons. */
     private fun getOrderedLiveChannelIds(): List<String> {
-        val sources = try { IptvSourceStore.getAll() } catch (_: Exception) { return emptyList() }
+        val sources = try { IptvSourceStore.getActiveOrAll() } catch (_: Exception) { return emptyList() }
         val out = mutableListOf<String>()
         for (source in sources) {
             val classified = classificationCache[source.id] ?: continue

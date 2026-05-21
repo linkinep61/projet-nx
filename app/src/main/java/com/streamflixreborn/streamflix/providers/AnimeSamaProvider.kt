@@ -57,11 +57,47 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
     override val changeUrlMutex = Mutex()
 
     private const val TAG = "AnimeSama"
-    private const val IMG_BASE = "https://raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/"
+    // 2026-05-20 (user "certaines jaquettes ne chargent qu'au reload — chargement
+    //   trop rapide qui oublie") : raw.githubusercontent.com est lent/peu caché
+    //   (surtout réseau satellite Tahiti) → 1er affichage rate l'image, reload =
+    //   disque cache. jsDelivr sert le MÊME fichier (vérifié 200, taille identique)
+    //   depuis un CDN global à cache immutable → 1er chargement rapide et fiable.
+    private const val IMG_BASE = "https://cdn.jsdelivr.net/gh/Anime-Sama/IMG@img/contenu/"
     private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+    /**
+     * Réécrit les URLs d'images lentes vers le CDN jsDelivr.
+     * - raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/X.jpg → jsDelivr CDN
+     * - URLs anime-sama.to/assets/… qui sont parfois instables → jsDelivr fallback
+     * - Déjà sur jsDelivr → inchangé
+     */
+    private fun optimizeImageUrl(rawUrl: String?, slug: String): String {
+        if (rawUrl.isNullOrBlank() || rawUrl.startsWith("data:")) {
+            return "${IMG_BASE}${slug}.jpg"
+        }
+        // raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/slug.jpg → jsDelivr
+        if (rawUrl.contains("raw.githubusercontent.com/Anime-Sama/IMG")) {
+            val filename = rawUrl.substringAfterLast("/")
+            return "${IMG_BASE}${filename}"
+        }
+        // Déjà sur jsDelivr → garder tel quel
+        if (rawUrl.contains("cdn.jsdelivr.net")) return rawUrl
+        // URL anime-sama.to interne → préférer jsDelivr pour la vitesse
+        if (rawUrl.contains("anime-sama.to") || rawUrl.contains("anime-sama.pw")) {
+            return "${IMG_BASE}${slug}.jpg"
+        }
+        // Autre CDN externe (ex: TMDb) → garder tel quel
+        return rawUrl
+    }
 
     // Cache of all Film slugs from AnimeSama catalogue — used to exclude films from the Série tab
     @Volatile private var cachedFilmSlugs: Set<String>? = null
+
+    // 2026-05-20 : quand true, getServers NE lance PAS ses propres backups
+    //   (Cloudstream, Moviebox, Papa). Utilisé quand AnimeSama est appelé COMME
+    //   backup par un autre provider (ex DessinAnime) → évite double-backup,
+    //   latence inutile et récursion. Même patron que MovixProvider.
+    @Volatile var skipBackupsForBackupCall: Boolean = false
 
     /**
      * Fetches all Film slugs from the AnimeSama catalogue (all pages, up to 20).
@@ -233,10 +269,11 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                     ?: card.selectFirst("h2.card-title")?.text()?.trim()
                     ?: slug.replace("-", " ").replaceFirstChar { it.uppercase() }
 
-                val img = imgEl?.let { el ->
-                    el.attr("src")?.takeIf { it.isNotBlank() && !it.startsWith("data:") }
+                val rawImg = imgEl?.let { el ->
+                    el.attr("src")?.takeIf { it.isNotBlank() }
                         ?: el.attr("data-src")?.takeIf { it.isNotBlank() }
-                } ?: "${IMG_BASE}${slug}.jpg"
+                }
+                val img = optimizeImageUrl(rawImg, slug)
 
                 // 2026-05-03 : ALLOWLIST strict — on ne garde QUE les cards qui
                 // sont explicitement marquées vidéo (Anime / Film). Tout le reste
@@ -409,7 +446,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 .removeSuffix("/")
                 .split("/").firstOrNull() ?: return@mapNotNull null
             val title = result.selectFirst("h3.asn-search-result-title")?.text()?.trim() ?: return@mapNotNull null
-            val img = result.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+            val img = optimizeImageUrl(result.selectFirst("img")?.attr("src"), slug)
             Triple(slug, title, img)
         }
 
@@ -507,7 +544,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                     .split("/").firstOrNull() ?: return@mapNotNull null
                 val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
-                val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+                val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                 Movie(id = "$slug@vf", title = title, poster = img).also { it.isSeries = true }
             }.let { movies.addAll(it) }
         } catch (_: Exception) {}
@@ -520,7 +557,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                     .split("/").firstOrNull() ?: return@mapNotNull null
                 val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
-                val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+                val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                 Movie(id = "$slug@film0", title = title, poster = img)
             }.let { movies.addAll(it) }
         } catch (_: Exception) {}
@@ -547,7 +584,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                         val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                             .split("/").firstOrNull() ?: return@mapNotNull null
                         val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
-                        val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+                        val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                         TvShow(id = "$slug@vostfr-film0", title = title, poster = img).also { it.isMovie = true }
                     }
                 } catch (_: Exception) { emptyList() }
@@ -563,7 +600,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                             .split("/").firstOrNull() ?: return@mapNotNull null
                         if (slug in filmSlugs) return@mapNotNull null // exclude films
                         val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
-                        val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+                        val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                         TvShow(id = "$slug@vostfr", title = title, poster = img)
                     }
                 } catch (_: Exception) { emptyList() }
@@ -583,7 +620,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                         val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                             .split("/").firstOrNull() ?: return@mapNotNull null
                         val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
-                        val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+                        val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                         Movie(id = "$slug@film0", title = title, poster = img)
                     }
                 } catch (_: Exception) { emptyList() }
@@ -599,7 +636,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                             .split("/").firstOrNull() ?: return@mapNotNull null
                         if (slug in filmSlugs) return@mapNotNull null // exclude films
                         val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
-                        val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+                        val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                         Movie(id = "$slug@vf", title = title, poster = img).also { it.isSeries = true }
                     }
                 } catch (_: Exception) { emptyList() }
@@ -632,7 +669,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 if (resultSlug == slug) return@mapNotNull null // Skip self
                 val resultTitle = result.selectFirst("h3.asn-search-result-title")?.text()?.trim()
                     ?: return@mapNotNull null
-                val resultImg = result.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${resultSlug}.jpg"
+                val resultImg = optimizeImageUrl(result.selectFirst("img")?.attr("src"), resultSlug)
                 // Show as a TvShow (clickable → will open detail with seasons/films)
                 TvShow(id = resultSlug, title = resultTitle, poster = resultImg)
             }.let { relatedFilms.addAll(it) }
@@ -702,7 +739,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                     if (resultSlug == slug) return@mapNotNull null // Skip self
                     val resultTitle = result.selectFirst("h3.asn-search-result-title")?.text()?.trim()
                         ?: return@mapNotNull null
-                    val resultImg = result.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${resultSlug}.jpg"
+                    val resultImg = optimizeImageUrl(result.selectFirst("img")?.attr("src"), resultSlug)
                     TvShow(id = resultSlug, title = resultTitle, poster = resultImg)
                 }.let { relatedContent.addAll(it) }
             } catch (_: Exception) {}
@@ -1118,7 +1155,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         val title = slug.replace("-", " ").trim()
 
         // 2026-05-06 : Cloudstream backup #2 — MovieBox+ via /resource (FR strict).
-        val cloudstreamBackup = if (title.isNotBlank()) {
+        val cloudstreamBackup = if (!skipBackupsForBackupCall && title.isNotBlank()) {
             try {
                 val csVideoType: Video.Type = when (videoType) {
                     is Video.Type.Movie -> Video.Type.Movie(
@@ -1138,7 +1175,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             } catch (_: Exception) { emptyList() }
         } else emptyList()
 
-        val movieboxBackup = if (title.isNotBlank()) {
+        val movieboxBackup = if (!skipBackupsForBackupCall && title.isNotBlank()) {
             try {
                 val type = if (videoType is Video.Type.Movie) 1 else 2
                 MovieboxProvider.getMovieboxSourcesByTitle(
@@ -1152,7 +1189,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
 
         // 2026-05-06 : Papadustream backup EN DERNIER (captcha CF). Anime providers
         // qui ont aussi du contenu sur Papadustream (séries TV-only) bénéficient.
-        val papaBackup = if (title.isNotBlank() && videoType is Video.Type.Episode) {
+        val papaBackup = if (!skipBackupsForBackupCall && title.isNotBlank() && videoType is Video.Type.Episode) {
             try {
                 PapadustreamProvider.getPapaSourcesByTitle(
                     title = title,
@@ -1179,6 +1216,54 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             (1000 - idx) + voOffset  // les VF gardent leur ordre, les VO chutent
         }.map { it.value }
         return sorted
+    }
+
+    /**
+     * Backup pour autres providers (ex DessinAnime) : retourne UNIQUEMENT les
+     *   serveurs natifs AnimeSama d'un titre (pas de backups internes, donc pas
+     *   de récursion ni de double-fetch). Best-effort, match par titre normalisé.
+     *   Réutilise les méthodes testées search → getTvShow → getEpisodesBySeason
+     *   → getServers, donc pas de reconstruction d'IDs fragile.
+     */
+    suspend fun getAnimeSamaSourcesByTitle(title: String, videoType: Video.Type): List<Video.Server> {
+        if (title.isBlank()) return emptyList()
+        val norm = { s: String -> s.lowercase().replace(Regex("[^a-z0-9]"), "") }
+        val want = norm(title)
+        if (want.isBlank()) return emptyList()
+        val matches = { n: String -> n == want || n.startsWith(want) || want.startsWith(n) || (n.length >= 4 && n.contains(want)) }
+        return try {
+            val items = kotlinx.coroutines.withTimeoutOrNull(9_000L) { search(title, 1) } ?: return emptyList()
+            val prev = skipBackupsForBackupCall
+            skipBackupsForBackupCall = true
+            try {
+                when (videoType) {
+                    is Video.Type.Movie -> {
+                        val movie = items.filterIsInstance<Movie>().firstOrNull { matches(norm(it.title)) }
+                            ?: return emptyList()
+                        Log.d(TAG, "[backup] AnimeSama movie match: ${movie.title} (${movie.id})")
+                        getServers(movie.id, videoType)
+                    }
+                    is Video.Type.Episode -> {
+                        val show = items.filterIsInstance<TvShow>().firstOrNull { matches(norm(it.title)) }
+                            ?: return emptyList()
+                        Log.d(TAG, "[backup] AnimeSama show match: ${show.title} (${show.id})")
+                        val full = kotlinx.coroutines.withTimeoutOrNull(9_000L) { getTvShow(show.id) }
+                            ?: return emptyList()
+                        val season = full.seasons.firstOrNull { it.number == videoType.season.number }
+                            ?: full.seasons.firstOrNull() ?: return emptyList()
+                        val eps = kotlinx.coroutines.withTimeoutOrNull(9_000L) { getEpisodesBySeason(season.id) }
+                            ?: return emptyList()
+                        val ep = eps.firstOrNull { it.number == videoType.number } ?: return emptyList()
+                        getServers(ep.id, videoType)
+                    }
+                }
+            } finally {
+                skipBackupsForBackupCall = prev
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "getAnimeSamaSourcesByTitle KO: ${e.message}")
+            emptyList()
+        }
     }
 
     // ========== HELPERS ==========
@@ -1250,7 +1335,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                     .split("/").firstOrNull() ?: return@mapNotNull null
                 val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
-                val img = card.selectFirst("img")?.attr("src") ?: "${IMG_BASE}${slug}.jpg"
+                val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
                 TvShow(id = slug, title = title, poster = img)
             },
         )

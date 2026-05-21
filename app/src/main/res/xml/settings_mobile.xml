@@ -482,6 +482,13 @@
             app:iconSpaceReserved="false" />
 
         <Preference
+            android:icon="@drawable/ic_favorite_enable"
+            android:key="p_settings_kofi"
+            android:title="Soutenir le projet"
+            android:summary="Offrez un café au développeur sur Ko-fi"
+            app:iconSpaceReserved="false" />
+
+        <Preference
             android:icon="@drawable/ic_settings_about"
             android:key="p_settings_about"
             android:title="@string/settings_about"

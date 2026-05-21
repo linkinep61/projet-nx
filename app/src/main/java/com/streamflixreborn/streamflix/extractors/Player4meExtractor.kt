@@ -78,10 +78,22 @@ open class Player4meExtractor : Extractor() {
             withTimeoutOrNull(35_000L) {
                 suspendCancellableCoroutine { cont ->
                     var resolved = false
+                    var wv: WebView? = null
 
                     fun resolve(value: String?) {
                         if (!resolved && cont.isActive) {
                             resolved = true
+                            // 2026-05-20 (fix fuite mémoire) : détruire la WebView sur
+                            //   succès ET timeout, pas seulement à l'annulation. Sinon
+                            //   chaque extraction Player4me laissait une WebView Chromium
+                            //   (+ bundle JS ~880 Ko) en mémoire → OOM Chromecast.
+                            //   On POSTe le destroy (resolve() est appelé depuis un
+                            //   callback WebView : détruire en synchrone planterait).
+                            val toDestroy = wv
+                            wv = null
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                try { toDestroy?.stopLoading(); toDestroy?.destroy() } catch (_: Throwable) {}
+                            }
                             cont.resume(value)
                         }
                     }
@@ -94,6 +106,7 @@ open class Player4meExtractor : Extractor() {
                         settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         settings.mediaPlaybackRequiresUserGesture = false
                     }
+                    wv = webView
 
                     webView.webChromeClient = object : WebChromeClient() {
                         override fun onCreateWindow(
@@ -164,9 +177,10 @@ open class Player4meExtractor : Extractor() {
                             view: WebView?,
                             request: WebResourceRequest?
                         ): Boolean {
-                            val host = request?.url?.host ?: return true
-                            val isAllowed = ALLOWED_HOSTS.any { host.endsWith(it) }
-                            return !isAllowed
+                            val host = request?.url?.host ?: return false
+                            // permissif : on bloque seulement les pubs, on laisse passer
+                            // toute la chaine de redirection du player (sinon stream bloque)
+                            return BLOCKED_HOSTS.any { host.contains(it) }
                         }
 
                         override fun shouldInterceptRequest(

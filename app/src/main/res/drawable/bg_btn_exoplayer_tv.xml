@@ -1,10 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Focus bien visible sur toutes les TV : fond rouge accent + contour blanc -->
     <item android:state_focused="true">
         <shape android:shape="rectangle">
             <corners android:radius="360dp" />
-            <solid android:color="#80808080" />
+            <solid android:color="#CCE50914" />
+            <stroke android:width="3dp" android:color="#FFFFFFFF" />
+        </shape>
+    </item>
+    <item android:state_selected="true">
+        <shape android:shape="rectangle">
+            <corners android:radius="360dp" />
+            <solid android:color="#CCE50914" />
+            <stroke android:width="3dp" android:color="#FFFFFFFF" />
         </shape>
     </item>
 

@@ -58,7 +58,8 @@ class ProfilePickerAdapter(
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         if (position < profiles.size) {
             val profile = profiles[position]
-            holder.emoji.text = profile.emoji
+            // 2026-05-20 : avatar Fluent 3D (image) avec fallback emoji systeme.
+            ProfileEmojiArt.bind(profile.emoji, holder.emojiImage, holder.emoji)
             holder.name.text = profile.name
             holder.lock.visibility = if (profile.pinHash != null) View.VISIBLE else View.GONE
             holder.itemView.setOnClickListener { onProfileClick(profile) }
@@ -66,6 +67,9 @@ class ProfilePickerAdapter(
             // tuile transparente, le wallpaper du home reste visible derrière.
             holder.avatar?.setBackgroundResource(android.R.color.transparent)
         } else {
+            // Carte "+ Ajouter" : pas d'image Fluent, juste le "+" en TextView.
+            holder.emojiImage?.visibility = View.GONE
+            holder.emoji.visibility = View.VISIBLE
             holder.emoji.text = "+"
             holder.name.text = "Ajouter"
             holder.lock.visibility = View.GONE
@@ -77,6 +81,8 @@ class ProfilePickerAdapter(
 
     class ViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         val emoji: TextView = itemView.findViewById(R.id.tv_profile_emoji)
+        // 2026-05-20 : image Fluent 3D (nullable pour compat anciens layouts).
+        val emojiImage: ImageView? = itemView.findViewById(R.id.iv_profile_emoji)
         val name: TextView = itemView.findViewById(R.id.tv_profile_name)
         val lock: ImageView = itemView.findViewById(R.id.iv_profile_lock)
         // Nullable car l'ID a été ajouté côté layout 2026-05-13 ; safety pour

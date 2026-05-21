@@ -49,11 +49,31 @@
         android:text="@string/providers_choose_title"
         android:textColor="#FFFFFF"
         android:textSize="30sp"
+        android:visibility="invisible"
         app:layout_constraintBottom_toTopOf="@id/rv_providers"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintVertical_chainStyle="packed" />
+
+    <!-- 2026-05-20 : cœur favoris global, centré à la place du titre "Fournisseur".
+         Focusable D-pad (bg_tv_button_focus), rouge. -->
+    <ImageView
+        android:id="@+id/btn_global_favorites"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:padding="10dp"
+        android:src="@drawable/ic_favorite_enable"
+        android:tint="#E50914"
+        android:focusable="true"
+        android:focusableInTouchMode="false"
+        android:contentDescription="Favoris"
+        android:background="@drawable/bg_tv_button_focus"
+        app:layout_constraintBottom_toBottomOf="@id/tv_providers_label"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="@id/tv_providers_label"
+        tools:ignore="UseAppTint" />
 
     <ImageView
         android:id="@+id/btn_providers_downloads"
@@ -148,10 +168,12 @@
         android:background="@android:color/transparent"
         android:focusable="true"
         android:focusableInTouchMode="true"
-        app:tabIndicatorColor="#FFFFFF"
+        app:tabBackground="@drawable/bg_tab_provider_tv"
+        app:tabIndicatorColor="#FFE53935"
         app:tabIndicatorHeight="3dp"
         app:tabMode="fixed"
-        app:tabSelectedTextColor="#FFFFFF"
+        app:tabRippleColor="#33E53935"
+        app:tabSelectedTextColor="#FFE53935"
         app:tabTextAppearance="@style/TextAppearance.AppCompat.Medium"
         app:tabTextColor="#AAFFFFFF"
         app:layout_constraintEnd_toEndOf="parent"
