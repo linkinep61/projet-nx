@@ -54,8 +54,15 @@ open class YflixExtractor : Extractor() {
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
     override suspend fun extract(link: String): Video {
-        val hlsUrl = extractByIntercepting(link)
-            ?: throw Exception("Yflix: Could not find HLS source in $link")
+        // 2026-05-21 (user "yflix apparaît encore en multi source — splitte-le par
+        //   serveur comme Videasy") : l'index du serveur yflix est encodé via
+        //   `yfsrv=N` dans le fragment. Chaque serveur yflix est exposé comme une
+        //   source séparée (Yflix Serveur 1/2…) ; ici on cible CE serveur précis.
+        val srvIndex = Regex("yfsrv=(\\d+)").find(link)?.groupValues?.getOrNull(1)
+            ?.toIntOrNull()?.coerceAtLeast(1) ?: 1
+        val cleanLink = link.replace(Regex("[#&]yfsrv=\\d+"), "")
+        val hlsUrl = extractByIntercepting(cleanLink, srvIndex)
+            ?: throw Exception("Yflix: aucun flux pour serveur $srvIndex de $cleanLink")
         return Video(
             source = hlsUrl,
             headers = mapOf(
@@ -67,11 +74,12 @@ open class YflixExtractor : Extractor() {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun extractByIntercepting(url: String): String? =
+    private suspend fun extractByIntercepting(url: String, srvIndex: Int): String? =
         withContext(Dispatchers.Main) {
-            withTimeoutOrNull(35_000L) {
+            withTimeoutOrNull(50_000L) {
                 suspendCancellableCoroutine { cont ->
                     var resolved = false
+                    var cycleStarted = false
 
                     fun resolve(value: String?) {
                         if (!resolved && cont.isActive) {
@@ -104,10 +112,14 @@ open class YflixExtractor : Extractor() {
                             request: WebResourceRequest?
                         ): Boolean {
                             val host = request?.url?.host ?: return true
-                            // Allow yflix + rapidshareee + common HLS hosts.
-                            // Block anything else (ads, popups, ww1/ww2 redirects)
-                            val isAllowed = ALLOWED_HOSTS.any { host.endsWith(it) }
-                            return !isAllowed
+                            // 2026-05-21 (user "yflix bugue un peu / se lance mais rien") :
+                            // yflix tourne régulièrement son host externe (rapidshareee
+                            // puis d'autres). Un whitelist strict (ALLOWED_HOSTS) cassait
+                            // toute la chaîne dès qu'ils changeaient de host → aucun m3u8.
+                            // On laisse donc passer TOUT sauf les hosts pub/tracker connus ;
+                            // le m3u8 est capté dans shouldInterceptRequest quel que soit
+                            // le host, donc plus besoin de whitelister la source.
+                            return BLOCKED_HOSTS.any { host.contains(it) }
                         }
 
                         override fun shouldInterceptRequest(
@@ -135,13 +147,34 @@ open class YflixExtractor : Extractor() {
                             if (view == null || resolved) return
                             android.util.Log.d("YflixExtractor", "onPageFinished: $finishedUrl")
 
-                            // Filet de sécurité : si après 25s rien capté, abandon
-                            view.postDelayed({
-                                if (!resolved) {
-                                    android.util.Log.w("YflixExtractor", "Timeout — no m3u8 captured")
-                                    resolve(null)
+                            // 2026-05-21 (user "yflix doit afficher TOUTES ses sources sinon
+                            //   l'algo de tri ne peut pas bien le classer") : chaque serveur
+                            //   yflix est exposé comme une source séparée. Ici on CIBLE le
+                            //   serveur demandé (srvIndex, 1-based) en cliquant le bon
+                            //   li.server[data-lid]. La liste est peuplée via un ajax token,
+                            //   donc on retente le clic quelques fois jusqu'à ce qu'elle
+                            //   existe ; le m3u8 est capté dans shouldInterceptRequest.
+                            if (finishedUrl != null && finishedUrl.contains("/watch/") && !cycleStarted) {
+                                cycleStarted = true
+                                val idx = srvIndex - 1
+                                for (d in longArrayOf(1_000L, 3_000L, 5_000L, 7_000L)) {
+                                    view.postDelayed({
+                                        if (resolved) return@postDelayed
+                                        view.evaluateJavascript(
+                                            "(function(){var s=document.querySelectorAll('li.server[data-lid]');" +
+                                                "if(s&&s[$idx]){s[$idx].click();return s.length;}return s?s.length:0;})()",
+                                            null,
+                                        )
+                                    }, d)
                                 }
-                            }, 25_000L)
+                                // Filet final : abandon si pas de m3u8 pour ce serveur précis.
+                                view.postDelayed({
+                                    if (!resolved) {
+                                        android.util.Log.w("YflixExtractor", "Timeout — pas de m3u8 pour serveur $srvIndex")
+                                        resolve(null)
+                                    }
+                                }, 18_000L)
+                            }
                         }
 
                         override fun onReceivedError(
@@ -171,6 +204,9 @@ open class YflixExtractor : Extractor() {
         }
 
     companion object {
+        // 2026-05-21 : auto-fallback — nb max de serveurs yflix essayés + fenêtre par serveur.
+        private const val MAX_SERVERS = 4
+        private const val PER_SERVER_MS = 8_000L
         // Hosts qu'on autorise à charger leurs JS/iframes pour la chaîne d'extraction
         private val ALLOWED_HOSTS = listOf(
             "yflix.to",

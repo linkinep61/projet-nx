@@ -757,6 +757,21 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                 // text becomes invisible when the row is focused.
                 if (item is Settings.ChannelVariant && item.isIptv && item.isSelected) {
                     setTextColor(0xFF4CAF50.toInt())  // Material Green
+                } else if (item is Settings.Server && !item.isIptv) {
+                    // 2026-05-21 (user) : couleur selon l'état du serveur VOD.
+                    //   rouge = HS/mort, orange = pas sûr, défaut(blanc) = pas testé.
+                    when (com.streamflixreborn.streamflix.utils.ExtractorRanker.statusOf(
+                        com.streamflixreborn.streamflix.models.Video.Server(id = item.id, name = item.name)
+                    )) {
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.VERIFIED ->
+                            setTextColor(0xFF4CAF50.toInt())   // vert = vérifié, ça marche
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD ->
+                            setTextColor(0xFFFF4444.toInt())   // rouge = ne marche pas
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.UNSURE ->
+                            setTextColor(0xFFFFA726.toInt())   // orange = lent / pas sûr
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.UNTESTED ->
+                            setTextColor(ContextCompat.getColorStateList(context, R.color.setting_text))
+                    }
                 } else {
                     setTextColor(ContextCompat.getColorStateList(context, R.color.setting_text))
                 }

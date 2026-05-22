@@ -206,6 +206,12 @@ class TvShowViewModel(
     fun getTvShow(id: String) = viewModelScope.launch(Dispatchers.IO) {
         _state.emit(State.Loading)
 
+        // Afficher immédiatement le cache DB (synopsis instantané)
+        val cachedTvShow = database.tvShowDao().getById(id)
+        if (cachedTvShow != null && !cachedTvShow.overview.isNullOrBlank()) {
+            _state.emit(State.SuccessLoading(cachedTvShow))
+        }
+
         try {
             val provider = UserPreferences.currentProvider ?: return@launch
             val tvShow = provider.getTvShow(id)
@@ -234,7 +240,10 @@ class TvShowViewModel(
             _state.emit(State.SuccessLoading(tvShow))
         } catch (e: Exception) {
             Log.e("TvShowViewModel", "getTvShow: ", e)
-            _state.emit(State.FailedLoading(e))
+            // Ne pas écraser si on avait déjà le cache affiché
+            if (cachedTvShow == null || cachedTvShow.overview.isNullOrBlank()) {
+                _state.emit(State.FailedLoading(e))
+            }
         }
     }
 

@@ -146,17 +146,22 @@ object FranimeProvider : Provider {
             }
         }
         // 2) Network fetch
+        // 2026-05-22 (user "FrAnime galère à charger le home") : l'API api.franime.fr
+        //   timeoutait à 45s → getHome bloquait jusqu'à ~60s puis renvoyait 0 catégorie.
+        //   On baisse le timeout à 20s (une réponse OK fait ~4s) pour échouer vite.
         Log.d(TAG, "loadCatalogue fetching from network")
         val body = try {
-            fetchText("${API_BASE}api/animes", timeoutMs = 45_000L)
+            fetchText("${API_BASE}api/animes", timeoutMs = 20_000L)
         } catch (e: OutOfMemoryError) {
             Log.e(TAG, "loadCatalogue OOM fetching network")
             System.gc()
-            return emptyList()
+            return loadStaleCatalogue(cacheFile)
         }
         if (body.isBlank() || body.length < 100) {
             Log.w(TAG, "loadCatalogue empty response")
-            return emptyList()
+            // 2026-05-22 : repli sur le cache disque MÊME PÉRIMÉ quand le réseau échoue/
+            //   timeout. Mieux vaut un home un peu vieux qu'un home vide après l'attente.
+            return loadStaleCatalogue(cacheFile)
         }
         val parsed = try {
             parseCatalogue(body)
@@ -177,6 +182,23 @@ object FranimeProvider : Provider {
         } catch (_: Exception) {}
         Log.d(TAG, "loadCatalogue fetched + cached (${parsed.size} animes)")
         return parsed
+    }
+
+    /**
+     * 2026-05-22 : repli quand le réseau échoue — relit le cache disque SANS contrôle
+     *   de TTL. Mieux vaut un catalogue un peu vieux qu'un home vide.
+     */
+    private fun loadStaleCatalogue(cacheFile: java.io.File): List<JSONObject> {
+        if (!cacheFile.exists()) return emptyList()
+        return try {
+            val parsed = parseCatalogue(cacheFile.readText())
+            if (parsed.isNotEmpty()) {
+                Log.d(TAG, "loadCatalogue STALE fallback (${parsed.size} animes)")
+                catalogue = parsed
+                catalogueIndex = parsed.associateBy { it.optLong("id") }
+            }
+            parsed
+        } catch (_: Throwable) { emptyList() }
     }
 
     private fun parseCatalogue(json: String): List<JSONObject> {

@@ -175,10 +175,10 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
                 if (popularFilmsDoc != null) {
                     val popularFilms = popularFilmsDoc.select(".page-item-detail").mapNotNull { item ->
                         val show = parseHomeItem(item) ?: return@mapNotNull null
+                        // Garder uniquement les vrais films, pas les séries mal étiquetées
                         when (show) {
-                            is TvShow -> Movie(id = show.id, title = show.title, poster = show.poster).apply { isSeries = true }
                             is Movie -> show
-                            else -> null
+                            else -> null // TvShow = série, pas un film
                         }
                     }
                     if (popularFilms.isNotEmpty()) {
@@ -349,6 +349,8 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
             id = id,
             title = title,
             poster = poster,
+            // 2026-05-21 : bannière en résolution d'origine (cf. getTvShow).
+            banner = fullResImageUrl(document.selectFirst(".summary_image img")?.attr("src")),
             overview = overview,
             genres = genres,
             rating = rating,
@@ -400,6 +402,11 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
             id = id,
             title = title,
             poster = poster,
+            // 2026-05-21 (user "le fond d'écran synopsis VoirAnime est immonde") :
+            //   VoirAnime n'a pas de backdrop → la bannière retombait sur le poster
+            //   réduit en 193x278, agrandi en plein écran = pixelisé. On fournit une
+            //   bannière en RÉSOLUTION D'ORIGINE (suffixe de taille WordPress retiré).
+            banner = fullResImageUrl(document.selectFirst(".summary_image img")?.attr("src")),
             overview = overview,
             genres = genres,
             rating = rating,
@@ -673,6 +680,14 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
         if (url.isNullOrBlank()) return null
         // Remplacer le suffixe de redimensionnement WordPress par -193x278 (meilleure qualité dispo)
         return url.replace(Regex("""-\d+x\d+\."""), "-193x278.")
+    }
+
+    // 2026-05-21 : version PLEINE RÉSOLUTION (pour la bannière / fond d'écran).
+    //   WordPress (Madara) sert l'original sans suffixe -LxH → on retire le suffixe
+    //   au lieu de le réduire. Évite le fond d'écran pixelisé sur la fiche.
+    private fun fullResImageUrl(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        return url.replace(Regex("""-\d+x\d+\."""), ".")
     }
 
     private fun getInfoValue(document: Document, label: String): String? {

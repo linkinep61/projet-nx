@@ -121,10 +121,17 @@ class SeasonMobileFragment : Fragment() {
         }
     }
 
+    private var episodeLoadJob: kotlinx.coroutines.Job? = null
+    private var loadedSignature: String? = null
+
     private fun displaySeason(episodes: List<Episode>) {
-        appAdapter.submitList(episodes.onEach { episode ->
+        val preparedEpisodes = episodes.onEach { episode ->
             episode.itemType = AppAdapter.Type.EPISODE_MOBILE_ITEM
-        })
+        }
+        // Le combine ré-émet à chaque changement DB : on évite de tout recharger si rien
+        // n'a changé (pas de re-render coûteux ni de saut de scroll).
+        val signature = "${episodes.size}:${episodes.firstOrNull()?.id}:${episodes.lastOrNull()?.id}"
+        if (signature == loadedSignature) return
 
         val episodeIndex = episodes
             .sortedByDescending { it.watchHistory?.lastEngagementTimeUtcMillis }
@@ -134,12 +141,43 @@ class SeasonMobileFragment : Fragment() {
                 .takeIf { it != -1 && it + 1 < episodes.size }
                 ?.let { it + 1 }
 
-        if (episodeIndex != null) {
-            val layoutManager = binding.rvEpisodes.layoutManager as? LinearLayoutManager
-            layoutManager?.scrollToPositionWithOffset(
-                episodeIndex,
-                binding.rvEpisodes.height / 2 - 100.dp(requireContext())
-            )
+        fun focusTarget() {
+            if (episodeIndex != null) {
+                val layoutManager = binding.rvEpisodes.layoutManager as? LinearLayoutManager
+                layoutManager?.scrollToPositionWithOffset(
+                    episodeIndex,
+                    binding.rvEpisodes.height / 2 - 100.dp(requireContext())
+                )
+            }
+        }
+
+        episodeLoadJob?.cancel()
+
+        // Petites saisons : envoi direct. Grosses séries (One Piece, 1000+ épisodes) :
+        //   CHARGEMENT PROGRESSIF par lots → plus de blocage du thread principal = plus d'ANR.
+        if (preparedEpisodes.size <= 60) {
+            appAdapter.submitList(preparedEpisodes)
+            loadedSignature = signature
+            focusTarget()
+            return
+        }
+
+        episodeLoadJob = viewLifecycleOwner.lifecycleScope.launch {
+            appAdapter.clearItems()
+            val chunkSize = 24
+            var i = 0
+            var scrolled = false
+            while (i < preparedEpisodes.size) {
+                val end = minOf(i + chunkSize, preparedEpisodes.size)
+                appAdapter.appendItems(preparedEpisodes.subList(i, end))
+                i = end
+                if (!scrolled && (episodeIndex == null || episodeIndex < i)) {
+                    focusTarget()
+                    scrolled = true
+                }
+                kotlinx.coroutines.delay(16)
+            }
+            loadedSignature = signature
         }
     }
 }

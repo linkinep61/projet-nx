@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.launch
 
@@ -48,9 +49,13 @@ class SeasonViewModel(
 
         when (state) {
             is State.SuccessLoadingEpisodes -> {
+                // 2026-05-21 (user "ça gèle sur One Piece, fais un chargement différé") :
+                //   le merge était en O(n²) (find linéaire par épisode) → 1M+ opérations
+                //   pour 1000+ épisodes. Pré-indexation O(1) par id.
+                val dbById = episodesDb.associateBy { it.id }
                 State.SuccessLoadingEpisodes(
                     episodes = state.episodes.map { episode ->
-                        episodesDb.find { it.id == episode.id }
+                        dbById[episode.id]
                             ?.takeIf { !episode.isSame(it) }
                             ?.let { episode.copy().merge(it) }
                             ?: episode
@@ -62,7 +67,10 @@ class SeasonViewModel(
             }
             else -> state
         }
-    }
+    // 2026-05-21 : ce combine (merge + tri de 1000+ épisodes) tournait sur le THREAD
+    //   PRINCIPAL (pas de flowOn, contrairement à MovieViewModel) → ANR « Input
+    //   dispatching timed out » sur les très grosses séries (One Piece). On le déporte.
+    }.flowOn(Dispatchers.Default)
 
     sealed class State {
         data object LoadingEpisodes : State()

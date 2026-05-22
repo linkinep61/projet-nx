@@ -21,6 +21,9 @@ import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.jsoup.nodes.Document
@@ -33,7 +36,7 @@ import retrofit2.http.POST
 import retrofit2.http.Query
 import retrofit2.http.Url
 
-object VoirDramaProvider : Provider, ProviderConfigUrl {
+object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvider {
 
     override val name = "VoirDrama"
 
@@ -860,202 +863,185 @@ object VoirDramaProvider : Provider, ProviderConfigUrl {
         }
         return try {
             coroutineScope {
-            // L'ID d'un épisode est le chemin complet sous /drama/ ex: "climax/climax-2026-10-vostfr"
-            val url = when (videoType) {
-                is Video.Type.Movie -> if (id.startsWith("http")) id else "${baseUrl}drama/$id/"
-                is Video.Type.Episode -> if (id.startsWith("http")) id else "${baseUrl}drama/$id/"
+                val (native, ctx) = fetchVoirDramaNative(id, videoType)
+                // DC enrich (timeout 5 s comme avant), puis Cloudstream + Moviebox.
+                val dcUnique = if (!ctx.showTitle.isNullOrBlank()) {
+                    kotlinx.coroutines.withTimeoutOrNull(5_000L) {
+                        fetchVdDramacoolEnrich(ctx).filter { it.src !in ctx.nativeSrcs }
+                    } ?: emptyList()
+                } else emptyList()
+                val cloudstreamBackup = fetchVdCloudstreamBackup(ctx, videoType)
+                val movieboxBackup = fetchVdMovieboxBackup(ctx, videoType)
+                native + cloudstreamBackup + dcUnique + movieboxBackup
             }
-            val document = service.getPage(url)
-
-            // 2026-05-04 : extraire le titre du show pour ENRICHIR avec les
-            // sources Dramacool en parallèle. Si DC a la même série, on
-            // ajoute ses players comme alternatives → l'utilisateur a plus
-            // de chances qu'au moins un fonctionne.
-            //
-            // 2026-05-05 : on NETTOIE agressivement le titre (vire "Saison X",
-            // "Épisode Y", "VOSTFR/VF/VO", année) — sinon DC search retourne 0
-            // résultats car cherche le full title type "Climax Saison 1 Épisode 5".
-            val rawTitle = document.selectFirst("h1.entry-title")?.text()?.trim()
-                ?: document.title()
-                    .substringBefore(" - ")
-                    .substringBefore(" – ")
-                    .trim()
-                    .ifBlank { null }
-            val showTitle = rawTitle?.let { t ->
-                t.replace(Regex("""\s*[-–]?\s*Saison\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
-                    .replace(Regex("""\s*[-–]?\s*[Ss]\d+\s*[Ee]\d+.*$"""), "")
-                    .replace(Regex("""\s*[-–]?\s*[ÉéEe]pisode\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
-                    .replace(Regex("""\s+(VOSTFR|VOST|VF|VO|FR)\b.*$""", RegexOption.IGNORE_CASE), "")
-                    .replace(Regex("""\s*\(\d{4}\)\s*$"""), "")
-                    .trim()
-                    .ifBlank { null }
-            }
-            val episodeNumber = (videoType as? Video.Type.Episode)?.number ?: 1
-            val seasonNumber = (videoType as? Video.Type.Episode)?.season?.number
-            // Extrait l'année du rawTitle si présent (cas "Show Name (2024)")
-            val year = rawTitle?.let {
-                Regex("""\((\d{4})\)""").find(it)?.groupValues?.get(1)?.toIntOrNull()
-            }
-            val dramacoolServersDeferred = if (!showTitle.isNullOrBlank()) {
-                Log.d("VoirDramaProvider", "DC enrich: rawTitle='$rawTitle' → cleaned='$showTitle' " +
-                    "year=$year season=$seasonNumber E$episodeNumber")
-                async { fetchDramacoolServersByTitle(showTitle, episodeNumber, year, seasonNumber) }
-            } else null
-
-            val servers = mutableListOf<Video.Server>()
-            val seenSrcs = mutableSetOf<String>()
-
-            // 1) Same Madara WP theme as VoirAnime: ALL players are stored in
-            //    `var thisChapterSources = {"LECTEUR X":"<iframe src=...>...}` —
-            //    the page only displays the first one. Without parsing this
-            //    JS map we miss every alternate player and end up stuck on
-            //    a single (often dead) embed.
-            val html = document.outerHtml()
-            // Same JS-aware regex as VoirAnime: tolerant to `\"` inside the
-            // value (lazy match) AND restricted to `\/` only inside the URL
-            // group (so the trailing `\"` doesn't leak into the captured URL
-            // and break extractors with a literal `"` suffix).
-            val srcRegex = Regex(
-                "\"([^\"]*LECTEUR[^\"]*)\"\\s*:\\s*\"(?:[^\"\\\\]|\\\\.)*?src=\\\\?[\"']?(https?:(?:[^\"'\\\\\\s]|\\\\/)+)",
-                RegexOption.IGNORE_CASE
-            )
-            srcRegex.findAll(html).forEach { match ->
-                val rawName = match.groupValues[1].trim()
-                val rawSrc = match.groupValues[2]
-                    .replace("\\/", "/")
-                    .replace("\\\"", "\"")
-                    .takeIf { it.startsWith("http") } ?: return@forEach
-                if (!seenSrcs.add(rawSrc)) return@forEach
-                val hostShort = try {
-                    java.net.URL(rawSrc).host.split(".").first { it != "www" }
-                        .replaceFirstChar { it.uppercase() }
-                } catch (_: Exception) { "Lecteur" }
-                servers.add(Video.Server(id = rawSrc, name = "$rawName ($hostShort)", src = rawSrc))
-                Log.w("VoirDramaProvider", "JS source matched: $rawName -> $rawSrc")
-            }
-            Log.w("VoirDramaProvider", "After JS parse: ${servers.size} servers")
-
-            // 2) DOM iframe fallback (older episodes / different page templates).
-            document.select(".chapter-video-frame iframe, .reading-content iframe, .entry-content iframe, iframe[src]").forEach { iframe ->
-                val src = iframe.attr("src").takeIf { it.isNotBlank() && it.startsWith("http") } ?: return@forEach
-                if (!seenSrcs.add(src)) return@forEach
-                val serverName = try {
-                    java.net.URL(src).host.split(".").first { it != "www" }
-                        .replaceFirstChar { it.uppercase() }
-                } catch (_: Exception) { "Lecteur" }
-                servers.add(Video.Server(id = src, name = serverName, src = src))
-            }
-
-            // Détecter la langue dans le titre/URL de la page
-            val pageTitle = document.title().lowercase()
-            val pageUrl = url.lowercase()
-            val lang = when {
-                pageTitle.contains("vostfr") || pageUrl.contains("vostfr") -> "VOSTFR"
-                pageTitle.contains("-vf") || pageUrl.contains("-vf") -> "VF"
-                pageTitle.contains("vo ") || pageUrl.contains("-vo-") -> "VO"
-                else -> "VOSTFR" // Par défaut pour les dramas coréens
-            }
-
-            // 2026-05-04 : reordered — mail.ru en premier car pas de
-            // Cloudflare challenge, extraction quasi-instantanée. vidmoly
-            // est descendu à priorité 5 car CF Turnstile prend ~10-20s.
-            // Filemoon / yourupload / voe en priorité moyenne car ont
-            // souvent leur propre captcha mais sont plus stables que vidmoly
-            // depuis que CF est en place.
-            val priority = mapOf(
-                "mail.ru" to 0, "my.mail.ru" to 0,  // Pas de CF, rapide
-                "voe" to 1, "voe.sx" to 1,
-                "filemoon" to 2, "weneverbeenfree" to 2,
-                "yourupload" to 3, "www.yourupload.com" to 3,
-                "streamtape" to 4,
-                "vidmoly" to 5,  // CF challenge → lent, dernière option
-                "streamhide" to 6
-            )
-            val withLang = servers.map { server ->
-                if (!server.name.contains("VF") && !server.name.contains("VOSTFR") && !server.name.contains("VO")) {
-                    Video.Server(id = server.id, name = "${server.name} ($lang)", src = server.src)
-                } else server
-            }.distinctBy { it.id }
-            val voirDramaSorted = withLang.sortedBy { server ->
-                val host = try { java.net.URL(server.src).host.lowercase() } catch (_: Exception) { "" }
-                priority.entries.firstOrNull { host.contains(it.key) }?.value ?: 50
-            }
-
-            // 2026-05-04 : on attend le résultat de l'enrichissement DC et on
-            // l'ajoute en QUEUE de liste (servers VoirDrama d'abord, DC en
-            // backup). Timeout de 5s pour pas bloquer le player si DC traîne.
-            val dcServers = dramacoolServersDeferred?.let { deferred ->
-                try {
-                    kotlinx.coroutines.withTimeoutOrNull(5_000L) { deferred.await() } ?: emptyList()
-                } catch (_: Exception) { emptyList() }
-            } ?: emptyList()
-            // Dédup : si DC pointe vers une URL déjà dans VoirDrama, skip
-            val existingSrcs = voirDramaSorted.map { it.src }.toHashSet()
-            val dcUnique = dcServers.filter { it.src !in existingSrcs }
-            if (dcUnique.isNotEmpty()) {
-                Log.d("VoirDramaProvider", "DC enrich: added ${dcUnique.size} backup servers")
-            }
-
-            // 2026-05-06 : Cloudstream backup #2 — pour les K-Dramas, Cloudstream
-            // (MovieBox+) couvre une partie du catalogue avec audio/sub FR.
-            val cloudstreamBackup = if (!showTitle.isNullOrBlank()) {
-                try {
-                    val year = document.selectFirst("h1.entry-title")?.text()?.let {
-                        Regex("""\((\d{4})\)""").find(it)?.groupValues?.get(1)?.toIntOrNull()
-                    }
-                    val csVideoType = when (videoType) {
-                        is Video.Type.Movie -> Video.Type.Movie(
-                            id = "0", title = showTitle,
-                            releaseDate = year?.toString() ?: "",
-                            poster = videoType.poster, imdbId = videoType.imdbId,
-                        )
-                        is Video.Type.Episode -> Video.Type.Episode(
-                            id = "0", number = videoType.number,
-                            title = videoType.title, poster = videoType.poster,
-                            overview = videoType.overview,
-                            tvShow = videoType.tvShow.copy(
-                                id = "0", title = showTitle,
-                                releaseDate = year?.toString() ?: videoType.tvShow.releaseDate,
-                            ),
-                            season = videoType.season,
-                        )
-                    }
-                    CloudstreamProvider.getServers("0", csVideoType)
-                        .also {
-                            if (it.isNotEmpty()) Log.d("VoirDramaProvider",
-                                "+ Cloudstream backup pour '$showTitle' : ${it.size} sources")
-                        }
-                } catch (e: Exception) {
-                    Log.d("VoirDramaProvider", "Cloudstream backup failed: ${e.message}")
-                    emptyList()
-                }
-            } else emptyList()
-
-            // 2026-05-05 : Moviebox backup pour les K-Dramas.
-            val movieboxBackup = if (!showTitle.isNullOrBlank()) {
-                try {
-                    val year = document.selectFirst("h1.entry-title")?.text()?.let {
-                        Regex("""\((\d{4})\)""").find(it)?.groupValues?.get(1)?.toIntOrNull()
-                    }
-                    val type = if (videoType is Video.Type.Movie) 1 else 2
-                    val (sNum, eNum) = if (videoType is Video.Type.Episode)
-                        videoType.season.number to videoType.number else null to null
-                    MovieboxProvider.getMovieboxSourcesByTitle(showTitle, year, type, sNum, eNum)
-                        .also {
-                            if (it.isNotEmpty()) Log.d("VoirDramaProvider",
-                                "+ Moviebox backup pour '$showTitle' : ${it.size} sources")
-                        }
-                } catch (e: Exception) {
-                    Log.d("VoirDramaProvider", "Moviebox backup failed: ${e.message}")
-                    emptyList()
-                }
-            } else emptyList()
-
-            voirDramaSorted + cloudstreamBackup + dcUnique + movieboxBackup
-            } // close coroutineScope
         } catch (e: Exception) {
             Log.e("VoirDramaProvider", "getServers error: ", e)
             emptyList()
+        }
+    }
+
+    /** Contexte extrait de la page VoirDrama, nécessaire aux backups. */
+    private data class VdCtx(
+        val showTitle: String?,
+        val year: Int?,
+        val seasonNumber: Int?,
+        val episodeNumber: Int,
+        val nativeSrcs: Set<String>,
+    )
+
+    /** Serveurs NATIFS VoirDrama (parse JS `LECTEUR` + iframes DOM, triés par
+     *  fiabilité d'hôte) + contexte (titre nettoyé, année, saison/épisode). */
+    private suspend fun fetchVoirDramaNative(id: String, videoType: Video.Type): Pair<List<Video.Server>, VdCtx> {
+        val url = when (videoType) {
+            is Video.Type.Movie -> if (id.startsWith("http")) id else "${baseUrl}drama/$id/"
+            is Video.Type.Episode -> if (id.startsWith("http")) id else "${baseUrl}drama/$id/"
+        }
+        val document = service.getPage(url)
+        val rawTitle = document.selectFirst("h1.entry-title")?.text()?.trim()
+            ?: document.title().substringBefore(" - ").substringBefore(" – ").trim().ifBlank { null }
+        val showTitle = rawTitle?.let { t ->
+            t.replace(Regex("""\s*[-–]?\s*Saison\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("""\s*[-–]?\s*[Ss]\d+\s*[Ee]\d+.*$"""), "")
+                .replace(Regex("""\s*[-–]?\s*[ÉéEe]pisode\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("""\s+(VOSTFR|VOST|VF|VO|FR)\b.*$""", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("""\s*\(\d{4}\)\s*$"""), "")
+                .trim().ifBlank { null }
+        }
+        val episodeNumber = (videoType as? Video.Type.Episode)?.number ?: 1
+        val seasonNumber = (videoType as? Video.Type.Episode)?.season?.number
+        val year = rawTitle?.let { Regex("""\((\d{4})\)""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
+
+        val servers = mutableListOf<Video.Server>()
+        val seenSrcs = mutableSetOf<String>()
+        val html = document.outerHtml()
+        val srcRegex = Regex(
+            "\"([^\"]*LECTEUR[^\"]*)\"\\s*:\\s*\"(?:[^\"\\\\]|\\\\.)*?src=\\\\?[\"']?(https?:(?:[^\"'\\\\\\s]|\\\\/)+)",
+            RegexOption.IGNORE_CASE
+        )
+        srcRegex.findAll(html).forEach { match ->
+            val rawName = match.groupValues[1].trim()
+            val rawSrc = match.groupValues[2].replace("\\/", "/").replace("\\\"", "\"")
+                .takeIf { it.startsWith("http") } ?: return@forEach
+            if (!seenSrcs.add(rawSrc)) return@forEach
+            val hostShort = try {
+                java.net.URL(rawSrc).host.split(".").first { it != "www" }.replaceFirstChar { it.uppercase() }
+            } catch (_: Exception) { "Lecteur" }
+            servers.add(Video.Server(id = rawSrc, name = "$rawName ($hostShort)", src = rawSrc))
+        }
+        document.select(".chapter-video-frame iframe, .reading-content iframe, .entry-content iframe, iframe[src]").forEach { iframe ->
+            val src = iframe.attr("src").takeIf { it.isNotBlank() && it.startsWith("http") } ?: return@forEach
+            if (!seenSrcs.add(src)) return@forEach
+            val serverName = try {
+                java.net.URL(src).host.split(".").first { it != "www" }.replaceFirstChar { it.uppercase() }
+            } catch (_: Exception) { "Lecteur" }
+            servers.add(Video.Server(id = src, name = serverName, src = src))
+        }
+
+        val pageTitle = document.title().lowercase()
+        val pageUrl = url.lowercase()
+        val lang = when {
+            pageTitle.contains("vostfr") || pageUrl.contains("vostfr") -> "VOSTFR"
+            pageTitle.contains("-vf") || pageUrl.contains("-vf") -> "VF"
+            pageTitle.contains("vo ") || pageUrl.contains("-vo-") -> "VO"
+            else -> "VOSTFR"
+        }
+        val priority = mapOf(
+            "mail.ru" to 0, "my.mail.ru" to 0,
+            "voe" to 1, "voe.sx" to 1,
+            "filemoon" to 2, "weneverbeenfree" to 2,
+            "yourupload" to 3, "www.yourupload.com" to 3,
+            "streamtape" to 4,
+            "vidmoly" to 5,
+            "streamhide" to 6
+        )
+        val withLang = servers.map { server ->
+            if (!server.name.contains("VF") && !server.name.contains("VOSTFR") && !server.name.contains("VO")) {
+                Video.Server(id = server.id, name = "${server.name} ($lang)", src = server.src)
+            } else server
+        }.distinctBy { it.id }
+        val voirDramaSorted = withLang.sortedBy { server ->
+            val host = try { java.net.URL(server.src).host.lowercase() } catch (_: Exception) { "" }
+            priority.entries.firstOrNull { host.contains(it.key) }?.value ?: 50
+        }
+        return voirDramaSorted to VdCtx(showTitle, year, seasonNumber, episodeNumber, voirDramaSorted.map { it.src }.toHashSet())
+    }
+
+    /** Enrichissement Dramacool par titre (le caller dédup contre nativeSrcs). */
+    private suspend fun fetchVdDramacoolEnrich(ctx: VdCtx): List<Video.Server> {
+        if (ctx.showTitle.isNullOrBlank()) return emptyList()
+        return try { fetchDramacoolServersByTitle(ctx.showTitle, ctx.episodeNumber, ctx.year, ctx.seasonNumber) }
+        catch (_: Exception) { emptyList() }
+    }
+
+    /** Backup Cloudstream (MovieBox+) — K-Dramas avec audio/sub FR. */
+    private suspend fun fetchVdCloudstreamBackup(ctx: VdCtx, videoType: Video.Type): List<Video.Server> {
+        if (ctx.showTitle.isNullOrBlank()) return emptyList()
+        return try {
+            val csVideoType = when (videoType) {
+                is Video.Type.Movie -> Video.Type.Movie(
+                    id = "0", title = ctx.showTitle, releaseDate = ctx.year?.toString() ?: "",
+                    poster = videoType.poster, imdbId = videoType.imdbId,
+                )
+                is Video.Type.Episode -> Video.Type.Episode(
+                    id = "0", number = videoType.number, title = videoType.title,
+                    poster = videoType.poster, overview = videoType.overview,
+                    tvShow = videoType.tvShow.copy(
+                        id = "0", title = ctx.showTitle,
+                        releaseDate = ctx.year?.toString() ?: videoType.tvShow.releaseDate,
+                    ),
+                    season = videoType.season,
+                )
+            }
+            CloudstreamProvider.getServers("0", csVideoType)
+        } catch (e: Exception) {
+            Log.d("VoirDramaProvider", "Cloudstream backup failed: ${e.message}"); emptyList()
+        }
+    }
+
+    /** Backup Moviebox — K-Dramas. */
+    private suspend fun fetchVdMovieboxBackup(ctx: VdCtx, videoType: Video.Type): List<Video.Server> {
+        if (ctx.showTitle.isNullOrBlank()) return emptyList()
+        return try {
+            val type = if (videoType is Video.Type.Movie) 1 else 2
+            val (sNum, eNum) = if (videoType is Video.Type.Episode)
+                videoType.season.number to videoType.number else null to null
+            MovieboxProvider.getMovieboxSourcesByTitle(ctx.showTitle, ctx.year, type, sNum, eNum)
+        } catch (e: Exception) {
+            Log.d("VoirDramaProvider", "Moviebox backup failed: ${e.message}"); emptyList()
+        }
+    }
+
+    /** Affichage PROGRESSIF : natif d'abord (vite), puis backups en parallèle —
+     *  plus d'attente bloquante sur Cloudstream/Moviebox avant de voir une source. */
+    override fun getServersProgressive(id: String, videoType: Video.Type): Flow<List<Video.Server>> = channelFlow {
+        initializeService()
+        // Items Dramacool (dc::) = mono-source → une seule émission.
+        if (isDramacool(id)) {
+            try {
+                val stripped = dcStripPrefix(id)
+                val s = when (videoType) {
+                    is Video.Type.Episode -> {
+                        val parts = stripped.split("/")
+                        val slug = parts.getOrElse(0) { stripped }
+                        val ep = parts.getOrElse(1) { videoType.number.toString() }.toIntOrNull() ?: videoType.number
+                        getServersFromDramacool(slug, ep)
+                    }
+                    is Video.Type.Movie -> getServersFromDramacool(stripped, 1)
+                }
+                if (s.isNotEmpty()) send(s)
+            } catch (e: Exception) { Log.w("VoirDramaProvider", "Progressive DC failed: ${e.message}") }
+            return@channelFlow
+        }
+        launch {
+            try {
+                val (native, ctx) = fetchVoirDramaNative(id, videoType)
+                if (native.isNotEmpty()) send(native)
+                if (!ctx.showTitle.isNullOrBlank()) {
+                    launch { try { val cs = fetchVdCloudstreamBackup(ctx, videoType); if (cs.isNotEmpty()) send(cs) } catch (e: Exception) { Log.w("VoirDramaProvider", "Progressive CS: ${e.message}") } }
+                    launch { try { val dc = fetchVdDramacoolEnrich(ctx).filter { it.src !in ctx.nativeSrcs }; if (dc.isNotEmpty()) send(dc) } catch (e: Exception) { Log.w("VoirDramaProvider", "Progressive DCenrich: ${e.message}") } }
+                    launch { try { val mb = fetchVdMovieboxBackup(ctx, videoType); if (mb.isNotEmpty()) send(mb) } catch (e: Exception) { Log.w("VoirDramaProvider", "Progressive MB: ${e.message}") } }
+                }
+            } catch (e: Exception) { Log.w("VoirDramaProvider", "Progressive native failed: ${e.message}") }
         }
     }
 

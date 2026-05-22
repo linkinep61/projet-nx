@@ -260,6 +260,11 @@ class PlayerTvFragment : Fragment() {
     // "extracteur foireux jamais démarré" (skip 30s) vs "coupure pendant
     // lecture" (super-buffer 15s, no swap).
     private var vodCurrentStreamHasWorked = false
+    // 2026-05-21 (user "baisse auto seulement si ça bufferise" + "remonte tout seul
+    //   quand c'est stable") : plafond de résolution adaptatif piloté par les
+    //   rebufferings (mode Auto/VOD uniquement). Cf AdaptiveQualityGovernor.
+    private var adaptiveQualityGovernor: com.streamflixreborn.streamflix.utils.AdaptiveQualityGovernor? = null
+    private var adaptiveQualityTicker: kotlinx.coroutines.Job? = null
 
     private var currentVideo: Video? = null
     private var currentServer: Video.Server? = null
@@ -287,6 +292,16 @@ class PlayerTvFragment : Fragment() {
     private var webViewOverlay: FrameLayout? = null
     private var overlayWebView: WebView? = null
     private var overlayIsAbyss = false
+    // 2026-05-21 (user "la petite barre comme Hydrax pour Player4me + curseur qui
+    //   disparaît une fois qu'on a cliqué sur la vidéo") : Player4me réutilise la
+    //   barre de contrôle abyss/Hydrax. overlayIsPlayer4me = ce flux Player4me ;
+    //   player4meStarted = la lecture a démarré (curseur caché, barre prend le relais).
+    private var overlayIsPlayer4me = false
+    private var player4meStarted = false
+    // Mode réglage qualité Player4me : on ré-affiche le curseur pour atteindre
+    //   l'engrenage natif (bas-droite), la barre est masquée et l'auto-hide du
+    //   curseur est suspendu ; Retour quitte ce mode.
+    private var player4meQualityMode = false
     private var abyssBar: android.widget.LinearLayout? = null
     private var abyssButtons: List<android.widget.TextView> = emptyList()
     private var abyssSeek: android.widget.ProgressBar? = null
@@ -303,6 +318,7 @@ class PlayerTvFragment : Fragment() {
     private var abyssQualityLabels: MutableList<android.widget.TextView> = mutableListOf()
     private var abyssQualityIndex = 0
     private var virtualCursorView: View? = null
+    private var overlayHint: TextView? = null
     private var cursorX = 0f
     private var cursorY = 0f
     private var pendingWebViewVideo: Video? = null
@@ -740,6 +756,7 @@ class PlayerTvFragment : Fragment() {
                         showLoadingOverlay()
                     }
                     is PlayerViewModel.State.SuccessLoadingServers -> {
+                        Log.d("ServDiag", "FRAG reçu SuccessLoadingServers n=${state.servers.size}")
                         servers = state.servers
 
                         val sToServer = servers.firstOrNull {
@@ -1321,6 +1338,39 @@ class PlayerTvFragment : Fragment() {
                         viewModel.getVideo(target)
                     }
                     // Downloads disabled on TV
+                }
+            }
+
+            // 2026-05-21 : mise à jour PROGRESSIVE de la liste (providers progressifs).
+            //   Reçoit la liste COMPLÈTE ré-ordonnée par bucket de langue à chaque
+            //   nouveau lot. On remplace le picker SANS relancer la lecture.
+            viewLifecycleOwner.lifecycleScope.launch {
+                viewModel.serversReordered.collect { reordered ->
+                    servers = reordered
+                    val nonOla = reordered.filter { !it.name.startsWith("OLA[") }
+                    val prevSelectedId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isSelected }?.id
+                    val prevLoadingId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isLoading }?.id
+                    PlayerSettingsView.Settings.Server.list.clear()
+                    PlayerSettingsView.Settings.Server.list.addAll(nonOla.map {
+                        PlayerSettingsView.Settings.Server(id = it.id, name = it.name).apply {
+                            isSelected = (it.id == prevSelectedId)
+                            isLoading = (it.id == prevLoadingId)
+                        }
+                    })
+                    if (::player.isInitialized) {
+                        player.playlistMetadata = MediaMetadata.Builder()
+                            .setTitle(player.playlistMetadata?.title?.toString() ?: "")
+                            .setMediaServers(nonOla.map { MediaServer(id = it.id, name = it.name) })
+                            .build()
+                    }
+                    binding.settings.setOnServerSelectedListener { sel ->
+                        try { player.stop() } catch (_: Exception) {}
+                        val target = servers.find { sel.id == it.id }
+                            ?: Video.Server(id = sel.id, name = sel.name)
+                        viewModel.getVideo(target)
+                    }
+                    scheduleServerRefresh()
+                    Log.d("PlayerTvFragment", "Servers reordered (progressive): ${reordered.size}")
                 }
             }
 
@@ -2316,12 +2366,16 @@ class PlayerTvFragment : Fragment() {
             shouldPlay: Boolean = true,
         ) {
             currentVideo = video
+            // 2026-05-21 : statut serveurs PAR TITRE (couleurs picker liées à ce contenu).
+            com.streamflixreborn.streamflix.utils.TitleServerStatus.setCurrentTitle(args.id)
             // Reset IPTV stickiness when the user (or auto-failover) selects a NEW server.
             // This way the new server gets its own retry budget and can also become sticky.
             if (currentServer?.id != server.id) {
                 iptvRetryCount = 0
                 iptvCurrentStreamHasWorked = false
                 vodCurrentStreamHasWorked = false
+                // 2026-05-21 : nouveau serveur → on repart en pleine qualité.
+                adaptiveQualityGovernor?.reset()
             }
             currentServer = server
             updatePlayerHeader()
@@ -2564,6 +2618,9 @@ class PlayerTvFragment : Fragment() {
                     super.onPlaybackStateChanged(playbackState)
                     wireCenterFocus()
 
+                    // 2026-05-21 : alimente le governor de qualité adaptatif (rebuffers).
+                    adaptiveQualityGovernor?.onState(playbackState)
+
                     // 2026-05-17 v18 (user "jumelage") : swap automatique vers backup
                     //   si BUFFERING persiste >2s ET qu'on a un backup dans la queue.
                     if (playbackState == Player.STATE_BUFFERING) {
@@ -2740,6 +2797,15 @@ class PlayerTvFragment : Fragment() {
                         if (!vodCurrentStreamHasWorked) {
                             vodCurrentStreamHasWorked = true
                             Log.d("PlayerTvFragment", "VOD stream marked as working — no more auto-swap")
+                        }
+                        // 2026-05-21 : ce serveur a RÉELLEMENT joué pour CE titre → VERIFIED
+                        //   (vert) uniquement pour ce titre (args.id).
+                        currentServer?.let {
+                            com.streamflixreborn.streamflix.utils.TitleServerStatus.record(
+                                it.id,
+                                com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.VERIFIED,
+                                args.id,
+                            )
                         }
                         // Restore the normal 2s auto-hide for the controller
                         // (we forced it to 0 during IPTV extraction so the
@@ -3191,6 +3257,15 @@ class PlayerTvFragment : Fragment() {
 
                 override fun onPlayerError(error: PlaybackException) {
                     super.onPlayerError(error)
+                    // 2026-05-21 : ce serveur a ÉCHOUÉ pour CE titre → DEAD (rouge) uniquement
+                    //   pour ce titre (args.id). Pas de bave sur les autres épisodes.
+                    currentServer?.let {
+                        com.streamflixreborn.streamflix.utils.TitleServerStatus.record(
+                            it.id,
+                            com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD,
+                            args.id,
+                        )
+                    }
                     Log.e("PlayerTvFragment", "onPlayerError: ", error)
 
                     val cause = error.cause?.cause
@@ -4456,7 +4531,7 @@ class PlayerTvFragment : Fragment() {
         }
 
         Glide.with(this)
-            .load(nextEpisode.poster ?: nextEpisode.tvShow.poster)
+            .load(com.streamflixreborn.streamflix.utils.optimizeArtworkUrl(nextEpisode.poster ?: nextEpisode.tvShow.poster, 400))
             .error(R.drawable.glide_fallback_cover)
             .fallback(R.drawable.glide_fallback_cover)
             .centerCrop()
@@ -5316,6 +5391,21 @@ class PlayerTvFragment : Fragment() {
                         .build()
                 }
 
+            // 2026-05-21 : governor de qualité adaptatif — actif uniquement en VOD +
+            //   qualité Auto (qualityHeight == null). Descend sur rebuffers répétés,
+            //   remonte quand stable. Recréé à chaque rebuild de player.
+            adaptiveQualityTicker?.cancel()
+            adaptiveQualityGovernor = com.streamflixreborn.streamflix.utils.AdaptiveQualityGovernor(player) {
+                !isLiveIptvHere2 && UserPreferences.qualityHeight == null
+            }
+            adaptiveQualityTicker = viewLifecycleOwner.lifecycleScope.launch {
+                while (_binding != null) {
+                    kotlinx.coroutines.delay(10_000L)
+                    if (_binding == null) break
+                    adaptiveQualityGovernor?.onTick()
+                }
+            }
+
             binding.pvPlayer.player = player
             binding.settings.player = player
             binding.settings.subtitleView = binding.pvPlayer.subtitleView
@@ -5373,7 +5463,14 @@ class PlayerTvFragment : Fragment() {
             // Detect if this is a DaddyLive/bolaloca embed
             val isDaddyLiveEmbed = embedUrl.contains("bolaloca")
             val isAbyssEmbed = embedUrl.contains("abyss")
+            // 2026-05-21 (user "bloque les pubs sinon on peut rien faire") : Player4me
+            //   (4meplayer.com) balance des interstitiels plein écran → on lui applique
+            //   le même anti-pub que DaddyLive (blocage ressources + tueur d'overlays JS).
+            val isPlayer4me = embedUrl.contains("4meplayer")
             overlayIsAbyss = isAbyssEmbed
+            overlayIsPlayer4me = isPlayer4me
+            player4meStarted = false
+            player4meQualityMode = false
             val abyssNavAllow = listOf(
                 "abysscdn.com", "abyss.to", "abyssa.cc", "abyssplayer.com", "hydrax.net",
                 "iamcdn.net", "googleapis.com", "jwpcdn.com", "jsdelivr.net",
@@ -5390,6 +5487,21 @@ class PlayerTvFragment : Fragment() {
                 override fun shouldOverrideUrlLoading(
                     view: WebView?, request: WebResourceRequest?
                 ): Boolean {
+                    // 2026-05-21 (logs : la WebView naviguait vers ch.marketdeathly.com) :
+                    //   Player4me redirige TOUTE la page vers un interstitiel pub. On
+                    //   bloque la navigation top-level vers tout ce qui n'est pas
+                    //   4meplayer + ses CDN connus. Le flux vidéo, lui, se charge en
+                    //   RESSOURCE (pas en navigation) → non impacté.
+                    if (isPlayer4me) {
+                        val nh = request?.url?.host ?: return false
+                        val ok = listOf(
+                            "4meplayer", "dessinanime", "cloudflare", "cloudfront",
+                            "akamaized", "googlevideo", "jsdelivr", "sendvid", "uqload",
+                            "abysscdn", "embed4me", "hakunaymatata", "bcdn", "hcdn"
+                        ).any { nh.contains(it) }
+                        if (!ok) { Log.d("PlayerTV", "Player4me NAV BLOCKED: $nh"); return true }
+                        return false
+                    }
                     if (!isAbyssEmbed) return false
                     val navHost = request?.url?.host ?: return false
                     val allowed = abyssNavAllow.any { navHost == it || navHost.endsWith(".$it") }
@@ -5408,6 +5520,23 @@ class PlayerTvFragment : Fragment() {
                             Log.d("PlayerTV", "Abyss AD BLOCKED: $ah")
                             return WebResourceResponse("text/plain", "UTF-8",
                                 java.io.ByteArrayInputStream("".toByteArray()))
+                        }
+                    }
+
+                    // ── Player4me: block ad resources (interstitiels plein écran) ──
+                    if (isPlayer4me) {
+                        val host = request?.url?.host ?: ""
+                        val isAd = AD_BLOCK_PATTERNS.any { host.contains(it, ignoreCase = true) }
+                            || url.contains("/ads/") || url.contains("/ad.")
+                            || url.contains("popunder") || url.contains("pop.js")
+                            || url.contains("/vast") || url.contains("vpaid")
+                            || url.contains("syndication") || url.contains("/banner")
+                        if (isAd) {
+                            Log.d("PlayerTV", "Player4me AD BLOCKED: $host/${url.takeLast(50)}")
+                            return WebResourceResponse(
+                                "text/plain", "UTF-8",
+                                java.io.ByteArrayInputStream("".toByteArray())
+                            )
                         }
                     }
 
@@ -5533,9 +5662,25 @@ class PlayerTvFragment : Fragment() {
                     }
 
                     // ── DaddyLive: inject anti-popup/ad JS ──
+                    //   (PAS pour Player4me : ce JS supprime les divs fixed/absolute
+                    //   z>100 → il enlevait le conteneur du player 4meplayer = écran noir.
+                    //   Pour Player4me on s'appuie sur le blocage des RESSOURCES pub +
+                    //   onCreateWindow=false, sans toucher au DOM du player.)
                     if (isDaddyLiveEmbed) {
                         view?.evaluateJavascript(DADDYLIVE_AD_KILL_JS, null)
                     }
+                }
+
+                // 2026-05-21 : accepter les certs SSL invalides dans l'overlay player.
+                //   Sans ça, les hosts au cert douteux (ex. 4meplayer/Player4me + leurs
+                //   CDN) sont rejetés (handshake -202) → page/vidéo bloquée = écran noir.
+                //   Cohérent avec le trust-all déjà en place (OkHttp/IptvTlsHelper).
+                override fun onReceivedSslError(
+                    view: WebView?,
+                    handler: android.webkit.SslErrorHandler?,
+                    error: android.net.http.SslError?
+                ) {
+                    try { handler?.proceed() } catch (_: Throwable) { handler?.cancel() }
                 }
             }
 
@@ -5560,7 +5705,7 @@ class PlayerTvFragment : Fragment() {
 
             // ── Hint text ──
             val hint = TextView(ctx).apply {
-                text = if (isDaddyLiveEmbed) "Chargement du flux DaddyLive..." else if (isAbyssEmbed) "OK = lecture/pause     gauche/droite = -10s / +10s" else "Utilisez les flèches pour déplacer, OK pour cliquer"
+                text = if (isDaddyLiveEmbed) "Chargement du flux DaddyLive..." else if (isAbyssEmbed) "OK = lecture/pause     gauche/droite = -10s / +10s" else if (isPlayer4me) "Placez le curseur sur la vidéo et OK pour lancer  •  ensuite : Haut = barre, Gauche/Droite = avancer (maintenir = plus vite)" else "Utilisez les flèches pour déplacer, OK pour cliquer"
                 setTextColor(Color.WHITE)
                 textSize = 14f
                 setShadowLayer(4f, 0f, 0f, Color.BLACK)
@@ -5575,8 +5720,18 @@ class PlayerTvFragment : Fragment() {
 
             overlay.addView(wv)
             overlay.addView(cursor)
+            // 2026-05-21 (user "fais-moi la petite barre comme Hydrax pour Player4me,
+            //   contrôlable télécommande, boutons repérables, tout fonctionnel ; le
+            //   bouton Serveur pour changer DE serveur ; et fais disparaître le pointeur
+            //   une fois qu'on a cliqué sur la vidéo") : on étend la barre de contrôle
+            //   abyss/Hydrax à Player4me. Différences :
+            //   - abyss est chargé en iframe → JS via iframe.contentWindow + jwplayer.
+            //   - Player4me est chargé EN DIRECT → JS sur le <video> du document top.
+            //   - abyss cache le curseur d'emblée ; Player4me a besoin d'UN clic pour
+            //     démarrer le lecteur, donc on garde le curseur jusqu'au 1er play puis
+            //     on le cache (le poll détecte position>0 → cursor GONE + barre active).
             if (isAbyssEmbed) cursor.visibility = View.GONE
-            if (isAbyssEmbed) {
+            if (isAbyssEmbed || isPlayer4me) {
                 val container = android.widget.LinearLayout(ctx).apply {
                     orientation = android.widget.LinearLayout.VERTICAL
                     setBackgroundColor(Color.parseColor("#CC000000"))
@@ -5603,7 +5758,13 @@ class PlayerTvFragment : Fragment() {
                     orientation = android.widget.LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_HORIZONTAL
                 }
-                val labels = listOf("Lecture / Pause", "-10s", "+10s", "Qualite", "Serveur")
+                // Player4me = <video> HTML5 direct. La qualité est gérée par l'engrenage
+                //   NATIF du lecteur (bas-droite) → le bouton « Qualité » ré-affiche le
+                //   curseur pour l'atteindre. « Serveur » change de serveur (showServers()).
+                val labels = if (isPlayer4me)
+                    listOf("Lecture / Pause", "-10s", "+10s", "Qualité", "Serveur")
+                else
+                    listOf("Lecture / Pause", "-10s", "+10s", "Qualite", "Serveur")
                 val btns = labels.map { lbl ->
                     android.widget.TextView(ctx).apply {
                         text = lbl; setTextColor(Color.WHITE); textSize = 18f
@@ -5618,6 +5779,7 @@ class PlayerTvFragment : Fragment() {
                 updateAbyssSelection(); showAbyssBar()
             }
             overlay.addView(hint)
+            overlayHint = hint
             rootView.addView(overlay)
 
             // Center cursor initially
@@ -5676,6 +5838,14 @@ class PlayerTvFragment : Fragment() {
                 // ad-kill JS runs in the same context as the popup-creating scripts.
                 Log.d("PlayerTV", "Loading DaddyLive embed directly: ${embedUrl.take(100)}")
                 wv.loadUrl(embedUrl)
+            } else if (embedUrl.contains("4meplayer")) {
+                // 2026-05-21 (user "Player4me écran noir, fais comme Hydrax") : 4meplayer
+                //   doit être chargé DIRECTEMENT (l'iframe wrapper provoque
+                //   « document.domain mutation blocked » → écran noir) avec Referer
+                //   dessinanime.cc (anti-hotlink). C'est ce que faisait l'ancien
+                //   extracteur quand il chargeait la page correctement.
+                Log.d("PlayerTV", "Loading Player4me directly: ${embedUrl.take(100)}")
+                wv.loadUrl(embedUrl, mapOf("Referer" to "https://dessinanime.cc/"))
             } else {
                 // Other embeds: use iframe wrapper (page expects to be in an iframe)
                 val iframeWrapper = """
@@ -5709,6 +5879,10 @@ class PlayerTvFragment : Fragment() {
             pendingWebViewVideo = null
             pendingWebViewServer = null
             overlayIsAbyss = false
+            overlayIsPlayer4me = false
+            player4meStarted = false
+            player4meQualityMode = false
+            overlayHint = null
             abyssHideRunnable?.let { abyssHandler.removeCallbacks(it) }
             abyssPollRunnable?.let { abyssHandler.removeCallbacks(it) }
             abyssPollRunnable = null
@@ -5736,7 +5910,17 @@ class PlayerTvFragment : Fragment() {
         fun handleOverlayKey(keyCode: Int, repeatCount: Int): Boolean {
             val overlay = webViewOverlay ?: return false
             val wv = overlayWebView ?: return false
-            if (overlayIsAbyss) {
+            // Player4me — mode réglage qualité : le curseur est actif pour atteindre
+            //   l'engrenage natif ; Retour quitte ce mode et rend la main à la barre.
+            //   (les autres touches tombent dans le bloc curseur plus bas).
+            if (overlayIsPlayer4me && player4meQualityMode && keyCode == KeyEvent.KEYCODE_BACK) {
+                exitPlayer4meQualityMode(); return true
+            }
+            // Player4me : tant que la lecture n'a pas démarré, le curseur est actif
+            //   (clic pour lancer le lecteur) → on laisse passer vers le bloc curseur.
+            //   Une fois démarré (player4meStarted), la barre prend le relais (sauf
+            //   pendant le mode réglage qualité où c'est le curseur qui pilote).
+            if (overlayIsAbyss || (overlayIsPlayer4me && player4meStarted && !player4meQualityMode)) {
                 showAbyssBar()
                 if (abyssQualityMode) {
                     when (keyCode) {
@@ -5763,6 +5947,12 @@ class PlayerTvFragment : Fragment() {
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                         triggerAbyssAction(if (abyssRow == 0) 0 else abyssBtnIndex); return true
                     }
+                    KeyEvent.KEYCODE_BACK -> {
+                        // Player4me : BACK ferme l'overlay proprement (sinon on reste coincé
+                        //   sur le lecteur sans curseur).
+                        if (overlayIsPlayer4me) { hideWebViewOverlay(); return true }
+                        return false
+                    }
                     else -> return false
                 }
             }
@@ -5774,10 +5964,10 @@ class PlayerTvFragment : Fragment() {
                 else -> CURSOR_STEP
             }
             return when (keyCode) {
-                KeyEvent.KEYCODE_DPAD_UP -> { cursorY = (cursorY - speed).coerceAtLeast(0f); updateCursorPosition(cursor); true }
-                KeyEvent.KEYCODE_DPAD_DOWN -> { cursorY = (cursorY + speed).coerceAtMost(overlay.height.toFloat()); updateCursorPosition(cursor); true }
-                KeyEvent.KEYCODE_DPAD_LEFT -> { cursorX = (cursorX - speed).coerceAtLeast(0f); updateCursorPosition(cursor); true }
-                KeyEvent.KEYCODE_DPAD_RIGHT -> { cursorX = (cursorX + speed).coerceAtMost(overlay.width.toFloat()); updateCursorPosition(cursor); true }
+                KeyEvent.KEYCODE_DPAD_UP -> { cursorY = (cursorY - speed).coerceAtLeast(0f); updateCursorPosition(cursor); if (overlayIsPlayer4me) dispatchHoverToWebView(wv, cursorX, cursorY); true }
+                KeyEvent.KEYCODE_DPAD_DOWN -> { cursorY = (cursorY + speed).coerceAtMost(overlay.height.toFloat()); updateCursorPosition(cursor); if (overlayIsPlayer4me) dispatchHoverToWebView(wv, cursorX, cursorY); true }
+                KeyEvent.KEYCODE_DPAD_LEFT -> { cursorX = (cursorX - speed).coerceAtLeast(0f); updateCursorPosition(cursor); if (overlayIsPlayer4me) dispatchHoverToWebView(wv, cursorX, cursorY); true }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> { cursorX = (cursorX + speed).coerceAtMost(overlay.width.toFloat()); updateCursorPosition(cursor); if (overlayIsPlayer4me) dispatchHoverToWebView(wv, cursorX, cursorY); true }
                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { dispatchClickToWebView(wv, cursorX, cursorY); true }
                 else -> false
             }
@@ -5803,9 +5993,9 @@ class PlayerTvFragment : Fragment() {
             val poll = object : Runnable {
                 override fun run() {
                     val wv = overlayWebView ?: return
-                    wv.evaluateJavascript(
+                    val posJs = if (overlayIsPlayer4me) p4mPosJs else
                         "(function(){try{var w=document.querySelector('iframe').contentWindow;var p=(w.jwplayer&&w.jwplayer());if(p&&p.getPosition){return Math.floor(p.getPosition())+'/'+Math.floor(p.getDuration()||0);}var v=w.document.querySelector('video');if(v)return Math.floor(v.currentTime||0)+'/'+Math.floor(v.duration||0);return '0/0';}catch(e){return '0/0';}})();"
-                    ) { res ->
+                    wv.evaluateJavascript(posJs) { res ->
                         try {
                             val s = res.trim('"')
                             val parts = s.split('/')
@@ -5813,6 +6003,14 @@ class PlayerTvFragment : Fragment() {
                                 abyssPosSec = parts[0].toFloatOrNull()?.toInt() ?: abyssPosSec
                                 abyssDurSec = parts[1].toFloatOrNull()?.toInt() ?: abyssDurSec
                                 updateAbyssProgress()
+                                // Player4me : dès que la lecture a démarré (position > 0),
+                                //   le curseur n'est plus utile → on le cache et la barre
+                                //   Hydrax prend la main sur la télécommande.
+                                if (overlayIsPlayer4me && !player4meStarted && abyssPosSec > 0) {
+                                    player4meStarted = true
+                                    virtualCursorView?.visibility = View.GONE
+                                    showAbyssBar()
+                                }
                             }
                         } catch (_: Exception) {}
                     }
@@ -5832,6 +6030,20 @@ class PlayerTvFragment : Fragment() {
             val h = s / 3600; val m = (s % 3600) / 60; val ss = s % 60
             return if (h > 0) String.format("%d:%02d:%02d", h, m, ss) else String.format("%02d:%02d", m, ss)
         }
+        // ── Player4me : le lecteur est chargé EN DIRECT (pas dans une iframe wrapper),
+        //   donc on agit sur le <video> du document top (avec repli sur les iframes
+        //   same-origin éventuelles). p4mVideoJs(body) = exécute `body` avec `v` = le
+        //   <video> trouvé ; p4mPosJs = renvoie "pos/dur". ──
+        private fun p4mVideoJs(body: String): String =
+            "(function(){try{var v=document.querySelector('video');" +
+            "if(!v){var f=document.querySelectorAll('iframe');for(var i=0;i<f.length;i++){" +
+            "try{var d=f[i].contentDocument||f[i].contentWindow.document;v=d&&d.querySelector('video');if(v)break;}catch(e){}}}" +
+            "if(v){" + body + "}}catch(e){}})();"
+        private val p4mPosJs: String =
+            "(function(){try{var v=document.querySelector('video');" +
+            "if(!v){var f=document.querySelectorAll('iframe');for(var i=0;i<f.length;i++){" +
+            "try{var d=f[i].contentDocument||f[i].contentWindow.document;v=d&&d.querySelector('video');if(v)break;}catch(e){}}}" +
+            "if(v)return Math.floor(v.currentTime||0)+'/'+Math.floor(v.duration||0);return '0/0';}catch(e){return '0/0';}})();"
         private fun abyssSeekBy(dir: Int, repeatCount: Int) {
             val dur = abyssDurSec.coerceAtLeast(1)
             val stepSec = when {
@@ -5842,13 +6054,25 @@ class PlayerTvFragment : Fragment() {
             val target = (abyssPosSec + dir * stepSec).coerceIn(0, dur)
             abyssPosSec = target
             updateAbyssProgress()
-            overlayWebView?.evaluateJavascript(
-                "(function(){try{var w=document.querySelector('iframe').contentWindow;var p=(w.jwplayer&&w.jwplayer());if(p&&p.seek){p.seek(" + target + ");return;}var v=w.document.querySelector('video');if(v)v.currentTime=" + target + ";}catch(e){}})();",
-                null
-            )
+            val seekJs = if (overlayIsPlayer4me) p4mVideoJs("v.currentTime=$target;") else
+                "(function(){try{var w=document.querySelector('iframe').contentWindow;var p=(w.jwplayer&&w.jwplayer());if(p&&p.seek){p.seek(" + target + ");return;}var v=w.document.querySelector('video');if(v)v.currentTime=" + target + ";}catch(e){}})();"
+            overlayWebView?.evaluateJavascript(seekJs, null)
         }
         private fun triggerAbyssAction(index: Int) {
             val wv = overlayWebView ?: return
+            // Player4me : boutons = [Lecture/Pause(0), -10s(1), +10s(2), Qualité(3), Serveur(4)],
+            //   JS direct sur le <video> (pas de jwplayer/iframe). Qualité = ré-affiche
+            //   le curseur pour atteindre l'engrenage natif (bas-droite).
+            if (overlayIsPlayer4me) {
+                when (index) {
+                    1 -> wv.evaluateJavascript(p4mVideoJs("v.currentTime=Math.max(0,v.currentTime-10);"), null)
+                    2 -> wv.evaluateJavascript(p4mVideoJs("v.currentTime=v.currentTime+10;"), null)
+                    3 -> enterPlayer4meQualityMode()
+                    4 -> { hideWebViewOverlay(); try { binding.settings.showServers() } catch (_: Exception) {} }
+                    else -> wv.evaluateJavascript(p4mVideoJs("if(v.paused){v.play();}else{v.pause();}"), null)
+                }
+                return
+            }
             if (index == 3) { showAbyssQualityMenu(); return }
             if (index == 4) { hideWebViewOverlay(); try { binding.settings.showServers() } catch (_: Exception) {}; return }
             val js = when (index) {
@@ -5858,6 +6082,36 @@ class PlayerTvFragment : Fragment() {
                 else -> "(function(){try{var w=document.querySelector('iframe').contentWindow;var p=(w.jwplayer&&w.jwplayer());if(p&&p.getState){if(p.getState()==='playing')p.pause();else p.play();return;}var v=w.document.querySelector('video');if(v){if(v.paused)v.play();else v.pause();}}catch(e){}})();"
             }
             wv.evaluateJavascript(js, null)
+        }
+        // ── Player4me : réglage de la qualité via l'engrenage NATIF du lecteur ──
+        //   La qualité n'est pas exposée à un JS générique pour ce lecteur ; on
+        //   ré-affiche donc le curseur (positionné près de l'engrenage bas-droite),
+        //   on masque notre barre et on suspend l'auto-masquage du curseur. Retour
+        //   (géré dans handleOverlayKey) ramène la barre.
+        private fun enterPlayer4meQualityMode() {
+            player4meQualityMode = true
+            abyssBar?.visibility = View.GONE
+            abyssHideRunnable?.let { abyssHandler.removeCallbacks(it) }
+            val ov = webViewOverlay
+            val cursor = virtualCursorView
+            if (cursor != null && ov != null) {
+                cursorX = ov.width * 0.93f
+                cursorY = ov.height * 0.93f
+                updateCursorPosition(cursor)
+                cursor.visibility = View.VISIBLE
+            }
+            // réveille les contrôles natifs du lecteur (sinon l'engrenage est caché)
+            overlayWebView?.let { dispatchHoverToWebView(it, cursorX, cursorY) }
+            overlayHint?.let {
+                it.text = "Curseur : engrenage qualité en bas à droite  •  OK pour ouvrir  •  Retour pour revenir à la barre"
+                it.alpha = 1f
+            }
+        }
+        private fun exitPlayer4meQualityMode() {
+            player4meQualityMode = false
+            virtualCursorView?.visibility = View.GONE
+            overlayHint?.let { it.animate().alpha(0f).setDuration(400).start() }
+            showAbyssBar()
         }
         private fun showAbyssQualityMenu() {
             val wv = overlayWebView ?: return

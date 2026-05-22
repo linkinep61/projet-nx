@@ -85,7 +85,7 @@ class ShowOptionsTvDialog(
         val provider = UserPreferences.currentProvider
 
         Glide.with(context)
-            .load(episode.poster ?: episode.tvShow?.poster)
+            .load(com.streamflixreborn.streamflix.utils.optimizeArtworkUrl(episode.poster ?: episode.tvShow?.poster, 400))
             .fallback(R.drawable.glide_fallback_cover)
             .fitCenter()
             .into(binding.ivOptionsShowPoster)

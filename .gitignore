@@ -50,6 +50,9 @@ trigger.txt
 # Keystore (ne pas exposer)
 streamflix-release.jks
 
+# Firebase config (contient API key — CI le reçoit via secrets)
+app/google-services.json
+
 # Backup providers (local uniquement)
 providers_backup/
 

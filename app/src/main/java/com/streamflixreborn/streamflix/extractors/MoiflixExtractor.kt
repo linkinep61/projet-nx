@@ -41,8 +41,11 @@ import kotlin.coroutines.resume
  */
 open class MoiflixExtractor : Extractor() {
     override val name = "Moiflix"
-    override val mainUrl = "https://moiflix.com/"
-    override val aliasUrls = listOf("https://moiflix.org")
+    // 2026-05-21 : moiflix.com redirige désormais vers moiflix.click (domaine actif,
+    //   vérifié dans le navigateur). On charge .click directement ; .com/.org gardés
+    //   en alias pour le matching d'URL.
+    override val mainUrl = "https://moiflix.click/"
+    override val aliasUrls = listOf("https://moiflix.com", "https://moiflix.org")
 
     private val context = StreamFlixApp.instance.applicationContext
 
@@ -227,6 +230,7 @@ open class MoiflixExtractor : Extractor() {
 
     companion object {
         private val ALLOWED_HOSTS = listOf(
+            "moiflix.click", // 2026-05-21 : domaine actif (moiflix.com y redirige)
             "moiflix.com",
             "moiflix.org",
             "xtremestream.xyz",

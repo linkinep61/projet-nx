@@ -6,13 +6,35 @@
     android:layout_height="match_parent"
     tools:context=".fragments.movie.MovieMobileFragment">
 
+    <!-- Couche 0 : wallpaper home provider en fond (visible sous la bannière) -->
+    <ImageView
+        android:id="@+id/iv_detail_wallpaper"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:src="@drawable/bg_wallpaper_mobile"
+        android:scaleType="centerCrop"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:ignore="ContentDescription" />
+
+    <!-- Guideline à 45% pour limiter la bannière au haut de l'écran -->
+    <androidx.constraintlayout.widget.Guideline
+        android:id="@+id/gl_banner_bottom"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        app:layout_constraintGuide_percent="0.45" />
+
+    <!-- Couche 1 : bannière backdrop (haut de l'écran, dégradé vers le wallpaper) -->
     <ImageView
         android:id="@+id/iv_movie_banner"
         android:layout_width="0dp"
         android:layout_height="0dp"
-        android:foreground="?attr/movie_banner_gradient_drawable"
+        android:foreground="@drawable/bg_banner_gradient_mobile_detail"
         android:scaleType="centerCrop"
-        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintBottom_toBottomOf="@id/gl_banner_bottom"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"

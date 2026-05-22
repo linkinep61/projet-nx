@@ -71,9 +71,16 @@ class TmdbProvider(override val language: String) : Provider {
         private val searchCache = java.util.concurrent.ConcurrentHashMap<String, CachedSearch>()
     }
 
+    /** 2026-05-21 — langue d'origine TMDB selon le filtre catalogue choisi par
+     *  l'utilisateur (item « Filtre »). null = pas de filtre (Monde). */
+    private fun tmdbCatalogOriginalLanguage(): TMDb3.Params.WithBuilder<String>? {
+        val lang = com.streamflixreborn.streamflix.utils.CatalogFilter.originalLanguage(name)
+        return lang?.let { TMDb3.Params.WithBuilder(it) }
+    }
+
     override suspend fun getHome(): List<Category> = coroutineScope {
         // 2026-05-04 : cache hit ?
-        val cacheKey = "home:$language"
+        val cacheKey = "home:$language:${com.streamflixreborn.streamflix.utils.CatalogFilter.get(name).pref}"
         val now = System.currentTimeMillis()
         homeCache[cacheKey]?.let { cached ->
             if (now < cached.expiresAtMs) {
@@ -121,18 +128,20 @@ class TmdbProvider(override val language: String) : Provider {
         }
 
         val popularMoviesDeferred = async {
+            val lang = tmdbCatalogOriginalLanguage()
             awaitAll(
-                async { TMDb3.MovieLists.popular(page = 1, language = language) },
-                async { TMDb3.MovieLists.popular(page = 2, language = language) },
-                async { TMDb3.MovieLists.popular(page = 3, language = language) },
+                async { TMDb3.Discover.movie(page = 1, language = language, sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC, withOriginalLanguage = lang) },
+                async { TMDb3.Discover.movie(page = 2, language = language, sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC, withOriginalLanguage = lang) },
+                async { TMDb3.Discover.movie(page = 3, language = language, sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC, withOriginalLanguage = lang) },
             ).flatMap { it.results }
         }
 
         val popularTvShowsDeferred = async {
+            val lang = tmdbCatalogOriginalLanguage()
             awaitAll(
-                async { TMDb3.TvSeriesLists.popular(page = 1, language = language) },
-                async { TMDb3.TvSeriesLists.popular(page = 2, language = language) },
-                async { TMDb3.TvSeriesLists.popular(page = 3, language = language) },
+                async { TMDb3.Discover.tv(page = 1, language = language, sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC, withOriginalLanguage = lang) },
+                async { TMDb3.Discover.tv(page = 2, language = language, sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC, withOriginalLanguage = lang) },
+                async { TMDb3.Discover.tv(page = 3, language = language, sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC, withOriginalLanguage = lang) },
             ).flatMap { it.results }
         }
 
@@ -478,7 +487,7 @@ class TmdbProvider(override val language: String) : Provider {
     }
 
     override suspend fun getMovies(page: Int): List<Movie> {
-        val movies = TMDb3.MovieLists.popular(page = page, language = language).results.map { movie ->
+        val movies = TMDb3.Discover.movie(page = page, language = language, sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC, withOriginalLanguage = tmdbCatalogOriginalLanguage()).results.map { movie ->
             Movie(
                 id = movie.id.toString(),
                 title = movie.title,
@@ -494,7 +503,7 @@ class TmdbProvider(override val language: String) : Provider {
     }
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
-        val tvShows = TMDb3.TvSeriesLists.popular(page = page, language = language).results.map { tv ->
+        val tvShows = TMDb3.Discover.tv(page = page, language = language, sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC, withOriginalLanguage = tmdbCatalogOriginalLanguage()).results.map { tv ->
             TvShow(
                 id = tv.id.toString(),
                 title = tv.name,
@@ -837,7 +846,9 @@ class TmdbProvider(override val language: String) : Provider {
                 val frembedUrl = UserPreferences.getProviderCache(FrembedProvider, UserPreferences.PROVIDER_URL).ifEmpty { FrembedProvider.defaultBaseUrl }
 
                 coroutineScope {
-                    val frProviders = listOf(UnJourUnFilmProvider, FrenchStreamProvider, KidrazProvider)
+                    // 2026-05-21 : KidrazProvider supprimé (doublon d'aplouf, absorbé par
+                    //   aploufProvider). Référence pendante → remplacée par aploufProvider.
+                    val frProviders = listOf(UnJourUnFilmProvider, FrenchStreamProvider, aploufProvider)
                     val perProviderTimeout = 12_000L // 12s max par provider
 
                     // Providers de recherche (priorité par ordre) — timeout individuel

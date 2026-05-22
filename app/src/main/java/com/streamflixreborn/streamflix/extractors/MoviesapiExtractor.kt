@@ -9,7 +9,10 @@ import retrofit2.http.Url
 class MoviesapiExtractor : Extractor() {
 
     override val name = "Moviesapi"
-    override val mainUrl = "https://moviesapi.club/"
+    // 2026-05-21 : moviesapi.club est NXDOMAIN — le service a migré vers moviesapi.to
+    //   (vérifié 200, embed /movie/<tmdbId> OK). Le .club est aussi visé par un
+    //   blocage judiciaire. Le user : "elles ont juste changé de nom de domaine".
+    override val mainUrl = "https://moviesapi.to/"
 
     fun server(videoType: Video.Type): Video.Server {
         return Video.Server(

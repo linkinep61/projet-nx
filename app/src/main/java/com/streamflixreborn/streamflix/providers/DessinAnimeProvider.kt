@@ -18,9 +18,12 @@ import com.streamflixreborn.streamflix.utils.TMDb3.w1280
 import com.streamflixreborn.streamflix.utils.TitleNormalizer
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -52,7 +55,7 @@ import java.util.concurrent.TimeUnit
  *   - getVideo délègue à Extractor.extract qui choisit l'extractor
  *     selon le host (uqload, sendvid, minochinos…)
  */
-object DessinAnimeProvider : Provider {
+object DessinAnimeProvider : Provider, ProgressiveServersProvider {
 
     override val name = "DessinAnime"
     override val baseUrl = "https://dessinanime.cc"
@@ -269,7 +272,7 @@ object DessinAnimeProvider : Provider {
         //   d'écran (ivHomeBackground) qu'on voit défiler derrière les rangées.
         val featuredSource = (if (homeItems.isNotEmpty()) homeItems else catalogItems)
             .filter { it is Movie || it is TvShow }
-            .take(6)
+            .take(10)
         if (featuredSource.isNotEmpty() && UserPreferences.enableTmdb) {
             val featured = featuredSource.map { item ->
                 when (item) {
@@ -278,6 +281,12 @@ object DessinAnimeProvider : Provider {
                     else -> item
                 }
             }
+            // 2026-05-22 (user "les catégories du home DessinAnime sont longues à
+            //   arriver") : l'enrichissement TMDB du carrousel (jusqu'à 10 recherches)
+            //   bloquait getHome SANS timeout → tout le home retardé si TMDB rame.
+            //   On le borne à 2,5s ; au timeout, les items gardent leur poster comme
+            //   bannière (fallback déjà géré plus bas) → home rapide.
+            kotlinx.coroutines.withTimeoutOrNull(2_500L) {
             featured.map { item ->
                 async(Dispatchers.IO) {
                     try {
@@ -307,15 +316,34 @@ object DessinAnimeProvider : Provider {
                     } catch (_: Exception) {}
                 }
             }.awaitAll()
-            // On ne garde dans le carrousel QUE les items qui ont un vrai backdrop
-            //   paysage TMDB (sinon poster portrait moche en fond). Si aucun → pas
-            //   de carrousel (home sans fond, léger).
+            }  // withTimeoutOrNull : carrousel non bloquant si TMDB rame
+            // Priorité aux items avec backdrop TMDB paysage, mais si trop peu
+            // (< 3), on complète avec les posters comme banner pour avoir un
+            // carrousel qui défile (mieux qu'une seule image fixe).
             val withBackdrop = featured.filter { item ->
                 val b = when (item) { is Movie -> item.banner; is TvShow -> item.banner; else -> null }
-                b != null && b.contains("/t/p/w1280/")  // backdrop paysage TMDB réellement trouvé
+                b != null && b.contains("/t/p/w1280/")
             }
-            if (withBackdrop.isNotEmpty()) {
-                categories.add(0, Category(name = Category.FEATURED, list = withBackdrop))
+            val carouselItems = if (withBackdrop.size >= 3) {
+                withBackdrop
+            } else {
+                // Fallback : tous les items avec au moins un poster (utilisé comme banner)
+                featured.onEach { item ->
+                    val b = when (item) { is Movie -> item.banner; is TvShow -> item.banner; else -> null }
+                    if (b == null || !b.contains("/t/p/")) {
+                        // Pas de backdrop TMDB → utiliser le poster comme banner
+                        when (item) {
+                            is Movie -> if (item.poster != null) item.banner = item.poster
+                            is TvShow -> if (item.poster != null) item.banner = item.poster
+                        }
+                    }
+                }.filter { item ->
+                    val b = when (item) { is Movie -> item.banner; is TvShow -> item.banner; else -> null }
+                    !b.isNullOrBlank()
+                }
+            }
+            if (carouselItems.isNotEmpty()) {
+                categories.add(0, Category(name = Category.FEATURED, list = carouselItems))
             }
         }
 
@@ -538,6 +566,16 @@ object DessinAnimeProvider : Provider {
             Log.w(TAG, "native servers KO: ${e.message}"); emptyList()
         }
 
+        // 2026-05-21 (user "ça charge plus les serveurs, remets les appels comme avant ;
+        //   ça a toujours bien chargé") : si on a déjà des serveurs natifs, on les renvoie
+        //   IMMÉDIATEMENT. Les secours croisés (Cloudstream → Movix avec id "0") restaient
+        //   bloqués sans réponse (fstream/0, wiflix/0) → l'écran de chargement ne finissait
+        //   jamais. Les secours ne servent QUE quand le natif est vide.
+        if (native.isNotEmpty()) {
+            Log.d(TAG, "getServers: ${native.size} natifs (secours ignorés, natif présent)")
+            return@withContext native
+        }
+
         val title = when (videoType) {
             is Video.Type.Movie -> videoType.title
             is Video.Type.Episode -> videoType.tvShow.title
@@ -584,6 +622,63 @@ object DessinAnimeProvider : Provider {
 
         Log.d(TAG, "getServers: ${native.size} natifs + ${backups.size} backups (CS+AS)")
         native + backups
+    }
+
+    // ── Chargement PROGRESSIF (2026-05-21) ─────────────────────────────
+    //   Natifs émis tout de suite, puis Cloudstream et AnimeSama émis
+    //   dès qu'ils répondent, en parallèle — pas d'attente bloquante.
+    override fun getServersProgressive(id: String, videoType: Video.Type): Flow<List<Video.Server>> = channelFlow {
+        // 1) Natifs — émis immédiatement
+        val native = try { fetchNativeServers(id, videoType) }
+        catch (e: Exception) { Log.w(TAG, "progressive native KO: ${e.message}"); emptyList() }
+        if (native.isNotEmpty()) {
+            // 2026-05-21 (user "remets les appels comme avant, ça a toujours bien chargé") :
+            //   on a du natif → on l'émet et on s'ARRÊTE. Les secours croisés
+            //   (Cloudstream → Movix id "0") restaient bloqués (fstream/0, wiflix/0) et
+            //   maintenaient le flux ouvert → chargement infini. Secours seulement si vide.
+            send(native)
+            return@channelFlow
+        }
+
+        val title = when (videoType) {
+            is Video.Type.Movie -> videoType.title
+            is Video.Type.Episode -> videoType.tvShow.title
+        }.trim()
+        if (title.isBlank()) return@channelFlow
+
+        // VideoType pour Cloudstream (id="0" car recherche par titre)
+        val csType: Video.Type = when (videoType) {
+            is Video.Type.Movie -> Video.Type.Movie(
+                id = "0", title = title, releaseDate = videoType.releaseDate,
+                poster = videoType.poster, imdbId = videoType.imdbId,
+            )
+            is Video.Type.Episode -> Video.Type.Episode(
+                id = "0", number = videoType.number, title = videoType.title,
+                poster = videoType.poster, overview = videoType.overview,
+                tvShow = videoType.tvShow.copy(id = "0", title = title),
+                season = videoType.season,
+            )
+        }
+
+        // 2) Backups en parallèle — chacun émet dès qu'il finit
+        val csJob = launch(Dispatchers.IO) {
+            try {
+                val servers = (kotlinx.coroutines.withTimeoutOrNull(12_000L) {
+                    CloudstreamProvider.getServers("0", csType)
+                } ?: emptyList()).map { it.copy(id = "csbackup__${it.id}", name = "CS · ${it.name}") }
+                if (servers.isNotEmpty()) send(servers)
+            } catch (e: Exception) { Log.w(TAG, "progressive CS backup KO: ${e.message}") }
+        }
+        val asJob = launch(Dispatchers.IO) {
+            try {
+                val servers = (kotlinx.coroutines.withTimeoutOrNull(15_000L) {
+                    AnimeSamaProvider.getAnimeSamaSourcesByTitle(title, videoType)
+                } ?: emptyList()).map { it.copy(id = "asbackup__${it.id}", name = "AS · ${it.name}") }
+                if (servers.isNotEmpty()) send(servers)
+            } catch (e: Exception) { Log.w(TAG, "progressive AS backup KO: ${e.message}") }
+        }
+        csJob.join()
+        asJob.join()
     }
 
     /**

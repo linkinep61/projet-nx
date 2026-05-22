@@ -43,6 +43,23 @@ object ExtractorRanker {
 
     private const val TAG = "ExtractorRanker"
 
+    // 2026-05-21 (user "VOE marche très bien mais se fait squeezer par Doodstream") :
+    //   un serveur PROUVÉ fonctionnel (a déjà des mesures d'extraction réussies +
+    //   zéro échec récent) doit passer AU-DESSUS d'un serveur jamais testé. Sans
+    //   ça, la latence mesurée d'un bon serveur (ex VOE ~2.5s → bias -5) le faisait
+    //   tomber sous un serveur neutre jamais mesuré (bias 0). Le bonus garantit
+    //   "prouvé qui marche > inconnu".
+    private const val PROVEN_BONUS = 15
+
+    // 2026-05-21 : Papadustream natif → score fixe -100 (early return dans computeScore).
+    // Ses sources captcha Cloudflare passent TOUJOURS en dernier (juste au-dessus
+    // des ISP-blocked à -200). Tout backup sain passe devant.
+
+    /** État de fiabilité d'un serveur, pour l'affichage couleur du picker et le
+     *  filtrage de la 2ᵉ passe (on ne retente que VERIFIED/UNSURE/UNTESTED, jamais DEAD).
+     *  VERIFIED=vert, DEAD=rouge, UNSURE=orange, UNTESTED=blanc. */
+    enum class ServerStatus { VERIFIED, DEAD, UNSURE, UNTESTED }
+
     /** Hosts/extracteurs notoirement bloqués par les FAI FR — toujours en
      *  bas de la liste, même s'ils sont "sains" côté tracker. */
     private val FRENCH_ISP_BLOCKED_PATTERNS = listOf(
@@ -292,6 +309,13 @@ object ExtractorRanker {
         }
         if (isFrenchIspBlocked) return -200
 
+        // ─── Papadustream natif → TOUJOURS en dernier (juste au-dessus de ISP-blocked) ───
+        // Ses sources sont gated par un captcha Cloudflare Turnstile, lentes et peu
+        // fiables. On les force à score fixe -100 : tout backup sain passe devant,
+        // même un VOSTFR ou un serveur jamais testé. Le captcha = ultime dernier recours.
+        val isCaptchaGated = srcLower.contains("papadustream") || srcLower.contains("#xf=")
+        if (isCaptchaGated) return -100
+
         // ─── Identifie l'extracteur ───
         // Stratégie hybride en 2 temps :
         //  1. Si le NOM du server matche un pattern "Wrapper — Real" (Movix —
@@ -325,7 +349,14 @@ object ExtractorRanker {
         // Pénalité langue : VF en haut, VOSTFR au milieu, VO tout en bas.
         val languagePenalty = computeLanguagePenalty(nameLower)
 
-        return health + speedBias - failurePenalty - languagePenalty
+        // 2026-05-21 : bonus "prouvé fonctionnel". Si l'extracteur est sain,
+        // sans échec récent ET qu'on a déjà des mesures d'extraction réussies
+        // (donc il a marché chez l'user), on le remonte au-dessus des jamais-testés.
+        // Corrige le cas VOE (qui marche) qui passait sous Doodstream (jamais mesuré).
+        val hasProvenSamples = ExtractorLatencyTracker.getAvgMs(extractorName) != null
+        val provenBonus = if (health >= 100 && failureCount == 0 && hasProvenSamples) PROVEN_BONUS else 0
+
+        return health + speedBias + provenBonus - failurePenalty - languagePenalty
     }
 
     /**
@@ -397,5 +428,76 @@ object ExtractorRanker {
         // Normalise première lettre majuscule (le tracker stocke "Filemoon"
         // pas "filemoon" parce qu'Extractor.name est CamelCase).
         return first.replaceFirstChar { it.uppercase() }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // 2026-05-21 : STATUT serveur (rouge/orange/blanc) pour le picker + 2ᵉ passe.
+    // ─────────────────────────────────────────────────────────────────────
+
+    // Cache court (2 s) des entrées d'échec pour éviter de re-parser le JSON à
+    // chaque ligne du picker (≈50 binds).
+    @Volatile private var cachedFailureEntries: Map<String, ExtractorFailureTracker.FailureEntry> = emptyMap()
+    @Volatile private var cachedFailureEntriesAtMs = 0L
+    private fun failureEntriesCached(): Map<String, ExtractorFailureTracker.FailureEntry> {
+        val now = System.currentTimeMillis()
+        if (now - cachedFailureEntriesAtMs > 2_000L) {
+            cachedFailureEntries = ExtractorFailureTracker.getFailures().associateBy { it.name }
+            cachedFailureEntriesAtMs = now
+        }
+        return cachedFailureEntries
+    }
+
+    /** Résout le nom d'extracteur d'un serveur (même logique que computeScore). */
+    private fun resolveExtractorName(server: Video.Server): String? {
+        val nameBased = extractKeywordFromServerName(server.name)
+        val urlBased = if (server.src.isNotBlank()) Extractor.identifyServiceName(server.src) else null
+        val isWrapped = server.name.contains(Regex("\\s[—–-]\\s"))
+        return when {
+            isWrapped && nameBased != null -> nameBased
+            urlBased != null -> urlBased
+            nameBased != null -> nameBased
+            else -> null
+        }
+    }
+
+    // Types d'échec qui NE comptent PAS comme une vraie tentative de lecture ratée :
+    //  - "embed-head-failed" = soupçon du scan HEAD de fond (pas un vrai essai)
+    //  - "dead-content"      = URL morte côté contenu, pas la faute de l'extracteur
+    private val SOFT_FAILURE_TYPES = setOf("embed-head-failed", "dead-content")
+    // Latence moyenne au-delà de laquelle l'extracteur est "lent" → orange (marche mais rame).
+    private const val SLOW_LATENCY_MS = 3_000L
+
+    /**
+     * Statut de fiabilité, calé sur le modèle user (2026-05-21) :
+     *  - DEAD (rouge)     : NE MARCHE PAS — FAI-bloqué, cassé (<5 min), OU au moins
+     *                       une VRAIE tentative de lecture a échoué (404/DNS/timeout/
+     *                       connexion/parsing…). 1 vrai échec suffit (plus besoin de 3).
+     *  - UNSURE (orange)  : LENT ou PAS SÛR — lent à l'extraction, OU seulement
+     *                       soupçonné par le scan de fond (jamais essayé pour de vrai).
+     *  - VERIFIED (vert)  : déjà extrait avec succès + aucun échec courant → ça marche.
+     *  - UNTESTED (blanc) : aucun signal, jamais essayé.
+     *
+     * Basé sur le NOM (le picker n'a pas l'URL) : health/échecs sont indexés par nom.
+     */
+    fun statusOf(server: Video.Server): ServerStatus {
+        val nameLower = server.name.lowercase()
+        val srcLower = server.src.lowercase()
+        if (FRENCH_ISP_BLOCKED_PATTERNS.any { nameLower.contains(it) || srcLower.contains(it) }) {
+            return ServerStatus.DEAD
+        }
+        // ─── PAR TITRE d'abord (2026-05-21, user "lié à l'épisode/film, pas de bave
+        //     sur les autres") : résultat RÉEL observé pour CE titre. Prioritaire.
+        //       VERIFIED = a joué (READY) ici · DEAD = a échoué ici · UNSURE = douteux ici.
+        //     Un échec sur l'épisode 1 ne colore PAS l'épisode 2 (clé = titre courant).
+        TitleServerStatus.statusOf(server.id)?.let { return it }
+
+        // ─── Pas encore essayé sur CE titre → indice FAIBLE, sans mentir "ça marche".
+        //     On ne réutilise PLUS les échecs/succès globaux comme couleur (ça bavait
+        //     entre titres + le vert global mentait : UQLOAD extrait parfois une URL
+        //     morte). Seul indice gardé : extracteur globalement LENT → orange ; sinon
+        //     blanc (= pas vérifié pour cette source-ci).
+        val extractorName = resolveExtractorName(server) ?: return ServerStatus.UNTESTED
+        val avgMs = ExtractorLatencyTracker.getAvgMs(extractorName)
+        return if (avgMs != null && avgMs >= SLOW_LATENCY_MS) ServerStatus.UNSURE else ServerStatus.UNTESTED
     }
 }

@@ -73,7 +73,7 @@ class ShowOptionsMobileDialog(
         val provider = UserPreferences.currentProvider
 
         Glide.with(context)
-            .load(episode.poster ?: episode.tvShow?.poster)
+            .load(com.streamflixreborn.streamflix.utils.optimizeArtworkUrl(episode.poster ?: episode.tvShow?.poster, 400))
             .fitCenter()
             .into(binding.ivOptionsShowPoster)
 

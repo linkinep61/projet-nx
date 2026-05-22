@@ -96,6 +96,12 @@ class MovieViewModel(id: String, private val database: AppDatabase) : ViewModel(
     fun getMovie(id: String) = viewModelScope.launch(Dispatchers.IO) {
         _state.emit(State.Loading)
 
+        // Afficher immédiatement le cache DB (synopsis instantané)
+        val cachedMovie = database.movieDao().getById(id)
+        if (cachedMovie != null && !cachedMovie.overview.isNullOrBlank()) {
+            _state.emit(State.SuccessLoading(cachedMovie))
+        }
+
         try {
             val provider = UserPreferences.currentProvider ?: return@launch
             val movie = provider.getMovie(id)
@@ -108,7 +114,10 @@ class MovieViewModel(id: String, private val database: AppDatabase) : ViewModel(
             _state.emit(State.SuccessLoading(movie))
         } catch (e: Exception) {
             Log.e("MovieViewModel", "getMovie: ", e)
-            _state.emit(State.FailedLoading(e))
+            // Ne pas écraser si on avait déjà le cache affiché
+            if (cachedMovie == null || cachedMovie.overview.isNullOrBlank()) {
+                _state.emit(State.FailedLoading(e))
+            }
         }
     }
 }

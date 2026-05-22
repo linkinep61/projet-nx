@@ -22,10 +22,11 @@ import kotlinx.coroutines.Dispatchers
 open class StreamWishExtractor : Extractor() {
 
     override val name = "Streamwish"
-    override val mainUrl = "https://streamwish.to"
+    override val mainUrl = "https://embedwish.com"
     override val aliasUrls = listOf(
         "https://streamwish.com",
         "https://streamwish.to",
+        "https://embedwish.com",
         "https://ajmidyad.sbs",
         "https://khadhnayad.sbs",
         "https://yadmalik.sbs",

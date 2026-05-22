@@ -451,7 +451,7 @@ class HomeTvFragment : Fragment() {
         if (swiperHasFocus == null && !swiperHasLastFocus) return
 
         Glide.with(requireContext())
-            .load(uri)
+            .load(com.streamflixreborn.streamflix.utils.optimizeArtworkUrl(uri, 1280))
             .transition(DrawableTransitionOptions.withCrossFade())
             .into(binding.ivHomeBackground)
         swiperHasLastFocus = swiperHasFocus ?: swiperHasLastFocus
@@ -462,7 +462,7 @@ class HomeTvFragment : Fragment() {
         if (UserPreferences.currentProvider is IptvProvider) return
         isBackgroundPinned = true
         Glide.with(requireContext())
-            .load(uri)
+            .load(com.streamflixreborn.streamflix.utils.optimizeArtworkUrl(uri, 1280))
             .transition(DrawableTransitionOptions.withCrossFade())
             .into(binding.ivHomeBackground)
     }
@@ -650,7 +650,7 @@ class HomeTvFragment : Fragment() {
         swiperHandler.postDelayed(object : Runnable {
             override fun run() {
                 if (isBackgroundPinned) {
-                    swiperHandler.postDelayed(this, 8_000)
+                    swiperHandler.postDelayed(this, 15_000)
                     return
                 }
 
@@ -682,9 +682,9 @@ class HomeTvFragment : Fragment() {
                 }
 
                 appAdapter.notifyItemChanged(position)
-                swiperHandler.postDelayed(this, 8_000)
+                swiperHandler.postDelayed(this, 15_000)
             }
-        }, 8_000)
+        }, 15_000)
     }
 
     private fun syncFeaturedBackground() {

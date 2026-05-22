@@ -439,27 +439,8 @@ class HomeMobileFragment : Fragment() {
     }
 
     private fun initializeHome() {
-        // Callback carrousel → fond d'écran global avec crossfade.
-        // Tous les providers qui ont un carrousel (FEATURED category) en bénéficient.
-        // Un seul backdrop en mémoire à la fois (celui du carrousel courant).
-        appAdapter.onSwiperPageChanged = { bannerUrl ->
-            if (_binding != null && isAdded) {
-                val target = binding.ivHomeBackground
-                if (bannerUrl.isNullOrBlank()) {
-                    target.visibility = View.GONE
-                    target.setImageDrawable(null)
-                } else {
-                    target.visibility = View.VISIBLE
-                    Glide.with(this)
-                        .load(bannerUrl)
-                        .override(800, 450)
-                        .format(com.bumptech.glide.load.DecodeFormat.PREFER_RGB_565)
-                        .centerCrop()
-                        .transition(com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions.withCrossFade(600))
-                        .into(target)
-                }
-            }
-        }
+        // Fond wallpaper fixe sur mobile — même fond que l'écran providers
+        appAdapter.onSwiperPageChanged = { _ -> /* no-op sur mobile */ }
 
         binding.rvHome.apply {
             setHasFixedSize(true)
@@ -525,10 +506,17 @@ class HomeMobileFragment : Fragment() {
             binding.ivIptvLanguage.visibility = View.GONE
         }
 
-        // Le fond d'écran global est piloté par le carrousel (onSwiperPageChanged).
-        // Visible uniquement si le provider a un carrousel (FEATURED category).
-        // Sinon reste GONE pour ne pas consommer de mémoire.
-        binding.ivHomeBackground.visibility = View.GONE
+        // 2026-05-20 : bouton filtre catalogue (langue/contenu) — uniquement sur
+        //   les providers TMDB compatibles (Cloudstream). Permet de choisir
+        //   "Productions françaises / Populaire international / Anime / US / …".
+        if (com.streamflixreborn.streamflix.utils.CatalogFilter.isSupported(UserPreferences.currentProvider?.name)) {
+            binding.ivCatalogFilter.visibility = View.VISIBLE
+            binding.ivCatalogFilter.setOnClickListener { showCatalogFilterPicker() }
+        } else {
+            binding.ivCatalogFilter.visibility = View.GONE
+        }
+
+        // Fond wallpaper fixe (bg_wallpaper_mobile via XML)
     }
 
     /** 2026-05-13 : ouvre un AlertDialog avec la liste des catégories LIVE
@@ -618,6 +606,38 @@ class HomeMobileFragment : Fragment() {
                     android.widget.Toast.makeText(
                         requireContext().applicationContext,
                         "Filtre langue : ${options[idx].first}",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                }
+                dlg.dismiss()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** 2026-05-20 : picker du filtre catalogue (providers TMDB type Cloudstream).
+     *  Sauve le mode PAR provider, invalide le HomeCacheStore (sinon le TTL 5 min
+     *  re-sert l'ancien home) puis recharge getHome(). Même patron que le picker
+     *  langue IPTV. */
+    private fun showCatalogFilterPicker() {
+        val provider = UserPreferences.currentProvider ?: return
+        val modes = com.streamflixreborn.streamflix.utils.CatalogFilter.Mode.entries
+        val current = com.streamflixreborn.streamflix.utils.CatalogFilter.get(provider.name)
+        val currentIdx = modes.indexOf(current).coerceAtLeast(0)
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("Filtrer le catalogue")
+            .setSingleChoiceItems(modes.map { it.label }.toTypedArray(), currentIdx) { dlg, idx ->
+                val newMode = modes[idx]
+                if (newMode != current) {
+                    com.streamflixreborn.streamflix.utils.CatalogFilter.set(provider.name, newMode)
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                        requireContext().applicationContext, provider,
+                    )
+                    viewModel.getHome()
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                    android.widget.Toast.makeText(
+                        requireContext().applicationContext,
+                        "Catalogue : ${newMode.label}",
                         android.widget.Toast.LENGTH_SHORT,
                     ).show()
                 }

@@ -114,6 +114,7 @@ class CategoryViewHolder(
                 addItemDecoration(SpacingItemDecoration(category.itemSpacing))
             }
         }
+        preloadRowArtwork(category.list)
     }
 
     private fun displayTvItem(
@@ -138,6 +139,34 @@ class CategoryViewHolder(
             isFocusable = true
             descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
         }
+        preloadRowArtwork(category.list)
+    }
+
+    /**
+     * 2026-05-21 (user "des jaquettes ne s'affichent qu'au moment où je navigue dessus,
+     *   faut précharger les suivantes") : précharge en cache Glide les jaquettes de la
+     *   rangée dès qu'elle s'affiche. Quand on scrolle, le téléchargement réseau est
+     *   déjà fait → la carte s'affiche tout de suite au lieu de rester vide. Limité à
+     *   ~15 items/rangée (Glide traite les cartes visibles en priorité, préchargées après).
+     */
+    private fun preloadRowArtwork(list: List<AppAdapter.Item>) {
+        list.take(15).forEach { item ->
+            val url = when (item) {
+                is Movie -> item.poster
+                is TvShow -> item.poster ?: item.banner
+                is com.streamflixreborn.streamflix.models.Episode -> item.poster
+                else -> null
+            }
+            if (!url.isNullOrBlank()) {
+                try {
+                    com.bumptech.glide.Glide.with(context)
+                        .load(com.streamflixreborn.streamflix.utils.optimizeArtworkUrl(url, 400))
+                        .format(com.bumptech.glide.load.DecodeFormat.PREFER_RGB_565)
+                        .preload(342, 513)
+                } catch (_: Throwable) {
+                }
+            }
+        }
     }
 
 
@@ -151,7 +180,7 @@ class CategoryViewHolder(
         val handler = Handler(Looper.getMainLooper())
         swiperHandler = handler
         swiperViewPager = binding.vpCategorySwiper
-        handler.postDelayed(8_000) {
+        handler.postDelayed(15_000) {
             binding.vpCategorySwiper.currentItem += 1
         }
 
@@ -208,7 +237,7 @@ class CategoryViewHolder(
                 onSwiperPageChanged?.invoke(bannerUrl)
 
                 handler.removeCallbacksAndMessages(null)
-                handler.postDelayed(8_000) {
+                handler.postDelayed(15_000) {
                     binding.vpCategorySwiper.currentItem += 1
                 }
             }

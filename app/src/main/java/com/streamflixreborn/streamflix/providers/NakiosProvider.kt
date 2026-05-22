@@ -59,13 +59,13 @@ object NakiosProvider : Provider, ProviderConfigUrl {
     private const val STATUS_PAGE = "https://nakios.online"
 
     /** Default si la découverte échoue. Mis à jour par onChangeUrl(). */
-    override val defaultBaseUrl: String = "https://nakios.fit"
+    override val defaultBaseUrl: String = "https://nakios.ink"
 
     /** Front URL courant (pour Origin/Referer). */
-    @Volatile private var currentFrontUrl: String = "https://nakios.fit"
+    @Volatile private var currentFrontUrl: String = "https://nakios.ink"
 
-    /** API base courant (`https://api.nakios.fit` par défaut). */
-    @Volatile private var currentApiBase: String = "https://api.nakios.fit"
+    /** API base courant (`https://api.nakios.ink` par défaut). */
+    @Volatile private var currentApiBase: String = "https://api.nakios.ink"
 
     override val baseUrl: String
         get() = currentApiBase
@@ -97,7 +97,7 @@ object NakiosProvider : Provider, ProviderConfigUrl {
      * la status page est mise à jour avant le reste.
      */
     override suspend fun onChangeUrl(forceRefresh: Boolean): String = changeUrlMutex.withLock {
-        if (!forceRefresh && currentApiBase != "https://api.nakios.fit") {
+        if (!forceRefresh && currentApiBase != "https://api.nakios.ink") {
             // déjà découvert et différent du défaut → on garde
             return@withLock currentApiBase
         }
@@ -157,9 +157,9 @@ object NakiosProvider : Provider, ProviderConfigUrl {
                 if (!resp.isSuccessful) {
                     Log.w(TAG, "GET $url → HTTP ${resp.code}")
                     // 403/404 sur l'API → potentiellement un changement de domaine
-                    if (retryWithRediscovery && (resp.code == 404 || resp.code in 500..599)) {
+                    if (retryWithRediscovery && (resp.code == 403 || resp.code == 404 || resp.code in 500..599)) {
                         val newBase = onChangeUrl(forceRefresh = true)
-                        if (newBase != currentApiBase || newBase != "https://api.nakios.fit") {
+                        if (newBase != currentApiBase || newBase != "https://api.nakios.ink") {
                             // baseUrl a changé → retry une fois sans rediscover récursif
                             return@withContext apiGet(path, retryWithRediscovery = false)
                         }
@@ -797,7 +797,7 @@ object NakiosProvider : Provider, ProviderConfigUrl {
     // JS-rendered, fetchPapadustreamSources retourne emptyList silencieusement.
     // V2 si nécessaire : créer un PapadustreamExtractor WebView style Moiflix.
 
-    private const val PAPADUSTREAM_BASE = "https://papadustream.motorcycles"
+    private const val PAPADUSTREAM_BASE = "https://papadustream.marketing"
 
     /** Cherche un titre sur Papadustream via le search DLE.
      *  Retourne l'URL absolue de la fiche (movie ou show), ou null. */

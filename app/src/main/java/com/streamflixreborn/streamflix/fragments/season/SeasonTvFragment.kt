@@ -124,11 +124,18 @@ class SeasonTvFragment : Fragment() {
     }
 
     private var focusedEpisodeIndex: Int? = null
+    private var episodeLoadJob: kotlinx.coroutines.Job? = null
+    private var loadedSignature: String? = null
 
     private fun displaySeason(episodes: List<Episode>) {
         val preparedEpisodes = episodes.onEach { episode ->
             episode.itemType = AppAdapter.Type.EPISODE_TV_ITEM
         }
+
+        // Le combine du ViewModel ré-émet à chaque changement de la base : on évite de
+        // tout recharger si la liste est identique (pas de re-render coûteux ni flicker).
+        val signature = "${episodes.size}:${episodes.firstOrNull()?.id}:${episodes.lastOrNull()?.id}"
+        if (signature == loadedSignature) return
 
         val lastWatchedIndex = episodes
             .filter { it.watchHistory != null }
@@ -136,17 +143,43 @@ class SeasonTvFragment : Fragment() {
             .firstOrNull()
             ?.let { episodes.indexOf(it) }
             ?: episodes.indexOfLast { it.isWatched }
+        val scrollIndex = when {
+            lastWatchedIndex == -1 -> 0
+            lastWatchedIndex < episodes.lastIndex -> lastWatchedIndex + 1
+            else -> lastWatchedIndex
+        }
 
-        appAdapter.submitList(preparedEpisodes)
+        episodeLoadJob?.cancel()
 
-        if (focusedEpisodeIndex == null) {
-            val scrollIndex = when {
-                lastWatchedIndex == -1 -> 0
-                lastWatchedIndex < episodes.lastIndex -> lastWatchedIndex + 1
-                else -> lastWatchedIndex
+        // Petites saisons : envoi direct. Grosses séries (One Piece, 1000+ épisodes) :
+        //   CHARGEMENT PROGRESSIF par lots avec une respiration entre chaque → le thread
+        //   principal n'est jamais bloqué >5s, donc plus d'ANR/crash.
+        if (preparedEpisodes.size <= 60) {
+            appAdapter.submitList(preparedEpisodes)
+            loadedSignature = signature
+            if (focusedEpisodeIndex == null) {
+                binding.hgvEpisodes.scrollAndFocus(scrollIndex)
+                focusedEpisodeIndex = scrollIndex
             }
-            binding.hgvEpisodes.scrollAndFocus(scrollIndex)
-            focusedEpisodeIndex = scrollIndex
+            return
+        }
+
+        episodeLoadJob = viewLifecycleOwner.lifecycleScope.launch {
+            appAdapter.clearItems()
+            val chunkSize = 24
+            var i = 0
+            while (i < preparedEpisodes.size) {
+                val end = minOf(i + chunkSize, preparedEpisodes.size)
+                appAdapter.appendItems(preparedEpisodes.subList(i, end))
+                i = end
+                // Dès que l'épisode de reprise est chargé, on s'y positionne une seule fois.
+                if (focusedEpisodeIndex == null && scrollIndex < i) {
+                    binding.hgvEpisodes.scrollAndFocus(scrollIndex)
+                    focusedEpisodeIndex = scrollIndex
+                }
+                kotlinx.coroutines.delay(16) // ~1 frame : laisse l'UI et la télécommande respirer
+            }
+            loadedSignature = signature
         }
     }
 

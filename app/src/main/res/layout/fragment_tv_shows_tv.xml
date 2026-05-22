@@ -208,7 +208,7 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/ll_iptv_actions"
-        app:numberOfColumns="6"
+        app:numberOfColumns="8"
         tools:listitem="@layout/item_tv_show_grid" />
 
     <include

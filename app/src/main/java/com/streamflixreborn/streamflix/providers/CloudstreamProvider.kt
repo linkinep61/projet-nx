@@ -25,6 +25,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -60,7 +63,7 @@ import javax.crypto.spec.SecretKeySpec
  *
  * Réfs reverse-engineering : https://github.com/Simatwa/moviebox-api (v3).
  */
-object CloudstreamProvider : Provider {
+object CloudstreamProvider : Provider, ProgressiveServersProvider {
 
     override val name = "Cloudstream"
     override val baseUrl = "https://api.themoviedb.org/3/"  // TMDB pour browsing
@@ -611,7 +614,7 @@ object CloudstreamProvider : Provider {
             watchRegion = "FR",
             sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
             withWatchProviders = TMDb3.Params.WithBuilder(watchProviderId),
-            withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
+            withOriginalLanguage = csOriginalLanguageBuilder(),
         ).results.filter { it.posterPath != null }.map(mapMovie)
     }.getOrDefault(emptyList())
 
@@ -623,9 +626,17 @@ object CloudstreamProvider : Provider {
             watchRegion = "FR",
             sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
             withWatchProviders = TMDb3.Params.WithBuilder(watchProviderId),
-            withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
+            withOriginalLanguage = csOriginalLanguageBuilder(),
         ).results.filter { it.posterPath != null }.map(mapTv)
     }.getOrDefault(emptyList())
+
+    /** 2026-05-20 — langue d'origine TMDB à appliquer selon le filtre catalogue
+     *  choisi par l'utilisateur (bouton filtre du home). null = pas de filtre de
+     *  langue (populaire international, souvent VF). Remplace le `"fr"` figé. */
+    private fun csOriginalLanguageBuilder(): TMDb3.Params.WithBuilder<String>? {
+        val lang = com.streamflixreborn.streamflix.utils.CatalogFilter.originalLanguage(name)
+        return lang?.let { TMDb3.Params.WithBuilder(it) }
+    }
 
     /** Home Cloudstream :
      *   1. Featured (carousel) — TMDB Trending Day FR
@@ -673,7 +684,7 @@ object CloudstreamProvider : Provider {
                 TMDb3.Discover.movie(
                     page = 1, language = language, region = "FR",
                     sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
-                    withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
+                    withOriginalLanguage = csOriginalLanguageBuilder(),
                     voteCount = TMDb3.Params.Range(50, null),
                 ).results
             }.getOrDefault(emptyList())
@@ -683,7 +694,7 @@ object CloudstreamProvider : Provider {
                 TMDb3.Discover.movie(
                     page = 1, language = language, region = "FR",
                     sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
-                    withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
+                    withOriginalLanguage = csOriginalLanguageBuilder(),
                 ).results
             }.getOrDefault(emptyList())
         }
@@ -692,7 +703,7 @@ object CloudstreamProvider : Provider {
                 TMDb3.Discover.movie(
                     page = 1, language = language, region = "FR",
                     sortBy = TMDb3.Params.SortBy.Movie.VOTE_AVERAGE_DESC,
-                    withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
+                    withOriginalLanguage = csOriginalLanguageBuilder(),
                     voteCount = TMDb3.Params.Range(200, null),
                 ).results
             }.getOrDefault(emptyList())
@@ -702,7 +713,7 @@ object CloudstreamProvider : Provider {
                 TMDb3.Discover.tv(
                     page = 1, language = language,
                     sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
-                    withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
+                    withOriginalLanguage = csOriginalLanguageBuilder(),
                 ).results
             }.getOrDefault(emptyList())
         }
@@ -711,7 +722,7 @@ object CloudstreamProvider : Provider {
                 TMDb3.Discover.tv(
                     page = 1, language = language,
                     sortBy = TMDb3.Params.SortBy.Tv.VOTE_AVERAGE_DESC,
-                    withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
+                    withOriginalLanguage = csOriginalLanguageBuilder(),
                     voteCount = TMDb3.Params.Range(50, null),
                 ).results
             }.getOrDefault(emptyList())
@@ -727,7 +738,7 @@ object CloudstreamProvider : Provider {
                         page = 1, language = language, region = "FR",
                         sortBy = TMDb3.Params.SortBy.Movie.PRIMARY_RELEASE_DATE_DESC,
                         voteCount = TMDb3.Params.Range(10, null),
-                        withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
+                        withOriginalLanguage = csOriginalLanguageBuilder(),
                     ).results
                 }
                 val p2 = async {
@@ -735,7 +746,7 @@ object CloudstreamProvider : Provider {
                         page = 2, language = language, region = "FR",
                         sortBy = TMDb3.Params.SortBy.Movie.PRIMARY_RELEASE_DATE_DESC,
                         voteCount = TMDb3.Params.Range(10, null),
-                        withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
+                        withOriginalLanguage = csOriginalLanguageBuilder(),
                     ).results
                 }
                 (p1.await() + p2.await()).distinctBy { it.id }
@@ -749,7 +760,7 @@ object CloudstreamProvider : Provider {
                         sortBy = TMDb3.Params.SortBy.Tv.FIRST_AIR_DATE_DESC,
                         voteCount = TMDb3.Params.Range(10, null),
                         watchRegion = "FR",
-                        withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
+                        withOriginalLanguage = csOriginalLanguageBuilder(),
                     ).results
                 }
                 val p2 = async {
@@ -758,7 +769,7 @@ object CloudstreamProvider : Provider {
                         sortBy = TMDb3.Params.SortBy.Tv.FIRST_AIR_DATE_DESC,
                         voteCount = TMDb3.Params.Range(10, null),
                         watchRegion = "FR",
-                        withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
+                        withOriginalLanguage = csOriginalLanguageBuilder(),
                     ).results
                 }
                 (p1.await() + p2.await()).distinctBy { it.id }
@@ -860,27 +871,9 @@ object CloudstreamProvider : Provider {
             .take(10).mapNotNull { it.toAppItem() }
         if (featured.isNotEmpty()) sections.add(Category(name = Category.FEATURED, list = featured))
 
-        // 1) Nouveau sur Cloudstream — toutes les nouveautés FR + VOSTFR sorties sur le
-        //    marché français, triées par date. TMDB Discover region=FR retourne le
-        //    contenu localisé pour la France (films français natifs + films étrangers
-        //    sortis en France = VOSTFR/VF disponibles). Jaquettes garanties (TMDB).
+        // Nouveautés FR (films + séries séparés, pas de section mixte doublon)
         val newMovies = newMoviesD.await().filter { it.posterPath != null }.map(mapMovie)
         val newTv = newTvD.await().filter { it.posterPath != null }.map(mapTv)
-        val nouveauTout = mutableListOf<AppAdapter.Item>()
-        nouveauTout += newMovies
-        nouveauTout += newTv
-        val nouveauSorted = nouveauTout
-            .distinctBy { (it as? Movie)?.id ?: (it as? TvShow)?.id ?: "" }
-            .sortedByDescending { item ->
-                val r = (item as? Movie)?.released ?: (item as? TvShow)?.released
-                r?.toString() ?: ""
-            }
-            .take(30)
-        if (nouveauSorted.isNotEmpty()) {
-            sections.add(Category(name = "Nouveau sur Cloudstream", list = nouveauSorted))
-        }
-
-        // 2) Films + Séries séparés
         if (newMovies.isNotEmpty()) sections.add(Category(name = "Nouveaux films", list = newMovies))
         if (newTv.isNotEmpty()) sections.add(Category(name = "Nouvelles séries", list = newTv))
 
@@ -913,7 +906,7 @@ object CloudstreamProvider : Provider {
         val topMovies = topMoviesD.await().filter { it.posterPath != null }.map(mapMovie)
         if (topMovies.isNotEmpty()) sections.add(Category(name = "Films les mieux notés", list = topMovies))
 
-        Log.d(TAG, "getHome Cloudstream : ${sections.size} sections — featured=${featured.size}, nouveau=${nouveauSorted.size}, nouveauxFilms=${newMovies.size}, nouvellesSeries=${newTv.size}")
+        Log.d(TAG, "getHome Cloudstream : ${sections.size} sections — featured=${featured.size}, nouveauxFilms=${newMovies.size}, nouvellesSeries=${newTv.size}")
         sections
     }
 
@@ -1113,7 +1106,7 @@ object CloudstreamProvider : Provider {
             TMDb3.Discover.movie(
                 page = page, language = language, region = "FR",
                 sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
-                withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
+                withOriginalLanguage = csOriginalLanguageBuilder(),
             ).results.map { m ->
                 Movie(
                     id = m.id.toString(),
@@ -1134,7 +1127,7 @@ object CloudstreamProvider : Provider {
             TMDb3.Discover.tv(
                 page = page, language = language,
                 sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
-                withOriginalLanguage = TMDb3.Params.WithBuilder("fr"),
+                withOriginalLanguage = csOriginalLanguageBuilder(),
             ).results.map { t ->
                 TvShow(
                     id = t.id.toString(),
@@ -1635,7 +1628,11 @@ object CloudstreamProvider : Provider {
 
     // ── Lecture : recherche subjectId Cloudstream + /resource ───────────
 
-    override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> = coroutineScope {
+    // 2026-05-21 : sources NATIVES Cloudstream (MovieBox+ : /resource + /play-info +
+    //   resourceDetectors + politique FR-only + unification multi-qualité). Extrait
+    //   de getServers pour être émis comme un étage du flux progressif. Résout son
+    //   propre subjectId. NE contient PLUS les backups Nakios/Movix (helpers séparés).
+    private suspend fun fetchNativeCloudstreamServers(id: String, videoType: Video.Type): List<Video.Server> = coroutineScope {
         // Cas 1 : id Cloudstream (cs::m::sid, cs::s::sid, cs::ep::sid::se::ep)
         // → on a déjà le subjectId, pas besoin de search
         var subjectId: String? = null
@@ -1713,48 +1710,9 @@ object CloudstreamProvider : Provider {
             }
         }
 
-        // Backup Nakios — lance EN PARALLÈLE de MovieBox+ (TMDB-id-based, indépendant)
-        val nakiosBackupD = async {
-            val tid = tmdbId ?: return@async emptyList<Video.Server>()
-            try {
-                NakiosProvider.fetchNakiosBackupServers(tid, videoType, season = se, episode = ep)
-            } catch (e: Exception) {
-                Log.w(TAG, "Nakios backup failed: ${e.message}")
-                emptyList()
-            }
-        }
-
-        // 2026-05-07 : Backup Movix #3 — pour les contenus que MovieBox+ et Nakios
-        // n'ont pas (ex: franchise Tuche absente de MovieBox+). Movix agrège
-        // fstream/links/wiflix/cpasmal/tmdb-movix avec ses propres extractors.
-        // skipBackupsForBackupCall=true → Movix skippe ses backups (Cloudstream,
-        // Moviebox, Papa, Coflix) pour éviter Cloudstream→Movix→Cloudstream→…
-        // Servers wrappés avec id `movix_backup__*` pour délégation getVideo.
-        val movixBackupD = async {
-            val tid = tmdbId ?: return@async emptyList<Video.Server>()
-            if (!tid.all { it.isDigit() }) return@async emptyList<Video.Server>()
-            try {
-                val prev = MovixProvider.skipBackupsForBackupCall
-                MovixProvider.skipBackupsForBackupCall = true
-                try {
-                    val raw = withTimeoutOrNull(8_000L) {
-                        MovixProvider.getServers(tid, videoType)
-                    } ?: emptyList()
-                    raw.map { srv ->
-                        srv.copy(
-                            id = "movix_backup__${srv.id}",
-                            name = "Movix — ${srv.name}",
-                        )
-                    }
-                } finally {
-                    MovixProvider.skipBackupsForBackupCall = prev
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Movix backup failed: ${e.message}")
-                emptyList()
-            }
-        }
-
+        // 2026-05-21 : backups Nakios/Movix déplacés dans des helpers séparés
+        //   (fetchNakiosBackup / fetchMovixBackupForCs) appelés par getServers et
+        //   getServersProgressive. Ici on ne produit QUE les sources natives MovieBox+.
         val servers = mutableListOf<Video.Server>()
 
         // 2026-05-08 : FAST PATH + DÉTECTION LANGUE — `/get` retourne 2 trésors :
@@ -1917,46 +1875,123 @@ object CloudstreamProvider : Provider {
         val getRespFinal = getRespD.await()
         val hasFrDub = getRespFinal?.let { hasFrenchDub(it) } == true
         val hasFrCaptions = frenchCaps.isNotEmpty()
-        // POLITIQUE STRICTE : SEUL le dub FR vrai (audio en français) garde les
-        // servers Cloudstream visibles. Les "[VF auto]" (audio EN + sub FR)
-        // mentaient pour Matrix → on les bannit. Les SRT FR cachés restent
-        // attachés au getVideo en bonus (utiles si dub FR coexiste avec sub FR).
-        if (hasFrDub) {
-            for (i in servers.indices) {
-                val srv = servers[i]
-                if (srv.id.startsWith("cs_") && !srv.name.contains(Regex("\\[V[FO]"))) {
-                    servers[i] = srv.copy(name = "${srv.name} [VF]")
-                }
-            }
-            Log.d(TAG, "getServers $id : Cloudstream gardés (dub FR confirmé, captions=$hasFrCaptions)")
-        } else {
-            // FILTRE DUR : retire TOUS les servers Cloudstream natifs (cs_*).
-            // User préfère 0 server Cloudstream plutôt qu'un faux VF.
-            // Movix/Nakios backups TMDB-id-based prennent le relais avec du VF garanti.
-            val before = servers.size
-            servers.removeAll { it.id.startsWith("cs_") }
-            val removed = before - servers.size
-            if (removed > 0) {
-                Log.d(TAG, "getServers $id : retiré $removed servers Cloudstream non-VF (hasFrDub=false, hasFrCaptions=$hasFrCaptions ignoré)")
+        // 2026-05-21 (user "surtout les serveurs de Cloudstream lui-même") : on ne
+        // SUPPRIME plus les sources Cloudstream natives quand le dub FR n'est pas
+        // confirmé — on les GARDE et on les TAGUE honnêtement par langue :
+        //   dub FR → [VF] ; sous-titres FR dispo → [VOSTFR] ; sinon → [VO].
+        // Ainsi elles apparaissent toujours, et le ranker (pénalité langue) les place
+        // VF en haut / VOSTFR au milieu / VO en bas. Plus de "faux VF" (l'ancienne
+        // raison du filtre dur) : un contenu anglais est tagué [VO], pas [VF].
+        val csLangTag = when {
+            hasFrDub -> "[VF]"
+            hasFrCaptions -> "[VOSTFR]"
+            else -> "[VO]"
+        }
+        for (i in servers.indices) {
+            val srv = servers[i]
+            if (srv.id.startsWith("cs_") && !srv.name.contains(Regex("\\[V[FO]"))) {
+                servers[i] = srv.copy(name = "${srv.name} $csLangTag")
             }
         }
+        Log.d(TAG, "getServers $id : Cloudstream natifs gardés, tag $csLangTag (dub=$hasFrDub, caps=$hasFrCaptions)")
 
-        // Append Nakios backup (lance toujours, ne dépend pas de MovieBox+)
-        val nakiosServers = nakiosBackupD.await()
-        if (nakiosServers.isNotEmpty()) {
-            servers += nakiosServers
-            Log.d(TAG, "getServers $id : +${nakiosServers.size} streams Nakios backup")
-        }
-
-        // 2026-05-07 : Append Movix backup #3 (couvre les contenus absents de MovieBox+/Nakios)
-        val movixServers = movixBackupD.await()
-        if (movixServers.isNotEmpty()) {
-            servers += movixServers
-            Log.d(TAG, "getServers $id : +${movixServers.size} streams Movix backup")
-        }
-
-        Log.d(TAG, "getServers $id → total=${servers.size}")
+        Log.d(TAG, "getServers $id (natif) → ${servers.size} sources Cloudstream")
         servers
+    }
+
+    // ───────── Backups (helpers extraits pour le flux progressif) ─────────
+
+    /** Backup Nakios (TMDB-id-based, indépendant de MovieBox+). */
+    private suspend fun fetchNakiosBackup(
+        tmdbId: String?, videoType: Video.Type, se: Int, ep: Int,
+    ): List<Video.Server> {
+        val tid = tmdbId ?: return emptyList()
+        return try {
+            NakiosProvider.fetchNakiosBackupServers(tid, videoType, season = se, episode = ep)
+        } catch (e: Exception) {
+            Log.w(TAG, "Nakios backup failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** Backup Movix #3 (couvre les contenus absents de MovieBox+/Nakios).
+     *  skipBackupsForBackupCall=true → Movix skippe ses propres backups (anti-récursion
+     *  Cloudstream↔Movix). Servers wrappés `movix_backup__*` pour délégation getVideo. */
+    private suspend fun fetchMovixBackupForCs(
+        tmdbId: String?, videoType: Video.Type, timeoutMs: Long = 8_000L,
+    ): List<Video.Server> {
+        val tid = tmdbId ?: return emptyList()
+        if (!tid.all { it.isDigit() }) return emptyList()
+        return try {
+            val prev = MovixProvider.skipBackupsForBackupCall
+            MovixProvider.skipBackupsForBackupCall = true
+            try {
+                val raw = withTimeoutOrNull(timeoutMs) { MovixProvider.getServers(tid, videoType) } ?: emptyList()
+                raw.map { srv -> srv.copy(id = "movix_backup__${srv.id}", name = "Movix — ${srv.name}") }
+            } finally {
+                MovixProvider.skipBackupsForBackupCall = prev
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Movix backup failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** Parse cheap du tmdbId/se/ep depuis l'id (sans findSubjectId), pour les backups. */
+    private fun parseCsIds(id: String, videoType: Video.Type): Triple<String?, Int, Int> = when {
+        id.startsWith("cs::ep::") -> {
+            val parts = id.removePrefix("cs::ep::").split("::")
+            Triple(null, parts.getOrNull(1)?.toIntOrNull() ?: 0, parts.getOrNull(2)?.toIntOrNull() ?: 0)
+        }
+        id.startsWith("cs::m::") || id.startsWith("cs::s::") -> Triple(null, 0, 0)
+        else -> when (videoType) {
+            is Video.Type.Movie -> Triple(id.takeIf { it.all(Char::isDigit) }, 0, 0)
+            is Video.Type.Episode -> {
+                val parts = id.split(":")
+                val tmdb = parts.firstOrNull()?.takeIf { it.all(Char::isDigit) }
+                val se = parts.getOrNull(1)?.toIntOrNull() ?: videoType.season.number
+                val ep = parts.getOrNull(2)?.toIntOrNull() ?: videoType.number
+                Triple(tmdb, se, ep)
+            }
+        }
+    }
+
+    // 2026-05-21 : version BATCH (inchangée pour l'extérieur — appels backup depuis
+    //   Movix, fallback ViewModel). Combine natif + Nakios + Movix, en parallèle.
+    override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> = coroutineScope {
+        val (tmdbId, se, ep) = parseCsIds(id, videoType)
+        val nativeD = async { fetchNativeCloudstreamServers(id, videoType) }
+        val nakiosD = async { fetchNakiosBackup(tmdbId, videoType, se, ep) }
+        val movixD = async { fetchMovixBackupForCs(tmdbId, videoType) }
+        val out = mutableListOf<Video.Server>()
+        out += nativeD.await()
+        nakiosD.await().let { if (it.isNotEmpty()) { Log.d(TAG, "getServers $id : +${it.size} Nakios"); out += it } }
+        movixD.await().let { if (it.isNotEmpty()) { Log.d(TAG, "getServers $id : +${it.size} Movix"); out += it } }
+        Log.d(TAG, "getServers $id → total=${out.size}")
+        out
+    }
+
+    // 2026-05-21 : version PROGRESSIVE — émet natif MovieBox+, Nakios et Movix au fur
+    //   et à mesure (Nakios/Movix partent tout de suite, basés tmdbId ; le natif après
+    //   résolution du subjectId). Le 1er prêt s'affiche en premier.
+    override fun getServersProgressive(
+        id: String, videoType: Video.Type,
+    ): Flow<List<Video.Server>> = channelFlow {
+        val (tmdbId, se, ep) = parseCsIds(id, videoType)
+        launch {
+            try { val n = fetchNativeCloudstreamServers(id, videoType); if (n.isNotEmpty()) send(n) }
+            catch (e: Exception) { Log.w(TAG, "Progressive native failed: ${e.message}") }
+        }
+        launch {
+            try { val k = fetchNakiosBackup(tmdbId, videoType, se, ep); if (k.isNotEmpty()) send(k) }
+            catch (e: Exception) { Log.w(TAG, "Progressive Nakios failed: ${e.message}") }
+        }
+        launch {
+            // Progressif non bloquant → on relâche le plafond (15 s) pour ne pas
+            // jeter les sources Movix juste à la fin (Moiflix lent à ~8 s).
+            try { val m = fetchMovixBackupForCs(tmdbId, videoType, timeoutMs = 15_000L); if (m.isNotEmpty()) send(m) }
+            catch (e: Exception) { Log.w(TAG, "Progressive Movix failed: ${e.message}") }
+        }
     }
 
     /** Vrai si la réponse `/get` liste un dub `fr` dans `data.dubs[]`.

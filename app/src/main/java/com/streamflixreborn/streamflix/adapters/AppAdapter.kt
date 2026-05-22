@@ -668,6 +668,24 @@ class AppAdapter(
         result.dispatchUpdatesTo(this)
     }
 
+    // 2026-05-21 (user "fais un chargement progressif pour One Piece") : ajout/vidage
+    //   INCRÉMENTAL sans DiffUtil. submitList() recalcule un diff synchrone sur tout
+    //   (1000+ épisodes = ANR sur le thread principal). Ces méthodes permettent
+    //   d'ajouter les items par petits lots, en O(lot), pour ne jamais bloquer l'UI.
+    fun appendItems(newItems: List<Item>) {
+        if (newItems.isEmpty()) return
+        val start = items.size
+        items.addAll(newItems)
+        notifyItemRangeInserted(start, newItems.size)
+    }
+
+    fun clearItems() {
+        val n = items.size
+        if (n == 0) return
+        items.clear()
+        notifyItemRangeRemoved(0, n)
+    }
+
 
     fun <T : ViewBinding> setHeader(
         binding: (parent: ViewGroup) -> T,

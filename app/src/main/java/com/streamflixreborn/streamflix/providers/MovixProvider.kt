@@ -20,6 +20,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -34,7 +37,7 @@ import retrofit2.http.Query
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
-object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
+object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, ProgressiveServersProvider {
 
     /** 2026-05-07 : Flag anti-récursion. Quand Cloudstream appelle Movix en backup,
      *  il met ce flag à true pour que Movix skippe ses propres backups (Cloudstream,
@@ -248,6 +251,16 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
     //   4. Build Video.Server avec src = yflix.to/watch/{slug}.{id}#ep=S,E
     //   5. YflixExtractor (WebView) intercepte le m3u8 final
     private const val YFLIX_BASE = "https://yflix.to/"
+    // 2026-05-21 : nb de serveurs yflix exposés comme sources séparées (le site en
+    //   propose ~2/titre). Fixe pour éviter une énumération WebView coûteuse au
+    //   moment du getServers ; les entrées en trop échouent et sont reléguées.
+    private const val YFLIX_MAX_SERVERS = 2
+    // 2026-05-21 (user "pour pas pénaliser l'app on désactive yflix pour l'instant,
+    //   on en trouvera un autre") : yflix est trop instable (WebView lente, hosts qui
+    //   tournent, fichiers morts "data center burned"). DÉSACTIVÉ temporairement —
+    //   searchYflix renvoie null donc aucune source yflix n'est générée. Remettre
+    //   à true pour réactiver (le split serveurs + auto-fallback restent en place).
+    private const val YFLIX_ENABLED = false
 
     /** Cherche un titre sur yflix.to via l'AJAX search public.
      *  Retourne le path /watch/{slug}.{id} du meilleur match, ou null si rien.
@@ -258,6 +271,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
         year: Int? = null,
         preferType: String = "Movie",
     ): String? {
+        if (!YFLIX_ENABLED) return null // 2026-05-21 : yflix désactivé temporairement
         if (title.isBlank()) return null
         // 2026-05-05 : normalise les apostrophes typographiques (U+2019 → ') avant URL-encoding
         // sinon le keyword devient %E2%80%99 et Yflix renvoie 0 résultats.
@@ -318,7 +332,20 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                     candidateWords.isNotEmpty() && targetWords.containsAll(candidateWords) && lenDiffPct <= 0.30 -> 80
                     else -> 0
                 }
-                if (year != null && iyear != null && Math.abs(iyear - year) <= 1) score += 30
+                // 2026-05-21 (user "le Rose voulu c'est un Rose 2026" alors que yflix
+                //   renvoyait Rose 2021) : l'année n'était qu'un BONUS, jamais une
+                //   pénalité — un titre exact mais mauvais millésime passait quand même
+                //   (100+10=110 > seuil 90). On pénalise désormais un écart d'année franc
+                //   pour repasser SOUS le seuil → mieux vaut ne rien renvoyer que le
+                //   mauvais film. Tolérance ±1 (bonus), 2 ans = neutre (metadata floue),
+                //   ≥3 ans = mauvais film → grosse pénalité.
+                if (year != null && iyear != null) {
+                    val yearDiff = Math.abs(iyear - year)
+                    when {
+                        yearDiff <= 1 -> score += 30
+                        yearDiff >= 3 -> score -= 60
+                    }
+                }
                 if (itype == preferType) score += 10
                 Triple(href, score, "$t ($itype, ${iyear ?: "?"})")
             }
@@ -336,19 +363,26 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
         }
     }
 
-    /** Construit un Video.Server pour yflix avec l'URL /watch/...
-     *  Pour un épisode, on ajoute le hash #ep=S,E que yflix attend. */
-    private fun buildYflixServer(watchPath: String, season: Int? = null, episode: Int? = null): Video.Server {
-        val baseUrl = if (watchPath.startsWith("http")) watchPath
+    /** 2026-05-21 (user "yflix doit afficher TOUTES ses sources, sinon l'algo de
+     *  tri ne peut pas bien le classer") : on génère UNE entrée Video.Server PAR
+     *  serveur yflix (le site expose ~2 serveurs/titre). Chaque entrée encode son
+     *  index via `yfsrv=N` pour que YflixExtractor cible le bon serveur. Ainsi
+     *  l'ExtractorRanker classe chaque serveur individuellement (au lieu d'un seul
+     *  bloc "Multi"). Pour un épisode, on ajoute aussi le hash #ep=S,E. */
+    private fun buildYflixServers(watchPath: String, season: Int? = null, episode: Int? = null): List<Video.Server> {
+        val base = if (watchPath.startsWith("http")) watchPath
             else YFLIX_BASE.trimEnd('/') + watchPath
-        val finalUrl = if (season != null && episode != null) {
-            "$baseUrl#ep=$season,${episode.toString().padStart(2, '0')}"
-        } else baseUrl
-        return Video.Server(
-            id = "yflix_${watchPath.substringAfterLast("/")}",
-            name = "Yflix [VF/Multi]",
-            src = finalUrl,
-        )
+        val epFrag = if (season != null && episode != null)
+            "#ep=$season,${episode.toString().padStart(2, '0')}" else ""
+        val idBase = watchPath.substringAfterLast("/")
+        return (1..YFLIX_MAX_SERVERS).map { n ->
+            val sep = if (epFrag.isEmpty()) "#" else "&"
+            Video.Server(
+                id = "yflix_${idBase}_s$n",
+                name = "Yflix Serveur $n",
+                src = "$base$epFrag${sep}yfsrv=$n",
+            )
+        }
     }
 
     // ── 2026-05-04 : Moiflix.com backup source ───────────────────────────
@@ -363,7 +397,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
     // Avantages : audio FR garanti (testé), pas de CF challenge, pas de
     // login, search JSON propre. Le bouton "Continuer" sur la page episode
     // est auto-cliqué par MoiflixExtractor.
-    private const val MOIFLIX_BASE = "https://moiflix.com/"
+    private const val MOIFLIX_BASE = "https://moiflix.click/" // 2026-05-21 : .com redirige vers .click (domaine actif)
 
     /** Cherche un titre sur moiflix via l'AJAX search public.
      *  Retourne le path /movie/{slug} ou /show/{slug} du meilleur match, ou null. */
@@ -858,6 +892,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
 
     // ==================== PROVIDER METHODS ====================
 
+    /** 2026-05-21 — langue d'origine TMDB selon le filtre catalogue choisi par
+     *  l'utilisateur (item « Filtre »). null = pas de filtre (Monde). */
+    private fun movixCatalogOriginalLanguage(): String? =
+        com.streamflixreborn.streamflix.utils.CatalogFilter.originalLanguage(name)
+
     override suspend fun getHome(): List<Category> {
         initializeService()
         val categories = mutableListOf<Category>()
@@ -893,7 +932,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             }
 
             // Séries récentes en premier
-            val popularTv = tmdbService.getPopularTvShows(apiKey = TMDB_API_KEY)
+            val popularTv = tmdbService.discoverTvShows(apiKey = TMDB_API_KEY, sortBy = "popularity.desc", withOriginalLanguage = movixCatalogOriginalLanguage())
             val tvItems = popularTv.results?.map { item ->
                 TvShow(
                     id = item.id.toString(),
@@ -909,7 +948,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             }
 
             // Top rated TV
-            val topTv = tmdbService.getTopRatedTvShows(apiKey = TMDB_API_KEY)
+            val topTv = tmdbService.discoverTvShows(apiKey = TMDB_API_KEY, sortBy = "vote_average.desc", withOriginalLanguage = movixCatalogOriginalLanguage(), voteCountGte = 200)
             val topTvItems = topTv.results?.map { item ->
                 TvShow(
                     id = item.id.toString(),
@@ -925,7 +964,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             }
 
             // Puis les films
-            val popularMovies = tmdbService.getPopularMovies(apiKey = TMDB_API_KEY)
+            val popularMovies = tmdbService.discoverMovies(apiKey = TMDB_API_KEY, sortBy = "popularity.desc", withOriginalLanguage = movixCatalogOriginalLanguage())
             val movieItems = popularMovies.results?.map { item ->
                 Movie(
                     id = item.id.toString(),
@@ -941,7 +980,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             }
 
             // Top rated movies
-            val topMovies = tmdbService.getTopRatedMovies(apiKey = TMDB_API_KEY)
+            val topMovies = tmdbService.discoverMovies(apiKey = TMDB_API_KEY, sortBy = "vote_average.desc", withOriginalLanguage = movixCatalogOriginalLanguage(), voteCountGte = 200)
             val topMovieItems = topMovies.results?.map { item ->
                 Movie(
                     id = item.id.toString(),
@@ -1060,7 +1099,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
 
     override suspend fun getMovies(page: Int): List<Movie> {
         return try {
-            val result = tmdbService.discoverMovies(apiKey = TMDB_API_KEY, page = page)
+            val result = tmdbService.discoverMovies(apiKey = TMDB_API_KEY, page = page, withOriginalLanguage = movixCatalogOriginalLanguage())
             result.results?.map { item ->
                 Movie(
                     id = item.id.toString(),
@@ -1079,7 +1118,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
         return try {
-            val result = tmdbService.discoverTvShows(apiKey = TMDB_API_KEY, page = page)
+            val result = tmdbService.discoverTvShows(apiKey = TMDB_API_KEY, page = page, withOriginalLanguage = movixCatalogOriginalLanguage())
             result.results?.map { item ->
                 TvShow(
                     id = item.id.toString(),
@@ -1350,6 +1389,34 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
         }
 
         val servers = mutableListOf<Video.Server>()
+        servers.addAll(fetchNativeMovixServers(id, videoType))
+        if (!skipBackupsForBackupCall) {
+            servers.addAll(fetchMovixBackups(id, videoType))
+        }
+
+        // Tri global : VF d'abord, VOSTFR ensuite, VO en dernier (toutes sources confondues)
+        val finalList = sortServersByLanguage(servers)
+
+        // 2026-05-04 : on cache l'agrégat (TTL 5 min). Les m3u8 individuels
+        // sont re-extracted à la demande (cache séparé Extractor.cacheTtlMs)
+        // donc pas de risque de servir un m3u8 périmé depuis ce cache.
+        if (finalList.isNotEmpty()) {
+            serversCache[cacheKey] = CachedServers(
+                servers = finalList,
+                expiresAtMs = System.currentTimeMillis() + SERVERS_CACHE_TTL_MS,
+            )
+        }
+
+        return finalList
+    }
+
+    /**
+     * Sources NATIVES Movix (fstream, links, wiflix, cpasmal, tmdb, videasy,
+     * seriesDl, mazQuest, yflix, moiflix…). Extrait de getServers pour pouvoir
+     * être émis EN PREMIER par getServersProgressive (avant les backups).
+     */
+    private suspend fun fetchNativeMovixServers(id: String, videoType: Video.Type): List<Video.Server> {
+        val servers = mutableListOf<Video.Server>()
 
         when (videoType) {
             is Video.Type.Movie -> {
@@ -1481,7 +1548,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                             val title = movie.title ?: return@runEndpoint emptyList()
                             val year = movie.release_date?.take(4)?.toIntOrNull()
                             val watchPath = searchYflix(title, year, "Movie") ?: return@runEndpoint emptyList()
-                            listOf(buildYflixServer(watchPath))
+                            buildYflixServers(watchPath)
                         }
                     }
                     val moiflixDeferred = async {
@@ -1701,7 +1768,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                             val title = tv.name ?: return@runEndpoint emptyList()
                             val year = tv.first_air_date?.take(4)?.toIntOrNull()
                             val watchPath = searchYflix(title, year, "TV") ?: return@runEndpoint emptyList()
-                            listOf(buildYflixServer(watchPath, season = seasonNum, episode = episodeNum))
+                            buildYflixServers(watchPath, season = seasonNum, episode = episodeNum)
                         }
                     }
                     val moiflixDeferred = async {
@@ -1722,10 +1789,16 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
                 allResults.forEach { servers.addAll(it) }
             }
         }
+        return servers
+    }
 
-        // 2026-05-07 : tous les backups (Cloudstream, Moviebox, Papa, Coflix) sont
-        // skippés quand on est appelé DEPUIS Cloudstream (anti-récursion infinie).
-        if (!skipBackupsForBackupCall) {
+    /**
+     * Backups cross-provider (Cloudstream, Moviebox, Papadustream, Coflix), dans
+     * cet ordre. Extrait de getServers. Le caller décide de les appeler ou non
+     * (anti-récursion Cloudstream↔Movix via skipBackupsForBackupCall).
+     */
+    private suspend fun fetchMovixBackups(id: String, videoType: Video.Type): List<Video.Server> {
+        val servers = mutableListOf<Video.Server>()
 
         // 2026-05-06 : Cloudstream backup #2 — démarre vite, MovieBox+ via /resource
         // bcdn (sans pre-roll). Insertion juste après les sources Movix natives.
@@ -1819,22 +1892,38 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             servers.addAll(coflixBackup)
         }
 
-        } // fin if (!skipBackupsForBackupCall)
+        return servers
+    }
 
-        // Tri global : VF d'abord, VOSTFR ensuite, VO en dernier (toutes sources confondues)
-        val finalList = sortServersByLanguage(servers)
-
-        // 2026-05-04 : on cache l'agrégat (TTL 5 min). Les m3u8 individuels
-        // sont re-extracted à la demande (cache séparé Extractor.cacheTtlMs)
-        // donc pas de risque de servir un m3u8 périmé depuis ce cache.
-        if (finalList.isNotEmpty()) {
-            serversCache[cacheKey] = CachedServers(
-                servers = finalList,
-                expiresAtMs = System.currentTimeMillis() + SERVERS_CACHE_TTL_MS,
-            )
+    // 2026-05-21 (user "affiche ce qu'il récupère au fur et à mesure, les autres
+    //   arrivent ensuite sans attendre") : version PROGRESSIVE de getServers.
+    //   Émet les natifs Movix dès qu'ils sont prêts, PUIS les backups, sans
+    //   attendre que tout soit fini. Natifs et backups tournent en parallèle :
+    //   le premier prêt est envoyé en premier (en général les natifs). Le
+    //   ViewModel affiche le 1er lot puis ré-ordonne par bucket de langue.
+    override fun getServersProgressive(
+        id: String,
+        videoType: Video.Type,
+    ): Flow<List<Video.Server>> = channelFlow {
+        initializeService()
+        launch {
+            try {
+                val native = fetchNativeMovixServers(id, videoType)
+                if (native.isNotEmpty()) send(native)
+            } catch (e: Exception) {
+                Log.w("MovixProvider", "Progressive native failed: ${e.message}")
+            }
         }
-
-        return finalList
+        if (!skipBackupsForBackupCall) {
+            launch {
+                try {
+                    val backups = fetchMovixBackups(id, videoType)
+                    if (backups.isNotEmpty()) send(backups)
+                } catch (e: Exception) {
+                    Log.w("MovixProvider", "Progressive backups failed: ${e.message}")
+                }
+            }
+        }
     }
 
     /**
@@ -2226,6 +2315,8 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             @Query("sort_by") sortBy: String = "popularity.desc",
             @Query("with_genres") withGenres: String? = null,
             @Query("with_origin_country") withOriginCountry: String? = null,
+            @Query("with_original_language") withOriginalLanguage: String? = null,
+            @Query("vote_count.gte") voteCountGte: Int? = null,
             @Query("include_adult") includeAdult: Boolean = false
         ): TmdbPageResult<TmdbMovieListItem>
 
@@ -2237,6 +2328,8 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl {
             @Query("sort_by") sortBy: String = "popularity.desc",
             @Query("with_genres") withGenres: String? = null,
             @Query("with_origin_country") withOriginCountry: String? = null,
+            @Query("with_original_language") withOriginalLanguage: String? = null,
+            @Query("vote_count.gte") voteCountGte: Int? = null,
             @Query("include_adult") includeAdult: Boolean = false
         ): TmdbPageResult<TmdbTvListItem>
 

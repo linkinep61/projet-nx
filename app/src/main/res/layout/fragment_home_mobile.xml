@@ -10,7 +10,7 @@
         android:id="@+id/iv_home_background"
         android:layout_width="0dp"
         android:layout_height="0dp"
-        android:foreground="?attr/home_gradient_drawable"
+        android:src="@drawable/bg_wallpaper_mobile"
         android:scaleType="centerCrop"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
@@ -190,6 +190,25 @@
         android:src="@drawable/ic_iptv_language"
         android:background="?attr/selectableItemBackgroundBorderless"
         android:contentDescription="Filtre langue IPTV"
+        android:visibility="gone"
+        app:tint="@android:color/white"
+        app:layout_constraintEnd_toStartOf="@id/iv_downloads"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- 2026-05-20 (user "sur les providers compatibles on pourrait choisir par
+         quoi trier — toutes régions, FR, etc.") : bouton filtre catalogue,
+         visible uniquement sur les providers TMDB (Cloudstream). Même slot que
+         iv_iptv_language (jamais affichés en même temps : IPTV vs Cloudstream). -->
+    <ImageView
+        android:id="@+id/iv_catalog_filter"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginEnd="4dp"
+        android:layout_marginTop="16dp"
+        android:padding="8dp"
+        android:src="@drawable/ic_categories_filter"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="Filtre catalogue"
         android:visibility="gone"
         app:tint="@android:color/white"
         app:layout_constraintEnd_toStartOf="@id/iv_downloads"

@@ -75,12 +75,16 @@ import com.streamflixreborn.streamflix.utils.dp
 import androidx.preference.Preference
 import com.streamflixreborn.streamflix.utils.format
 import com.streamflixreborn.streamflix.utils.getCurrentFragment
+import com.streamflixreborn.streamflix.utils.LanguageTag
 import com.streamflixreborn.streamflix.utils.loadMovieBanner
 import com.streamflixreborn.streamflix.utils.loadMoviePoster
 import com.streamflixreborn.streamflix.utils.ArtworkRepair
 import com.streamflixreborn.streamflix.utils.toActivity
 import java.util.Locale
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import com.streamflixreborn.streamflix.utils.RatingService
+import com.streamflixreborn.streamflix.utils.CommunityRatingView
+import com.streamflixreborn.streamflix.utils.CommunityLanguageView
 import com.streamflixreborn.streamflix.providers.Provider
 import android.view.KeyEvent
 import com.streamflixreborn.streamflix.databinding.ContentMovieDirectorsMobileBinding
@@ -743,15 +747,9 @@ class MovieViewHolder(
 
 
     private fun displayMovieMobile(binding: ContentMovieMobileBinding) {
-        binding.ivMoviePoster.run {
-            loadMoviePoster(movie) {
-                transition(DrawableTransitionOptions.withCrossFade())
-            }
-            visibility = when {
-                movie.poster.isNullOrEmpty() -> View.GONE
-                else -> View.VISIBLE
-            }
-        }
+        // Poster GONE = le goneMarginTop du titre s'applique (espace pour la bannière)
+        // La bannière backdrop est gérée par le fragment (iv_movie_banner), pas ici.
+        binding.ivMoviePoster.visibility = View.GONE
 
         binding.tvMovieTitle.text = movie.title
 
@@ -800,11 +798,38 @@ class MovieViewHolder(
             }
         }
 
+        val overviewText = LanguageTag.prefixOverview(
+            overview = movie.overview,
+            title = movie.title,
+            quality = movie.quality,
+            version = movie.version,
+        )
         binding.tvMovieOverview.apply {
-            text = movie.overview
-            visibility = if (movie.overview.isNullOrBlank()) View.GONE else View.VISIBLE
+            text = overviewText
+            visibility = if (overviewText.isNullOrBlank()) View.GONE else View.VISIBLE
         }
-        binding.tvMovieOverviewLabel.visibility = if (movie.overview.isNullOrBlank()) View.GONE else View.VISIBLE
+        binding.tvMovieOverviewLabel.visibility = if (overviewText.isNullOrBlank()) View.GONE else View.VISIBLE
+
+        // Note communautaire
+        binding.root.findViewById<View>(R.id.include_community_rating)?.let { ratingRoot ->
+            val yearStr = movie.released?.format("yyyy")
+            val contentKey = RatingService.contentKey(
+                tmdbId = movie.id.takeIf { it.all { c -> c.isDigit() } },
+                title = movie.title,
+                year = yearStr,
+            )
+            CommunityRatingView.bind(ratingRoot, contentKey, movie.title, context, year = yearStr, isTvShow = false)
+        }
+
+        // Langue communautaire (vote VF/VOSTFR/VO)
+        binding.root.findViewById<View>(R.id.include_community_language)?.let { langRoot ->
+            val contentKey = RatingService.contentKey(
+                tmdbId = movie.id.takeIf { it.all { c -> c.isDigit() } },
+                title = movie.title,
+                year = movie.released?.format("yyyy"),
+            )
+            CommunityLanguageView.bind(langRoot, contentKey, movie.title, context)
+        }
 
         binding.btnMovieWatchNow.apply {
             setOnClickListener {
@@ -878,15 +903,12 @@ class MovieViewHolder(
     }
 
     private fun displayMovieTv(binding: ContentMovieTvBinding) {
-        binding.ivMoviePoster.run {
-            loadMoviePoster(movie) {
-                transition(DrawableTransitionOptions.withCrossFade())
-            }
-            visibility = when {
-                movie.poster.isNullOrEmpty() -> View.GONE
-                else -> View.VISIBLE
-            }
-        }
+        // 2026-05-21 (user "le poster de gauche est redondant avec le backdrop, et
+        //   flou depuis qu'on a réduit les jaquettes → on le vire et on réagence la
+        //   fiche TV") : poster masqué. Le layout a un goneMarginStart=70dp sur
+        //   titre/genres/boutons/synopsis → ils glissent à gauche automatiquement.
+        //   On ne charge plus le poster (inutile + économise une image en RAM).
+        binding.ivMoviePoster.visibility = View.GONE
 
         binding.tvMovieTitle.text = movie.title
 
@@ -935,11 +957,38 @@ class MovieViewHolder(
             }
         }
 
+        val overviewText = LanguageTag.prefixOverview(
+            overview = movie.overview,
+            title = movie.title,
+            quality = movie.quality,
+            version = movie.version,
+        )
         binding.tvMovieOverview.apply {
-            text = movie.overview
-            visibility = if (movie.overview.isNullOrBlank()) View.GONE else View.VISIBLE
+            text = overviewText
+            visibility = if (overviewText.isNullOrBlank()) View.GONE else View.VISIBLE
         }
-        binding.tvMovieOverviewLabel.visibility = if (movie.overview.isNullOrBlank()) View.GONE else View.VISIBLE
+        binding.tvMovieOverviewLabel.visibility = if (overviewText.isNullOrBlank()) View.GONE else View.VISIBLE
+
+        // Note communautaire
+        binding.root.findViewById<View>(R.id.include_community_rating)?.let { ratingRoot ->
+            val yearStr = movie.released?.format("yyyy")
+            val contentKey = RatingService.contentKey(
+                tmdbId = movie.id.takeIf { it.all { c -> c.isDigit() } },
+                title = movie.title,
+                year = yearStr,
+            )
+            CommunityRatingView.bind(ratingRoot, contentKey, movie.title, context, year = yearStr, isTvShow = false)
+        }
+
+        // Langue communautaire (vote VF/VOSTFR/VO)
+        binding.root.findViewById<View>(R.id.include_community_language)?.let { langRoot ->
+            val contentKey = RatingService.contentKey(
+                tmdbId = movie.id.takeIf { it.all { c -> c.isDigit() } },
+                title = movie.title,
+                year = movie.released?.format("yyyy"),
+            )
+            CommunityLanguageView.bind(langRoot, contentKey, movie.title, context)
+        }
 
         binding.btnMovieWatchNow.apply {
             setOnClickListener {
@@ -1008,6 +1057,10 @@ class MovieViewHolder(
                 ContextCompat.getDrawable(context, movie.isFavorite.drawable())
             )
         }
+
+        // Force le focus initial sur "Regarder" (évite que les boutons langue/étoiles
+        // sous la jaquette captent le focus D-pad à l'ouverture de la fiche)
+        binding.btnMovieWatchNow.requestFocus()
     }
 
     private fun displayCastMobile(binding: ContentMovieCastMobileBinding) {

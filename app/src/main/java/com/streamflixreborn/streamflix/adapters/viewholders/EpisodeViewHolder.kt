@@ -28,6 +28,7 @@ import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.format
 import com.streamflixreborn.streamflix.utils.loadTvShowCardArtwork
 import com.streamflixreborn.streamflix.utils.loadTvShowPoster
+import com.streamflixreborn.streamflix.utils.optimizeArtworkUrl
 
 class EpisodeViewHolder(
     private val _binding: ViewBinding
@@ -123,7 +124,7 @@ class EpisodeViewHolder(
         binding.ivEpisodePoster.apply {
             clipToOutline = true
             Glide.with(context)
-                .load(episode.poster)
+                .load(optimizeArtworkUrl(episode.poster, 400))
                 .error(R.drawable.glide_fallback_cover)
                 .centerCrop()
                 .transition(DrawableTransitionOptions.withCrossFade())
@@ -249,7 +250,7 @@ class EpisodeViewHolder(
         binding.ivEpisodePoster.apply {
             clipToOutline = true
             Glide.with(context)
-                .load(episode.poster)
+                .load(optimizeArtworkUrl(episode.poster, 400))
                 .error(R.drawable.glide_fallback_cover)
                 .fallback(R.drawable.glide_fallback_cover)
                 .centerCrop()
@@ -582,7 +583,7 @@ class EpisodeViewHolder(
         val tvShow = episode.tvShow
         if (tvShow == null) {
             Glide.with(context)
-                .load(episode.poster)
+                .load(optimizeArtworkUrl(episode.poster, 400))
                 .error(R.drawable.glide_fallback_cover)
                 .apply {
                     if (withFallback) fallback(R.drawable.glide_fallback_cover)

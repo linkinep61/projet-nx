@@ -360,6 +360,10 @@ class MainTvActivity : FragmentActivity() {
                     }
                     return@setOnItemSelectedListener false
                 }
+                R.id.catalog_filter_menu -> {
+                    showCatalogFilterPicker()
+                    return@setOnItemSelectedListener false
+                }
             }
             val handled = androidx.navigation.ui.NavigationUI.onNavDestinationSelected(menuItem, navController)
             val provider = UserPreferences.currentProvider
@@ -578,6 +582,30 @@ class MainTvActivity : FragmentActivity() {
             .show()
     }
 
+    /** 2026-05-21 : picker filtre catalogue (item sidebar sous Paramètres,
+     *  providers TMDB type Cloudstream). Sauve le mode PAR provider, invalide le
+     *  HomeCacheStore et notifie pour rafraîchir le home. */
+    fun showCatalogFilterPicker() {
+        val provider = UserPreferences.currentProvider ?: return
+        val modes = com.streamflixreborn.streamflix.utils.CatalogFilter.Mode.entries
+        val current = com.streamflixreborn.streamflix.utils.CatalogFilter.get(provider.name)
+        val currentIdx = modes.indexOf(current).coerceAtLeast(0)
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Filtrer le catalogue")
+            .setSingleChoiceItems(modes.map { it.label }.toTypedArray(), currentIdx) { dlg, idx ->
+                val newMode = modes[idx]
+                if (newMode != current) {
+                    com.streamflixreborn.streamflix.utils.CatalogFilter.set(provider.name, newMode)
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(applicationContext, provider)
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                    Toast.makeText(applicationContext, "Catalogue : ${newMode.label}", Toast.LENGTH_SHORT).show()
+                }
+                dlg.dismiss()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
     /** 2026-05-12 (user "quand on clique TV, menu déroulant avec catégories") :
      *  ouvre un AlertDialog listant toutes les catégories disponibles pour le type
      *  donné (LIVE = home, MOVIE = movies, SERIES = tv_shows). Sur sélection,
@@ -723,6 +751,7 @@ class MainTvActivity : FragmentActivity() {
             binding.navMain.menu.findItem(R.id.iptv_favorites)?.isVisible = false
             binding.navMain.menu.findItem(R.id.iptv_categories_menu)?.isVisible = false
             binding.navMain.menu.findItem(R.id.iptv_language_menu)?.isVisible = false
+            binding.navMain.menu.findItem(R.id.catalog_filter_menu)?.isVisible = false
             return
         }
         // Provider sélectionné : restaure la visibilité des onglets pertinents.
@@ -772,12 +801,12 @@ class MainTvActivity : FragmentActivity() {
                 // (singulier, comme main_menu_series_tab) + icône ic_menu_series
                 // pour matcher le nom. Pas "VOSTFR" (label langue), pas "Séries TV"
                 // (sonne IPTV).
-                provider.name in setOf("DessinAnime", "AnimeSite") ->
+                provider.name == "DessinAnime" ->
                     getString(R.string.main_menu_series_tab)
                 else -> getString(R.string.main_menu_tv_shows)
             }
             // Force l'icône série (ic_menu_series) car le default est ic_menu_tv qui collide avec TV
-            if (isMyIptv || provider.name in setOf("DessinAnime", "AnimeSite")) {
+            if (isMyIptv || provider.name == "DessinAnime") {
                 setIcon(R.drawable.ic_menu_series)
             }
         }
@@ -790,6 +819,10 @@ class MainTvActivity : FragmentActivity() {
         val isVavoo = provider is com.streamflixreborn.streamflix.providers.VavooProvider
         binding.navMain.menu.findItem(R.id.iptv_categories_menu)?.isVisible = isMyIptv
         binding.navMain.menu.findItem(R.id.iptv_language_menu)?.isVisible = isMyIptv || isVavoo
+        // 2026-05-21 : filtre catalogue (sous Paramètres) uniquement pour les
+        //   providers TMDB compatibles (Cloudstream).
+        binding.navMain.menu.findItem(R.id.catalog_filter_menu)?.isVisible =
+            com.streamflixreborn.streamflix.utils.CatalogFilter.isSupported(provider.name)
     }
 
     /** 2026-05-13 : picker pays Vavoo (item sidebar). */

@@ -94,7 +94,17 @@ class GlobalFavoritesMobileFragment : Fragment() {
 
             movies.forEach { it.itemType = AppAdapter.Type.MOVIE_GRID_MOBILE_ITEM }
             tvShows.forEach { it.itemType = AppAdapter.Type.TV_SHOW_GRID_MOBILE_ITEM }
-            val items = (movies + tvShows)
+            // 2026-05-21 : saisons favorites (appui long sur une saison) → cartes
+            //   "Série — Saison N" dans le même écran.
+            val seasonFavs = com.streamflixreborn.streamflix.utils.SeasonFavorites.all().map { e ->
+                TvShow(
+                    id = e.syntheticId(),
+                    title = "${e.showTitle} — Saison ${e.seasonNumber}",
+                    poster = e.showPoster,
+                    banner = e.showBanner,
+                ).apply { itemType = AppAdapter.Type.TV_SHOW_GRID_MOBILE_ITEM }
+            }
+            val items = (movies + tvShows + seasonFavs)
             appAdapter.submitList(items)
 
             if (items.isEmpty()) {
@@ -109,6 +119,13 @@ class GlobalFavoritesMobileFragment : Fragment() {
 
     /** Appui long sur un favori : le retirer + recharger la grille. */
     fun removeFavorite(itemId: String, isMovie: Boolean) {
+        // 2026-05-21 : saison favorite (id synthétique) → store dédié.
+        if (itemId.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
+            com.streamflixreborn.streamflix.utils.SeasonFavorites.removeBySyntheticId(itemId)
+            Toast.makeText(requireContext(), "Saison retirée des favoris", Toast.LENGTH_SHORT).show()
+            loadFavorites()
+            return
+        }
         viewLifecycleOwner.lifecycleScope.launch {
             val ok = GlobalFavorites.removeFavorite(requireContext(), itemId, isMovie)
             if (_binding == null) return@launch
