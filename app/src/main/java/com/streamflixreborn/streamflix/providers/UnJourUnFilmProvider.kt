@@ -56,7 +56,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             return cachePortalURL.ifEmpty { field }
         }
 
-    override val defaultBaseUrl: String = "https://1jour1film0526.site/"
+    override val defaultBaseUrl: String = "https://1jour1film0526c.site/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
@@ -1273,11 +1273,12 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private interface Service {
 
         companion object {
-            // Dedicated client with shorter timeouts — 1Jour1Film site responds
-            // quickly, no need for 30s global default.
+            // 2026-05-22 : timeouts augmentés — le site 1Jour1Film est souvent
+            // lent (Cloudflare, CDN variable). 10s causait des SocketTimeoutException
+            // fréquentes sur le home. 20s laisse le temps au site de répondre.
             private val client = NetworkClient.default.newBuilder()
-                .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
 
             fun buildAddressFetcher(): Service {
