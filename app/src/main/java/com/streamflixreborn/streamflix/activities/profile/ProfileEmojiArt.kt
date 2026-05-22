@@ -1,6 +1,8 @@
 package com.streamflixreborn.streamflix.activities.profile
 
+import android.content.Context
 import android.graphics.drawable.Drawable
+import android.util.Log
 import android.view.View
 import android.widget.ImageView
 import android.widget.TextView
@@ -9,6 +11,11 @@ import com.bumptech.glide.load.DataSource
 import com.bumptech.glide.load.engine.GlideException
 import com.bumptech.glide.request.RequestListener
 import com.bumptech.glide.request.target.Target
+import com.streamflixreborn.streamflix.StreamFlixApp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.net.URL
 
 /**
  * 2026-05-20 (user "des trucs design cool" / "les emojis systeme sont pourris") :
@@ -145,13 +152,54 @@ object ProfileEmojiArt {
         return value
     }
 
+    // ══════════════════════════════════════════════════════════════
+    //  Cache local des avatars (2026-05-22)
+    //  User : "une fois l'émoticône choisi, il est implémenté
+    //  jusqu'au prochain changement — pas d'appels réseau inutiles"
+    // ══════════════════════════════════════════════════════════════
+
+    private const val AVATAR_DIR = "profile_avatars"
+    private const val TAG = "ProfileEmojiArt"
+
+    /** Nom de fichier local pour un emoji/chemin donné. */
+    private fun localFileName(emojiValue: String): String {
+        // Hash simple pour un nom de fichier safe
+        val hash = emojiValue.toByteArray().fold(0L) { acc, b ->
+            acc * 31 + b.toLong()
+        }.let { kotlin.math.abs(it) }
+        return "avatar_${hash}.png"
+    }
+
+    /** Fichier local pour un emoji (peut ne pas exister). */
+    private fun localFile(context: Context, emojiValue: String): File {
+        val dir = File(context.filesDir, AVATAR_DIR)
+        if (!dir.exists()) dir.mkdirs()
+        return File(dir, localFileName(emojiValue))
+    }
+
+    /** Télécharge l'image Fluent et la sauvegarde en local. Appelé au moment
+     *  du CHOIX d'un emoji dans le picker → 1 seul appel réseau, puis plus
+     *  jamais tant que l'avatar ne change pas. */
+    suspend fun cacheLocally(context: Context, emojiValue: String) {
+        val url = urlForValue(emojiValue) ?: return
+        val file = localFile(context, emojiValue)
+        if (file.exists() && file.length() > 100) return // déjà en cache
+        withContext(Dispatchers.IO) {
+            try {
+                val bytes = URL(url).openStream().use { it.readBytes() }
+                file.writeBytes(bytes)
+                Log.d(TAG, "avatar cached: ${file.name} (${bytes.size} bytes)")
+            } catch (e: Exception) {
+                Log.w(TAG, "cache download failed for $emojiValue: ${e.message}")
+            }
+        }
+    }
+
     /**
-     * Affiche l'avatar : image Fluent 3D dans [image] si dispo, sinon l'emoji
-     * systeme dans [fallback]. A appeler a chaque (re)bind d'un ViewHolder.
+     * Affiche l'avatar : fichier local en priorité (0 réseau), sinon CDN via
+     * Glide, sinon emoji système en fallback.
      */
     fun bind(emoji: String?, image: ImageView?, fallback: TextView?) {
-        // Texte de fallback : seulement si la valeur est un VRAI emoji Unicode
-        // (les chemins Fluent ne doivent jamais s'afficher en texte).
         val fallbackText = if (emoji != null && PATHS.containsKey(emoji)) emoji else ""
         if (image == null) {
             fallback?.apply { visibility = View.VISIBLE; text = fallbackText }
@@ -159,16 +207,20 @@ object ProfileEmojiArt {
         }
         val url = urlForValue(emoji)
         if (url == null) {
-            // Pas de mapping (ex: emoji custom) -> emoji systeme.
             image.visibility = View.GONE
             fallback?.apply { visibility = View.VISIBLE; text = fallbackText }
             return
         }
-        // Pendant le chargement on cache le fallback (evite le double rendu).
-        fallback?.visibility = View.GONE
+
+        // 1) Essayer le fichier local d'abord (pas de réseau)
+        val ctx = image.context.applicationContext
+        val local = emoji?.let { localFile(ctx, it) }
+        val source: Any = if (local != null && local.exists() && local.length() > 100) local else url
+
+        fallback?.apply { visibility = View.VISIBLE; text = fallbackText }
         image.visibility = View.VISIBLE
         Glide.with(image)
-            .load(url)
+            .load(source)
             .fitCenter()
             .listener(object : RequestListener<Drawable> {
                 override fun onLoadFailed(

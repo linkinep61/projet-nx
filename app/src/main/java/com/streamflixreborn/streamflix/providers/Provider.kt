@@ -111,6 +111,9 @@ interface Provider {
             VoirDramaProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             // Moviebox (themoviebox.org/aoneroom) — niche K-Dramas/animes/films VF.
             MovieboxProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
+            // NetMirror — Netflix/Prime/Hotstar/Disney+ via net52.cc mirror.
+            // Catalogue TMDB + CatalogFilter, streams via NewTV API.
+            NetMirrorProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             // ─── Anime (onglet Animés) — ordre interne inchangé ───
             AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME),

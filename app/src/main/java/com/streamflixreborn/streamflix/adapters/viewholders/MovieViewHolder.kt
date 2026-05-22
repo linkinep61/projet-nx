@@ -321,6 +321,13 @@ class MovieViewHolder(
         binding.root.apply {
             setOnClickListener {
                 checkProviderAndRun {
+                    // 2026-05-22 : reprise de lecture film depuis le cœur → switch provider + ouvre fiche
+                    if (movie.itemType == AppAdapter.Type.MOVIE_CONTINUE_WATCHING_MOBILE_ITEM
+                        && context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
+                        com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin("resume_movie_${movie.id}")
+                        findNavController().navigate(R.id.action_global_movie, android.os.Bundle().apply { putString("id", movie.id) })
+                        return@checkProviderAndRun
+                    }
                     if (isDramaOrAnimeProvider()) {
                         when (context.toActivity()?.getCurrentFragment()) {
                             is HomeMobileFragment -> findNavController().navigate(HomeMobileFragmentDirections.actionHomeToTvShow(id = movie.id, poster = movie.poster))
@@ -396,6 +403,13 @@ class MovieViewHolder(
             isFocusable = true
             setOnClickListener {
                 checkProviderAndRun {
+                    // 2026-05-22 : reprise de lecture film depuis le cœur → switch provider + ouvre fiche
+                    if (movie.itemType == AppAdapter.Type.MOVIE_CONTINUE_WATCHING_TV_ITEM
+                        && context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
+                        com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin("resume_movie_${movie.id}")
+                        findNavController().navigate(R.id.action_global_movie, android.os.Bundle().apply { putString("id", movie.id) })
+                        return@checkProviderAndRun
+                    }
                     if (isDramaOrAnimeProvider()) {
                         when (context.toActivity()?.getCurrentFragment()) {
                             is HomeTvFragment -> findNavController().navigate(HomeTvFragmentDirections.actionHomeToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))

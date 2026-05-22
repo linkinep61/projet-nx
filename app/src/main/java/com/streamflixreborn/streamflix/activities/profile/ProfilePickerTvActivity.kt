@@ -18,6 +18,7 @@ import com.streamflixreborn.streamflix.activities.main.MainTvActivity
 import com.streamflixreborn.streamflix.models.Profile
 import com.streamflixreborn.streamflix.utils.ProfileManager
 import com.streamflixreborn.streamflix.utils.ProfileStore
+import kotlinx.coroutines.launch
 
 /**
  * 2026-05-12 : équivalent TV de [ProfilePickerActivity]. Affiche un grid
@@ -162,6 +163,10 @@ class ProfilePickerTvActivity : FragmentActivity() {
                         isAdmin = false,
                     )
                 )
+                // 2026-05-22 : cache l'image Fluent en local
+                kotlinx.coroutines.MainScope().launch {
+                    ProfileEmojiArt.cacheLocally(this@ProfilePickerTvActivity, pickedEmoji)
+                }
                 refreshList()
             }
             .setNegativeButton("Annuler", null)
@@ -194,6 +199,10 @@ class ProfilePickerTvActivity : FragmentActivity() {
                     }
                     "Changer emoji" -> EmojiPickerDialog.show(this, profile.emoji) { picked ->
                         ProfileStore.upsert(profile.copy(emoji = picked))
+                        // 2026-05-22 : cache l'image Fluent en local (1 seul DL réseau)
+                        kotlinx.coroutines.MainScope().launch {
+                            ProfileEmojiArt.cacheLocally(this@ProfilePickerTvActivity, picked)
+                        }
                         refreshList()
                     }
                     "Définir un PIN" -> editText(

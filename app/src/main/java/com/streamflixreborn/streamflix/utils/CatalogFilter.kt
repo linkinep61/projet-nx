@@ -23,7 +23,7 @@ object CatalogFilter {
      * en VF sur le marché FR).
      */
     enum class Mode(val pref: String, val label: String, val originalLanguage: String?) {
-        POPULAR_INTL("popular_intl", "Monde — tout (souvent VF)", null),
+        POPULAR_INTL("popular_intl", "Monde — FR", null),
         ORIGIN_FR("origin_fr", "Productions françaises", "fr"),
         US_EN("us_en", "Anglophone / US-UK", "en"),
         ANIME_JA("anime_ja", "Anime / Japon", "ja"),
@@ -49,13 +49,16 @@ object CatalogFilter {
     fun isSupported(providerName: String?): Boolean =
         providerName == "Cloudstream" ||
         providerName == "Movix" ||
+        providerName == "NetMirror" ||
         providerName?.startsWith("TMDb") == true
 
     /** Défaut PAR provider pour ne rien changer par surprise :
      *  - Cloudstream était FR-only → ORIGIN_FR (comportement historique)
      *  - Tmdb / Movix montraient du contenu mondial → POPULAR_INTL (pas de restriction) */
-    fun defaultFor(providerName: String): Mode =
-        if (providerName == "Cloudstream") Mode.ORIGIN_FR else Mode.POPULAR_INTL
+    fun defaultFor(providerName: String): Mode = when (providerName) {
+        "Cloudstream" -> Mode.ORIGIN_FR
+        else -> Mode.POPULAR_INTL
+    }
 
     private fun key(providerName: String) = "pref_catalog_filter_$providerName"
 

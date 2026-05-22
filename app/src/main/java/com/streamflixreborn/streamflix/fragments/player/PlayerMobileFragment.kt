@@ -4468,6 +4468,11 @@ class PlayerMobileFragment : Fragment() {
                 val tsBuilder = player.trackSelectionParameters.buildUpon()
                 if (lang == "es") {
                     tsBuilder.setPreferredAudioLanguage("spa")
+                } else {
+                    // 2026-05-22 : toujours préférer l'audio français par défaut
+                    // (user "quand on lance un film qui a du FR dedans, qu'il se
+                    // mette en priorité — on est obligé d'aller dans Audio changer").
+                    tsBuilder.setPreferredAudioLanguage("fr")
                 }
                 // 2026-05-09 : pour IPTV, prioriser AAC > AC3 > MP3 (anti EAC-3
                 // qui n'est pas décodé par tous les hardware → "pas de son sur

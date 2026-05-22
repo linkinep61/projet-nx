@@ -23,6 +23,7 @@ import com.streamflixreborn.streamflix.models.Episode
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.ui.ShowOptionsMobileDialog
 import com.streamflixreborn.streamflix.ui.ShowOptionsTvDialog
+import com.streamflixreborn.streamflix.utils.EpisodeFavorites
 import com.streamflixreborn.streamflix.utils.EpisodeManager
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.format
@@ -50,6 +51,37 @@ class EpisodeViewHolder(
         }
     }
 
+
+    /** 2026-05-22 : toggle favori ÉPISODE (appui long). Même pattern que
+     *  SeasonViewHolder.toggleSeasonFavorite(). */
+    private fun toggleEpisodeFavorite(): Boolean {
+        val provider = UserPreferences.currentProvider?.name ?: return true
+        val show = episode.tvShow ?: return true
+        val season = episode.season ?: return true
+        val nowFav = EpisodeFavorites.toggle(
+            EpisodeFavorites.Entry(
+                provider = provider,
+                showId = show.id,
+                showTitle = show.title ?: "",
+                showPoster = show.poster,
+                showBanner = show.banner,
+                seasonId = season.id,
+                seasonNumber = season.number,
+                seasonTitle = season.title,
+                episodeId = episode.id,
+                episodeNumber = episode.number,
+                episodeTitle = episode.title,
+                episodePoster = episode.poster,
+                favoritedAt = 0L,
+            )
+        )
+        android.widget.Toast.makeText(
+            context,
+            if (nowFav) "Épisode ajouté aux favoris ♥" else "Épisode retiré des favoris",
+            android.widget.Toast.LENGTH_SHORT,
+        ).show()
+        return true
+    }
 
     private fun displayMobileItem(binding: ItemEpisodeMobileBinding) {
         binding.root.apply {
@@ -114,11 +146,8 @@ class EpisodeViewHolder(
                     )
                 )
             }
-            setOnLongClickListener {
-                ShowOptionsMobileDialog(context, episode)
-                    .show()
-                true
-            }
+            // 2026-05-22 : appui long → ajoute/retire l'épisode des favoris.
+            setOnLongClickListener { toggleEpisodeFavorite() }
         }
 
         binding.ivEpisodePoster.apply {
@@ -232,11 +261,8 @@ class EpisodeViewHolder(
                     )
                 )
             }
-            setOnLongClickListener {
-                ShowOptionsTvDialog(context, episode)
-                    .show()
-                true
-            }
+            // 2026-05-22 : appui long → ajoute/retire l'épisode des favoris.
+            setOnLongClickListener { toggleEpisodeFavorite() }
             setOnFocusChangeListener { _, hasFocus ->
                 val animation = when {
                     hasFocus -> AnimationUtils.loadAnimation(context, R.anim.zoom_in)

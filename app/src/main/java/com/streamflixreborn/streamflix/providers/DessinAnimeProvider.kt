@@ -566,15 +566,8 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
             Log.w(TAG, "native servers KO: ${e.message}"); emptyList()
         }
 
-        // 2026-05-21 (user "ça charge plus les serveurs, remets les appels comme avant ;
-        //   ça a toujours bien chargé") : si on a déjà des serveurs natifs, on les renvoie
-        //   IMMÉDIATEMENT. Les secours croisés (Cloudstream → Movix avec id "0") restaient
-        //   bloqués sans réponse (fstream/0, wiflix/0) → l'écran de chargement ne finissait
-        //   jamais. Les secours ne servent QUE quand le natif est vide.
-        if (native.isNotEmpty()) {
-            Log.d(TAG, "getServers: ${native.size} natifs (secours ignorés, natif présent)")
-            return@withContext native
-        }
+        // Backups TOUJOURS lancés (même si natifs présents) — l'ancien early-return
+        // coupait les backups dès qu'un seul serveur natif existait.
 
         val title = when (videoType) {
             is Video.Type.Movie -> videoType.title
@@ -582,25 +575,33 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
         }.trim()
         if (title.isBlank()) return@withContext native
 
+        // Extraire le tmdbId du slug DessinAnime (ex: "movie::269149-zootopie" → "269149")
+        // pour que les backups Cloudstream/Nakios/Movix cherchent par tmdbId direct.
+        val tmdbId = id.split("::").getOrNull(1)
+            ?.substringBefore("-")
+            ?.takeIf { it.all(Char::isDigit) && it.length >= 2 }
+            ?: "0"
+        Log.d(TAG, "backups: title='$title', tmdbId=$tmdbId (from id=$id)")
+
         val backups = try {
             coroutineScope {
-                // Backup #1 : Cloudstream (films/séries FR via TMDB, inclut Movix)
+                // Backup #1 : Cloudstream (films/séries FR via TMDB, inclut Movix+Nakios)
                 val csD = async {
                     try {
                         val csType: Video.Type = when (videoType) {
                             is Video.Type.Movie -> Video.Type.Movie(
-                                id = "0", title = title, releaseDate = videoType.releaseDate,
+                                id = tmdbId, title = title, releaseDate = videoType.releaseDate,
                                 poster = videoType.poster, imdbId = videoType.imdbId,
                             )
                             is Video.Type.Episode -> Video.Type.Episode(
-                                id = "0", number = videoType.number, title = videoType.title,
+                                id = tmdbId, number = videoType.number, title = videoType.title,
                                 poster = videoType.poster, overview = videoType.overview,
-                                tvShow = videoType.tvShow.copy(id = "0", title = title),
+                                tvShow = videoType.tvShow.copy(id = tmdbId, title = title),
                                 season = videoType.season,
                             )
                         }
-                        (kotlinx.coroutines.withTimeoutOrNull(10_000L) {
-                            CloudstreamProvider.getServers("0", csType)
+                        (kotlinx.coroutines.withTimeoutOrNull(15_000L) {
+                            CloudstreamProvider.getServers(tmdbId, csType)
                         } ?: emptyList()).map {
                             it.copy(id = "csbackup__${it.id}", name = "CS · ${it.name}")
                         }
@@ -616,7 +617,23 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                         }
                     } catch (e: Exception) { Log.w(TAG, "AS backup KO: ${e.message}"); emptyList() }
                 }
-                csD.await() + asD.await()
+                // Backup #3 : Wiflix (films/séries FR, VF + VOSTFR)
+                val wfD = async {
+                    try {
+                        fetchWiflixBackup(title, videoType)
+                    } catch (e: Exception) { Log.w(TAG, "WF backup KO: ${e.message}"); emptyList() }
+                }
+                // Backup #4 : NetMirror (Netflix/Prime/Disney+ mirrors)
+                val nmD = async {
+                    try {
+                        (kotlinx.coroutines.withTimeoutOrNull(12_000L) {
+                            NetMirrorProvider.getServers(tmdbId, videoType)
+                        } ?: emptyList()).map {
+                            it.copy(id = "nmbackup__${it.id}", name = "NM · ${it.name}")
+                        }
+                    } catch (e: Exception) { Log.w(TAG, "NM backup KO: ${e.message}"); emptyList() }
+                }
+                csD.await() + asD.await() + wfD.await() + nmD.await()
             }
         } catch (e: Exception) { Log.w(TAG, "backups KO: ${e.message}"); emptyList() }
 
@@ -632,39 +649,42 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
         val native = try { fetchNativeServers(id, videoType) }
         catch (e: Exception) { Log.w(TAG, "progressive native KO: ${e.message}"); emptyList() }
         if (native.isNotEmpty()) {
-            // 2026-05-21 (user "remets les appels comme avant, ça a toujours bien chargé") :
-            //   on a du natif → on l'émet et on s'ARRÊTE. Les secours croisés
-            //   (Cloudstream → Movix id "0") restaient bloqués (fstream/0, wiflix/0) et
-            //   maintenaient le flux ouvert → chargement infini. Secours seulement si vide.
             send(native)
-            return@channelFlow
         }
 
+        // 2) Backups TOUJOURS lancés (même si natifs présents) — le progressif
+        //    affiche le natif tout de suite et les backups arrivent ensuite.
         val title = when (videoType) {
             is Video.Type.Movie -> videoType.title
             is Video.Type.Episode -> videoType.tvShow.title
         }.trim()
         if (title.isBlank()) return@channelFlow
 
-        // VideoType pour Cloudstream (id="0" car recherche par titre)
+        // Extraire le tmdbId du slug DessinAnime pour les backups
+        val tmdbId = id.split("::").getOrNull(1)
+            ?.substringBefore("-")
+            ?.takeIf { it.all(Char::isDigit) && it.length >= 2 }
+            ?: "0"
+
+        // VideoType pour Cloudstream (tmdbId extrait du slug)
         val csType: Video.Type = when (videoType) {
             is Video.Type.Movie -> Video.Type.Movie(
-                id = "0", title = title, releaseDate = videoType.releaseDate,
+                id = tmdbId, title = title, releaseDate = videoType.releaseDate,
                 poster = videoType.poster, imdbId = videoType.imdbId,
             )
             is Video.Type.Episode -> Video.Type.Episode(
-                id = "0", number = videoType.number, title = videoType.title,
+                id = tmdbId, number = videoType.number, title = videoType.title,
                 poster = videoType.poster, overview = videoType.overview,
-                tvShow = videoType.tvShow.copy(id = "0", title = title),
+                tvShow = videoType.tvShow.copy(id = tmdbId, title = title),
                 season = videoType.season,
             )
         }
 
-        // 2) Backups en parallèle — chacun émet dès qu'il finit
+        // Backups en parallèle — chacun émet dès qu'il finit
         val csJob = launch(Dispatchers.IO) {
             try {
-                val servers = (kotlinx.coroutines.withTimeoutOrNull(12_000L) {
-                    CloudstreamProvider.getServers("0", csType)
+                val servers = (kotlinx.coroutines.withTimeoutOrNull(15_000L) {
+                    CloudstreamProvider.getServers(tmdbId, csType)
                 } ?: emptyList()).map { it.copy(id = "csbackup__${it.id}", name = "CS · ${it.name}") }
                 if (servers.isNotEmpty()) send(servers)
             } catch (e: Exception) { Log.w(TAG, "progressive CS backup KO: ${e.message}") }
@@ -677,8 +697,53 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                 if (servers.isNotEmpty()) send(servers)
             } catch (e: Exception) { Log.w(TAG, "progressive AS backup KO: ${e.message}") }
         }
+        // Backup #3 : Wiflix
+        val wfJob = launch(Dispatchers.IO) {
+            try {
+                val servers = fetchWiflixBackup(title, videoType)
+                if (servers.isNotEmpty()) send(servers)
+            } catch (e: Exception) { Log.w(TAG, "progressive WF backup KO: ${e.message}") }
+        }
+        // Backup #4 : NetMirror
+        val nmJob = launch(Dispatchers.IO) {
+            try {
+                val servers = (kotlinx.coroutines.withTimeoutOrNull(12_000L) {
+                    NetMirrorProvider.getServers(tmdbId, videoType)
+                } ?: emptyList()).map { it.copy(id = "nmbackup__${it.id}", name = "NM · ${it.name}") }
+                if (servers.isNotEmpty()) send(servers)
+            } catch (e: Exception) { Log.w(TAG, "progressive NM backup KO: ${e.message}") }
+        }
         csJob.join()
         asJob.join()
+        wfJob.join()
+        nmJob.join()
+    }
+
+    /**
+     * Backup Wiflix : recherche par titre → getServers du 1er match.
+     * Timeout 10s. Préfixe "wfbackup__".
+     */
+    private suspend fun fetchWiflixBackup(
+        title: String,
+        videoType: Video.Type,
+    ): List<Video.Server> = withContext(Dispatchers.IO) {
+        val results = kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+            WiflixProvider.search(title, 1)
+        } ?: return@withContext emptyList()
+
+        // Trouver le 1er résultat du bon type (Movie ou TvShow)
+        val matchId: String = when (videoType) {
+            is Video.Type.Movie -> results.filterIsInstance<Movie>().firstOrNull()?.id
+            is Video.Type.Episode -> results.filterIsInstance<TvShow>().firstOrNull()?.id
+        } ?: return@withContext emptyList()
+
+        val wfServers = kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+            WiflixProvider.getServers(matchId, videoType)
+        } ?: emptyList()
+
+        wfServers.map {
+            it.copy(id = "wfbackup__${it.id}", name = "WF · ${it.name}")
+        }
     }
 
     /**
@@ -796,6 +861,12 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
         }
         if (server.id.startsWith("asbackup__")) {
             return AnimeSamaProvider.getVideo(server.copy(id = server.id.removePrefix("asbackup__")))
+        }
+        if (server.id.startsWith("wfbackup__")) {
+            return WiflixProvider.getVideo(server.copy(id = server.id.removePrefix("wfbackup__")))
+        }
+        if (server.id.startsWith("nmbackup__")) {
+            return NetMirrorProvider.getVideo(server.copy(id = server.id.removePrefix("nmbackup__")))
         }
         // Un host peut avoir PLUSIEURS miroirs (ex 3 liens Uqload pour 1 film).
         //   On essaie chacun jusqu'au premier qui sort une vraie source -> un

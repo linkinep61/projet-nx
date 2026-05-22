@@ -35,6 +35,15 @@ object CommunityRatingView {
         year: String? = null,
         isTvShow: Boolean = false,
     ) {
+        // Anti-reset : si le contentKey n'a pas changé, ne pas re-bind
+        // (le ViewModel émet 2-3x pour la même fiche → évite de perdre les étoiles)
+        val prevKey = rootView.getTag(R.id.include_community_rating) as? String
+        if (prevKey == contentKey) {
+            Log.d(TAG, "bind() skip — même contentKey=$contentKey")
+            return
+        }
+        rootView.setTag(R.id.include_community_rating, contentKey)
+
         val star1 = rootView.findViewById<ImageView>(R.id.iv_star_1) ?: return
         val star2 = rootView.findViewById<ImageView>(R.id.iv_star_2) ?: return
         val star3 = rootView.findViewById<ImageView>(R.id.iv_star_3) ?: return
@@ -150,14 +159,19 @@ object CommunityRatingView {
             }
         }
 
-        // ── TV D-pad : barre focusable, chaque OK incrémente et valide ──
+        // ── TV D-pad : barre focusable, confirmation en 2 clics ──
+        // 1er OK = choisir note (cycle 1→5), 2e OK dans 3s = confirmer.
+        // Évite les votes accidentels par navigation D-pad.
         val starBar = rootView.findViewById<LinearLayout>(R.id.ll_star_bar)
         Log.d(TAG, "starBar found: ${starBar != null}")
+        var starConfirmPending = false
+        var starConfirmTs = 0L
         if (starBar != null) {
             starBar.setOnFocusChangeListener { _, hasFocus ->
                 Log.d(TAG, "starBar focus=$hasFocus")
                 if (hasFocus) {
                     dpadPreview = currentUserRating ?: 0
+                    starConfirmPending = false
                     if (dpadPreview > 0) {
                         updateStarsForUserVote(stars, dpadPreview)
                     }
@@ -165,17 +179,29 @@ object CommunityRatingView {
                     infoText.text = "$label · OK pour noter"
                 } else {
                     dpadPreview = 0
+                    starConfirmPending = false
                     updateStars(stars, currentAvg, currentUserRating)
                     infoText.text = formatRatingInfo(currentAvg, currentTotal)
                 }
             }
 
             starBar.setOnClickListener {
-                dpadPreview = if (dpadPreview >= 5) 1 else dpadPreview + 1
-                Log.d(TAG, "starBar clicked → dpadPreview=$dpadPreview")
-                updateStarsForUserVote(stars, dpadPreview)
-                infoText.text = "★ $dpadPreview/5 — envoi…"
-                submitRating(dpadPreview)
+                val now = System.currentTimeMillis()
+                if (starConfirmPending && now - starConfirmTs < 3_000) {
+                    // 2e clic dans 3s → confirmer le vote
+                    Log.d(TAG, "starBar confirmed → submit $dpadPreview")
+                    starConfirmPending = false
+                    infoText.text = "★ $dpadPreview/5 — envoi…"
+                    submitRating(dpadPreview)
+                } else {
+                    // 1er clic → choisir la note (cycle 1→5), pas de soumission
+                    dpadPreview = if (dpadPreview >= 5) 1 else dpadPreview + 1
+                    starConfirmPending = true
+                    starConfirmTs = now
+                    Log.d(TAG, "starBar preview → dpadPreview=$dpadPreview (appuie encore)")
+                    updateStarsForUserVote(stars, dpadPreview)
+                    infoText.text = "★ $dpadPreview/5 · OK pour confirmer"
+                }
             }
         }
     }

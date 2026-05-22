@@ -13,6 +13,7 @@ import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.databinding.FragmentTvShowsTvBinding
 import com.streamflixreborn.streamflix.models.Movie
 import com.streamflixreborn.streamflix.models.TvShow
+import com.streamflixreborn.streamflix.utils.EpisodeFavorites
 import com.streamflixreborn.streamflix.utils.GlobalFavorites
 import kotlinx.coroutines.launch
 
@@ -79,8 +80,7 @@ class GlobalFavoritesTvFragment : Fragment() {
 
             movies.forEach { it.itemType = AppAdapter.Type.MOVIE_GRID_TV_ITEM }
             tvShows.forEach { it.itemType = AppAdapter.Type.TV_SHOW_GRID_TV_ITEM }
-            // 2026-05-21 : saisons favorites (toggle par appui long sur une saison),
-            //   présentées comme des cartes "Série — Saison N" dans le même écran.
+            // 2026-05-21 : saisons favorites
             val seasonFavs = com.streamflixreborn.streamflix.utils.SeasonFavorites.all().map { e ->
                 TvShow(
                     id = e.syntheticId(),
@@ -89,14 +89,45 @@ class GlobalFavoritesTvFragment : Fragment() {
                     banner = e.showBanner,
                 ).apply { itemType = AppAdapter.Type.TV_SHOW_GRID_TV_ITEM }
             }
-            val items = (movies + tvShows + seasonFavs)
+            // 2026-05-22 : épisodes favoris
+            val episodeFavs = EpisodeFavorites.all().map { e ->
+                TvShow(
+                    id = e.syntheticId(),
+                    title = "${e.showTitle} — S${e.seasonNumber}E${e.episodeNumber}",
+                    overview = e.episodeTitle,
+                    poster = e.episodePoster ?: e.showPoster,
+                    banner = e.showBanner,
+                ).apply { itemType = AppAdapter.Type.TV_SHOW_GRID_TV_ITEM }
+            }
+            // 2026-05-22 : reprises de lecture films
+            val cwMovies = try {
+                GlobalFavorites.loadContinueWatchingMovies(requireContext(), 20)
+            } catch (_: Exception) { emptyList() }
+            cwMovies.forEach { it.itemType = AppAdapter.Type.MOVIE_CONTINUE_WATCHING_TV_ITEM }
+            // 2026-05-22 : reprises de lecture séries (carte série)
+            val cwSeries = try {
+                GlobalFavorites.loadContinueWatchingSeries(requireContext(), 20)
+            } catch (_: Exception) { emptyList() }
+            val cwSeriesCards = cwSeries.map { cw ->
+                val title = "${cw.tvShow.title} — S${cw.seasonNumber}E${cw.episodeNumber}"
+                TvShow(
+                    id = "resume_series_${cw.tvShow.id}",
+                    title = title,
+                    overview = cw.lastEpisode.title,
+                    poster = cw.tvShow.poster,
+                    banner = cw.tvShow.banner,
+                ).apply { itemType = AppAdapter.Type.TV_SHOW_GRID_TV_ITEM }
+            }
+
+            // Ordre : favoris en haut, reprises films, reprises séries
+            val items = (movies + tvShows + seasonFavs + episodeFavs) + cwMovies + cwSeriesCards
             appAdapter.submitList(items)
             binding.vgvTvShows.visibility = View.VISIBLE
 
             if (items.isEmpty()) {
                 Toast.makeText(
                     requireContext(),
-                    "Aucun favori — ajoute des films/séries en favori dans les providers",
+                    "Aucun favori ni reprise de lecture",
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -109,6 +140,27 @@ class GlobalFavoritesTvFragment : Fragment() {
         if (itemId.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
             com.streamflixreborn.streamflix.utils.SeasonFavorites.removeBySyntheticId(itemId)
             Toast.makeText(requireContext(), "Saison retirée des favoris", Toast.LENGTH_SHORT).show()
+            loadFavorites()
+            return
+        }
+        // 2026-05-22 : épisode favori (id synthétique)
+        if (itemId.startsWith(EpisodeFavorites.SYNTHETIC_ID_PREFIX)) {
+            EpisodeFavorites.removeBySyntheticId(itemId)
+            Toast.makeText(requireContext(), "Épisode retiré des favoris", Toast.LENGTH_SHORT).show()
+            loadFavorites()
+            return
+        }
+        // 2026-05-22 : reprises de lecture → masquer du cœur
+        if (itemId.startsWith("resume_")) {
+            GlobalFavorites.dismissContinueWatching(itemId)
+            Toast.makeText(requireContext(), "Reprise retirée", Toast.LENGTH_SHORT).show()
+            loadFavorites()
+            return
+        }
+        // 2026-05-22 : reprises de lecture films (id original sans préfixe resume_)
+        if (isMovie && GlobalFavorites.originByItemId.containsKey("resume_movie_$itemId")) {
+            GlobalFavorites.dismissContinueWatching("resume_movie_$itemId")
+            Toast.makeText(requireContext(), "Reprise retirée", Toast.LENGTH_SHORT).show()
             loadFavorites()
             return
         }
