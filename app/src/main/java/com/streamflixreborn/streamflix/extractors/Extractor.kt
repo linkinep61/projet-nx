@@ -491,6 +491,54 @@ abstract class Extractor {
             extractionCache.remove(embedUrl)
         }
 
+        // ── Domain fallback : redirection automatique ────────────────────
+        // Quand un domaine d'hoster tombe (DNS/connect/SSL), on ré-essaie
+        // avec les aliasUrls de l'extracteur. Si ça marche, on mémorise
+        // la redirection pour les prochains appels (évite de re-tenter
+        // le domaine mort). Cache en mémoire, reset au restart app.
+        private val domainRedirects = ConcurrentHashMap<String, String>()
+
+        /** Extrait le host d'une URL (sans protocole ni www). */
+        private fun extractHost(url: String): String? {
+            return try {
+                val cleaned = url.removePrefix("https://").removePrefix("http://").removePrefix("www.")
+                cleaned.substringBefore("/").substringBefore(":").ifBlank { null }
+            } catch (_: Exception) { null }
+        }
+
+        /** Vrai si l'erreur est liée au domaine/réseau (DNS, connect, SSL, timeout).
+         *  Ces erreurs justifient un retry sur un domaine alias car le contenu
+         *  est probablement le même — c'est juste le TLD qui a changé. */
+        private fun isDomainError(e: Throwable): Boolean {
+            var cur: Throwable? = e
+            var depth = 0
+            while (cur != null && depth < 6) {
+                when (cur) {
+                    is java.net.UnknownHostException -> return true
+                    is java.net.ConnectException -> return true
+                    is javax.net.ssl.SSLException -> return true
+                    is java.net.SocketTimeoutException -> return true
+                    is java.io.InterruptedIOException -> return true
+                    is kotlinx.coroutines.TimeoutCancellationException -> return true
+                }
+                val msg = cur.message?.lowercase().orEmpty()
+                if (msg.contains("unable to resolve host") || msg.contains("failed to connect")) return true
+                cur = cur.cause
+                depth++
+            }
+            return false
+        }
+
+        /** Applique les redirections domaine mémorisées sur un lien.
+         *  Si le host du lien a un redirect connu (succès précédent sur un alias),
+         *  on réécrit directement le lien pour éviter de retenter le domaine mort. */
+        private fun applyDomainRedirect(url: String): String {
+            val host = extractHost(url) ?: return url
+            val redirectTo = domainRedirects[host] ?: return url
+            Log.d("Extractor", "Applying cached domain redirect: $host → $redirectTo")
+            return url.replace(host, redirectTo)
+        }
+
         suspend fun extract(link: String, server: Video.Server? = null): Video {
             Log.d("Extractor", "extract() called with link=$link server=${server?.name}")
 
@@ -503,7 +551,10 @@ abstract class Extractor {
                 extractionCache.remove(link)
             }
 
-            var finalLink = link
+            // 2026-05-21 : Appliquer les redirections de domaine mémorisées
+            // (un domaine mort qui a déjà été résolu vers un alias vivant).
+            // Ceci évite de re-tenter le domaine mort à chaque extraction.
+            var finalLink = applyDomainRedirect(link)
 
             // 1. RISOLUZIONE BRIDGE UNIVERSALE (StreamHG/Sync/Cuevana)
             // Facciamo questo PRIMA di cercare l'estrattore perché il link bridge (es. mysync.mov)
@@ -615,6 +666,52 @@ abstract class Extractor {
                 val video = try {
                     foundExtractor.extract(finalLink)
                 } catch (e: Exception) {
+                    // 2026-05-21 : DOMAIN FALLBACK — si l'erreur est réseau
+                    // (DNS/connect/SSL/timeout), on ré-essaie en remplaçant le
+                    // domaine du lien par chaque alias connu. Couvre le cas
+                    // classique : un hoster change de TLD (streamwish.to → .com,
+                    // moiflix.com → .click, moviesapi.club → .to, etc.) et les
+                    // providers envoient encore l'ancien domaine dans les embeds.
+                    // Le fallback est transparent : l'extracteur reçoit l'URL
+                    // réécrite et fonctionne normalement.
+                    if (isDomainError(e) && foundExtractor.aliasUrls.isNotEmpty()) {
+                        val linkHost = extractHost(finalLink)
+                        if (linkHost != null) {
+                            // Construire la liste de domaines candidats : mainUrl + aliasUrls
+                            // sauf celui qui vient de fail
+                            val allDomains = buildList {
+                                extractHost(foundExtractor.mainUrl)?.let { add(it) }
+                                foundExtractor.aliasUrls.forEach { alias ->
+                                    extractHost(alias)?.let { add(it) }
+                                }
+                            }.distinct().filter { it != linkHost }
+
+                            for (altHost in allDomains) {
+                                val altLink = finalLink.replace(linkHost, altHost)
+                                Log.w("Extractor", "Domain fallback ${foundExtractor.name}: $linkHost → $altHost")
+                                try {
+                                    val altVideo = foundExtractor.extract(altLink)
+                                    // Succès ! Mémoriser le domaine qui marche
+                                    domainRedirects[linkHost] = altHost
+                                    val altDuration = System.currentTimeMillis() - extractStartMs
+                                    com.streamflixreborn.streamflix.utils.ExtractorLatencyTracker
+                                        .recordExtraction(name, altDuration)
+                                    Log.i("StreamFlixES", "[VIDEO] -> Extracted via fallback ($altHost): ${altVideo.source}")
+                                    recordSuccess(name)
+                                    val filtered = enforceFrenchSubtitlesOnly(altVideo)
+                                    if (foundExtractor.cacheTtlMs > 0L) {
+                                        extractionCache[link] = CachedExtraction(
+                                            video = filtered,
+                                            expiresAtMillis = System.currentTimeMillis() + foundExtractor.cacheTtlMs,
+                                        )
+                                    }
+                                    return filtered
+                                } catch (altE: Exception) {
+                                    Log.w("Extractor", "Domain fallback $altHost also failed: ${altE.message}")
+                                }
+                            }
+                        }
+                    }
                     // C: track the failure so the provider can grey/sort this server out.
                     // On passe l'exception pour permettre au tracker de classifier
                     // le type d'erreur (timeout / 403 / parsing / …) et de logger

@@ -24,6 +24,9 @@ import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.TmdbUtils
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -234,7 +237,7 @@ data class MovieboxResolution(
  * `/bt/{hash}.mp4?sign=X&t=Y` sur un CDN aoneroom dont le host est obfusqué
  * par JWT token côté client). À reverse-eng en v2.
  */
-object MovieboxProvider : Provider {
+object MovieboxProvider : Provider, ProgressiveServersProvider {
 
     override val name = "Moviebox"
     override val baseUrl = "https://themoviebox.org"
@@ -960,45 +963,40 @@ object MovieboxProvider : Provider {
             )
         )
 
-        // 2026-05-05 : Movix backup — quand on regarde depuis Moviebox, on ajoute
-        // aussi les sources Movix (Filemoon/VOE/Uqload/etc.) si on trouve un match
-        // par titre+année via TMDB. Ça donne au minimum 2 sources cliquables au
-        // user (Moviebox direct + Movix multi-hosters) au lieu d'une seule.
-        //
-        // 2026-05-05 v2 : titre NORMALISÉ avant TMDB lookup (vire "[Version
-        // française]", "(VF)", etc. sinon TMDB multi-search retourne 0 results
-        // pour "Sonic the Hedgehog 3 [Version française]").
-        val movixBackup = runCatching {
-            val rawTitle = detail.title.orEmpty()
-            val normalizedTitle = normalizeTitleForTmdb(rawTitle)
-            val year = detail.releaseDate?.take(4)?.toIntOrNull()
-            val tmdbId = synchronized(tmdbCacheLock) { movieboxToTmdbId[subjectId] } ?: run {
-                // 2026-05-05 v3 : variantes + retry sans year (cf getTvShow)
-                val variants = listOf(normalizedTitle, rawTitle).filter { it.isNotBlank() }.distinct()
-                var foundId: String? = null
+        // 2026-05-21 : résolution TMDB partagée (Movix + Cloudstream backups)
+        val rawTitle = detail.title.orEmpty()
+        val normalizedTitle = normalizeTitleForTmdb(rawTitle)
+        val backupYear = detail.releaseDate?.take(4)?.toIntOrNull()
+        val resolvedTmdbId: Int? = synchronized(tmdbCacheLock) { movieboxToTmdbId[subjectId] } ?: run {
+            val variants = listOf(normalizedTitle, rawTitle).filter { it.isNotBlank() }.distinct()
+            var foundId: String? = null
+            for (v in variants) {
+                foundId = when (videoType) {
+                    is Video.Type.Movie -> TmdbUtils.getMovie(v, backupYear, "fr-FR")?.id
+                    is Video.Type.Episode -> TmdbUtils.getTvShow(v, backupYear, "fr-FR")?.id
+                }
+                if (foundId != null) break
+            }
+            if (foundId == null && backupYear != null) {
                 for (v in variants) {
                     foundId = when (videoType) {
-                        is Video.Type.Movie -> TmdbUtils.getMovie(v, year, "fr-FR")?.id
-                        is Video.Type.Episode -> TmdbUtils.getTvShow(v, year, "fr-FR")?.id
+                        is Video.Type.Movie -> TmdbUtils.getMovie(v, null, "fr-FR")?.id
+                        is Video.Type.Episode -> TmdbUtils.getTvShow(v, null, "fr-FR")?.id
                     }
                     if (foundId != null) break
                 }
-                if (foundId == null && year != null) {
-                    for (v in variants) {
-                        foundId = when (videoType) {
-                            is Video.Type.Movie -> TmdbUtils.getMovie(v, null, "fr-FR")?.id
-                            is Video.Type.Episode -> TmdbUtils.getTvShow(v, null, "fr-FR")?.id
-                        }
-                        if (foundId != null) break
-                    }
-                }
-                val foundIdInt = foundId?.toIntOrNull()
-                Log.d(TAG, "Movix backup TMDB lookup: raw='$rawTitle' → variants=$variants year=$year → tmdbId=$foundIdInt")
-                if (foundIdInt != null) synchronized(tmdbCacheLock) { movieboxToTmdbId[subjectId] = foundIdInt }
-                foundIdInt
             }
+            val foundIdInt = foundId?.toIntOrNull()
+            Log.d(TAG, "Backup TMDB lookup: raw='$rawTitle' → variants=$variants year=$backupYear → tmdbId=$foundIdInt")
+            if (foundIdInt != null) synchronized(tmdbCacheLock) { movieboxToTmdbId[subjectId] = foundIdInt }
+            foundIdInt
+        }
+
+        // Movix backup
+        val movixBackup = runCatching {
+            val tmdbId = resolvedTmdbId
             if (tmdbId == null) {
-                Log.w(TAG, "No TMDB match for '$normalizedTitle' (year=$year) — skip Movix backup")
+                Log.w(TAG, "No TMDB match for '$normalizedTitle' (year=$backupYear) — skip Movix backup")
                 emptyList()
             } else when (videoType) {
                 is Video.Type.Movie -> MovixProvider.getServers("$tmdbId", videoType)
@@ -1049,12 +1047,149 @@ object MovieboxProvider : Provider {
             Log.d(TAG, "+ Coflix backup pour Moviebox $subjectId : ${coflixBackup.size} sources")
         }
 
-        // 2026-05-05 v2 : ordre = NATIVE Moviebox → Movix backup → Coflix EN DERNIER.
-        // Dedup par src (au cas où Movix backup contenait déjà des Coflix).
+        // 2026-05-21 : Cloudstream backup — MovieBox+ via /resource bcdn (sans pre-roll).
+        val cloudstreamBackup = runCatching {
+            if (resolvedTmdbId != null) {
+                val csId = when (videoType) {
+                    is Video.Type.Movie -> "$resolvedTmdbId"
+                    is Video.Type.Episode -> "$resolvedTmdbId:${sNum}:${eNum}"
+                }
+                CloudstreamProvider.getServers(csId, videoType)
+            } else emptyList()
+        }.getOrElse {
+            Log.d(TAG, "Cloudstream backup failed for moviebox $subjectId: ${it.message}")
+            emptyList()
+        }
+        if (cloudstreamBackup.isNotEmpty()) {
+            Log.d(TAG, "+ Cloudstream backup pour Moviebox $subjectId : ${cloudstreamBackup.size} sources")
+        }
+
+        // Ordre = NATIVE Moviebox → Movix backup → Cloudstream → Coflix EN DERNIER.
+        // Dedup par src (au cas où les backups partagent des sources).
         val seen = mutableSetOf<String>()
-        val ordered = (moviebox + movixBackup + coflixBackup)
+        val ordered = (moviebox + movixBackup + cloudstreamBackup + coflixBackup)
             .filter { it.src.isBlank() || seen.add(it.src.lowercase().trim()) }
         return ordered
+    }
+
+    // ─── Chargement progressif (2026-05-21) ──────────────────────────────
+
+    override fun getServersProgressive(
+        id: String,
+        videoType: Video.Type,
+    ): Flow<List<Video.Server>> = channelFlow {
+        val subjectId = id
+            .removePrefix("mvbx::m::")
+            .removePrefix("mvbx::s::")
+            .removePrefix("mvbx::ep::")
+            .substringBefore("::")
+        if (subjectId.isBlank() || subjectId == id) return@channelFlow
+
+        val detail = runCatching {
+            service.getDetailById(apiHeaders(), subjectId).data?.subject
+        }.getOrNull() ?: return@channelFlow
+
+        val frDub = detail.dubs?.firstOrNull { it.lanCode.equals("fr", ignoreCase = true) }
+        val effectiveDetailPath = frDub?.detailPath ?: detail.detailPath ?: return@channelFlow
+        val effectiveSubjectId = frDub?.subjectId ?: subjectId
+        val (sNum, eNum) = when (videoType) {
+            is Video.Type.Episode -> videoType.season.number to videoType.number
+            else -> null to null
+        }
+
+        // 1) Natif = part direct
+        launch {
+            try {
+                val native = listOf(buildMovieboxServer(
+                    effectiveDetailPath, effectiveSubjectId, "Moviebox VF",
+                    seasonNumber = sNum, episodeNumber = eNum,
+                ))
+                send(native)
+            } catch (e: Exception) {
+                Log.w(TAG, "Progressive native failed: ${e.message}")
+            }
+        }
+
+        // Résolution TMDB partagée pour backups
+        val rawTitle = detail.title.orEmpty()
+        val normalizedTitle = normalizeTitleForTmdb(rawTitle)
+        val backupYear = detail.releaseDate?.take(4)?.toIntOrNull()
+        val resolvedTmdbId: Int? = synchronized(tmdbCacheLock) { movieboxToTmdbId[subjectId] } ?: run {
+            val variants = listOf(normalizedTitle, rawTitle).filter { it.isNotBlank() }.distinct()
+            var foundId: String? = null
+            for (v in variants) {
+                foundId = when (videoType) {
+                    is Video.Type.Movie -> TmdbUtils.getMovie(v, backupYear, "fr-FR")?.id
+                    is Video.Type.Episode -> TmdbUtils.getTvShow(v, backupYear, "fr-FR")?.id
+                }
+                if (foundId != null) break
+            }
+            if (foundId == null && backupYear != null) {
+                for (v in variants) {
+                    foundId = when (videoType) {
+                        is Video.Type.Movie -> TmdbUtils.getMovie(v, null, "fr-FR")?.id
+                        is Video.Type.Episode -> TmdbUtils.getTvShow(v, null, "fr-FR")?.id
+                    }
+                    if (foundId != null) break
+                }
+            }
+            val foundIdInt = foundId?.toIntOrNull()
+            if (foundIdInt != null) synchronized(tmdbCacheLock) { movieboxToTmdbId[subjectId] = foundIdInt }
+            foundIdInt
+        }
+
+        // 2) Movix backup
+        if (resolvedTmdbId != null) {
+            launch {
+                try {
+                    val movix = when (videoType) {
+                        is Video.Type.Movie -> MovixProvider.getServers("$resolvedTmdbId", videoType)
+                        is Video.Type.Episode -> {
+                            val mvt = videoType.copy(tvShow = videoType.tvShow.copy(id = "$resolvedTmdbId"))
+                            val meid = "$resolvedTmdbId-s${sNum}e${eNum}"
+                            MovixProvider.getServers(meid, mvt)
+                        }
+                    }
+                    if (movix.isNotEmpty()) send(movix)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Progressive Movix failed: ${e.message}")
+                }
+            }
+        }
+
+        // 3) Cloudstream backup
+        if (resolvedTmdbId != null) {
+            launch {
+                try {
+                    val csId = when (videoType) {
+                        is Video.Type.Movie -> "$resolvedTmdbId"
+                        is Video.Type.Episode -> "$resolvedTmdbId:${sNum}:${eNum}"
+                    }
+                    val cs = CloudstreamProvider.getServers(csId, videoType)
+                    if (cs.isNotEmpty()) send(cs)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Progressive Cloudstream failed: ${e.message}")
+                }
+            }
+        }
+
+        // 4) Coflix backup (par titre, pas tmdbId)
+        launch {
+            try {
+                val cleanTitle = normalizeTitleForTmdb(detail.title.orEmpty())
+                val year = detail.releaseDate?.take(4)?.toIntOrNull()
+                val coflix = when (videoType) {
+                    is Video.Type.Movie -> CoflixSourceProvider.getMovieSources(cleanTitle, year)
+                    is Video.Type.Episode -> CoflixSourceProvider.getEpisodeSources(
+                        showTitle = cleanTitle, year = year,
+                        seasonNumber = videoType.season.number, episodeNumber = videoType.number,
+                    )
+                }
+                if (coflix.isNotEmpty()) send(coflix)
+            } catch (e: Exception) {
+                Log.w(TAG, "Progressive Coflix failed: ${e.message}")
+            }
+        }
     }
 
     override suspend fun getVideo(server: Video.Server): Video {

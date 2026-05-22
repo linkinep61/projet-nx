@@ -42,6 +42,9 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             return cachePortalURL.ifEmpty{ field }
         }
 
+    // Fallback portal : kidraz.com (même backend, fusionné 2026-05-21)
+    private const val FALLBACK_PORTAL_URL = "http://chezlesducs.free.fr/films.php"
+
     override val defaultBaseUrl: String = "https://www.aplouf.com/zaxd03o2n0gfpub/home/aplouf"
     override val baseUrl: String = defaultBaseUrl
         get() {
@@ -411,8 +414,30 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                         }
                     }
                 } catch (e: Exception) {
-                    // In case of failure, we'll use the default URL
-                    // No need to throw as we already have a fallback URL
+                    // Portal aplouf.com KO → fallback kidraz via chezlesducs.free.fr
+                    try {
+                        val fbUrl = FALLBACK_PORTAL_URL.toHttpUrl()
+                        val fbService = Service.buildAddressFetcher(fbUrl)
+                        val fbDoc = fbService.loadPage(fbUrl.encodedPath.removePrefix("/"))
+                        val fbLink = fbDoc.selectFirst("a:contains(kidraz)")
+                        var fbNewUrl = fbLink?.attr("href")
+                        if (!fbNewUrl.isNullOrEmpty()) {
+                            fbNewUrl = if (fbNewUrl.endsWith("/")) fbNewUrl else "$fbNewUrl/"
+                            val fbDoc2 = fbService.loadPage(fbNewUrl)
+                            val fbPath = fbDoc2.selectFirst("a#kidrazc")?.attr("href") ?: ""
+                            val fbRaw = fbService.loadPageRaw(fbNewUrl + fbPath)
+                            if (fbRaw.isSuccessful) {
+                                val homeUrl = fbRaw.raw().request.url
+                                homePath = homeUrl.encodedPath
+                                UserPreferences.setProviderCache(this,
+                                    UserPreferences.PROVIDER_URL, homeUrl.toString())
+                                UserPreferences.setProviderCache(this,
+                                    UserPreferences.PROVIDER_LOGO, fbNewUrl + "favicon.png")
+                            }
+                        }
+                    } catch (_: Exception) {
+                        // Les 2 portals KO → on garde l'URL par défaut
+                    }
                 }
             }
             val url = baseUrl.toHttpUrl()

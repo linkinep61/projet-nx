@@ -428,6 +428,17 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
             return
         }
         currentProvider = provider
+
+        // 2026-05-22 : attendre que le refresh URL du provider soit fini
+        // (max 5s) avant de lancer le fetch. Sans ça, getHome() part sur
+        // une vieille URL → timeout → écran vide au 1er clic.
+        val refreshJob = StreamFlixApp.instance.providerUrlRefreshJob
+        if (refreshJob != null && refreshJob.isActive) {
+            Log.d("HomeBoot", "[${provider.name}] waiting for URL refresh…")
+            withTimeoutOrNull(5_000L) { refreshJob.join() }
+            Log.d("HomeBoot", "[${provider.name}] URL refresh done (or timed out) +${System.currentTimeMillis() - t0}ms")
+        }
+
         val appContext = StreamFlixApp.instance.applicationContext
         Log.d("HomeBoot", "[${provider.name}] start +${System.currentTimeMillis() - t0}ms")
         val cachedCategories = HomeCacheStore.read(appContext, provider)
@@ -441,13 +452,22 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
 
         loadUserDataCache(provider)
 
-        // 2026-05-12 : skip le network refresh si le cache home est récent
-        // (< 5 min). Évite les 43 calls TMDB sur Cloudstream à chaque retour
-        // home, et la re-shuffle visuelle qui suit ~3s après l'entrée.
-        // Pour forcer un refresh : pull-to-refresh ou clear cache.
+        // Skip le network refresh si le cache home est récent.
+        // TTL variable par provider : les sites lents (scrape Cloudflare) ont
+        // un TTL plus long pour éviter le re-scrape qui bloque l'ouverture.
+        // Pull-to-refresh ou clear cache pour forcer un refresh.
         val cacheAgeMs = HomeCacheStore.ageMs(appContext, provider)
-        if (!cachedCategories.isNullOrEmpty() && cacheAgeMs != null && cacheAgeMs < 5 * 60 * 1000L) {
-            Log.d("HomeBoot", "[${provider.name}] SKIP network (cache age ${cacheAgeMs / 1000}s) total=${System.currentTimeMillis() - t0}ms")
+        val cacheTtlMs = when {
+            // Providers lents (Cloudflare, scrape) → 30 min
+            provider.name.contains("Anime", ignoreCase = true) ||
+            provider.name.contains("Dessin", ignoreCase = true) ||
+            provider.name.contains("Franime", ignoreCase = true) ||
+            provider.name.contains("Manga", ignoreCase = true) -> 30 * 60 * 1000L
+            // Providers normaux → 5 min
+            else -> 5 * 60 * 1000L
+        }
+        if (!cachedCategories.isNullOrEmpty() && cacheAgeMs != null && cacheAgeMs < cacheTtlMs) {
+            Log.d("HomeBoot", "[${provider.name}] SKIP network (cache age ${cacheAgeMs / 1000}s, TTL ${cacheTtlMs / 60000}min) total=${System.currentTimeMillis() - t0}ms")
             return
         }
 
@@ -458,8 +478,10 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
 
             // Emit base categories immediately so the UI appears fast.
             // Enrichment (20 extra requests) runs AFTER this first display.
-            // Si nb catégories suspect-bas (< 2) vs cache existant plus riche, on NE write PAS.
-            val shouldWriteCache = cachedCategories.isNullOrEmpty() || categories.size >= cachedCategories.size
+            // Tolérer une baisse de 3 catégories max (suppressions volontaires, A/B test…).
+            // Ne bloquer que les résultats VRAIMENT partiels (perte >= 4 cats = probable erreur réseau).
+            val shouldWriteCache = cachedCategories.isNullOrEmpty()
+                || categories.size >= cachedCategories.size - 3
             if (shouldWriteCache) {
                 HomeCacheStore.write(appContext, provider, categories)
             } else {

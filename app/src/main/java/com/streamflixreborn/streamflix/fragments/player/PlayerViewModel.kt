@@ -46,6 +46,15 @@ class PlayerViewModel(
     val additionalServer: SharedFlow<Video.Server> = _additionalServer
     private var additionalServerJob: Job? = null
 
+    // 2026-05-21 (user "affiche au fur et à mesure" + "trier VF/VOSTFR/VO") :
+    //   mise à jour PROGRESSIVE de la liste de serveurs pour les providers
+    //   ProgressiveServersProvider. Porte la liste COMPLÈTE ré-ordonnée par
+    //   bucket de langue (VF→VOSTFR→VO) à chaque nouveau lot, SANS relancer la
+    //   lecture (≠ SuccessLoadingServers qui auto-joue). Le fragment remplace sa
+    //   liste de serveurs et rafraîchit le picker en préservant la sélection.
+    private val _serversReordered = MutableSharedFlow<List<Video.Server>>(extraBufferCapacity = 16)
+    val serversReordered: SharedFlow<List<Video.Server>> = _serversReordered
+
     // ─── 2026-05-09 : tracking session pour FilmHealthTracker ─────────────
     // Compte les échecs dead-content dans cette session de player. Sert au
     // FilmHealthTracker pour décider de marquer le film "vide" quand tous
@@ -245,7 +254,16 @@ class PlayerViewModel(
                             if (!alive) {
                                 com.streamflixreborn.streamflix.extractors.Extractor
                                     .recordFailureExternal(srv.name, "embed-head-failed")
-                                Log.d("PlayerViewModel", "Background HEAD-scan: ${srv.name} → embed dead, flagged broken")
+                                // 2026-05-21 : scanné mais suspect → ORANGE (UNSURE) pour CE
+                                //   titre. Pas rouge : un HEAD KO n'est pas un vrai échec de
+                                //   lecture (faux négatifs possibles). Le rouge reste réservé
+                                //   à un onPlayerError réel. En phase 2, on retentera ces
+                                //   oranges/blancs (pas les rouges).
+                                com.streamflixreborn.streamflix.utils.TitleServerStatus.record(
+                                    srv.id,
+                                    com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.UNSURE,
+                                )
+                                Log.d("PlayerViewModel", "Background HEAD-scan: ${srv.name} → embed suspect (orange ce titre)")
                             }
                         } catch (_: kotlinx.coroutines.CancellationException) {
                             // ignore
@@ -259,6 +277,12 @@ class PlayerViewModel(
             val jobs = mutableListOf<Job>()
             toExtract.forEachIndexed { idx, server ->
                 jobs += launch {
+                    // 2026-05-21 : ne PAS pré-extraire les sources natives Papadustream :
+                    //   elles passent par un Cloudflare Turnstile que SEUL l'utilisateur
+                    //   peut résoudre → pré-extraire en fond lancerait l'écran captcha
+                    //   sans clic de l'user. On les résout uniquement au clic manuel.
+                    if (server.src.contains("papadustream", ignoreCase = true) ||
+                        server.src.contains("#xf=")) return@launch
                     try {
                         val startMs = System.currentTimeMillis()
                         // 2026-05-09 v2 : timeout 10s → 15s. Donne le temps aux
@@ -419,9 +443,21 @@ class PlayerViewModel(
         Log.d("PlayerViewModel", "Inizio ricerca server per ID: $id")
         lastVideoType = videoType
         lastId = id
+        // 2026-05-21 : statut serveurs PAR TITRE — posé tôt pour que le scan HEAD de
+        //   fond (preExtract) enregistre ses "scannés/suspects" sur le bon titre.
+        com.streamflixreborn.streamflix.utils.TitleServerStatus.setCurrentTitle(id)
         _state.emit(State.LoadingServers)
         try {
             val provider = UserPreferences.currentProvider ?: return@launch
+            Log.d("ServDiag", "path provider=${provider.name} progressive=${provider is com.streamflixreborn.streamflix.providers.ProgressiveServersProvider}")
+
+            // 2026-05-21 : si le provider sait streamer ses serveurs au fur et à
+            //   mesure, on prend le chemin progressif (1er lot affiché tout de
+            //   suite, le reste s'ajoute sans bloquer).
+            if (provider is com.streamflixreborn.streamflix.providers.ProgressiveServersProvider) {
+                collectProgressiveServers(provider, id, videoType)
+                return@launch
+            }
             // 2026-05-09 : auto-retry sur empty servers — gère les transient
             // (timeout backend AnimeSama, parsing race, upstream Sibnet/VidMoLy
             // en glitch momentané). 3 tentatives total avec backoff 0/2/5s :
@@ -522,6 +558,87 @@ class PlayerViewModel(
             Log.e("PlayerViewModel", "Errore ricerca server: ", e)
             _state.emit(State.FailedLoadingServers(e))
         }
+    }
+
+    /**
+     * 2026-05-21 : chemin PROGRESSIF. Collecte les lots de serveurs au fur et à
+     * mesure que les sources répondent. Le 1er lot débloque l'écran via
+     * SuccessLoadingServers (auto-play du meilleur natif) ; les lots suivants
+     * mettent à jour la liste COMPLÈTE ré-ordonnée par bucket de langue via
+     * serversReordered (sans relancer la lecture). Si rien n'arrive → fallback
+     * batch puis erreur.
+     */
+    private suspend fun collectProgressiveServers(
+        provider: com.streamflixreborn.streamflix.providers.ProgressiveServersProvider,
+        id: String,
+        videoType: Video.Type,
+    ) {
+        val accumulated = mutableListOf<Video.Server>()
+        val seenIds = HashSet<String>()
+        var firstEmitted = false
+        Log.d("ServDiag", "PROG enter id=$id")
+        try {
+            provider.getServersProgressive(id, videoType).collect { batch ->
+                Log.d("ServDiag", "PROG batch reçu size=${batch.size} firstEmitted=$firstEmitted")
+                val fresh = batch.filter { it.id.isNotBlank() && seenIds.add(it.id) }
+                if (fresh.isEmpty()) return@collect
+                accumulated.addAll(fresh)
+                val ordered = orderByFrenchBuckets(accumulated)
+                if (!firstEmitted) {
+                    firstEmitted = true
+                    Log.i("StreamFlixES", "[SERVERS PROGRESSIVE] 1er lot affiché : ${ordered.size} serveurs")
+                    _state.emit(State.SuccessLoadingServers(ordered))
+                    preExtractTopServersInBackground(ordered)
+                } else {
+                    Log.d("PlayerViewModel", "[SERVERS PROGRESSIVE] +${fresh.size} → ${ordered.size} (ré-ordonné par langue)")
+                    _serversReordered.emit(ordered)
+                }
+            }
+        } catch (e: Exception) {
+            if (firstEmitted) {
+                Log.w("PlayerViewModel", "Progressive: erreur après affichage (ignorée) : ${e.message}")
+                return
+            }
+            Log.w("PlayerViewModel", "Progressive: échec avant 1er lot, fallback batch : ${e.message}")
+        }
+        if (!firstEmitted) {
+            // Aucun lot émis → fallback sur le chemin batch (avec retry).
+            val raw = try {
+                fetchServersWithRetry(provider as com.streamflixreborn.streamflix.providers.Provider, id, videoType)
+            } catch (e: Exception) {
+                _state.emit(State.FailedLoadingServers(e))
+                return
+            }
+            if (raw.isEmpty()) {
+                val name = (provider as? com.streamflixreborn.streamflix.providers.Provider)?.name ?: "ce provider"
+                _state.emit(State.FailedLoadingServers(Exception("Aucune source disponible pour ce contenu sur $name. Essayez un autre provider ou réessayez plus tard.")))
+                return
+            }
+            val ordered = orderByFrenchBuckets(raw)
+            _state.emit(State.SuccessLoadingServers(ordered))
+            preExtractTopServersInBackground(ordered)
+        }
+    }
+
+    /**
+     * Ordonne par PRIORITÉ DE LANGUE (VF=0 → VOSTFR=1 → VO=2) en gardant, à
+     * l'intérieur de chaque bucket, l'ordre de fiabilité d'ExtractorRanker.
+     * sortedBy est stable → la fiabilité est préservée comme axe secondaire.
+     */
+    private fun orderByFrenchBuckets(list: List<Video.Server>): List<Video.Server> {
+        val ranked = try {
+            com.streamflixreborn.streamflix.utils.ExtractorRanker.rankServers(list)
+        } catch (_: Exception) { list }
+        val voRegex = Regex("""(^|[^a-z])vo([^a-z]|$)""")
+        fun bucket(s: Video.Server): Int {
+            val n = s.name.lowercase()
+            return when {
+                n.contains("vostfr") || n.contains("sous-titr") -> 1
+                voRegex.containsMatchIn(n) -> 2
+                else -> 0
+            }
+        }
+        return ranked.sortedBy { bucket(it) }
     }
 
     // 2026-05-16 (user "ça charge à l'infini sans savoir si serveur OK") :

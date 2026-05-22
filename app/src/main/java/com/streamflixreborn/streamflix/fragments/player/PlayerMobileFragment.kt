@@ -148,6 +148,9 @@ class PlayerMobileFragment : Fragment() {
             "acdn.adnxs", "adnxs.com", "adsrvr.org",
             "serving-sys.com", "zedo.com", "yieldmanager",
             "disqusads", "revdeepak", "pushance",
+            // 2026-05-21 (capture user : pub AliExpress plein écran sur Player4me mobile) :
+            //   hôtes d'interstitiels vus sur les players anime.
+            "aliexpress", "decafeligibly", "morphify",
         )
 
         /** JS injected into DaddyLive embeds to kill popup ads and overlays */
@@ -200,6 +203,59 @@ class PlayerMobileFragment : Fragment() {
                     '{ display:none !important; }'
                 ].join('');
                 document.head.appendChild(css);
+            })();
+        """
+
+        /** JS injecté dans Player4me pour tuer les pubs (interstitiels / overlays
+         *  injectés dans le DOM) SANS supprimer le conteneur du player.
+         *  2026-05-22 (user "des pubs passent encore" sur mobile) : le tueur
+         *  générique DaddyLive enlevait le player Player4me (écran noir). Version
+         *  CONSERVATRICE ici : on ne retire QUE
+         *    1) les iframes dont le src est un hôte pub connu (jamais l'iframe
+         *       du player, dont le src est un CDN),
+         *    2) les overlays plein écran cliquables target=_blank cross-origin
+         *       (interstitiels), jamais ceux qui contiennent la <video>,
+         *    3) les éléments nommés pub (id/class) via CSS display:none.
+         *  On ne touche JAMAIS aux fixed/absolute génériques ni aux iframes du
+         *  player → pas d'écran noir. */
+        private const val PLAYER4ME_AD_KILL_JS = """
+            (function(){
+                try {
+                    window.open = function(){ return null; };
+                    window.alert = function(){};
+                    window.confirm = function(){ return false; };
+                    window.prompt = function(){ return null; };
+                } catch(e){}
+                var AD = ['aliexpress','decafeligibly','morphify','doubleclick',
+                    'googlesyndication','popads','popunder','popcash','propellerads',
+                    'exoclick','juicyads','trafficjunky','clickadu','adsterra',
+                    'hilltopads','adnxs','adsrvr','adserver','/ads/','/vast','vpaid',
+                    'syndication','onclckmn','onclicka'];
+                function isAd(s){ s=(s||'').toLowerCase();
+                    for(var i=0;i<AD.length;i++){ if(s.indexOf(AD[i])>=0) return true; }
+                    return false; }
+                function kill(){
+                    try {
+                        document.querySelectorAll('iframe').forEach(function(f){
+                            if(isAd(f.src)) f.remove();
+                        });
+                        document.querySelectorAll('a[target="_blank"]').forEach(function(a){
+                            var h=a.href||''; if(h.indexOf('http')!==0) return;
+                            var r=a.getBoundingClientRect();
+                            var big=r.width>=window.innerWidth*0.5 && r.height>=window.innerHeight*0.5;
+                            if((big || isAd(h)) && !a.querySelector('video')) a.remove();
+                        });
+                    } catch(e){}
+                }
+                kill();
+                setInterval(kill, 1500);
+                try {
+                    var css=document.createElement('style');
+                    css.textContent='[id*="ad-"],[id*="ad_"],[id*="popup"],[id*="interstitial"],'
+                        +'[class*="ad-overlay"],[class*="popup"],[class*="interstitial"],'
+                        +'[class*="sponsor"]{display:none!important;}';
+                    (document.head||document.documentElement).appendChild(css);
+                } catch(e){}
             })();
         """
     }
@@ -258,6 +314,11 @@ class PlayerMobileFragment : Fragment() {
     // si le player reste bloqué en STATE_BUFFERING > N secondes (Darkibox & co
     // qui renvoient une URL valide mais ne délivrent pas de données).
     private var bufferingWatchdog: kotlinx.coroutines.Job? = null
+    // 2026-05-21 (user "baisse auto seulement si ça bufferise" + "remonte tout seul
+    //   quand c'est stable") : plafond de résolution adaptatif piloté par les
+    //   rebufferings (mode Auto/VOD uniquement). Cf AdaptiveQualityGovernor.
+    private var adaptiveQualityGovernor: com.streamflixreborn.streamflix.utils.AdaptiveQualityGovernor? = null
+    private var adaptiveQualityTicker: kotlinx.coroutines.Job? = null
     // 2026-05-09 v2 : 10s → 20s → 45s.
     // Règle user : "il faut que la source aille jusqu'à l'échec avant de
     // changer". Le watchdog ne doit PAS kill prématurément une source qui
@@ -1010,6 +1071,37 @@ class PlayerMobileFragment : Fragment() {
                 binding.settings.setOnServerSelectedListener { sel ->
                     servers.find { sel.id == it.id }?.let { viewModel.getVideo(it) }
                 }
+            }
+        }
+
+        // 2026-05-21 : mise à jour PROGRESSIVE de la liste (providers progressifs).
+        //   Reçoit la liste COMPLÈTE ré-ordonnée par bucket de langue à chaque
+        //   nouveau lot. On remplace le picker SANS relancer la lecture (la
+        //   sélection/loading en cours est préservée par id).
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewModel.serversReordered.collect { reordered ->
+                servers = reordered
+                val nonOla = reordered.filter { !it.name.startsWith("OLA[") }
+                val prevSelectedId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isSelected }?.id
+                val prevLoadingId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isLoading }?.id
+                PlayerSettingsView.Settings.Server.list.clear()
+                PlayerSettingsView.Settings.Server.list.addAll(nonOla.map {
+                    PlayerSettingsView.Settings.Server(id = it.id, name = it.name).apply {
+                        isSelected = (it.id == prevSelectedId)
+                        isLoading = (it.id == prevLoadingId)
+                    }
+                })
+                if (::player.isInitialized) {
+                    player.playlistMetadata = MediaMetadata.Builder()
+                        .setTitle(player.playlistMetadata?.title?.toString() ?: "")
+                        .setMediaServers(nonOla.map { MediaServer(id = it.id, name = it.name) })
+                        .build()
+                }
+                binding.settings.setOnServerSelectedListener { sel ->
+                    servers.find { sel.id == it.id }?.let { viewModel.getVideo(it) }
+                }
+                scheduleServerRefresh()
+                Log.d("PlayerMobileFragment", "Servers reordered (progressive): ${reordered.size}")
             }
         }
 
@@ -2327,11 +2419,15 @@ class PlayerMobileFragment : Fragment() {
 
     private fun displayVideo(video: Video, server: Video.Server) {
         currentVideo = video
+        // 2026-05-21 : statut serveurs PAR TITRE (couleurs picker liées à ce contenu).
+        com.streamflixreborn.streamflix.utils.TitleServerStatus.setCurrentTitle(args.id)
         // Reset IPTV stickiness when switching to a different server (manual or auto).
         if (currentServer?.id != server.id) {
             iptvRetryCount = 0
             iptvCurrentStreamHasWorked = false
             vodCurrentStreamHasWorked = false
+            // 2026-05-21 : nouveau serveur → on repart en pleine qualité.
+            adaptiveQualityGovernor?.reset()
         }
         currentServer = server
         updatePlayerHeader()
@@ -2723,6 +2819,9 @@ class PlayerMobileFragment : Fragment() {
                 }
                 Log.d("PlayerDebug", "onPlaybackStateChanged: $stateName, uri=${player.currentMediaItem?.localConfiguration?.uri?.toString()?.take(80)}")
 
+                // 2026-05-21 : alimente le governor de qualité adaptatif (rebuffers).
+                adaptiveQualityGovernor?.onState(playbackState)
+
                 // 2026-05-05 : watchdog buffering — fallback auto si bloqué > 10s
                 if (playbackState != Player.STATE_BUFFERING) {
                     bufferingWatchdog?.cancel()
@@ -2852,6 +2951,15 @@ class PlayerMobileFragment : Fragment() {
                     if (!vodCurrentStreamHasWorked) {
                         vodCurrentStreamHasWorked = true
                         Log.d("PlayerMobileFragment", "VOD stream marked as working — fast-swap on glitch enabled")
+                    }
+                    // 2026-05-21 : ce serveur a RÉELLEMENT joué pour CE titre → VERIFIED (vert)
+                    //   uniquement pour ce titre (args.id), pas de bave sur les autres.
+                    currentServer?.let {
+                        com.streamflixreborn.streamflix.utils.TitleServerStatus.record(
+                            it.id,
+                            com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.VERIFIED,
+                            args.id,
+                        )
                     }
                 }
 
@@ -3007,6 +3115,15 @@ class PlayerMobileFragment : Fragment() {
 
             override fun onPlayerError(error: PlaybackException) {
                 super.onPlayerError(error)
+                // 2026-05-21 : ce serveur a ÉCHOUÉ pour CE titre → DEAD (rouge) uniquement
+                //   pour ce titre (args.id). Un échec ici ne colore pas les autres épisodes.
+                currentServer?.let {
+                    com.streamflixreborn.streamflix.utils.TitleServerStatus.record(
+                        it.id,
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD,
+                        args.id,
+                    )
+                }
                 Log.e("PlayerDebug", "onPlayerError: code=${error.errorCode}, msg=${error.message}")
                 Log.e("PlayerDebug", "  cause: ${error.cause}")
                 Log.e("PlayerDebug", "  cause.cause: ${error.cause?.cause}")
@@ -3830,7 +3947,7 @@ class PlayerMobileFragment : Fragment() {
         }
 
         Glide.with(this)
-            .load(nextEpisode.poster ?: nextEpisode.tvShow.poster)
+            .load(com.streamflixreborn.streamflix.utils.optimizeArtworkUrl(nextEpisode.poster ?: nextEpisode.tvShow.poster, 400))
             .error(R.drawable.glide_fallback_cover)
             .fallback(R.drawable.glide_fallback_cover)
             .centerCrop()
@@ -4374,6 +4491,21 @@ class PlayerMobileFragment : Fragment() {
                     .build()
             }
 
+        // 2026-05-21 : governor de qualité adaptatif — actif uniquement en VOD +
+        //   qualité Auto (qualityHeight == null). Descend sur rebuffers répétés,
+        //   remonte quand stable. Recréé à chaque rebuild de player.
+        adaptiveQualityTicker?.cancel()
+        adaptiveQualityGovernor = com.streamflixreborn.streamflix.utils.AdaptiveQualityGovernor(player) {
+            !isLiveIptvHere && UserPreferences.qualityHeight == null
+        }
+        adaptiveQualityTicker = viewLifecycleOwner.lifecycleScope.launch {
+            while (_binding != null) {
+                kotlinx.coroutines.delay(10_000L)
+                if (_binding == null) break
+                adaptiveQualityGovernor?.onTick()
+            }
+        }
+
         binding.pvPlayer.player = player
         binding.settings.player = player
         binding.settings.subtitleView = binding.pvPlayer.subtitleView
@@ -4431,6 +4563,10 @@ class PlayerMobileFragment : Fragment() {
         //   car le stream abyss a un binding TLS qui casse hors WebView). La WebView
         //   visible/interactive EST le player ; l'utilisateur tape play.
         val isAbyssEmbed = embedUrl.contains("abyss")
+        // 2026-05-21 (user "sur mobile Player4me affiche des pubs, pas comme sur TV où il
+        //   marche bien") : on porte le traitement Player4me du TV vers le mobile —
+        //   chargement direct + Referer, blocage des pubs (ressources + navigation), SSL.
+        val isPlayer4me = embedUrl.contains("4meplayer")
         val abyssNavAllow = listOf(
             "abysscdn.com", "abyss.to", "abyssa.cc", "abyssplayer.com", "hydrax.net",
             "iamcdn.net", "googleapis.com", "jwpcdn.com", "jsdelivr.net",
@@ -4447,6 +4583,19 @@ class PlayerMobileFragment : Fragment() {
             override fun shouldOverrideUrlLoading(
                 view: WebView?, request: WebResourceRequest?
             ): Boolean {
+                // Player4me redirige toute la page vers des interstitiels pub : on
+                //   bloque la navigation top-level vers tout ce qui n'est pas 4meplayer
+                //   + ses CDN connus. Le flux vidéo se charge en ressource → non impacté.
+                if (isPlayer4me) {
+                    val nh = request?.url?.host ?: return false
+                    val ok = listOf(
+                        "4meplayer", "dessinanime", "cloudflare", "cloudfront",
+                        "akamaized", "googlevideo", "jsdelivr", "sendvid", "uqload",
+                        "abysscdn", "embed4me", "hakunaymatata", "bcdn", "hcdn"
+                    ).any { nh.contains(it) }
+                    if (!ok) { Log.d("PlayerMobile", "Player4me NAV BLOCKED: $nh"); return true }
+                    return false
+                }
                 if (!isAbyssEmbed) return false
                 val navHost = request?.url?.host ?: return false
                 val allowed = abyssNavAllow.any { navHost == it || navHost.endsWith(".$it") }
@@ -4463,6 +4612,21 @@ class PlayerMobileFragment : Fragment() {
                     val ah = request?.url?.host ?: ""
                     if (abyssAdHosts.any { ah.contains(it, ignoreCase = true) }) {
                         Log.d("PlayerMobile", "Abyss AD BLOCKED: $ah")
+                        return WebResourceResponse("text/plain", "UTF-8",
+                            java.io.ByteArrayInputStream("".toByteArray()))
+                    }
+                }
+
+                // ── Player4me : blocage des ressources pub (interstitiels plein écran) ──
+                if (isPlayer4me) {
+                    val host = request?.url?.host ?: ""
+                    val isAd = AD_BLOCK_PATTERNS.any { host.contains(it, ignoreCase = true) }
+                        || url.contains("/ads/") || url.contains("/ad.")
+                        || url.contains("popunder") || url.contains("pop.js")
+                        || url.contains("/vast") || url.contains("vpaid")
+                        || url.contains("syndication") || url.contains("/banner")
+                    if (isAd) {
+                        Log.d("PlayerMobile", "Player4me AD BLOCKED: $host")
                         return WebResourceResponse("text/plain", "UTF-8",
                             java.io.ByteArrayInputStream("".toByteArray()))
                     }
@@ -4578,6 +4742,21 @@ class PlayerMobileFragment : Fragment() {
                 if (isDaddyLiveEmbed) {
                     view?.evaluateJavascript(DADDYLIVE_AD_KILL_JS, null)
                 }
+                // ── Player4me: tueur de pub conservateur (préserve le player) ──
+                if (isPlayer4me) {
+                    view?.evaluateJavascript(PLAYER4ME_AD_KILL_JS, null)
+                }
+            }
+
+            // 2026-05-21 : accepter les certs SSL invalides dans l'overlay player
+            //   (Player4me + ses CDN ont parfois un cert douteux → handshake rejeté =
+            //   écran noir). Cohérent avec le trust-all déjà en place ailleurs.
+            override fun onReceivedSslError(
+                view: WebView?,
+                handler: android.webkit.SslErrorHandler?,
+                error: android.net.http.SslError?
+            ) {
+                try { handler?.proceed() } catch (_: Throwable) { handler?.cancel() }
             }
         }
 
@@ -4623,6 +4802,12 @@ class PlayerMobileFragment : Fragment() {
             // ad-kill JS runs in the same context as the popup-creating scripts.
             Log.d("PlayerMobile", "Loading DaddyLive embed directly: ${embedUrl.take(100)}")
             wv.loadUrl(embedUrl)
+        } else if (isPlayer4me) {
+            // Player4me doit être chargé DIRECTEMENT (le wrapper iframe provoque
+            //   « document.domain mutation blocked » → écran noir) avec Referer
+            //   dessinanime.cc (anti-hotlink). Identique au TV.
+            Log.d("PlayerMobile", "Loading Player4me directly: ${embedUrl.take(100)}")
+            wv.loadUrl(embedUrl, mapOf("Referer" to "https://dessinanime.cc/"))
         } else {
             // Other embeds: use iframe wrapper (page expects to be in an iframe)
             val baseHost = if (isAbyssEmbed) "https://dessinanime.cc/" else "https://frembed.cyou/"

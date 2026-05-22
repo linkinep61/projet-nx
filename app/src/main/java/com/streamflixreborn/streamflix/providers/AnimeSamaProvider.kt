@@ -17,13 +17,17 @@ import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.TMDb3.original
+import com.streamflixreborn.streamflix.utils.TMDb3.w500
+import com.streamflixreborn.streamflix.utils.TMDb3.w1280
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
@@ -72,22 +76,28 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
      * - Déjà sur jsDelivr → inchangé
      */
     private fun optimizeImageUrl(rawUrl: String?, slug: String): String {
-        if (rawUrl.isNullOrBlank() || rawUrl.startsWith("data:")) {
-            return "${IMG_BASE}${slug}.jpg"
+        // Origine (sans schéma) à passer au proxy de redimensionnement.
+        val origin: String = when {
+            rawUrl.isNullOrBlank() || rawUrl.startsWith("data:") ->
+                "raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/${slug}.jpg"
+            rawUrl.contains("raw.githubusercontent.com/Anime-Sama/IMG") ->
+                "raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/${rawUrl.substringAfterLast("/")}"
+            rawUrl.contains("cdn.jsdelivr.net") && rawUrl.contains("/contenu/") ->
+                "raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/${rawUrl.substringAfterLast("/")}"
+            rawUrl.contains("anime-sama.to") || rawUrl.contains("anime-sama.pw") ->
+                "raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/${slug}.jpg"
+            else ->
+                // Autre CDN déjà optimisé (ex: TMDb) → pas de proxy.
+                return rawUrl
         }
-        // raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/slug.jpg → jsDelivr
-        if (rawUrl.contains("raw.githubusercontent.com/Anime-Sama/IMG")) {
-            val filename = rawUrl.substringAfterLast("/")
-            return "${IMG_BASE}${filename}"
-        }
-        // Déjà sur jsDelivr → garder tel quel
-        if (rawUrl.contains("cdn.jsdelivr.net")) return rawUrl
-        // URL anime-sama.to interne → préférer jsDelivr pour la vitesse
-        if (rawUrl.contains("anime-sama.to") || rawUrl.contains("anime-sama.pw")) {
-            return "${IMG_BASE}${slug}.jpg"
-        }
-        // Autre CDN externe (ex: TMDb) → garder tel quel
-        return rawUrl
+        // 2026-05-20 (user "jaquettes trop longues à charger sur Chromecast") :
+        //   les covers AnimeSama sont des JPEG full-res ~680 Ko. Sur Chromecast /
+        //   réseau satellite, c'est le POIDS qui plombe le home (le choix du CDN
+        //   ne change quasi rien). On redimensionne en thumbnail webp (~15 Ko,
+        //   mesuré 680 Ko→17 Ko) via le proxy weserv → ~×40 plus léger.
+        return "https://images.weserv.nl/?url=" +
+            java.net.URLEncoder.encode(origin, "UTF-8") +
+            "&w=300&output=webp&q=72"
     }
 
     // Cache of all Film slugs from AnimeSama catalogue — used to exclude films from the Série tab
@@ -204,8 +214,45 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
 
     // ========== HOME ==========
 
-    override suspend fun getHome(): List<Category> {
+    override suspend fun getHome(): List<Category> = kotlinx.coroutines.coroutineScope {
         initializeService()
+        // 2026-05-21 (user "fais 2 appels en parallèle pour que ça aille plus vite" +
+        //   "y a plus le carrousel") : le carrousel TMDB tournait SÉQUENTIELLEMENT après
+        //   le scrape et SANS timeout → home lent, et si l'appel TMDB traînait/échouait
+        //   le catch l'avalait → carrousel disparu. On le lance EN PARALLÈLE du scrape
+        //   et on le borne par un timeout : le home s'affiche vite, le carrousel arrive
+        //   dès que TMDB répond (sinon home sans carrousel, mais jamais bloqué).
+        val featuredDeferred: kotlinx.coroutines.Deferred<List<TvShow>>? = if (UserPreferences.enableTmdb) {
+            async(Dispatchers.IO) {
+                try {
+                    kotlinx.coroutines.withTimeoutOrNull(5_000L) {
+                        TMDb3.Discover.tv(
+                            page = 1,
+                            language = "fr-FR",
+                            sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
+                            withOriginalLanguage = TMDb3.Params.WithBuilder("ja"),
+                            voteCount = TMDb3.Params.Range(100, null),
+                            withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Tv.ANIMATION),
+                        ).results.filter { it.backdropPath != null && it.posterPath != null }
+                            .take(10)
+                            .map { t ->
+                                TvShow(
+                                    id = "tmdb_anime_${t.id}",
+                                    title = t.name,
+                                    overview = t.overview,
+                                    released = t.firstAirDate,
+                                    rating = t.voteAverage.toDouble(),
+                                    poster = t.posterPath?.w500,
+                                    banner = t.backdropPath?.w1280,
+                                )
+                            }
+                    } ?: emptyList<TvShow>()
+                } catch (e: Exception) {
+                    Log.w(TAG, "TMDB featured anime failed: ${e.message}")
+                    emptyList<TvShow>()
+                }
+            }
+        } else null
         val document = fetchDocument(baseUrl)
         val categories = mutableListOf<Category>()
 
@@ -328,80 +375,109 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             }
         }
 
-        // FEATURED: Build hero slider from "Derniers contenus sortis" en priorité,
-        // sinon fallback sur la première section vidéo disponible (Sorties du jour,
-        // animes populaires, etc.). Sans fallback, le carrousel disparait totalement
-        // quand AnimeSama renomme/supprime "Derniers contenus sortis" du home.
-        val derniersContenus = categories.firstOrNull {
-            it.name.lowercase().contains("derniers contenus")
-        } ?: categories.firstOrNull {
-            val n = it.name.lowercase()
-            n.contains("derniers épisodes") || n.contains("derniers episodes") || n.contains("sorties du") || n.contains("ajoutés") || n.contains("ajoutes")
-        } ?: categories.firstOrNull { it.list.isNotEmpty() }
-        if (derniersContenus != null) {
-            val featured = derniersContenus.list.take(10).map { item ->
-                when (item) {
-                    is Movie -> Movie(
-                        id = item.id,
-                        title = item.title,
-                        banner = item.poster,
-                        poster = item.poster
-                    )
-                    is TvShow -> TvShow(
-                        id = item.id,
-                        title = item.title,
-                        banner = item.poster,
-                        poster = item.poster
-                    )
-                    else -> item
-                }
-            }
-            if (featured.isNotEmpty()) {
-                // Enhance banners with TMDB HD backdrops — parallel
-                if (UserPreferences.enableTmdb) {
-                    val animeLanguages = setOf("ja", "ko", "zh")
-                    coroutineScope {
-                        featured.map { item ->
-                            async(Dispatchers.IO) {
+        // FEATURED: récupère le carrousel TMDB lancé EN PARALLÈLE au début (await).
+        //   Il a tourné pendant le scrape → ici on ne fait qu'attendre son résultat
+        //   (déjà prêt la plupart du temps), borné par le timeout interne de 4s.
+        // Attend le résultat TMDB max 5s après le scrape. L'appel TMDB tourne en
+        // parallèle du scrape donc en pratique il est souvent déjà prêt ici.
+        // Timeout interne = 5s, await = encore 5s → total max 10s mais le scrape
+        // prend lui-même 5-15s donc le TMDB a largement le temps.
+        val trendingAnime = if (featuredDeferred != null) {
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(5_000L) { featuredDeferred.await() } ?: emptyList()
+            } catch (_: Exception) { emptyList() }
+        } else emptyList()
+        // 2026-05-22 (user "le carrousel AnimeSama n'apparaît pas du tout") : si le
+        //   featured TMDB revient vide (timeout / TMDB désactivé / échec), on bâtit
+        //   un carrousel de SECOURS depuis les items scrappés (poster utilisé en
+        //   bannière) — même approche que DessinAnime — pour que le carrousel soit
+        //   TOUJOURS présent. On crée des COPIES neuves (id identique mais objet
+        //   distinct) pour ne pas partager de référence avec les rangées (sinon
+        //   conflits d'itemType du FEATURED côté HomeViewModel).
+        val featuredList: List<TvShow> = trendingAnime.ifEmpty {
+            categories.flatMap { it.list }
+                .filterIsInstance<TvShow>()
+                .filter { !it.id.startsWith("tmdb_anime_") }
+                .distinctBy { it.id }
+                .take(10)
+                .map { s -> TvShow(id = s.id, title = s.title, poster = s.poster, banner = s.poster ?: s.banner) }
+        }
+        if (featuredList.isNotEmpty()) {
+            categories.add(0, Category(name = Category.FEATURED, list = featuredList))
+        }
+
+        // ── Enrichissement TMDB des jaquettes ──
+        // Les covers AnimeSama (GitHub Anime-Sama/IMG) ne correspondent souvent pas
+        // au contenu réel. On cherche chaque titre sur TMDB et on remplace le poster
+        // par celui de TMDB (w500, net et cohérent). Borné à 6s global + sem=8.
+        if (UserPreferences.enableTmdb) {
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(6_000L) {
+                    val allItems = categories.flatMap { it.list }
+                    // Titres uniques à enrichir (hors featured déjà TMDB)
+                    val uniqueTitles = mutableMapOf<String, String>() // title → poster TMDB
+                    val seen = mutableSetOf<String>()
+                    for (item in allItems) {
+                        val title = when (item) {
+                            is Movie -> item.title
+                            is TvShow -> if (item.id.startsWith("tmdb_anime_")) null else item.title
+                            else -> null
+                        } ?: continue
+                        val key = title.lowercase().trim()
+                        if (key.isNotBlank() && seen.add(key)) {
+                            uniqueTitles[title] = "" // placeholder
+                        }
+                    }
+                    // Recherche TMDB en parallèle (sem=8, timeout par recherche 2s)
+                    val sem = Semaphore(8)
+                    val results = uniqueTitles.keys.map { title ->
+                        async(Dispatchers.IO) {
+                            sem.withPermit {
                                 try {
-                                    val title = when (item) {
-                                        is Movie -> item.title
-                                        is TvShow -> item.title
-                                        else -> return@async
+                                    val resp = kotlinx.coroutines.withTimeoutOrNull(2_000L) {
+                                        TMDb3.Search.multi(query = title, language = "fr-FR", page = 1)
                                     }
-                                    // 2026-05-05 : normalise le titre avant TMDB (apostrophes
-                                    // typographiques, annotations VF/saison/etc. cassent les matchs)
-                                    val normalized = com.streamflixreborn.streamflix.utils.TitleNormalizer.cleanForTmdbSearch(title)
-                                    val results = TMDb3.Search.multi(normalized.ifBlank { title })
-                                    val match = results.results.firstOrNull { result ->
-                                        when (result) {
-                                            is TMDb3.Movie -> result.originalLanguage in animeLanguages && result.backdropPath != null
-                                            is TMDb3.Tv -> result.originalLanguage in animeLanguages && result.backdropPath != null
+                                    val best = resp?.results?.firstOrNull { r ->
+                                        when (r) {
+                                            is TMDb3.Tv -> r.posterPath != null
+                                            is TMDb3.Movie -> r.posterPath != null
                                             else -> false
                                         }
                                     }
-                                    val tmdbBanner = when (match) {
-                                        is TMDb3.Movie -> match.backdropPath?.original
-                                        is TMDb3.Tv -> match.backdropPath?.original
+                                    val poster = when (best) {
+                                        is TMDb3.Tv -> best.posterPath?.w500
+                                        is TMDb3.Movie -> best.posterPath?.w500
                                         else -> null
                                     }
-                                    if (tmdbBanner != null) {
-                                        when (item) {
-                                            is Movie -> item.banner = tmdbBanner
-                                            is TvShow -> item.banner = tmdbBanner
-                                        }
-                                    }
-                                } catch (_: Exception) {}
+                                    if (poster != null) title to poster else null
+                                } catch (_: Exception) { null }
                             }
-                        }.awaitAll()
+                        }
+                    }.awaitAll().filterNotNull().toMap()
+
+                    // Applique les posters TMDB sur les items existants
+                    if (results.isNotEmpty()) {
+                        for (cat in categories) {
+                            for (item in cat.list) {
+                                when (item) {
+                                    is Movie -> results[item.title]?.let { item.poster = it }
+                                    is TvShow -> if (!item.id.startsWith("tmdb_anime_")) {
+                                        results[item.title]?.let { item.poster = it }
+                                    }
+                                    else -> {}
+                                }
+                            }
+                        }
+                        Log.d(TAG, "TMDB enrichment: ${results.size}/${uniqueTitles.size} posters replaced")
                     }
                 }
-                categories.add(0, Category(name = Category.FEATURED, list = featured))
+            } catch (e: Exception) {
+                Log.w(TAG, "TMDB enrichment failed: ${e.message}")
             }
         }
 
         // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films
-        return categories.sortedWith(compareBy { cat ->
+        categories.sortedWith(compareBy { cat ->
             val n = cat.name.lowercase()
             val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
             val isSeries = n.contains("séri") || n.contains("seri") || n.contains("saison") || n.contains("tv") || n.contains("anim")
@@ -688,6 +764,45 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
     // ========== TV SHOW DETAIL ==========
 
     override suspend fun getTvShow(id: String): TvShow {
+        // ── Carrousel TMDB : redirection vers le catalogue AnimeSama ──
+        // Les items du carrousel TMDB ont un id "tmdb_anime_<tmdbId>" qui n'est
+        // pas un slug AnimeSama. On récupère le titre FR depuis TMDB, on cherche
+        // sur AnimeSama, et on redirige vers le premier résultat.
+        if (id.startsWith("tmdb_anime_")) {
+            val tmdbId = id.removePrefix("tmdb_anime_").toIntOrNull()
+            if (tmdbId != null) {
+                try {
+                    val details = TMDb3.TvSeries.details(tmdbId, language = "fr-FR")
+                    val searchTitle = details.name
+                    val html = searchPost(searchTitle)
+                    val doc = Jsoup.parse(html)
+                    val firstResult = doc.select("a.asn-search-result").firstOrNull()
+                    if (firstResult != null) {
+                        val href = firstResult.attr("href")
+                        val realSlug = href.substringAfter("/catalogue/")
+                            .removeSuffix("/").split("/").firstOrNull()
+                        if (!realSlug.isNullOrBlank()) {
+                            return getTvShow(realSlug)
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "TMDB→AnimeSama redirect failed for $id: ${e.message}")
+                }
+                // Fallback : pas trouvé sur AnimeSama → TvShow minimal avec les infos TMDB
+                try {
+                    val details = TMDb3.TvSeries.details(tmdbId, language = "fr-FR")
+                    return TvShow(
+                        id = id,
+                        title = details.name,
+                        overview = details.overview,
+                        poster = details.posterPath?.w500,
+                        banner = details.backdropPath?.w1280,
+                    )
+                } catch (_: Exception) {}
+                throw Exception("Anime non trouvé sur AnimeSama")
+            }
+        }
+
         val slug = id.substringBefore("@")
         val afterAt = id.substringAfter("@", "")
         // Parse forced language: supports "vostfr", "vf", "vostfr-film0", "vf-film2", etc.
@@ -1149,6 +1264,15 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 }
             }
         )
+
+        // 2026-05-21 (user "remets les appels comme avant, ça a toujours bien chargé") :
+        //   natif d'abord — les secours croisés (Cloudstream → Movix avec id "0")
+        //   restaient bloqués (fstream/0, wiflix/0) et bloquaient l'affichage. On ne
+        //   les lance QUE si le natif est vide.
+        if (servers.isNotEmpty()) {
+            Log.d(TAG, "[Servers] ${servers.size} natifs (secours ignorés, natif présent)")
+            return servers
+        }
 
         // 2026-05-05 : Moviebox + Cloudstream backups pour les animes.
         val slug = id.substringBefore("@").substringBefore("/")

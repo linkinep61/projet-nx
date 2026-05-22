@@ -217,6 +217,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
         refreshServerList()
     }
 
+    private var lastServerListCount = -1
     fun refreshServerList() {
         // 2026-05-17 (user "le Focus ne reste pas sur serveur" sur Chromecast) :
         // notifyItemChanged au lieu de notifyDataSetChanged → ne re-bind que
@@ -225,7 +226,16 @@ class PlayerSettingsTvView @JvmOverloads constructor(
         // notifyDataSetChanged + requestFocus(root) en post() loupait
         // souvent → focus partait vers un autre View en background.
         val count = Settings.Server.list.size
-        if (count == 0) {
+        // 2026-05-21 (user "l'affichage reste bloqué si on fait pas retour") :
+        // si le NOMBRE de serveurs a changé (affichage progressif : nouveaux
+        // serveurs qui arrivent), il FAUT un notifyDataSetChanged complet —
+        // sinon le RecyclerView ne sait pas qu'il y a de nouvelles lignes et
+        // elles n'apparaissent qu'après un "retour". Le refresh partiel "select"
+        // (qui préserve le focus) n'est gardé que quand le compte est inchangé.
+        if (count != lastServerListCount) {
+            lastServerListCount = count
+            serversAdapter.notifyDataSetChanged()
+        } else if (count == 0) {
             serversAdapter.notifyDataSetChanged()
         } else {
             serversAdapter.notifyItemRangeChanged(0, count, "select")
@@ -706,6 +716,21 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                 // is invisible when the row is focused.
                 if (item is Settings.ChannelVariant && item.isIptv && item.isSelected) {
                     setTextColor(0xFF4CAF50.toInt())  // Material Green
+                } else if (item is Settings.Server && !item.isIptv) {
+                    // 2026-05-21 (user) : couleur selon l'état du serveur VOD.
+                    //   rouge = HS/mort, orange = pas sûr, défaut(blanc) = pas testé.
+                    when (com.streamflixreborn.streamflix.utils.ExtractorRanker.statusOf(
+                        com.streamflixreborn.streamflix.models.Video.Server(id = item.id, name = item.name)
+                    )) {
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.VERIFIED ->
+                            setTextColor(0xFF4CAF50.toInt())   // vert = vérifié, ça marche
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD ->
+                            setTextColor(0xFFFF4444.toInt())   // rouge = ne marche pas
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.UNSURE ->
+                            setTextColor(0xFFFFA726.toInt())   // orange = lent / pas sûr
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.UNTESTED ->
+                            setTextColor(ContextCompat.getColorStateList(context, R.color.setting_text))
+                    }
                 } else {
                     setTextColor(ContextCompat.getColorStateList(context, R.color.setting_text))
                 }

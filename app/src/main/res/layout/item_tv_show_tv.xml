@@ -11,7 +11,7 @@
     <ImageView
         android:id="@+id/iv_tv_show_poster"
         android:layout_width="0dp"
-        android:layout_height="200dp"
+        android:layout_height="150dp"
         android:scaleType="centerCrop"
         android:importantForAccessibility="no"
         app:layout_constraintDimensionRatio="2:3"
@@ -33,6 +33,19 @@
         app:layout_constraintEnd_toEndOf="@id/iv_tv_show_poster"
         app:layout_constraintStart_toStartOf="@id/iv_tv_show_poster"
         tools:progress="80" />
+
+    <!-- 2026-05-21 : voile semi-transparent derrière le texte (titre/qualité) pour
+         qu'il reste lisible par-dessus le backdrop du home. Dessiné AVANT le texte
+         → derrière lui ; ne couvre pas la jaquette (commence sous le poster). -->
+    <View
+        android:id="@+id/v_tv_show_text_scrim"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="@drawable/bg_card_text_scrim"
+        app:layout_constraintTop_toBottomOf="@id/iv_tv_show_poster"
+        app:layout_constraintBottom_toBottomOf="@id/tv_tv_show_title"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
 
     <TextView
         android:id="@+id/tv_tv_show_quality"

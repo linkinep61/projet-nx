@@ -57,7 +57,7 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
     private const val USER_AGENT =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
-    override val defaultBaseUrl: String = "https://papadustream.courses"
+    override val defaultBaseUrl: String = "https://papadustream.marketing"
     @Volatile private var currentBaseUrl: String = defaultBaseUrl
     override val baseUrl: String
         get() = currentBaseUrl
@@ -70,6 +70,7 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
         .build()
 
     private val knownDomains = listOf(
+        "https://papadustream.marketing",
         "https://papadustream.courses",
         "https://papadustream.motorcycles",
         "https://papadustream.dad",
@@ -505,7 +506,33 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             .sortedBy { it.first }
 
         // Récupérer les still images TMDB par épisode si on a le mapping TMDB id.
-        val tmdbId = synchronized(tmdbCacheLock) { papaToTmdbShowId[papaShowId] }
+        // 2026-05-21 : si le mapping n'existe pas en cache (ouverture depuis les
+        // favoris saison = on n'est pas passé par getTvShow), on tente de retrouver
+        // le TMDB id via une recherche par titre extrait du slug Papa.
+        var tmdbId = synchronized(tmdbCacheLock) { papaToTmdbShowId[papaShowId] }
+        if (tmdbId == null) {
+            // Extraire le titre du slug (ex: "1318-the-terror" → "the terror")
+            val slug = parts[1] // "<id>-<slug-name>"
+            val titleFromSlug = slug.substringAfter("-").replace("-", " ").trim()
+            if (titleFromSlug.isNotBlank()) {
+                Log.d(TAG, "TMDB id not cached for $papaShowId, searching by slug title: '$titleFromSlug'")
+                try {
+                    val cleanTitle = com.streamflixreborn.streamflix.utils.TitleNormalizer.cleanForTmdbSearch(titleFromSlug)
+                        .ifBlank { titleFromSlug }
+                    val tmdbShow = TmdbUtils.getTvShow(title = cleanTitle, year = null, language = "fr-FR")
+                    if (tmdbShow != null) {
+                        val resolvedId = tmdbShow.id.toIntOrNull()
+                        if (resolvedId != null) {
+                            synchronized(tmdbCacheLock) { papaToTmdbShowId[papaShowId] = resolvedId }
+                            tmdbId = resolvedId
+                            Log.d(TAG, "TMDB id resolved for $papaShowId: $resolvedId (via slug search)")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.d(TAG, "TMDB slug search failed for '$titleFromSlug': ${e.message}")
+                }
+            }
+        }
         val tmdbEpisodes: Map<Int, com.streamflixreborn.streamflix.models.Episode> = if (tmdbId != null) {
             try {
                 TmdbUtils.getEpisodesBySeason(tvShowId = tmdbId.toString(), seasonNumber = seasonNum, language = "fr-FR")
@@ -1025,6 +1052,18 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
         // URLs directes (MP4/HLS/MPD) → lecture immédiate sans extraction.
         if (src.matches(Regex(".*\\.(mp4|m3u8|mpd|webm|mkv)(\\?.*)?$", RegexOption.IGNORE_CASE))) {
             return Video(source = src)
+        }
+        // 2026-05-21 : sources NATIVES Papadustream (page épisode #xf=) → passent
+        // par le Cloudflare Turnstile : tentative headless 10s, PUIS écran captcha
+        // que l'UTILISATEUR résout lui-même (PapadustreamCaptchaActivity, timeout
+        // interne 3 min). Le plafond 5s ci-dessous tuait ce flux AVANT même le
+        // headless → "tous les serveurs Papadustream HS". On laisse donc
+        // l'extracteur gérer ses propres timeouts pour ces sources.
+        // (Pas d'auto-bypass : c'est l'user qui valide le Turnstile, comme sur le
+        //  site officiel — on ne fait que ré-afficher le captcha au lieu d'échouer.)
+        val isNativePapa = src.contains("papadustream", ignoreCase = true) || src.contains("#xf=")
+        if (isNativePapa) {
+            return Extractor.extract(server.src, server)
         }
         // Vrais extracteurs (Videasy/Doodstream/Voe/Filemoon/Kakaflix/...) :
         // timeout 5s pour passer rapidement au serveur suivant si la source est down.

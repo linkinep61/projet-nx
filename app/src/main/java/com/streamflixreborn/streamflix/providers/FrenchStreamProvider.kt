@@ -19,6 +19,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
@@ -42,7 +45,7 @@ import retrofit2.http.Query
 import kotlin.math.round
 import kotlinx.coroutines.coroutineScope
 
-object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
+object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, ProgressiveServersProvider {
     override val name = "FrenchStream"
 
     override val defaultPortalUrl: String = "http://fstream.info/"
@@ -1371,6 +1374,91 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             )
         }
         return sorted
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // 2026-05-21 : version PROGRESSIVE (user "il faut le faire sur tous les
+    //   providers"). FrenchStream est un agrégateur (natif + Cloudstream + Movix
+    //   + Moviebox) qui tournait en SÉQUENTIEL → lent. Ici on lance tout en
+    //   PARALLÈLE et on émet chaque source dès qu'elle répond. getServers (batch)
+    //   reste inchangé comme fallback. Helpers dédiés (pas de refactor du batch).
+    // ─────────────────────────────────────────────────────────────────────
+
+    private suspend fun fetchFsNativeServers(id: String, videoType: Video.Type): List<Video.Server> = when (videoType) {
+        is Video.Type.Episode -> {
+            val parts = id.split("/")
+            val tvShowId = parts.getOrElse(0) { id }
+            val episodeNum = parts.getOrElse(1) { videoType.number.toString() }.toIntOrNull() ?: videoType.number
+            resolveEpisodeServers(tvShowId, episodeNum)
+        }
+        is Video.Type.Movie -> resolveMovieServers(id)
+    }
+
+    /** Résout le tmdbId via TMDB par titre (nécessaire pour les backups). */
+    private suspend fun resolveFsTmdbId(id: String, videoType: Video.Type): Int? = runCatching {
+        val title = when (videoType) {
+            is Video.Type.Movie -> videoType.title
+            is Video.Type.Episode -> videoType.tvShow.title
+        }
+        val cleanTitle = com.streamflixreborn.streamflix.utils.TitleNormalizer
+            .cleanForTmdbSearch(title).ifBlank { title }
+        val year = when (videoType) {
+            is Video.Type.Movie -> videoType.releaseDate.takeIf { it.isNotBlank() }?.take(4)?.toIntOrNull()
+            is Video.Type.Episode -> videoType.tvShow.releaseDate?.take(4)?.toIntOrNull()
+        }
+        val tmdbItem: Any? = when (videoType) {
+            is Video.Type.Movie -> com.streamflixreborn.streamflix.utils.TmdbUtils.getMovie(cleanTitle, year, "fr-FR")
+            is Video.Type.Episode -> com.streamflixreborn.streamflix.utils.TmdbUtils.getTvShow(cleanTitle, year, "fr-FR")
+        }
+        when (tmdbItem) {
+            is com.streamflixreborn.streamflix.models.Movie -> tmdbItem.id.toIntOrNull()
+            is com.streamflixreborn.streamflix.models.TvShow -> tmdbItem.id.toIntOrNull()
+            else -> null
+        }
+    }.getOrNull()
+
+    private suspend fun fetchFsCloudstreamBackup(tmdbId: Int, videoType: Video.Type): List<Video.Server> = runCatching {
+        val csId = when (videoType) {
+            is Video.Type.Movie -> "$tmdbId"
+            is Video.Type.Episode -> "$tmdbId:${videoType.season.number}:${videoType.number}"
+        }
+        val csVideoType = if (videoType is Video.Type.Episode)
+            videoType.copy(tvShow = videoType.tvShow.copy(id = "$tmdbId"))
+        else videoType
+        CloudstreamProvider.getServers(csId, csVideoType)
+    }.getOrNull().orEmpty()
+
+    private suspend fun fetchFsMovixBackup(tmdbId: Int, videoType: Video.Type): List<Video.Server> = runCatching {
+        val movixVideoType = if (videoType is Video.Type.Episode)
+            videoType.copy(tvShow = videoType.tvShow.copy(id = "$tmdbId"))
+        else videoType
+        val movixId = when (videoType) {
+            is Video.Type.Movie -> "$tmdbId"
+            is Video.Type.Episode -> "$tmdbId-s${videoType.season.number}e${videoType.number}"
+        }
+        MovixProvider.getServers(movixId, movixVideoType)
+    }.getOrNull().orEmpty()
+
+    private suspend fun fetchFsMovieboxBackup(tmdbId: Int, videoType: Video.Type): List<Video.Server> = runCatching {
+        MovieboxProvider.getMovieboxSourcesByTmdbId(tmdbId, videoType)
+    }.getOrNull().orEmpty()
+
+    override fun getServersProgressive(
+        id: String, videoType: Video.Type,
+    ): Flow<List<Video.Server>> = channelFlow {
+        initializeService()
+        // Natif : part tout de suite (pas besoin du tmdbId).
+        launch {
+            try { val n = fetchFsNativeServers(id, videoType); if (n.isNotEmpty()) send(n) }
+            catch (e: Exception) { Log.w("FrenchStream", "Progressive native failed: ${e.message}") }
+        }
+        // Backups : après résolution tmdbId, lancés en parallèle.
+        launch {
+            val tid = resolveFsTmdbId(id, videoType) ?: return@launch
+            launch { try { val cs = fetchFsCloudstreamBackup(tid, videoType); if (cs.isNotEmpty()) send(cs) } catch (e: Exception) { Log.w("FrenchStream", "Progressive CS failed: ${e.message}") } }
+            launch { try { val mx = fetchFsMovixBackup(tid, videoType); if (mx.isNotEmpty()) send(mx) } catch (e: Exception) { Log.w("FrenchStream", "Progressive Movix failed: ${e.message}") } }
+            launch { try { val mb = fetchFsMovieboxBackup(tid, videoType); if (mb.isNotEmpty()) send(mb) } catch (e: Exception) { Log.w("FrenchStream", "Progressive Moviebox failed: ${e.message}") } }
+        }
     }
 
     /** Strategy chain pour un FILM : AJAX `film_api.php` → fallback HTML

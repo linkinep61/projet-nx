@@ -5,6 +5,7 @@ plugins {
     id 'kotlin-parcelize'
     id 'com.google.devtools.ksp'
     id 'org.jetbrains.kotlin.plugin.serialization'
+    id 'com.google.gms.google-services'
 }
 
 android {
@@ -39,10 +40,10 @@ android {
 
     defaultConfig {
         applicationId "com.streamfr.app"
-        minSdk 21
+        minSdk 23
         targetSdk 35
-        versionCode 10897
-        versionName "1.7.197"
+        versionCode 10898
+        versionName "1.7.198"
 
         // 2026-05-11 : RESTAURATION x86 (32-bit) — abandonné en v19 par erreur.
         // Certains émulateurs (Genymotion, AVD images anciennes) et surtout les
@@ -177,6 +178,10 @@ dependencies {
     implementation "androidx.browser:browser:1.7.0"
     implementation "org.nanohttpd:nanohttpd:2.3.1"
     implementation "com.google.zxing:core:3.5.1"
+
+    // Firebase — système de notes/ratings communautaire
+    implementation platform('com.google.firebase:firebase-bom:34.13.0')
+    implementation 'com.google.firebase:firebase-firestore'
     implementation("org.java-websocket:Java-WebSocket:1.5.3")
     
 }

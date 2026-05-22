@@ -52,13 +52,13 @@ import kotlin.coroutines.resume
  */
 open class PapadustreamExtractor : Extractor() {
     override val name = "Papadustream"
-    override val mainUrl = "https://papadustream.courses/"
+    override val mainUrl = "https://papadustream.marketing/"
     override val aliasUrls = listOf(
+        "https://papadustream.courses",
         "https://papadustream.motorcycles",
         "https://papadustream.dad",
         "https://papadustream.com",
         "https://papadustream.fit",
-        "https://papadustream.courses",
     )
 
     private val context = StreamFlixApp.instance.applicationContext
@@ -633,6 +633,7 @@ open class PapadustreamExtractor : Extractor() {
         private const val TAG = "PapadustreamExtractor"
 
         private val ALLOWED_HOSTS = listOf(
+            "papadustream.marketing",
             "papadustream.courses",
             "papadustream.motorcycles",
             "papadustream.dad",

@@ -56,4 +56,14 @@
         android:icon="@drawable/ic_menu_settings"
         android:title="@string/main_menu_settings" />
 
+    <!-- 2026-05-21 (user "le bouton il aurait fallu le mettre en dessous de
+         Paramètres sur TV") : filtre catalogue (Cloudstream / providers TMDB).
+         Item sidebar sous Paramètres, invisible par défaut — affiché par
+         updateNavigationVisibility() seulement si CatalogFilter.isSupported. -->
+    <item
+        android:id="@+id/catalog_filter_menu"
+        android:icon="@drawable/ic_categories_filter"
+        android:title="Filtre"
+        android:visible="false" />
+
 </menu>

@@ -72,6 +72,11 @@ class Movie(
     @Ignore
     var isSeries: Boolean = false
 
+    /** Version/langue annoncée par le provider (ex: champ "Version: VOSTFR" de Wiflix).
+     *  Source autoritaire lue par LanguageTag pour afficher VF/VOSTFR/VO sur la fiche. */
+    @Ignore
+    var version: String? = null
+
     @Ignore
     override lateinit var itemType: AppAdapter.Type
 
@@ -111,7 +116,7 @@ class Movie(
         cast,
         recommendations,
         isFavorite,
-    ).also { it.isSeries = this.isSeries }
+    ).also { it.isSeries = this.isSeries; it.version = this.version }
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

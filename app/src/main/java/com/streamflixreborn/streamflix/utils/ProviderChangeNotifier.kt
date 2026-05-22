@@ -40,5 +40,35 @@ object ProviderChangeNotifier {
      */
     fun notifyProviderChanged() {
         _flow.tryEmit(Unit)
+        purgePreviousProviderArtwork()
+    }
+
+    /**
+     * 2026-05-21 (user "qu'un seul provider garde ses jaquettes à la fois, les
+     * autres vidés ; mais un simple retour-home sur le même provider ne doit pas
+     * tout recharger") : purge les bitmaps en RAM (cache mémoire Glide) du
+     * provider qu'on quitte, dès qu'on change RÉELLEMENT de provider ou de filtre.
+     *
+     * Cette fonction n'est appelée QUE sur un vrai changement (sélection d'un
+     * autre provider, application d'un filtre) — JAMAIS sur un simple retour-home
+     * vers le même provider. Donc revenir sur le même provider ne vide rien.
+     *
+     * clearMemory() ne touche PAS le cache DISQUE (150 Mo) : les jaquettes du
+     * nouveau provider reviennent du disque (rapide, pas de re-téléchargement).
+     * Les données du home (titres, listes) sont dans HomeCacheStore, indépendant.
+     *
+     * clearMemory() DOIT s'exécuter sur le main thread.
+     */
+    private fun purgePreviousProviderArtwork() {
+        try {
+            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                try {
+                    com.bumptech.glide.Glide.get(ctx).clearMemory()
+                } catch (_: Throwable) {
+                }
+            }
+        } catch (_: Throwable) {
+        }
     }
 }

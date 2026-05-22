@@ -189,23 +189,39 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         app:barrierDirection="bottom"
-        app:constraint_referenced_ids="pb_movie_progress,btn_movie_trailer,btn_movie_favorite" />
+        app:constraint_referenced_ids="pb_movie_progress,btn_movie_trailer,btn_movie_favorite,include_community_rating" />
 
     <TextView
         android:id="@+id/tv_movie_overview_label"
-        android:layout_width="0dp"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginStart="40dp"
         android:layout_marginTop="20dp"
-        android:layout_marginEnd="70dp"
         android:text="@string/movie_synopsis_label"
         android:textColor="#FFFFFF"
         android:textSize="20sp"
         android:textStyle="bold"
-        app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toEndOf="@id/iv_movie_poster"
         app:layout_constraintTop_toBottomOf="@id/barrier_buttons_bottom"
         app:layout_goneMarginStart="70dp" />
+
+    <!-- Langue communautaire : dans la continuité du mot « Synopsis » (même ligne) -->
+    <include
+        android:id="@+id/include_community_language"
+        layout="@layout/include_community_language_tv"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        app:layout_constraintBottom_toBottomOf="@id/tv_movie_overview_label"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toEndOf="@id/tv_movie_overview_label"
+        app:layout_constraintTop_toTopOf="@id/tv_movie_overview_label" />
+
+    <androidx.constraintlayout.widget.Barrier
+        android:id="@+id/barrier_synopsis_row"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        app:barrierDirection="bottom"
+        app:constraint_referenced_ids="tv_movie_overview_label,include_community_language" />
 
     <TextView
         android:id="@+id/tv_movie_overview"
@@ -219,8 +235,18 @@
         android:lineSpacingExtra="4dp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toEndOf="@id/iv_movie_poster"
-        app:layout_constraintTop_toBottomOf="@id/tv_movie_overview_label"
+        app:layout_constraintTop_toBottomOf="@id/barrier_synopsis_row"
         app:layout_goneMarginStart="70dp"
         tools:text="Overview" />
+
+    <include
+        android:id="@+id/include_community_rating"
+        layout="@layout/include_community_rating_tv"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="20dp"
+        app:layout_constraintStart_toEndOf="@id/btn_movie_favorite"
+        app:layout_constraintTop_toTopOf="@id/btn_movie_favorite"
+        app:layout_constraintBottom_toBottomOf="@id/btn_movie_favorite" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

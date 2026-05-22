@@ -119,7 +119,7 @@ class PapadustreamCaptchaActivity : AppCompatActivity() {
 
         setupWebView()
         webView.loadUrl(pageUrl, mapOf(
-            "Referer" to "https://papadustream.courses/",
+            "Referer" to "https://papadustream.marketing/",
             "User-Agent" to ANDROID_CHROME_UA,
         ))
 

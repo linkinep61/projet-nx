@@ -41,7 +41,7 @@ class DownloadAdapter(
             // Poster
             if (!item.poster.isNullOrEmpty()) {
                 Glide.with(binding.ivPoster)
-                    .load(item.poster)
+                    .load(com.streamflixreborn.streamflix.utils.optimizeArtworkUrl(item.poster, 400))
                     .placeholder(R.drawable.glide_fallback_cover)
                     .error(R.drawable.glide_fallback_cover)
                     .centerCrop()

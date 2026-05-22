@@ -628,6 +628,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
         )
 
+        // Champ "Version: VOSTFR / VF" de la fiche Wiflix → source autoritaire de langue.
+        movie.version = document.select("ul.mov-list li")
+            .find { it.selectFirst("div.mov-label")?.text()?.contains("Version", ignoreCase = true) == true }
+            ?.selectFirst("div.mov-desc")?.text()?.trim()
+
         return movie
     }
 
@@ -749,6 +754,12 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 }
             }
         )
+
+        // Champ "Version" éventuel de la fiche série (sinon les libellés de saison
+        // blocfr/blocvostfr renseignent déjà la langue via LanguageTag).
+        tvShow.version = document.select("ul.mov-list li")
+            .find { it.selectFirst("div.mov-label")?.text()?.contains("Version", ignoreCase = true) == true }
+            ?.selectFirst("div.mov-desc")?.text()?.trim()
 
         return tvShow
     }

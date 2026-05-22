@@ -403,11 +403,11 @@ class MainMobileActivity : FragmentActivity() {
                     getString(R.string.main_menu_all_channels)
                 isAnimeOnly ->
                     getString(R.string.main_menu_series)  // "VOSTFR"
-                provider.name in setOf("DessinAnime", "AnimeSite") ->
+                provider.name == "DessinAnime" ->
                     getString(R.string.main_menu_series_tab)
                 else -> getString(R.string.main_menu_tv_shows)
             }
-            if (provider.name in setOf("DessinAnime", "AnimeSite")) {
+            if (provider.name == "DessinAnime") {
                 setIcon(R.drawable.ic_menu_series)
             }
         }

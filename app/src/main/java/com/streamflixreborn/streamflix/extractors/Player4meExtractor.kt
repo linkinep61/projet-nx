@@ -54,21 +54,17 @@ open class Player4meExtractor : Extractor() {
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
     override suspend fun extract(link: String): Video {
-        // 2026-05-15 : timeout étendu (35s) pour couvrir le 22s d'attente post-load
-        // + le temps de chargement du player.
-        val streamUrl = extractByIntercepting(link)
-            ?: throw Exception("Player4me: Could not capture stream URL from $link")
-        val isHls = streamUrl.contains(".m3u8", ignoreCase = true)
-        // 2026-05-15 : Referer = le player lui-même (le m3u8 server check ce header
-        // pour anti-hotlink). Origin = dessinanime.4meplayer.com.
+        // 2026-05-21 (user "il y a rien à capturer, affiche-moi le Player avec sa barre,
+        //   on pilote ses boutons à la télécommande") : 4meplayer.com est un VRAI player
+        //   WebView, pas un host à scraper. On le renvoie en webViewUrl + needsWebViewClick
+        //   → PlayerTvFragment/PlayerMobileFragment affichent le WebView overlay AVEC le
+        //   curseur virtuel (boutons pilotables au D-pad), comme Hydrax/Netu.
+        //   (L'ancienne approche « capturer un m3u8 » échouait toujours — « Could not
+        //   capture » — car il n'y a rien à intercepter : c'est un player complet.)
         return Video(
-            source = streamUrl,
-            headers = mapOf(
-                "Referer" to "https://dessinanime.4meplayer.com/",
-                "Origin" to "https://dessinanime.4meplayer.com",
-                "User-Agent" to ANDROID_CHROME_UA,
-            ),
-            type = if (isHls) androidx.media3.common.MimeTypes.APPLICATION_M3U8 else null,
+            source = link,
+            webViewUrl = link,
+            needsWebViewClick = true,
         )
     }
 
@@ -271,6 +267,17 @@ open class Player4meExtractor : Extractor() {
                                                     return origTest.call(this,s);
                                                 };
                                             }catch(e){}
+                                            // === 2026-05-21 : EXTRACTION SILENCIEUSE (confirmé par logs :
+                                            //   org.chromium.content.browser.AudioFocusDelegate prend le focus
+                                            //   audio = la WebView hors-écran joue le son = « démarre, pas au
+                                            //   premier plan, que le son »). On MUTE tout média ; le fetch du
+                                            //   stream se fait quand même (muet). N'altère PAS l'extraction. ===
+                                            try{
+                                                var __m4mMute=function(){try{document.querySelectorAll('video,audio').forEach(function(el){try{el.muted=true;el.volume=0;}catch(e){}});}catch(e){}};
+                                                try{var __m4mPlay=HTMLMediaElement.prototype.play;HTMLMediaElement.prototype.play=function(){try{this.muted=true;this.volume=0;}catch(e){}return __m4mPlay.apply(this,arguments);};}catch(e){}
+                                                try{new MutationObserver(__m4mMute).observe(document.documentElement||document,{childList:true,subtree:true});}catch(e){}
+                                                __m4mMute();setInterval(__m4mMute,400);
+                                            }catch(e){}
                                         })();
                                     """.trimIndent()
                                     val patchedJs = spoofPrelude + "\n" + originalJs
@@ -357,6 +364,20 @@ open class Player4meExtractor : Extractor() {
                             request: WebResourceRequest?,
                             error: android.webkit.WebResourceError?
                         ) { /* ignore */ }
+
+                        // 2026-05-21 (logs : "handshake failed ... net_error -202" =
+                        //   ERR_CERT_AUTHORITY_INVALID) : les hosts 4meplayer + leur CDN
+                        //   ont souvent des certs invalides/auto-signés. Par défaut la
+                        //   WebView ANNULE la requête → le player ne charge pas le flux →
+                        //   extraction échoue. On PROCEED (cohérent avec le trust-all déjà
+                        //   en place côté OkHttp/IptvTlsHelper, qui ne couvre PAS la WebView).
+                        override fun onReceivedSslError(
+                            view: WebView?,
+                            handler: android.webkit.SslErrorHandler?,
+                            error: android.net.http.SslError?
+                        ) {
+                            try { handler?.proceed() } catch (_: Throwable) { handler?.cancel() }
+                        }
                     }
 
                     // 2026-05-15 : top-level load avec Referer dessinanime.cc.

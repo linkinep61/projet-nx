@@ -309,9 +309,18 @@ class StreamFlixApp : Application() {
      * currentProvider in onCreate, so refreshActiveProviderUrl() at startup
      * never has anyone to refresh — every provider has to refresh on click.
      */
+    /**
+     * Job public pour que le HomeViewModel puisse attendre la fin du refresh
+     * avant de lancer getHome(). Sans ça, getHome() part sur une vieille URL
+     * → timeout → écran vide (user doit re-cliquer).
+     */
+    @Volatile
+    var providerUrlRefreshJob: kotlinx.coroutines.Job? = null
+        private set
+
     fun refreshProviderUrlAsync(provider: com.streamflixreborn.streamflix.providers.Provider?) {
         if (provider == null || provider !is com.streamflixreborn.streamflix.providers.ProviderConfigUrl) return
-        applicationScope.launch(Dispatchers.IO) {
+        providerUrlRefreshJob = applicationScope.launch(Dispatchers.IO) {
             refreshProviderUrl(provider)
         }
     }

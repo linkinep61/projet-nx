@@ -55,6 +55,10 @@ import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.format
 import com.streamflixreborn.streamflix.utils.toActivity
 import com.streamflixreborn.streamflix.utils.getCurrentFragment
+import com.streamflixreborn.streamflix.utils.LanguageTag
+import com.streamflixreborn.streamflix.utils.RatingService
+import com.streamflixreborn.streamflix.utils.CommunityRatingView
+import com.streamflixreborn.streamflix.utils.CommunityLanguageView
 import com.streamflixreborn.streamflix.utils.dp
 import com.streamflixreborn.streamflix.utils.loadTvShowBanner
 import com.streamflixreborn.streamflix.utils.loadTvShowPoster
@@ -491,8 +495,31 @@ class TvShowViewHolder(
         binding.tvTvShowTitle.text = tvShow.title
     }
 
+    /** 2026-05-21 : ouvre une saison favorite (carte synthétique du cœur) sur sa
+     *  liste d'épisodes, dans le provider d'origine. La fiche saison affiche la
+     *  progression par épisode → l'user reprend là où il en était. */
+    private fun openSeasonFavorite(navController: androidx.navigation.NavController) {
+        val e = com.streamflixreborn.streamflix.utils.SeasonFavorites.findBySyntheticId(tvShow.id) ?: return
+        com.streamflixreborn.streamflix.providers.Provider.findByName(e.provider)?.let {
+            com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider = it
+        }
+        val args = android.os.Bundle().apply {
+            putString("tvShowId", e.showId)
+            putString("tvShowTitle", e.showTitle)
+            putString("tvShowPoster", e.showPoster)
+            putString("tvShowBanner", e.showBanner)
+            putString("seasonId", e.seasonId)
+            putInt("seasonNumber", e.seasonNumber)
+            putString("seasonTitle", e.seasonTitle)
+        }
+        try { navController.navigate(R.id.season, args) } catch (_: Exception) {}
+    }
+
     private fun displayGridMobileItem(binding: ItemTvShowGridMobileBinding) {
         binding.root.setOnClickListener {
+            if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
+                openSeasonFavorite(binding.root.findNavController()); return@setOnClickListener
+            }
             checkProviderAndRun {
                 if (context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
                     com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin(tvShow.id)
@@ -535,6 +562,9 @@ class TvShowViewHolder(
     private fun displayGridTvItem(binding: ItemTvShowGridBinding) {
         binding.root.apply {
             setOnClickListener {
+                if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
+                    openSeasonFavorite(findNavController()); return@setOnClickListener
+                }
                 checkProviderAndRun {
                     if (context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
                         com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin(tvShow.id)
@@ -746,13 +776,9 @@ class TvShowViewHolder(
 
     private fun displayTvShowMobile(binding: ContentTvShowMobileBinding) {
         // MOBILE TV SHOW DETAIL
-        binding.ivTvShowPoster.run {
-            loadTvShowPoster(tvShow) {
-                fallback(R.drawable.glide_fallback_cover)
-                transition(DrawableTransitionOptions.withCrossFade())
-            }
-            visibility = if (tvShow.poster.isNullOrEmpty()) View.GONE else View.VISIBLE
-        }
+        // Poster GONE = le goneMarginTop du titre s'applique (espace pour la bannière)
+        // La bannière backdrop est gérée par le fragment (iv_tv_show_banner), pas ici.
+        binding.ivTvShowPoster.visibility = View.GONE
         binding.tvTvShowTitle.text = tvShow.title
 
         binding.tvTvShowRating.apply {
@@ -788,11 +814,40 @@ class TvShowViewHolder(
             isVisible = tvShow.genres.isNotEmpty()
         }
 
+        val overviewText = LanguageTag.prefixOverview(
+            overview = tvShow.overview,
+            title = tvShow.title,
+            quality = tvShow.quality,
+            seasonLabels = tvShow.seasons.mapNotNull { it.title },
+            version = tvShow.version,
+        )
         binding.tvTvShowOverview.apply {
-            text = tvShow.overview
-            isVisible = !tvShow.overview.isNullOrBlank()
+            text = overviewText
+            isVisible = !overviewText.isNullOrBlank()
         }
-        binding.tvTvShowOverviewLabel.isVisible = !tvShow.overview.isNullOrBlank()
+        binding.tvTvShowOverviewLabel.isVisible = !overviewText.isNullOrBlank()
+
+        // Note communautaire
+        binding.root.findViewById<View>(R.id.include_community_rating)?.let { ratingRoot ->
+            val yearStr = tvShow.released?.format("yyyy")
+            val contentKey = RatingService.contentKey(
+                tmdbId = tvShow.id.takeIf { it.all { c -> c.isDigit() } },
+                title = tvShow.title,
+                year = yearStr,
+            )
+            CommunityRatingView.bind(ratingRoot, contentKey, tvShow.title, context, year = yearStr, isTvShow = true)
+        }
+
+        // Langue communautaire (vote VF/VOSTFR/VO)
+        binding.root.findViewById<View>(R.id.include_community_language)?.let { langRoot ->
+            val contentKey = RatingService.contentKey(
+                tmdbId = tvShow.id.takeIf { it.all { c -> c.isDigit() } },
+                title = tvShow.title,
+                year = tvShow.released?.format("yyyy"),
+            )
+            CommunityLanguageView.bind(langRoot, contentKey, tvShow.title, context)
+        }
+
         val episodeToWatch = tvShow.episodeToWatch
         val episodeSeason = resolveEpisodeSeason(episodeToWatch)
         binding.btnTvShowWatchNow.apply {
@@ -908,13 +963,11 @@ class TvShowViewHolder(
     }
 
     private fun displayTvShowTv(binding: ContentTvShowTvBinding) {
-        binding.ivTvShowPoster.run {
-            loadTvShowPoster(tvShow) {
-                fallback(R.drawable.glide_fallback_cover)
-                transition(DrawableTransitionOptions.withCrossFade())
-            }
-            visibility = if (tvShow.poster.isNullOrEmpty()) View.GONE else View.VISIBLE
-        }
+        // 2026-05-21 (user "le poster de gauche est redondant avec le backdrop, et
+        //   flou depuis qu'on a réduit les jaquettes → on le vire et on réagence la
+        //   fiche TV") : poster masqué. Le goneMarginStart=70dp du layout fait
+        //   glisser titre/synopsis/boutons à gauche automatiquement.
+        binding.ivTvShowPoster.visibility = View.GONE
         binding.tvTvShowTitle.text = tvShow.title
 
         binding.tvTvShowRating.apply {
@@ -950,11 +1003,40 @@ class TvShowViewHolder(
             isVisible = tvShow.genres.isNotEmpty()
         }
 
+        val overviewText = LanguageTag.prefixOverview(
+            overview = tvShow.overview,
+            title = tvShow.title,
+            quality = tvShow.quality,
+            seasonLabels = tvShow.seasons.mapNotNull { it.title },
+            version = tvShow.version,
+        )
         binding.tvTvShowOverview.apply {
-            text = tvShow.overview
-            isVisible = !tvShow.overview.isNullOrBlank()
+            text = overviewText
+            isVisible = !overviewText.isNullOrBlank()
         }
-        binding.tvTvShowOverviewLabel.isVisible = !tvShow.overview.isNullOrBlank()
+        binding.tvTvShowOverviewLabel.isVisible = !overviewText.isNullOrBlank()
+
+        // Note communautaire
+        binding.root.findViewById<View>(R.id.include_community_rating)?.let { ratingRoot ->
+            val yearStr = tvShow.released?.format("yyyy")
+            val contentKey = RatingService.contentKey(
+                tmdbId = tvShow.id.takeIf { it.all { c -> c.isDigit() } },
+                title = tvShow.title,
+                year = yearStr,
+            )
+            CommunityRatingView.bind(ratingRoot, contentKey, tvShow.title, context, year = yearStr, isTvShow = true)
+        }
+
+        // Langue communautaire (vote VF/VOSTFR/VO)
+        binding.root.findViewById<View>(R.id.include_community_language)?.let { langRoot ->
+            val contentKey = RatingService.contentKey(
+                tmdbId = tvShow.id.takeIf { it.all { c -> c.isDigit() } },
+                title = tvShow.title,
+                year = tvShow.released?.format("yyyy"),
+            )
+            CommunityLanguageView.bind(langRoot, contentKey, tvShow.title, context)
+        }
+
         val episodeToWatch = tvShow.episodeToWatch
         val episodeSeason = resolveEpisodeSeason(episodeToWatch)
         binding.btnTvShowWatchNow.apply {
@@ -1067,6 +1149,10 @@ class TvShowViewHolder(
                 ContextCompat.getDrawable(context, tvShow.isFavorite.drawable())
             )
         }
+
+        // Force le focus initial sur "Regarder" (évite que les boutons langue/étoiles
+        // sous la jaquette captent le focus D-pad à l'ouverture de la fiche)
+        binding.btnTvShowWatchNow.requestFocus()
     }
 
     private val languageCodes = setOf("VOSTFR", "VF", "VOSTFR/VF", "VF/VOSTFR", "MULTI")

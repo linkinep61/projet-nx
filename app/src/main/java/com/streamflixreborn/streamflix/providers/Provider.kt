@@ -93,44 +93,33 @@ interface Provider {
             // 2026-05-06: Cloudstream EN TÊTE — démarre vite, FR/VOSTFR strict,
             // catalogue TMDB-style avec carrousels riches + Nouveautés MovieBox+.
             // Backup #2 d'extraction = Nakios (TMDB-id-based, parallèle à MovieBox+).
+            // 2026-05-21 (user) : ordre du home Films/Séries imposé =
+            //   1 Cloudstream · 2 Movix · 3 Wiflix · 4 FrenchStream · 5 1Jour1Film
+            //   · 6 Frembed · 7 aplouf · puis les autres (Papadustream, VoirDrama, Moviebox).
+            //   L'ordre d'insertion dans ce linkedMapOf = l'ordre d'affichage par onglet.
             CloudstreamProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
-            // 2026-05-04: Papadustream — provider standalone séries-only (DLE CMS).
-            // Sources résolues via PapadustreamExtractor (WebView + getxfield AJAX).
-            // 12 sources par épisode (VOE/Filemoon/Doodstream/Netu/Uqload/Vidoza × VF/VOSTFR).
-            PapadustreamProvider to ProviderSupport(movies = false, tvShows = true),
-            // FrenchStream: enrichment disabled — natural home a déjà
-            // "Nouveautés Films" + "Nouveautés Séries".
-            FrenchStreamProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             MovixProvider to ProviderSupport(movies = true, tvShows = true),
+            WiflixProvider to ProviderSupport(movies = true, tvShows = true),
+            // FrenchStream: enrichment disabled — home naturel a déjà "Nouveautés".
+            FrenchStreamProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             UnJourUnFilmProvider to ProviderSupport(movies = true, tvShows = true),
-            AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             FrembedProvider to ProviderSupport(movies = true, tvShows = true),
             aploufProvider to ProviderSupport(movies = true, tvShows = false),
+            // « ensuite les autres » (Films/Séries) :
+            // Papadustream — séries-only (DLE CMS), sources via PapadustreamExtractor.
+            PapadustreamProvider to ProviderSupport(movies = false, tvShows = true),
+            VoirDramaProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
+            // Moviebox (themoviebox.org/aoneroom) — niche K-Dramas/animes/films VF.
+            MovieboxProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
+            // ─── Anime (onglet Animés) — ordre interne inchangé ───
+            AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME),
             FrenchAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
-            // 2026-05-14 : DessinAnime (dessinanime.cc) — provider standalone dessins
-            // animés FR. Next.js + API /api/search propre. Catalogue : classiques
-            // (Dragon Ball, Sailor Moon, Astérix, Tintin, Les Simpson…) + animes
-            // modernes. Hosts vidéo supportés : uqload + sendvid (extractors existants).
-            // 2026-05-18 v84 : RÉACTIVÉ — site re-opérationnel (user confirmé).
-            //   API /api/search propre + iframe direct uqload/sendvid/minochinos.
             DessinAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
-            // 2026-05-16 : FRAnime (franime.fr) — Provider anime FR. Next.js SSR + API
-            // JSON séparée api.franime.fr. Hosts vidéo : sibnet, sendvid (extractors
-            // existants). Series-only (films groupés dans le catalogue anime).
             FranimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
-            KidrazProvider to ProviderSupport(movies = true, tvShows = false),
-            WiflixProvider to ProviderSupport(movies = true, tvShows = true),
-            VoirDramaProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             VoirAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
-            // 2026-05-12 : AnimeSite (animesite.fr) — provider anime FR. Next.js SPA,
-            // catalogue parsé depuis la home server-rendered. 5 lecteurs par épisode
-            // (sendvid x2 + myvi + sbfull + sendvid VF) — pour l'instant seul sendvid
-            // est supporté (extractor existant). Series-only (movies = false).
-            AnimeSiteProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
-            // 2026-05-05: Moviebox (themoviebox.org/aoneroom) — niche K-Dramas + animes + films Hollywood VF.
-            // v1: catalogue uniquement (search/browse). Extraction streams TODO v2.
-            MovieboxProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
+            // 2026-05-21 : AnimeSite SUPPRIMÉ du provider list (user). SendvidExtractor reste dispo pour les autres.
+            // AnimeSiteProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
             // 2026-05-18 : AllMovieLand SUPPRIMÉ. Catalog principalement Bollywood
             // (pas l'usage anime voulu) + serveur Cloudflare-protected qui exige un
             // bypass WebView fragile. User : "supprime ce provider, on fera jamais
