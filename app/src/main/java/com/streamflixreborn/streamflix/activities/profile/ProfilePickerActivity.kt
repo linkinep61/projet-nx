@@ -18,6 +18,7 @@ import com.streamflixreborn.streamflix.activities.main.MainMobileActivity
 import com.streamflixreborn.streamflix.models.Profile
 import com.streamflixreborn.streamflix.utils.ProfileManager
 import com.streamflixreborn.streamflix.utils.ProfileStore
+import kotlinx.coroutines.launch
 
 /**
  * 2026-05-12 : écran "Qui regarde ?" lancé avant [MainMobileActivity] quand
@@ -141,6 +142,10 @@ class ProfilePickerActivity : FragmentActivity() {
                     isAdmin = false,
                 )
                 ProfileStore.upsert(newProfile)
+                // 2026-05-22 : cache l'image Fluent en local
+                kotlinx.coroutines.MainScope().launch {
+                    ProfileEmojiArt.cacheLocally(this@ProfilePickerActivity, pickedEmoji)
+                }
                 refreshList()
                 Toast.makeText(this, "Profil '${name}' créé", Toast.LENGTH_SHORT).show()
             }
@@ -176,6 +181,10 @@ class ProfilePickerActivity : FragmentActivity() {
                     }
                     "Changer emoji" -> EmojiPickerDialog.show(this, profile.emoji) { picked ->
                         ProfileStore.upsert(profile.copy(emoji = picked))
+                        // 2026-05-22 : cache l'image Fluent en local (1 seul DL réseau)
+                        kotlinx.coroutines.MainScope().launch {
+                            ProfileEmojiArt.cacheLocally(this@ProfilePickerActivity, picked)
+                        }
                         refreshList()
                     }
                     "Définir un PIN" -> editText(

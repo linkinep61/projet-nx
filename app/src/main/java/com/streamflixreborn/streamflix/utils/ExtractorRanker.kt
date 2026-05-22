@@ -387,8 +387,11 @@ object ExtractorRanker {
             return 100
         }
         // VO / original / multi / langues étrangères
+        // 2026-05-22 : pénalité MASSIVE (user "mets -1000000 dessus, je veux
+        // pas les voir en premier"). Les sources étrangères ne doivent JAMAIS
+        // passer avant une source FR, même un backup lent ou jamais testé.
         if (nameLower.contains(Regex("\\b(vo|raw|multi|eng|english|spa|ita|german|deu|jap)\\b"))) {
-            return 150
+            return 1_000_000
         }
         // Pas de marker langue → assume VF (cas typique des IPTV/Sport, et
         // de pas mal de providers qui ne tagguent pas explicitement)

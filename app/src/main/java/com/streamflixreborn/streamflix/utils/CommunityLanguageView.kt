@@ -1,6 +1,7 @@
 package com.streamflixreborn.streamflix.utils
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.util.Log
 import android.view.View
 import android.widget.TextView
@@ -40,6 +41,15 @@ object CommunityLanguageView {
         context: Context,
         onLabel: ((String?) -> Unit)? = null,
     ) {
+        // Anti-reset : si le contentKey n'a pas changé, ne pas re-bind
+        // (le ViewModel émet 2-3x pour la même fiche → évite de perdre les boutons)
+        val prevKey = rootView.getTag(R.id.include_community_language) as? String
+        if (prevKey == contentKey) {
+            Log.d(TAG, "bind() skip — même contentKey=$contentKey")
+            return
+        }
+        rootView.setTag(R.id.include_community_language, contentKey)
+
         val btnVf = rootView.findViewById<TextView>(R.id.btn_lang_vf) ?: return
         val btnVostfr = rootView.findViewById<TextView>(R.id.btn_lang_vostfr) ?: return
         val btnVo = rootView.findViewById<TextView>(R.id.btn_lang_vo) ?: return
@@ -142,10 +152,42 @@ object CommunityLanguageView {
             }
         }
 
+        // TV : confirmation anti-vote accidentel (D-pad). 1er clic = "Confirmer ?",
+        // 2e clic dans 3 s = vote réel. Mobile : vote direct au clic.
+        val isTv = context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+        var pendingLang: LanguageReportService.Lang? = null
+        var pendingTs = 0L
+
         buttons.forEach { (lang, btn) ->
             btn.setOnClickListener {
                 val mine = current?.userVote
-                if (mine != null && mine.equals(lang.name, ignoreCase = true)) remove() else vote(lang)
+                if (mine != null && mine.equals(lang.name, ignoreCase = true)) {
+                    // Retirer son vote — pas de confirmation nécessaire
+                    remove()
+                    return@setOnClickListener
+                }
+
+                if (!isTv) {
+                    // Mobile : vote direct
+                    vote(lang)
+                    return@setOnClickListener
+                }
+
+                // TV : confirmation en 2 clics
+                val now = System.currentTimeMillis()
+                if (pendingLang == lang && now - pendingTs < 3_000) {
+                    // 2e clic sur le même bouton dans les 3 s → voter
+                    pendingLang = null
+                    vote(lang)
+                } else {
+                    // 1er clic → prévisualiser, pas voter
+                    pendingLang = lang
+                    pendingTs = now
+                    btn.setTextColor(COLOR_USER)
+                    info.text = "${lang.name} ? Appuie encore pour confirmer"
+                    info.setTextColor(COLOR_INFO)
+                    Log.d(TAG, "TV confirm pending: ${lang.name}")
+                }
             }
         }
 

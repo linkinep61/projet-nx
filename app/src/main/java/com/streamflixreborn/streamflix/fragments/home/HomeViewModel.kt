@@ -430,12 +430,14 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         currentProvider = provider
 
         // 2026-05-22 : attendre que le refresh URL du provider soit fini
-        // (max 5s) avant de lancer le fetch. Sans ça, getHome() part sur
-        // une vieille URL → timeout → écran vide au 1er clic.
+        // avant de lancer le fetch. Sans ça, getHome() part sur une vieille
+        // URL → timeout → moulinette infinie au 1er clic.
+        // 15s = assez pour les providers lents (1Jour1Film Cloudflare, portals
+        // FrenchStream/AnimeSama) ; si ça dépasse, on tente quand même.
         val refreshJob = StreamFlixApp.instance.providerUrlRefreshJob
         if (refreshJob != null && refreshJob.isActive) {
             Log.d("HomeBoot", "[${provider.name}] waiting for URL refresh…")
-            withTimeoutOrNull(5_000L) { refreshJob.join() }
+            withTimeoutOrNull(15_000L) { refreshJob.join() }
             Log.d("HomeBoot", "[${provider.name}] URL refresh done (or timed out) +${System.currentTimeMillis() - t0}ms")
         }
 

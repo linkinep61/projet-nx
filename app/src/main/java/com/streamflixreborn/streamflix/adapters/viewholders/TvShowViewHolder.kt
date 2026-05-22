@@ -515,10 +515,56 @@ class TvShowViewHolder(
         try { navController.navigate(R.id.season, args) } catch (_: Exception) {}
     }
 
+    /** 2026-05-22 : ouvre un épisode favori (carte synthétique du cœur) sur sa
+     *  saison, dans le provider d'origine. Même logique que openSeasonFavorite. */
+    private fun openEpisodeFavorite(navController: androidx.navigation.NavController) {
+        val e = com.streamflixreborn.streamflix.utils.EpisodeFavorites.findBySyntheticId(tvShow.id) ?: return
+        com.streamflixreborn.streamflix.providers.Provider.findByName(e.provider)?.let {
+            com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider = it
+        }
+        val args = android.os.Bundle().apply {
+            putString("tvShowId", e.showId)
+            putString("tvShowTitle", e.showTitle)
+            putString("tvShowPoster", e.showPoster)
+            putString("tvShowBanner", e.showBanner)
+            putString("seasonId", e.seasonId)
+            putInt("seasonNumber", e.seasonNumber)
+            putString("seasonTitle", e.seasonTitle)
+        }
+        try { navController.navigate(R.id.season, args) } catch (_: Exception) {}
+    }
+
+    /** 2026-05-22 : ouvre une reprise de lecture série (carte synthétique du cœur)
+     *  sur la saison du dernier épisode regardé, dans le provider d'origine. */
+    private fun openResumeSeries(navController: androidx.navigation.NavController) {
+        val rawId = tvShow.id.removePrefix("resume_series_")
+        val origin = com.streamflixreborn.streamflix.utils.GlobalFavorites.originByItemId[tvShow.id]
+        if (origin != null) {
+            com.streamflixreborn.streamflix.providers.Provider.findByName(origin)?.let {
+                com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider = it
+            }
+        }
+        // Naviguer vers la fiche série → l'user verra la saison avec la progression
+        val args = android.os.Bundle().apply {
+            putString("id", rawId)
+            putString("poster", tvShow.poster)
+            putString("banner", tvShow.banner)
+        }
+        try { navController.navigate(R.id.tv_show, args) } catch (_: Exception) {}
+    }
+
     private fun displayGridMobileItem(binding: ItemTvShowGridMobileBinding) {
         binding.root.setOnClickListener {
             if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
                 openSeasonFavorite(binding.root.findNavController()); return@setOnClickListener
+            }
+            // 2026-05-22 : épisode favori → ouvre la saison dans le provider d'origine
+            if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.EpisodeFavorites.SYNTHETIC_ID_PREFIX)) {
+                openEpisodeFavorite(binding.root.findNavController()); return@setOnClickListener
+            }
+            // 2026-05-22 : reprise de lecture série → ouvre la fiche série dans le provider d'origine
+            if (tvShow.id.startsWith("resume_series_")) {
+                openResumeSeries(binding.root.findNavController()); return@setOnClickListener
             }
             checkProviderAndRun {
                 if (context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
@@ -564,6 +610,14 @@ class TvShowViewHolder(
             setOnClickListener {
                 if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
                     openSeasonFavorite(findNavController()); return@setOnClickListener
+                }
+                // 2026-05-22 : épisode favori → ouvre la saison dans le provider d'origine
+                if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.EpisodeFavorites.SYNTHETIC_ID_PREFIX)) {
+                    openEpisodeFavorite(findNavController()); return@setOnClickListener
+                }
+                // 2026-05-22 : reprise de lecture série → ouvre la fiche série dans le provider d'origine
+                if (tvShow.id.startsWith("resume_series_")) {
+                    openResumeSeries(findNavController()); return@setOnClickListener
                 }
                 checkProviderAndRun {
                     if (context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {

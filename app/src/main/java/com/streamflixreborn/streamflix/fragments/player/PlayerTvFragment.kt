@@ -5090,6 +5090,10 @@ class PlayerTvFragment : Fragment() {
             if (lang == "es") {
                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                     .setPreferredAudioLanguage("spa").build()
+            } else {
+                // 2026-05-22 : toujours préférer l'audio français par défaut
+                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                    .setPreferredAudioLanguage("fr").build()
             }
             mediaSession = MediaSession.Builder(requireContext(), player).build()
             binding.pvPlayer.player = player
@@ -5368,6 +5372,9 @@ class PlayerTvFragment : Fragment() {
                     val builder = player.trackSelectionParameters.buildUpon()
                     if (lang == "es") {
                         builder.setPreferredAudioLanguage("spa")
+                    } else {
+                        // 2026-05-22 : toujours préférer l'audio français par défaut
+                        builder.setPreferredAudioLanguage("fr")
                     }
                     // 2026-05-09 : pour IPTV, prioriser AAC > AC3 > MP3 (plutôt
                     // qu'EAC-3 que le décodeur hardware Chromecast ne supporte

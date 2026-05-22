@@ -584,6 +584,11 @@ class PlayerViewModel(
                 if (fresh.isEmpty()) return@collect
                 accumulated.addAll(fresh)
                 val ordered = orderByFrenchBuckets(accumulated)
+                if (ordered.isEmpty()) {
+                    // Lot reçu mais 0 serveurs après tri/dedup — on attend le prochain
+                    Log.d("ServDiag", "PROG lot reçu mais ordered=0, on attend le suivant")
+                    return@collect
+                }
                 if (!firstEmitted) {
                     firstEmitted = true
                     Log.i("StreamFlixES", "[SERVERS PROGRESSIVE] 1er lot affiché : ${ordered.size} serveurs")
@@ -630,15 +635,39 @@ class PlayerViewModel(
             com.streamflixreborn.streamflix.utils.ExtractorRanker.rankServers(list)
         } catch (_: Exception) { list }
         val voRegex = Regex("""(^|[^a-z])vo([^a-z]|$)""")
+        // Regex pour détecter une mention FR/VF/multi dans le nom du serveur
+        val frRegex = Regex("""(?i)\b(vf|vff|vfq|vfi|fr|french|français|francais|multi|vostfr|vost)\b""")
         fun bucket(s: Video.Server): Int {
             val n = s.name.lowercase()
             return when {
                 n.contains("vostfr") || n.contains("sous-titr") -> 1
-                voRegex.containsMatchIn(n) -> 2
+                // 2026-05-22 : VO/étrangères enterrées massivement — ne doivent
+                // JAMAIS passer avant une source FR même lente.
+                voRegex.containsMatchIn(n) ||
+                    n.contains(Regex("\\b(raw|eng|english|spa|ita|german|deu|jap)\\b")) -> 999
                 else -> 0
             }
         }
-        return ranked.sortedBy { bucket(it) }
+        // 2026-05-22 : quand le filtre catalogue est "Monde — tout", on RETIRE
+        // les serveurs sans mention VF/FR/multi (l'user ne veut pas les voir du
+        // tout, pas juste les enterrer). Garde les non-taggés (= assumés VF par
+        // les providers classiques) et les multi.
+        val providerName = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name
+        val hideVo = providerName != null &&
+            com.streamflixreborn.streamflix.utils.CatalogFilter.isSupported(providerName) &&
+            com.streamflixreborn.streamflix.utils.CatalogFilter.get(providerName) ==
+                com.streamflixreborn.streamflix.utils.CatalogFilter.Mode.POPULAR_INTL
+        val filtered = if (hideVo) {
+            ranked.filter { s ->
+                val n = s.name.lowercase()
+                val b = bucket(s)
+                // Garder : bucket 0 (VF/non-taggé) ou bucket 1 (VOSTFR)
+                // Virer : bucket 999 (VO explicite) SAUF si le nom contient quand même
+                // une mention FR/multi (ex: "Movix — Doodstream [VO] (multi)")
+                b < 999 || frRegex.containsMatchIn(n)
+            }
+        } else ranked
+        return filtered.sortedBy { bucket(it) }
     }
 
     // 2026-05-16 (user "ça charge à l'infini sans savoir si serveur OK") :
