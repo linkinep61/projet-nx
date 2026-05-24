@@ -260,7 +260,9 @@ class HomeTvFragment : Fragment() {
 
     private fun initializeMiniPlayer() {
         val isIptv = UserPreferences.currentProvider is IptvProvider
-        if (!isIptv || !UserPreferences.miniPlayerEnabled) {
+        // WiTV v2 : pas de mini-player, 1 clic = fullscreen direct
+        val isWiTv = UserPreferences.currentProvider?.name?.contains("WiTV") == true
+        if (!isIptv || !UserPreferences.miniPlayerEnabled || isWiTv) {
             binding.miniPlayerContainer.visibility = View.GONE
             MiniPlayerController.onIptvChannelClick = null
             return
@@ -415,10 +417,9 @@ class HomeTvFragment : Fragment() {
         val channelName = MiniPlayerController.currentChannelName ?: channelId
         val channelPoster = MiniPlayerController.currentChannelPoster
 
-        // Set transition flag BEFORE navigate so onPause skips cleanup.
-        // The actual ExoPlayer transfer happens in PlayerTvFragment.onViewCreated().
-        MiniPlayerController.transitioningToFullscreen = true
-        // Detach surface to avoid blocking, but keep the player alive for transfer
+        // v70 : CUT propre — on COUPE le mini-player au lieu de transférer le player.
+        // Le fullscreen se reconnecte de zéro (plus fiable, pas de bug de transition).
+        MiniPlayerController.stopAsync()
         if (_binding != null) {
             binding.miniPlayerView.player = null
         }

@@ -106,6 +106,7 @@ import com.streamflixreborn.streamflix.utils.setMediaServers
 import com.streamflixreborn.streamflix.utils.toSubtitleMimeType
 import com.streamflixreborn.streamflix.providers.IptvProvider
 import com.streamflixreborn.streamflix.providers.WiTvProvider
+import com.streamflixreborn.streamflix.providers.WiTvProviderV2
 import com.streamflixreborn.streamflix.utils.viewModelsFactory
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
@@ -819,7 +820,7 @@ class PlayerTvFragment : Fragment() {
                         val isTmdb = providerName.contains("TMDb", ignoreCase = true)
 
                         if (servers.isEmpty()) {
-                            if (providerName == "WiTV") {
+                            if (providerName == "WiTV" || providerName == "WiTV v2") {
                                 Log.d("PlayerTvFragment", "No initial servers, waiting for OLA CID servers...")
                                 PlayerSettingsView.Settings.ChannelVariant.list.clear()
                                 binding.settings.refreshChannelVariantList()
@@ -1998,6 +1999,10 @@ class PlayerTvFragment : Fragment() {
                     prevId = provider.getPreviousChannelId(args.id)
                     nextId = provider.getNextChannelId(args.id)
                 }
+                is WiTvProviderV2 -> {
+                    prevId = provider.getPreviousChannelId(args.id)
+                    nextId = provider.getNextChannelId(args.id)
+                }
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> {
                     prevId = provider.getPreviousChannelId(args.id)
                     nextId = provider.getNextChannelId(args.id)
@@ -2086,6 +2091,7 @@ class PlayerTvFragment : Fragment() {
         private fun showChannelOverlay(channelId: String, channelNumber: Int, provider: Any?) {
             val channelName = when (provider) {
                 is WiTvProvider -> provider.getChannelDisplayName(channelId)
+                is WiTvProviderV2 -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(channelId)
@@ -2096,6 +2102,7 @@ class PlayerTvFragment : Fragment() {
                 .removePrefix("vavoo::")
             val channelLogo = when (provider) {
                 is WiTvProvider -> provider.getChannelPoster(channelId)
+                is WiTvProviderV2 -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(channelId)
@@ -2145,6 +2152,7 @@ class PlayerTvFragment : Fragment() {
         private fun navigateToChannel(channelId: String, provider: Any?) {
             val channelName = when (provider) {
                 is WiTvProvider -> provider.getChannelDisplayName(channelId)
+                is WiTvProviderV2 -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(channelId)
@@ -2154,6 +2162,7 @@ class PlayerTvFragment : Fragment() {
             } ?: channelId
             val channelPoster = when (provider) {
                 is WiTvProvider -> provider.getChannelPoster(channelId)
+                is WiTvProviderV2 -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(channelId)
@@ -2645,10 +2654,26 @@ class PlayerTvFragment : Fragment() {
                                     System.currentTimeMillis() - bufferingStartTimestampMs >= 10_000L) {
                                     val srv = currentServer
                                     if (srv != null) {
-                                        Log.e("PlayerTvFragment", "WATCHDOG CRITIQUE: BUFFERING >10s sans recovery → FULL RESTART via viewModel.getVideo(${srv.name})")
-                                        backupJumelageAttempted = false  // permet re-add backups après restart
+                                        backupJumelageAttempted = false
+                                        // Rotation auto : marque le serveur mort et essaie le suivant
+                                        val wdNow = System.currentTimeMillis()
+                                        serverFailedAt[srv.id] = wdNow
+                                        val wdAvailable = servers.filter { s ->
+                                            s.id != srv.id &&
+                                            (wdNow - (serverFailedAt[s.id] ?: 0L)) >= SERVER_COOLDOWN_MS
+                                        }
+                                        val wdNext = wdAvailable.firstOrNull()
+                                            ?: servers.filter { it.id != srv.id }
+                                                .minByOrNull { serverFailedAt[it.id] ?: 0L }
                                         try {
-                                            viewModel.getVideo(srv)
+                                            if (wdNext != null) {
+                                                Log.e("PlayerTvFragment", "WATCHDOG: ${srv.name} stuck → rotation vers ${wdNext.name}")
+                                                lastAutoSwitchTime = wdNow
+                                                viewModel.getVideo(wdNext)
+                                            } else {
+                                                Log.e("PlayerTvFragment", "WATCHDOG: ${srv.name} stuck, pas d'autre serveur → retry même")
+                                                viewModel.getVideo(srv)
+                                            }
                                         } catch (e: Exception) {
                                             Log.w("PlayerTvFragment", "Watchdog critique getVideo failed: ${e.message}")
                                         }
@@ -3519,6 +3544,29 @@ class PlayerTvFragment : Fragment() {
                                             player.prepare()
                                             player.playWhenReady = true
                                         }
+                                    }
+                                }
+                            } else if (server.id.startsWith("m3u8::")) {
+                                // WiTV v2 m3u8 server failed → rotation auto vers le suivant
+                                val now = System.currentTimeMillis()
+                                serverFailedAt[server.id] = now
+                                Log.w("PlayerTvFragment", "WiTV m3u8 ${server.name} failed ($errCodeName) → rotation auto")
+                                viewLifecycleOwner.lifecycleScope.launch {
+                                    val available = servers.filter { srv ->
+                                        srv.id != server.id &&
+                                        (now - (serverFailedAt[srv.id] ?: 0L)) >= SERVER_COOLDOWN_MS
+                                    }
+                                    val nextServer = available.firstOrNull()
+                                        ?: servers.filter { it.id != server.id }
+                                            .minByOrNull { serverFailedAt[it.id] ?: 0L }
+                                    if (nextServer != null && _binding != null) {
+                                        Log.w("PlayerTvFragment", "  → essai ${nextServer.name}")
+                                        lastAutoSwitchTime = now
+                                        viewModel.getVideo(nextServer)
+                                    } else {
+                                        // Aucun autre serveur → retry même en dernier recours
+                                        player.prepare()
+                                        player.playWhenReady = true
                                     }
                                 }
                             } else {

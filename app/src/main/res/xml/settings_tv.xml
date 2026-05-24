@@ -233,6 +233,12 @@
                 android:title="@string/settings_keep_screen_on_app"
                 android:summary="@string/settings_keep_screen_on_app_summary"
                 android:defaultValue="false" />
+
+            <SwitchPreference
+                android:key="PROFILE_PICKER_ENABLED"
+                android:title="@string/settings_profile_picker"
+                android:summary="@string/settings_profile_picker_summary"
+                android:defaultValue="true" />
         </PreferenceCategory>
 
         <PreferenceCategory android:title="Mini Player IPTV">

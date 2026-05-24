@@ -72,6 +72,41 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     private var serviceInitialized = false
     private val initializationMutex = Mutex()
 
+    /** Mots génériques que le site met dans .j1f-card__title au lieu du vrai nom */
+    private val TYPE_LABELS = setOf("film", "série", "serie", "movie", "tv show", "anime", "épisode", "episode", "saison")
+
+    /** Extrait le vrai titre d'une carte j1f-card.
+     *  Priorité : alt img > title/aria-label du lien > slug URL.
+     *  On ignore .j1f-card__title si c'est juste un label de type ("Film"/"Série"). */
+    private fun extractCardTitle(card: Element, href: String): String {
+        // 1. j1f-card__title — seulement si c'est un VRAI titre (pas "Film"/"Série")
+        val rawTitle = card.selectFirst(".j1f-card__title")?.text()?.trim()
+        if (!rawTitle.isNullOrBlank() && rawTitle.lowercase() !in TYPE_LABELS) {
+            return rawTitle
+        }
+        // 2. alt de l'image poster (souvent le vrai titre)
+        val alt = (card.selectFirst(".j1f-card__poster img") ?: card.selectFirst("img"))
+            ?.attr("alt")?.trim()
+        if (!alt.isNullOrBlank() && alt.lowercase() !in TYPE_LABELS) {
+            return alt
+        }
+        // 3. attribut title ou aria-label sur le lien <a>
+        val aTitle = card.attr("title")?.trim()
+        if (!aTitle.isNullOrBlank()) return aTitle
+        val ariaLabel = card.attr("aria-label")?.trim()
+        if (!ariaLabel.isNullOrBlank()) return ariaLabel
+        // 4. Dernier fallback : slug URL humanisé (ex: "mon-film-2024" → "Mon film 2024")
+        return href.substringBeforeLast("/").substringAfterLast("/")
+            .replace("-", " ")
+            .replaceFirstChar { it.uppercaseChar() }
+    }
+
+    /** Extrait le poster d'une carte j1f-card. */
+    private fun extractCardPoster(card: Element): String {
+        val posterImg = card.selectFirst(".j1f-card__poster img") ?: card.selectFirst("img")
+        return posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
+    }
+
     fun ignoreSource(source: String, href: String): Boolean {
         if (arrayOf("youtube.").any {
                 href.contains(
@@ -134,10 +169,8 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             val items = section.select("a.j1f-card")
                 .mapNotNull { card ->
                     val href = card.attr("href")
-
-                    val title = card.selectFirst(".j1f-card__title")?.text() ?: ""
-                    val posterImg = card.selectFirst(".j1f-card__poster img")
-                    val poster = posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
+                    val title = extractCardTitle(card, href)
+                    val poster = extractCardPoster(card)
                     val id = href.substringBeforeLast("/").substringAfterLast("/")
 
                     if (href.contains("/films/")) {
@@ -255,27 +288,15 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             results = document.select("a.j1f-card")
                 .mapNotNull { card ->
                     val href = card.attr("href")
-
-                    val title = card.selectFirst(".j1f-card__title")?.text() ?: ""
-                    val posterImg = card.selectFirst(".j1f-card__poster img")
-                    val poster = posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
+                    val title = extractCardTitle(card, href)
+                    val poster = extractCardPoster(card)
                     val id = href.substringBeforeLast("/").substringAfterLast("/")
 
                     if (href.contains("/films/")) {
-                        Movie(
-                            id = id,
-                            title = title,
-                            poster = poster
-                        )
+                        Movie(id = id, title = title, poster = poster)
                     } else if (href.contains("/tvshows/")) {
-                        TvShow(
-                            id = id,
-                            title = title,
-                            poster = poster
-                        )
-                    } else {
-                        null
-                    }
+                        TvShow(id = id, title = title, poster = poster)
+                    } else null
                 }
         }
 
@@ -321,13 +342,10 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             .mapNotNull { card ->
                 val href = card.attr("href")
                 if (!href.contains("/films/")) return@mapNotNull null
-                val title = card.selectFirst(".j1f-card__title")?.text() ?: ""
-                val posterImg = card.selectFirst(".j1f-card__poster img")
-                val poster = posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
                 Movie(
                     id = href.substringBeforeLast("/").substringAfterLast("/"),
-                    title = title,
-                    poster = poster
+                    title = extractCardTitle(card, href),
+                    poster = extractCardPoster(card)
                 )
             }
 
@@ -344,13 +362,10 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             .mapNotNull { card ->
                 val href = card.attr("href")
                 if (!href.contains("/tvshows/")) return@mapNotNull null
-                val title = card.selectFirst(".j1f-card__title")?.text() ?: ""
-                val posterImg = card.selectFirst(".j1f-card__poster img")
-                val poster = posterImg?.attr("src")?.ifBlank { posterImg.attr("data-src") } ?: ""
                 TvShow(
                     id = href.substringBeforeLast("/").substringAfterLast("/"),
-                    title = title,
-                    poster = poster
+                    title = extractCardTitle(card, href),
+                    poster = extractCardPoster(card)
                 )
             }
 
