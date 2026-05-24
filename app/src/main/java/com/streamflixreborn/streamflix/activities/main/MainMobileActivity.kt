@@ -159,13 +159,19 @@ class MainMobileActivity : FragmentActivity() {
             return
         }
 
-        // 2026-05-12 (user "profil multi-utilisateur style Netflix") : si aucun
-        // profil n'est actif (cold start ou switch en cours), rediriger vers
-        // l'écran "Qui regarde ?" avant d'afficher la home. Phase 1 = mobile-only.
+        // 2026-05-12 : si aucun profil actif, redirect vers "Qui regarde ?"
+        // 2026-05-22 : si le ProfilePicker est désactivé, profil principal auto.
         if (com.streamflixreborn.streamflix.utils.ProfileManager.currentProfile() == null) {
-            finish()
-            startActivity(Intent(this, com.streamflixreborn.streamflix.activities.profile.ProfilePickerActivity::class.java))
-            return
+            if (com.streamflixreborn.streamflix.utils.UserPreferences.profilePickerEnabled) {
+                finish()
+                startActivity(Intent(this, com.streamflixreborn.streamflix.activities.profile.ProfilePickerActivity::class.java))
+                return
+            } else {
+                val defaultProfile = com.streamflixreborn.streamflix.utils.ProfileStore.getAll().firstOrNull()
+                if (defaultProfile != null) {
+                    com.streamflixreborn.streamflix.utils.ProfileManager.setCurrentProfile(defaultProfile)
+                }
+            }
         }
 
         // Per user request: cold start lands on the Providers home with NO
@@ -315,6 +321,19 @@ class MainMobileActivity : FragmentActivity() {
         // dans les 30 prochaines minutes ne re-bounce pas vers ProfilePicker
         // (cf StreamFlixApp.onCreate logique smart-cold-start).
         com.streamflixreborn.streamflix.utils.ProfileStore.touchLastActiveTimestamp()
+
+        // 2026-05-22 : verrouillage auto au retour du background (Home).
+        if (com.streamflixreborn.streamflix.StreamFlixApp.shouldLockOnResume
+            && com.streamflixreborn.streamflix.utils.UserPreferences.profilePickerEnabled) {
+            com.streamflixreborn.streamflix.StreamFlixApp.shouldLockOnResume = false
+            com.streamflixreborn.streamflix.utils.ProfileStore.clearLastActiveTimestamp()
+            com.streamflixreborn.streamflix.utils.ProfileStore.setCurrentProfileId(null)
+            UserPreferences.currentProvider = null
+            finish()
+            startActivity(Intent(this, com.streamflixreborn.streamflix.activities.profile.ProfilePickerActivity::class.java))
+            return
+        }
+        com.streamflixreborn.streamflix.StreamFlixApp.shouldLockOnResume = false
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -324,6 +343,11 @@ class MainMobileActivity : FragmentActivity() {
     }
 
     override fun onDestroy() {
+        // 2026-05-22 : fermeture volontaire → clear timestamp pour retomber
+        // sur le ProfilePicker au prochain lancement (Netflix-style).
+        if (isFinishing) {
+            com.streamflixreborn.streamflix.utils.ProfileStore.clearLastActiveTimestamp()
+        }
         dismissUpdateDialog()
         _binding = null
         super.onDestroy()

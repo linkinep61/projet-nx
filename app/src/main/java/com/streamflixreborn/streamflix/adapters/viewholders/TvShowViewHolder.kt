@@ -265,9 +265,12 @@ class TvShowViewHolder(
         val isStalkerEpisode = tvShow.id.startsWith("myiptv-ep::") ||
             tvShow.id.startsWith("myiptv-movie::") ||
             tvShow.id.startsWith("myiptv-ep-stk::")
+        // WiTV v2 : pas de mini-player, direct fullscreen (1 clic = lecture)
+        val isWiTvChannel = tvShow.providerName == "WiTV" ||
+            (tvShow.id.startsWith("ch::") && !tvShow.id.startsWith("ch::myiptv"))
         val interceptor = MiniPlayerController.onIptvChannelClick
-        Log.d("TvShowViewHolder", "handleDirectPlay: interceptor=${if (interceptor != null) "SET" else "NULL"}, isStalkerEpisode=$isStalkerEpisode, tvShow=${tvShow.title}")
-        if (!isStalkerEpisode && interceptor != null && interceptor(tvShow)) {
+        Log.d("TvShowViewHolder", "handleDirectPlay: interceptor=${if (interceptor != null) "SET" else "NULL"}, isStalkerEpisode=$isStalkerEpisode, isWiTv=$isWiTvChannel, tvShow=${tvShow.title}")
+        if (!isStalkerEpisode && !isWiTvChannel && interceptor != null && interceptor(tvShow)) {
             return // interceptor handled the click (playing in mini player)
         }
         // Interceptor returned false or not set OR isStalkerEpisode → navigate to full player

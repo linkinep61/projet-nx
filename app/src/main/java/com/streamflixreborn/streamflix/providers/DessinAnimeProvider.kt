@@ -798,6 +798,8 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
             val iframeTemplate = m.groupValues[3]
             val url = iframeTemplate.replace("{{slug}}", embedId)
             if (!url.startsWith("http")) return@forEach
+            // 2026-05-23 : Player4me désactivé (API "Video not found" sur tout)
+            if (url.contains("4meplayer")) return@forEach
             if (!seenUrls.add(url)) return@forEach
             val ws = maxOf(0, m.range.first - 250)
             val we = minOf(unescaped.length, m.range.last + 50)

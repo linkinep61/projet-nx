@@ -147,6 +147,13 @@ object ProfileStore {
         prefs.edit().putLong(KEY_LAST_ACTIVE_TIMESTAMP, System.currentTimeMillis()).apply()
     }
 
+    /** Efface le timestamp → le prochain onCreate traitera comme un vrai cold
+     *  start et renverra vers le ProfilePicker. Appelé depuis
+     *  Activity.onDestroy quand isFinishing==true (fermeture volontaire). */
+    fun clearLastActiveTimestamp() {
+        prefs.edit().remove(KEY_LAST_ACTIVE_TIMESTAMP).apply()
+    }
+
     /** Génère un id stable pour un nouveau profil — basé sur timestamp + suffix
      *  random pour éviter les collisions sur création rapide. */
     fun generateId(): String =

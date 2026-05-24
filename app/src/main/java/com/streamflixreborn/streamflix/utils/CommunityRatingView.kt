@@ -159,48 +159,65 @@ object CommunityRatingView {
             }
         }
 
-        // ── TV D-pad : barre focusable, confirmation en 2 clics ──
-        // 1er OK = choisir note (cycle 1→5), 2e OK dans 3s = confirmer.
-        // Évite les votes accidentels par navigation D-pad.
+        // ── TV D-pad : 1 clic = mode sélection, gauche/droite = étoiles, OK = valider ──
         val starBar = rootView.findViewById<LinearLayout>(R.id.ll_star_bar)
         Log.d(TAG, "starBar found: ${starBar != null}")
-        var starConfirmPending = false
-        var starConfirmTs = 0L
+        var isSelecting = false
         if (starBar != null) {
             starBar.setOnFocusChangeListener { _, hasFocus ->
                 Log.d(TAG, "starBar focus=$hasFocus")
                 if (hasFocus) {
                     dpadPreview = currentUserRating ?: 0
-                    starConfirmPending = false
+                    isSelecting = false
                     if (dpadPreview > 0) {
                         updateStarsForUserVote(stars, dpadPreview)
                     }
-                    val label = if (dpadPreview > 0) "$dpadPreview/5" else "—"
-                    infoText.text = "$label · OK pour noter"
+                    infoText.text = "OK pour noter"
                 } else {
+                    // Quitte le focus → annule la sélection, restore l'affichage normal
                     dpadPreview = 0
-                    starConfirmPending = false
+                    isSelecting = false
                     updateStars(stars, currentAvg, currentUserRating)
                     infoText.text = formatRatingInfo(currentAvg, currentTotal)
                 }
             }
 
+            // D-pad gauche/droite pour ajuster les étoiles en mode sélection
+            starBar.setOnKeyListener { _, keyCode, event ->
+                if (!isSelecting || event.action != android.view.KeyEvent.ACTION_DOWN) {
+                    return@setOnKeyListener false
+                }
+                when (keyCode) {
+                    android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        dpadPreview = (dpadPreview + 1).coerceAtMost(5)
+                        updateStarsForUserVote(stars, dpadPreview)
+                        infoText.text = "★ $dpadPreview/5 · OK pour valider"
+                        true
+                    }
+                    android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        dpadPreview = (dpadPreview - 1).coerceAtLeast(1)
+                        updateStarsForUserVote(stars, dpadPreview)
+                        infoText.text = "★ $dpadPreview/5 · OK pour valider"
+                        true
+                    }
+                    else -> false
+                }
+            }
+
             starBar.setOnClickListener {
-                val now = System.currentTimeMillis()
-                if (starConfirmPending && now - starConfirmTs < 3_000) {
-                    // 2e clic dans 3s → confirmer le vote
+                if (!isSelecting) {
+                    // 1er clic → entre en mode sélection, commence à 3 étoiles (milieu)
+                    isSelecting = true
+                    dpadPreview = currentUserRating ?: 3
+                    updateStarsForUserVote(stars, dpadPreview)
+                    infoText.text = "★ $dpadPreview/5 · ◄ ► puis OK"
+                    Log.d(TAG, "starBar → mode sélection, preview=$dpadPreview")
+                } else {
+                    // 2e clic → confirme le vote
+                    isSelecting = false
                     Log.d(TAG, "starBar confirmed → submit $dpadPreview")
-                    starConfirmPending = false
                     infoText.text = "★ $dpadPreview/5 — envoi…"
                     submitRating(dpadPreview)
-                } else {
-                    // 1er clic → choisir la note (cycle 1→5), pas de soumission
-                    dpadPreview = if (dpadPreview >= 5) 1 else dpadPreview + 1
-                    starConfirmPending = true
-                    starConfirmTs = now
-                    Log.d(TAG, "starBar preview → dpadPreview=$dpadPreview (appuie encore)")
-                    updateStarsForUserVote(stars, dpadPreview)
-                    infoText.text = "★ $dpadPreview/5 · OK pour confirmer"
                 }
             }
         }

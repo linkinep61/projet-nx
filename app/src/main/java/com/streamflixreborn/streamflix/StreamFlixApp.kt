@@ -33,6 +33,16 @@ class StreamFlixApp : Application() {
         var currentActivity: Activity? = null
             private set
 
+        /** Compteur d'activités visibles — quand il tombe à 0, l'app
+         *  est en background (Home TV, switch app, etc.). */
+        @Volatile
+        private var visibleActivityCount = 0
+
+        /** True quand l'app revient du background → les Main activities
+         *  doivent vérifier si le ProfilePicker doit être affiché. */
+        @Volatile
+        var shouldLockOnResume = false
+
         /**
          * Pre-initialized Cronet engine (lazy, thread-safe).
          * CronetEngine.Builder().build() takes 300-800ms on ARM/Chromecast.
@@ -167,12 +177,24 @@ class StreamFlixApp : Application() {
         }
 
         // Track current foreground Activity for WebView dialogs
+        // + compteur d'activités visibles pour détecter le background (Home TV)
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) { currentActivity = activity }
             override fun onActivityPaused(activity: Activity) { if (currentActivity == activity) currentActivity = null }
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
-            override fun onActivityStarted(activity: Activity) {}
-            override fun onActivityStopped(activity: Activity) {}
+            override fun onActivityStarted(activity: Activity) {
+                visibleActivityCount++
+            }
+            override fun onActivityStopped(activity: Activity) {
+                visibleActivityCount--
+                if (visibleActivityCount <= 0) {
+                    visibleActivityCount = 0
+                    // L'app entière est en background (Home TV, switch app…)
+                    // → marquer pour verrouillage au retour
+                    shouldLockOnResume = true
+                    Log.d("StreamFlixApp", "App went to background — lock on resume")
+                }
+            }
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
             override fun onActivityDestroyed(activity: Activity) { if (currentActivity == activity) currentActivity = null }
         })
@@ -239,10 +261,16 @@ class StreamFlixApp : Application() {
         // start → on clear comme avant.
         try {
             val recentSession = ProfileStore.isRecentlyActive()
-            if (!recentSession) {
+            val pickerEnabled = UserPreferences.profilePickerEnabled
+            if (!recentSession && pickerEnabled) {
                 UserPreferences.currentProvider = null
                 ProfileStore.setCurrentProfileId(null)
                 Log.d("StreamFlixApp", "Cold start: profile + provider cleared (Netflix-style)")
+            } else if (!pickerEnabled) {
+                // ProfilePicker désactivé → on garde le profil principal,
+                // mais on clear le provider pour atterrir sur le Home Fournisseur.
+                UserPreferences.currentProvider = null
+                Log.d("StreamFlixApp", "ProfilePicker disabled: provider cleared, profile kept")
             } else {
                 Log.d("StreamFlixApp", "Process recreated mid-session: profile preserved")
             }

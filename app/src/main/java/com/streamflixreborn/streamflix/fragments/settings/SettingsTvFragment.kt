@@ -520,6 +520,15 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             }
         }
 
+        // 2026-05-22 : toggle écran "Qui regarde ?" au lancement.
+        findPreference<SwitchPreference>("PROFILE_PICKER_ENABLED")?.apply {
+            isChecked = UserPreferences.profilePickerEnabled
+            setOnPreferenceChangeListener { _, newValue ->
+                UserPreferences.profilePickerEnabled = newValue as Boolean
+                true
+            }
+        }
+
         findPreference<SwitchPreference>("MINI_PLAYER_ENABLED")?.apply {
             isChecked = UserPreferences.miniPlayerEnabled
             setOnPreferenceChangeListener { _, newValue ->

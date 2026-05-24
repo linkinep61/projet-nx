@@ -311,6 +311,8 @@
     <string name="settings_keep_screen_on_when_paused_summary">Prevents the screen from turning off when a video is paused</string>
     <string name="settings_keep_screen_on_app">Keep screen always on</string>
     <string name="settings_keep_screen_on_app_summary">Prevents the screen from turning off while browsing the app (catalog, home, channel picker, etc.). May increase battery usage on mobile.</string>
+    <string name="settings_profile_picker">Profile screen on launch</string>
+    <string name="settings_profile_picker_summary">Shows \"Who\'s watching?\" at each launch. Disable to go straight to content.</string>
     <string name="miscelaneous_title">Miscellaneous</string>
     <string name="settings_screen_misc_summary">Version info, help links and community shortcuts</string>
     <string name="clear_cache_done">Cache cleared</string>

@@ -54,13 +54,19 @@ open class Player4meExtractor : Extractor() {
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
     override suspend fun extract(link: String): Video {
-        // 2026-05-21 (user "il y a rien à capturer, affiche-moi le Player avec sa barre,
-        //   on pilote ses boutons à la télécommande") : 4meplayer.com est un VRAI player
-        //   WebView, pas un host à scraper. On le renvoie en webViewUrl + needsWebViewClick
-        //   → PlayerTvFragment/PlayerMobileFragment affichent le WebView overlay AVEC le
-        //   curseur virtuel (boutons pilotables au D-pad), comme Hydrax/Netu.
-        //   (L'ancienne approche « capturer un m3u8 » échouait toujours — « Could not
-        //   capture » — car il n'y a rien à intercepter : c'est un player complet.)
+        // 2026-05-23 : refonte extracteur — on tente d'abord de capturer le m3u8/mp4
+        // via WebView headless (interception réseau + console CORS). Si ça échoue,
+        // fallback en webViewUrl + needsWebViewClick (mode player WebView).
+        val streamUrl = extractByIntercepting(link)
+        if (!streamUrl.isNullOrBlank()) {
+            android.util.Log.d("Player4meExtractor", "Stream extrait : $streamUrl")
+            return Video(
+                source = streamUrl,
+                subtitles = listOf(),
+            )
+        }
+        // Fallback : mode player WebView (curseur virtuel, pilotable D-pad)
+        android.util.Log.w("Player4meExtractor", "Extraction échouée, fallback webViewUrl")
         return Video(
             source = link,
             webViewUrl = link,
@@ -119,7 +125,29 @@ open class Player4meExtractor : Extractor() {
                             consoleMessage: android.webkit.ConsoleMessage?
                         ): Boolean {
                             val msg = consoleMessage?.message() ?: return false
-                            // Pattern : "Access to XMLHttpRequest at '<URL>'" ou autre
+                            // Log TOUT pour debug
+                            if (msg.startsWith("P4M_")) {
+                                android.util.Log.d("Player4meExtractor", "CONSOLE: $msg")
+                            }
+                            // 2026-05-23 : fail-fast si vidéo morte
+                            if (msg.startsWith("P4M_API_RESP: ")) {
+                                val body = msg.removePrefix("P4M_API_RESP: ")
+                                if (body.contains("not found") || body.contains("deleted") || body.contains("error")) {
+                                    android.util.Log.w("Player4meExtractor", "Dead content detected: $body")
+                                    resolve(null) // fail-fast, pas besoin d'attendre 22s
+                                    return true
+                                }
+                            }
+                            // 2026-05-23 : capturer P4M_STREAM: (émis par nos hooks fetch/XHR)
+                            if (msg.startsWith("P4M_STREAM: ")) {
+                                val url = msg.removePrefix("P4M_STREAM: ").trim()
+                                if (url.isNotBlank() && (url.startsWith("http://") || url.startsWith("https://"))) {
+                                    android.util.Log.d("Player4meExtractor", "STREAM captured via JS hook: $url")
+                                    resolve(url)
+                                    return true
+                                }
+                            }
+                            // Pattern legacy : "Access to XMLHttpRequest at '<URL>'" ou autre
                             val m3u8Rx = Regex("""https?://[^\s"']+\.m3u8[^\s"']*""")
                             val match = m3u8Rx.find(msg)
                             if (match != null) {
@@ -267,17 +295,13 @@ open class Player4meExtractor : Extractor() {
                                                     return origTest.call(this,s);
                                                 };
                                             }catch(e){}
-                                            // === 2026-05-21 : EXTRACTION SILENCIEUSE (confirmé par logs :
-                                            //   org.chromium.content.browser.AudioFocusDelegate prend le focus
-                                            //   audio = la WebView hors-écran joue le son = « démarre, pas au
-                                            //   premier plan, que le son »). On MUTE tout média ; le fetch du
-                                            //   stream se fait quand même (muet). N'altère PAS l'extraction. ===
-                                            try{
-                                                var __m4mMute=function(){try{document.querySelectorAll('video,audio').forEach(function(el){try{el.muted=true;el.volume=0;}catch(e){}});}catch(e){}};
-                                                try{var __m4mPlay=HTMLMediaElement.prototype.play;HTMLMediaElement.prototype.play=function(){try{this.muted=true;this.volume=0;}catch(e){}return __m4mPlay.apply(this,arguments);};}catch(e){}
-                                                try{new MutationObserver(__m4mMute).observe(document.documentElement||document,{childList:true,subtree:true});}catch(e){}
-                                                __m4mMute();setInterval(__m4mMute,400);
-                                            }catch(e){}
+                                            // === 2026-05-23 : MUTE RETIRÉ ===
+                                            // Le mute (MutationObserver + setInterval) causait des AbortError
+                                            // ("play() interrupted by pause()/media removed") qui tuaient la
+                                            // chaîne d'extraction. Le son hors-écran est un moindre mal vs
+                                            // l'extraction qui échoue. Côté audio focus, Android le gère
+                                            // naturellement (la WebView headless perd le focus au profit du
+                                            // player principal). On ne force plus rien.
                                         })();
                                     """.trimIndent()
                                     val patchedJs = spoofPrelude + "\n" + originalJs
@@ -317,40 +341,95 @@ open class Player4meExtractor : Extractor() {
                             if (view == null || resolved) return
                             android.util.Log.d("Player4meExtractor", "onPageFinished: $finishedUrl")
 
-                            // 2026-05-15 : simule user activity (click + touch) au cas
-                            // où le player attendrait une interaction. Player4me peut
-                            // checker navigator.userActivation.isActive ou attendre
-                            // un click sur le bouton play overlay.
+                            // 2026-05-23 : injecter un hook JS qui :
+                            // 1) Override window.fetch pour capturer les appels /api/v1/player
+                            //    et les m3u8 fetch via JS (invisible pour shouldInterceptRequest)
+                            // 2) Monitor video.src et video.currentSrc
+                            // 3) Simule un clic pour déclencher la lecture
                             view.evaluateJavascript(
                                 """
                                 (function(){
+                                    // === HOOK FETCH pour capturer le m3u8 ===
+                                    var __origFetch = window.fetch;
+                                    window.fetch = function() {
+                                        var url = (arguments[0] && arguments[0].url) ? arguments[0].url : String(arguments[0]);
+                                        // Log TOUTES les fetch pour debug
+                                        console.log('P4M_FETCH: ' + url);
+                                        // Intercepter la réponse API (player OU video)
+                                        if (url.indexOf('/api/') !== -1) {
+                                            return __origFetch.apply(this, arguments).then(function(resp) {
+                                                return resp.clone().text().then(function(body) {
+                                                    console.log('P4M_API_RESP: ' + body.substring(0, 3000));
+                                                    // Chercher m3u8/mp4 dans la réponse JSON
+                                                    var m = body.match(/https?:[^"'\s\\]+\.m3u8[^"'\s\\]*/);
+                                                    if (m) console.log('P4M_STREAM: ' + m[0].replace(/\\/g,''));
+                                                    var mp = body.match(/https?:[^"'\s\\]+\.mp4[^"'\s\\]*/);
+                                                    if (mp) console.log('P4M_STREAM: ' + mp[0].replace(/\\/g,''));
+                                                    // Chercher aussi dans les champs JSON "url", "file", "src", "source"
+                                                    try {
+                                                        var j = JSON.parse(body);
+                                                        var fields = ['url','file','src','source','stream','video','link','embed'];
+                                                        for(var k=0;k<fields.length;k++){
+                                                            var v = j[fields[k]] || (j.data && j.data[fields[k]]);
+                                                            if(v && typeof v === 'string' && v.indexOf('http') !== -1){
+                                                                console.log('P4M_STREAM: ' + v);
+                                                            }
+                                                        }
+                                                    } catch(e) {}
+                                                    return resp;
+                                                });
+                                            });
+                                        }
+                                        // Capturer directement les fetch m3u8/mp4
+                                        if (url.indexOf('.m3u8') !== -1 || url.indexOf('.mp4') !== -1) {
+                                            console.log('P4M_STREAM: ' + url);
+                                        }
+                                        return __origFetch.apply(this, arguments);
+                                    };
+                                    // === HOOK XMLHttpRequest ===
+                                    var __origOpen = XMLHttpRequest.prototype.open;
+                                    XMLHttpRequest.prototype.open = function(method, url) {
+                                        console.log('P4M_XHR: ' + url);
+                                        if (url && (url.indexOf('.m3u8') !== -1 || url.indexOf('.mp4') !== -1)) {
+                                            console.log('P4M_STREAM: ' + url);
+                                        }
+                                        if (url && url.indexOf('/api/') !== -1) {
+                                            this.addEventListener('load', function() {
+                                                try {
+                                                    console.log('P4M_API_RESP: ' + this.responseText.substring(0, 2000));
+                                                    var m = this.responseText.match(/https?:[^"'\s]+\.m3u8[^"'\s]*/);
+                                                    if (m) console.log('P4M_STREAM: ' + m[0]);
+                                                } catch(e) {}
+                                            });
+                                        }
+                                        return __origOpen.apply(this, arguments);
+                                    };
+                                    // === MONITOR video.src ===
+                                    setInterval(function(){
+                                        var vids = document.querySelectorAll('video');
+                                        for(var i=0;i<vids.length;i++){
+                                            var s = vids[i].currentSrc || vids[i].src;
+                                            if(s && s.indexOf('blob:') === -1 && s.indexOf('data:') === -1 && s.length > 10){
+                                                console.log('P4M_STREAM: ' + s);
+                                            }
+                                        }
+                                    }, 2000);
+                                    // === CLIC SYNTHETIQUE ===
                                     try{
-                                        // Click center of viewport
-                                        const evt = new MouseEvent('click', {bubbles:true,cancelable:true,view:window,clientX:window.innerWidth/2,clientY:window.innerHeight/2,button:0,buttons:1});
+                                        var evt = new MouseEvent('click', {bubbles:true,cancelable:true,view:window,clientX:window.innerWidth/2,clientY:window.innerHeight/2});
                                         document.body.dispatchEvent(evt);
-                                        // Touch event for mobile players
-                                        if(typeof TouchEvent === 'function'){
-                                            try{
-                                                const touch = new Touch({identifier:1,target:document.body,clientX:window.innerWidth/2,clientY:window.innerHeight/2});
-                                                document.body.dispatchEvent(new TouchEvent('touchstart',{bubbles:true,cancelable:true,touches:[touch],targetTouches:[touch],changedTouches:[touch]}));
-                                                document.body.dispatchEvent(new TouchEvent('touchend',{bubbles:true,cancelable:true,touches:[],targetTouches:[],changedTouches:[touch]}));
-                                            }catch(e){}
+                                        var candidates = document.querySelectorAll('button,[role=button],[class*=play],[id*=play],video');
+                                        for(var j=0;j<candidates.length;j++){
+                                            try{ candidates[j].click(); }catch(e){}
                                         }
-                                        // Click any play-button-like element
-                                        const candidates = document.querySelectorAll('button,[role=button],[class*=play],[id*=play],video');
-                                        for(const el of candidates){
-                                            try{ el.click&&el.click(); }catch(e){}
-                                        }
-                                        // Try video.play() directly
-                                        document.querySelectorAll('video').forEach(v=>{try{v.muted=true;v.play();}catch(e){}});
-                                    }catch(e){console.log('synth click err:',e.message);}
+                                        document.querySelectorAll('video').forEach(function(v){try{v.play();}catch(e){}});
+                                    }catch(e){}
                                 })();
                                 """.trimIndent(),
                                 null,
                             )
 
-                            // 25s timeout — le player SPA Vite + chargement HLS + checks
-                            // anti-bot peut prendre du temps.
+                            // 25s timeout
                             view.postDelayed({
                                 if (!resolved) {
                                     android.util.Log.w("Player4meExtractor", "Timeout — no stream captured")

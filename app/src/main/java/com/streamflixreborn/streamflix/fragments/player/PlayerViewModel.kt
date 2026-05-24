@@ -458,6 +458,19 @@ class PlayerViewModel(
                 collectProgressiveServers(provider, id, videoType)
                 return@launch
             }
+            // 2026-05-22 : démarrer le collecteur additionalServers AVANT le getServers
+            // pour IPTV, car WiTV v2 émet ses serveurs via _additionalServers DANS
+            // getServersInternal. Si on lance le collecteur après, les émissions sont perdues.
+            additionalServerJob?.cancel()
+            if (provider is IptvProvider) {
+                additionalServerJob = viewModelScope.launch(Dispatchers.IO) {
+                    provider.additionalServersFlow.collect { server ->
+                        Log.d("PlayerViewModel", "Additional server arrived: ${server.name}")
+                        _additionalServer.emit(server)
+                    }
+                }
+            }
+
             // 2026-05-09 : auto-retry sur empty servers — gère les transient
             // (timeout backend AnimeSama, parsing race, upstream Sibnet/VidMoLy
             // en glitch momentané). 3 tentatives total avec backoff 0/2/5s :
@@ -468,11 +481,13 @@ class PlayerViewModel(
             // où on aurait failed sans nous.
             val rawServers = fetchServersWithRetry(provider, id, videoType)
             if (rawServers.isEmpty()) {
-                // Message clair pour l'utilisateur (vs "No servers found" en
-                // anglais). Souvent ça arrive sur des films/séries trop récents
-                // ou trop obscurs où le provider courant n'a pas indexé de
-                // source. Suggérer de changer de provider évite la confusion
-                // "ça marche pas, l'app est cassée".
+                // Pour IPTV : les serveurs arrivent via additionalServersFlow
+                // (onglet Chaîne), pas via getServers. Ne pas lancer d'exception.
+                if (provider is IptvProvider) {
+                    Log.d("PlayerViewModel", "IPTV: 0 serveurs sync, émission via additionalServers (Chaîne tab)")
+                    _state.emit(State.SuccessLoadingServers(emptyList()))
+                    return@launch
+                }
                 throw Exception("Aucune source disponible pour ce contenu sur ${provider.name}. Essayez un autre provider ou réessayez plus tard.")
             }
 
@@ -544,16 +559,8 @@ class PlayerViewModel(
             // Si une pré-extraction échoue → silencieuse, normale path au clic.
             preExtractTopServersInBackground(sortedServers)
 
-            // Start collecting progressive servers for any IPTV provider (WiTv / OlaTv).
-            additionalServerJob?.cancel()
-            if (provider is IptvProvider) {
-                additionalServerJob = viewModelScope.launch(Dispatchers.IO) {
-                    provider.additionalServersFlow.collect { server ->
-                        Log.d("PlayerViewModel", "Additional server arrived: ${server.name}")
-                        _additionalServer.emit(server)
-                    }
-                }
-            }
+            // NB: le collecteur additionalServerJob est déjà démarré AVANT le getServers
+            // (cf bloc plus haut) pour ne pas rater les émissions IPTV synchrones.
         } catch (e: Exception) {
             Log.e("PlayerViewModel", "Errore ricerca server: ", e)
             _state.emit(State.FailedLoadingServers(e))

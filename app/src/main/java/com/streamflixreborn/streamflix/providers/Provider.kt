@@ -136,6 +136,7 @@ interface Provider {
             // Home organisé par genre, TNT order pour les chaînes principales.
             VavooProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             WiTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
+            // WiTvProviderV2 to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false), // désactivé temporairement
             OlaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             VegetaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             // 2026-05-17 : 3BoxTV/BoxXtemus complètement retiré (fichier supprimé).

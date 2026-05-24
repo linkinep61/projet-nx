@@ -265,6 +265,15 @@ object UserPreferences {
             Key.KEEP_SCREEN_ON_WHEN_PAUSED.setBoolean(value)
         }
 
+    /** Écran "Qui regarde ?" au lancement + verrouillage auto Home.
+     *  Activé par défaut. Si désactivé, pas de ProfilePicker auto,
+     *  l'user change de profil manuellement via les paramètres. */
+    var profilePickerEnabled: Boolean
+        get() = Key.PROFILE_PICKER_ENABLED.getBoolean() ?: true
+        set(value) {
+            Key.PROFILE_PICKER_ENABLED.setBoolean(value)
+        }
+
     var playerGestures: Boolean
         get() = Key.PLAYER_GESTURES.getBoolean() ?: true
         set(value) {
@@ -669,7 +678,8 @@ object UserPreferences {
         PROVIDER_TAB_INDEX,
         HLS_PROXY_URL,
         MINI_PLAYER_ENABLED,
-        FAILED_CHANNELS;
+        FAILED_CHANNELS,
+        PROFILE_PICKER_ENABLED;
 
         fun getBoolean(): Boolean? = when {
             prefs.contains(name) -> prefs.getBoolean(name, false)

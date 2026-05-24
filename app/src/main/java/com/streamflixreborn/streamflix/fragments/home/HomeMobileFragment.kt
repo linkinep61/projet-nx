@@ -239,8 +239,10 @@ class HomeMobileFragment : Fragment() {
     private fun initializeMiniPlayer() {
         val provider = UserPreferences.currentProvider
         val isIptv = provider is IptvProvider
-        Log.d("HomeMobile", "initializeMiniPlayer: provider=${provider?.name} (${provider?.javaClass?.simpleName}), isIptv=$isIptv, miniPlayerEnabled=${UserPreferences.miniPlayerEnabled}")
-        if (!isIptv || !UserPreferences.miniPlayerEnabled) {
+        // WiTV v2 : pas de mini-player, 1 clic = fullscreen direct
+        val isWiTv = provider?.name?.contains("WiTV") == true
+        Log.d("HomeMobile", "initializeMiniPlayer: provider=${provider?.name} (${provider?.javaClass?.simpleName}), isIptv=$isIptv, isWiTv=$isWiTv, miniPlayerEnabled=${UserPreferences.miniPlayerEnabled}")
+        if (!isIptv || !UserPreferences.miniPlayerEnabled || isWiTv) {
             binding.miniPlayerContainer.visibility = View.GONE
             MiniPlayerController.onIptvChannelClick = null
             return
@@ -474,35 +476,37 @@ class HomeMobileFragment : Fragment() {
         // au lieu d'aller sur le Home provider") : le clic sur le logo provider
         // RAMÈNE au picker des providers (R.id.providers). La gestion des
         // sources reste accessible via Paramètres → Mon IPTV → Mes sources.
-        if (com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
-            is com.streamflixreborn.streamflix.providers.MyIptvProvider
-        ) {
+        val currentProv = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+        val isMyIptv = currentProv is com.streamflixreborn.streamflix.providers.MyIptvProvider
+        val isVavoo = currentProv is com.streamflixreborn.streamflix.providers.VavooProvider
+        val isWiTvV2 = currentProv is com.streamflixreborn.streamflix.providers.WiTvProviderV2
+
+        if (isMyIptv) {
             binding.ivProviderLogo.setOnClickListener {
                 try {
                     findNavController().navigate(R.id.providers)
                 } catch (_: Throwable) {}
             }
-            // Hint visuel : le logo devient "cliquable" avec ripple
             binding.ivProviderLogo.isClickable = true
             binding.ivProviderLogo.isFocusable = true
 
-            // 2026-05-13 (user "à côté de l'onglet téléchargement il faudrait
-            // mettre un icône catégorie / mais que sur ce provider là") :
-            // bouton picker de catégorie visible uniquement sur Mon IPTV.
+            // Bouton picker de catégorie visible uniquement sur Mon IPTV.
             binding.ivIptvCategories.visibility = View.VISIBLE
             binding.ivIptvCategories.setOnClickListener {
                 showIptvCategoryPicker()
             }
+        } else {
+            binding.ivIptvCategories.visibility = View.GONE
+        }
 
-            // 2026-05-13 (user "tu mets un troisième bouton à côté de
-            // téléchargement ça peut être pas mal pour ce provider") :
-            // bouton globe pour switcher Auto/Toutes/FR strict.
+        // 2026-05-23 : bouton globe langue visible sur MyIptv, Vavoo et WiTV v2
+        // (aligné avec le comportement TV — sidebar iptv_language_menu).
+        if (isMyIptv || isVavoo || isWiTvV2) {
             binding.ivIptvLanguage.visibility = View.VISIBLE
             binding.ivIptvLanguage.setOnClickListener {
                 showIptvLanguageFilterPicker()
             }
         } else {
-            binding.ivIptvCategories.visibility = View.GONE
             binding.ivIptvLanguage.visibility = View.GONE
         }
 
@@ -569,11 +573,19 @@ class HomeMobileFragment : Fragment() {
             .show()
     }
 
-    /** 2026-05-13 : picker rapide du filtre langue. Modifie le pref
-     *  `pref_iptv_language_filter`, reset le filtre catégorie (sinon l'ancien
-     *  filtre cache peut masquer les nouveaux résultats), invalide les caches
-     *  et notifie le viewModel. */
+    /** 2026-05-13 : picker rapide du filtre langue.
+     *  2026-05-23 : route vers le bon picker selon le provider actif
+     *  (Vavoo = pays, WiTV v2 = groupe/langue, MyIptv = filtre auto/all/fr). */
     private fun showIptvLanguageFilterPicker() {
+        val currentProv = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+        when {
+            currentProv is com.streamflixreborn.streamflix.providers.VavooProvider -> showVavooCountryPicker()
+            currentProv is com.streamflixreborn.streamflix.providers.WiTvProviderV2 -> showWiTvV2GroupPicker()
+            else -> showMyIptvLanguageFilterPicker()
+        }
+    }
+
+    private fun showMyIptvLanguageFilterPicker() {
         val provider = com.streamflixreborn.streamflix.providers.MyIptvProvider
         val options = arrayOf(
             "Auto (recommandé)" to "auto",
@@ -588,17 +600,9 @@ class HomeMobileFragment : Fragment() {
                 val newMode = options[idx].second
                 if (newMode != current) {
                     provider.setLanguageFilterMode(newMode)
-                    // Reset filtre catégorie — l'ancien filtre RAW peut ne plus
-                    // matcher aucune chaîne dans le nouvel ensemble.
                     provider.selectedCategoryLive = null
                     provider.selectedCategoryMovie = null
                     provider.selectedCategorySeries = null
-                    // 2026-05-13 : pas besoin d'invalider le cache M3U (les
-                    // channels parsées ne dépendent pas du filtre langue) ni
-                    // la classification (filterFrOrFallback est appliqué dans
-                    // collectByType après le cache hit, à chaque appel). On
-                    // efface SEULEMENT HomeCacheStore pour forcer le viewModel
-                    // à rappeler getHome() au lieu du snapshot.
                     com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
                         requireContext().applicationContext, provider,
                     )
@@ -610,6 +614,87 @@ class HomeMobileFragment : Fragment() {
                     ).show()
                 }
                 dlg.dismiss()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** 2026-05-23 : picker pays Vavoo (mobile, même logique que MainTvActivity). */
+    private fun showVavooCountryPicker() {
+        val ctx = requireContext()
+        val current = com.streamflixreborn.streamflix.providers.VavooCountrySettings.getCurrent(ctx)
+        val list = com.streamflixreborn.streamflix.providers.VavooCountrySettings.list
+        val items = list.map {
+            "${it.flag} ${it.label}${if (it.code == current.code) "  ✓" else ""}"
+        }.toTypedArray()
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Pays Vavoo")
+            .setItems(items) { _, idx ->
+                val picked = list[idx]
+                if (picked.code == current.code) return@setItems
+                com.streamflixreborn.streamflix.providers.VavooCountrySettings.setCurrent(ctx, picked)
+                com.streamflixreborn.streamflix.providers.VavooProvider.setCountryFilter(picked.filterValue)
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                        ctx.applicationContext,
+                        com.streamflixreborn.streamflix.providers.VavooProvider,
+                    )
+                }
+                android.widget.Toast.makeText(
+                    ctx,
+                    "Vavoo : ${picked.flag} ${picked.label} — chargement…",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** 2026-05-23 : picker groupe/langue WiTV v2 (mobile, même logique que MainTvActivity). */
+    private fun showWiTvV2GroupPicker() {
+        val ctx = requireContext()
+        val current = com.streamflixreborn.streamflix.providers.WiTvProviderV2.getSelectedGroup()
+        val groups = com.streamflixreborn.streamflix.providers.WiTvProviderV2.getAvailableGroups()
+
+        val labels = mutableListOf("🇫🇷 France${if (current.isBlank()) "  ✓" else ""}")
+        if (groups.isEmpty()) {
+            labels.add("⏳ Chargement des groupes…")
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                try {
+                    com.streamflixreborn.streamflix.providers.WiTvProviderV2.ensureOtfCache()
+                } catch (_: Exception) {}
+            }
+        } else {
+            labels.addAll(groups.map { "$it${if (it.equals(current, true)) "  ✓" else ""}" })
+        }
+
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Langue / Groupe")
+            .setItems(labels.toTypedArray()) { _, idx ->
+                if (groups.isEmpty()) {
+                    android.widget.Toast.makeText(ctx, "Chargement en cours, réessayez…", android.widget.Toast.LENGTH_SHORT).show()
+                    return@setItems
+                }
+                val picked = if (idx == 0) "" else groups.getOrElse(idx - 1) { "" }
+                if (picked.equals(current, true)) return@setItems
+                com.streamflixreborn.streamflix.providers.WiTvProviderV2.setSelectedGroup(picked)
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                        ctx.applicationContext,
+                        com.streamflixreborn.streamflix.providers.WiTvProviderV2,
+                    )
+                }
+                android.widget.Toast.makeText(
+                    ctx,
+                    if (picked.isBlank()) "France — catalogue TNT" else "$picked — chargement…",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                }
             }
             .setNegativeButton("Annuler", null)
             .show()

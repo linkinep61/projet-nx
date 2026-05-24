@@ -626,7 +626,7 @@ class PlayerMobileFragment : Fragment() {
 
                             if (servers.isEmpty()) {
                                 // For WiTV provider, don't exit — OLA CID servers may arrive progressively
-                                if (providerName == "WiTV") {
+                                if (providerName == "WiTV" || providerName == "WiTV v2") {
                                     Log.d("PlayerMobileFragment", "No initial servers, waiting for OLA CID servers...")
                                     PlayerSettingsView.Settings.ChannelVariant.list.clear()
                                     binding.settings.refreshChannelVariantList()
@@ -3370,6 +3370,20 @@ class PlayerMobileFragment : Fragment() {
                                         player.prepare()
                                         player.playWhenReady = true
                                     }
+                                }
+                            }
+                        } else if (server.id.startsWith("m3u8::")) {
+                            // WiTV v2 m3u8 server failed → rotation auto vers le suivant
+                            Log.w("PlayerMobileFragment", "WiTV m3u8 ${server.name} failed ($errCodeName) → rotation auto")
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
+                                    ?: servers.firstOrNull { it.id != server.id }
+                                if (nextServer != null && _binding != null) {
+                                    Log.w("PlayerMobileFragment", "  → essai ${nextServer.name}")
+                                    viewModel.getVideo(nextServer)
+                                } else {
+                                    player.prepare()
+                                    player.playWhenReady = true
                                 }
                             }
                         } else {

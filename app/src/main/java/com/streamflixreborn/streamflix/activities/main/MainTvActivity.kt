@@ -264,14 +264,21 @@ class MainTvActivity : FragmentActivity() {
             return
         }
 
-        // 2026-05-12 (user "on peut s'attaquer à la version télé") : si aucun
-        // profil n'est actif, redirect vers l'écran "Qui regarde ?" TV avant
-        // d'afficher la home. StreamFlixApp clear le profil au cold start →
-        // garantit que le picker apparaît à chaque cold launch (Netflix-style).
+        // 2026-05-12 : si aucun profil n'est actif, redirect vers "Qui regarde ?"
+        // 2026-05-22 : si le ProfilePicker est désactivé dans les préfs, on set
+        // le profil principal automatiquement (pas de picker).
         if (com.streamflixreborn.streamflix.utils.ProfileManager.currentProfile() == null) {
-            finish()
-            startActivity(Intent(this, com.streamflixreborn.streamflix.activities.profile.ProfilePickerTvActivity::class.java))
-            return
+            if (com.streamflixreborn.streamflix.utils.UserPreferences.profilePickerEnabled) {
+                finish()
+                startActivity(Intent(this, com.streamflixreborn.streamflix.activities.profile.ProfilePickerTvActivity::class.java))
+                return
+            } else {
+                // Picker désactivé → profil principal auto
+                val defaultProfile = com.streamflixreborn.streamflix.utils.ProfileStore.getAll().firstOrNull()
+                if (defaultProfile != null) {
+                    com.streamflixreborn.streamflix.utils.ProfileManager.setCurrentProfile(defaultProfile)
+                }
+            }
         }
 
         // Per user request: cold start lands on the Providers home with NO
@@ -353,7 +360,9 @@ class MainTvActivity : FragmentActivity() {
                 R.id.iptv_language_menu -> {
                     val provider = UserPreferences.currentProvider
                     Log.d("MainTv", "iptv_language_menu clicked, provider=${provider?.name}, isVavoo=${provider is com.streamflixreborn.streamflix.providers.VavooProvider}")
-                    if (provider is com.streamflixreborn.streamflix.providers.VavooProvider) {
+                    if (provider is com.streamflixreborn.streamflix.providers.WiTvProviderV2) {
+                        showWiTvV2GroupPicker()
+                    } else if (provider is com.streamflixreborn.streamflix.providers.VavooProvider) {
                         showVavooCountryPicker()
                     } else {
                         showIptvLanguageFilterPicker()
@@ -525,6 +534,31 @@ class MainTvActivity : FragmentActivity() {
         // dans les 30 prochaines minutes ne re-bounce pas vers ProfilePicker
         // (cf StreamFlixApp.onCreate logique smart-cold-start).
         com.streamflixreborn.streamflix.utils.ProfileStore.touchLastActiveTimestamp()
+
+        // 2026-05-22 : verrouillage auto au retour du background (Home TV).
+        // Si le ProfilePicker est activé dans les préfs ET que l'app revient
+        // du background → redirect vers le picker "Qui regarde ?".
+        if (com.streamflixreborn.streamflix.StreamFlixApp.shouldLockOnResume
+            && com.streamflixreborn.streamflix.utils.UserPreferences.profilePickerEnabled) {
+            com.streamflixreborn.streamflix.StreamFlixApp.shouldLockOnResume = false
+            com.streamflixreborn.streamflix.utils.ProfileStore.clearLastActiveTimestamp()
+            com.streamflixreborn.streamflix.utils.ProfileStore.setCurrentProfileId(null)
+            UserPreferences.currentProvider = null
+            finish()
+            startActivity(Intent(this, com.streamflixreborn.streamflix.activities.profile.ProfilePickerTvActivity::class.java))
+            return
+        }
+        com.streamflixreborn.streamflix.StreamFlixApp.shouldLockOnResume = false
+    }
+
+    override fun onDestroy() {
+        // 2026-05-22 : si l'user ferme volontairement l'app (back/swipe),
+        // on efface le timestamp pour que le prochain lancement retombe
+        // sur le ProfilePicker (Netflix-style).
+        if (isFinishing) {
+            com.streamflixreborn.streamflix.utils.ProfileStore.clearLastActiveTimestamp()
+        }
+        super.onDestroy()
     }
 
     private fun applyThemeNavigationChrome() {
@@ -817,12 +851,64 @@ class MainTvActivity : FragmentActivity() {
         // MyIptv ou Vavoo est actif. Catégories seulement pour MyIptv (Vavoo
         // n'a pas de catégories user-pickable).
         val isVavoo = provider is com.streamflixreborn.streamflix.providers.VavooProvider
+        val isWiTvV2 = provider is com.streamflixreborn.streamflix.providers.WiTvProviderV2
         binding.navMain.menu.findItem(R.id.iptv_categories_menu)?.isVisible = isMyIptv
-        binding.navMain.menu.findItem(R.id.iptv_language_menu)?.isVisible = isMyIptv || isVavoo
+        binding.navMain.menu.findItem(R.id.iptv_language_menu)?.isVisible = isMyIptv || isVavoo || isWiTvV2
         // 2026-05-21 : filtre catalogue (sous Paramètres) uniquement pour les
         //   providers TMDB compatibles (Cloudstream).
         binding.navMain.menu.findItem(R.id.catalog_filter_menu)?.isVisible =
             com.streamflixreborn.streamflix.utils.CatalogFilter.isSupported(provider.name)
+    }
+
+    /** V2 : picker groupe/langue pour WiTV v2.
+     *  "France" (défaut) = catalogue hardcodé instantané.
+     *  Autre groupe = chaînes OTF de ce groupe (chargé en fond). */
+    fun showWiTvV2GroupPicker() {
+        val current = com.streamflixreborn.streamflix.providers.WiTvProviderV2.getSelectedGroup()
+        val groups = com.streamflixreborn.streamflix.providers.WiTvProviderV2.getAvailableGroups()
+
+        // "France" en premier (défaut hardcodé), puis les groupes OTF
+        val labels = mutableListOf("🇫🇷 France${if (current.isBlank()) "  ✓" else ""}")
+        if (groups.isEmpty()) {
+            // OTF pas encore chargé — lancer en fond + afficher quand même le picker
+            labels.add("⏳ Chargement des groupes…")
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                try {
+                    com.streamflixreborn.streamflix.providers.WiTvProviderV2.ensureOtfCache()
+                } catch (_: Exception) {}
+            }
+        } else {
+            labels.addAll(groups.map { "$it${if (it.equals(current, true)) "  ✓" else ""}" })
+        }
+
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Langue / Groupe")
+            .setItems(labels.toTypedArray()) { _, idx ->
+                if (groups.isEmpty()) {
+                    // OTF en chargement, retry dans 2s
+                    android.widget.Toast.makeText(this, "Chargement en cours, réessayez…", android.widget.Toast.LENGTH_SHORT).show()
+                    return@setItems
+                }
+                val picked = if (idx == 0) "" else groups.getOrElse(idx - 1) { "" }
+                if (picked.equals(current, true)) return@setItems
+                com.streamflixreborn.streamflix.providers.WiTvProviderV2.setSelectedGroup(picked)
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                        this,
+                        com.streamflixreborn.streamflix.providers.WiTvProviderV2,
+                    )
+                }
+                android.widget.Toast.makeText(
+                    this,
+                    if (picked.isBlank()) "France — catalogue TNT" else "$picked — chargement…",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
     }
 
     /** 2026-05-13 : picker pays Vavoo (item sidebar). */
@@ -861,6 +947,7 @@ class MainTvActivity : FragmentActivity() {
             .setNegativeButton("Annuler", null)
             .show()
     }
+
 
     fun adjustLayoutDelta(deltaX: Int?, deltaY: Int?) {
         val uDeltaX = deltaX ?: UserPreferences.paddingX

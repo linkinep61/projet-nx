@@ -186,7 +186,10 @@ abstract class Extractor {
             UqloadExtractor(),
             // 2026-05-14 : ajouts pour DessinAnime (hydrax + 4meplayer)
             HydraxExtractor(),
-            Player4meExtractor(),
+            // 2026-05-23 : Player4me désactivé — API renvoie "Video not found or deleted"
+            // sur tous les contenus testés. Le code d'extraction (hooks fetch/XHR) est prêt
+            // et fonctionnel → réactiver quand Player4me remarche.
+            // Player4meExtractor(),
             // 2026-05-15 : ajout Hoca8 pour chaînes sport/Canal+ Live de LiveTvHub
             Hoca8Extractor(),
             // 2026-05-15 : Freeshot pour les ~48 chaînes FR de freeshot.live

@@ -11,6 +11,7 @@ import com.streamflixreborn.streamflix.models.Episode
 import com.streamflixreborn.streamflix.models.Movie
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.providers.Provider
+import com.streamflixreborn.streamflix.providers.WarmUpCapable
 import com.streamflixreborn.streamflix.ui.UserDataNotifier
 import com.streamflixreborn.streamflix.utils.EnrichmentTrigger
 import com.streamflixreborn.streamflix.utils.HomeCacheStore
@@ -445,11 +446,19 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         Log.d("HomeBoot", "[${provider.name}] start +${System.currentTimeMillis() - t0}ms")
         val cachedCategories = HomeCacheStore.read(appContext, provider)
         Log.d("HomeBoot", "[${provider.name}] cache read +${System.currentTimeMillis() - t0}ms (categories=${cachedCategories?.size ?: 0})")
-        if (!cachedCategories.isNullOrEmpty()) {
+
+        // 2026-05-22 : si le provider a un warm-up (ex. WiTV v2 : scan OLA),
+        // NE PAS servir le cache disque tant que le warm-up n'est pas fini.
+        // Sinon l'user voit les chaînes (cache) et clique avant que les
+        // streams soient pré-cachés → lancement lent.
+        val warmUpPending = provider is WarmUpCapable && !provider.isWarmUpDone
+
+        if (!cachedCategories.isNullOrEmpty() && !warmUpPending) {
             _state.emit(State.SuccessLoading(cachedCategories))
             Log.d("HomeBoot", "[${provider.name}] emit cache +${System.currentTimeMillis() - t0}ms")
         } else {
             _state.emit(State.Loading)
+            if (warmUpPending) Log.d("HomeBoot", "[${provider.name}] warm-up pending → Loading (cache ignoré)")
         }
 
         loadUserDataCache(provider)
@@ -458,6 +467,8 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         // TTL variable par provider : les sites lents (scrape Cloudflare) ont
         // un TTL plus long pour éviter le re-scrape qui bloque l'ouverture.
         // Pull-to-refresh ou clear cache pour forcer un refresh.
+        // NE PAS skip si warm-up pending (le provider.getHome() doit tourner
+        // pour que le warm-up bloquant s'exécute).
         val cacheAgeMs = HomeCacheStore.ageMs(appContext, provider)
         val cacheTtlMs = when {
             // Providers lents (Cloudflare, scrape) → 30 min
@@ -468,7 +479,7 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
             // Providers normaux → 5 min
             else -> 5 * 60 * 1000L
         }
-        if (!cachedCategories.isNullOrEmpty() && cacheAgeMs != null && cacheAgeMs < cacheTtlMs) {
+        if (!warmUpPending && !cachedCategories.isNullOrEmpty() && cacheAgeMs != null && cacheAgeMs < cacheTtlMs) {
             Log.d("HomeBoot", "[${provider.name}] SKIP network (cache age ${cacheAgeMs / 1000}s, TTL ${cacheTtlMs / 60000}min) total=${System.currentTimeMillis() - t0}ms")
             return
         }
