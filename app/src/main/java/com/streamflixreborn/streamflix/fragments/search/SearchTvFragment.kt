@@ -25,8 +25,10 @@ import com.streamflixreborn.streamflix.models.Category
 import com.streamflixreborn.streamflix.models.Genre
 import com.streamflixreborn.streamflix.models.Movie
 import com.streamflixreborn.streamflix.models.TvShow
+import android.app.AlertDialog
 import com.streamflixreborn.streamflix.utils.CacheUtils
 import com.streamflixreborn.streamflix.utils.LoggingUtils
+import com.streamflixreborn.streamflix.utils.SearchHistory
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.VoiceRecognitionHelper
 import com.streamflixreborn.streamflix.utils.hideKeyboard
@@ -165,12 +167,11 @@ class SearchTvFragment : Fragment() {
             return true
         }
         hideKeyboard()
+        SearchHistory.add(requireContext(), query)
 
         if (isGlobalSearchChecked) {
-            // 2026-05-18 : on passe le group du provider courant pour que
-            //   searchGlobal sépare IPTV vs FILMS/Séries/Anime.
             val currentProvider = UserPreferences.currentProvider
-            val currentLanguage = currentProvider?.language ?: "es"
+            val currentLanguage = currentProvider?.language ?: "fr"
             val group = currentProvider?.let { Provider.getGroup(it) }
                 ?: Provider.Companion.ProviderGroup.FILMS_SERIES
             viewModel.searchGlobal(query, currentLanguage, group)
@@ -178,6 +179,32 @@ class SearchTvFragment : Fragment() {
             viewModel.search(query)
         }
         return true
+    }
+
+    private fun showHistoryDialog() {
+        val history = SearchHistory.getAll(requireContext())
+        if (history.isEmpty()) {
+            Toast.makeText(requireContext(), getString(R.string.search_history_cleared), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val items = history.toMutableList()
+        items.add(getString(R.string.search_history_clear))
+
+        AlertDialog.Builder(requireContext())
+            .setTitle(getString(R.string.search_history_title))
+            .setItems(items.toTypedArray()) { _, which ->
+                if (which == items.size - 1) {
+                    SearchHistory.clear(requireContext())
+                    Toast.makeText(requireContext(), getString(R.string.search_history_cleared), Toast.LENGTH_SHORT).show()
+                } else {
+                    val query = items[which]
+                    binding.etSearch.setText(query)
+                    binding.etSearch.setSelection(query.length)
+                    submitSearch()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     private fun initializeSearch() {
@@ -198,6 +225,9 @@ class SearchTvFragment : Fragment() {
                 if (isGlobalSearchChecked) R.drawable.ic_switch_on else R.drawable.ic_switch_off
             )
         }
+
+        // Historique de recherche (bouton → dialog)
+        binding.btnSearchHistory.setOnClickListener { showHistoryDialog() }
 
         binding.etSearch.apply {
             setOnEditorActionListener { _, actionId, event ->
@@ -258,7 +288,7 @@ class SearchTvFragment : Fragment() {
             onResult = { query ->
                 binding.btnSearchVoice.clearAnimation()
                 binding.etSearch.setText(query)
-                viewModel.search(query)
+                submitSearch()
             },
             onError = { msg ->
                 Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show()

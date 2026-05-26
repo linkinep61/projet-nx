@@ -11,6 +11,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.RecyclerView
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.databinding.FragmentTvShowsTvBinding
+import com.streamflixreborn.streamflix.models.Category
 import com.streamflixreborn.streamflix.models.Movie
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.utils.EpisodeFavorites
@@ -19,8 +20,9 @@ import kotlinx.coroutines.launch
 
 /**
  * 2026-05-20 : "Cœur" favoris global (TV). Agrège les favoris (films + séries) de
- * TOUS les providers non-IPTV dans une grille VerticalGridView. Le clic est géré
- * dans MovieViewHolder / TvShowViewHolder (cas GlobalFavoritesTvFragment).
+ * TOUS les providers non-IPTV.
+ * 2026-05-24 : refactoré en sections Category horizontales (comme le home) :
+ *   Films, Séries, Saisons, Épisodes, Reprendre.
  */
 class GlobalFavoritesTvFragment : Fragment() {
 
@@ -43,6 +45,9 @@ class GlobalFavoritesTvFragment : Fragment() {
 
         binding.tabLanguage.visibility = View.GONE
 
+        // 2026-05-24 : numColumns=1 pour afficher des Category (bandeaux horizontaux)
+        //   au lieu d'une grille plate. Chaque Category gère son propre scroll interne.
+        binding.vgvTvShows.setNumColumns(1)
         binding.vgvTvShows.apply {
             adapter = appAdapter.apply {
                 stateRestorationPolicy = RecyclerView.Adapter.StateRestorationPolicy.PREVENT_WHEN_EMPTY
@@ -78,53 +83,88 @@ class GlobalFavoritesTvFragment : Fragment() {
             if (_binding == null) return@launch
             binding.isLoading.root.visibility = View.GONE
 
-            movies.forEach { it.itemType = AppAdapter.Type.MOVIE_GRID_TV_ITEM }
-            tvShows.forEach { it.itemType = AppAdapter.Type.TV_SHOW_GRID_TV_ITEM }
-            // 2026-05-21 : saisons favorites
+            // --- Préparer les items par catégorie ---
+            // 2026-05-24 : utiliser les types du HOME (TV_ITEM / MOBILE_ITEM), PAS
+            //   les GRID_TV_ITEM qui sont faits pour une grille plate 8 colonnes.
+
+            // Films
+            movies.forEach { it.itemType = AppAdapter.Type.MOVIE_TV_ITEM }
+
+            // Séries
+            tvShows.forEach { it.itemType = AppAdapter.Type.TV_SHOW_TV_ITEM }
+
+            // Saisons favorites
             val seasonFavs = com.streamflixreborn.streamflix.utils.SeasonFavorites.all().map { e ->
                 TvShow(
                     id = e.syntheticId(),
                     title = "${e.showTitle} — Saison ${e.seasonNumber}",
                     poster = e.showPoster,
                     banner = e.showBanner,
-                ).apply { itemType = AppAdapter.Type.TV_SHOW_GRID_TV_ITEM }
+                ).apply { itemType = AppAdapter.Type.TV_SHOW_TV_ITEM }
             }
-            // 2026-05-22 : épisodes favoris
+
+            // Épisodes favoris — poster SÉRIE + titre "Série — S1E3"
             val episodeFavs = EpisodeFavorites.all().map { e ->
                 TvShow(
                     id = e.syntheticId(),
                     title = "${e.showTitle} — S${e.seasonNumber}E${e.episodeNumber}",
                     overview = e.episodeTitle,
-                    poster = e.episodePoster ?: e.showPoster,
+                    poster = e.showPoster ?: e.episodePoster,
                     banner = e.showBanner,
-                ).apply { itemType = AppAdapter.Type.TV_SHOW_GRID_TV_ITEM }
+                ).apply { itemType = AppAdapter.Type.TV_SHOW_TV_ITEM }
             }
-            // 2026-05-22 : reprises de lecture films
+
+            // Reprises de lecture — films
             val cwMovies = try {
                 GlobalFavorites.loadContinueWatchingMovies(requireContext(), 20)
             } catch (_: Exception) { emptyList() }
             cwMovies.forEach { it.itemType = AppAdapter.Type.MOVIE_CONTINUE_WATCHING_TV_ITEM }
-            // 2026-05-22 : reprises de lecture séries (carte série)
+
+            // Reprises de lecture — séries (format épisode avec thumbnail + barre de progression)
             val cwSeries = try {
                 GlobalFavorites.loadContinueWatchingSeries(requireContext(), 20)
             } catch (_: Exception) { emptyList() }
-            val cwSeriesCards = cwSeries.map { cw ->
-                val title = "${cw.tvShow.title} — S${cw.seasonNumber}E${cw.episodeNumber}"
-                TvShow(
-                    id = "resume_series_${cw.tvShow.id}",
-                    title = title,
-                    overview = cw.lastEpisode.title,
-                    poster = cw.tvShow.poster,
-                    banner = cw.tvShow.banner,
-                ).apply { itemType = AppAdapter.Type.TV_SHOW_GRID_TV_ITEM }
+            val cwSeriesEpisodes = cwSeries.map { cw ->
+                cw.lastEpisode.apply { itemType = AppAdapter.Type.EPISODE_CONTINUE_WATCHING_TV_ITEM }
+            }
+            Log.d(TAG, "Reprendre: ${cwMovies.size} films, ${cwSeriesEpisodes.size} séries")
+
+            // --- Construire les sections Category (comme le home) ---
+            val categories = mutableListOf<Category>()
+
+            // Reprendre EN PREMIER (le plus utile)
+            val resumeItems: List<AppAdapter.Item> = cwMovies + cwSeriesEpisodes
+            if (resumeItems.isNotEmpty()) {
+                categories += Category(name = "Reprendre", list = resumeItems).apply {
+                    itemType = AppAdapter.Type.CATEGORY_TV_ITEM
+                }
+            }
+            if (movies.isNotEmpty()) {
+                categories += Category(name = "Films", list = movies).apply {
+                    itemType = AppAdapter.Type.CATEGORY_TV_ITEM
+                }
+            }
+            if (tvShows.isNotEmpty()) {
+                categories += Category(name = "Séries", list = tvShows).apply {
+                    itemType = AppAdapter.Type.CATEGORY_TV_ITEM
+                }
+            }
+            if (seasonFavs.isNotEmpty()) {
+                categories += Category(name = "Saisons", list = seasonFavs).apply {
+                    itemType = AppAdapter.Type.CATEGORY_TV_ITEM
+                }
+            }
+            if (episodeFavs.isNotEmpty()) {
+                categories += Category(name = "Épisodes", list = episodeFavs).apply {
+                    itemType = AppAdapter.Type.CATEGORY_TV_ITEM
+                }
             }
 
-            // Ordre : favoris en haut, reprises films, reprises séries
-            val items = (movies + tvShows + seasonFavs + episodeFavs) + cwMovies + cwSeriesCards
-            appAdapter.submitList(items)
+            if (_binding == null) return@launch
+            appAdapter.submitList(categories)
             binding.vgvTvShows.visibility = View.VISIBLE
 
-            if (items.isEmpty()) {
+            if (categories.isEmpty()) {
                 Toast.makeText(
                     requireContext(),
                     "Aucun favori ni reprise de lecture",

@@ -45,10 +45,23 @@
             android:paddingBottom="13dp"
             android:textSize="16sp"
             app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@id/btn_search_clear"
+            app:layout_constraintEnd_toStartOf="@id/btn_search_history"
             app:layout_constraintStart_toEndOf="@id/ic_search"
             app:layout_constraintTop_toTopOf="parent"
             tools:ignore="Autofill,UnusedAttribute" />
+
+        <ImageView
+            android:id="@+id/btn_search_history"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:padding="12dp"
+            android:src="@drawable/ic_history"
+            android:tint="#FFFFFF"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintDimensionRatio="1:1"
+            app:layout_constraintEnd_toStartOf="@id/btn_search_clear"
+            app:layout_constraintTop_toTopOf="parent"
+            tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
 
         <ImageView
             android:id="@+id/btn_search_clear"

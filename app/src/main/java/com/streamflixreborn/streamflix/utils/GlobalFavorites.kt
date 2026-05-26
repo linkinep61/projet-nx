@@ -15,18 +15,18 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * 2026-05-20 (user "un cœur centré à la place de Fournisseur qui montre les
- *   favoris de TOUS les providers sauf TV") : agrège les favoris (films + séries)
- *   de chaque base provider non-IPTV. Chaque provider a sa propre DB
- *   (`{profile}_{provider}.db`) ; on lit getFavorites() de chacune et on retient
- *   le provider d'origine de chaque item pour pouvoir rouvrir la fiche dans le
- *   bon provider.
+ * Agrège les favoris (films + séries) de chaque provider non-IPTV.
+ * Retient le provider d'origine de chaque item pour rouvrir la fiche
+ * dans le bon provider.
  */
 object GlobalFavorites {
     private const val TAG = "GlobalFavorites"
 
     /** id de l'item -> nom du provider d'origine. Rempli à chaque [load]. */
     val originByItemId = ConcurrentHashMap<String, String>()
+
+    /** id synthétique "resume_series_..." → données de reprise (pour navigation directe au player). */
+    val resumeSeriesData = ConcurrentHashMap<String, ContinueWatchingSeriesItem>()
 
     suspend fun load(context: Context): Pair<List<Movie>, List<TvShow>> =
         withContext(Dispatchers.IO) {
@@ -112,47 +112,79 @@ object GlobalFavorites {
      *  le dernier épisode regardé). Clic → ouvre la saison dans le provider. */
     suspend fun loadContinueWatchingSeries(context: Context, limit: Int = 20): List<ContinueWatchingSeriesItem> =
         withContext(Dispatchers.IO) {
-            // tvShowId → (providerName, dernierÉpisode)
-            val seriesMap = LinkedHashMap<String, Pair<String, Episode>>()
+            // tvShowId → (providerName, dernierÉpisode, db)
+            data class RawEntry(val providerName: String, val episode: Episode, val db: AppDatabase)
+            val seriesMap = LinkedHashMap<String, RawEntry>()
+            val openDbs = mutableListOf<AppDatabase>()
             val providers = Provider.providers.keys.filter { it !is IptvProvider }
             for (p in providers) {
                 if (!AppDatabase.providerDbExists(p.name, context)) continue
                 try {
                     val db = AppDatabase.getInstanceForProvider(p.name, context)
+                    openDbs += db
                     try {
                         val episodes = db.episodeDao().getWatchingEpisodes().first()
                         for (ep in episodes) {
                             val tvId = ep.tvShow?.id ?: continue
                             val wh = ep.watchHistory ?: continue
-                            if ((wh.lastPlaybackPositionMillis ?: 0) <= 5_000) continue
+                            if (wh.lastPlaybackPositionMillis <= 5_000) continue
                             val existing = seriesMap[tvId]
-                            val existingTs = existing?.second?.watchHistory?.lastEngagementTimeUtcMillis ?: 0
-                            val thisTs = wh.lastEngagementTimeUtcMillis ?: 0
+                            val existingTs = existing?.episode?.watchHistory?.lastEngagementTimeUtcMillis ?: 0
+                            val thisTs = wh.lastEngagementTimeUtcMillis
                             if (existing == null || thisTs > existingTs) {
-                                seriesMap[tvId] = Pair(p.name, ep)
+                                seriesMap[tvId] = RawEntry(p.name, ep, db)
                             }
                         }
-                    } finally {
-                        try { db.close() } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                        Log.w(TAG, "continueWatching series ${p.name}: ${e.message}")
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "continueWatching series ${p.name}: ${e.message}")
+                    Log.w(TAG, "continueWatching series open DB ${p.name}: ${e.message}")
                 }
             }
-            seriesMap.values
-                .filter { !isContinueWatchingDismissed("resume_series_${it.second.tvShow?.id}") }
-                .sortedByDescending { it.second.watchHistory?.lastEngagementTimeUtcMillis ?: 0 }
+
+            val result = seriesMap.values
+                .filter { entry ->
+                    val id = "resume_series_${entry.episode.tvShow?.id}"
+                    !isContinueWatchingDismissed(id)
+                }
+                .sortedByDescending { it.episode.watchHistory?.lastEngagementTimeUtcMillis ?: 0 }
                 .take(limit)
-                .map { (providerName, ep) ->
-                    originByItemId["resume_series_${ep.tvShow?.id}"] = providerName
-                    ContinueWatchingSeriesItem(
-                        providerName = providerName,
-                        tvShow = ep.tvShow!!,
+                .map { entry ->
+                    val ep = entry.episode
+                    val db = entry.db
+                    val tvShowId = ep.tvShow?.id
+                    val fullTvShow = tvShowId?.let {
+                        try { db.tvShowDao().getById(it) } catch (_: Exception) { null }
+                    } ?: ep.tvShow
+                    val seasonId = ep.season?.id
+                    val fullSeason = seasonId?.let {
+                        try { db.seasonDao().getById(it) } catch (_: Exception) { null }
+                    } ?: ep.season
+                    ep.tvShow = fullTvShow
+                    ep.season = fullSeason
+                    if (ep.poster.isNullOrBlank()) {
+                        ep.poster = fullTvShow?.poster
+                    }
+
+                    val syntheticId = "resume_series_${tvShowId}"
+                    originByItemId[syntheticId] = entry.providerName
+                    val item = ContinueWatchingSeriesItem(
+                        providerName = entry.providerName,
+                        tvShow = fullTvShow ?: ep.tvShow!!,
                         lastEpisode = ep,
-                        seasonNumber = ep.season?.number ?: 1,
+                        seasonNumber = fullSeason?.number ?: 1,
                         episodeNumber = ep.number,
                     )
+                    resumeSeriesData[syntheticId] = item
+                    item
                 }
+
+            // Fermer les DBs
+            for (db in openDbs) {
+                try { db.close() } catch (_: Exception) {}
+            }
+            result
         }
 
     /** Représente une série en cours de lecture pour l'écran cœur. */
@@ -187,7 +219,7 @@ object GlobalFavorites {
         }
 
     // ══════════════════════════════════════════════════════════════════
-    //  Masquage des reprises de lecture (2026-05-22)
+    //  Masquage des reprises de lecture
     // ══════════════════════════════════════════════════════════════════
 
     private const val PREFS_DISMISSED = "continue_watching_dismissed"

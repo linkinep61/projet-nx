@@ -736,6 +736,21 @@ class PlayerTvFragment : Fragment() {
         }
         binding.pvPlayer.onMediaPreviousClicked = ::handleMediaPrevious
         binding.pvPlayer.onMediaNextClicked = ::handleMediaNext
+        binding.pvPlayer.onOverlayFocusRequested = {
+            if (_binding != null && binding.layoutNextEpisodeOverlay.isVisible) {
+                binding.btnNextEpisodeAction.requestFocus()
+            }
+        }
+        binding.pvPlayer.onOverlayConfirmRequested = {
+            if (_binding != null && binding.layoutNextEpisodeOverlay.isVisible) {
+                if (binding.btnNextEpisodeAction.hasFocus()) {
+                    binding.btnNextEpisodeAction.performClick()
+                } else {
+                    binding.btnNextEpisodeAction.requestFocus()
+                    binding.btnNextEpisodeAction.performClick()
+                }
+            }
+        }
         gestureHelper = PlayerGestureHelper(
             requireContext(),
             binding.pvPlayer,
@@ -1123,6 +1138,12 @@ class PlayerTvFragment : Fragment() {
                             // (extraction failed = mort certaine).
                             com.streamflixreborn.streamflix.extractors.Extractor
                                 .recordFailureExternal(state.server.name, "extraction-failed")
+                            com.streamflixreborn.streamflix.utils.TitleServerStatus.record(
+                                state.server.id,
+                                com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD,
+                            )
+                            // Rafraîchir le picker pour que la couleur rouge s'affiche
+                            binding.settings.refreshServerList()
                             // IPTV: never auto-advance on extractor failure (same sticky
                             // policy as onPlayerError). Auto-jumping between OLA/Vegeta
                             // variants during initial loading was breaking playback.
@@ -1140,6 +1161,8 @@ class PlayerTvFragment : Fragment() {
                             val brokenCoresFailed = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames()
                                 .map { extractorCore(it) }.filter { it.isNotBlank() }.toSet()
                             fun isBrokenSrv(srv: com.streamflixreborn.streamflix.models.Video.Server): Boolean {
+                                val titleStatus = com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(srv.id)
+                                if (titleStatus == com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD) return true
                                 if (brokenCoresFailed.isEmpty()) return false
                                 return extractorCore(srv.name) in brokenCoresFailed
                             }
@@ -2831,6 +2854,9 @@ class PlayerTvFragment : Fragment() {
                                 com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.VERIFIED,
                                 args.id,
                             )
+                            com.streamflixreborn.streamflix.utils.LastWorkingServer.save(
+                                requireContext(), args.id, it.id
+                            )
                         }
                         // Restore the normal 2s auto-hide for the controller
                         // (we forced it to 0 during IPTV extraction so the
@@ -3291,6 +3317,8 @@ class PlayerTvFragment : Fragment() {
                             args.id,
                         )
                     }
+                    // Rafraîchir le picker pour que la couleur rouge s'affiche
+                    binding.settings.refreshServerList()
                     Log.e("PlayerTvFragment", "onPlayerError: ", error)
 
                     val cause = error.cause?.cause
@@ -4561,6 +4589,9 @@ class PlayerTvFragment : Fragment() {
     }
 
     private fun showNextEpisodeOverlay(nextEpisode: Video.Type.Episode, remainingMs: Long) {
+        binding.pvPlayer.isNextEpisodeOverlayActive = true
+        binding.pvPlayer.hideController()
+        binding.pvPlayer.controllerAutoShow = false
         updateNextEpisodeOverlayFocusBindings(true)
         binding.tvNextEpisodeMeta.text = getString(
             R.string.tv_show_item_season_number_episode_number,
@@ -4594,6 +4625,7 @@ class PlayerTvFragment : Fragment() {
             updateNextEpisodeOverlayAlpha(
                 binding.btnNextEpisodeAction.hasFocus() || binding.btnNextEpisodeDismiss.hasFocus()
             )
+            binding.layoutNextEpisodeOverlay.bringToFront()
             binding.layoutNextEpisodeOverlay.startAnimation(fadeIn)
             binding.layoutNextEpisodeOverlay.isVisible = true
             binding.btnNextEpisodeAction.post {
@@ -4605,6 +4637,8 @@ class PlayerTvFragment : Fragment() {
 
     private fun hideNextEpisodeOverlay() {
         if (_binding == null) return
+        binding.pvPlayer.isNextEpisodeOverlayActive = false
+        binding.pvPlayer.controllerAutoShow = true
         updateNextEpisodeOverlayFocusBindings(false)
         if (binding.layoutNextEpisodeOverlay.isVisible) {
             val fadeOut = android.view.animation.AnimationUtils.loadAnimation(

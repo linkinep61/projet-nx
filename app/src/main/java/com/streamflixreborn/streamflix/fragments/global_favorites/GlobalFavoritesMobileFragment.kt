@@ -1,6 +1,5 @@
 package com.streamflixreborn.streamflix.fragments.global_favorites
 
-import android.content.res.Configuration
 import android.os.Bundle
 import android.util.Log
 import android.view.LayoutInflater
@@ -13,20 +12,18 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.databinding.FragmentTvShowsMobileBinding
+import com.streamflixreborn.streamflix.models.Category
 import com.streamflixreborn.streamflix.models.Movie
 import com.streamflixreborn.streamflix.models.TvShow
-import com.streamflixreborn.streamflix.ui.SpacingItemDecoration
 import com.streamflixreborn.streamflix.utils.EpisodeFavorites
 import com.streamflixreborn.streamflix.utils.GlobalFavorites
-import com.streamflixreborn.streamflix.utils.dp
 import kotlinx.coroutines.launch
 
 /**
  * 2026-05-20 : "Cœur" favoris global — agrège les favoris (films + séries) de
- * TOUS les providers non-IPTV dans une seule grille. Réutilise la grille
- * [FragmentTvShowsMobileBinding]. Le clic sur un item est géré dans
- * MovieViewHolder / TvShowViewHolder (cas GlobalFavoritesMobileFragment) :
- * bascule sur le provider d'origine puis ouvre la fiche.
+ * TOUS les providers non-IPTV.
+ * 2026-05-24 : refactoré en sections Category horizontales (comme le home) :
+ *   Films, Séries, Saisons, Épisodes, Reprendre.
  */
 class GlobalFavoritesMobileFragment : Fragment() {
 
@@ -49,14 +46,14 @@ class GlobalFavoritesMobileFragment : Fragment() {
 
         binding.tabLanguage.visibility = View.GONE
 
+        // 2026-05-24 : spanCount=1 pour afficher des Category (bandeaux horizontaux).
+        //   Chaque Category gère son propre RecyclerView horizontal interne.
         binding.rvTvShows.apply {
             setHasFixedSize(true)
             adapter = appAdapter.apply {
                 stateRestorationPolicy = RecyclerView.Adapter.StateRestorationPolicy.PREVENT_WHEN_EMPTY
             }
-            val spanCount = if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) 6 else 3
-            (layoutManager as? GridLayoutManager)?.spanCount = spanCount
-            addItemDecoration(SpacingItemDecoration(10.dp(requireContext())))
+            (layoutManager as? GridLayoutManager)?.spanCount = 1
         }
 
         loadFavorites()
@@ -65,12 +62,6 @@ class GlobalFavoritesMobileFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         loadFavorites()
-    }
-
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        val spanCount = if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) 6 else 3
-        (binding.rvTvShows.layoutManager as? GridLayoutManager)?.spanCount = spanCount
     }
 
     override fun onDestroyView() {
@@ -93,33 +84,42 @@ class GlobalFavoritesMobileFragment : Fragment() {
             if (_binding == null) return@launch
             binding.isLoading.root.visibility = View.GONE
 
-            movies.forEach { it.itemType = AppAdapter.Type.MOVIE_GRID_MOBILE_ITEM }
-            tvShows.forEach { it.itemType = AppAdapter.Type.TV_SHOW_GRID_MOBILE_ITEM }
-            // 2026-05-21 : saisons favorites
+            // --- Préparer les items par catégorie ---
+            // 2026-05-24 : utiliser les types du HOME (MOBILE_ITEM), PAS les
+            //   GRID_MOBILE_ITEM qui sont faits pour une grille plate 3 colonnes.
+
+            // Films
+            movies.forEach { it.itemType = AppAdapter.Type.MOVIE_MOBILE_ITEM }
+
+            // Séries
+            tvShows.forEach { it.itemType = AppAdapter.Type.TV_SHOW_MOBILE_ITEM }
+
+            // Saisons favorites
             val seasonFavs = com.streamflixreborn.streamflix.utils.SeasonFavorites.all().map { e ->
                 TvShow(
                     id = e.syntheticId(),
                     title = "${e.showTitle} — Saison ${e.seasonNumber}",
                     poster = e.showPoster,
                     banner = e.showBanner,
-                ).apply { itemType = AppAdapter.Type.TV_SHOW_GRID_MOBILE_ITEM }
+                ).apply { itemType = AppAdapter.Type.TV_SHOW_MOBILE_ITEM }
             }
-            // 2026-05-22 : épisodes favoris
+
+            // Épisodes favoris — poster SÉRIE + titre "Série — S1E3"
             val episodeFavs = EpisodeFavorites.all().map { e ->
                 TvShow(
                     id = e.syntheticId(),
                     title = "${e.showTitle} — S${e.seasonNumber}E${e.episodeNumber}",
                     overview = e.episodeTitle,
-                    poster = e.episodePoster ?: e.showPoster,
+                    poster = e.showPoster ?: e.episodePoster,
                     banner = e.showBanner,
-                ).apply { itemType = AppAdapter.Type.TV_SHOW_GRID_MOBILE_ITEM }
+                ).apply { itemType = AppAdapter.Type.TV_SHOW_MOBILE_ITEM }
             }
-            // 2026-05-22 : reprises de lecture films
+
+            // Reprises de lecture
             val cwMovies = try {
                 GlobalFavorites.loadContinueWatchingMovies(requireContext(), 20)
             } catch (_: Exception) { emptyList() }
             cwMovies.forEach { it.itemType = AppAdapter.Type.MOVIE_CONTINUE_WATCHING_MOBILE_ITEM }
-            // 2026-05-22 : reprises de lecture séries
             val cwSeries = try {
                 GlobalFavorites.loadContinueWatchingSeries(requireContext(), 20)
             } catch (_: Exception) { emptyList() }
@@ -131,14 +131,42 @@ class GlobalFavoritesMobileFragment : Fragment() {
                     overview = cw.lastEpisode.title,
                     poster = cw.tvShow.poster,
                     banner = cw.tvShow.banner,
-                ).apply { itemType = AppAdapter.Type.TV_SHOW_GRID_MOBILE_ITEM }
+                ).apply { itemType = AppAdapter.Type.TV_SHOW_MOBILE_ITEM }
             }
 
-            // Ordre : favoris en haut, reprises films, reprises séries
-            val items = (movies + tvShows + seasonFavs + episodeFavs) + cwMovies + cwSeriesCards
-            appAdapter.submitList(items)
+            // --- Construire les sections Category (comme le home) ---
+            val categories = mutableListOf<Category>()
+            if (movies.isNotEmpty()) {
+                categories += Category(name = "Films", list = movies).apply {
+                    itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
+                }
+            }
+            if (tvShows.isNotEmpty()) {
+                categories += Category(name = "Séries", list = tvShows).apply {
+                    itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
+                }
+            }
+            if (seasonFavs.isNotEmpty()) {
+                categories += Category(name = "Saisons", list = seasonFavs).apply {
+                    itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
+                }
+            }
+            if (episodeFavs.isNotEmpty()) {
+                categories += Category(name = "Épisodes", list = episodeFavs).apply {
+                    itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
+                }
+            }
+            val resumeItems: List<AppAdapter.Item> = cwMovies + cwSeriesCards
+            if (resumeItems.isNotEmpty()) {
+                categories += Category(name = "Reprendre", list = resumeItems).apply {
+                    itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
+                }
+            }
 
-            if (items.isEmpty()) {
+            if (_binding == null) return@launch
+            appAdapter.submitList(categories)
+
+            if (categories.isEmpty()) {
                 Toast.makeText(
                     requireContext(),
                     "Aucun favori ni reprise de lecture",
