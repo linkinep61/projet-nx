@@ -628,6 +628,23 @@ class AppAdapter(
 
 
     fun submitList(list: List<Item>) {
+        // 2026-05-25 FIX ANR IPTV : DiffUtil.calculateDiff() est synchrone sur le main
+        // thread. identityAt() est O(n) par appel (scan linéaire des doublons), DiffUtil
+        // l'appelle O(n²) fois → coût total O(n³). Avec 2400 chaînes IPTV = 40s+ de CPU
+        // pur → ANR systématique. Pour les grosses listes, on bypass le DiffUtil et on
+        // fait un swap direct avec notifyDataSetChanged().
+        val DIFF_THRESHOLD = 200
+        if (items.size > DIFF_THRESHOLD || list.size > DIFF_THRESHOLD) {
+            states.clear()
+            items.clear()
+            items.addAll(list)
+            notifyDataSetChanged()
+            return
+        }
+
+        val oldIdentities = items.buildIdentityMap()
+        val newIdentities = list.buildIdentityMap()
+
         val result = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
             override fun getOldListSize() = items.size
 
@@ -636,7 +653,7 @@ class AppAdapter(
             override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {
                 val oldItem = items[oldItemPosition]
                 val newItem = list[newItemPosition]
-                return items.identityAt(oldItemPosition) == list.identityAt(newItemPosition) &&
+                return oldIdentities[oldItemPosition] == newIdentities[newItemPosition] &&
                         oldItem::class == newItem::class
             }
 
@@ -750,6 +767,21 @@ class AppAdapter(
     private fun List<Item>.stableIdAt(position: Int): Long {
         return identityAt(position).fold(1125899906842597L) { acc, char ->
             31L * acc + char.code
+        }
+    }
+
+    // 2026-05-25 FIX ANR : pré-calcul des identités en O(n) total au lieu de O(n²).
+    // L'ancien identityAt(position) faisait un subList(0,position).count{} = O(n) par appel.
+    // buildIdentityMap() parcourt la liste UNE SEULE fois et retourne un array indexé.
+    private fun List<Item>.buildIdentityMap(): Array<String> {
+        val occurrenceCounts = HashMap<String, Int>(size)
+        return Array(size) { position ->
+            val item = this[position]
+            val baseKey = item.baseIdentityKey()
+            val compositeKey = "${item.itemType.ordinal}:$baseKey"
+            val occ = occurrenceCounts.getOrDefault(compositeKey, 0)
+            occurrenceCounts[compositeKey] = occ + 1
+            "$compositeKey:$occ"
         }
     }
 
