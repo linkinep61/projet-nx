@@ -451,6 +451,16 @@ class TvShowViewHolder(
     private fun displayTvItem(binding: ItemTvShowTvBinding) {
         binding.root.apply {
             setOnClickListener {
+                // 2026-05-24 : guards pour items synthétiques du cœur (favoris saison/épisode, reprises)
+                if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
+                    openSeasonFavorite(findNavController()); return@setOnClickListener
+                }
+                if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.EpisodeFavorites.SYNTHETIC_ID_PREFIX)) {
+                    openEpisodeFavorite(findNavController()); return@setOnClickListener
+                }
+                if (tvShow.id.startsWith("resume_series_")) {
+                    openResumeSeries(findNavController()); return@setOnClickListener
+                }
                 checkProviderAndRun {
                     if (context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
                         com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin(tvShow.id)
@@ -518,42 +528,95 @@ class TvShowViewHolder(
         try { navController.navigate(R.id.season, args) } catch (_: Exception) {}
     }
 
-    /** 2026-05-22 : ouvre un épisode favori (carte synthétique du cœur) sur sa
-     *  saison, dans le provider d'origine. Même logique que openSeasonFavorite. */
+    /** 2026-05-24 : ouvre un épisode favori (carte synthétique du cœur)
+     *  → navigation DIRECTE au player sur cet épisode. */
     private fun openEpisodeFavorite(navController: androidx.navigation.NavController) {
         val e = com.streamflixreborn.streamflix.utils.EpisodeFavorites.findBySyntheticId(tvShow.id) ?: return
         com.streamflixreborn.streamflix.providers.Provider.findByName(e.provider)?.let {
             com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider = it
         }
-        val args = android.os.Bundle().apply {
-            putString("tvShowId", e.showId)
-            putString("tvShowTitle", e.showTitle)
-            putString("tvShowPoster", e.showPoster)
-            putString("tvShowBanner", e.showBanner)
-            putString("seasonId", e.seasonId)
-            putInt("seasonNumber", e.seasonNumber)
-            putString("seasonTitle", e.seasonTitle)
+        if (com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider == null) return
+        val args = Bundle().apply {
+            putString("id", e.episodeId)
+            putString("title", e.showTitle)
+            putString("subtitle", "S${e.seasonNumber}E${e.episodeNumber} — ${e.episodeTitle ?: ""}")
+            putSerializable(
+                "videoType",
+                Video.Type.Episode(
+                    id = e.episodeId,
+                    number = e.episodeNumber,
+                    title = e.episodeTitle,
+                    poster = e.episodePoster,
+                    overview = null,
+                    tvShow = Video.Type.Episode.TvShow(
+                        id = e.showId,
+                        title = e.showTitle,
+                        poster = e.showPoster,
+                        banner = e.showBanner,
+                        releaseDate = null,
+                        imdbId = null,
+                    ),
+                    season = Video.Type.Episode.Season(
+                        number = e.seasonNumber,
+                        title = e.seasonTitle,
+                    ),
+                )
+            )
         }
-        try { navController.navigate(R.id.season, args) } catch (_: Exception) {}
+        try { navController.navigate(R.id.action_global_player, args) } catch (_: Exception) {}
     }
 
-    /** 2026-05-22 : ouvre une reprise de lecture série (carte synthétique du cœur)
-     *  sur la saison du dernier épisode regardé, dans le provider d'origine. */
+    /** 2026-05-24 : ouvre une reprise de lecture série (carte synthétique du cœur)
+     *  → navigation DIRECTE au player sur le dernier épisode regardé. */
     private fun openResumeSeries(navController: androidx.navigation.NavController) {
-        val rawId = tvShow.id.removePrefix("resume_series_")
         val origin = com.streamflixreborn.streamflix.utils.GlobalFavorites.originByItemId[tvShow.id]
         if (origin != null) {
             com.streamflixreborn.streamflix.providers.Provider.findByName(origin)?.let {
                 com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider = it
             }
         }
-        // Naviguer vers la fiche série → l'user verra la saison avec la progression
-        val args = android.os.Bundle().apply {
-            putString("id", rawId)
-            putString("poster", tvShow.poster)
-            putString("banner", tvShow.banner)
+        val resumeData = com.streamflixreborn.streamflix.utils.GlobalFavorites.resumeSeriesData[tvShow.id]
+        if (resumeData != null) {
+            val ep = resumeData.lastEpisode
+            val args = Bundle().apply {
+                putString("id", ep.id)
+                putString("title", resumeData.tvShow.title)
+                putString("subtitle", "S${resumeData.seasonNumber}E${resumeData.episodeNumber} — ${ep.title ?: ""}")
+                putSerializable(
+                    "videoType",
+                    Video.Type.Episode(
+                        id = ep.id,
+                        number = ep.number,
+                        title = ep.title,
+                        poster = ep.poster,
+                        overview = ep.overview,
+                        tvShow = Video.Type.Episode.TvShow(
+                            id = resumeData.tvShow.id,
+                            title = resumeData.tvShow.title,
+                            poster = resumeData.tvShow.poster,
+                            banner = resumeData.tvShow.banner,
+                            releaseDate = resumeData.tvShow.released?.format("yyyy-MM-dd"),
+                            imdbId = resumeData.tvShow.imdbId,
+                        ),
+                        season = Video.Type.Episode.Season(
+                            number = resumeData.seasonNumber,
+                            title = ep.season?.title,
+                        ),
+                    )
+                )
+            }
+            try { navController.navigate(R.id.action_global_player, args) } catch (_: Exception) {}
+        } else {
+            // Fallback : ouvre la fiche série (uniquement si un provider est défini)
+            if (com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider == null) return
+            val rawId = tvShow.id.removePrefix("resume_series_")
+            val args = Bundle().apply {
+                putString("id", rawId)
+                putString("poster", tvShow.poster)
+                putString("banner", tvShow.banner)
+            }
+            try { navController.navigate(R.id.tv_show, args) } catch (_: Exception) {}
         }
-        try { navController.navigate(R.id.tv_show, args) } catch (_: Exception) {}
     }
 
     private fun displayGridMobileItem(binding: ItemTvShowGridMobileBinding) {

@@ -321,11 +321,28 @@ class MovieViewHolder(
         binding.root.apply {
             setOnClickListener {
                 checkProviderAndRun {
-                    // 2026-05-22 : reprise de lecture film depuis le cœur → switch provider + ouvre fiche
+                    // 2026-05-24 : reprise de lecture film depuis le cœur → switch provider + direct player
                     if (movie.itemType == AppAdapter.Type.MOVIE_CONTINUE_WATCHING_MOBILE_ITEM
                         && context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
                         com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin("resume_movie_${movie.id}")
-                        findNavController().navigate(R.id.action_global_movie, android.os.Bundle().apply { putString("id", movie.id) })
+                        findNavController().navigate(
+                            R.id.action_global_player,
+                            Bundle().apply {
+                                putString("id", movie.id)
+                                putString("title", movie.title)
+                                putString("subtitle", movie.released?.format("yyyy") ?: "")
+                                putSerializable(
+                                    "videoType",
+                                    Video.Type.Movie(
+                                        id = movie.id,
+                                        title = movie.title,
+                                        releaseDate = movie.released?.format("yyyy-MM-dd") ?: "",
+                                        poster = movie.poster ?: movie.banner ?: "",
+                                        imdbId = movie.imdbId,
+                                    )
+                                )
+                            }
+                        )
                         return@checkProviderAndRun
                     }
                     if (isDramaOrAnimeProvider()) {
@@ -403,11 +420,28 @@ class MovieViewHolder(
             isFocusable = true
             setOnClickListener {
                 checkProviderAndRun {
-                    // 2026-05-22 : reprise de lecture film depuis le cœur → switch provider + ouvre fiche
+                    // 2026-05-24 : reprise de lecture film depuis le cœur → switch provider + direct player
                     if (movie.itemType == AppAdapter.Type.MOVIE_CONTINUE_WATCHING_TV_ITEM
                         && context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
                         com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin("resume_movie_${movie.id}")
-                        findNavController().navigate(R.id.action_global_movie, android.os.Bundle().apply { putString("id", movie.id) })
+                        findNavController().navigate(
+                            R.id.action_global_player,
+                            Bundle().apply {
+                                putString("id", movie.id)
+                                putString("title", movie.title)
+                                putString("subtitle", movie.released?.format("yyyy") ?: "")
+                                putSerializable(
+                                    "videoType",
+                                    Video.Type.Movie(
+                                        id = movie.id,
+                                        title = movie.title,
+                                        releaseDate = movie.released?.format("yyyy-MM-dd") ?: "",
+                                        poster = movie.poster ?: movie.banner ?: "",
+                                        imdbId = movie.imdbId,
+                                    )
+                                )
+                            }
+                        )
                         return@checkProviderAndRun
                     }
                     if (isDramaOrAnimeProvider()) {

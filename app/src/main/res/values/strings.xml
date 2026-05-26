@@ -62,6 +62,9 @@
     <string name="searching">Searching...</string>
     <string name="search_empty_query">Please enter a search term</string>
     <string name="search_error">Error</string>
+    <string name="search_history_title">Recherches récentes</string>
+    <string name="search_history_clear">Effacer tout</string>
+    <string name="search_history_cleared">Historique effacé</string>
     <string name="result">Result</string>
     <string name="results">Results</string>
     <string name="switching_to_provider">Switching to %s</string>

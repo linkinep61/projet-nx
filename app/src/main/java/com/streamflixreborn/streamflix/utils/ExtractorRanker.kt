@@ -60,11 +60,10 @@ object ExtractorRanker {
      *  VERIFIED=vert, DEAD=rouge, UNSURE=orange, UNTESTED=blanc. */
     enum class ServerStatus { VERIFIED, DEAD, UNSURE, UNTESTED }
 
-    /** Hosts/extracteurs notoirement bloqués par les FAI FR — toujours en
-     *  bas de la liste, même s'ils sont "sains" côté tracker. */
-    private val FRENCH_ISP_BLOCKED_PATTERNS = listOf(
-        "netu", "waaw", "hqq", "hqcloud", "younetu",
-    )
+    // 2026-05-24 : liste noire ISP SUPPRIMÉE. Aucun serveur n'est bloqué
+    // a priori — si ça marche pas, le fallback passe au suivant (onPlayerError).
+    // Pas besoin de deviner qui est bloqué ou pas.
+    private val FRENCH_ISP_BLOCKED_PATTERNS = emptyList<String>()
 
     /**
      * Bias empirique de vitesse de démarrage par extracteur.
@@ -191,8 +190,7 @@ object ExtractorRanker {
         "shareciously" to -15,
         "sharecloudy" to -15,
 
-        // ─── Notoirement bloqués (déjà -200 via ISP_BLOCKED) ───
-        "netu" to -50,            // safeguard si pattern ISP_BLOCKED rate
+        // ─── (netu retiré 2026-05-24 — fonctionne normalement) ───
     )
 
     /**
@@ -485,14 +483,22 @@ object ExtractorRanker {
     fun statusOf(server: Video.Server): ServerStatus {
         val nameLower = server.name.lowercase()
         val srcLower = server.src.lowercase()
-        if (FRENCH_ISP_BLOCKED_PATTERNS.any { nameLower.contains(it) || srcLower.contains(it) }) {
-            return ServerStatus.DEAD
-        }
+
         // ─── PAR TITRE d'abord (2026-05-21, user "lié à l'épisode/film, pas de bave
         //     sur les autres") : résultat RÉEL observé pour CE titre. Prioritaire.
         //       VERIFIED = a joué (READY) ici · DEAD = a échoué ici · UNSURE = douteux ici.
         //     Un échec sur l'épisode 1 ne colore PAS l'épisode 2 (clé = titre courant).
+        //     Le résultat réel PRIME SUR TOUT — y compris la liste ISP-blocked (le serveur
+        //     a peut-être été débloqué ou l'user est sur VPN).
         TitleServerStatus.statusOf(server.id)?.let { return it }
+
+        // ─── ISP-blocked comme signal FAIBLE (orange) — plus rouge inconditionnel.
+        //     Si le serveur a réellement joué (VERIFIED ci-dessus), il est vert.
+        //     Sinon, on le marque orange = "probablement bloqué, pas sûr" au lieu de
+        //     rouge = "mort certain". L'user peut quand même le tenter.
+        if (FRENCH_ISP_BLOCKED_PATTERNS.any { nameLower.contains(it) || srcLower.contains(it) }) {
+            return ServerStatus.UNSURE
+        }
 
         // ─── Pas encore essayé sur CE titre → indice FAIBLE, sans mentir "ça marche".
         //     On ne réutilise PLUS les échecs/succès globaux comme couleur (ça bavait

@@ -33,6 +33,15 @@ class PlayerTvView @JvmOverloads constructor(
     /** IPTV zapping: channel down (D-pad DOWN when controller hidden) */
     var onChannelDown: (() -> Unit)? = null
 
+    /** Quand l'overlay "épisode suivant" est visible, ne pas intercepter les D-pad. */
+    var isNextEpisodeOverlayActive: Boolean = false
+
+    /** Callback D-pad navigation quand overlay actif → requestFocus sur le bouton. */
+    var onOverlayFocusRequested: (() -> Unit)? = null
+
+    /** Callback OK/ENTER quand overlay actif → performClick sur le bouton. */
+    var onOverlayConfirmRequested: (() -> Unit)? = null
+
     private var zoomToast: Toast? = null
 
     fun enterManualZoomMode() {
@@ -60,8 +69,6 @@ class PlayerTvView @JvmOverloads constructor(
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (isManualZoomEnabled) {
             if (event.action == KeyEvent.ACTION_DOWN) {
-                // RIPRISTINATA LOGICA ORIGINALE: Scaliamo solo il videoSurfaceView.
-                // Grazie all'uso di texture_view nel layout, ora le modifiche sono visibili in tempo reale anche in pausa.
                 val videoView = videoSurfaceView ?: return true
                 when (event.keyCode) {
                     KeyEvent.KEYCODE_DPAD_UP -> {
@@ -113,6 +120,21 @@ class PlayerTvView @JvmOverloads constructor(
         }
 
         if (controller.isVisible) return super.dispatchKeyEvent(event)
+
+        if (isNextEpisodeOverlayActive) {
+            if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+                return super.dispatchKeyEvent(event)
+            }
+            hideController()
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                when (event.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+                    KeyEvent.KEYCODE_NUMPAD_ENTER -> onOverlayConfirmRequested?.invoke()
+                    else -> onOverlayFocusRequested?.invoke()
+                }
+            }
+            return true
+        }
 
         return when (event.keyCode) {
             // IPTV zapping: D-pad UP/DOWN changes channel when callbacks are set

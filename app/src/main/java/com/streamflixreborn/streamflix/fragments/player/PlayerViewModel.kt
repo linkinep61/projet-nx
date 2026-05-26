@@ -542,8 +542,22 @@ class PlayerViewModel(
                 Log.d("PlayerViewModel", "Pushed $brokenCount broken servers to bottom (cores=$brokenCores)")
             }
 
-            Log.d("PlayerViewModel", "Ricerca server completata: ${sortedServers.size} server trovati")
-            _state.emit(State.SuccessLoadingServers(sortedServers))
+            // 2026-05-24 : reprise de lecture — si on a un serveur qui a marché
+            // la dernière fois pour ce contenu, on le met en premier (auto-play dessus).
+            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext
+            val lastServerId = com.streamflixreborn.streamflix.utils.LastWorkingServer.get(ctx, id)
+            val finalServers = if (lastServerId != null && sortedServers.any { it.id == lastServerId }) {
+                val last = sortedServers.first { it.id == lastServerId }
+                listOf(last) + sortedServers.filter { it.id != lastServerId }
+            } else {
+                sortedServers
+            }
+            if (lastServerId != null && finalServers.firstOrNull()?.id == lastServerId) {
+                Log.d("PlayerViewModel", "Reprise: serveur '${finalServers.first().name}' remis en 1er (dernier qui a marché)")
+            }
+
+            Log.d("PlayerViewModel", "Ricerca server completata: ${finalServers.size} server trovati")
+            _state.emit(State.SuccessLoadingServers(finalServers))
 
             // 2026-05-09 : pré-extraction parallèle des 3 premiers serveurs en
             // background. Le but : quand l'user clique "Watch", l'URL m3u8 est
@@ -557,7 +571,7 @@ class PlayerViewModel(
             // les coroutines remplir le cache. Si l'user clique sur le 4e
             // serveur (non pré-extrait) → fallback normal sans régression.
             // Si une pré-extraction échoue → silencieuse, normale path au clic.
-            preExtractTopServersInBackground(sortedServers)
+            preExtractTopServersInBackground(finalServers)
 
             // NB: le collecteur additionalServerJob est déjà démarré AVANT le getServers
             // (cf bloc plus haut) pour ne pas rater les émissions IPTV synchrones.
@@ -598,9 +612,16 @@ class PlayerViewModel(
                 }
                 if (!firstEmitted) {
                     firstEmitted = true
-                    Log.i("StreamFlixES", "[SERVERS PROGRESSIVE] 1er lot affiché : ${ordered.size} serveurs")
-                    _state.emit(State.SuccessLoadingServers(ordered))
-                    preExtractTopServersInBackground(ordered)
+                    // 2026-05-24 : reprise de lecture — prioriser le dernier serveur
+                    val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext
+                    val lastSrvId = com.streamflixreborn.streamflix.utils.LastWorkingServer.get(ctx, id)
+                    val finalOrdered = if (lastSrvId != null && ordered.any { it.id == lastSrvId }) {
+                        val last = ordered.first { it.id == lastSrvId }
+                        listOf(last) + ordered.filter { it.id != lastSrvId }
+                    } else ordered
+                    Log.i("StreamFlixES", "[SERVERS PROGRESSIVE] 1er lot affiché : ${finalOrdered.size} serveurs")
+                    _state.emit(State.SuccessLoadingServers(finalOrdered))
+                    preExtractTopServersInBackground(finalOrdered)
                 } else {
                     Log.d("PlayerViewModel", "[SERVERS PROGRESSIVE] +${fresh.size} → ${ordered.size} (ré-ordonné par langue)")
                     _serversReordered.emit(ordered)

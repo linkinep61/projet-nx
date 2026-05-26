@@ -874,6 +874,12 @@ class PlayerMobileFragment : Fragment() {
                         // Drop this broken variant from the visible Chaîne page so the user
                         // doesn't see piling up dead entries. Re-emitted next session.
                         pruneBrokenVariant(state.server)
+                        // 2026-05-24 : marque DEAD par titre — le fallback et le picker
+                        //   voient ce serveur en rouge pour CE titre (pas de bave).
+                        com.streamflixreborn.streamflix.utils.TitleServerStatus.record(
+                            state.server.id,
+                            com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD,
+                        )
                         // IPTV (live channels): NEVER auto-advance to a different server on
                         // extractor failure. Same sticky policy as onPlayerError. Without
                         // this, OLA/Vegeta jumped from variant to variant during initial
@@ -1810,6 +1816,10 @@ class PlayerMobileFragment : Fragment() {
         val brokenCores = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames()
             .map { extractorCore(it) }.filter { it.isNotBlank() }.toSet()
         fun isBroken(srv: Video.Server): Boolean {
+            // 2026-05-24 : serveur rouge PAR TITRE (extraction fail / onPlayerError)
+            //   → skip direct, pas besoin d'attendre 3 fails globaux.
+            val titleStatus = com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(srv.id)
+            if (titleStatus == com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD) return true
             if (brokenCores.isEmpty()) return false
             return extractorCore(srv.name) in brokenCores
         }

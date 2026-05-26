@@ -25,11 +25,14 @@ import com.streamflixreborn.streamflix.ui.ShowOptionsMobileDialog
 import com.streamflixreborn.streamflix.ui.ShowOptionsTvDialog
 import com.streamflixreborn.streamflix.utils.EpisodeFavorites
 import com.streamflixreborn.streamflix.utils.EpisodeManager
+import com.streamflixreborn.streamflix.utils.GlobalFavorites
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.format
+import com.streamflixreborn.streamflix.utils.getCurrentFragment
 import com.streamflixreborn.streamflix.utils.loadTvShowCardArtwork
 import com.streamflixreborn.streamflix.utils.loadTvShowPoster
 import com.streamflixreborn.streamflix.utils.optimizeArtworkUrl
+import com.streamflixreborn.streamflix.utils.toActivity
 
 class EpisodeViewHolder(
     private val _binding: ViewBinding
@@ -322,6 +325,13 @@ class EpisodeViewHolder(
     private fun displayContinueWatchingMobileItem(binding: ItemEpisodeContinueWatchingMobileBinding) {
         binding.root.apply {
             setOnClickListener {
+                // 2026-05-24 : depuis le cœur favoris → navigation directe au player
+                val isFromGlobalFavorites = context.toActivity()?.getCurrentFragment() is
+                    com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment
+                if (isFromGlobalFavorites) {
+                    navigateToPlayerFromFavorites()
+                    return@setOnClickListener
+                }
                 findNavController().navigate(
                     HomeMobileFragmentDirections.actionHomeToTvShow(
                         id = episode.tvShow?.id ?: "",
@@ -333,43 +343,8 @@ class EpisodeViewHolder(
                     TvShowMobileFragmentDirections.actionTvShowToPlayer(
                         id = episode.id,
                         title = episode.tvShow?.title ?: "",
-                        subtitle = episode.season?.takeIf { it.number != 0 }?.let { season ->
-                            context.getString(
-                                R.string.player_subtitle_tv_show,
-                                season.number,
-                                episode.number,
-                                episode.title ?: context.getString(
-                                    R.string.episode_number,
-                                    episode.number
-                                )
-                            )
-                        } ?: context.getString(
-                            R.string.player_subtitle_tv_show_episode_only,
-                            episode.number,
-                            episode.title ?: context.getString(
-                                R.string.episode_number,
-                                episode.number
-                            )
-                        ),
-                        videoType = Video.Type.Episode(
-                            id = episode.id,
-                            number = episode.number,
-                            title = episode.title,
-                            poster = episode.poster,
-                            overview = episode.overview,
-                            tvShow = Video.Type.Episode.TvShow(
-                                id = episode.tvShow?.id ?: "",
-                                title = episode.tvShow?.title ?: "",
-                                poster = episode.tvShow?.poster,
-                                banner = episode.tvShow?.banner,
-                                releaseDate = episode.tvShow?.released?.format("yyyy-MM-dd"),
-                                imdbId = episode.tvShow?.imdbId,
-                            ),
-                            season = Video.Type.Episode.Season(
-                                number = episode.season?.number ?: 0,
-                                title = episode.season?.title,
-                            ),
-                        ),
+                        subtitle = buildEpisodeSubtitle(),
+                        videoType = buildEpisodeVideoType(),
                     )
                 )
             }
@@ -460,6 +435,13 @@ class EpisodeViewHolder(
     private fun displayContinueWatchingTvItem(binding: ItemEpisodeContinueWatchingTvBinding) {
         binding.root.apply {
             setOnClickListener {
+                // 2026-05-24 : depuis le cœur favoris → navigation directe au player
+                val isFromGlobalFavorites = context.toActivity()?.getCurrentFragment() is
+                    com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment
+                if (isFromGlobalFavorites) {
+                    navigateToPlayerFromFavorites()
+                    return@setOnClickListener
+                }
                 findNavController().navigate(
                     HomeTvFragmentDirections.actionHomeToTvShow(
                         id = episode.tvShow?.id ?: "",
@@ -471,43 +453,8 @@ class EpisodeViewHolder(
                     TvShowTvFragmentDirections.actionTvShowToPlayer(
                         id = episode.id,
                         title = episode.tvShow?.title ?: "",
-                        subtitle = episode.season?.takeIf { it.number != 0 }?.let { season ->
-                            context.getString(
-                                R.string.player_subtitle_tv_show,
-                                season.number,
-                                episode.number,
-                                episode.title ?: context.getString(
-                                    R.string.episode_number,
-                                    episode.number
-                                )
-                            )
-                        } ?: context.getString(
-                            R.string.player_subtitle_tv_show_episode_only,
-                            episode.number,
-                            episode.title ?: context.getString(
-                                R.string.episode_number,
-                                episode.number
-                            )
-                        ),
-                        videoType = Video.Type.Episode(
-                            id = episode.id,
-                            number = episode.number,
-                            title = episode.title,
-                            poster = episode.poster,
-                            overview = episode.overview,
-                            tvShow = Video.Type.Episode.TvShow(
-                                id = episode.tvShow?.id ?: "",
-                                title = episode.tvShow?.title ?: "",
-                                poster = episode.tvShow?.poster,
-                                banner = episode.tvShow?.banner,
-                                releaseDate = episode.tvShow?.released?.format("yyyy-MM-dd"),
-                                imdbId = episode.tvShow?.imdbId,
-                            ),
-                            season = Video.Type.Episode.Season(
-                                number = episode.season?.number ?: 0,
-                                title = episode.season?.title,
-                            ),
-                        ),
+                        subtitle = buildEpisodeSubtitle(),
+                        videoType = buildEpisodeVideoType(),
                     )
                 )
             }
@@ -628,5 +575,62 @@ class EpisodeViewHolder(
             centerCrop()
             transition(DrawableTransitionOptions.withCrossFade())
         }
+    }
+
+    // --- Helpers pour navigation "Reprendre" depuis le cœur favoris ---
+
+    /** Navigation directe au player depuis l'écran cœur (GlobalFavorites). */
+    private fun navigateToPlayerFromFavorites() {
+        val syntheticId = "resume_series_${episode.tvShow?.id}"
+        GlobalFavorites.switchToOrigin(syntheticId)
+        val nav = itemView.findNavController()
+        val args = android.os.Bundle().apply {
+            putString("id", episode.id)
+            putString("title", episode.tvShow?.title ?: "")
+            putString("subtitle", buildEpisodeSubtitle())
+            putSerializable("videoType", buildEpisodeVideoType())
+        }
+        try {
+            nav.navigate(R.id.action_global_player, args)
+        } catch (e: Exception) {
+            android.util.Log.e("EpisodeViewHolder", "navigateToPlayerFromFavorites failed: ${e.message}")
+        }
+    }
+
+    private fun buildEpisodeSubtitle(): String {
+        return episode.season?.takeIf { it.number != 0 }?.let { season ->
+            context.getString(
+                R.string.player_subtitle_tv_show,
+                season.number,
+                episode.number,
+                episode.title ?: context.getString(R.string.episode_number, episode.number)
+            )
+        } ?: context.getString(
+            R.string.player_subtitle_tv_show_episode_only,
+            episode.number,
+            episode.title ?: context.getString(R.string.episode_number, episode.number)
+        )
+    }
+
+    private fun buildEpisodeVideoType(): Video.Type.Episode {
+        return Video.Type.Episode(
+            id = episode.id,
+            number = episode.number,
+            title = episode.title,
+            poster = episode.poster,
+            overview = episode.overview,
+            tvShow = Video.Type.Episode.TvShow(
+                id = episode.tvShow?.id ?: "",
+                title = episode.tvShow?.title ?: "",
+                poster = episode.tvShow?.poster,
+                banner = episode.tvShow?.banner,
+                releaseDate = episode.tvShow?.released?.format("yyyy-MM-dd"),
+                imdbId = episode.tvShow?.imdbId,
+            ),
+            season = Video.Type.Episode.Season(
+                number = episode.season?.number ?: 0,
+                title = episode.season?.title,
+            ),
+        )
     }
 }

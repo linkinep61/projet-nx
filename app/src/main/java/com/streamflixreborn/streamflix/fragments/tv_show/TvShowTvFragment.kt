@@ -57,6 +57,12 @@ class TvShowTvFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // Guard : si aucun provider n'est set (ex: restauration après crash), retour arrière
+        if (com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider == null) {
+            try { findNavController().popBackStack() } catch (_: Exception) {}
+            return
+        }
+
         initializeTvShow()
 
         viewLifecycleOwner.lifecycleScope.launch {

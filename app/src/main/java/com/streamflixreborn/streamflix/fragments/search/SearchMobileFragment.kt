@@ -26,10 +26,12 @@ import com.streamflixreborn.streamflix.models.Genre
 import com.streamflixreborn.streamflix.models.Movie
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.ui.SpacingItemDecoration
+import android.app.AlertDialog
 import com.streamflixreborn.streamflix.utils.CacheUtils
 import com.streamflixreborn.streamflix.utils.LoggingUtils
 import com.streamflixreborn.streamflix.providers.Provider
-import com.streamflixreborn.streamflix.utils.UserPreferences // <-- IMPORT AÑADIDO
+import com.streamflixreborn.streamflix.utils.SearchHistory
+import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.VoiceRecognitionHelper
 import com.streamflixreborn.streamflix.utils.dp
 import com.streamflixreborn.streamflix.utils.hideKeyboard
@@ -138,44 +140,70 @@ class SearchMobileFragment : Fragment() {
         _binding = null
     }
 
+    private fun executeSearch(query: String) {
+        if (query.isBlank()) {
+            Toast.makeText(requireContext(), getString(R.string.search_empty_query), Toast.LENGTH_SHORT).show()
+            return
+        }
+        hideKeyboard()
+        SearchHistory.add(requireContext(), query)
+
+        if (binding.swGlobalSearch.isChecked) {
+            val currentProvider = UserPreferences.currentProvider
+            val currentLanguage = currentProvider?.language ?: "fr"
+            val group = currentProvider?.let { Provider.getGroup(it) }
+                ?: Provider.Companion.ProviderGroup.FILMS_SERIES
+            viewModel.searchGlobal(query, currentLanguage, group)
+        } else {
+            viewModel.search(query)
+        }
+    }
+
+    private fun showHistoryDialog() {
+        val history = SearchHistory.getAll(requireContext())
+        if (history.isEmpty()) {
+            Toast.makeText(requireContext(), getString(R.string.search_history_cleared), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val items = history.toMutableList()
+        items.add(getString(R.string.search_history_clear))
+
+        AlertDialog.Builder(requireContext())
+            .setTitle(getString(R.string.search_history_title))
+            .setItems(items.toTypedArray()) { _, which ->
+                if (which == items.size - 1) {
+                    SearchHistory.clear(requireContext())
+                    Toast.makeText(requireContext(), getString(R.string.search_history_cleared), Toast.LENGTH_SHORT).show()
+                } else {
+                    val query = items[which]
+                    binding.etSearch.setText(query)
+                    binding.etSearch.setSelection(query.length)
+                    executeSearch(query)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun initializeSearch() {
-        // 2026-05-18 : restore saved state au démarrage (default=true →
-        //   recherche globale active d'office sur tous les providers du même language).
+        // 2026-05-18 : restore saved state au démarrage
         binding.swGlobalSearch.isChecked = UserPreferences.isGlobalSearchEnabled
 
-        // Sync global search toggle with UserPreferences
         binding.swGlobalSearch.setOnCheckedChangeListener { _, isChecked ->
             UserPreferences.isGlobalSearchEnabled = isChecked
         }
 
+        // Historique de recherche (bouton → dialog)
+        binding.btnSearchHistory.setOnClickListener { showHistoryDialog() }
+
         binding.etSearch.apply {
-            // ========= LÓGICA DE BÚSQUEDA MODIFICADA =========
             setOnEditorActionListener { _, actionId, _ ->
                 if (actionId == EditorInfo.IME_ACTION_SEARCH) {
-                    val query = binding.etSearch.text.toString()
-                    if (query.isBlank()) {
-                        Toast.makeText(requireContext(), getString(R.string.search_empty_query), Toast.LENGTH_SHORT).show()
-                        return@setOnEditorActionListener true
-                    }
-                    hideKeyboard()
-
-                    if (binding.swGlobalSearch.isChecked) {
-                        // 2026-05-18 : passe le group du provider courant. La recherche
-                        //   globale partition IPTV vs FILMS/Séries/Anime — on cherche
-                        //   uniquement dans le bon côté.
-                        val currentProvider = UserPreferences.currentProvider
-                        val currentLanguage = currentProvider?.language ?: "fr"
-                        val group = currentProvider?.let { Provider.getGroup(it) }
-                            ?: Provider.Companion.ProviderGroup.FILMS_SERIES
-                        viewModel.searchGlobal(query, currentLanguage, group)
-                    } else {
-                        viewModel.search(query)
-                    }
+                    executeSearch(binding.etSearch.text.toString())
                     return@setOnEditorActionListener true
                 }
                 return@setOnEditorActionListener false
             }
-            // =================================================
 
             addTextChangedListener(object : TextWatcher {
                 override fun afterTextChanged(s: Editable?) {
@@ -199,7 +227,7 @@ class SearchMobileFragment : Fragment() {
             onResult = { query ->
                 binding.btnSearchVoice.clearAnimation()
                 binding.etSearch.setText(query)
-                viewModel.search(query)
+                executeSearch(query)
             },
             onError = { msg ->
                 Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show()
