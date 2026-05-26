@@ -414,7 +414,20 @@ class TvShowViewHolder(
 
     private fun displayMobileItem(binding: ItemTvShowMobileBinding) {
         binding.root.setOnClickListener {
+            // 2026-05-25 : guards pour items synthétiques du cœur (favoris saison/épisode, reprises)
+            if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
+                openSeasonFavorite(binding.root.findNavController()); return@setOnClickListener
+            }
+            if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.EpisodeFavorites.SYNTHETIC_ID_PREFIX)) {
+                openEpisodeFavorite(binding.root.findNavController()); return@setOnClickListener
+            }
+            if (tvShow.id.startsWith("resume_series_")) {
+                openResumeSeries(binding.root.findNavController()); return@setOnClickListener
+            }
             checkProviderAndRun {
+                if (context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
+                    com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin(tvShow.id)
+                }
                 if (isIptvProvider()) {
                     handleDirectPlay(binding.root.findNavController())
                 } else {
@@ -423,8 +436,11 @@ class TvShowViewHolder(
             }
         }
         binding.root.setOnLongClickListener {
-            // IPTV channels: long-press toggles favorite. Other content: options dialog.
-            if (!handleIptvFavoriteLongPress()) {
+            // 2026-05-25 : retirer favori depuis le cœur (mobile)
+            val cf = context.toActivity()?.getCurrentFragment()
+            if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
+                cf.removeFavorite(tvShow.id, false)
+            } else if (!handleIptvFavoriteLongPress()) {
                 ShowOptionsMobileDialog(context, tvShow).show()
             }
             true
