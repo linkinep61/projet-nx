@@ -1845,8 +1845,14 @@ class PlayerMobileFragment : Fragment() {
             detectServerLanguage(it.name) == fallbackLang && !isBroken(it)
         }
         if (nextNonBroken != null) return nextNonBroken
-        // Dernier recours : aucun serveur sain, on accepte un broken (HEAD peut mentir)
-        return allServers.firstOrNull { detectServerLanguage(it.name) == fallbackLang }
+        // 2026-05-25 : dernier recours — accepte un broken HEAD (HEAD peut mentir)
+        // MAIS JAMAIS un serveur DEAD per-titre (a réellement échoué SUR CE contenu).
+        val lastResort = allServers.firstOrNull {
+            detectServerLanguage(it.name) == fallbackLang &&
+                com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(it.id) !=
+                    com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD
+        }
+        return lastResort
     }
 
     /** Détection langue cohérente avec ExtractorRanker. Retourne "vf", "vostfr", "vo". */
@@ -2089,6 +2095,21 @@ class PlayerMobileFragment : Fragment() {
      *  finds them again and they happen to work that time. Also reports the resolved
      *  upstream URL to OlaTvProvider so other variants pointing to the same dead URL
      *  fail fast. */
+    /**
+     * 2026-05-25 : prochain serveur non-DEAD per-titre après [current].
+     * Remplace les `servers.getOrNull(indexOf+1)` bruts qui ré-essayaient
+     * les serveurs rouges en boucle.
+     */
+    private fun nextNonDeadServer(current: Video.Server?): Video.Server? {
+        if (current == null) return null
+        val idx = servers.indexOf(current)
+        if (idx < 0) return null
+        return servers.drop(idx + 1).firstOrNull {
+            com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(it.id) !=
+                com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD
+        }
+    }
+
     private fun pruneBrokenVariant(server: Video.Server?) {
         if (server == null) return
         triedChannelVariantIds.add(server.id)
@@ -3307,7 +3328,7 @@ class PlayerMobileFragment : Fragment() {
                     } else if (shouldSwitch) {
                         Log.w("PlayerMobileFragment", "IPTV switch on ${server.name} ($errCodeName, retry=$iptvRetryCount, hasWorked=$iptvCurrentStreamHasWorked, permanentHttp=$isPermanentHttpError)")
                         pruneBrokenVariant(server)
-                        val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
+                        val nextServer = nextNonDeadServer(server)
                         if (nextServer != null) {
                             iptvRetryCount = 0
                             iptvCurrentStreamHasWorked = false
@@ -3331,7 +3352,7 @@ class PlayerMobileFragment : Fragment() {
                         errCodeName == "ERROR_CODE_PARSING_CONTAINER_MALFORMED" ||
                         errCodeName == "ERROR_CODE_PARSING_MANIFEST_MALFORMED" ||
                         errCodeName == "ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED"
-                    val noFallbackAvailable = servers.getOrNull(servers.indexOf(server) + 1) == null
+                    val noFallbackAvailable = nextNonDeadServer(server) == null
                     if (!iptvCurrentStreamHasWorked && iptvRetryCount >= HARD_RETRY_CAP && (isParseError || noFallbackAvailable)) {
                         Log.e("PlayerMobileFragment",
                             "IPTV hard cap atteint sur ${server.name} ($errCodeName, retry=$iptvRetryCount, hasWorked=false, noFallback=$noFallbackAvailable) — abandon")
@@ -3372,8 +3393,10 @@ class PlayerMobileFragment : Fragment() {
                                     Log.w("PlayerMobileFragment",
                                         "Refresh impossible (no Stalker context) — pruning ${server.name} and auto-switching")
                                     pruneBrokenVariant(server)
-                                    val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
-                                        ?: servers.firstOrNull { it.id != server.id }
+                                    val nextServer = nextNonDeadServer(server)
+                                        ?: servers.firstOrNull { it.id != server.id &&
+                                            com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(it.id) !=
+                                                com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD }
                                     if (nextServer != null) {
                                         viewModel.getVideo(nextServer)
                                     } else {
@@ -3386,8 +3409,10 @@ class PlayerMobileFragment : Fragment() {
                             // WiTV v2 m3u8 server failed → rotation auto vers le suivant
                             Log.w("PlayerMobileFragment", "WiTV m3u8 ${server.name} failed ($errCodeName) → rotation auto")
                             viewLifecycleOwner.lifecycleScope.launch {
-                                val nextServer = servers.getOrNull(servers.indexOf(server) + 1)
-                                    ?: servers.firstOrNull { it.id != server.id }
+                                val nextServer = nextNonDeadServer(server)
+                                    ?: servers.firstOrNull { it.id != server.id &&
+                                        com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(it.id) !=
+                                            com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD }
                                 if (nextServer != null && _binding != null) {
                                     Log.w("PlayerMobileFragment", "  → essai ${nextServer.name}")
                                     viewModel.getVideo(nextServer)
@@ -3425,9 +3450,17 @@ class PlayerMobileFragment : Fragment() {
                     val server = currentServer ?: return
                     val errCodeName = error.errorCodeName
                     val msg = (error.message ?: "") + " " + (error.cause?.message ?: "")
+                    // 2026-05-25 : PARSING_CONTAINER_UNSUPPORTED/MALFORMED = le serveur
+                    // renvoie du contenu illisible (page HTML, fichier corrompu). C'est
+                    // permanent, pas transitoire — re-prepare boucle à l'infini.
                     val isServerDead = Regex("\\b(404|410|451|456|500|502|503|504)\\b").containsMatchIn(msg) ||
                         errCodeName.contains("HTTP_DATA_SOURCE_FORBIDDEN") ||
-                        errCodeName.contains("DECODING_FAILED")
+                        errCodeName.contains("DECODING_FAILED") ||
+                        errCodeName.contains("PARSING_CONTAINER_UNSUPPORTED") ||
+                        errCodeName.contains("PARSING_CONTAINER_MALFORMED") ||
+                        errCodeName.contains("PARSING_MANIFEST_MALFORMED") ||
+                        errCodeName.contains("PARSING_MANIFEST_UNSUPPORTED") ||
+                        errCodeName.contains("UnrecognizedInputFormatException")
                     if (isServerDead) {
                         pruneBrokenVariant(server)
                         val nextServer = nextAutoFallbackServer(servers, server)
