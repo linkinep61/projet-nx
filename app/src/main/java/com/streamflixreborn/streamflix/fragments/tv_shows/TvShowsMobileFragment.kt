@@ -187,16 +187,26 @@ class TvShowsMobileFragment : Fragment() {
      *  + filtre langue. Visibles uniquement sur Mon IPTV. */
     private fun initializeIptvActions() {
         val provider = UserPreferences.currentProvider
-        if (provider !is com.streamflixreborn.streamflix.providers.MyIptvProvider) {
+        if (provider is com.streamflixreborn.streamflix.providers.MyIptvProvider) {
+            binding.llIptvActions.visibility = View.VISIBLE
+            binding.ivIptvCategories.visibility = View.VISIBLE
+            binding.ivIptvLanguage.visibility = View.VISIBLE
+            binding.ivIptvCategories.setOnClickListener {
+                showIptvSeriesCategoryPicker()
+            }
+            binding.ivIptvLanguage.setOnClickListener {
+                showIptvLanguageFilterPicker()
+            }
+        } else if (com.streamflixreborn.streamflix.utils.GenreFilter.isSupported(provider?.name)) {
+            // 2026-05-26 : filtre genre TMDB
+            binding.llIptvActions.visibility = View.VISIBLE
+            binding.ivIptvCategories.visibility = View.VISIBLE
+            binding.ivIptvLanguage.visibility = View.GONE
+            binding.ivIptvCategories.setOnClickListener {
+                showGenreFilterPicker()
+            }
+        } else {
             binding.llIptvActions.visibility = View.GONE
-            return
-        }
-        binding.llIptvActions.visibility = View.VISIBLE
-        binding.ivIptvCategories.setOnClickListener {
-            showIptvSeriesCategoryPicker()
-        }
-        binding.ivIptvLanguage.setOnClickListener {
-            showIptvLanguageFilterPicker()
         }
     }
 
@@ -261,6 +271,33 @@ class TvShowsMobileFragment : Fragment() {
                     android.widget.Toast.makeText(
                         requireContext().applicationContext,
                         "Filtre langue : ${options[idx].first}",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                }
+                dlg.dismiss()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** 2026-05-26 : filtre par genre TMDB (Action, Comédie…) pour les providers TMDB. */
+    private fun showGenreFilterPicker() {
+        val provider = UserPreferences.currentProvider ?: return
+        val entries = com.streamflixreborn.streamflix.utils.GenreFilter.genres
+        val current = com.streamflixreborn.streamflix.utils.GenreFilter.get(provider.name)
+        val labels = arrayOf("Tous les genres") + entries.map { it.name }.toTypedArray()
+        val currentIdx = if (current == null) 0 else entries.indexOfFirst { it.id == current.id } + 1
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("Filtrer par genre")
+            .setSingleChoiceItems(labels, currentIdx.coerceAtLeast(0)) { dlg, idx ->
+                val newGenre = if (idx == 0) null else entries[idx - 1]
+                val changed = newGenre?.id != current?.id
+                if (changed) {
+                    com.streamflixreborn.streamflix.utils.GenreFilter.set(provider.name, newGenre)
+                    viewModel.setGenreFilter(newGenre?.id)
+                    android.widget.Toast.makeText(
+                        requireContext(),
+                        if (newGenre != null) "Genre : ${newGenre.name}" else "Genre : tous",
                         android.widget.Toast.LENGTH_SHORT,
                     ).show()
                 }

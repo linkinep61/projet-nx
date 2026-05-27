@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.streamflixreborn.streamflix.database.AppDatabase
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.providers.FilterableProvider
+import com.streamflixreborn.streamflix.utils.GenreFilter
 import com.streamflixreborn.streamflix.utils.ParentalControlUtils
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
@@ -33,6 +34,11 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
                     UserPreferences.currentProvider is FilterableProvider -> "vf"
                     else -> "all"
                 }
+                // 2026-05-26 : lire le genre SAUVÉ pour le provider courant.
+                // GenreFilter stocke par provider → changement de provider = null
+                // (nouveau provider n'a pas de genre sauvé). Changement de genre
+                // depuis la sidebar TV = le bon ID est lu.
+                genreId = GenreFilter.currentGenreId()
                 getTvShows()
             }
         }
@@ -86,6 +92,16 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
     val isTypeFilterable: Boolean
         get() = UserPreferences.currentProvider?.name in typeFilterProviders
 
+    /** Genre TMDB sélectionné (null = tout). Seuls les providers TMDB le supportent. */
+    private var genreId: String? = null
+
+    fun setGenreFilter(newGenreId: String?) {
+        if (genreId != newGenreId) {
+            genreId = newGenreId
+            getTvShows()
+        }
+    }
+
     fun setLanguageFilter(language: String) {
         if (languageFilter != language) {
             languageFilter = language
@@ -117,8 +133,13 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
             _state.emit(State.Loading)
             try {
                 val provider = UserPreferences.currentProvider ?: return@launch
-                Log.d("TvShowsViewModel", "getTvShows: provider=${provider.name}, isFilterable=${provider is FilterableProvider}, languageFilter=$languageFilter")
-                var tvShows = if (provider is FilterableProvider && languageFilter != "all") {
+                Log.d("TvShowsViewModel", "getTvShows: provider=${provider.name}, isFilterable=${provider is FilterableProvider}, languageFilter=$languageFilter, genreId=$genreId")
+                var tvShows = if (genreId != null && GenreFilter.isSupported(provider.name)) {
+                    Log.d("TvShowsViewModel", "getTvShows: using GENRE filter id=$genreId")
+                    ParentalControlUtils.filterItems(
+                        provider.getGenre(genreId!!, 1).shows
+                    ).filterIsInstance<TvShow>()
+                } else if (provider is FilterableProvider && languageFilter != "all") {
                     Log.d("TvShowsViewModel", "getTvShows: using FILTERED with language=$languageFilter")
                     ParentalControlUtils.filterItems(
                         provider.getFilteredTvShows(languageFilter)
@@ -154,7 +175,11 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
                 _state.emit(State.LoadingMore)
                 try {
                     val provider = UserPreferences.currentProvider ?: return@launch
-                    var tvShows = if (provider is FilterableProvider && languageFilter != "all") {
+                    var tvShows = if (genreId != null && GenreFilter.isSupported(provider.name)) {
+                        ParentalControlUtils.filterItems(
+                            provider.getGenre(genreId!!, page + 1).shows
+                        ).filterIsInstance<TvShow>()
+                    } else if (provider is FilterableProvider && languageFilter != "all") {
                         ParentalControlUtils.filterItems(
                             provider.getFilteredTvShows(languageFilter, page + 1)
                         ).filterIsInstance<TvShow>()

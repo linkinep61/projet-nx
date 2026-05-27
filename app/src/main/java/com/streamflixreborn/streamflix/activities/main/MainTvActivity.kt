@@ -383,6 +383,22 @@ class MainTvActivity : FragmentActivity() {
             handled
         }
 
+        // 2026-05-26 : re-clic sur Films ou Séries → ouvre le filtre genre TMDB.
+        // Pas d'icône supplémentaire dans la sidebar, juste un double-clic.
+        binding.navMain.setOnItemReselectedListener { menuItem ->
+            when (menuItem.itemId) {
+                R.id.movies, R.id.tv_shows -> {
+                    if (com.streamflixreborn.streamflix.utils.GenreFilter.isSupported(
+                            UserPreferences.currentProvider?.name
+                        )
+                    ) {
+                        showGenreFilterPicker()
+                    }
+                }
+            }
+            true
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             binding.navMainFragment.isFocusedByDefault = true
         }
@@ -640,6 +656,35 @@ class MainTvActivity : FragmentActivity() {
             .show()
     }
 
+    /** 2026-05-26 : filtre par genre TMDB (Action, Comédie, Drame…).
+     *  Sauve le genre PAR provider et notifie pour rafraîchir Films/Séries. */
+    fun showGenreFilterPicker() {
+        val provider = UserPreferences.currentProvider ?: return
+        val entries = com.streamflixreborn.streamflix.utils.GenreFilter.genres
+        val current = com.streamflixreborn.streamflix.utils.GenreFilter.get(provider.name)
+        // "Tous" en 1ère position (= pas de filtre), puis les genres
+        val labels = arrayOf("Tous les genres") + entries.map { it.name }.toTypedArray()
+        val currentIdx = if (current == null) 0 else entries.indexOfFirst { it.id == current.id } + 1
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Filtrer par genre")
+            .setSingleChoiceItems(labels, currentIdx.coerceAtLeast(0)) { dlg, idx ->
+                val newGenre = if (idx == 0) null else entries[idx - 1]
+                val changed = newGenre?.id != current?.id
+                if (changed) {
+                    com.streamflixreborn.streamflix.utils.GenreFilter.set(provider.name, newGenre)
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                    Toast.makeText(
+                        applicationContext,
+                        if (newGenre != null) "Genre : ${newGenre.name}" else "Genre : tous",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                dlg.dismiss()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
     /** 2026-05-12 (user "quand on clique TV, menu déroulant avec catégories") :
      *  ouvre un AlertDialog listant toutes les catégories disponibles pour le type
      *  donné (LIVE = home, MOVIE = movies, SERIES = tv_shows). Sur sélection,
@@ -858,6 +903,8 @@ class MainTvActivity : FragmentActivity() {
         //   providers TMDB compatibles (Cloudstream).
         binding.navMain.menu.findItem(R.id.catalog_filter_menu)?.isVisible =
             com.streamflixreborn.streamflix.utils.CatalogFilter.isSupported(provider.name)
+        // 2026-05-26 : filtre genre TMDB = re-clic sur Films/Séries
+        // (pas d'item sidebar, géré par setOnItemReselectedListener)
     }
 
     /** V2 : picker groupe/langue pour WiTV v2.
