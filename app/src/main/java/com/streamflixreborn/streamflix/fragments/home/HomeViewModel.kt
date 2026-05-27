@@ -402,7 +402,12 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         // provider, on ne le cancel pas — on le laisse finir.
         val newProviderKey = UserPreferences.currentProvider?.name
         val activeJob = homeJob
-        if (activeJob != null && activeJob.isActive && currentlyLoadingProvider == newProviderKey) {
+        // 2026-05-27 : AnimeSama = TOUJOURS relancer (CF Turnstile exige un
+        // cycle frais à chaque ouverture, le job précédent peut avoir émis du
+        // vieux cache ou un état CF périmé). Les autres providers gardent le
+        // skip pour éviter les cancel-boucles (Cloudflare lent).
+        val forceRelaunch = newProviderKey == "AnimeSama"
+        if (!forceRelaunch && activeJob != null && activeJob.isActive && currentlyLoadingProvider == newProviderKey) {
             android.util.Log.d("HomeViewModel", "getHome() skip — job déjà actif pour $newProviderKey")
             return
         }
@@ -453,12 +458,17 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         // streams soient pré-cachés → lancement lent.
         val warmUpPending = provider is WarmUpCapable && !provider.isWarmUpDone
 
-        if (!cachedCategories.isNullOrEmpty() && !warmUpPending) {
+        // 2026-05-26 : AnimeSama a un Cloudflare Turnstile — ne PAS servir le
+        // cache avant le CF bypass, sinon le captcha pop 30s+ après l'ouverture.
+        // On montre le spinner Loading et getHome() fait le bypass en premier.
+        val needsCfCheck = provider.name == "AnimeSama"
+        if (!needsCfCheck && !cachedCategories.isNullOrEmpty() && !warmUpPending) {
             _state.emit(State.SuccessLoading(cachedCategories))
             Log.d("HomeBoot", "[${provider.name}] emit cache +${System.currentTimeMillis() - t0}ms")
         } else {
             _state.emit(State.Loading)
             if (warmUpPending) Log.d("HomeBoot", "[${provider.name}] warm-up pending → Loading (cache ignoré)")
+            if (needsCfCheck) Log.d("HomeBoot", "[${provider.name}] CF check pending → Loading (cache ignoré)")
         }
 
         loadUserDataCache(provider)
@@ -479,7 +489,8 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
             // Providers normaux → 5 min
             else -> 5 * 60 * 1000L
         }
-        if (!warmUpPending && !cachedCategories.isNullOrEmpty() && cacheAgeMs != null && cacheAgeMs < cacheTtlMs) {
+        // 2026-05-26 : AnimeSama = jamais skip réseau (CF Turnstile check).
+        if (!needsCfCheck && !warmUpPending && !cachedCategories.isNullOrEmpty() && cacheAgeMs != null && cacheAgeMs < cacheTtlMs) {
             Log.d("HomeBoot", "[${provider.name}] SKIP network (cache age ${cacheAgeMs / 1000}s, TTL ${cacheTtlMs / 60000}min) total=${System.currentTimeMillis() - t0}ms")
             return
         }

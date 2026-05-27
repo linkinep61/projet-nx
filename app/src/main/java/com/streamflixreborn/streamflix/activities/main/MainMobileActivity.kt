@@ -29,6 +29,7 @@ import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.activities.tools.BypassWebViewActivity
 import com.streamflixreborn.streamflix.databinding.ActivityMainMobileBinding
 import com.streamflixreborn.streamflix.fragments.player.PlayerMobileFragment
+import com.streamflixreborn.streamflix.providers.AnimeSamaProvider
 import com.streamflixreborn.streamflix.providers.WiflixProvider
 import com.streamflixreborn.streamflix.providers.FranimeProvider
 import com.streamflixreborn.streamflix.providers.Provider
@@ -106,6 +107,7 @@ class MainMobileActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
 
         WiflixProvider.init(this)
+        AnimeSamaProvider.init(this)
         // 2026-05-16 : DessinAnime utilise aussi WebViewResolver pour bypass
         // le JS Detection Challenge Cloudflare. init avec context activité
         // car le dialog de captcha visible doit pouvoir s'attacher au theme.

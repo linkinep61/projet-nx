@@ -1,8 +1,10 @@
 package com.streamflixreborn.streamflix.providers
 
+import android.content.Context
 import android.util.Log
 import com.tanasi.retrofit_jsoup.converter.JsoupConverterFactory
 import com.streamflixreborn.streamflix.BuildConfig
+import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.adapters.AppAdapter
 import com.streamflixreborn.streamflix.extractors.Extractor
 import com.streamflixreborn.streamflix.models.Category
@@ -15,11 +17,13 @@ import com.streamflixreborn.streamflix.models.Show
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
+import com.streamflixreborn.streamflix.utils.NetworkClient
 import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.TMDb3.original
 import com.streamflixreborn.streamflix.utils.TMDb3.w500
 import com.streamflixreborn.streamflix.utils.TMDb3.w1280
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import com.streamflixreborn.streamflix.utils.WebViewResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -67,7 +71,9 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
     //   disque cache. jsDelivr sert le MÊME fichier (vérifié 200, taille identique)
     //   depuis un CDN global à cache immutable → 1er chargement rapide et fiable.
     private const val IMG_BASE = "https://cdn.jsdelivr.net/gh/Anime-Sama/IMG@img/contenu/"
-    private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    // DOIT être identique à NetworkClient.USER_AGENT pour que le cf_clearance
+    // cookie obtenu par le WebView (bypass Cloudflare) soit accepté par OkHttp.
+    private val USER_AGENT get() = NetworkClient.USER_AGENT
 
     /**
      * Réécrit les URLs d'images lentes vers le CDN jsDelivr.
@@ -134,8 +140,11 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         return slugs
     }
 
-    private val client = OkHttpClient.Builder()
+    // Basé sur NetworkClient.default pour partager le cookie jar global
+    // (WebView CF bypass → cf_clearance disponible en OkHttp)
+    private val client = NetworkClient.default.newBuilder()
         .dns(DnsResolver.doh)
+        .cache(null) // 2026-05-26 : PAS de cache HTTP pour AnimeSama — CF Turnstile
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         // Preserve POST method & body on redirects (site may change domain)
@@ -162,19 +171,151 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         .readTimeout(5, TimeUnit.SECONDS)
         .build()
 
+    // --- Cloudflare bypass VISIBLE (le Turnstile d'AnimeSama exige interaction user) ---
+    private var webViewResolver: WebViewResolver? = null
+
+    private val challengeKeywords = listOf(
+        "Just a moment...", "cf-browser-verification", "challenge-running",
+        "Checking your browser", "cf-turnstile"
+    )
+
+    private fun getResolver(): WebViewResolver {
+        return webViewResolver ?: WebViewResolver(StreamFlixApp.instance).also {
+            webViewResolver = it
+        }
+    }
+
+    fun init(context: Context) {
+        webViewResolver = WebViewResolver(context)
+    }
+
+    // Bypass CF UNE SEULE FOIS (visible) — l'user complète le Turnstile,
+    // le cookie cf_clearance se propage à OkHttp via CookieManager partagé.
+    @Volatile private var cfBypassDone = false
+    private val cfBypassMutex = Mutex()
+
+    private suspend fun ensureCfBypassed() {
+        if (cfBypassDone) return
+        // 2026-05-26 : supprimé le check isCurrentProvider qui bloquait le bypass
+        // (getHome n'est appelé QUE pour le provider actif, pas besoin de vérifier).
+        cfBypassMutex.withLock {
+            if (cfBypassDone) return
+            // Test OkHttp rapide : si le site répond sans captcha, on skip le dialog
+            try {
+                val testHtml = withContext(Dispatchers.IO) {
+                    val request = Request.Builder()
+                        .url(baseUrl)
+                        .header("User-Agent", USER_AGENT)
+                        .header("Referer", baseUrl)
+                        .build()
+                    client.newCall(request).execute().body?.string() ?: ""
+                }
+                val isChallenge = challengeKeywords.any { testHtml.contains(it, ignoreCase = true) }
+                if (!isChallenge && testHtml.length > 500) {
+                    Log.d(TAG, "[AnimeSama] Pas de captcha CF → bypass inutile")
+                    cfBypassDone = true
+                    return
+                }
+                Log.d(TAG, "[AnimeSama] Captcha CF détecté → dialog visible")
+            } catch (e: Exception) {
+                Log.d(TAG, "[AnimeSama] Test OkHttp échoué (${e.message}) → dialog visible")
+            }
+            // Le site a un captcha → dialog visible pour que l'user le complète
+            val html = getResolver().get(baseUrl, silent = false)
+            val cookies = android.webkit.CookieManager.getInstance().getCookie(baseUrl) ?: ""
+            val hasClearance = cookies.contains("cf_clearance")
+            val hasContent = html.contains("grabScroll") || html.contains("catalog-card") ||
+                             html.contains("fadeJours") || html.length > 5000
+            if (hasContent || hasClearance) {
+                Log.d(TAG, "[AnimeSama] Bypass CF RÉUSSI (${html.length} chars, clearance=$hasClearance)")
+                cfBypassDone = true
+            } else {
+                Log.w(TAG, "[AnimeSama] Bypass CF ÉCHOUÉ (${html.length} chars)")
+            }
+        }
+    }
+
+    // 2026-05-27 : cache désactivé — Cloudflare Turnstile rend le cache
+    // contre-productif (pages challenge cachées = épisodes sans lecture).
+    @Suppress("UNUSED_PARAMETER")
+    private fun getCachedDocument(url: String): Document? = null
+    @Suppress("UNUSED_PARAMETER")
+    private fun cacheDocument(url: String, doc: Document) { /* no-op */ }
+
+    /**
+     * 2026-05-26 : Reset complet de l'état CF + cache quand on quitte/revient
+     * sur le provider. À la réouverture, ensureCfBypassed() refait son test
+     * OkHttp : si le cookie est encore valide → pas de dialog ; sinon → dialog.
+     */
+    fun resetState() {
+        cfBypassDone = false
+        // 2026-05-26 : vider aussi le HomeCacheStore pour forcer un vrai getHome()
+        // au retour sur AnimeSama (sinon le HomeViewModel sert le cache périmé
+        // et ne déclenche jamais ensureCfBypassed → rien ne s'affiche).
+        try {
+            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
+            com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(ctx, this)
+        } catch (_: Exception) {}
+        Log.d(TAG, "[AnimeSama] State reset (cfBypass + documentCache + HomeCacheStore cleared)")
+    }
+
     private var serviceInitialized = false
 
     private var service: Service = Service.build(baseUrl)
 
-    private suspend fun fetchDocument(url: String): Document = withContext(Dispatchers.IO) {
-        val request = Request.Builder()
-            .url(url)
-            .header("User-Agent", USER_AGENT)
-            .header("Referer", baseUrl)
-            .build()
-        val response = client.newCall(request).execute()
-        val html = response.body?.string() ?: ""
-        Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+    private suspend fun fetchDocument(url: String): Document {
+        getCachedDocument(url)?.let { return it }
+
+        // 1) OkHttp (rapide si cookies CF déjà en place)
+        try {
+            val doc = withContext(Dispatchers.IO) {
+                val request = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", USER_AGENT)
+                    .header("Referer", baseUrl)
+                    .build()
+                val response = client.newCall(request).execute()
+                val html = response.body?.string() ?: ""
+                html to Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+            }
+            if (challengeKeywords.none { doc.first.contains(it, ignoreCase = true) } && doc.first.length > 500) {
+                cacheDocument(url, doc.second)
+                return doc.second
+            }
+            Log.d(TAG, "[AnimeSama] CF challenge détecté sur $url → bypass visible")
+        } catch (e: Exception) {
+            Log.d(TAG, "[AnimeSama] OkHttp échoué pour $url: ${e.message}")
+        }
+
+        // 2) Bypass CF visible (une seule fois — l'user complète le Turnstile)
+        ensureCfBypassed()
+
+        // 3) Retry OkHttp avec cookies CF propagés
+        try {
+            val doc = withContext(Dispatchers.IO) {
+                val request = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", USER_AGENT)
+                    .header("Referer", baseUrl)
+                    .build()
+                val response = client.newCall(request).execute()
+                val html = response.body?.string() ?: ""
+                html to Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+            }
+            if (challengeKeywords.none { doc.first.contains(it, ignoreCase = true) } && doc.first.length > 500) {
+                cacheDocument(url, doc.second)
+                return doc.second
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "[AnimeSama] OkHttp post-bypass échoué pour $url: ${e.message}")
+        }
+
+        // 4) Dernier recours : WebView direct sur cette URL
+        Log.d(TAG, "[AnimeSama] Dernier recours WebView direct pour $url")
+        val html = getResolver().get(url, silent = true)
+        val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+        if (html.length > 500) cacheDocument(url, doc)
+        return doc
     }
 
     private suspend fun fetchText(url: String): String = fetchTextWith(url, client)
@@ -216,6 +357,12 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
 
     override suspend fun getHome(): List<Category> = kotlinx.coroutines.coroutineScope {
         initializeService()
+        // 2026-05-26 : force re-check CF à chaque ouverture du home AnimeSama.
+        // Les cookies CF expirent → il faut refaire le test OkHttp (rapide si
+        // encore valide, dialog si expiré). Sans ça, cfBypassDone reste true
+        // même après expiration du cookie → requêtes échouent silencieusement.
+        cfBypassDone = false
+        ensureCfBypassed()
         // 2026-05-21 (user "fais 2 appels en parallèle pour que ça aille plus vite" +
         //   "y a plus le carrousel") : le carrousel TMDB tournait SÉQUENTIELLEMENT après
         //   le scrape et SANS timeout → home lent, et si l'appel TMDB traînait/échouait
@@ -274,7 +421,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                     val parentClass = h2.parent()?.className() ?: ""
                     // Section headers have parent with class "flex", card titles have parent "card-content"
                     if (!parentClass.contains("card-content")) {
-                        sectionTitle = h2.text().trim()
+                        sectionTitle = h2.text().replace("\\t", "").replace("\t", "").trim().replace("\\s+".toRegex(), " ")
                         break
                     }
                 }
@@ -375,32 +522,66 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             }
         }
 
-        // FEATURED: récupère le carrousel TMDB lancé EN PARALLÈLE au début (await).
-        //   Il a tourné pendant le scrape → ici on ne fait qu'attendre son résultat
-        //   (déjà prêt la plupart du temps), borné par le timeout interne de 4s.
-        // Attend le résultat TMDB max 5s après le scrape. L'appel TMDB tourne en
-        // parallèle du scrape donc en pratique il est souvent déjà prêt ici.
-        // Timeout interne = 5s, await = encore 5s → total max 10s mais le scrape
-        // prend lui-même 5-15s donc le TMDB a largement le temps.
+        // ── CARROUSEL NATIF AnimeSama ──
+        // 2026-05-26 : parse les slides .ak-slide du carrousel ak-carousel
+        // (titre, synopsis, bannière, slug). Zéro requête supplémentaire (même document).
+        // Fallback TMDB si le carrousel natif est vide (site a changé / CF bloqué).
+        val nativeCarousel = mutableListOf<TvShow>()
+        val carouselSlides = document.select(".ak-carousel .ak-slide")
+        val seenSlugs = mutableSetOf<String>()
+        for (slide in carouselSlides) {
+            val titleEl = slide.selectFirst("h2.ak-slide-title, h2, h3")
+            val slideTitle = titleEl?.text()?.trim() ?: continue
+
+            // Slug depuis le premier CTA (lien VOSTFR/VF)
+            val ctaHref = slide.selectFirst(".ak-slide-ctas a")?.attr("href") ?: ""
+            val slug = ctaHref.substringAfter("/catalogue/")
+                .split("/").firstOrNull()?.trim()?.removeSuffix("/") ?: continue
+            if (slug.isBlank() || !seenSlugs.add(slug)) continue
+
+            // Bannière = image dans .ak-slide-bg
+            val bannerImg = slide.selectFirst(".ak-slide-bg img")
+            val bannerUrl = bannerImg?.let { el ->
+                el.attr("src")?.takeIf { it.isNotBlank() }
+                    ?: el.attr("data-src")?.takeIf { it.isNotBlank() }
+            } ?: ""
+
+            // Synopsis
+            val synopsis = slide.selectFirst("p.ak-slide-synopsis, p")?.text()?.trim() ?: ""
+
+            // Genres (concaténés)
+            val genres = slide.select(".ak-slide-genres .ak-genre-tag")
+                .joinToString(", ") { it.text().trim() }
+
+            val overview = if (genres.isNotBlank() && synopsis.isNotBlank()) "$genres — $synopsis"
+                else genres.ifBlank { synopsis }
+
+            nativeCarousel.add(TvShow(
+                id = slug,
+                title = slideTitle,
+                overview = overview,
+                poster = optimizeImageUrl(bannerUrl, slug),
+                banner = bannerUrl.ifBlank { null },
+            ))
+        }
+        Log.d(TAG, "Native carousel: ${nativeCarousel.size} slides parsed")
+
+        // FEATURED : carrousel natif > TMDB > fallback scrape
         val trendingAnime = if (featuredDeferred != null) {
             try {
                 kotlinx.coroutines.withTimeoutOrNull(5_000L) { featuredDeferred.await() } ?: emptyList()
             } catch (_: Exception) { emptyList() }
         } else emptyList()
-        // 2026-05-22 (user "le carrousel AnimeSama n'apparaît pas du tout") : si le
-        //   featured TMDB revient vide (timeout / TMDB désactivé / échec), on bâtit
-        //   un carrousel de SECOURS depuis les items scrappés (poster utilisé en
-        //   bannière) — même approche que DessinAnime — pour que le carrousel soit
-        //   TOUJOURS présent. On crée des COPIES neuves (id identique mais objet
-        //   distinct) pour ne pas partager de référence avec les rangées (sinon
-        //   conflits d'itemType du FEATURED côté HomeViewModel).
-        val featuredList: List<TvShow> = trendingAnime.ifEmpty {
-            categories.flatMap { it.list }
-                .filterIsInstance<TvShow>()
-                .filter { !it.id.startsWith("tmdb_anime_") }
-                .distinctBy { it.id }
-                .take(10)
-                .map { s -> TvShow(id = s.id, title = s.title, poster = s.poster, banner = s.poster ?: s.banner) }
+
+        val featuredList: List<TvShow> = nativeCarousel.ifEmpty {
+            trendingAnime.ifEmpty {
+                categories.flatMap { it.list }
+                    .filterIsInstance<TvShow>()
+                    .filter { !it.id.startsWith("tmdb_anime_") }
+                    .distinctBy { it.id }
+                    .take(10)
+                    .map { s -> TvShow(id = s.id, title = s.title, poster = s.poster, banner = s.poster ?: s.banner) }
+            }
         }
         if (featuredList.isNotEmpty()) {
             categories.add(0, Category(name = Category.FEATURED, list = featuredList))
@@ -650,11 +831,14 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
 
     override suspend fun getFilteredTvShows(language: String, page: Int): List<TvShow> {
         // "language" is reused as type filter: "serie" or "film"
+        // 2026-05-26 : filtre langue explicite (VF/VOSTFR/tous)
+        val explicitLang = com.streamflixreborn.streamflix.utils.GenreFilter.currentLang()
         return when (language) {
             "film" -> {
                 // Films only — from catalogue type=Film
                 try {
-                    val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
+                    val langParam = if (explicitLang != null) "&langue[]=$explicitLang" else ""
+                    val filmUrl = "${baseUrl}catalogue/?type[]=Film${langParam}&page=$page"
                     fetchDocument(filmUrl).select(".catalog-card").mapNotNull { card ->
                         val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
                         val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
@@ -666,10 +850,12 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 } catch (_: Exception) { emptyList() }
             }
             else -> {
-                // Series only — fetch Anime VOSTFR, exclude anything in the Film catalogue
+                // Series only — fetch Anime, exclude anything in the Film catalogue
+                // 2026-05-26 : utilise la langue explicite si choisie, sinon VOSTFR par défaut
                 try {
                     val filmSlugs = getFilmSlugs()
-                    val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=vostfr&page=$page"
+                    val langForSeries = explicitLang ?: "vostfr"
+                    val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=$langForSeries&page=$page"
                     fetchDocument(animeUrl).select(".catalog-card").mapNotNull { card ->
                         val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
                         val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
@@ -686,11 +872,14 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
 
     override suspend fun getFilteredMovies(language: String, page: Int): List<Movie> {
         // Fast path: single catalogue request per tab (no per-item probing)
+        // 2026-05-26 : filtre langue explicite (VF/VOSTFR/tous)
+        val explicitLang = com.streamflixreborn.streamflix.utils.GenreFilter.currentLang()
         return when (language) {
             "film" -> {
                 // Films only — from catalogue type=Film
                 try {
-                    val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
+                    val langParam = if (explicitLang != null) "&langue[]=$explicitLang" else ""
+                    val filmUrl = "${baseUrl}catalogue/?type[]=Film${langParam}&page=$page"
                     fetchDocument(filmUrl).select(".catalog-card").mapNotNull { card ->
                         val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
                         val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
@@ -702,10 +891,12 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 } catch (_: Exception) { emptyList() }
             }
             else -> {
-                // Series (Anime VF) — exclude anything in the Film catalogue
+                // Series (Anime) — exclude anything in the Film catalogue
+                // 2026-05-26 : utilise la langue explicite si choisie, sinon VF par défaut
                 try {
                     val filmSlugs = getFilmSlugs()
-                    val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=vf&page=$page"
+                    val langForSeries = explicitLang ?: "vf"
+                    val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=$langForSeries&page=$page"
                     fetchDocument(animeUrl).select(".catalog-card").mapNotNull { card ->
                         val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
                         val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
@@ -1449,18 +1640,35 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
     // ========== GENRE ==========
 
     override suspend fun getGenre(id: String, page: Int): Genre {
-        val url = "${baseUrl}catalogue/?genre[]=$id&type[]=Anime&type[]=Film&page=$page"
+        // 2026-05-27 : le serveur anime-sama attend les crochets encodés (%5B%5D)
+        // dans les noms de paramètres, sinon il ignore le filtre genre → 0 résultat.
+        val lang = com.streamflixreborn.streamflix.utils.GenreFilter.currentLang()
+        val langParam = if (lang != null) "&langue%5B%5D=$lang" else ""
+        val encodedGenre = java.net.URLEncoder.encode(id, "UTF-8")
+        // 2026-05-27 : PAS de type[] — le combiner avec genre[] restreint trop
+        // (ex: "Réincarnation / Transmigration" + type[]=Anime → 0 résultats).
+        // &search= requis par le backend (sinon le genre est ignoré).
+        val url = "${baseUrl}catalogue/?genre%5B%5D=$encodedGenre${langParam}&search=&page=$page"
         val document = fetchDocument(url)
         return Genre(
             id = id,
             name = id.replaceFirstChar { it.uppercase() },
+            // 2026-05-26 : émettre CHAQUE carte en Movie + TvShow pour que
+            // MoviesViewModel.filterIsInstance<Movie>() ET
+            // TvShowsViewModel.filterIsInstance<TvShow>() trouvent des résultats.
             shows = document.select(".catalog-card").mapNotNull { card ->
                 val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
                 val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
                     .split("/").firstOrNull() ?: return@mapNotNull null
                 val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
                 val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
-                TvShow(id = slug, title = title, poster = img)
+                slug to (title to img)
+            }.flatMap { (slug, pair) ->
+                val (title, poster) = pair
+                listOf(
+                    Movie(id = slug, title = title, poster = poster),
+                    TvShow(id = slug, title = title, poster = poster),
+                )
             },
         )
     }

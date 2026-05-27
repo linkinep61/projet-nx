@@ -197,15 +197,9 @@ class TvShowsMobileFragment : Fragment() {
             binding.ivIptvLanguage.setOnClickListener {
                 showIptvLanguageFilterPicker()
             }
-        } else if (com.streamflixreborn.streamflix.utils.GenreFilter.isSupported(provider?.name)) {
-            // 2026-05-26 : filtre genre TMDB
-            binding.llIptvActions.visibility = View.VISIBLE
-            binding.ivIptvCategories.visibility = View.VISIBLE
-            binding.ivIptvLanguage.visibility = View.GONE
-            binding.ivIptvCategories.setOnClickListener {
-                showGenreFilterPicker()
-            }
         } else {
+            // 2026-05-26 : pour les providers genre-supported (Cloudstream, AnimeSama…),
+            // le genre picker s'ouvre par re-clic sur le tab actif — pas d'icône.
             binding.llIptvActions.visibility = View.GONE
         }
     }
@@ -280,10 +274,39 @@ class TvShowsMobileFragment : Fragment() {
             .show()
     }
 
+    /** 2026-05-26 : filtre langue VF/VOSTFR pour AnimeSama */
+    private fun showAnimeSamaLanguagePicker() {
+        val provider = UserPreferences.currentProvider ?: return
+        val options = arrayOf(
+            "Toutes les langues" to null as String?,
+            "VF uniquement" to "vf",
+            "VOSTFR uniquement" to "vostfr",
+        )
+        val current = com.streamflixreborn.streamflix.utils.GenreFilter.getLang(provider.name)
+        val currentIdx = options.indexOfFirst { it.second == current }.coerceAtLeast(0)
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("Filtrer par langue")
+            .setSingleChoiceItems(options.map { it.first }.toTypedArray(), currentIdx) { dlg, idx ->
+                val newLang = options[idx].second
+                if (newLang != current) {
+                    com.streamflixreborn.streamflix.utils.GenreFilter.setLang(provider.name, newLang)
+                    viewModel.getTvShows()
+                    android.widget.Toast.makeText(
+                        requireContext(),
+                        if (newLang != null) "Langue : ${options[idx].first}" else "Langue : toutes",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                }
+                dlg.dismiss()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
     /** 2026-05-26 : filtre par genre TMDB (Action, Comédie…) pour les providers TMDB. */
     private fun showGenreFilterPicker() {
         val provider = UserPreferences.currentProvider ?: return
-        val entries = com.streamflixreborn.streamflix.utils.GenreFilter.genres
+        val entries = com.streamflixreborn.streamflix.utils.GenreFilter.genresForProvider()
         val current = com.streamflixreborn.streamflix.utils.GenreFilter.get(provider.name)
         val labels = arrayOf("Tous les genres") + entries.map { it.name }.toTypedArray()
         val currentIdx = if (current == null) 0 else entries.indexOfFirst { it.id == current.id } + 1
@@ -307,8 +330,12 @@ class TvShowsMobileFragment : Fragment() {
             .show()
     }
 
+    /** Track du tab actif pour détecter un re-clic → genre picker */
+    private var activeTab: android.widget.TextView? = null
+
     private fun initializeLanguageTabs() {
         val providerName = UserPreferences.currentProvider?.name ?: return
+        val genreSupported = com.streamflixreborn.streamflix.utils.GenreFilter.isSupported(providerName)
 
         if (viewModel.isTypeFilterable) {
             // Providers like AnimeSama: "Série" / "Film" tabs — reload from server on each tab
@@ -316,13 +343,24 @@ class TvShowsMobileFragment : Fragment() {
             binding.tabFr.text = "Série"
             binding.tabVostfr.text = "Film"
             selectTab(binding.tabFr, binding.tabVostfr)
+            activeTab = binding.tabFr
             binding.tabFr.setOnClickListener {
-                selectTab(binding.tabFr, binding.tabVostfr)
-                viewModel.setLanguageFilter("serie")
+                if (activeTab == binding.tabFr && genreSupported) {
+                    showGenreFilterPicker()
+                } else {
+                    selectTab(binding.tabFr, binding.tabVostfr)
+                    activeTab = binding.tabFr
+                    viewModel.setLanguageFilter("serie")
+                }
             }
             binding.tabVostfr.setOnClickListener {
-                selectTab(binding.tabVostfr, binding.tabFr)
-                viewModel.setLanguageFilter("film")
+                if (activeTab == binding.tabVostfr && genreSupported) {
+                    showGenreFilterPicker()
+                } else {
+                    selectTab(binding.tabVostfr, binding.tabFr)
+                    activeTab = binding.tabVostfr
+                    viewModel.setLanguageFilter("film")
+                }
             }
         } else if (viewModel.isFilterable) {
             // Language-filterable providers: "FR" / "VOSTFR" tabs
@@ -330,13 +368,24 @@ class TvShowsMobileFragment : Fragment() {
             binding.tabFr.text = "FR"
             binding.tabVostfr.text = "VOSTFR"
             selectTab(binding.tabFr, binding.tabVostfr)
+            activeTab = binding.tabFr
             binding.tabFr.setOnClickListener {
-                selectTab(binding.tabFr, binding.tabVostfr)
-                viewModel.setLanguageFilter("vf")
+                if (activeTab == binding.tabFr && genreSupported) {
+                    showGenreFilterPicker()
+                } else {
+                    selectTab(binding.tabFr, binding.tabVostfr)
+                    activeTab = binding.tabFr
+                    viewModel.setLanguageFilter("vf")
+                }
             }
             binding.tabVostfr.setOnClickListener {
-                selectTab(binding.tabVostfr, binding.tabFr)
-                viewModel.setLanguageFilter("vostfr")
+                if (activeTab == binding.tabVostfr && genreSupported) {
+                    showGenreFilterPicker()
+                } else {
+                    selectTab(binding.tabVostfr, binding.tabFr)
+                    activeTab = binding.tabVostfr
+                    viewModel.setLanguageFilter("vostfr")
+                }
             }
         }
     }

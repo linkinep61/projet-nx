@@ -115,12 +115,16 @@ class WebViewResolver(private val context: Context) {
                              cleanHtml.contains("TPost") || cleanHtml.contains("grid-item") ||
                              cleanHtml.contains("optnslst") || // Rilevamento server Cine24h (come da registro)
                              cleanHtml.contains("block-main") || cleanHtml.contains("mov-t") ||
-                             cleanHtml.contains("mov-list") || cleanHtml.contains("posterimg") // Wiflix
+                             cleanHtml.contains("mov-list") || cleanHtml.contains("posterimg") || // Wiflix
+                             cleanHtml.contains("grabScroll") || cleanHtml.contains("catalog-card") ||
+                             cleanHtml.contains("fadeJours") || cleanHtml.contains("anime-card-premium") // AnimeSama
 
             Log.d(TAG, "[WebView] Status -> Challenge: $isChallenge, Content: $hasContent, Clearance: $hasClearance, Polling: $pollingCount")
 
-            // Se rileviamo sblocco, chiudiamo tutto subito
-            if ((!isChallenge && hasContent && cleanHtml.length > 1000) || hasClearance) {
+            // 2026-05-26 : un ancien cookie cf_clearance PÉRIMÉ peut être présent
+            // alors que le challenge est toujours actif → ne PAS court-circuiter
+            // sur hasClearance si isChallenge=true (sinon le dialog ne s'affiche jamais).
+            if ((!isChallenge && hasContent && cleanHtml.length > 1000) || (hasClearance && !isChallenge)) {
                 Log.d(TAG, "[WebView] SUCCESS detected! Closing bypass.")
                 cookieManager.flush()
                 if (continuation.isActive) {
