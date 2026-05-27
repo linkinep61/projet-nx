@@ -41,6 +41,9 @@ object ProviderChangeNotifier {
     fun notifyProviderChanged() {
         _flow.tryEmit(Unit)
         purgePreviousProviderArtwork()
+        // 2026-05-26 : reset AnimeSama CF state + cache au changement de provider
+        // pour qu'à la réouverture, le contrôle CF soit refait proprement.
+        try { com.streamflixreborn.streamflix.providers.AnimeSamaProvider.resetState() } catch (_: Throwable) {}
     }
 
     /**

@@ -65,6 +65,9 @@ class ProviderViewHolder(
         }
         // Stop & release mini player before switching provider
         MiniPlayerController.stop()
+        // 2026-05-26 : vider le cache AnimeSama AVANT le restart activité
+        // pour forcer un vrai getHome() + CF bypass au retour.
+        try { com.streamflixreborn.streamflix.providers.AnimeSamaProvider.resetState() } catch (_: Throwable) {}
         UserPreferences.currentProvider = provider.provider
         com.streamflixreborn.streamflix.StreamFlixApp.instance
             .refreshProviderUrlAsync(provider.provider)

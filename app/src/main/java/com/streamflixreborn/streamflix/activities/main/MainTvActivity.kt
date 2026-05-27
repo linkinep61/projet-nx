@@ -25,6 +25,7 @@ import com.streamflixreborn.streamflix.databinding.ContentHeaderMenuMainTvBindin
 import com.streamflixreborn.streamflix.fragments.player.PlayerTvFragment
 import com.streamflixreborn.streamflix.ui.UpdateAppTvDialog
 import com.streamflixreborn.streamflix.providers.Provider
+import com.streamflixreborn.streamflix.providers.AnimeSamaProvider
 import com.streamflixreborn.streamflix.providers.WiflixProvider
 import com.streamflixreborn.streamflix.providers.FranimeProvider
 import com.streamflixreborn.streamflix.utils.AppLanguageManager
@@ -199,6 +200,7 @@ class MainTvActivity : FragmentActivity() {
         // ait l'occasion de save state). Seul step4 (nav + listeners) reste
         // déferré pour laisser le splash s'afficher.
         try { WiflixProvider.init(this) } catch (_: Throwable) {}
+        try { AnimeSamaProvider.init(this) } catch (_: Throwable) {}
         // 2026-05-16 : DessinAnime DÉSACTIVÉ (serveur dessinanime.cc instable).
         // try { DessinAnimeProvider.init(this) } catch (_: Throwable) {}
         try { FranimeProvider.init(this) } catch (_: Throwable) {}
@@ -386,12 +388,14 @@ class MainTvActivity : FragmentActivity() {
         // 2026-05-26 : re-clic sur Films ou Séries → ouvre le filtre genre TMDB.
         // Pas d'icône supplémentaire dans la sidebar, juste un double-clic.
         binding.navMain.setOnItemReselectedListener { menuItem ->
+            Log.d("MainTv", "RESELECT item=${menuItem.title} id=${menuItem.itemId} provider=${UserPreferences.currentProvider?.name}")
             when (menuItem.itemId) {
                 R.id.movies, R.id.tv_shows -> {
-                    if (com.streamflixreborn.streamflix.utils.GenreFilter.isSupported(
-                            UserPreferences.currentProvider?.name
-                        )
-                    ) {
+                    val supported = com.streamflixreborn.streamflix.utils.GenreFilter.isSupported(
+                        UserPreferences.currentProvider?.name
+                    )
+                    Log.d("MainTv", "Genre supported=$supported")
+                    if (supported) {
                         showGenreFilterPicker()
                     }
                 }
@@ -660,7 +664,11 @@ class MainTvActivity : FragmentActivity() {
      *  Sauve le genre PAR provider et notifie pour rafraîchir Films/Séries. */
     fun showGenreFilterPicker() {
         val provider = UserPreferences.currentProvider ?: return
-        val entries = com.streamflixreborn.streamflix.utils.GenreFilter.genres
+        showGenreFilterPickerInner(provider)
+    }
+
+    private fun showGenreFilterPickerInner(provider: com.streamflixreborn.streamflix.providers.Provider) {
+        val entries = com.streamflixreborn.streamflix.utils.GenreFilter.genresForProvider()
         val current = com.streamflixreborn.streamflix.utils.GenreFilter.get(provider.name)
         // "Tous" en 1ère position (= pas de filtre), puis les genres
         val labels = arrayOf("Tous les genres") + entries.map { it.name }.toTypedArray()
@@ -676,6 +684,34 @@ class MainTvActivity : FragmentActivity() {
                     Toast.makeText(
                         applicationContext,
                         if (newGenre != null) "Genre : ${newGenre.name}" else "Genre : tous",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                dlg.dismiss()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** 2026-05-26 : filtre langue VF/VOSTFR pour AnimeSama (TV). */
+    private fun showAnimeSamaLanguagePicker(provider: com.streamflixreborn.streamflix.providers.Provider) {
+        val options = arrayOf(
+            "Toutes les langues" to null as String?,
+            "VF uniquement" to "vf",
+            "VOSTFR uniquement" to "vostfr",
+        )
+        val current = com.streamflixreborn.streamflix.utils.GenreFilter.getLang(provider.name)
+        val currentIdx = options.indexOfFirst { it.second == current }.coerceAtLeast(0)
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Filtrer par langue")
+            .setSingleChoiceItems(options.map { it.first }.toTypedArray(), currentIdx) { dlg, idx ->
+                val newLang = options[idx].second
+                if (newLang != current) {
+                    com.streamflixreborn.streamflix.utils.GenreFilter.setLang(provider.name, newLang)
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                    Toast.makeText(
+                        applicationContext,
+                        if (newLang != null) "Langue : ${options[idx].first}" else "Langue : toutes",
                         Toast.LENGTH_SHORT
                     ).show()
                 }
