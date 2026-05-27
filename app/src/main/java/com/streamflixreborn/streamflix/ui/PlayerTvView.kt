@@ -119,8 +119,10 @@ class PlayerTvView @JvmOverloads constructor(
             return super.dispatchKeyEvent(event)
         }
 
-        if (controller.isVisible) return super.dispatchKeyEvent(event)
-
+        // 2026-05-26 : l'overlay « épisode suivant » a PRIORITÉ sur le
+        // controller. Avant, si le controller était encore visible (animation
+        // de fermeture) quand l'overlay apparaît, OK allait au controller
+        // (play/pause) au lieu du bouton « Lire ».
         if (isNextEpisodeOverlayActive) {
             if (event.keyCode == KeyEvent.KEYCODE_BACK) {
                 return super.dispatchKeyEvent(event)
@@ -135,6 +137,8 @@ class PlayerTvView @JvmOverloads constructor(
             }
             return true
         }
+
+        if (controller.isVisible) return super.dispatchKeyEvent(event)
 
         return when (event.keyCode) {
             // IPTV zapping: D-pad UP/DOWN changes channel when callbacks are set

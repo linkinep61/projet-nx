@@ -41,6 +41,7 @@ import kotlinx.coroutines.launch
 class SearchMobileFragment : Fragment() {
 
     private var hasAutoCleared409: Boolean = false
+    private var globalSearchScrollDone: Boolean = false
 
     private var _binding: FragmentSearchMobileBinding? = null
     private val binding get() = _binding!!
@@ -149,6 +150,7 @@ class SearchMobileFragment : Fragment() {
         SearchHistory.add(requireContext(), query)
 
         if (binding.swGlobalSearch.isChecked) {
+            globalSearchScrollDone = false
             val currentProvider = UserPreferences.currentProvider
             val currentLanguage = currentProvider?.language ?: "fr"
             val group = currentProvider?.let { Provider.getGroup(it) }
@@ -330,6 +332,13 @@ class SearchMobileFragment : Fragment() {
 
         appAdapter.submitList(allItems)
         appAdapter.setOnLoadMoreListener(null) // Desactivamos la carga infinita en la búsqueda global
+
+        // Scroll en haut lors de la 1ère émission de résultats (sinon DiffUtil
+        // insère les résultats progressifs entre les headers → vue poussée en bas)
+        if (!globalSearchScrollDone) {
+            globalSearchScrollDone = true
+            binding.rvSearch.post { binding.rvSearch.scrollToPosition(0) }
+        }
     }
     // ================================================================
 }

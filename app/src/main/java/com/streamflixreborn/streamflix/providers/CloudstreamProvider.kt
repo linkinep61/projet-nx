@@ -443,8 +443,13 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         }
         // Match contains AVEC année proche : "Mission: Impossible" vs "Mission Impossible 7"
         // (year ±2 obligatoire pour éviter de matcher un autre film du même franchise)
+        // 2026-05-26 : garde longueur — le titre court doit faire ≥50% du long,
+        // sinon "Faux" (4 chars) matche dans "Vrais voisins, faux amis" (24 chars).
         candidates.firstOrNull {
+            val shorter = minOf(it.normTitle.length, normQuery.length)
+            val longer  = maxOf(it.normTitle.length, normQuery.length)
             (it.normTitle.contains(normQuery) || normQuery.contains(it.normTitle))
+                && shorter >= longer / 2
                 && year != null && kotlin.math.abs(it.year - year) <= 2
         }?.let {
             tmdbToSubjectIdCache[cacheKey] = it.sid
@@ -459,12 +464,19 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         if (year != null) {
             val withinRange = candidates.filter { kotlin.math.abs(it.year - year) <= 5 }
             // Score : plus c'est petit, mieux c'est
-            fun titleScore(c: Candidate): Int = when {
-                c.normTitle == normQuery -> 0  // titre identique (devrait avoir matché plus haut)
-                c.normTitle.startsWith(normQuery) -> 1
-                normQuery.startsWith(c.normTitle) -> 2
-                c.normTitle.contains(normQuery) || normQuery.contains(c.normTitle) -> 3
-                else -> 10
+            // 2026-05-26 : garde longueur — le titre court doit faire ≥50% du long
+            // pour les niveaux 1-3 (startsWith/contains), sinon "Faux" matche "Vrais voisins faux amis".
+            fun titleScore(c: Candidate): Int {
+                val shorter = minOf(c.normTitle.length, normQuery.length)
+                val longer  = maxOf(c.normTitle.length, normQuery.length)
+                val lenOk   = shorter >= longer / 2
+                return when {
+                    c.normTitle == normQuery -> 0
+                    lenOk && c.normTitle.startsWith(normQuery) -> 1
+                    lenOk && normQuery.startsWith(c.normTitle) -> 2
+                    lenOk && (c.normTitle.contains(normQuery) || normQuery.contains(c.normTitle)) -> 3
+                    else -> 10
+                }
             }
             val best = withinRange.minByOrNull {
                 titleScore(it) * 100 + kotlin.math.abs(it.year - year)
@@ -1528,45 +1540,60 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             "k-drama", "drama-coreen" -> "KR"
             else -> null
         }
-        // 2026-05-07 : strict FR sauf K-Drama qui veut explicitement KR
-        val withFrLang: TMDb3.Params.WithBuilder<String>? =
-            if (originCountry == null) TMDb3.Params.WithBuilder("fr") else null
+        // 2026-05-26 : respecte le CatalogFilter (comme getMovies/getTvShows)
+        // au lieu de forcer "fr" en dur — sinon genres de niche (Musique, Western…) = vides.
+        val langFilter: TMDb3.Params.WithBuilder<String>? =
+            if (originCountry == null) csOriginalLanguageBuilder() else null
         return runCatching {
             val tmdbGenreId = id.toIntOrNull()
             val withOrigin: TMDb3.Params.WithBuilder<String>? = originCountry?.let {
                 TMDb3.Params.WithBuilder(it)
             }
+            // 2026-05-26 : passe withGenres à l'API TMDB au lieu de filtrer côté client.
+            // L'API renvoie directement les résultats du bon genre → beaucoup plus de résultats.
+            val genreFilterMovie: TMDb3.Params.WithBuilder<TMDb3.Genre.Movie>? =
+                tmdbGenreId?.let { gid ->
+                    TMDb3.Genre.Movie.entries.find { it.id == gid }
+                        ?.let { TMDb3.Params.WithBuilder(it) }
+                }
+            val genreFilterTv: TMDb3.Params.WithBuilder<TMDb3.Genre.Tv>? =
+                tmdbGenreId?.let { gid ->
+                    TMDb3.Genre.Tv.entries.find { it.id == gid }
+                        ?.let { TMDb3.Params.WithBuilder(it) }
+                }
             // Films
-            val movies = TMDb3.Discover.movie(
-                language = language, page = page,
-                withOriginCountry = withOrigin,
-                withOriginalLanguage = withFrLang,
-            ).results.let { all ->
-                if (tmdbGenreId != null) all.filter { it.genresIds.contains(tmdbGenreId) }
-                else all
-            }.map { m ->
-                Movie(
-                    id = m.id.toString(), title = m.title, overview = m.overview,
-                    released = m.releaseDate, rating = m.voteAverage.toDouble(),
-                    poster = m.posterPath?.w500, banner = m.backdropPath?.w1280,
-                )
-            }
+            val movies = if (genreFilterMovie != null || tmdbGenreId == null) {
+                TMDb3.Discover.movie(
+                    language = language, page = page,
+                    withOriginCountry = withOrigin,
+                    withOriginalLanguage = langFilter,
+                    withGenres = genreFilterMovie,
+                    sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
+                ).results.map { m ->
+                    Movie(
+                        id = m.id.toString(), title = m.title, overview = m.overview,
+                        released = m.releaseDate, rating = m.voteAverage.toDouble(),
+                        poster = m.posterPath?.w500, banner = m.backdropPath?.w1280,
+                    )
+                }
+            } else emptyList()  // genre ID existe côté TV mais pas Movie → skip
             // Séries TV
-            val tvShows = TMDb3.Discover.tv(
-                language = language, page = page,
-                withOriginCountry = withOrigin,
-                withOriginalLanguage = withFrLang,
-            ).results.let { all ->
-                if (tmdbGenreId != null) all.filter { it.genresIds.contains(tmdbGenreId) }
-                else all
-            }.map { t ->
-                TvShow(
-                    id = t.id.toString(), title = t.name, overview = t.overview,
-                    released = t.firstAirDate, rating = t.voteAverage.toDouble(),
-                    poster = t.posterPath?.w500, banner = t.backdropPath?.w1280,
-                )
-            }
-            // Tri par popularité (rating desc) façon Movix
+            val tvShows = if (genreFilterTv != null || tmdbGenreId == null) {
+                TMDb3.Discover.tv(
+                    language = language, page = page,
+                    withOriginCountry = withOrigin,
+                    withOriginalLanguage = langFilter,
+                    withGenres = genreFilterTv,
+                    sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
+                ).results.map { t ->
+                    TvShow(
+                        id = t.id.toString(), title = t.name, overview = t.overview,
+                        released = t.firstAirDate, rating = t.voteAverage.toDouble(),
+                        poster = t.posterPath?.w500, banner = t.backdropPath?.w1280,
+                    )
+                }
+            } else emptyList()  // genre ID existe côté Movie mais pas TV → skip
+            // Tri par popularité desc (les plus populaires en haut)
             val combined = (movies + tvShows).sortedByDescending {
                 when (it) {
                     is Movie -> it.rating ?: 0.0

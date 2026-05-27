@@ -40,6 +40,7 @@ import com.streamflixreborn.streamflix.providers.Provider
 class SearchTvFragment : Fragment() {
 
     private var hasAutoCleared409: Boolean = false
+    private var globalSearchScrollDone: Boolean = false
     private var _binding: FragmentSearchTvBinding? = null
     private val binding get() = _binding!!
 
@@ -170,6 +171,7 @@ class SearchTvFragment : Fragment() {
         SearchHistory.add(requireContext(), query)
 
         if (isGlobalSearchChecked) {
+            globalSearchScrollDone = false
             val currentProvider = UserPreferences.currentProvider
             val currentLanguage = currentProvider?.language ?: "fr"
             val group = currentProvider?.let { Provider.getGroup(it) }
@@ -405,5 +407,11 @@ class SearchTvFragment : Fragment() {
         binding.vgvSearch.setNumColumns(currentGridColumns) // La lista de categorías es una sola columna vertical
         appAdapter.submitList(categories)
         appAdapter.setOnLoadMoreListener(null)
+
+        // Scroll en haut lors de la 1ère émission (sinon résultats progressifs poussent la vue en bas)
+        if (!globalSearchScrollDone) {
+            globalSearchScrollDone = true
+            binding.vgvSearch.post { binding.vgvSearch.scrollToPosition(0) }
+        }
     }
 }

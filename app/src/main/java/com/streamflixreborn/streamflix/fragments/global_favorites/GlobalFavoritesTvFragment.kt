@@ -87,11 +87,23 @@ class GlobalFavoritesTvFragment : Fragment() {
             // 2026-05-24 : utiliser les types du HOME (TV_ITEM / MOBILE_ITEM), PAS
             //   les GRID_TV_ITEM qui sont faits pour une grille plate 8 colonnes.
 
-            // Films
-            movies.forEach { it.itemType = AppAdapter.Type.MOVIE_TV_ITEM }
+            // Films — injecter le providerName d'origine pour que le clic
+            // switch au bon provider (sinon la fiche s'ouvre sur le provider
+            // actif qui ne connaît pas forcément ce film → clic mort).
+            movies.forEach {
+                it.itemType = AppAdapter.Type.MOVIE_TV_ITEM
+                if (it.providerName.isNullOrBlank()) {
+                    it.providerName = GlobalFavorites.originByItemId[it.id]
+                }
+            }
 
             // Séries
-            tvShows.forEach { it.itemType = AppAdapter.Type.TV_SHOW_TV_ITEM }
+            tvShows.forEach {
+                it.itemType = AppAdapter.Type.TV_SHOW_TV_ITEM
+                if (it.providerName.isNullOrBlank()) {
+                    it.providerName = GlobalFavorites.originByItemId[it.id]
+                }
+            }
 
             // Saisons favorites
             val seasonFavs = com.streamflixreborn.streamflix.utils.SeasonFavorites.all().map { e ->

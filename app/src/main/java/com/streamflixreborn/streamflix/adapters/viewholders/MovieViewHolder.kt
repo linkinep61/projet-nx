@@ -345,14 +345,30 @@ class MovieViewHolder(
                         )
                         return@checkProviderAndRun
                     }
+                    // 2026-05-26 : clic film depuis le Cœur (favoris globaux) mobile →
+                    // navigation globale (le fragment favoris n'a pas d'actions directionnelles).
+                    val currentFragment = context.toActivity()?.getCurrentFragment()
+                    if (currentFragment is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
+                        if (isDramaOrAnimeProvider()) {
+                            findNavController().navigate(R.id.action_global_tv_show, Bundle().apply {
+                                putString("id", movie.id)
+                                putString("poster", movie.poster)
+                            })
+                        } else {
+                            findNavController().navigate(R.id.action_global_movie, Bundle().apply {
+                                putString("id", movie.id)
+                            })
+                        }
+                        return@checkProviderAndRun
+                    }
                     if (isDramaOrAnimeProvider()) {
-                        when (context.toActivity()?.getCurrentFragment()) {
+                        when (currentFragment) {
                             is HomeMobileFragment -> findNavController().navigate(HomeMobileFragmentDirections.actionHomeToTvShow(id = movie.id, poster = movie.poster))
                             is MovieMobileFragment -> findNavController().navigate(MovieMobileFragmentDirections.actionMovieToTvShow(id = movie.id, poster = movie.poster))
                             is TvShowMobileFragment -> findNavController().navigate(TvShowMobileFragmentDirections.actionTvShowToTvShow(id = movie.id, poster = movie.poster))
                         }
                     } else {
-                        when (context.toActivity()?.getCurrentFragment()) {
+                        when (currentFragment) {
                             is HomeMobileFragment -> {
                                 findNavController().navigate(HomeMobileFragmentDirections.actionHomeToMovie(id = movie.id))
                                 if (movie.itemType == AppAdapter.Type.MOVIE_CONTINUE_WATCHING_MOBILE_ITEM) {
@@ -444,8 +460,25 @@ class MovieViewHolder(
                         )
                         return@checkProviderAndRun
                     }
+                    // 2026-05-26 : clic film depuis le Cœur (favoris globaux) →
+                    // navigation globale (pas de direction spécifique au fragment).
+                    val currentFragment = context.toActivity()?.getCurrentFragment()
+                    if (currentFragment is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
+                        if (isDramaOrAnimeProvider()) {
+                            findNavController().navigate(R.id.action_global_tv_show, Bundle().apply {
+                                putString("id", movie.id)
+                                putString("poster", movie.poster)
+                                putString("banner", movie.banner)
+                            })
+                        } else {
+                            findNavController().navigate(R.id.action_global_movie, Bundle().apply {
+                                putString("id", movie.id)
+                            })
+                        }
+                        return@checkProviderAndRun
+                    }
                     if (isDramaOrAnimeProvider()) {
-                        when (context.toActivity()?.getCurrentFragment()) {
+                        when (currentFragment) {
                             is HomeTvFragment -> findNavController().navigate(HomeTvFragmentDirections.actionHomeToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
                             is MoviesTvFragment -> findNavController().navigate(MoviesTvFragmentDirections.actionMoviesToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
                             is GenreTvFragment -> findNavController().navigate(GenreTvFragmentDirections.actionGenreToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
@@ -455,7 +488,7 @@ class MovieViewHolder(
                             is PeopleTvFragment -> findNavController().navigate(PeopleTvFragmentDirections.actionPeopleToTvShow(id = movie.id, poster = movie.poster, banner = movie.banner))
                         }
                     } else {
-                        when (context.toActivity()?.getCurrentFragment()) {
+                        when (currentFragment) {
                             is HomeTvFragment -> {
                                 if (movie.itemType == AppAdapter.Type.MOVIE_CONTINUE_WATCHING_TV_ITEM) {
                                     findNavController().navigate(

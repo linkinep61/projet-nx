@@ -66,4 +66,7 @@
         android:title="Filtre"
         android:visible="false" />
 
+    <!-- 2026-05-26 : filtre genre TMDB = re-clic sur Films/Séries (pas d'item dédié).
+         Voir setOnItemReselectedListener dans MainTvActivity. -->
+
 </menu>
