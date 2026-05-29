@@ -264,6 +264,10 @@ abstract class Extractor {
             VkExtractor(),
         )
 
+        // 2026-05-27 : expose la liste des noms d'extracteurs pour le toggle UI.
+        fun allExtractorNames(): List<String> =
+            extractors.map { it.name }.distinct().sorted()
+
         // ── A: Extraction cache ─────────────────────────────────────────────
         // Memoise resolved Video objects by source link. Avoids replaying the full
         // pipeline (DNS → details → playback POST → AES decrypt → m3u8) when the user

@@ -539,8 +539,35 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                         settingsView.onServerFavoriteToggled?.invoke(item)
                     }
                 } else {
+                    // VOD server — cœur favori par provider (ExtractorToggleStore)
                     binding.root.alpha = 1.0f
-                    // Ne PAS toucher à ivSettingBan/Favorite ici — geré plus bas.
+                    val providerName = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name ?: ""
+                    val extName = (com.streamflixreborn.streamflix.utils.ExtractorRanker.resolveExtractorName(
+                        com.streamflixreborn.streamflix.models.Video.Server(id = item.id, name = item.name)
+                    ) ?: item.name).lowercase()
+                    if (providerName.isNotEmpty()) {
+                        val isFav = com.streamflixreborn.streamflix.utils.ExtractorToggleStore.isFavorite(extName, providerName)
+                        binding.ivSettingFavorite.visibility = View.VISIBLE
+                        binding.ivSettingFavorite.setImageResource(
+                            if (isFav) R.drawable.ic_favorite_enable else R.drawable.ic_favorite_disable
+                        )
+                        binding.ivSettingFavorite.imageTintList = android.content.res.ColorStateList.valueOf(
+                            if (isFav) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                        )
+                        binding.ivSettingFavorite.setOnClickListener {
+                            val nowFav = com.streamflixreborn.streamflix.utils.ExtractorToggleStore.toggleFavorite(extName, providerName)
+                            binding.ivSettingFavorite.setImageResource(
+                                if (nowFav) R.drawable.ic_favorite_enable else R.drawable.ic_favorite_disable
+                            )
+                            binding.ivSettingFavorite.imageTintList = android.content.res.ColorStateList.valueOf(
+                                if (nowFav) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                            )
+                            settingsView.refreshServerList()
+                        }
+                    } else {
+                        binding.ivSettingFavorite.visibility = View.GONE
+                    }
+                    binding.ivSettingBan.visibility = View.GONE
                 }
             } else {
                 binding.ivSettingDownload.visibility = View.GONE
@@ -603,7 +630,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                 // un Settings.Server IPTV — ma branche plus haut les a déjà mis
                 // VISIBLE. Sans ce check, la croix/cœur seraient GONE pour les
                 // Server IPTV.
-                if (!(item is Settings.Server && item.isIptv && item.channelKey != null)) {
+                if (!(item is Settings.Server)) {
                     binding.ivSettingFavorite.visibility = View.GONE
                     binding.ivSettingBan.visibility = View.GONE
                 }

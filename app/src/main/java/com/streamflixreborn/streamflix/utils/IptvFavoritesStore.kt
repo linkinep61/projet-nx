@@ -52,6 +52,19 @@ object IptvFavoritesStore {
             return vid.lowercase().trim()
         }
 
+        // Mon IPTV : ID interne contient sourceId::channelIdx, pas un nom.
+        // On délègue au provider pour résoudre la clé canonique (= nom de chaîne normalisé).
+        if (channelId.startsWith("myiptv-live::") || channelId.startsWith("myiptv-movie::")
+            || channelId.startsWith("myiptv-ep::") || channelId.startsWith("myiptv::")) {
+            val canonical = com.streamflixreborn.streamflix.providers.MyIptvProvider
+                .getCanonicalKeyForChannelId(channelId)
+            android.util.Log.d("IptvFavStore", "normalize myiptv: channelId='$channelId' canonical='$canonical'")
+            if (!canonical.isNullOrBlank()) return canonical
+            // Fallback : si cache pas chargé, utilise l'id complet (sera réconcilié après)
+            android.util.Log.w("IptvFavStore", "normalize myiptv FALLBACK (cache vide?) → raw id")
+            return channelId.lowercase().trim()
+        }
+
         // 2026-05-17 : 3BoxTV/BoxXtemus retiré du projet — bloc bxt:: supprimé.
 
         // 2026-05-15 (user "est-ce que les chaînes en favoris vont continuer

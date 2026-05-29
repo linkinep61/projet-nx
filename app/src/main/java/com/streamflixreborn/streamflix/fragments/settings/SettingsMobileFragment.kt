@@ -497,6 +497,11 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             true
         }
 
+        findPreference<Preference>("p_settings_extractor_toggle")?.setOnPreferenceClickListener {
+            showExtractorToggleDialog()
+            true
+        }
+
         findPreference<Preference>("p_scan_resolver_qr")?.setOnPreferenceClickListener {
             scanResolverQrLauncher.launch(Intent(requireContext(), QrScannerActivity::class.java))
             true
@@ -1495,5 +1500,96 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         findPreference<SwitchPreference>("KEEP_SCREEN_ON_WHEN_PAUSED")?.isChecked = UserPreferences.keepScreenOnWhenPaused
         findPreference<SwitchPreferenceCompat>("ENABLE_TMDB")?.isChecked = UserPreferences.enableTmdb
         updateParentalControlPreferenceState()
+    }
+
+    // 2026-05-27 : dialog pour activer/désactiver + cœur par provider.
+    private fun showExtractorToggleDialog() {
+        val store = com.streamflixreborn.streamflix.utils.ExtractorToggleStore
+        val allNames = store.allExtractorNames()
+        if (allNames.isEmpty()) return
+        val providerName = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name ?: ""
+        val disabled = store.getDisabled().toMutableSet()
+        val favorites = if (providerName.isNotEmpty()) store.getFavorites(providerName).toMutableSet() else mutableSetOf()
+
+        val listView = android.widget.ListView(requireContext())
+        val adapter = ExtractorToggleAdapter(requireContext(), allNames, disabled, favorites, providerName)
+        listView.adapter = adapter
+
+        val titleSuffix = if (providerName.isNotEmpty()) " — $providerName" else ""
+        android.app.AlertDialog.Builder(requireContext())
+            .setTitle("Gérer les sources (${allNames.size})$titleSuffix")
+            .setView(listView)
+            .setPositiveButton("OK") { _, _ ->
+                store.setDisabled(disabled)
+                if (providerName.isNotEmpty()) store.setFavorites(providerName, favorites)
+                val disCount = disabled.size
+                val favCount = favorites.size
+                val msg = buildString {
+                    if (disCount > 0) append("$disCount désactivée${if (disCount > 1) "s" else ""}")
+                    if (favCount > 0) {
+                        if (disCount > 0) append(" · ")
+                        append("$favCount favori${if (favCount > 1) "s" else ""}")
+                    }
+                    if (disCount == 0 && favCount == 0) append("Toutes les sources activées")
+                }
+                android.widget.Toast.makeText(requireContext(), msg, android.widget.Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Annuler", null)
+            .setNeutralButton("Tout réinitialiser") { _, _ ->
+                store.setDisabled(emptySet())
+                if (providerName.isNotEmpty()) store.setFavorites(providerName, emptySet())
+                android.widget.Toast.makeText(requireContext(), "Sources réinitialisées", android.widget.Toast.LENGTH_SHORT).show()
+            }
+            .show()
+    }
+
+    /**
+     * Adapter pour la liste des extracteurs : checkbox activé/désactivé + cœur favori.
+     */
+    private class ExtractorToggleAdapter(
+        private val ctx: android.content.Context,
+        private val names: List<String>,
+        private val disabled: MutableSet<String>,
+        private val favorites: MutableSet<String>,
+        private val providerName: String,
+    ) : android.widget.BaseAdapter() {
+        override fun getCount() = names.size
+        override fun getItem(pos: Int) = names[pos]
+        override fun getItemId(pos: Int) = pos.toLong()
+
+        override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View {
+            val view = convertView ?: android.view.LayoutInflater.from(ctx)
+                .inflate(com.streamflixreborn.streamflix.R.layout.item_extractor_toggle, parent, false)
+            val cb = view.findViewById<android.widget.CheckBox>(com.streamflixreborn.streamflix.R.id.cb_enabled)
+            val heart = view.findViewById<android.widget.ImageView>(com.streamflixreborn.streamflix.R.id.iv_favorite)
+            val nameLower = names[position].lowercase()
+
+            cb.setOnCheckedChangeListener(null)
+            cb.text = names[position]
+            cb.isChecked = nameLower !in disabled
+            cb.setOnCheckedChangeListener { _, isChecked ->
+                if (isChecked) disabled.remove(nameLower) else disabled.add(nameLower)
+            }
+
+            if (providerName.isNotEmpty()) {
+                heart.visibility = android.view.View.VISIBLE
+                updateHeartIcon(heart, nameLower in favorites)
+                heart.setOnClickListener {
+                    if (nameLower in favorites) favorites.remove(nameLower) else favorites.add(nameLower)
+                    updateHeartIcon(heart, nameLower in favorites)
+                }
+            } else {
+                heart.visibility = android.view.View.GONE
+            }
+            return view
+        }
+
+        private fun updateHeartIcon(iv: android.widget.ImageView, isFav: Boolean) {
+            iv.setImageResource(
+                if (isFav) com.streamflixreborn.streamflix.R.drawable.ic_favorite_enable
+                else com.streamflixreborn.streamflix.R.drawable.ic_favorite_disable
+            )
+            iv.alpha = if (isFav) 1.0f else 0.4f
+        }
     }
 }

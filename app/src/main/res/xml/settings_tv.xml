@@ -8,6 +8,17 @@
         android:widgetLayout="@layout/preference_widget_chevron">
 
         <PreferenceCategory
+            android:key="pc_extractor_management"
+            android:title="Sources vidéo">
+
+            <Preference
+                android:key="p_settings_extractor_toggle"
+                android:title="Gérer les sources"
+                android:summary="Activer/désactiver les extracteurs vidéo, mettre en favori" />
+
+        </PreferenceCategory>
+
+        <PreferenceCategory
             android:key="pc_provider_settings"
             android:title="@string/settings_category_provider_title">
 

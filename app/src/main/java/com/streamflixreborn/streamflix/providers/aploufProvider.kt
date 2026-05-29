@@ -19,8 +19,14 @@ import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
+import com.streamflixreborn.streamflix.utils.TitleNormalizer
+import com.streamflixreborn.streamflix.utils.TmdbUtils
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.launch
+import android.util.Log
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.ResponseBody
@@ -31,7 +37,7 @@ import retrofit2.http.GET
 import retrofit2.http.Query
 import retrofit2.http.Url
 
-object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
+object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, ProgressiveServersProvider {
 
     override val name = "aplouf"
 
@@ -372,7 +378,95 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // 2026-05-27 : Backups Movix + Cloudstream (user "ajoute wiflix et
+    //   frenchstream en backup pour tous les providers"). aplouf = scraper
+    //   natif iframe, pas de tmdbId → résolution TMDB par titre/année.
+    // ─────────────────────────────────────────────────────────────────────
+
+    private suspend fun resolveAploufTmdbId(videoType: Video.Type): Int? = runCatching {
+        val title = when (videoType) {
+            is Video.Type.Movie -> videoType.title
+            is Video.Type.Episode -> videoType.tvShow.title
+        }
+        val cleanTitle = TitleNormalizer.cleanForTmdbSearch(title).ifBlank { title }
+        val year = when (videoType) {
+            is Video.Type.Movie -> videoType.releaseDate.takeIf { it.isNotBlank() }?.take(4)?.toIntOrNull()
+            is Video.Type.Episode -> videoType.tvShow.releaseDate?.take(4)?.toIntOrNull()
+        }
+        val tmdbItem: Any? = when (videoType) {
+            is Video.Type.Movie -> TmdbUtils.getMovie(cleanTitle, year, "fr-FR")
+            is Video.Type.Episode -> TmdbUtils.getTvShow(cleanTitle, year, "fr-FR")
+        }
+        when (tmdbItem) {
+            is Movie -> tmdbItem.id.toIntOrNull()
+            is TvShow -> tmdbItem.id.toIntOrNull()
+            else -> null
+        }
+    }.getOrNull()
+
+    private suspend fun fetchAploufMovixBackup(tmdbId: Int, videoType: Video.Type): List<Video.Server> = runCatching {
+        val movixVideoType = if (videoType is Video.Type.Episode)
+            videoType.copy(tvShow = videoType.tvShow.copy(id = "$tmdbId"))
+        else videoType
+        val movixId = when (videoType) {
+            is Video.Type.Movie -> "$tmdbId"
+            is Video.Type.Episode -> "$tmdbId-s${videoType.season.number}e${videoType.number}"
+        }
+        MovixProvider.getServers(movixId, movixVideoType)
+            .map { srv -> srv.copy(id = "movix_backup__${srv.id}") }
+    }.getOrNull().orEmpty()
+
+    private suspend fun fetchAploufCloudstreamBackup(tmdbId: Int, videoType: Video.Type): List<Video.Server> = runCatching {
+        val csId = when (videoType) {
+            is Video.Type.Movie -> "$tmdbId"
+            is Video.Type.Episode -> "$tmdbId:${videoType.season.number}:${videoType.number}"
+        }
+        val csVideoType = if (videoType is Video.Type.Episode)
+            videoType.copy(tvShow = videoType.tvShow.copy(id = "$tmdbId"))
+        else videoType
+        CloudstreamProvider.getServers(csId, csVideoType)
+            .map { srv -> srv.copy(id = "cs_backup__${srv.id}", name = "Cloudstream — ${srv.name}") }
+    }.getOrNull().orEmpty()
+
+    override fun getServersProgressive(
+        id: String, videoType: Video.Type,
+    ): Flow<List<Video.Server>> = channelFlow {
+        initializeService()
+        // Natif : part tout de suite.
+        launch {
+            try {
+                val native = getServers(id, videoType)
+                if (native.isNotEmpty()) send(native)
+            } catch (e: Exception) { Log.w("aplouf", "Progressive native failed: ${e.message}") }
+        }
+        // Backups : après résolution tmdbId, lancés en parallèle.
+        launch {
+            val tid = resolveAploufTmdbId(videoType) ?: return@launch
+            launch {
+                try { val mx = fetchAploufMovixBackup(tid, videoType); if (mx.isNotEmpty()) send(mx) }
+                catch (e: Exception) { Log.w("aplouf", "Progressive Movix failed: ${e.message}") }
+            }
+            launch {
+                try { val cs = fetchAploufCloudstreamBackup(tid, videoType); if (cs.isNotEmpty()) send(cs) }
+                catch (e: Exception) { Log.w("aplouf", "Progressive CS failed: ${e.message}") }
+            }
+        }
+    }
+
     override suspend fun getVideo(server: Video.Server): Video {
+        // Délégation backups
+        if (server.id.startsWith("movix_backup__")) {
+            val original = server.copy(id = server.id.removePrefix("movix_backup__"))
+            return try { MovixProvider.getVideo(original) }
+            catch (e: Exception) { Log.w("aplouf", "Movix getVideo failed: ${e.message}"); Video(source = original.src) }
+        }
+        if (server.id.startsWith("cs_backup__")) {
+            val original = server.copy(id = server.id.removePrefix("cs_backup__"))
+            return try { CloudstreamProvider.getVideo(original) }
+            catch (e: Exception) { Log.w("aplouf", "CS getVideo failed: ${e.message}"); Video(source = original.src) }
+        }
+
         val video = Extractor.extract(server.src)
 
         return video

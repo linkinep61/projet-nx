@@ -51,6 +51,14 @@ object ExtractorRanker {
     //   "prouvé qui marche > inconnu".
     private const val PROVEN_BONUS = 15
 
+    // 2026-05-27 : bonus qualité vidéo (user "les serveurs 1080p/720p en premier").
+    // Ajouté au score pour que les hautes résolutions remontent dans le picker.
+    // Les noms de serveurs contiennent souvent "1080p", "720p", "4K", "HD", etc.
+    private const val QUALITY_4K = 30
+    private const val QUALITY_1080P = 20
+    private const val QUALITY_720P = 10
+    // 480p/SD/sans mention = 0 (pas de bonus)
+
     // 2026-05-21 : Papadustream natif → score fixe -100 (early return dans computeScore).
     // Ses sources captcha Cloudflare passent TOUJOURS en dernier (juste au-dessus
     // des ISP-blocked à -200). Tout backup sain passe devant.
@@ -253,13 +261,21 @@ object ExtractorRanker {
     fun rankServers(servers: List<Video.Server>): List<Video.Server> {
         if (servers.size <= 1) return servers
 
+        // 2026-05-27 : filtre les extracteurs désactivés manuellement par l'user.
+        val disabled = ExtractorToggleStore.getDisabled()
+        val filtered = if (disabled.isEmpty()) servers else servers.filter { server ->
+            val extName = resolveExtractorName(server)?.lowercase()
+            extName == null || extName !in disabled  // inconnu = on garde (sécurité)
+        }
+        if (filtered.isEmpty()) return servers  // sécurité : si tout filtré, on garde tout
+
         // Précalcule le mapping name → failureCount pour éviter de re-parser
         // le JSON à chaque comparaison.
         val failureMap: Map<String, Int> = ExtractorFailureTracker.getFailures()
             .associate { it.name to it.count }
 
         // Score chaque server une fois.
-        val scored = servers.map { server -> ScoredServer(server, computeScore(server, failureMap)) }
+        val scored = filtered.map { server -> ScoredServer(server, computeScore(server, failureMap)) }
 
         // Log pour debug (visible dans le rapport bug aussi).
         if (Log.isLoggable(TAG, Log.DEBUG)) {
@@ -301,18 +317,26 @@ object ExtractorRanker {
         val nameLower = server.name.lowercase()
         val srcLower = server.src.lowercase()
 
-        // ─── Pénalité ISP-block : force en bas de liste ───
+        // 2026-05-27 : check favori AVANT les pénalités ISP/captcha.
+        // Un cœur supplante TOUT le tri automatique (user : "si on met un cœur
+        // c'est définitif, ça sera toujours les cœurs qui seront lancés en premier").
+        val currentProviderName = UserPreferences.currentProvider?.name ?: ""
+        val earlyExtName = (resolveExtractorName(server) ?: server.name).lowercase()
+        val hasFavorite = currentProviderName.isNotEmpty() &&
+            ExtractorToggleStore.isFavorite(earlyExtName, currentProviderName)
+
+        // ─── Pénalité ISP-block : force en bas de liste (SAUF si cœur) ───
         val isFrenchIspBlocked = FRENCH_ISP_BLOCKED_PATTERNS.any { p ->
             nameLower.contains(p) || srcLower.contains(p)
         }
-        if (isFrenchIspBlocked) return -200
+        if (isFrenchIspBlocked && !hasFavorite) return -200
 
-        // ─── Papadustream natif → TOUJOURS en dernier (juste au-dessus de ISP-blocked) ───
+        // ─── Papadustream natif → TOUJOURS en dernier (SAUF si cœur) ───
         // Ses sources sont gated par un captcha Cloudflare Turnstile, lentes et peu
         // fiables. On les force à score fixe -100 : tout backup sain passe devant,
         // même un VOSTFR ou un serveur jamais testé. Le captcha = ultime dernier recours.
         val isCaptchaGated = srcLower.contains("papadustream") || srcLower.contains("#xf=")
-        if (isCaptchaGated) return -100
+        if (isCaptchaGated && !hasFavorite) return -100
 
         // ─── Identifie l'extracteur ───
         // Stratégie hybride en 2 temps :
@@ -354,7 +378,48 @@ object ExtractorRanker {
         val hasProvenSamples = ExtractorLatencyTracker.getAvgMs(extractorName) != null
         val provenBonus = if (health >= 100 && failureCount == 0 && hasProvenSamples) PROVEN_BONUS else 0
 
-        return health + speedBias + provenBonus - failurePenalty - languagePenalty
+        // 2026-05-27 : bonus qualité vidéo (user "les 1080p/720p en premier").
+        val qualityBonus = computeQualityBonus(nameLower)
+
+        // 2026-05-27 : bonus favori par provider (user "cœur = définitif,
+        // toujours les cœurs lancés en premier"). +500 = supplante tout.
+        val favoriteBonus = if (hasFavorite) ExtractorToggleStore.FAVORITE_BONUS else 0
+
+        return health + speedBias + provenBonus + qualityBonus + favoriteBonus - failurePenalty - languagePenalty
+    }
+
+    /**
+     * Détecte la qualité vidéo depuis le nom du serveur et retourne un bonus.
+     * Les serveurs hautes résolutions remontent dans le picker.
+     *
+     *  Détection (ordre de priorité) :
+     *   - "4k" / "2160p" / "uhd"  → +30
+     *   - "1080p" / "fhd"         → +20
+     *   - "720p" / "hd" (seul)    → +10
+     *   - "480p" / "sd" / rien    → 0
+     *
+     *  Edge case : "HD" seul matche 720p (+10), mais "FHD" matche 1080p (+20).
+     *  "HD" dans "FHD" ou "UHD" ne matche PAS via le word-boundary \b.
+     */
+    private fun computeQualityBonus(nameLower: String): Int {
+        // 4K / UHD en premier (priorité max)
+        if (nameLower.contains("4k") || nameLower.contains("2160p") || nameLower.contains("uhd")) {
+            return QUALITY_4K
+        }
+        // 1080p / Full HD
+        if (nameLower.contains("1080p") || nameLower.contains("1080") || nameLower.contains("fhd")) {
+            return QUALITY_1080P
+        }
+        // 720p / HD (attention : "hd" seul, pas dans "fhd"/"uhd"/"vhd")
+        if (nameLower.contains("720p") || nameLower.contains("720")) {
+            return QUALITY_720P
+        }
+        // "HD" seul comme mot (pas dans FHD/UHD) → 720p
+        if (nameLower.contains(Regex("\\bhd\\b"))) {
+            return QUALITY_720P
+        }
+        // Pas de mention de qualité ou 480p/SD → pas de bonus
+        return 0
     }
 
     /**
@@ -420,7 +485,7 @@ object ExtractorRanker {
         // "Wrapper - Real" (hyphen). Si présent, prends le mot APRÈS le tiret.
         // Ex: "Movix — Voe (DEFAULT - HD)" → après le 1er " — " : "Voe (DEFAULT - HD)"
         // → puis on extrait le 1er mot : "Voe"
-        val emDashSplit = name.split(Regex("\\s[—–-]\\s"), limit = 2)
+        val emDashSplit = name.split(Regex("\\s[—–·-]\\s"), limit = 2)
         val candidate = if (emDashSplit.size == 2) emDashSplit[1] else name
 
         val first = candidate.split(Regex("[\\s\\-(\\[]"), limit = 2).firstOrNull()
@@ -449,10 +514,10 @@ object ExtractorRanker {
     }
 
     /** Résout le nom d'extracteur d'un serveur (même logique que computeScore). */
-    private fun resolveExtractorName(server: Video.Server): String? {
+    fun resolveExtractorName(server: Video.Server): String? {
         val nameBased = extractKeywordFromServerName(server.name)
         val urlBased = if (server.src.isNotBlank()) Extractor.identifyServiceName(server.src) else null
-        val isWrapped = server.name.contains(Regex("\\s[—–-]\\s"))
+        val isWrapped = server.name.contains(Regex("\\s[—–·-]\\s"))
         return when {
             isWrapped && nameBased != null -> nameBased
             urlBased != null -> urlBased

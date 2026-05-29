@@ -27,6 +27,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import retrofit2.Retrofit
@@ -47,13 +48,13 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     @Volatile var skipBackupsForBackupCall: Boolean = false
 
     override val name = "Movix"
-    override val defaultBaseUrl: String = "https://api.movix.tax/"  // v89 2026-05-20 : movix.cash mort, domaine actif = movix.tax
+    override val defaultBaseUrl: String = "https://api.movix.cloud/"  // v90 2026-05-27 : movix.tax mort NXDOMAIN, domaine actif = movix.cloud
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
             return cacheURL.ifEmpty { field }
         }
-    override val defaultPortalUrl: String = "https://movix.tax/"
+    override val defaultPortalUrl: String = "https://movix.cloud/"
     override val portalUrl: String = defaultPortalUrl
         get() {
             val cachePortalURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_PORTAL_URL)
@@ -64,7 +65,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     override val language = "fr"
     override val changeUrlMutex = Mutex()
 
-    private const val AUTO_UPDATE_URL = "https://movix.health/"
+    private const val AUTO_UPDATE_URL = "https://movix.online/"  // v90 2026-05-27 : portail d'adresses officiel (remplace movix.health mort)
 
     private lateinit var movixServiceInstance: MovixService
     private var serviceInitialized = false
@@ -793,6 +794,13 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
 
     override suspend fun onChangeUrl(forceRefresh: Boolean): String {
         changeUrlMutex.withLock {
+            // v90 2026-05-27 : purger le cache si l'ancien domaine mort est encore présent
+            val cachedUrl = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
+            if (cachedUrl.contains("movix.tax") || cachedUrl.contains("movix.cash") || cachedUrl.contains("movix.health")) {
+                Log.w("MovixProvider", "Purging stale cached domain: $cachedUrl")
+                UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_URL, "")
+                UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_PORTAL_URL, "")
+            }
             if (forceRefresh || UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
                 try {
                     val activeDomain = fetchActiveDomain()
@@ -1392,6 +1400,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         servers.addAll(fetchNativeMovixServers(id, videoType))
         if (!skipBackupsForBackupCall) {
             servers.addAll(fetchMovixBackups(id, videoType))
+            // 2026-05-28 : Wiflix + FrenchStream DIRECT scrape en complément
+            try { servers.addAll(fetchWiflixDirectBackup(id, videoType)) }
+            catch (e: Exception) { Log.d("MovixProvider", "Wiflix direct failed: ${e.message}") }
+            try { servers.addAll(fetchFrenchStreamDirectBackup(id, videoType)) }
+            catch (e: Exception) { Log.d("MovixProvider", "FS direct failed: ${e.message}") }
         }
 
         // Tri global : VF d'abord, VOSTFR ensuite, VO en dernier (toutes sources confondues)
@@ -1438,7 +1451,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                         val quality = player.quality?.takeIf { it.isNotBlank() } ?: "HD"
                                         val playerName = player.player?.takeIf { it.isNotBlank() }
                                             ?: guessPlayerName(url)
-                                        list.add(Video.Server(id = "fstream-$lang-${list.size}", name = "$playerName ($displayLang - $quality)", src = url))
+                                        list.add(Video.Server(id = "fstream-$lang-${list.size}", name = "FS · $playerName ($displayLang - $quality)", src = url))
                                     }
                                 }
                             }
@@ -1473,7 +1486,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                         val url = source.url ?: return@forEach
                                         if (url.isBlank()) return@forEach
                                         val playerName = source.name?.takeIf { it.isNotBlank() } ?: guessPlayerName(url)
-                                        list.add(Video.Server(id = "wiflix-$lang-${list.size}", name = "$playerName ($displayLang)", src = url))
+                                        list.add(Video.Server(id = "wiflix-$lang-${list.size}", name = "Wiflix · $playerName ($displayLang)", src = url))
                                     }
                                 }
                             }
@@ -1491,7 +1504,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     val url = link.url ?: return@forEach
                                     if (url.isBlank()) return@forEach
                                     val playerName = link.server?.replaceFirstChar { it.uppercase() } ?: guessPlayerName(url)
-                                    list.add(Video.Server(id = "cpasmal-$lang-${list.size}", name = "$playerName ($displayLang)", src = url))
+                                    list.add(Video.Server(id = "cpasmal-$lang-${list.size}", name = "CPasMal · $playerName ($displayLang)", src = url))
                                 }
                             }
                             list
@@ -1509,7 +1522,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     else link.language ?: ""
                                 val qualityLabel = link.quality?.substringBefore("/")?.trim() ?: "HD"
                                 val playerName = guessPlayerName(url)
-                                list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "$playerName - $qualityLabel ($lang)", src = url))
+                                list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "TMDb · $playerName - $qualityLabel ($lang)", src = url))
                             }
                             list
                         }
@@ -1588,7 +1601,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     if (url.isBlank()) return@forEach
                                     val quality = player.quality?.takeIf { it.isNotBlank() } ?: "HD"
                                     val playerName = player.player?.takeIf { it.isNotBlank() } ?: guessPlayerName(url)
-                                    list.add(Video.Server(id = "fstream-$lang-${list.size}", name = "$playerName ($displayLang - $quality)", src = url))
+                                    list.add(Video.Server(id = "fstream-$lang-${list.size}", name = "FS · $playerName ($displayLang - $quality)", src = url))
                                 }
                             }
                             list
@@ -1621,7 +1634,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     val url = source.url ?: return@forEach
                                     if (url.isBlank()) return@forEach
                                     val playerName = source.name?.takeIf { it.isNotBlank() } ?: guessPlayerName(url)
-                                    list.add(Video.Server(id = "wiflix-$lang-${list.size}", name = "$playerName ($displayLang)", src = url))
+                                    list.add(Video.Server(id = "wiflix-$lang-${list.size}", name = "Wiflix · $playerName ($displayLang)", src = url))
                                 }
                             }
                             list
@@ -1638,7 +1651,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     val url = link.url ?: return@forEach
                                     if (url.isBlank()) return@forEach
                                     val playerName = link.server?.replaceFirstChar { it.uppercase() } ?: guessPlayerName(url)
-                                    list.add(Video.Server(id = "cpasmal-$lang-${list.size}", name = "$playerName ($displayLang)", src = url))
+                                    list.add(Video.Server(id = "cpasmal-$lang-${list.size}", name = "CPasMal · $playerName ($displayLang)", src = url))
                                 }
                             }
                             list
@@ -1656,7 +1669,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     else link.language ?: ""
                                 val qualityLabel = link.quality?.substringBefore("/")?.trim() ?: "HD"
                                 val playerName = guessPlayerName(url)
-                                list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "$playerName - $qualityLabel ($lang)", src = url))
+                                list.add(Video.Server(id = "tmdbmovix-${list.size}", name = "TMDb · $playerName - $qualityLabel ($lang)", src = url))
                             }
                             list
                         }
@@ -1685,7 +1698,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     val displayLang = source.language?.uppercase() ?: "MULTI"
                                     val quality = source.quality ?: "HD"
                                     val playerName = if (!m3u8Url.isNullOrBlank()) "Darkibox HLS" else guessPlayerName(url)
-                                    list.add(Video.Server(id = "seriesdl-${list.size}", name = "$playerName ($displayLang - $quality)", src = url))
+                                    list.add(Video.Server(id = "seriesdl-${list.size}", name = "SériesDL · $playerName ($displayLang - $quality)", src = url))
                                 }
                             }
                             list
@@ -1895,6 +1908,295 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         return servers
     }
 
+    /**
+     * Scrape DIRECT de flemmix.win : recherche par titre TMDB → meilleur match →
+     * getServers. Les serveurs sont préfixés "Wiflix · " pour identification.
+     * Pas de prefix d'ID (les URLs embed passent par le même extracteur que Movix).
+     */
+    internal suspend fun fetchWiflixDirectBackup(id: String, videoType: Video.Type): List<Video.Server> {
+        // Timeout global généreux : le progressif affiche déjà les serveurs natifs Movix,
+        // donc on peut laisser 60s à Wiflix (init CF + search + getServers).
+        return withTimeoutOrNull(60_000) {
+            fetchWiflixDirectBackupInner(id, videoType)
+        } ?: run {
+            Log.w("MovixProvider", "Wiflix direct: GLOBAL timeout 60s")
+            emptyList()
+        }
+    }
+
+    /** Log Wiflix direct backup (Log.d, pas d'écriture fichier). */
+    private fun wfLog(msg: String) {
+        Log.d("WiflixDirect", msg)
+    }
+
+    /**
+     * Scrape HTTP direct de flemmix.win — contourne complètement WiflixProvider
+     * et son mécanisme CF/Retrofit/WebView qui timeout. On fait :
+     *   1. POST search sur flemmix.win (DLE standard)
+     *   2. Parse les <a> avec href film-en-streaming/ ou serie/
+     *   3. GET la page du match
+     *   4. Parse les loadVideo('url', this) → serveurs
+     * Tout en OkHttp simple, ~2-3 secondes max.
+     */
+    private suspend fun fetchWiflixDirectBackupInner(id: String, videoType: Video.Type): List<Video.Server> =
+        withContext(Dispatchers.IO) {
+            wfLog("=== fetchWiflixDirectBackup START id=$id type=${videoType::class.simpleName} ===")
+            val tmdbIdInt = when (videoType) {
+                is Video.Type.Movie -> id.toIntOrNull()
+                is Video.Type.Episode -> id.substringBefore("-").toIntOrNull()
+            } ?: run {
+                wfLog("cannot parse tmdbId from '$id'")
+                return@withContext emptyList()
+            }
+
+            val tmdbDetails = resolveTmdbTitleYear(tmdbIdInt, videoType) ?: run {
+                wfLog("TMDB resolve failed for $tmdbIdInt")
+                return@withContext emptyList()
+            }
+            val (title, year) = tmdbDetails
+
+            // Titre original aussi (ex: "Swapped" vs "Aventures croisées")
+            val originalTitle = try {
+                when (videoType) {
+                    is Video.Type.Movie -> TMDb3.Movies.details(movieId = tmdbIdInt, language = "fr-FR").originalTitle
+                    is Video.Type.Episode -> TMDb3.TvSeries.details(seriesId = tmdbIdInt, language = "fr-FR").originalName
+                }
+            } catch (_: Exception) { null }
+
+            val queries = listOfNotNull(title, originalTitle?.takeIf { it != title }).distinct()
+            wfLog("queries=$queries (year=$year)")
+
+            // Résoudre le domaine actif de Wiflix (peut changer)
+            val wiflixBase = try { WiflixProvider.baseUrl.trimEnd('/') } catch (_: Exception) { "https://flemmix.win" }
+            wfLog("wiflixBase=$wiflixBase")
+
+            val client = OkHttpClient.Builder()
+                .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                .followRedirects(true)
+                .build()
+
+            val typeSlug = when (videoType) {
+                is Video.Type.Movie -> "film-en-streaming/"
+                is Video.Type.Episode -> "serie/"
+            }
+
+            for (query in queries) {
+                try {
+                    // ① Recherche DLE POST
+                    wfLog("HTTP search '$query' on $wiflixBase...")
+                    val t0 = System.currentTimeMillis()
+                    val formBody = okhttp3.FormBody.Builder()
+                        .add("do", "search")
+                        .add("subaction", "search")
+                        .add("story", query)
+                        .add("search_start", "1")
+                        .add("result_from", "1")
+                        .build()
+                    val searchReq = Request.Builder()
+                        .url("$wiflixBase/")
+                        .post(formBody)
+                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
+                        .header("Referer", "$wiflixBase/")
+                        .build()
+                    val searchResp = client.newCall(searchReq).execute()
+                    val searchHtml = searchResp.body?.string() ?: ""
+                    searchResp.close()
+                    wfLog("search HTTP ${searchResp.code} len=${searchHtml.length} in ${System.currentTimeMillis() - t0}ms")
+
+                    if (searchHtml.length < 200) {
+                        wfLog("search response too short, CF blocked?")
+                        continue
+                    }
+
+                    // ② Parser les résultats : <a class="mov-t" href="...">Titre</a>
+                    val resultPattern = Regex("""<a\s+class="mov-t[^"]*"\s+href="([^"]+)"[^>]*>\s*(.*?)\s*</a>""", RegexOption.DOT_MATCHES_ALL)
+                    val results = resultPattern.findAll(searchHtml).toList()
+                    wfLog("found ${results.size} search results")
+
+                    // Filtrer par type (film ou série dans l'URL)
+                    val typed = results.filter { it.groupValues[1].contains(typeSlug) }
+                    wfLog("${typed.size} after type filter ($typeSlug)")
+
+                    // Matching : titre normalisé
+                    val normQuery = normalizeTitle(query)
+                    val match = typed.firstOrNull {
+                        val normResult = normalizeTitle(it.groupValues[2].replace(Regex("<[^>]+>"), ""))
+                        normResult.contains(normQuery) || normQuery.contains(normResult)
+                    } ?: typed.firstOrNull()
+
+                    if (match == null) {
+                        wfLog("no match for '$query'")
+                        continue
+                    }
+
+                    val matchUrl = match.groupValues[1]
+                    val matchTitle = match.groupValues[2].replace(Regex("<[^>]+>"), "").trim()
+                    wfLog("match '$matchTitle' => $matchUrl")
+
+                    // ③ GET la page du film/épisode
+                    val t1 = System.currentTimeMillis()
+                    val pageReq = Request.Builder()
+                        .url(matchUrl)
+                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
+                        .header("Referer", "$wiflixBase/")
+                        .build()
+                    val pageResp = client.newCall(pageReq).execute()
+                    val pageHtml = pageResp.body?.string() ?: ""
+                    pageResp.close()
+                    wfLog("page HTTP ${pageResp.code} len=${pageHtml.length} in ${System.currentTimeMillis() - t1}ms")
+
+                    // ④ Parser les serveurs : loadVideo('URL', this)...<span>Name</span>
+                    val serverPattern = Regex("""loadVideo\('([^']+)',\s*this\).*?<span>([^<]+)</span>""")
+                    val servers = serverPattern.findAll(pageHtml).toList()
+                    wfLog("parsed ${servers.size} servers from page")
+
+                    if (servers.isEmpty()) continue
+
+                    val result = servers.mapIndexed { idx, srv ->
+                        val embedUrl = srv.groupValues[1]
+                        val serverName = srv.groupValues[2].trim()
+                        // Détecter la langue : si le nom contient "vostfr" → VOSTFR
+                        val langTag = if (serverName.lowercase().contains("vostfr")) " [VOSTFR]" else ""
+                        Video.Server(
+                            id = "wiflix_direct__${idx}_${serverName.lowercase().replace(" ", "_")}",
+                            name = "Wiflix · $serverName$langTag",
+                            src = embedUrl,
+                        )
+                    }
+                    wfLog("SUCCESS: ${result.size} Wiflix servers!")
+                    return@withContext result
+
+                } catch (e: Exception) {
+                    wfLog("FAILED for '$query': ${e::class.simpleName}: ${e.message}")
+                }
+            }
+
+            wfLog("=== NO RESULTS after all queries ===")
+            emptyList()
+        }
+
+    /**
+     * Scrape DIRECT de fs17.lol : recherche par titre TMDB → meilleur match →
+     * getServers. Les serveurs sont préfixés "FS · " pour identification.
+     */
+    internal suspend fun fetchFrenchStreamDirectBackup(id: String, videoType: Video.Type): List<Video.Server> {
+        return withTimeoutOrNull(60_000) {
+            fetchFrenchStreamDirectBackupInner(id, videoType)
+        } ?: run {
+            Log.w("MovixProvider", "FS direct: GLOBAL timeout 60s")
+            emptyList()
+        }
+    }
+
+    private suspend fun fetchFrenchStreamDirectBackupInner(id: String, videoType: Video.Type): List<Video.Server> {
+        val tmdbIdInt = when (videoType) {
+            is Video.Type.Movie -> id.toIntOrNull()
+            is Video.Type.Episode -> id.substringBefore("-").toIntOrNull()
+        } ?: run {
+            Log.w("MovixProvider", "FS direct: cannot parse tmdbId from '$id'")
+            return emptyList()
+        }
+
+        val tmdbDetails = resolveTmdbTitleYear(tmdbIdInt, videoType) ?: run {
+            Log.w("MovixProvider", "FS direct: TMDB resolve failed for $tmdbIdInt")
+            return emptyList()
+        }
+        val (title, year) = tmdbDetails
+
+        val originalTitle = try {
+            when (videoType) {
+                is Video.Type.Movie -> TMDb3.Movies.details(movieId = tmdbIdInt, language = "fr-FR").originalTitle
+                is Video.Type.Episode -> TMDb3.TvSeries.details(seriesId = tmdbIdInt, language = "fr-FR").originalName
+            }
+        } catch (_: Exception) { null }
+
+        val queries = listOfNotNull(title, originalTitle?.takeIf { it != title }).distinct()
+        Log.d("MovixProvider", "FS direct: queries=$queries (year=$year)")
+
+        for (query in queries) {
+            try {
+                Log.d("MovixProvider", "FS direct: searching '$query'...")
+                val searchResults = FrenchStreamProvider.search(query, 1)
+                Log.d("MovixProvider", "FS direct: search '$query' returned ${searchResults.size} items")
+
+                val typed = searchResults.filter { item ->
+                    when (videoType) {
+                        is Video.Type.Movie -> item is Movie
+                        is Video.Type.Episode -> item is TvShow
+                    }
+                }
+
+                val match = typed.firstOrNull { item ->
+                    val itemTitle = when (item) {
+                        is Movie -> item.title
+                        is TvShow -> item.title
+                        else -> ""
+                    }
+                    val normItem = normalizeTitle(itemTitle)
+                    val normQuery = normalizeTitle(query)
+                    normItem.contains(normQuery) || normQuery.contains(normItem)
+                } ?: typed.firstOrNull()
+
+                if (match == null) {
+                    Log.d("MovixProvider", "FS direct: no match for '$query'")
+                    continue
+                }
+
+                val matchId = when (match) {
+                    is Movie -> match.id
+                    is TvShow -> match.id
+                    else -> continue
+                }
+                Log.d("MovixProvider", "FS direct: match found id=$matchId")
+
+                Log.d("MovixProvider", "FS direct: fetching servers for $matchId...")
+                val servers = FrenchStreamProvider.getServers(matchId, videoType)
+                if (servers.isEmpty()) {
+                    Log.w("MovixProvider", "FS direct: getServers returned empty for $matchId")
+                    continue
+                }
+                Log.d("MovixProvider", "FS direct: ${servers.size} servers found!")
+
+                return servers.map { srv ->
+                    val name = if (srv.name.startsWith("FS")) srv.name else "FS · ${srv.name}"
+                    srv.copy(id = "fs_direct__${srv.id}", name = name)
+                }
+            } catch (e: Exception) {
+                Log.w("MovixProvider", "FS direct: failed for '$query': ${e.message}")
+            }
+        }
+
+        Log.d("MovixProvider", "FS direct: no results after all queries")
+        return emptyList()
+    }
+
+    /** Résout le titre et l'année depuis TMDB. Réutilisé par les backups directs. */
+    private suspend fun resolveTmdbTitleYear(tmdbIdInt: Int, videoType: Video.Type): Pair<String, Int?>? = try {
+        when (videoType) {
+            is Video.Type.Movie -> {
+                val det = TMDb3.Movies.details(movieId = tmdbIdInt, language = "fr-FR")
+                (det.title.takeIf { it.isNotBlank() } ?: det.originalTitle) to
+                    det.releaseDate?.take(4)?.toIntOrNull()
+            }
+            is Video.Type.Episode -> {
+                val det = TMDb3.TvSeries.details(seriesId = tmdbIdInt, language = "fr-FR")
+                (det.name.takeIf { it.isNotBlank() } ?: det.originalName) to
+                    det.firstAirDate?.take(4)?.toIntOrNull()
+            }
+        }
+    } catch (e: Exception) {
+        Log.w("MovixProvider", "TMDB resolve failed: ${e.message}")
+        null
+    }
+
+    /** Normalise un titre pour la comparaison fuzzy (minuscule, sans accents, sans ponctuation). */
+    private fun normalizeTitle(title: String): String =
+        java.text.Normalizer.normalize(title.lowercase().trim(), java.text.Normalizer.Form.NFD)
+            .replace(Regex("[\\p{InCombiningDiacriticalMarks}]"), "")
+            .replace(Regex("[^a-z0-9 ]"), "")
+            .replace(Regex("\\s+"), " ")
+
     // 2026-05-21 (user "affiche ce qu'il récupère au fur et à mesure, les autres
     //   arrivent ensuite sans attendre") : version PROGRESSIVE de getServers.
     //   Émet les natifs Movix dès qu'ils sont prêts, PUIS les backups, sans
@@ -1921,6 +2223,23 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     if (backups.isNotEmpty()) send(backups)
                 } catch (e: Exception) {
                     Log.w("MovixProvider", "Progressive backups failed: ${e.message}")
+                }
+            }
+            // 2026-05-28 : Wiflix + FrenchStream direct en parallèle (scrape réel des sites)
+            launch {
+                try {
+                    val wf = fetchWiflixDirectBackup(id, videoType)
+                    if (wf.isNotEmpty()) send(wf)
+                } catch (e: Exception) {
+                    Log.w("MovixProvider", "Progressive Wiflix direct failed: ${e.message}")
+                }
+            }
+            launch {
+                try {
+                    val fs = fetchFrenchStreamDirectBackup(id, videoType)
+                    if (fs.isNotEmpty()) send(fs)
+                } catch (e: Exception) {
+                    Log.w("MovixProvider", "Progressive FS direct failed: ${e.message}")
                 }
             }
         }

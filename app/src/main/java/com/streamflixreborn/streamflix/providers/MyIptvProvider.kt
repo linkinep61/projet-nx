@@ -294,6 +294,29 @@ object MyIptvProvider : Provider, IptvProvider {
         val (liveItems, errors) = collectByType(sources, IptvClassifier.ContentType.LIVE)
         val sections = mutableListOf<Category>()
         errors.forEach { sections.add(Category(name = it, list = emptyList())) }
+
+            // ─── ★ Favoris EN TÊTE ───
+            // 2026-05-28 : section "Favoris" pour que IptvFavoritesMobileFragment /
+            // IptvFavoritesTvFragment trouvent les chaînes favorites via getHome().
+            try {
+                val favKeys = com.streamflixreborn.streamflix.utils.IptvFavoritesStore
+                    .getAllCanonicalFavorites()
+                Log.d(TAG, "getHome Favoris: favKeys=$favKeys liveItems=${liveItems.size}")
+                if (favKeys.isNotEmpty() && liveItems.isNotEmpty()) {
+                    val favItems = liveItems.filter { item ->
+                        val key = normalizeChannelKey(item.channel.name)
+                        val match = key in favKeys
+                        if (match) Log.d(TAG, "getHome Favoris MATCH: '${item.channel.name}' → key='$key'")
+                        match
+                    }.map { itemToTvShowLive(it) }
+                    Log.d(TAG, "getHome Favoris: ${favItems.size} matches")
+                    if (favItems.isNotEmpty()) {
+                        sections.add(Category(name = "Favoris", list = favItems))
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "getHome Favoris ERROR", t)
+            }
         if (liveItems.isNotEmpty()) {
             // 2026-05-12 (user "il faudrait pouvoir descendre vers le bas et avoir
             // un gros paquet de chaînes") : split en plusieurs rangées de 8 pour
@@ -1024,6 +1047,106 @@ object MyIptvProvider : Provider, IptvProvider {
         poster = item.channel.logo,
         banner = item.channel.logo,
     )
+
+    // ═══════════════════════════════════════════════════════════════
+    //   FAVORIS — bridge channelId ↔ clé canonique cross-provider
+    // ═══════════════════════════════════════════════════════════════
+
+    /** 2026-05-28 : normalise un nom de chaîne en clé canonique cross-provider.
+     *  Compatible avec les clés Vavoo/WiTV/OLA/Vegeta (ex: "tf1", "france2",
+     *  "canalplus"). Strip préfixes, qualité, diacritiques, symboles. */
+    fun normalizeChannelKey(name: String): String {
+        return prettyChannelName(name)
+            .lowercase()
+            .replace(Regex("[éèêë]"), "e")
+            .replace(Regex("[àâä]"), "a")
+            .replace(Regex("[ùûü]"), "u")
+            .replace(Regex("[îï]"), "i")
+            .replace(Regex("[ôö]"), "o")
+            .replace("ç", "c")
+            .replace("+", "plus")
+            .replace("&", "et")
+            .replace(Regex("[^a-z0-9]"), "")
+    }
+
+    /** Convertit un channelId Mon IPTV (ex: "myiptv-live::src123::42") en clé
+     *  canonique (ex: "tf1"). Utilisé par IptvFavoritesStore.normalize(). */
+    fun getCanonicalKeyForChannelId(channelId: String): String? {
+        val cleaned = channelId
+            .removePrefix("myiptv-live::")
+            .removePrefix("myiptv-movie::")
+            .removePrefix("myiptv-ep::")
+            .removePrefix("myiptv::")
+        val parts = cleaned.split("::")
+        if (parts.size != 2) {
+            Log.w(TAG, "getCanonicalKey: parts=${parts.size} for '$cleaned' (from '$channelId')")
+            return null
+        }
+        val sourceId = parts[0]
+        val channelIdx = parts[1].toIntOrNull() ?: run {
+            Log.w(TAG, "getCanonicalKey: idx not int '${parts[1]}'")
+            return null
+        }
+        val cached = cache[sourceId] ?: run {
+            Log.w(TAG, "getCanonicalKey: cache MISS for sourceId='$sourceId' (cache keys=${cache.keys})")
+            return null
+        }
+        val channel = cached.channels.getOrNull(channelIdx) ?: run {
+            Log.w(TAG, "getCanonicalKey: idx $channelIdx out of bounds (size=${cached.channels.size})")
+            return null
+        }
+        val key = normalizeChannelKey(channel.name)
+        Log.d(TAG, "getCanonicalKey: '$channelId' → name='${channel.name}' → key='$key'")
+        return key
+    }
+
+    /** 2026-05-28 : résout les favoris SANS appeler getHome() — utilise le
+     *  classificationCache interne (déjà chargé si l'onglet TV a été vu au moins
+     *  une fois). Si le cache est vide, charge les channels + classifie juste ce
+     *  qu'il faut (pas de rebuild home complet).
+     *  Appelé par IptvFavoritesMobileFragment / TvFragment pour éviter le
+     *  chargement interminable quand on switch d'onglet. */
+    suspend fun resolveFavoriteItems(): List<TvShow> = withContext(Dispatchers.IO) {
+        val favKeys = com.streamflixreborn.streamflix.utils.IptvFavoritesStore
+            .getAllCanonicalFavorites()
+        if (favKeys.isEmpty()) return@withContext emptyList()
+
+        val sources = IptvSourceStore.getActiveOrAll()
+        if (sources.isEmpty()) return@withContext emptyList()
+
+        val liveItems = mutableListOf<ClassifiedItem>()
+        for (source in sources) {
+            try {
+                var classified = classificationCache[source.id]
+                if (classified == null) {
+                    val channels = loadChannels(source)
+                    if (channels.isEmpty()) continue
+                    val diskCached = loadClassificationFromDisk(source, channels)
+                    classified = diskCached ?: run {
+                        val byType = mutableMapOf<IptvClassifier.ContentType, MutableList<ClassifiedItem>>()
+                        channels.forEachIndexed { idx, ch ->
+                            val t = IptvClassifier.classify(ch)
+                            val item = ClassifiedItem(source, ch, idx, t)
+                            byType.getOrPut(t) { mutableListOf() }.add(item)
+                        }
+                        val cc = CachedClassification(byType)
+                        saveClassificationToDisk(source.id, channels.size, byType)
+                        cc
+                    }
+                    classificationCache[source.id] = classified
+                }
+                classified.byType[IptvClassifier.ContentType.LIVE]?.let { items ->
+                    liveItems.addAll(filterFrOrFallback(items))
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "resolveFavoriteItems source '${source.name}' error", t)
+            }
+        }
+
+        liveItems.filter { item ->
+            normalizeChannelKey(item.channel.name) in favKeys
+        }.map { itemToTvShowLive(it) }
+    }
 
     /** Encode un show name pour usage en ID (gère caractères spéciaux). */
     private fun encodeId(s: String): String =

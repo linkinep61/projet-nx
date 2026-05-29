@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:paddingStart="16dp"
+    android:paddingEnd="8dp"
+    android:paddingTop="2dp"
+    android:paddingBottom="2dp"
+    android:minHeight="48dp">
+
+    <CheckBox
+        android:id="@+id/cb_enabled"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:minHeight="48dp"
+        android:textSize="15sp"
+        android:focusable="true"
+        android:focusableInTouchMode="false" />
+
+    <ImageView
+        android:id="@+id/iv_favorite"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:padding="8dp"
+        android:scaleType="centerInside"
+        android:src="@drawable/ic_favorite_disable"
+        android:contentDescription="Favori"
+        android:background="@null"
+        android:focusable="true"
+        android:clickable="true"
+        android:nextFocusLeft="@id/cb_enabled" />
+
+</LinearLayout>

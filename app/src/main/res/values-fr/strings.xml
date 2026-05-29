@@ -253,7 +253,7 @@
     <string name="settings_category_streamingcommunity_dnsOverHttps">Utiliser DNS sécurisé</string>
     <string name="settings_section_content_title">Contenu et sécurité</string>
     <string name="settings_category_network_title">Connexion et services</string>
-    <string name="settings_category_provider_title">Paramètres du fournisseur</string>
+    <string name="settings_category_provider_title">Paramètres des fournisseurs</string>
     <string name="settings_category_provider_url">URL principale</string>
     <string name="settings_category_provider_update_url">Portal URL</string>
     <string name="settings_autoupdate">Mettre à jour l\'URL au démarrage</string>

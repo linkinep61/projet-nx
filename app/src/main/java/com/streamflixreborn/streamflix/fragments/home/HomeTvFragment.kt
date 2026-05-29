@@ -574,6 +574,32 @@ class HomeTvFragment : Fragment() {
                 // Force home reload pour récupérer le nouveau pays.
                 viewModel.getHome()
             }
+            .setNeutralButton("Miroir") { _, _ -> showVavooMirrorPicker() }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** 2026-05-28 : picker miroir Vavoo (TV fragment). */
+    private fun showVavooMirrorPicker() {
+        val ctx = requireContext()
+        val current = com.streamflixreborn.streamflix.providers.VavooMirrorSettings.getCurrent(ctx)
+        val mirrors = com.streamflixreborn.streamflix.providers.VavooMirrorSettings.list
+        val items = mirrors.map {
+            "${it.label}${if (it.url == current.url) "  ✓" else ""}"
+        }.toTypedArray()
+        android.app.AlertDialog.Builder(ctx)
+            .setTitle("Miroir Vavoo")
+            .setItems(items) { _, idx ->
+                val picked = mirrors[idx]
+                if (picked.url == current.url) return@setItems
+                com.streamflixreborn.streamflix.providers.VavooMirrorSettings.setCurrent(ctx, picked)
+                android.widget.Toast.makeText(
+                    ctx,
+                    "Miroir Vavoo : ${picked.label} — chargement…",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                viewModel.getHome()
+            }
             .setNegativeButton("Annuler", null)
             .show()
     }

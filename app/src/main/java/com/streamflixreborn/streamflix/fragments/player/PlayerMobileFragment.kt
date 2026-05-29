@@ -115,6 +115,7 @@ import com.streamflixreborn.streamflix.utils.UserDataCache.toMovie
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 // Removed: import okhttp3.internal.userAgent — it resolves to "okhttp/4.12.0"
@@ -348,6 +349,10 @@ class PlayerMobileFragment : Fragment() {
     // "petite coupure pendant lecture" (swap rapide) vs "n'a jamais démarré"
     // (sticky, l'user veut choisir manuellement).
     private var vodCurrentStreamHasWorked = false
+    // 2026-05-28 : compteur de retries STICKY sur erreurs "transitoires" (non-dead).
+    // Si on re-prepare 3× de suite sans jamais atteindre STATE_READY, le serveur
+    // est mort en pratique — swap au suivant au lieu de boucler indéfiniment.
+    private var vodStickyRetryCount = 0
 
     // ── WebView overlay (Netu anti-bot bypass — touch-friendly for mobile) ──
     private var webViewOverlay: FrameLayout? = null
@@ -911,9 +916,9 @@ class PlayerMobileFragment : Fragment() {
                             // For IPTV providers (WiTv / OlaTv) keep the player open and wait for
                             // additional progressive servers instead of closing immediately.
                             val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
-                            if (isIptv) {
+                            if (isIptv || viewModel.progressiveStillCollecting) {
                                 if (!awaitingMoreServers) {
-                                    Log.d("PlayerMobileFragment", "All initial servers failed — awaiting progressive sources…")
+                                    Log.d("PlayerMobileFragment", "All initial servers failed — awaiting progressive backups…")
                                     Toast.makeText(
                                         requireContext(),
                                         "Recherche d'autres sources…",
@@ -1801,7 +1806,10 @@ class PlayerMobileFragment : Fragment() {
      */
     private fun nextAutoFallbackServer(allServers: List<Video.Server>, current: Video.Server?): Video.Server? {
         if (current == null) return null
-        val curIdx = allServers.indexOf(current)
+        // 2026-05-28 : indexOf par ID au lieu de equals — après un refresh
+        // progressif, l'objet `current` (ancien lot) n'est plus == au même
+        // serveur dans la nouvelle liste (champs mirror/video modifiés).
+        val curIdx = allServers.indexOfFirst { it.id == current.id }
         if (curIdx < 0) return null
 
         val currentLang = detectServerLanguage(current.name)
@@ -1832,23 +1840,18 @@ class PlayerMobileFragment : Fragment() {
             }
         }
 
-        // Étape 2 : dégradation contrôlée. Si on était en VF → on accepte VOSTFR.
-        // Si on était en VOSTFR → on accepte VO. Si on était en VO → STOP.
-        val fallbackLang = when (currentLang) {
-            "vf" -> "vostfr"
-            "vostfr" -> "vo"
-            else -> return null  // VO épuisés → vraiment STOP
+        // Étape 2 : cherche N'IMPORTE QUEL serveur NON-BROKEN d'une autre langue
+        // (VF prioritaire, puis VOSTFR, puis VO). Avant : VO → "STOP" = bug si
+        // le 1er serveur auto-play était taggé [MULTI] (= VO) → 0 fallback.
+        val nextAny = allServers.firstOrNull {
+            it.id != current.id && !isBroken(it)
         }
-        // On scanne TOUTE la liste (pas juste après curIdx) pour trouver le 1er
-        // server NON-BROKEN du fallback lang — il peut être avant curIdx dans l'ordre brut.
-        val nextNonBroken = allServers.firstOrNull {
-            detectServerLanguage(it.name) == fallbackLang && !isBroken(it)
-        }
-        if (nextNonBroken != null) return nextNonBroken
-        // 2026-05-25 : dernier recours — accepte un broken HEAD (HEAD peut mentir)
+        if (nextAny != null) return nextAny
+
+        // Dernier recours — accepte un broken HEAD (HEAD peut mentir)
         // MAIS JAMAIS un serveur DEAD per-titre (a réellement échoué SUR CE contenu).
         val lastResort = allServers.firstOrNull {
-            detectServerLanguage(it.name) == fallbackLang &&
+            it.id != current.id &&
                 com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(it.id) !=
                     com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD
         }
@@ -2102,7 +2105,7 @@ class PlayerMobileFragment : Fragment() {
      */
     private fun nextNonDeadServer(current: Video.Server?): Video.Server? {
         if (current == null) return null
-        val idx = servers.indexOf(current)
+        val idx = servers.indexOfFirst { it.id == current.id }
         if (idx < 0) return null
         return servers.drop(idx + 1).firstOrNull {
             com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(it.id) !=
@@ -2457,6 +2460,7 @@ class PlayerMobileFragment : Fragment() {
             iptvRetryCount = 0
             iptvCurrentStreamHasWorked = false
             vodCurrentStreamHasWorked = false
+            vodStickyRetryCount = 0
             // 2026-05-21 : nouveau serveur → on repart en pleine qualité.
             adaptiveQualityGovernor?.reset()
         }
@@ -2898,24 +2902,68 @@ class PlayerMobileFragment : Fragment() {
                                         com.streamflixreborn.streamflix.extractors.Extractor
                                             .recordFailureExternal(server.name, "pre-ready-freeze")
                                     }
-                                    if (nextServer != null) viewModel.getVideo(nextServer)
+                                    if (nextServer != null) {
+                                        viewModel.getVideo(nextServer)
+                                    } else if (viewModel.progressiveStillCollecting) {
+                                        // 2026-05-28 : backups en cours → attendre le prochain lot
+                                        Log.w("PlayerNetwork", "Pre-READY freeze, no servers YET — waiting for progressive backups…")
+                                        viewModel.serversReordered.first().let { newList ->
+                                            val candidate = newList.firstOrNull { s -> s.id != server?.id }
+                                            if (candidate != null) {
+                                                Log.w("PlayerNetwork", "Progressive backup arrived → trying ${candidate.name}")
+                                                servers = newList
+                                                viewModel.getVideo(candidate)
+                                            }
+                                        }
+                                    }
                                 }
                             } else {
-                                // (B) Post-READY : 15s puis super-buffer, jamais de swap
+                                // (B) Post-READY : 15s puis super-buffer OU swap si déjà tenté
                                 kotlinx.coroutines.delay(15_000L)
                                 if (player.playbackState == Player.STATE_BUFFERING &&
-                                    player.currentPosition == initialPosition &&
-                                    !currentExtraBuffering) {
-                                    val server = currentServer
-                                    val video = currentVideo
-                                    if (server != null && video != null) {
-                                        val savedPos = player.currentPosition
+                                    player.currentPosition == initialPosition) {
+                                    if (!currentExtraBuffering) {
+                                        // 1ʳᵉ tentative : activer ExtraBuffering + re-init
+                                        val server = currentServer
+                                        val video = currentVideo
+                                        if (server != null && video != null) {
+                                            val savedPos = player.currentPosition
+                                            Log.w("PlayerNetwork",
+                                                "Post-READY 15s freeze on ${server.name} → ExtraBuffering ON @${savedPos}ms")
+                                            PlayerSettingsView.Settings.ExtraBuffering.init(true)
+                                            initializePlayer(true, currentSoftwareDecoder, video.source)
+                                            displayVideo(video, server)
+                                            try { player.seekTo(savedPos) } catch (_: Exception) {}
+                                        }
+                                    } else {
+                                        // 2ᵉ tentative : ExtraBuffering déjà actif et TOUJOURS
+                                        // coincé → le serveur est réellement mort. Swap.
+                                        val server = currentServer
                                         Log.w("PlayerNetwork",
-                                            "Post-READY 15s freeze on ${server.name} → ExtraBuffering ON @${savedPos}ms")
-                                        PlayerSettingsView.Settings.ExtraBuffering.init(true)
-                                        initializePlayer(true, currentSoftwareDecoder, video.source)
-                                        displayVideo(video, server)
-                                        try { player.seekTo(savedPos) } catch (_: Exception) {}
+                                            "Post-READY freeze AFTER ExtraBuffering on ${server?.name} → server dead, swapping")
+                                        if (server != null) {
+                                            pruneBrokenVariant(server)
+                                            com.streamflixreborn.streamflix.utils.TitleServerStatus.record(
+                                                server.id,
+                                                com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD,
+                                            )
+                                        }
+                                        val nextServer = nextAutoFallbackServer(servers, server)
+                                        if (nextServer != null) {
+                                            Log.w("PlayerNetwork", "→ auto-switching to ${nextServer.name}")
+                                            viewModel.getVideo(nextServer)
+                                        } else if (viewModel.progressiveStillCollecting) {
+                                            Log.w("PlayerNetwork", "→ waiting for progressive backups…")
+                                            viewModel.serversReordered.first().let { newList ->
+                                                val candidate = newList.firstOrNull { s -> s.id != server?.id }
+                                                if (candidate != null) {
+                                                    servers = newList
+                                                    viewModel.getVideo(candidate)
+                                                }
+                                            }
+                                        } else {
+                                            Log.e("PlayerNetwork", "→ no more servers to try")
+                                        }
                                     }
                                 }
                             }
@@ -2981,6 +3029,7 @@ class PlayerMobileFragment : Fragment() {
                     // 2026-05-11 : VOD too — flag pour swap rapide sur "petite coupure"
                     if (!vodCurrentStreamHasWorked) {
                         vodCurrentStreamHasWorked = true
+                        vodStickyRetryCount = 0
                         Log.d("PlayerMobileFragment", "VOD stream marked as working — fast-swap on glitch enabled")
                     }
                     // 2026-05-21 : ce serveur a RÉELLEMENT joué pour CE titre → VERIFIED (vert)
@@ -3469,14 +3518,60 @@ class PlayerMobileFragment : Fragment() {
                                 "Server HS on ${server.name} ($errCodeName: ${error.message}) — auto-switching to ${nextServer.name}")
                             viewModel.getVideo(nextServer)
                         } else if (!tryNextChannelVariant(server)) {
-                            Log.e("PlayerNetwork", "Server HS on ${server.name} ($errCodeName) and no more servers")
+                            if (viewModel.progressiveStillCollecting) {
+                                // 2026-05-28 : le flow progressif est encore en cours
+                                // → des backups Movix/Cloudstream arrivent bientôt.
+                                // On attend le prochain lot puis on retente le meilleur.
+                                Log.w("PlayerNetwork", "Server HS on ${server.name} ($errCodeName) — no servers YET, waiting for progressive backups…")
+                                viewLifecycleOwner.lifecycleScope.launch {
+                                    viewModel.serversReordered.first().let { newList ->
+                                        val candidate = newList.firstOrNull { s -> s.id != server.id }
+                                        if (candidate != null) {
+                                            Log.w("PlayerNetwork", "Progressive backup arrived → trying ${candidate.name}")
+                                            servers = newList
+                                            viewModel.getVideo(candidate)
+                                        } else {
+                                            Log.e("PlayerNetwork", "Progressive backup arrived but no new server to try")
+                                        }
+                                    }
+                                }
+                            } else {
+                                Log.e("PlayerNetwork", "Server HS on ${server.name} ($errCodeName) and no more servers")
+                            }
                         }
                     } else {
                         // Erreur transitoire (glitch décodeur, network blip) — STICKY.
-                        // L'user a choisi ce serveur, on garde. Re-prepare pour reprendre.
-                        Log.w("PlayerNetwork",
-                            "Transient error on ${server.name} ($errCodeName: ${error.message}) — STICKY (re-prepare same server)")
-                        try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
+                        // 2026-05-28 : compteur anti-boucle infinie. Si 3 re-prepare
+                        // échouent sans jamais atteindre READY → serveur mort en pratique.
+                        vodStickyRetryCount++
+                        if (vodStickyRetryCount >= 3) {
+                            Log.w("PlayerNetwork",
+                                "3 sticky retries failed on ${server.name} ($errCodeName) — treating as dead, swapping")
+                            vodStickyRetryCount = 0
+                            pruneBrokenVariant(server)
+                            com.streamflixreborn.streamflix.utils.TitleServerStatus.record(
+                                server.id,
+                                com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD,
+                            )
+                            val nextServer = nextAutoFallbackServer(servers, server)
+                            if (nextServer != null) {
+                                viewModel.getVideo(nextServer)
+                            } else if (viewModel.progressiveStillCollecting) {
+                                viewLifecycleOwner.lifecycleScope.launch {
+                                    viewModel.serversReordered.first().let { newList ->
+                                        val candidate = newList.firstOrNull { s -> s.id != server.id }
+                                        if (candidate != null) {
+                                            servers = newList
+                                            viewModel.getVideo(candidate)
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            Log.w("PlayerNetwork",
+                                "Transient error on ${server.name} ($errCodeName: ${error.message}) — STICKY retry $vodStickyRetryCount/3")
+                            try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
+                        }
                     }
                 }
             }
