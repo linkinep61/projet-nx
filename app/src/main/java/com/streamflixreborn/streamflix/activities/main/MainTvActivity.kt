@@ -1027,10 +1027,42 @@ class MainTvActivity : FragmentActivity() {
                     com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
                 }
             }
+            .setNeutralButton("Miroir") { _, _ -> showVavooMirrorPicker() }
             .setNegativeButton("Annuler", null)
             .show()
     }
 
+    /** 2026-05-28 : picker miroir Vavoo (TV). */
+    fun showVavooMirrorPicker() {
+        val current = com.streamflixreborn.streamflix.providers.VavooMirrorSettings.getCurrent(this)
+        val mirrors = com.streamflixreborn.streamflix.providers.VavooMirrorSettings.list
+        val items = mirrors.map {
+            "${it.label}${if (it.url == current.url) "  ✓" else ""}"
+        }.toTypedArray()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Miroir Vavoo")
+            .setItems(items) { _, idx ->
+                val picked = mirrors[idx]
+                if (picked.url == current.url) return@setItems
+                com.streamflixreborn.streamflix.providers.VavooMirrorSettings.setCurrent(this, picked)
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                        this,
+                        com.streamflixreborn.streamflix.providers.VavooProvider,
+                    )
+                }
+                android.widget.Toast.makeText(
+                    this,
+                    "Miroir Vavoo : ${picked.label} — chargement…",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
 
     fun adjustLayoutDelta(deltaX: Int?, deltaY: Int?) {
         val uDeltaX = deltaX ?: UserPreferences.paddingX

@@ -439,7 +439,9 @@ class TvShowViewHolder(
             // 2026-05-25 : retirer favori depuis le cœur (mobile)
             val cf = context.toActivity()?.getCurrentFragment()
             if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
-                cf.removeFavorite(tvShow.id, false)
+                showFavoriteLongPressDialog(context, tvShow.title, onRemove = {
+                    cf.removeFavorite(tvShow.id, false)
+                }, onDownload = null)
             } else if (!handleIptvFavoriteLongPress()) {
                 ShowOptionsMobileDialog(context, tvShow).show()
             }
@@ -662,7 +664,9 @@ class TvShowViewHolder(
         binding.root.setOnLongClickListener {
             val cf = context.toActivity()?.getCurrentFragment()
             if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
-                cf.removeFavorite(tvShow.id, false)
+                showFavoriteLongPressDialog(context, tvShow.title, onRemove = {
+                    cf.removeFavorite(tvShow.id, false)
+                }, onDownload = null)
             } else if (!handleIptvFavoriteLongPress()) {
                 ShowOptionsMobileDialog(context, tvShow).show()
             }

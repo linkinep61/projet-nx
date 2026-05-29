@@ -649,6 +649,41 @@ class HomeMobileFragment : Fragment() {
                     com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
                 }
             }
+            .setNeutralButton("Miroir") { _, _ -> showVavooMirrorPicker() }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** 2026-05-28 : picker miroir Vavoo — choisir quel site utiliser en priorité. */
+    private fun showVavooMirrorPicker() {
+        val ctx = requireContext()
+        val current = com.streamflixreborn.streamflix.providers.VavooMirrorSettings.getCurrent(ctx)
+        val mirrors = com.streamflixreborn.streamflix.providers.VavooMirrorSettings.list
+        val items = mirrors.map {
+            "${it.label}${if (it.url == current.url) "  ✓" else ""}"
+        }.toTypedArray()
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Miroir Vavoo")
+            .setItems(items) { _, idx ->
+                val picked = mirrors[idx]
+                if (picked.url == current.url) return@setItems
+                com.streamflixreborn.streamflix.providers.VavooMirrorSettings.setCurrent(ctx, picked)
+                // Vider le cache catalog pour forcer un rechargement depuis le nouveau miroir
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                        ctx.applicationContext,
+                        com.streamflixreborn.streamflix.providers.VavooProvider,
+                    )
+                }
+                android.widget.Toast.makeText(
+                    ctx,
+                    "Miroir Vavoo : ${picked.label} — chargement…",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                }
+            }
             .setNegativeButton("Annuler", null)
             .show()
     }

@@ -1329,6 +1329,8 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                 is Video.Type.Episode -> "$tmdbIdResolved-s${videoType.season.number}e${videoType.number}"
             }
             MovixProvider.getServers(movixId, movixVideoType)
+                // Filtrer les sources fstream de Movix (on les a déjà en natif)
+                .filter { srv -> !srv.id.startsWith("fstream-") }
         }.getOrNull().orEmpty() else emptyList()
 
         val movieboxBackup = if (tmdbIdResolved != null) runCatching {
@@ -1437,6 +1439,8 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             is Video.Type.Episode -> "$tmdbId-s${videoType.season.number}e${videoType.number}"
         }
         MovixProvider.getServers(movixId, movixVideoType)
+            // Filtrer les sources fstream de Movix (on les a déjà en natif)
+            .filter { srv -> !srv.id.startsWith("fstream-") }
     }.getOrNull().orEmpty()
 
     private suspend fun fetchFsMovieboxBackup(tmdbId: Int, videoType: Video.Type): List<Video.Server> = runCatching {
@@ -1458,6 +1462,8 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             launch { try { val cs = fetchFsCloudstreamBackup(tid, videoType); if (cs.isNotEmpty()) send(cs) } catch (e: Exception) { Log.w("FrenchStream", "Progressive CS failed: ${e.message}") } }
             launch { try { val mx = fetchFsMovixBackup(tid, videoType); if (mx.isNotEmpty()) send(mx) } catch (e: Exception) { Log.w("FrenchStream", "Progressive Movix failed: ${e.message}") } }
             launch { try { val mb = fetchFsMovieboxBackup(tid, videoType); if (mb.isNotEmpty()) send(mb) } catch (e: Exception) { Log.w("FrenchStream", "Progressive Moviebox failed: ${e.message}") } }
+            // 2026-05-27 : scrape direct Wiflix (~2s, HTTP simple)
+            launch { try { val wf = MovixProvider.fetchWiflixDirectBackup(tid.toString(), videoType); if (wf.isNotEmpty()) send(wf) } catch (e: Exception) { Log.w("FrenchStream", "Progressive Wiflix direct failed: ${e.message}") } }
         }
     }
 

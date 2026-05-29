@@ -1011,7 +1011,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                     Log.d(TAG, "+ Movix backup : ${mx.size} sources")
                     servers.addAll(mx.map { it.copy(
                         id = "nm_movix__${it.id}",
-                        name = "Movix — ${it.name}",
+                        name = it.name,
                     )})
                 }
             } finally {
@@ -1229,7 +1229,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                         val mx = MovixProvider.getServers(movixId, videoType)
                         if (mx.isNotEmpty()) {
                             Log.d(TAG, "+ Movix backup (prog) : ${mx.size} sources")
-                            send(mx.map { it.copy(id = "nm_movix__${it.id}", name = "Movix — ${it.name}") })
+                            send(mx.map { it.copy(id = "nm_movix__${it.id}") })
                         }
                     } finally { MovixProvider.skipBackupsForBackupCall = false }
                 } catch (e: Exception) { Log.d(TAG, "Prog Movix failed: ${e.message}") }

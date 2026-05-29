@@ -1954,7 +1954,7 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             MovixProvider.skipBackupsForBackupCall = true
             try {
                 val raw = withTimeoutOrNull(timeoutMs) { MovixProvider.getServers(tid, videoType) } ?: emptyList()
-                raw.map { srv -> srv.copy(id = "movix_backup__${srv.id}", name = "Movix — ${srv.name}") }
+                raw.map { srv -> srv.copy(id = "movix_backup__${srv.id}") }
             } finally {
                 MovixProvider.skipBackupsForBackupCall = prev
             }
@@ -2018,6 +2018,17 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             // jeter les sources Movix juste à la fin (Moiflix lent à ~8 s).
             try { val m = fetchMovixBackupForCs(tmdbId, videoType, timeoutMs = 15_000L); if (m.isNotEmpty()) send(m) }
             catch (e: Exception) { Log.w(TAG, "Progressive Movix failed: ${e.message}") }
+        }
+        // 2026-05-28 : scrape direct Wiflix + FrenchStream (HTTP simple, ~3s)
+        if (tmdbId != null) {
+            launch {
+                try { val wf = MovixProvider.fetchWiflixDirectBackup(tmdbId, videoType); if (wf.isNotEmpty()) send(wf) }
+                catch (e: Exception) { Log.w(TAG, "Progressive Wiflix direct failed: ${e.message}") }
+            }
+            launch {
+                try { val fs = MovixProvider.fetchFrenchStreamDirectBackup(tmdbId, videoType); if (fs.isNotEmpty()) send(fs) }
+                catch (e: Exception) { Log.w(TAG, "Progressive FS direct failed: ${e.message}") }
+            }
         }
     }
 
@@ -2335,6 +2346,13 @@ $url
                 Log.w(TAG, "Movix getVideo failed for ${original.src}: ${e.message}")
                 Video(source = original.src)
             }
+        }
+        // 2026-05-27 : Wiflix/FrenchStream direct scraping → les URLs embed
+        // doivent passer par Extractor.extract() pour décoder le m3u8 réel
+        // (VidSonic hex, Voe decrypt, etc.). Sans ça, ExoPlayer reçoit la page
+        // HTML embed au lieu du stream → crash immédiat → rouge à tort.
+        if (server.id.startsWith("wiflix_direct__") || server.id.startsWith("fs_direct__")) {
+            return com.streamflixreborn.streamflix.extractors.Extractor.extract(server.src, server)
         }
         // MovieBox+ direct (MP4 1080p max). Master m3u8 multi-quality testé via
         // data URI imbriqué → ExoPlayer Media3 le rejette. Pour vraie multi-

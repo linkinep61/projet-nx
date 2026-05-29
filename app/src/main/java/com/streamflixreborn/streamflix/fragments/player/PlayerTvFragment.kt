@@ -261,6 +261,7 @@ class PlayerTvFragment : Fragment() {
     // "extracteur foireux jamais démarré" (skip 30s) vs "coupure pendant
     // lecture" (super-buffer 15s, no swap).
     private var vodCurrentStreamHasWorked = false
+    private var vodStickyRetryCount = 0
     // 2026-05-21 (user "baisse auto seulement si ça bufferise" + "remonte tout seul
     //   quand c'est stable") : plafond de résolution adaptatif piloté par les
     //   rebufferings (mode Auto/VOD uniquement). Cf AdaptiveQualityGovernor.
@@ -2425,6 +2426,7 @@ class PlayerTvFragment : Fragment() {
                 iptvRetryCount = 0
                 iptvCurrentStreamHasWorked = false
                 vodCurrentStreamHasWorked = false
+                vodStickyRetryCount = 0
                 // 2026-05-21 : nouveau serveur → on repart en pleine qualité.
                 adaptiveQualityGovernor?.reset()
             }
@@ -2817,18 +2819,53 @@ class PlayerTvFragment : Fragment() {
                                 } else {
                                     kotlinx.coroutines.delay(15_000L)
                                     if (player.playbackState == Player.STATE_BUFFERING &&
-                                        player.currentPosition == initialPosition &&
-                                        !currentExtraBuffering) {
-                                        val server = currentServer
-                                        val video = currentVideo
-                                        if (server != null && video != null) {
-                                            val savedPos = player.currentPosition
+                                        player.currentPosition == initialPosition) {
+                                        if (!currentExtraBuffering) {
+                                            // 1ʳᵉ tentative : activer ExtraBuffering + re-init
+                                            val server = currentServer
+                                            val video = currentVideo
+                                            if (server != null && video != null) {
+                                                val savedPos = player.currentPosition
+                                                Log.w("PlayerNetwork",
+                                                    "Post-READY 15s freeze on ${server.name} → ExtraBuffering ON @${savedPos}ms")
+                                                PlayerSettingsView.Settings.ExtraBuffering.init(true)
+                                                initializePlayer(true, currentSoftwareDecoder, video.source)
+                                                displayVideo(video, server)
+                                                try { player.seekTo(savedPos) } catch (_: Exception) {}
+                                            }
+                                        } else {
+                                            // 2ᵉ tentative : ExtraBuffering déjà actif et TOUJOURS
+                                            // coincé → le serveur est réellement mort. Swap.
+                                            val deadServer = currentServer
                                             Log.w("PlayerNetwork",
-                                                "Post-READY 15s freeze on ${server.name} → ExtraBuffering ON @${savedPos}ms")
-                                            PlayerSettingsView.Settings.ExtraBuffering.init(true)
-                                            initializePlayer(true, currentSoftwareDecoder, video.source)
-                                            displayVideo(video, server)
-                                            try { player.seekTo(savedPos) } catch (_: Exception) {}
+                                                "Post-READY freeze AFTER ExtraBuffering on ${deadServer?.name} → server dead, swapping")
+                                            if (deadServer != null) {
+                                                pruneBrokenVariant(deadServer)
+                                                com.streamflixreborn.streamflix.utils.TitleServerStatus.record(
+                                                    deadServer.id,
+                                                    com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD
+                                                )
+                                            }
+                                            val deadId = deadServer?.id
+                                            val currentIdx = if (deadId != null) servers.indexOfFirst { it.id == deadId } else -1
+                                            val nextServer: com.streamflixreborn.streamflix.models.Video.Server? = if (currentIdx >= 0) {
+                                                servers.drop(currentIdx + 1).firstOrNull { srv ->
+                                                    com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(srv.id) !=
+                                                        com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD
+                                                }
+                                            } else {
+                                                servers.firstOrNull { srv ->
+                                                    srv.id != deadId &&
+                                                        com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(srv.id) !=
+                                                        com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD
+                                                }
+                                            }
+                                            if (nextServer != null) {
+                                                Log.w("PlayerNetwork", "→ auto-switching to ${nextServer.name}")
+                                                viewModel.getVideo(nextServer)
+                                            } else {
+                                                Log.e("PlayerNetwork", "→ no more servers to try")
+                                            }
                                         }
                                     }
                                 }
@@ -2867,6 +2904,7 @@ class PlayerTvFragment : Fragment() {
                         // 2026-05-11 : VOD aussi flag pour différencier pre/post-READY
                         if (!vodCurrentStreamHasWorked) {
                             vodCurrentStreamHasWorked = true
+                            vodStickyRetryCount = 0
                             Log.d("PlayerTvFragment", "VOD stream marked as working — no more auto-swap")
                         }
                         // 2026-05-21 : ce serveur a RÉELLEMENT joué pour CE titre → VERIFIED
@@ -3673,11 +3711,24 @@ class PlayerTvFragment : Fragment() {
                             errCodeName.contains("PARSING_MANIFEST_MALFORMED") ||
                             errCodeName.contains("PARSING_MANIFEST_UNSUPPORTED")
                         val nextServer = if (!isPermanentFailure) {
-                            // STICKY : transitoire → re-prepare le même server, pas de swap auto.
-                            Log.w("PlayerNetwork",
-                                "Transient VOD error on ${server.name} ($errCodeName: ${error.message}) — STICKY (re-prepare same server)")
-                            try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
-                            null
+                            // STICKY : transitoire → re-prepare, mais avec compteur anti-boucle.
+                            vodStickyRetryCount++
+                            if (vodStickyRetryCount >= 3) {
+                                Log.w("PlayerNetwork",
+                                    "3 sticky retries failed on ${server.name} ($errCodeName) — treating as dead, swapping")
+                                vodStickyRetryCount = 0
+                                pruneBrokenVariant(server)
+                                com.streamflixreborn.streamflix.utils.TitleServerStatus.record(
+                                    server.id,
+                                    com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD
+                                )
+                                nextNonDeadServer(server)
+                            } else {
+                                Log.w("PlayerNetwork",
+                                    "Transient VOD error on ${server.name} ($errCodeName: ${error.message}) — STICKY retry $vodStickyRetryCount/3")
+                                try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
+                                null
+                            }
                         } else {
                             nextNonDeadServer(server)
                         }

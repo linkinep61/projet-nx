@@ -654,15 +654,21 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
                     else emptyList()
                 } catch (_: Exception) { emptyList() }
             }
+            // 2026-05-27 : scrape direct Wiflix (~2s, HTTP simple, 11-14 serveurs)
+            val wiflixServersD = async {
+                try { MovixProvider.fetchWiflixDirectBackup(id, videoType) }
+                catch (_: Exception) { emptyList() }
+            }
             val cloudstream = cloudstreamServersD.await()
             val movix = movixServersD.await()
             val papa = papaServersD.await()
             val moviebox = movieboxServersD.await()
-            Log.d(TAG, "Hybrid getServers (Movix-id $id) : cloudstream=${cloudstream.size} + movix=${movix.size} + moviebox=${moviebox.size} + papa=${papa.size} (papa last)")
+            val wiflix = wiflixServersD.await()
+            Log.d(TAG, "Hybrid getServers (Movix-id $id) : cloudstream=${cloudstream.size} + movix=${movix.size} + moviebox=${moviebox.size} + wiflix=${wiflix.size} + papa=${papa.size} (papa last)")
             // Papa en dernier (captcha CF friction). Cloudstream / Movix / Moviebox d'abord.
             // Dédup par NAME pour les backups Cloudstream/Nakios (Movix appelle
             // Cloudstream en interne, sign URLs diffèrent → distinctBy src ne marche pas).
-            val merged = (cloudstream + movix + moviebox + papa).let { all ->
+            val merged = (cloudstream + movix + moviebox + wiflix + papa).let { all ->
                 val seen = mutableSetOf<String>()
                 all.filter { srv ->
                     val isBackup = srv.id.startsWith("cs_resource_") ||
@@ -1033,6 +1039,10 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
 
     override suspend fun getVideo(server: Video.Server): Video {
         val src = server.src
+        // 2026-05-27 : Wiflix direct → embed URL, doit passer par l'extracteur
+        if (server.id.startsWith("wiflix_direct__") || server.id.startsWith("fs_direct__")) {
+            return com.streamflixreborn.streamflix.extractors.Extractor.extract(server.src, server)
+        }
         // Cloudstream/Nakios backups : URLs déjà résolues, on délègue au provider
         // d'origine pour récupérer les bons headers (Referer moviebox.ph etc.) sans
         // passer par Extractor.extract qui ne connaît pas ces hosts.

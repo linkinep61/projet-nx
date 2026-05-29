@@ -389,7 +389,14 @@ class MovieViewHolder(
             setOnLongClickListener {
                 val cf = context.toActivity()?.getCurrentFragment()
                 if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
-                    cf.removeFavorite(movie.id, true)
+                    showFavoriteLongPressDialog(context, movie.title, onRemove = {
+                        cf.removeFavorite(movie.id, true)
+                    }, onDownload = {
+                        val activity = context.toActivity()
+                        if (activity != null) {
+                            com.streamflixreborn.streamflix.download.QuickDownload.downloadMovie(context, activity.lifecycleScope, movie)
+                        }
+                    })
                 } else if (isDramaOrAnimeProvider()) {
                     ShowOptionsMobileDialog(context, TvShow(id = movie.id, title = movie.title, poster = movie.poster, banner = movie.banner)).show()
                 } else {
@@ -605,7 +612,14 @@ class MovieViewHolder(
             setOnLongClickListener {
                 val cf = context.toActivity()?.getCurrentFragment()
                 if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
-                    cf.removeFavorite(movie.id, true)
+                    showFavoriteLongPressDialog(context, movie.title, onRemove = {
+                        cf.removeFavorite(movie.id, true)
+                    }, onDownload = {
+                        val activity = context.toActivity()
+                        if (activity != null) {
+                            com.streamflixreborn.streamflix.download.QuickDownload.downloadMovie(context, activity.lifecycleScope, movie)
+                        }
+                    })
                 } else if (isDramaOrAnimeProvider()) {
                     ShowOptionsMobileDialog(context, TvShow(id = movie.id, title = movie.title, poster = movie.poster, banner = movie.banner)).show()
                 } else {
@@ -1206,4 +1220,27 @@ class MovieViewHolder(
             setItemSpacing(20)
         }
     }
+}
+
+/**
+ * 2026-05-27 : dialog long-press favoris mobile — choix Supprimer / Télécharger.
+ * [onDownload] peut être null (séries : pas de téléchargement direct).
+ */
+internal fun showFavoriteLongPressDialog(
+    context: Context,
+    title: String,
+    onRemove: () -> Unit,
+    onDownload: (() -> Unit)?,
+) {
+    val items = mutableListOf("Supprimer des favoris")
+    if (onDownload != null) items += "Télécharger"
+    AlertDialog.Builder(context)
+        .setTitle(title)
+        .setItems(items.toTypedArray()) { _, which ->
+            when (which) {
+                0 -> onRemove()
+                1 -> onDownload?.invoke()
+            }
+        }
+        .show()
 }

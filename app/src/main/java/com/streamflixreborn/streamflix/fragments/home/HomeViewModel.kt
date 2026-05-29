@@ -486,6 +486,9 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
             provider.name.contains("Dessin", ignoreCase = true) ||
             provider.name.contains("Franime", ignoreCase = true) ||
             provider.name.contains("Manga", ignoreCase = true) -> 30 * 60 * 1000L
+            // IPTV → 30 min (le provider gère déjà son cache interne 30 min,
+            // pas besoin de re-itérer 6000+ chaînes à chaque tab switch)
+            provider is com.streamflixreborn.streamflix.providers.IptvProvider -> 30 * 60 * 1000L
             // Providers normaux → 5 min
             else -> 5 * 60 * 1000L
         }

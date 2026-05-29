@@ -260,9 +260,26 @@ class IptvFavoritesMobileFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             val items: List<TvShow> = try {
                 withContext(Dispatchers.IO) {
-                    val home = provider.getHome()
-                    val favCategory = home.firstOrNull { it.name == "Favoris" }
-                    favCategory?.list?.filterIsInstance<TvShow>() ?: emptyList()
+                    // 2026-05-28 : Mon IPTV → résolution directe depuis le cache
+                    // interne du provider, SANS appeler getHome() (qui re-scanne
+                    // 6000+ chaînes et provoque un chargement interminable au retour
+                    // sur l'onglet TV).
+                    if (provider is com.streamflixreborn.streamflix.providers.MyIptvProvider) {
+                        provider.resolveFavoriteItems()
+                    } else {
+                        // Autres IPTV : lire le HomeCacheStore d'abord (instant),
+                        // fallback getHome() seulement si cache vide.
+                        val cached = com.streamflixreborn.streamflix.utils.HomeCacheStore
+                            .read(requireContext().applicationContext, provider as com.streamflixreborn.streamflix.providers.Provider)
+                        val favCategory = cached?.firstOrNull { it.name == "Favoris" }
+                        if (favCategory != null) {
+                            favCategory.list.filterIsInstance<TvShow>()
+                        } else {
+                            val home = provider.getHome()
+                            home.firstOrNull { it.name == "Favoris" }
+                                ?.list?.filterIsInstance<TvShow>() ?: emptyList()
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "loadFavorites failed", e)

@@ -55,6 +55,12 @@ class PlayerViewModel(
     private val _serversReordered = MutableSharedFlow<List<Video.Server>>(extraBufferCapacity = 16)
     val serversReordered: SharedFlow<List<Video.Server>> = _serversReordered
 
+    // 2026-05-28 : flag indiquant que le flow progressif est encore en cours
+    // de collecte. Si un onPlayerError arrive et que nextAutoFallbackServer==null,
+    // le fragment peut attendre le prochain lot au lieu de déclarer forfait.
+    @Volatile var progressiveStillCollecting: Boolean = false
+        private set
+
     // ─── 2026-05-09 : tracking session pour FilmHealthTracker ─────────────
     // Compte les échecs dead-content dans cette session de player. Sert au
     // FilmHealthTracker pour décider de marquer le film "vide" quand tous
@@ -597,6 +603,7 @@ class PlayerViewModel(
         val accumulated = mutableListOf<Video.Server>()
         val seenIds = HashSet<String>()
         var firstEmitted = false
+        progressiveStillCollecting = true
         Log.d("ServDiag", "PROG enter id=$id")
         try {
             provider.getServersProgressive(id, videoType).collect { batch ->
@@ -630,10 +637,12 @@ class PlayerViewModel(
         } catch (e: Exception) {
             if (firstEmitted) {
                 Log.w("PlayerViewModel", "Progressive: erreur après affichage (ignorée) : ${e.message}")
+                progressiveStillCollecting = false
                 return
             }
             Log.w("PlayerViewModel", "Progressive: échec avant 1er lot, fallback batch : ${e.message}")
         }
+        progressiveStillCollecting = false
         if (!firstEmitted) {
             // Aucun lot émis → fallback sur le chemin batch (avec retry).
             val raw = try {

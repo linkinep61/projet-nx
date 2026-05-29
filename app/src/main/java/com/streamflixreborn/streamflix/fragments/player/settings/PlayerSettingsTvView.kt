@@ -981,7 +981,51 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                 binding.ivSettingFavorite.nextFocusRightId = R.id.iv_setting_ban
                 binding.ivSettingBan.nextFocusRightId = View.NO_ID
             } else if (item is Settings.Server) {
+                // VOD server — cœur favori par provider (ExtractorToggleStore)
                 binding.root.alpha = 1.0f
+                val providerName = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name ?: ""
+                val extName = (com.streamflixreborn.streamflix.utils.ExtractorRanker.resolveExtractorName(
+                    com.streamflixreborn.streamflix.models.Video.Server(id = item.id, name = item.name)
+                ) ?: item.name).lowercase()
+                if (providerName.isNotEmpty()) {
+                    val isFav = com.streamflixreborn.streamflix.utils.ExtractorToggleStore.isFavorite(extName, providerName)
+                    binding.ivSettingFavorite.visibility = View.VISIBLE
+                    binding.ivSettingFavorite.setImageResource(
+                        if (isFav) R.drawable.ic_favorite_enable else R.drawable.ic_favorite_disable
+                    )
+                    binding.ivSettingFavorite.imageTintList = android.content.res.ColorStateList.valueOf(
+                        if (isFav) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                    )
+                    binding.ivSettingFavorite.tag = if (isFav) "fav" else "not_fav"
+                    binding.ivSettingFavorite.setOnClickListener {
+                        val nowFav = com.streamflixreborn.streamflix.utils.ExtractorToggleStore.toggleFavorite(extName, providerName)
+                        binding.ivSettingFavorite.setImageResource(
+                            if (nowFav) R.drawable.ic_favorite_enable else R.drawable.ic_favorite_disable
+                        )
+                        binding.ivSettingFavorite.imageTintList = android.content.res.ColorStateList.valueOf(
+                            if (nowFav) 0xFFFF4444.toInt() else 0xFF808080.toInt()
+                        )
+                        binding.ivSettingFavorite.tag = if (nowFav) "fav" else "not_fav"
+                        settingsView.refreshServerList()
+                    }
+                    // D-pad : right row → favorite
+                    binding.root.nextFocusRightId = R.id.iv_setting_favorite
+                    binding.ivSettingFavorite.nextFocusRightId = View.NO_ID
+                    // Long-press menu contextuel
+                    binding.root.setOnLongClickListener {
+                        val ctx = binding.root.context
+                        val label = if (isFav) "♥ Retirer du favori" else "♥ Marquer favori"
+                        androidx.appcompat.app.AlertDialog.Builder(ctx)
+                            .setTitle("Action sur ce serveur")
+                            .setItems(arrayOf(label)) { _, _ ->
+                                binding.ivSettingFavorite.performClick()
+                            }.show()
+                        true
+                    }
+                } else {
+                    binding.ivSettingFavorite.visibility = View.GONE
+                }
+                binding.ivSettingBan.visibility = View.GONE
             }
 
             // IPTV-specific buttons: favorite (★) and ban (✕) — for ChannelVariant items
@@ -1071,7 +1115,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                 // (ligne ~817) les a déjà mis VISIBLE pour le picker IPTV.
                 // Sans ce check, le ❤ et la ✕ étaient invisibles pour les servers IPTV
                 // sur TV (bug : "le favori serveur n'apparaît pas sur Vegeta TV").
-                if (!(item is Settings.Server && item.isIptv && item.channelKey != null)) {
+                if (!(item is Settings.Server)) {
                     binding.ivSettingFavorite.visibility = View.GONE
                     binding.ivSettingBan.visibility = View.GONE
                 }

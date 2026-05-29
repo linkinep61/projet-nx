@@ -37,7 +37,10 @@ import java.util.concurrent.TimeUnit
 object VavooProvider : Provider, IptvProvider {
 
     override val name = "Vavoo TV"
-    override val baseUrl = "https://oha.to"
+    override val baseUrl: String
+        get() = try {
+            VavooMirrorSettings.getCurrent(com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext).url
+        } catch (_: Exception) { "https://vavoo.to" }
     override val logo = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_vavoo"
     override val language = "fr"
 
@@ -48,15 +51,14 @@ object VavooProvider : Provider, IptvProvider {
     private const val APP_VERSION = "3.1.8"
 
     // ───────── API domains (fallback chain) ─────────
-    // 2026-05-10 : vavoo.to et kool.to en premier — testés UP. oha.to et
-    // huhu.to retournent 404 sur les routes catalog/resolve (l'addon n'y
-    // est plus servi en mai 2026), gardés en fallback ultime.
-    private val BASE_SITES = listOf(
-        "https://vavoo.to",
-        "https://kool.to",
-        "https://oha.to",
-        "https://huhu.to",
-    )
+    // 2026-05-28 : miroir préféré en premier (choix user dans Paramètres),
+    // les autres restent en fallback.
+    private val BASE_SITES: List<String>
+        get() = try {
+            VavooMirrorSettings.getOrderedSites(com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext)
+        } catch (_: Exception) {
+            listOf("https://vavoo.to", "https://kool.to", "https://oha.to", "https://huhu.to")
+        }
 
     private val PING_URLS = listOf(
         "https://www.lokke.app/api/app/ping",
