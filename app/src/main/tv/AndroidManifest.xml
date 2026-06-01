@@ -66,6 +66,11 @@
             android:theme="@style/AppTheme.Tv" />
 
         <activity
+            android:name=".activities.sync.DeviceSyncActivity"
+            android:exported="false"
+            android:theme="@style/AppTheme.Tv" />
+
+        <activity
             android:name=".activities.tools.BypassWebViewActivity"
             android:exported="false"
             android:theme="@style/AppTheme.Tv" />

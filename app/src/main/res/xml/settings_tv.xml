@@ -403,6 +403,11 @@
                 android:key="key_backup_import_db_tv"
                 android:title="@string/backup_db_import_title"
                 android:summary="@string/backup_db_import_summary" />
+
+            <Preference
+                android:key="key_device_sync_tv"
+                android:title="Synchroniser avec un autre appareil"
+                android:summary="Transfère tes données entre téléphone et TV via un code" />
         </PreferenceCategory>
     </PreferenceScreen>
 

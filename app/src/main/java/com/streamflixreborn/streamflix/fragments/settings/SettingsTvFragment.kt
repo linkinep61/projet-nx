@@ -899,6 +899,11 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             showDatabaseBackupImportOptions()
             true
         }
+
+        findPreference<Preference>("key_device_sync_tv")?.setOnPreferenceClickListener {
+            startActivity(android.content.Intent(requireContext(), com.streamflixreborn.streamflix.activities.sync.DeviceSyncActivity::class.java))
+            true
+        }
     }
 
     private suspend fun performBackupExport(uri: Uri) {
