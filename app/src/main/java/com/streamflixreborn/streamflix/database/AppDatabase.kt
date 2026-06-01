@@ -120,6 +120,21 @@ abstract class AppDatabase : RoomDatabase() {
             return buildDatabase(profileId, providerName, context)
         }
 
+        /** 2026-05-29 : ouvre la DB d'un profil SPÉCIFIQUE (pas forcément le profil actif).
+         *  Utilisé par DeviceSyncManager pour sérialiser TOUS les profils. */
+        fun getInstanceForProfileAndProvider(profileId: String, providerName: String, context: Context): AppDatabase {
+            return buildDatabase(profileId, providerName, context)
+        }
+
+        /** 2026-05-29 : vérifie si la DB existe pour un profil spécifique. */
+        fun providerDbExistsForProfile(profileId: String, providerName: String, context: Context): Boolean {
+            return try {
+                context.getDatabasePath(buildDbFileName(profileId, providerName)).exists()
+            } catch (_: Exception) {
+                false
+            }
+        }
+
         /** 2026-05-20 : true si le fichier DB du provider existe déjà (= provider
          *  déjà parcouru). Permet au "cœur favoris global" de n'ouvrir QUE les
          *  bases existantes au lieu d'en créer 30 vides. */

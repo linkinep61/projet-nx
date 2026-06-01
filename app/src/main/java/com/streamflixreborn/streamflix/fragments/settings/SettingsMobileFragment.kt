@@ -886,6 +886,11 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             importDbBackupLauncher.launch(arrayOf("application/zip"))
             true
         }
+
+        findPreference<Preference>("key_device_sync_mobile")?.setOnPreferenceClickListener {
+            startActivity(android.content.Intent(requireContext(), com.streamflixreborn.streamflix.activities.sync.DeviceSyncActivity::class.java))
+            true
+        }
     }
 
     private fun updateOverviewLabels() {
