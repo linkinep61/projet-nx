@@ -3840,9 +3840,9 @@ class PlayerMobileFragment : Fragment() {
                         val pri = ctrl.findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.live_primary_progress)
                         val sec = ctrl.findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.live_secondary_progress)
                         // 2026-05-31 : masquer les barres de jumelage sur IPTV
-                        if (stdBar != null && stdBar.visibility != View.VISIBLE) stdBar.visibility = View.VISIBLE
-                        if (pri != null && pri.visibility != View.GONE) pri.visibility = View.GONE
-                        if (sec != null && sec.visibility != View.GONE) sec.visibility = View.GONE
+                        if (stdBar != null && stdBar.visibility != View.GONE) stdBar.visibility = View.GONE
+                        if (pri != null && pri.visibility != View.VISIBLE) pri.visibility = View.VISIBLE
+                        if (sec != null && sec.visibility != View.VISIBLE) sec.visibility = View.VISIBLE
                         if (pri != null && sec != null) {
                             liveCumulativePlaybackMs += 1000L
                             smoothedAheadMs = if (ahead > smoothedAheadMs) ahead

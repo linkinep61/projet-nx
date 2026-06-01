@@ -2926,16 +2926,6 @@ class PlayerTvFragment : Fragment() {
                                 if (::player.isInitialized && player.playbackState == Player.STATE_BUFFERING &&
                                     bufferingStartTimestampMs > 0L &&
                                     System.currentTimeMillis() - bufferingStartTimestampMs >= 10_000L) {
-                                    // 2026-05-31 : ne pas reseter si le buffer a des données
-                                    // (le stream charge, juste lentement — le reset tue tout)
-                                    val wdBuffered = try { player.bufferedPosition } catch (_: Exception) { 0L }
-                                    val wdPos = try { player.currentPosition } catch (_: Exception) { 0L }
-                                    val wdAhead = wdBuffered - wdPos
-                                    if (wdAhead > 5_000L) {
-                                        Log.d("PlayerTvFragment", "WATCHDOG: buffer OK (${wdAhead/1000}s d'avance), pas de reset")
-                                        bufferingStartTimestampMs = System.currentTimeMillis()
-                                        return@launch // buffer a des données, on laisse le player gérer
-                                    }
                                     val srv = currentServer
                                     if (srv != null) {
                                         backupJumelageAttempted = false
@@ -4217,6 +4207,8 @@ class PlayerTvFragment : Fragment() {
         private fun startProgressHandler() {
             progressHandler = android.os.Handler(android.os.Looper.getMainLooper())
             var liveCheckCounter = 0
+            var stuckCounter = 0
+            var lastStuckPosKey = -1
             // 2026-05-09 PISTE A v2 : tracking du drain buffer pour reload préemptif.
             // L'idée : sur MPEG-TS Progressive sain, le buffer ahead reste ~stable
             // (download = lecture). Si la connexion HTTP meurt côté serveur,
@@ -4293,6 +4285,29 @@ class PlayerTvFragment : Fragment() {
                             liveCheckCounter = 0
                             Log.d("PlayerTvFragment", "Live buffer: pos=${pos/1000}s buf=${buf/1000}s ahead=${aheadSec}s")
                         }
+                        // 2026-05-31 : détection flux corrompu — si la position de lecture
+                        // ne progresse pas pendant 8s alors que le buffer est plein (>10s),
+                        // le décodeur est bloqué sur des frames corrompues → auto-refresh.
+                        if (aheadSec > 10 && player.isPlaying) {
+                            val posKey = (pos / 2000).toInt() // arrondi à 2s
+                            if (posKey == lastStuckPosKey) {
+                                stuckCounter++
+                                if (stuckCounter >= 8) {
+                                    Log.w("PlayerTvFragment", "Flux corrompu détecté (position bloquée ${pos/1000}s avec ${aheadSec}s de buffer) → auto-refresh")
+                                    stuckCounter = 0
+                                    try {
+                                        player.seekToDefaultPosition()
+                                        player.prepare()
+                                        player.playWhenReady = true
+                                    } catch (_: Exception) {}
+                                }
+                            } else {
+                                stuckCounter = 0
+                                lastStuckPosKey = posKey
+                            }
+                        } else {
+                            stuckCounter = 0
+                        }
                         // 2026-05-17 v3 (user "barre 1 = chunk en lecture, barre 2
                         //   = pré-chargé, switch quand barre 1 finit, total 60s
                         //   respecté") : drive 2 DefaultTimeBars custom.
@@ -4309,11 +4324,13 @@ class PlayerTvFragment : Fragment() {
                             val stdBar = ctrl.findViewById<View>(R.id.exo_progress)
                             val pri = ctrl.findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.live_primary_progress)
                             val sec = ctrl.findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.live_secondary_progress)
-                            // 2026-05-31 : masquer les barres de jumelage sur IPTV
-                            // (inutiles pour le live, perturbent l'UX). Garder la barre standard.
-                            if (stdBar != null && stdBar.visibility != View.VISIBLE) stdBar.visibility = View.VISIBLE
-                            if (pri != null && pri.visibility != View.GONE) pri.visibility = View.GONE
-                            if (sec != null && sec.visibility != View.GONE) sec.visibility = View.GONE
+                            // Live IPTV → hide standard, show 2 custom bars
+                            if (stdBar != null && stdBar.visibility != View.GONE) stdBar.visibility = View.GONE
+                            if (pri != null && pri.visibility != View.VISIBLE) pri.visibility = View.VISIBLE
+                            if (sec != null && sec.visibility != View.VISIBLE) sec.visibility = View.VISIBLE
+                            // 2026-05-31 : forcer non-focusable (DefaultTimeBar force focusable=true en interne)
+                            pri?.isFocusable = false
+                            sec?.isFocusable = false
 
                             if (pri != null && sec != null) {
                                 // 2026-05-17 v7 : tick cumulatif basé sur WALL-CLOCK
@@ -4495,10 +4512,11 @@ class PlayerTvFragment : Fragment() {
                         if (aheadSec < 25 && aheadSec > 0) {
                             Log.d("PREEMPTIVE_CHECK", "ahead=${aheadSec}s, drainTicks=$consecutiveDrainTicks, bufferEverHealthy=$bufferEverHealthy, preemptiveInFlight=$preemptiveReloadInFlight, mediaItemCount=${try { player.mediaItemCount } catch (_: Exception) { -1 }}, hasNext=${try { player.hasNextMediaItem() } catch (_: Exception) { false }}")
                         }
-                        // v51: RESTAURE v44 seuils — ahead<12s + 5 ticks (user-validé "good"
-                        //   avec une petite coupure acceptable). Moins agressif que v48
-                        //   pour limiter les decoder resets fréquents.
-                        if (consecutiveDrainTicks >= 5 && aheadSec < 12 && bufferEverHealthy &&
+                        // 2026-05-31 : swap préemptif DÉSACTIVÉ — le swap cause un écran noir
+                        // quand le backup ne charge pas (bande passante Tahiti insuffisante).
+                        // Mieux vaut laisser le buffer se vider naturellement et rebufferer
+                        // (micro-coupure) que forcer un swap qui tue le player.
+                        if (false && consecutiveDrainTicks >= 5 && aheadSec < 5 && bufferEverHealthy &&
                             !preemptiveReloadInFlight) {
                             preemptiveReloadInFlight = true
                             consecutiveDrainTicks = 0
@@ -5446,34 +5464,8 @@ class PlayerTvFragment : Fragment() {
         private fun createDefaultHttpDataSourceFactory(): HttpDataSource.Factory {
             usingCronet = false
             usingDoH = false
-            // 2026-05-31 : sur Chromecast (Android TV), Google Play Services impose
-            // son propre conscrypt qui IGNORE le IptvTlsHelper global de l'app.
-            // DefaultHttpDataSource utilise HttpsURLConnection → GMS conscrypt
-            // rejette le cert expiré du CDN Vavoo → écran noir.
-            // Fix : OkHttpDataSource pour IPTV (OkHttp a son propre SSLContext).
-            val isIptv = isIptvChannelContext()
-            if (isIptv) {
-                Log.d("PlayerNetwork", "Using OkHttpDataSource (trust-all TLS) for IPTV")
-                val trustAll = object : javax.net.ssl.X509TrustManager {
-                    override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
-                    override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
-                    override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
-                }
-                val sslCtx = javax.net.ssl.SSLContext.getInstance("TLS").apply {
-                    init(null, arrayOf(trustAll), java.security.SecureRandom())
-                }
-                val client = OkHttpClient.Builder()
-                    .sslSocketFactory(sslCtx.socketFactory, trustAll)
-                    .hostnameVerifier { _, _ -> true }
-                    .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
-                    .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                    .followRedirects(true)
-                    .followSslRedirects(true)
-                    .build()
-                val base = OkHttpDataSource.Factory(client)
-                    .setUserAgent(NetworkClient.USER_AGENT)
-                return com.streamflixreborn.streamflix.utils.LiveReconnectingHttpDataSource.Factory(base)
-            }
+            // 2026-05-31 : le fix OkHttp SSL est dans MiniPlayerController uniquement.
+            // Le fullscreen utilise DefaultHttpDataSource + LiveReconnecting (plus stable).
             Log.d("PlayerNetwork", "Using DefaultHttpDataSource + LiveReconnecting wrapper")
             val base = DefaultHttpDataSource.Factory()
                 .setUserAgent(NetworkClient.USER_AGENT)
