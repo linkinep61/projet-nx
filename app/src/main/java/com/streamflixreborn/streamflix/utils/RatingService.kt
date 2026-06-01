@@ -4,21 +4,25 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.provider.Settings
 import android.util.Log
-import com.google.firebase.firestore.FieldValue
-import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.SetOptions
+import com.streamflixreborn.streamflix.StreamFlixApp
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Service de notes communautaires via Firebase Firestore.
+ * Service de notes communautaires via Cloudflare Worker + D1.
  *
- * Structure Firestore :
- *   ratings/{contentKey}                → { averageRating, totalVotes }
- *   ratings/{contentKey}/votes/{deviceId} → { rating, timestamp }
+ * API :
+ *   POST /rating/get   {contentKey}                      → {averageRating, totalVotes, title}
+ *   POST /rating/vote  {contentKey, deviceId, rating, title} → {averageRating, totalVotes}
+ *
+ * Le vote individuel de CE device est caché localement en SharedPreferences
+ * (le Worker ne renvoie pas le vote par device).
  *
  * contentKey = tmdbId quand dispo (cross-provider), sinon SHA-256(title|year).
  * deviceId  = SHA-256(ANDROID_ID) — anonyme, pas de compte.
@@ -26,10 +30,9 @@ import java.util.concurrent.ConcurrentHashMap
 object RatingService {
 
     private const val TAG = "RatingService"
-    private const val COLLECTION_RATINGS = "ratings"
-    private const val SUBCOLLECTION_VOTES = "votes"
-
-    private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
+    private const val API_URL = "https://streamflix-api.logami61250.workers.dev"
+    private const val PREFS_NAME = "community_rating_votes"
+    private val JSON_MEDIA = "application/json".toMediaType()
 
     // ── Device ID (anonyme, stable par device) ──────────────────────────
 
@@ -116,6 +119,27 @@ object RatingService {
         }
     }
 
+    // ── Cache local du vote de CE device ────────────────────────────────
+
+    private fun saveLocalVote(contentKey: String, deviceId: String, rating: Int) {
+        try {
+            val ctx = StreamFlixApp.instance ?: return
+            ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putInt("vote_${contentKey}_$deviceId", rating)
+                .apply()
+        } catch (_: Exception) {}
+    }
+
+    private fun getLocalVote(contentKey: String, deviceId: String): Int? {
+        return try {
+            val ctx = StreamFlixApp.instance ?: return null
+            val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val key = "vote_${contentKey}_$deviceId"
+            if (prefs.contains(key)) prefs.getInt(key, 0) else null
+        } catch (_: Exception) { null }
+    }
+
     // ── Soumettre / mettre à jour une note ──────────────────────────────
 
     /**
@@ -134,43 +158,31 @@ object RatingService {
         require(rating in 1..5) { "Rating must be 1..5" }
         withContext(Dispatchers.IO) {
             try {
-                val ratingDoc = db.collection(COLLECTION_RATINGS).document(contentKey)
-                val voteDoc = ratingDoc.collection(SUBCOLLECTION_VOTES).document(deviceId)
-
-                // 1) Écrire / écraser le vote individuel
-                voteDoc.set(
-                    mapOf(
-                        "rating" to rating,
-                        "timestamp" to FieldValue.serverTimestamp(),
-                    )
-                ).await()
-
-                // 2) Recalculer la moyenne depuis tous les votes
-                val votes = ratingDoc.collection(SUBCOLLECTION_VOTES).get().await()
-                var sum = 0L
-                var count = 0
-                for (doc in votes.documents) {
-                    val r = doc.getLong("rating")
-                    if (r != null && r in 1..5) {
-                        sum += r
-                        count++
-                    }
+                val body = JSONObject().apply {
+                    put("contentKey", contentKey)
+                    put("deviceId", deviceId)
+                    put("rating", rating)
+                    put("title", title)
                 }
+                val request = Request.Builder()
+                    .url("$API_URL/rating/vote")
+                    .post(body.toString().toRequestBody(JSON_MEDIA))
+                    .build()
 
-                // 3) Mettre à jour le document parent (cache agrégé)
-                if (count > 0) {
-                    val avg = sum.toDouble() / count
-                    ratingDoc.set(
-                        mapOf(
-                            "averageRating" to Math.round(avg * 10) / 10.0, // 1 décimale
-                            "totalVotes" to count,
-                            "title" to title,
-                        ),
-                        SetOptions.merge()
-                    ).await()
+                val response = NetworkClient.default.newCall(request).execute()
+                val respBody = response.body?.string()
+                response.close()
+
+                if (response.isSuccessful && respBody != null) {
+                    // Sauvegarder le vote localement
+                    saveLocalVote(contentKey, deviceId, rating)
+                    val json = JSONObject(respBody)
+                    val avg = json.optDouble("averageRating", 0.0)
+                    val total = json.optInt("totalVotes", 0)
+                    Log.d(TAG, "Rating $rating submitted for $contentKey (avg=$avg, n=$total)")
+                } else {
+                    Log.e(TAG, "Failed to submit rating for $contentKey: HTTP ${response.code}")
                 }
-
-                Log.d(TAG, "Rating $rating submitted for $contentKey (avg=${if (count > 0) sum.toDouble() / count else 0}, n=$count)")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to submit rating for $contentKey", e)
             }
@@ -192,27 +204,28 @@ object RatingService {
     suspend fun getRating(contentKey: String, deviceId: String): RatingInfo? {
         return withContext(Dispatchers.IO) {
             try {
-                val ratingDoc = db.collection(COLLECTION_RATINGS)
-                    .document(contentKey)
-                    .get()
-                    .await()
+                val body = JSONObject().apply {
+                    put("contentKey", contentKey)
+                }
+                val request = Request.Builder()
+                    .url("$API_URL/rating/get")
+                    .post(body.toString().toRequestBody(JSON_MEDIA))
+                    .build()
 
-                if (!ratingDoc.exists()) return@withContext null
+                val response = NetworkClient.default.newCall(request).execute()
+                val respBody = response.body?.string()
+                response.close()
 
-                val avg = ratingDoc.getDouble("averageRating") ?: 0.0
-                val total = ratingDoc.getLong("totalVotes")?.toInt() ?: 0
+                if (!response.isSuccessful || respBody == null) return@withContext null
 
-                // Lire le vote individuel de ce device
-                val voteDoc = db.collection(COLLECTION_RATINGS)
-                    .document(contentKey)
-                    .collection(SUBCOLLECTION_VOTES)
-                    .document(deviceId)
-                    .get()
-                    .await()
+                val json = JSONObject(respBody)
+                val avg = json.optDouble("averageRating", 0.0)
+                val total = json.optInt("totalVotes", 0)
 
-                val userRating = if (voteDoc.exists()) {
-                    voteDoc.getLong("rating")?.toInt()
-                } else null
+                if (total == 0 && avg == 0.0) return@withContext null
+
+                // Le vote individuel est lu depuis le cache local
+                val userRating = getLocalVote(contentKey, deviceId)
 
                 RatingInfo(
                     averageRating = avg,

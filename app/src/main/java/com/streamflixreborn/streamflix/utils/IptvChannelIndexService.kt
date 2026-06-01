@@ -52,6 +52,9 @@ object IptvChannelIndexService {
     private const val PREF_INDEX_CACHE = "iptv_channel_index_cache"
     private const val PREF_INDEX_CACHE_TS = "iptv_channel_index_cache_ts"
 
+    // 2026-05-31 : Firebase DÉSACTIVÉ — migrée vers D1 plus tard.
+    // Les fonctions Firebase sont court-circuitées pour ne plus consommer le quota.
+    private val FIREBASE_DISABLED = true
     private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
 
     // ── Cache mémoire : channelKey → Set<CID> ──
@@ -222,6 +225,7 @@ object IptvChannelIndexService {
     fun reportStreamUrl(channelKey: String, cid: String, url: String) {
         val map = streamUrlMap.getOrPut(channelKey) { ConcurrentHashMap() }
         map[cid] = url
+        if (FIREBASE_DISABLED) return
         // Fire-and-forget Firebase update
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -253,6 +257,7 @@ object IptvChannelIndexService {
      * Supprime automatiquement les CIDs morts (pas vus depuis 72h) de Firestore.
      */
     suspend fun fetchAllChannels(): Map<String, Set<String>> = withContext(Dispatchers.IO) {
+        if (FIREBASE_DISABLED) return@withContext channelIndex.toMap()
         try {
             val t0 = System.currentTimeMillis()
             val snapshot = db.collection(COLLECTION).get().await()
@@ -396,6 +401,7 @@ object IptvChannelIndexService {
         lsMap[cid] = System.currentTimeMillis()
 
         // ── Throttle Firebase (1 report / CID / heure) ──
+        if (FIREBASE_DISABLED) return@withContext
         val throttleKey = "$channelKey::$cid"
         val now = System.currentTimeMillis()
         val lastReport = lastReportTime[throttleKey] ?: 0L
@@ -428,6 +434,13 @@ object IptvChannelIndexService {
      * Rétro-compatible avec les appels existants.
      */
     suspend fun reportCid(channelKey: String, cid: String) = withContext(Dispatchers.IO) {
+        if (FIREBASE_DISABLED) {
+            val set = channelIndex.getOrPut(channelKey) {
+                java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+            }
+            set.add(cid)
+            return@withContext
+        }
         try {
             val set = channelIndex.getOrPut(channelKey) {
                 java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
@@ -452,6 +465,13 @@ object IptvChannelIndexService {
      */
     suspend fun reportCids(channelKey: String, cids: Collection<String>) = withContext(Dispatchers.IO) {
         if (cids.isEmpty()) return@withContext
+        if (FIREBASE_DISABLED) {
+            val set = channelIndex.getOrPut(channelKey) {
+                java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+            }
+            cids.forEach { set.add(it) }
+            return@withContext
+        }
         try {
             val set = channelIndex.getOrPut(channelKey) {
                 java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
