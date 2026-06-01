@@ -109,7 +109,6 @@ object IptvFavoritesStore {
     /** Reconstruit le préfixe provider à partir du nom pour reformer un channelId.
      *  2026-05-10 : Sport Live et Movix LiveTV retirés (providers supprimés). */
     private fun prefixFor(providerName: String): String = when (providerName) {
-        "WiTV" -> "ch::"
         "OLA TV" -> "ola::"
         "Vegeta TV" -> "vegeta::"
         "TV Hub" -> "livehub::"

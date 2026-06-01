@@ -134,8 +134,7 @@ class TvShowTvFragment : Fragment() {
     }
 
     private fun isIptvChannel(tvShow: TvShow): Boolean {
-        return tvShow.providerName == "WiTV"
-            || tvShow.providerName == "OLA TV"
+        return tvShow.providerName == "OLA TV"
             || tvShow.providerName == "Vegeta TV"
             || tvShow.providerName == "Vavoo TV"
             || tvShow.providerName == "Sport Live"

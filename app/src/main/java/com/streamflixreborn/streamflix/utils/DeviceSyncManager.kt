@@ -246,7 +246,7 @@ object DeviceSyncManager {
     private fun collectIptvFavorites(context: Context): JSONObject {
         val result = JSONObject()
         val providerNames = listOf(
-            "WiTV v2", "OlaTV", "VegetaTV", "Movix LiveTV", "Sport Live", "Mon IPTV"
+            "OlaTV", "VegetaTV", "Movix LiveTV", "Sport Live", "Mon IPTV"
         )
         providerNames.forEach { name ->
             val prefsName = "iptv_favorites_${name.lowercase().replace(" ", "_")}"

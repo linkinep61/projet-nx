@@ -73,7 +73,6 @@ import com.streamflixreborn.streamflix.utils.setMediaServerId
 import com.streamflixreborn.streamflix.utils.setMediaServers
 import com.streamflixreborn.streamflix.utils.toSubtitleMimeType
 import com.streamflixreborn.streamflix.providers.IptvProvider
-import com.streamflixreborn.streamflix.providers.WiTvProvider
 import com.streamflixreborn.streamflix.utils.viewModelsFactory
 import kotlinx.coroutines.launch
 import java.util.Calendar
@@ -630,13 +629,6 @@ class PlayerMobileFragment : Fragment() {
                             val isTmdb = providerName.contains("TMDb", ignoreCase = true)
 
                             if (servers.isEmpty()) {
-                                // For WiTV provider, don't exit — OLA CID servers may arrive progressively
-                                if (providerName == "WiTV" || providerName == "WiTV v2") {
-                                    Log.d("PlayerMobileFragment", "No initial servers, waiting for OLA CID servers...")
-                                    PlayerSettingsView.Settings.ChannelVariant.list.clear()
-                                    binding.settings.refreshChannelVariantList()
-                                    return@collect
-                                }
                                 val message = if (isTmdb) {
                                     val langCode = providerName.substringAfter("(").substringBefore(")")
                                     val locale = Locale.forLanguageTag(langCode)
@@ -1643,12 +1635,6 @@ class PlayerMobileFragment : Fragment() {
         val resolvePoster: (String) -> String?
 
         when (provider) {
-            is WiTvProvider -> {
-                prevId = provider.getPreviousChannelId(args.id)
-                nextId = provider.getNextChannelId(args.id)
-                resolveDisplayName = { provider.getChannelDisplayName(it) }
-                resolvePoster = { provider.getChannelPoster(it) }
-            }
             is com.streamflixreborn.streamflix.providers.OlaTvProvider -> {
                 prevId = provider.getPreviousChannelId(args.id)
                 nextId = provider.getNextChannelId(args.id)

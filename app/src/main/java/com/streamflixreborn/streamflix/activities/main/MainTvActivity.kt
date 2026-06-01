@@ -385,9 +385,7 @@ class MainTvActivity : FragmentActivity() {
                 R.id.iptv_language_menu -> {
                     val provider = UserPreferences.currentProvider
                     Log.d("MainTv", "iptv_language_menu clicked, provider=${provider?.name}, isVavoo=${provider is com.streamflixreborn.streamflix.providers.VavooProvider}")
-                    if (provider is com.streamflixreborn.streamflix.providers.WiTvProviderV2) {
-                        showWiTvV2GroupPicker()
-                    } else if (provider is com.streamflixreborn.streamflix.providers.VavooProvider) {
+                    if (provider is com.streamflixreborn.streamflix.providers.VavooProvider) {
                         showVavooCountryPicker()
                     } else {
                         showIptvLanguageFilterPicker()
@@ -955,66 +953,14 @@ class MainTvActivity : FragmentActivity() {
         // MyIptv ou Vavoo est actif. Catégories seulement pour MyIptv (Vavoo
         // n'a pas de catégories user-pickable).
         val isVavoo = provider is com.streamflixreborn.streamflix.providers.VavooProvider
-        val isWiTvV2 = provider is com.streamflixreborn.streamflix.providers.WiTvProviderV2
         binding.navMain.menu.findItem(R.id.iptv_categories_menu)?.isVisible = isMyIptv
-        binding.navMain.menu.findItem(R.id.iptv_language_menu)?.isVisible = isMyIptv || isVavoo || isWiTvV2
+        binding.navMain.menu.findItem(R.id.iptv_language_menu)?.isVisible = isMyIptv || isVavoo
         // 2026-05-21 : filtre catalogue (sous Paramètres) uniquement pour les
         //   providers TMDB compatibles (Cloudstream).
         binding.navMain.menu.findItem(R.id.catalog_filter_menu)?.isVisible =
             com.streamflixreborn.streamflix.utils.CatalogFilter.isSupported(provider.name)
         // 2026-05-26 : filtre genre TMDB = re-clic sur Films/Séries
         // (pas d'item sidebar, géré par setOnItemReselectedListener)
-    }
-
-    /** V2 : picker groupe/langue pour WiTV v2.
-     *  "France" (défaut) = catalogue hardcodé instantané.
-     *  Autre groupe = chaînes OTF de ce groupe (chargé en fond). */
-    fun showWiTvV2GroupPicker() {
-        val current = com.streamflixreborn.streamflix.providers.WiTvProviderV2.getSelectedGroup()
-        val groups = com.streamflixreborn.streamflix.providers.WiTvProviderV2.getAvailableGroups()
-
-        // "France" en premier (défaut hardcodé), puis les groupes OTF
-        val labels = mutableListOf("🇫🇷 France${if (current.isBlank()) "  ✓" else ""}")
-        if (groups.isEmpty()) {
-            // OTF pas encore chargé — lancer en fond + afficher quand même le picker
-            labels.add("⏳ Chargement des groupes…")
-            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-                try {
-                    com.streamflixreborn.streamflix.providers.WiTvProviderV2.ensureOtfCache()
-                } catch (_: Exception) {}
-            }
-        } else {
-            labels.addAll(groups.map { "$it${if (it.equals(current, true)) "  ✓" else ""}" })
-        }
-
-        android.app.AlertDialog.Builder(this)
-            .setTitle("Langue / Groupe")
-            .setItems(labels.toTypedArray()) { _, idx ->
-                if (groups.isEmpty()) {
-                    // OTF en chargement, retry dans 2s
-                    android.widget.Toast.makeText(this, "Chargement en cours, réessayez…", android.widget.Toast.LENGTH_SHORT).show()
-                    return@setItems
-                }
-                val picked = if (idx == 0) "" else groups.getOrElse(idx - 1) { "" }
-                if (picked.equals(current, true)) return@setItems
-                com.streamflixreborn.streamflix.providers.WiTvProviderV2.setSelectedGroup(picked)
-                kotlin.runCatching {
-                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
-                        this,
-                        com.streamflixreborn.streamflix.providers.WiTvProviderV2,
-                    )
-                }
-                android.widget.Toast.makeText(
-                    this,
-                    if (picked.isBlank()) "France — catalogue TNT" else "$picked — chargement…",
-                    android.widget.Toast.LENGTH_SHORT,
-                ).show()
-                kotlin.runCatching {
-                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
-                }
-            }
-            .setNegativeButton("Annuler", null)
-            .show()
     }
 
     /** 2026-05-13 : picker pays Vavoo (item sidebar). */

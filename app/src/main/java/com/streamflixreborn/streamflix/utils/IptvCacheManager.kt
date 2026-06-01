@@ -4,7 +4,7 @@ import android.util.Log
 
 /**
  * 2026-05-18 v85 : orchestrateur de cache IPTV — évite l'OOM observé quand
- *   plusieurs providers IPTV (Vavoo 4063 ch + WiTv + OlaTv + VegetaTv + MyIptv
+ *   plusieurs providers IPTV (Vavoo 4063 ch + OlaTv + VegetaTv + MyIptv
  *   M3U) accumulent leurs catalogues en heap.
  *
  * Règle : un seul provider IPTV peut tenir son catalogue en mémoire à la fois.
@@ -32,12 +32,6 @@ object IptvCacheManager {
                 cleared++
             }
         } catch (e: Throwable) { Log.w(TAG, "Vavoo clear failed: ${e.message}") }
-        try {
-            if (keep != "WiTV") {
-                com.streamflixreborn.streamflix.providers.WiTvProvider.clearCache()
-                cleared++
-            }
-        } catch (e: Throwable) { Log.w(TAG, "WiTV clear failed: ${e.message}") }
         try {
             if (keep != "OLA TV") {
                 com.streamflixreborn.streamflix.providers.OlaTvProvider.clearCache()

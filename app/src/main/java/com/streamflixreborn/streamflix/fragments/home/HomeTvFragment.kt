@@ -31,7 +31,6 @@ import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.MiniPlayerController
 import com.streamflixreborn.streamflix.utils.viewModelsFactory
 import com.streamflixreborn.streamflix.providers.IptvProvider
-import com.streamflixreborn.streamflix.providers.WiTvProvider
 import kotlinx.coroutines.Runnable
 import com.streamflixreborn.streamflix.utils.CacheUtils
 import kotlinx.coroutines.launch
@@ -265,9 +264,7 @@ class HomeTvFragment : Fragment() {
 
     private fun initializeMiniPlayer() {
         val isIptv = UserPreferences.currentProvider is IptvProvider
-        // WiTV v2 : pas de mini-player, 1 clic = fullscreen direct
-        val isWiTv = UserPreferences.currentProvider?.name?.contains("WiTV") == true
-        if (!isIptv || !UserPreferences.miniPlayerEnabled || isWiTv) {
+        if (!isIptv || !UserPreferences.miniPlayerEnabled) {
             binding.miniPlayerContainer.visibility = View.GONE
             MiniPlayerController.onIptvChannelClick = null
             return

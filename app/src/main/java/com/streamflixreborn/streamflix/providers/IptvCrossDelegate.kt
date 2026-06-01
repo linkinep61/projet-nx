@@ -33,9 +33,6 @@ object IptvCrossDelegate {
                 val cidShort = parts[0].takeLast(6)
                 Video.Server(favId, "OLA[$cidShort] ${parts[1]}")
             }
-            favId.startsWith("ch::") || favId.startsWith("m3u8::") || favId.startsWith("sport::") -> {
-                Video.Server(favId, "WiTV ${favId.take(40)}")
-            }
             favId.startsWith("movixlivetv__") -> {
                 val parts = favId.removePrefix("movixlivetv__").split("__")
                 val mirror = parts.getOrNull(1) ?: "?"
@@ -85,13 +82,6 @@ object IptvCrossDelegate {
                 val parts = favId.split("::", limit = 4)
                 if (parts.size >= 3) "${parts[0]}::${parts[1]}::${parts[2]}" else favId
             }
-            favId.startsWith("m3u8::") || favId.startsWith("ch::") || favId.startsWith("sport::") -> {
-                // WiTV : URL brute → on dédup par hôte+path (sans query string)
-                // pour résister aux tokens CDN dans les query params.
-                val urlPart = favId.substringAfter("::")
-                val noQuery = urlPart.substringBefore('?')
-                "${favId.substringBefore("::")}::$noQuery"
-            }
             favId.startsWith("movixlivetv__") -> {
                 // Format : movixlivetv__rawId__mirror → already stable
                 favId
@@ -110,9 +100,6 @@ object IptvCrossDelegate {
                     VegetaTvProvider.getVideo(server)
                 server.id.startsWith("ola_stream::") ->
                     OlaTvProvider.getVideo(server)
-                server.id.startsWith("ch::") || server.id.startsWith("m3u8::") ||
-                    server.id.startsWith("sport::") ->
-                    WiTvProvider.getVideo(server)
                 // 2026-05-10 : Movix LiveTV (Vavoo) retiré (inaccessible Tahiti
                 // sans VPN propre).
                 else -> null

@@ -723,13 +723,6 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2. Fallback : la chaîne est dans le Hub via ★ mais sans ❤ server marqué
         //    → on agrège pour ne pas avoir un player vide.
         return coroutineScope {
-            val witvD = async {
-                runCatching {
-                    withTimeoutOrNull(6_000L) {
-                        WiTvProvider.getServers("ch::${c.witvKey}", videoType)
-                    } ?: emptyList()
-                }.getOrElse { emptyList() }
-            }
             val olaD = async {
                 runCatching {
                     withTimeoutOrNull(6_000L) {
@@ -745,7 +738,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 }.getOrElse { emptyList() }
             }
 
-            val all = witvD.await() + olaD.await() + vegetaD.await()
+            val all = olaD.await() + vegetaD.await()
             // Dédup par URL (la même chaîne peut être diffusée via la même URL
             // sur plusieurs providers — pas la peine de doubler)
             val seenSrc = HashSet<String>()
@@ -767,7 +760,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             return com.streamflixreborn.streamflix.extractors.Extractor.extract(server.src, server)
         }
         return IptvCrossDelegate.delegateGetVideo(server)
-            ?: WiTvProvider.getVideo(server)  // fallback si format inconnu
+            ?: throw Exception("No IPTV provider can handle server: ${server.id}")
     }
 
     // ─────────────── Channel navigation (next/previous) ───────────────
