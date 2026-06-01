@@ -1,11 +1,15 @@
 package com.streamflixreborn.streamflix.activities.profile
 
 import android.content.Context
+import android.text.InputType
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
+import android.widget.EditText
 import android.widget.ImageView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -15,6 +19,11 @@ import com.streamflixreborn.streamflix.R
  * 2026-05-12 : dialog de sélection d'emoji pour l'avatar de profil. Affiche
  * une grille focusable (D-pad friendly TV + tap mobile) des emojis de
  * [ProfileEmojis.list]. Au clic, callback avec l'emoji sélectionné.
+ *
+ * 2026-05-29 : ajout bouton "Coller une URL d'image" en haut du picker.
+ * Permet de mettre une image perso (URL ou GIF) comme avatar de profil,
+ * comme Nuvio. L'URL est stockée directement dans Profile.emoji et
+ * ProfileEmojiArt.urlForValue() la détecte automatiquement (startsWith http).
  *
  * Utilisé par [ProfilePickerActivity] et [ProfilePickerTvActivity] dans
  * les flows "créer profil" et "changer emoji".
@@ -34,6 +43,15 @@ object EmojiPickerDialog {
             dialogRef?.dismiss()
         }
 
+        // 2026-05-29 : bouton URL personnalisée
+        val btnUrl = view.findViewById<Button>(R.id.btn_custom_url)
+        btnUrl.setOnClickListener {
+            showCustomUrlDialog(context, currentEmoji) { url ->
+                onPick(url)
+                dialogRef?.dismiss()
+            }
+        }
+
         dialogRef = AlertDialog.Builder(context)
             .setTitle("Choisir un avatar")
             .setView(view)
@@ -41,10 +59,48 @@ object EmojiPickerDialog {
             .create()
         dialogRef.show()
 
-        // Demande le focus initial sur le 1er emoji (D-pad ready).
-        rv.post {
-            rv.findViewHolderForAdapterPosition(0)?.itemView?.requestFocus()
+        // Demande le focus initial sur le bouton URL (D-pad ready).
+        btnUrl.post { btnUrl.requestFocus() }
+    }
+
+    /**
+     * Dialog pour saisir une URL d'image personnalisée.
+     * Accepte http/https, PNG/JPG/WEBP/GIF.
+     */
+    private fun showCustomUrlDialog(
+        context: Context,
+        currentUrl: String?,
+        onConfirm: (String) -> Unit,
+    ) {
+        val input = EditText(context).apply {
+            hint = "https://exemple.com/avatar.png"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            isSingleLine = true
+            // Pré-remplir si l'avatar actuel est déjà une URL
+            if (currentUrl?.startsWith("http") == true) {
+                setText(currentUrl)
+                selectAll()
+            }
+            setPadding(48, 24, 48, 0)
         }
+        AlertDialog.Builder(context)
+            .setTitle("URL d'avatar personnalisée")
+            .setMessage("Colle un lien d'image (PNG, JPG, WEBP ou GIF animé)")
+            .setView(input)
+            .setPositiveButton("OK") { _, _ ->
+                val url = input.text.toString().trim()
+                if (url.startsWith("http://") || url.startsWith("https://")) {
+                    onConfirm(url)
+                } else if (url.isNotEmpty()) {
+                    Toast.makeText(
+                        context,
+                        "L'URL doit commencer par http:// ou https://",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
     }
 
     private class Adapter(

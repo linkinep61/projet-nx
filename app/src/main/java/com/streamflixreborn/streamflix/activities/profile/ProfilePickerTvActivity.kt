@@ -186,7 +186,7 @@ class ProfilePickerTvActivity : FragmentActivity() {
     }
 
     private fun openEditProfileDialog(profile: Profile) {
-        val options = mutableListOf("Renommer", "Changer emoji")
+        val options = mutableListOf("Renommer", "Changer avatar")
         if (profile.pinHash != null) options += "Supprimer PIN" else options += "Définir un PIN"
         options += "Supprimer ce profil"
         AlertDialog.Builder(this)
@@ -197,7 +197,7 @@ class ProfilePickerTvActivity : FragmentActivity() {
                         ProfileStore.upsert(profile.copy(name = value))
                         refreshList()
                     }
-                    "Changer emoji" -> EmojiPickerDialog.show(this, profile.emoji) { picked ->
+                    "Changer avatar" -> EmojiPickerDialog.show(this, profile.emoji) { picked ->
                         ProfileStore.upsert(profile.copy(emoji = picked))
                         // 2026-05-22 : cache l'image Fluent en local (1 seul DL réseau)
                         kotlinx.coroutines.MainScope().launch {

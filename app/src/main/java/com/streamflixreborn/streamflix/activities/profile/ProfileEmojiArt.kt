@@ -143,13 +143,20 @@ object ProfileEmojiArt {
 
     /**
      * Libelle lisible pour les dialogs texte : l'emoji si c'est un caractere
-     * connu, sinon le nom du dossier Fluent (ex: "Fox/3D/fox_3d.png" -> "Fox").
+     * connu, sinon le nom du dossier Fluent (ex: "Fox/3D/fox_3d.png" -> "Fox"),
+     * sinon "Image perso" pour les URLs custom.
      */
     fun displayName(value: String?): String {
         if (value.isNullOrEmpty()) return ""
         if (PATHS.containsKey(value)) return value
+        if (value.startsWith("http")) return "Image perso"
         if (value.contains("/")) return value.substringBefore("/")
         return value
+    }
+
+    /** Vérifie si la valeur stockée est une URL custom (pas Fluent). */
+    fun isCustomUrl(value: String?): Boolean {
+        return value?.startsWith("http") == true
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -200,7 +207,9 @@ object ProfileEmojiArt {
      * Glide, sinon emoji système en fallback.
      */
     fun bind(emoji: String?, image: ImageView?, fallback: TextView?) {
-        val fallbackText = if (emoji != null && PATHS.containsKey(emoji)) emoji else ""
+        val fallbackText = if (emoji != null && PATHS.containsKey(emoji)) emoji
+                          else if (emoji != null && emoji.startsWith("http")) ""
+                          else emoji ?: ""
         if (image == null) {
             fallback?.apply { visibility = View.VISIBLE; text = fallbackText }
             return

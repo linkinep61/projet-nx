@@ -1,5 +1,8 @@
 package com.streamflixreborn.streamflix.activities.iptv
 
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.text.InputType
 import android.view.LayoutInflater
@@ -10,10 +13,12 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.FragmentActivity
 import androidx.recyclerview.widget.RecyclerView
 import com.streamflixreborn.streamflix.R
+import com.streamflixreborn.streamflix.activities.tools.QrScannerActivity
 import com.streamflixreborn.streamflix.models.IptvSource
 import com.streamflixreborn.streamflix.providers.MyIptvProvider
 import com.streamflixreborn.streamflix.utils.IptvSourceStore
@@ -38,6 +43,186 @@ class IptvSourcesActivity : FragmentActivity() {
     private val scope = kotlinx.coroutines.CoroutineScope(
         kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main
     )
+
+    // 2026-05-29 : scanner QR → auto-détection du contenu (URL M3U, MAC Stalker,
+    // Xtream Codes) et pré-remplissage du bon formulaire.
+    private val qrScanLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val scanned = result.data?.getStringExtra(QrScannerActivity.EXTRA_QR_VALUE)
+                ?.trim() ?: return@registerForActivityResult
+            handleScannedValue(scanned)
+        }
+    }
+
+    /** Analyse le contenu scanné et ouvre le bon formulaire pré-rempli. */
+    private fun handleScannedValue(value: String) {
+        // 1) MAC address (format 00:1A:79:XX:XX:XX ou similaire)
+        val macRegex = Regex("^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+        if (macRegex.matches(value)) {
+            Toast.makeText(this, "MAC détectée : $value", Toast.LENGTH_SHORT).show()
+            openSourceFormPrefilled(IptvSource.Type.STALKER, url = null, mac = value)
+            return
+        }
+
+        // 2) Xtream Codes — URL contenant get.php?username=...&password=...
+        if (value.contains("get.php") && value.contains("username=") && value.contains("password=")) {
+            Toast.makeText(this, "Source Xtream Codes détectée", Toast.LENGTH_SHORT).show()
+            // Parse les composants depuis l'URL
+            val uri = android.net.Uri.parse(value)
+            val server = "${uri.scheme}://${uri.host}${if (uri.port > 0) ":${uri.port}" else ""}"
+            val user = uri.getQueryParameter("username") ?: ""
+            val pwd = uri.getQueryParameter("password") ?: ""
+            openXtreamFormPrefilled(server, user, pwd)
+            return
+        }
+
+        // 3) URL http(s) → M3U
+        if (value.startsWith("http://", true) || value.startsWith("https://", true)) {
+            Toast.makeText(this, "URL détectée", Toast.LENGTH_SHORT).show()
+            openSourceFormPrefilled(IptvSource.Type.M3U, url = value, mac = null)
+            return
+        }
+
+        // 4) Contenu mixte — plusieurs lignes (URL + MAC, portail Stalker, etc.)
+        // Essayer d'extraire une URL et/ou une MAC
+        val lines = value.lines().map { it.trim() }.filter { it.isNotBlank() }
+        val foundUrl = lines.firstOrNull {
+            it.startsWith("http://", true) || it.startsWith("https://", true)
+        }
+        val foundMac = lines.firstOrNull { macRegex.matches(it) }
+
+        if (foundUrl != null && foundMac != null) {
+            // Stalker : URL portail + MAC
+            Toast.makeText(this, "Portail Stalker détecté (URL + MAC)", Toast.LENGTH_SHORT).show()
+            openSourceFormPrefilled(IptvSource.Type.STALKER, url = foundUrl, mac = foundMac)
+            return
+        }
+        if (foundUrl != null) {
+            Toast.makeText(this, "URL détectée", Toast.LENGTH_SHORT).show()
+            openSourceFormPrefilled(IptvSource.Type.M3U, url = foundUrl, mac = null)
+            return
+        }
+        if (foundMac != null) {
+            Toast.makeText(this, "MAC détectée : $foundMac", Toast.LENGTH_SHORT).show()
+            openSourceFormPrefilled(IptvSource.Type.STALKER, url = null, mac = foundMac)
+            return
+        }
+
+        // 5) Fallback : affiche le contenu brut et laisse le user choisir
+        AlertDialog.Builder(this)
+            .setTitle("QR scanné")
+            .setMessage("Contenu détecté :\n\n$value\n\nType de source ?")
+            .setPositiveButton("M3U (URL)") { _, _ ->
+                openSourceFormPrefilled(IptvSource.Type.M3U, url = value, mac = null)
+            }
+            .setNeutralButton("Stalker (MAC)") { _, _ ->
+                openSourceFormPrefilled(IptvSource.Type.STALKER, url = null, mac = value)
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** Ouvre le formulaire M3U ou Stalker pré-rempli avec les valeurs scannées. */
+    private fun openSourceFormPrefilled(type: IptvSource.Type, url: String?, mac: String?) {
+        // Crée une source temporaire avec les valeurs scannées pour pré-remplir le form
+        val prefilled = IptvSource(
+            id = IptvSourceStore.generateId(),
+            type = type,
+            name = "",
+            url = url ?: "",
+            mac = mac,
+        )
+        openSourceForm(type, prefilled)
+    }
+
+    /** Ouvre le formulaire Xtream pré-rempli. */
+    private fun openXtreamFormPrefilled(server: String, user: String, pwd: String) {
+        fun fieldParams() = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        )
+        val nameInput = EditText(this).apply {
+            layoutParams = fieldParams()
+            hint = "Nom (ex: Mon abonnement Xtream)"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+        }
+        val serverInput = EditText(this).apply {
+            layoutParams = fieldParams()
+            hint = "URL serveur (ex: http://srv.com:8080)"
+            setText(server)
+            inputType = InputType.TYPE_TEXT_VARIATION_URI
+        }
+        val userInput = EditText(this).apply {
+            layoutParams = fieldParams()
+            hint = "Username"
+            setText(user)
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+        val pwdInput = EditText(this).apply {
+            layoutParams = fieldParams()
+            hint = "Password"
+            setText(pwd)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+        }
+        val uaInput = EditText(this).apply {
+            layoutParams = fieldParams()
+            hint = "User-Agent (optionnel)"
+        }
+        val container = LinearLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 0)
+            addView(nameInput)
+            addView(spacer())
+            addView(serverInput)
+            addView(spacer())
+            addView(userInput)
+            addView(spacer())
+            addView(pwdInput)
+            addView(spacer())
+            addView(uaInput)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Source Xtream (QR)")
+            .setView(container)
+            .setPositiveButton("Sauver") { _, _ ->
+                val name = nameInput.text.toString().trim()
+                val srv = serverInput.text.toString().trim().trimEnd('/')
+                val u = userInput.text.toString().trim()
+                val p = pwdInput.text.toString().trim()
+                val ua = uaInput.text.toString().trim().takeIf { it.isNotBlank() }
+                if (name.isBlank() || srv.isBlank() || u.isBlank() || p.isBlank()) {
+                    Toast.makeText(this, "Tous les champs requis", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                val m3uUrl = "$srv/get.php?username=${java.net.URLEncoder.encode(u, "UTF-8")}" +
+                    "&password=${java.net.URLEncoder.encode(p, "UTF-8")}" +
+                    "&type=m3u_plus&output=hls"
+                val source = IptvSource(
+                    id = IptvSourceStore.generateId(),
+                    type = IptvSource.Type.M3U,
+                    name = name,
+                    url = m3uUrl,
+                    userAgent = ua,
+                )
+                IptvSourceStore.upsert(source)
+                MyIptvProvider.invalidateCache(source.id)
+                com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(this, MyIptvProvider)
+                MyIptvProvider.selectedCategoryLive = null
+                MyIptvProvider.selectedCategoryMovie = null
+                MyIptvProvider.selectedCategorySeries = null
+                com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                Toast.makeText(this, "Source Xtream '$name' créée", Toast.LENGTH_SHORT).show()
+                openSourceContent(source)
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -245,19 +430,24 @@ class IptvSourcesActivity : FragmentActivity() {
             openSourceForm(existing.type, existing)
             return
         }
+        val hasCamera = packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
+        val items = mutableListOf(
+            "M3U / M3U8 (URL playlist)",
+            "Stalker MAG (URL portail + MAC)",
+            "Xtream Codes (URL serveur + login)",
+            "📦 Importer un pack (fichier de plusieurs sources)",
+        )
+        if (hasCamera) items.add("📷 Scanner un QR code")
+
         AlertDialog.Builder(this)
             .setTitle("Type de source")
-            .setItems(arrayOf(
-                "M3U / M3U8 (URL playlist)",
-                "Stalker MAG (URL portail + MAC)",
-                "Xtream Codes (URL serveur + login)",
-                "📦 Importer un pack (fichier de plusieurs sources)",
-            )) { _, idx ->
+            .setItems(items.toTypedArray()) { _, idx ->
                 when (idx) {
                     0 -> openSourceForm(IptvSource.Type.M3U, null)
                     1 -> openSourceForm(IptvSource.Type.STALKER, null)
                     2 -> openXtreamForm(null)
                     3 -> openImportPackDialog()
+                    4 -> qrScanLauncher.launch(Intent(this, QrScannerActivity::class.java))
                 }
             }
             .setNegativeButton("Annuler", null)
