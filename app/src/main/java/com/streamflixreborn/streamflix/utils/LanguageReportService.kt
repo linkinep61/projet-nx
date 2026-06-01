@@ -1,28 +1,31 @@
 package com.streamflixreborn.streamflix.utils
 
+import android.content.Context
 import android.util.Log
-import com.google.firebase.firestore.FieldValue
-import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.SetOptions
+import com.streamflixreborn.streamflix.StreamFlixApp
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 
 /**
- * Service communautaire de LANGUE (VF / VOSTFR / VO) — séparé de RatingService
- * (on NE touche PAS à leur fichier), mais on réutilise la MÊME collection
- * `ratings/{contentKey}` et leurs helpers publics `RatingService.contentKey(...)`
- * + `RatingService.getDeviceId(...)`.
+ * Service communautaire de LANGUE (VF / VOSTFR / VO) — via Cloudflare Worker + D1.
  *
- * Structure Firestore (greffée sur le doc existant) :
- *   ratings/{contentKey}                    → { langVotesVF, langVotesVOSTFR, langVotesVO }
- *   ratings/{contentKey}/langs/{deviceId}   → { lang, timestamp }
+ * API :
+ *   POST /lang/get    {contentKey}                → {votesVF, votesVOSTFR, votesVO}
+ *   POST /lang/vote   {contentKey, deviceId, lang} → {votesVF, votesVOSTFR, votesVO}
+ *   POST /lang/remove {contentKey, deviceId}       → {votesVF, votesVOSTFR, votesVO}
+ *
+ * Le vote individuel de CE device est caché localement en SharedPreferences
+ * (le Worker ne renvoie pas le vote par device).
  *
  * contentKey = tmdbId quand dispo (cross-provider) → un seul vote partagé entre
  * Wiflix / Cloudstream / Movix pour le même film.
  *
  * Règle de verrouillage (validée user) :
- *  - figé si total ≥ 10 ET écart 1ʳᵉ/2ᵉ ≥ 5 → langue définitive ;
+ *  - figé si total >= 10 ET écart 1re/2e >= 5 → langue définitive ;
  *  - si serré à 10 (écart < 5) → on continue de voter (dépassement) ;
  *  - garde-fou : au-delà de SAFETY_CAP votes toujours serré → les deux versions
  *    existent vraiment → on fige sur « VF + VOSTFR » (les 2 têtes).
@@ -31,16 +34,45 @@ import kotlinx.coroutines.withContext
 object LanguageReportService {
 
     private const val TAG = "LanguageReport"
-    private const val COLLECTION_RATINGS = "ratings"
-    private const val SUBCOLLECTION_LANGS = "langs"
+    private const val API_URL = "https://streamflix-api.logami61250.workers.dev"
+    private const val PREFS_NAME = "community_lang_votes"
+    private val JSON_MEDIA = "application/json".toMediaType()
 
     private const val LOCK_MIN_TOTAL = 10   // pas de verrou avant 10 votes
-    private const val LOCK_MIN_GAP = 5      // écart 1ʳᵉ/2ᵉ requis pour figer
+    private const val LOCK_MIN_GAP = 5      // écart 1re/2e requis pour figer
     private const val SAFETY_CAP = 20       // au-delà, serré = les 2 versions existent
 
     enum class Lang { VF, VOSTFR, VO }
 
-    private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
+    // ── Cache local du vote de CE device ────────────────────────────────
+
+    private fun saveLocalLangVote(contentKey: String, deviceId: String, lang: String) {
+        try {
+            val ctx = StreamFlixApp.instance ?: return
+            ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString("lang_${contentKey}_$deviceId", lang)
+                .apply()
+        } catch (_: Exception) {}
+    }
+
+    private fun removeLocalLangVote(contentKey: String, deviceId: String) {
+        try {
+            val ctx = StreamFlixApp.instance ?: return
+            ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .remove("lang_${contentKey}_$deviceId")
+                .apply()
+        } catch (_: Exception) {}
+    }
+
+    private fun getLocalLangVote(contentKey: String, deviceId: String): String? {
+        return try {
+            val ctx = StreamFlixApp.instance ?: return null
+            ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString("lang_${contentKey}_$deviceId", null)
+        } catch (_: Exception) { null }
+    }
 
     // ── Logique PURE (testable hors Android) ────────────────────────────
 
@@ -99,6 +131,15 @@ object LanguageReportService {
         val canVote: Boolean get() = !locked && userVote == null
     }
 
+    // ── Helper : parse la réponse JSON compteurs ────────────────────────
+
+    private fun parseVoteCounts(json: JSONObject): Triple<Int, Int, Int> {
+        val vf = json.optInt("votesVF", 0)
+        val vostfr = json.optInt("votesVOSTFR", 0)
+        val vo = json.optInt("votesVO", 0)
+        return Triple(vf, vostfr, vo)
+    }
+
     // ── Soumettre un vote de langue (1 / appareil) ──────────────────────
 
     suspend fun submitVote(
@@ -109,40 +150,29 @@ object LanguageReportService {
     ) {
         withContext(Dispatchers.IO) {
             try {
-                val ratingDoc = db.collection(COLLECTION_RATINGS).document(contentKey)
-                val langDoc = ratingDoc.collection(SUBCOLLECTION_LANGS).document(deviceId)
-
-                // 1) écrire / écraser le vote individuel
-                langDoc.set(
-                    mapOf(
-                        "lang" to lang.name,
-                        "timestamp" to FieldValue.serverTimestamp(),
-                    )
-                ).await()
-
-                // 2) recompter depuis tous les votes de langue
-                val all = ratingDoc.collection(SUBCOLLECTION_LANGS).get().await()
-                var vf = 0; var vostfr = 0; var vo = 0
-                for (doc in all.documents) {
-                    when (doc.getString("lang")?.uppercase()) {
-                        "VF" -> vf++
-                        "VOSTFR" -> vostfr++
-                        "VO" -> vo++
-                    }
+                val body = JSONObject().apply {
+                    put("contentKey", contentKey)
+                    put("deviceId", deviceId)
+                    put("lang", lang.name)
                 }
+                val request = Request.Builder()
+                    .url("$API_URL/lang/vote")
+                    .post(body.toString().toRequestBody(JSON_MEDIA))
+                    .build()
 
-                // 3) mettre à jour les compteurs agrégés sur le doc parent
-                ratingDoc.set(
-                    mapOf(
-                        "langVotesVF" to vf,
-                        "langVotesVOSTFR" to vostfr,
-                        "langVotesVO" to vo,
-                        "title" to title,
-                    ),
-                    SetOptions.merge()
-                ).await()
+                val response = NetworkClient.default.newCall(request).execute()
+                val respBody = response.body?.string()
+                response.close()
 
-                Log.d(TAG, "lang vote ${lang.name} for $contentKey → VF=$vf VOSTFR=$vostfr VO=$vo")
+                if (response.isSuccessful && respBody != null) {
+                    // Sauvegarder le vote localement
+                    saveLocalLangVote(contentKey, deviceId, lang.name)
+                    val json = JSONObject(respBody)
+                    val (vf, vostfr, vo) = parseVoteCounts(json)
+                    Log.d(TAG, "lang vote ${lang.name} for $contentKey → VF=$vf VOSTFR=$vostfr VO=$vo")
+                } else {
+                    Log.e(TAG, "submitVote failed for $contentKey: HTTP ${response.code}")
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "submitVote failed for $contentKey", e)
             }
@@ -155,28 +185,28 @@ object LanguageReportService {
     suspend fun removeVote(contentKey: String, deviceId: String) {
         withContext(Dispatchers.IO) {
             try {
-                val ratingDoc = db.collection(COLLECTION_RATINGS).document(contentKey)
-                ratingDoc.collection(SUBCOLLECTION_LANGS).document(deviceId).delete().await()
-
-                val all = ratingDoc.collection(SUBCOLLECTION_LANGS).get().await()
-                var vf = 0; var vostfr = 0; var vo = 0
-                for (doc in all.documents) {
-                    when (doc.getString("lang")?.uppercase()) {
-                        "VF" -> vf++
-                        "VOSTFR" -> vostfr++
-                        "VO" -> vo++
-                    }
+                val body = JSONObject().apply {
+                    put("contentKey", contentKey)
+                    put("deviceId", deviceId)
                 }
-                ratingDoc.set(
-                    mapOf(
-                        "langVotesVF" to vf,
-                        "langVotesVOSTFR" to vostfr,
-                        "langVotesVO" to vo,
-                    ),
-                    SetOptions.merge()
-                ).await()
+                val request = Request.Builder()
+                    .url("$API_URL/lang/remove")
+                    .post(body.toString().toRequestBody(JSON_MEDIA))
+                    .build()
 
-                Log.d(TAG, "lang vote removed for $contentKey → VF=$vf VOSTFR=$vostfr VO=$vo")
+                val response = NetworkClient.default.newCall(request).execute()
+                val respBody = response.body?.string()
+                response.close()
+
+                if (response.isSuccessful && respBody != null) {
+                    // Retirer le vote local
+                    removeLocalLangVote(contentKey, deviceId)
+                    val json = JSONObject(respBody)
+                    val (vf, vostfr, vo) = parseVoteCounts(json)
+                    Log.d(TAG, "lang vote removed for $contentKey → VF=$vf VOSTFR=$vostfr VO=$vo")
+                } else {
+                    Log.e(TAG, "removeVote failed for $contentKey: HTTP ${response.code}")
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "removeVote failed for $contentKey", e)
             }
@@ -188,17 +218,25 @@ object LanguageReportService {
     suspend fun getLanguage(contentKey: String, deviceId: String): LanguageInfo? {
         return withContext(Dispatchers.IO) {
             try {
-                val doc = db.collection(COLLECTION_RATINGS).document(contentKey).get().await()
-                val vf = doc.getLong("langVotesVF")?.toInt() ?: 0
-                val vostfr = doc.getLong("langVotesVOSTFR")?.toInt() ?: 0
-                val vo = doc.getLong("langVotesVO")?.toInt() ?: 0
+                val body = JSONObject().apply {
+                    put("contentKey", contentKey)
+                }
+                val request = Request.Builder()
+                    .url("$API_URL/lang/get")
+                    .post(body.toString().toRequestBody(JSON_MEDIA))
+                    .build()
 
-                val userVote = db.collection(COLLECTION_RATINGS)
-                    .document(contentKey)
-                    .collection(SUBCOLLECTION_LANGS)
-                    .document(deviceId)
-                    .get().await()
-                    .getString("lang")
+                val response = NetworkClient.default.newCall(request).execute()
+                val respBody = response.body?.string()
+                response.close()
+
+                if (!response.isSuccessful || respBody == null) return@withContext null
+
+                val json = JSONObject(respBody)
+                val (vf, vostfr, vo) = parseVoteCounts(json)
+
+                // Le vote individuel est lu depuis le cache local
+                val userVote = getLocalLangVote(contentKey, deviceId)
 
                 val res = resolve(vf, vostfr, vo)
                 LanguageInfo(
