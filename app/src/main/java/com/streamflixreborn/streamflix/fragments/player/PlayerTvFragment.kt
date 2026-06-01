@@ -136,6 +136,8 @@ import java.util.UUID
 
 class PlayerTvFragment : Fragment() {
     companion object {
+        /** Ré-ouvrir la liste des chaînes après navigation vers une nouvelle chaîne */
+        @JvmStatic var reopenChannelListAfterNavigation = false
         private const val NEXT_EPISODE_PREFETCH_THRESHOLD_MS = 60_000L
         private const val NEXT_EPISODE_OVERLAY_MIN_THRESHOLD_MS = 30_000L
         private const val NEXT_EPISODE_OVERLAY_ALPHA_UNFOCUSED = 0.72f
@@ -1619,6 +1621,11 @@ class PlayerTvFragment : Fragment() {
 
     fun onBackPressed(): Boolean = when {
 
+        channelListVisible -> {
+            hideChannelListPanel()
+            true
+        }
+
         webViewOverlay != null -> {
             hideWebViewOverlay()
             true
@@ -1919,6 +1926,12 @@ class PlayerTvFragment : Fragment() {
                 args.id.startsWith("myiptv-live::")
             if (isIptvChannel) {
                 setupChannelNavigationButtons(btnPrevious, btnNext)
+                setupChannelListPanel()
+                // Ré-ouvrir la liste si on vient d'un changement de chaîne
+                if (reopenChannelListAfterNavigation) {
+                    reopenChannelListAfterNavigation = false
+                    binding.pvPlayer.post { showChannelListPanel() }
+                }
                 return
             }
 
@@ -2175,6 +2188,253 @@ class PlayerTvFragment : Fragment() {
                     }
                     .start()
             }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // 2026-05-31 : Panel latéral liste des chaînes IPTV (D-pad LEFT)
+        // ═══════════════════════════════════════════════════════════════════
+
+        private var channelListVisible = false
+        private var channelListAdapter: ChannelListAdapter? = null
+
+        private data class ChannelItem(val id: String, val name: String, val logo: String?)
+
+        private inner class ChannelListAdapter(
+            private val items: List<ChannelItem>,
+            private val currentId: String,
+            private val onChannelSelected: (ChannelItem) -> Unit
+        ) : androidx.recyclerview.widget.RecyclerView.Adapter<ChannelListAdapter.VH>() {
+
+            inner class VH(val view: android.view.View) : androidx.recyclerview.widget.RecyclerView.ViewHolder(view) {
+                val logo: android.widget.ImageView = view.findViewById(R.id.iv_channel_logo)
+                val name: android.widget.TextView = view.findViewById(R.id.tv_channel_name)
+                val indicator: android.view.View = view.findViewById(R.id.indicator_current)
+            }
+
+            override fun onCreateViewHolder(parent: android.view.ViewGroup, viewType: Int): VH {
+                val v = android.view.LayoutInflater.from(parent.context)
+                    .inflate(R.layout.item_channel_list, parent, false)
+                return VH(v)
+            }
+
+            override fun onBindViewHolder(holder: VH, position: Int) {
+                val item = items[position]
+                holder.name.text = item.name
+                holder.indicator.visibility = if (item.id == currentId) android.view.View.VISIBLE else android.view.View.GONE
+                if (item.id == currentId) {
+                    holder.name.setTextColor(0xFF4A90E2.toInt())
+                } else {
+                    holder.name.setTextColor(0xFFFFFFFF.toInt())
+                }
+                if (!item.logo.isNullOrBlank()) {
+                    com.bumptech.glide.Glide.with(holder.logo).load(item.logo)
+                        .placeholder(R.drawable.glide_fallback_cover)
+                        .error(R.drawable.glide_fallback_cover)
+                        .into(holder.logo)
+                } else {
+                    holder.logo.setImageResource(R.drawable.glide_fallback_cover)
+                }
+                holder.view.setOnClickListener {
+                    reopenChannelListAfterNavigation = true
+                    onChannelSelected(item)
+                }
+                holder.view.setOnFocusChangeListener { v, hasFocus ->
+                    v.setBackgroundColor(if (hasFocus) 0x33FFFFFF.toInt() else 0x00000000)
+                }
+            }
+
+            override fun getItemCount() = items.size
+        }
+
+        private var channelListFocusedPosition = 0
+
+        private var channelListItems: List<ChannelItem> = emptyList()
+
+        private fun setupChannelListPanel() {
+            binding.pvPlayer.onChannelListRequested = {
+                if (channelListVisible) hideChannelListPanel() else showChannelListPanel()
+            }
+            // Callbacks globaux — MainTvActivity les appelle directement
+            com.streamflixreborn.streamflix.utils.ChannelListState.onOkPressed = {
+                val provider = UserPreferences.currentProvider
+                if (channelListItems.isNotEmpty() && channelListFocusedPosition in channelListItems.indices && provider != null) {
+                    val item = channelListItems[channelListFocusedPosition]
+                    reopenChannelListAfterNavigation = true
+                    navigateToChannel(item.id, provider)
+                }
+            }
+            com.streamflixreborn.streamflix.utils.ChannelListState.onUpPressed = {
+                if (channelListItems.isNotEmpty()) {
+                    channelListFocusedPosition = (channelListFocusedPosition - 1).coerceAtLeast(0)
+                    updateChannelListHighlight()
+                }
+            }
+            com.streamflixreborn.streamflix.utils.ChannelListState.onDownPressed = {
+                if (channelListItems.isNotEmpty()) {
+                    channelListFocusedPosition = (channelListFocusedPosition + 1).coerceAtMost(channelListItems.size - 1)
+                    updateChannelListHighlight()
+                }
+            }
+            com.streamflixreborn.streamflix.utils.ChannelListState.onCloseRequested = {
+                hideChannelListPanel()
+            }
+        }
+
+        /**
+         * Appelé depuis MainTvActivity.dispatchKeyEvent — PRIORITÉ sur tout.
+         * @return true si l'event a été consommé.
+         */
+        fun handleChannelListKey(keyCode: Int): Boolean {
+            if (!channelListVisible) return false
+            val provider = UserPreferences.currentProvider ?: return false
+
+            when (keyCode) {
+                android.view.KeyEvent.KEYCODE_BACK,
+                android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    hideChannelListPanel()
+                    return true
+                }
+                android.view.KeyEvent.KEYCODE_DPAD_UP -> {
+                    if (channelListItems.isNotEmpty()) {
+                        channelListFocusedPosition = (channelListFocusedPosition - 1)
+                            .coerceAtLeast(0)
+                        updateChannelListHighlight()
+                    }
+                    return true
+                }
+                android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    if (channelListItems.isNotEmpty()) {
+                        channelListFocusedPosition = (channelListFocusedPosition + 1)
+                            .coerceAtMost(channelListItems.size - 1)
+                        updateChannelListHighlight()
+                    }
+                    return true
+                }
+                android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+                android.view.KeyEvent.KEYCODE_ENTER,
+                android.view.KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                    if (channelListItems.isNotEmpty() && channelListFocusedPosition in channelListItems.indices) {
+                        val item = channelListItems[channelListFocusedPosition]
+                        navigateToChannel(item.id, provider)
+                    }
+                    return true
+                }
+                else -> return true // consommer tout quand la liste est ouverte
+            }
+        }
+
+        private fun updateChannelListHighlight() {
+            val rv = binding.rvChannelList
+            rv.scrollToPosition(channelListFocusedPosition)
+            rv.post {
+                for (i in 0 until rv.childCount) {
+                    val child = rv.getChildAt(i)
+                    val pos = rv.getChildAdapterPosition(child)
+                    child.setBackgroundColor(if (pos == channelListFocusedPosition) 0x33FFFFFF.toInt() else 0x00000000)
+                }
+            }
+        }
+
+        private fun showChannelListPanel() {
+            if (channelListVisible) return
+            val provider = UserPreferences.currentProvider ?: return
+            val panel = binding.layoutChannelList
+            val rv = binding.rvChannelList
+
+            // 2026-05-31 : afficher le panel IMMÉDIATEMENT (feedback visuel instant)
+            // puis charger les chaînes en arrière-plan.
+            binding.tvChannelListTitle.text = "Chaînes — chargement…"
+            panel.visibility = android.view.View.VISIBLE
+            panel.animate().translationX(0f).setDuration(200).start()
+            channelListVisible = true
+            binding.pvPlayer.isChannelListOpen = true
+            binding.pvPlayer.hideController()
+            binding.pvPlayer.controllerAutoShow = false
+            com.streamflixreborn.streamflix.utils.ChannelListState.isOpen = true
+
+            // Charger les chaînes en background
+            viewLifecycleOwner.lifecycleScope.launch {
+                val items = withContext(kotlinx.coroutines.Dispatchers.Default) {
+                    val channelIds: List<String> = when (provider) {
+                        is WiTvProviderV2 -> provider.getOrderedChannelIds()
+                        is WiTvProvider -> provider.getOrderedChannelIds()
+                        is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getOrderedChannelIds()
+                        is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getOrderedChannelIds()
+                        is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getOrderedChannelIds()
+                        is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getOrderedChannelIds()
+                        is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getOrderedLiveChannelIds()
+                        else -> emptyList()
+                    }
+                    channelIds.mapNotNull { id ->
+                        val name = when (provider) {
+                            is WiTvProviderV2 -> provider.getChannelDisplayName(id)
+                            is WiTvProvider -> provider.getChannelDisplayName(id)
+                            is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(id)
+                            is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(id)
+                            is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(id)
+                            is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelDisplayName(id)
+                            is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getChannelDisplayName(id)
+                            else -> null
+                        } ?: return@mapNotNull null
+                        val logo = when (provider) {
+                            is WiTvProviderV2 -> provider.getChannelPoster(id)
+                            is WiTvProvider -> provider.getChannelPoster(id)
+                            is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(id)
+                            is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(id)
+                            is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(id)
+                            is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelPoster(id)
+                            is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getChannelPoster(id)
+                            else -> null
+                        }
+                        ChannelItem(id, name, logo)
+                    }
+                }
+
+                if (_binding == null || !channelListVisible) return@launch
+
+                channelListItems = items
+                binding.tvChannelListTitle.text = "Chaînes (${items.size})"
+                val adapter = ChannelListAdapter(items, args.id) { item ->
+                    navigateToChannel(item.id, provider)
+                }
+                channelListAdapter = adapter
+                rv.layoutManager = androidx.recyclerview.widget.LinearLayoutManager(requireContext())
+                rv.adapter = adapter
+
+                // Scroll vers la chaîne actuelle + focus
+                val currentIndex = items.indexOfFirst { it.id == args.id }
+                channelListFocusedPosition = if (currentIndex >= 0) currentIndex else 0
+                binding.pvPlayer.channelListSelectedPosition = channelListFocusedPosition
+                if (channelListFocusedPosition >= 0) {
+                    rv.scrollToPosition(channelListFocusedPosition)
+                    rv.post {
+                        // Donner le focus à l'item courant — Android gère UP/DOWN/OK nativement
+                        val vh = rv.findViewHolderForAdapterPosition(channelListFocusedPosition)
+                        vh?.itemView?.requestFocus()
+                        for (i in 0 until rv.childCount) {
+                            val child = rv.getChildAt(i)
+                            val pos = rv.getChildAdapterPosition(child)
+                            child.setBackgroundColor(if (pos == channelListFocusedPosition) 0x33FFFFFF.toInt() else 0x00000000)
+                        }
+                    }
+                } else if (items.isNotEmpty()) {
+                    channelListFocusedPosition = 0
+                }
+            }
+        }
+
+        private fun hideChannelListPanel() {
+            if (!channelListVisible) return
+            val panel = binding.layoutChannelList
+            panel.animate().translationX(-360f * resources.displayMetrics.density / resources.displayMetrics.density)
+                .setDuration(200)
+                .withEndAction { panel.visibility = android.view.View.GONE }
+                .start()
+            channelListVisible = false
+            binding.pvPlayer.isChannelListOpen = false
+            com.streamflixreborn.streamflix.utils.ChannelListState.isOpen = false
+            binding.pvPlayer.controllerAutoShow = true
+            binding.pvPlayer.requestFocus()
         }
 
         private fun navigateToChannel(channelId: String, provider: Any?) {
@@ -2696,6 +2956,16 @@ class PlayerTvFragment : Fragment() {
                                 if (::player.isInitialized && player.playbackState == Player.STATE_BUFFERING &&
                                     bufferingStartTimestampMs > 0L &&
                                     System.currentTimeMillis() - bufferingStartTimestampMs >= 10_000L) {
+                                    // 2026-05-31 : ne pas reseter si le buffer a des données
+                                    // (le stream charge, juste lentement — le reset tue tout)
+                                    val wdBuffered = try { player.bufferedPosition } catch (_: Exception) { 0L }
+                                    val wdPos = try { player.currentPosition } catch (_: Exception) { 0L }
+                                    val wdAhead = wdBuffered - wdPos
+                                    if (wdAhead > 5_000L) {
+                                        Log.d("PlayerTvFragment", "WATCHDOG: buffer OK (${wdAhead/1000}s d'avance), pas de reset")
+                                        bufferingStartTimestampMs = System.currentTimeMillis()
+                                        return@launch // buffer a des données, on laisse le player gérer
+                                    }
                                     val srv = currentServer
                                     if (srv != null) {
                                         backupJumelageAttempted = false
@@ -4074,10 +4344,11 @@ class PlayerTvFragment : Fragment() {
                             val stdBar = ctrl.findViewById<View>(R.id.exo_progress)
                             val pri = ctrl.findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.live_primary_progress)
                             val sec = ctrl.findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.live_secondary_progress)
-                            // Live IPTV → hide standard, show 2 custom bars
-                            if (stdBar != null && stdBar.visibility != View.GONE) stdBar.visibility = View.GONE
-                            if (pri != null && pri.visibility != View.VISIBLE) pri.visibility = View.VISIBLE
-                            if (sec != null && sec.visibility != View.VISIBLE) sec.visibility = View.VISIBLE
+                            // 2026-05-31 : masquer les barres de jumelage sur IPTV
+                            // (inutiles pour le live, perturbent l'UX). Garder la barre standard.
+                            if (stdBar != null && stdBar.visibility != View.VISIBLE) stdBar.visibility = View.VISIBLE
+                            if (pri != null && pri.visibility != View.GONE) pri.visibility = View.GONE
+                            if (sec != null && sec.visibility != View.GONE) sec.visibility = View.GONE
 
                             if (pri != null && sec != null) {
                                 // 2026-05-17 v7 : tick cumulatif basé sur WALL-CLOCK
@@ -5210,6 +5481,34 @@ class PlayerTvFragment : Fragment() {
         private fun createDefaultHttpDataSourceFactory(): HttpDataSource.Factory {
             usingCronet = false
             usingDoH = false
+            // 2026-05-31 : sur Chromecast (Android TV), Google Play Services impose
+            // son propre conscrypt qui IGNORE le IptvTlsHelper global de l'app.
+            // DefaultHttpDataSource utilise HttpsURLConnection → GMS conscrypt
+            // rejette le cert expiré du CDN Vavoo → écran noir.
+            // Fix : OkHttpDataSource pour IPTV (OkHttp a son propre SSLContext).
+            val isIptv = isIptvChannelContext()
+            if (isIptv) {
+                Log.d("PlayerNetwork", "Using OkHttpDataSource (trust-all TLS) for IPTV")
+                val trustAll = object : javax.net.ssl.X509TrustManager {
+                    override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
+                    override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
+                    override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+                }
+                val sslCtx = javax.net.ssl.SSLContext.getInstance("TLS").apply {
+                    init(null, arrayOf(trustAll), java.security.SecureRandom())
+                }
+                val client = OkHttpClient.Builder()
+                    .sslSocketFactory(sslCtx.socketFactory, trustAll)
+                    .hostnameVerifier { _, _ -> true }
+                    .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                    .followRedirects(true)
+                    .followSslRedirects(true)
+                    .build()
+                val base = OkHttpDataSource.Factory(client)
+                    .setUserAgent(NetworkClient.USER_AGENT)
+                return com.streamflixreborn.streamflix.utils.LiveReconnectingHttpDataSource.Factory(base)
+            }
             Log.d("PlayerNetwork", "Using DefaultHttpDataSource + LiveReconnecting wrapper")
             val base = DefaultHttpDataSource.Factory()
                 .setUserAgent(NetworkClient.USER_AGENT)
