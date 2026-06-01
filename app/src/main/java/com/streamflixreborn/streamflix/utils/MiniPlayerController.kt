@@ -9,6 +9,11 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
+import okhttp3.OkHttpClient
+import java.security.cert.X509Certificate
+import javax.net.ssl.SSLContext
+import javax.net.ssl.X509TrustManager
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -63,7 +68,7 @@ object MiniPlayerController {
     // Promoted to field so we can apply per-channel headers (Referer/Origin)
     // before each play. Necessary for sources like meritend.net that 403
     // sans Referer correct.
-    private var httpDataSourceFactory: DefaultHttpDataSource.Factory? = null
+    private var httpDataSourceFactory: OkHttpDataSource.Factory? = null
     private var loadJob: Job? = null
     private var retryJob: Job? = null
     private var progressiveServerJob: Job? = null
@@ -311,16 +316,32 @@ object MiniPlayerController {
     fun initPlayer(context: Context) {
         if (player != null) return
 
-        val httpDataSource = DefaultHttpDataSource.Factory()
+        // 2026-05-31 : OkHttpDataSource au lieu de DefaultHttpDataSource.
+        // Raison : sur Chromecast (Android TV), Google Play Services impose
+        // son propre conscrypt qui IGNORE le IptvTlsHelper global de l'app.
+        // DefaultHttpDataSource utilise HttpsURLConnection → GMS conscrypt
+        // rejette le cert expiré du CDN Vavoo → écran noir.
+        // OkHttpDataSource utilise OkHttp qui a son propre SSLContext
+        // configuré DANS le client → immunisé contre GMS override.
+        val trustAllManager = object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+        }
+        val sslContext = SSLContext.getInstance("TLS").apply {
+            init(null, arrayOf(trustAllManager), java.security.SecureRandom())
+        }
+        val okHttpClient = OkHttpClient.Builder()
+            .sslSocketFactory(sslContext.socketFactory, trustAllManager)
+            .hostnameVerifier { _, _ -> true }
+            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+
+        val httpDataSource = OkHttpDataSource.Factory(okHttpClient)
             .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            // v65 (user "ça rame Mon IPTV"): timeouts plus larges pour absorber
-            //   les hiccups des serveurs Stalker lents. Connect 30s, read 30s.
-            //   Réduit les rebuffers quand le serveur prend du temps à répondre
-            //   à un GET (cas typique TS Stalker just-in-time).
-            .setConnectTimeoutMs(30_000)
-            .setReadTimeoutMs(30_000)
-            .setAllowCrossProtocolRedirects(true)
-            .setKeepPostFor302Redirects(true)
         httpDataSourceFactory = httpDataSource
 
         val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSource)
