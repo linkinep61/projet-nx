@@ -33,6 +33,24 @@ class PlayerTvView @JvmOverloads constructor(
     /** IPTV zapping: channel down (D-pad DOWN when controller hidden) */
     var onChannelDown: (() -> Unit)? = null
 
+    /** IPTV : D-pad LEFT ouvre la liste des chaînes au lieu de seek -10s */
+    var onChannelListRequested: (() -> Unit)? = null
+
+    /** Quand la liste des chaînes est ouverte, ne pas intercepter les D-pad/OK */
+    var isChannelListOpen: Boolean = false
+
+    /** Callback pour redonner le focus à la liste des chaînes */
+    var onChannelListFocusRequested: (() -> Unit)? = null
+
+    /** Callback quand l'user appuie OK sur la liste des chaînes */
+    var onChannelListOkPressed: (() -> Unit)? = null
+
+    /** Callback D-pad haut/bas dans la liste des chaînes */
+    var onChannelListNavigate: ((direction: Int) -> Unit)? = null
+
+    /** Position sélectionnée dans la liste des chaînes (accessible depuis MainTvActivity) */
+    var channelListSelectedPosition: Int = 0
+
     /** Quand l'overlay "épisode suivant" est visible, ne pas intercepter les D-pad. */
     var isNextEpisodeOverlayActive: Boolean = false
 
@@ -138,6 +156,23 @@ class PlayerTvView @JvmOverloads constructor(
             return true
         }
 
+        // 2026-05-31 : quand la liste des chaînes est ouverte, ne PAS intercepter.
+        // MainTvActivity.dispatchKeyEvent gère tout directement (OK, D-pad, BACK).
+        // Retourner false pour que l'event remonte à l'Activity.
+        if (isChannelListOpen) {
+            return false
+        }
+
+        // 2026-05-31 : D-pad LEFT sur IPTV :
+        // - Controller VISIBLE → navigation normale entre boutons (super)
+        // - Controller CACHÉ → ouvrir la liste des chaînes (pas de seek)
+        if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT && onChannelListRequested != null && !controller.isVisible) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                onChannelListRequested?.invoke()
+            }
+            return true
+        }
+
         if (controller.isVisible) return super.dispatchKeyEvent(event)
 
         return when (event.keyCode) {
@@ -180,10 +215,17 @@ class PlayerTvView @JvmOverloads constructor(
             }
 
             KeyEvent.KEYCODE_DPAD_LEFT -> {
-                if (event.action == KeyEvent.ACTION_DOWN) {
-                    player.seekTo(player.currentPosition - 10_000)
+                if (onChannelListRequested != null) {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        onChannelListRequested?.invoke()
+                    }
+                    true
+                } else {
+                    if (event.action == KeyEvent.ACTION_DOWN) {
+                        player.seekTo(player.currentPosition - 10_000)
+                    }
+                    true
                 }
-                true
             }
 
             KeyEvent.KEYCODE_DPAD_RIGHT -> {

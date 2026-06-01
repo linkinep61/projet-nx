@@ -1195,7 +1195,7 @@ object VavooProvider : Provider, IptvProvider {
      *  AVANT : appelait normalizeKey() ~30 000 fois sur main thread (compareBy
      *  sortedWith sur 983 chaînes × 10 regex chacune) = freeze 32 sec.
      *  MAINTENANT : 0 regex sur main thread, juste comparaisons string. */
-    private fun getOrderedChannelIds(): List<String> {
+    fun getOrderedChannelIds(): List<String> {
         cachedOrderedIds?.let { return it }
         val all = synchronized(registryLock) { channelRegistry.toList() }
         val unique = all.distinctBy { it.canonicalKey } // pré-calculé

@@ -244,9 +244,14 @@ class HomeTvFragment : Fragment() {
         if (MiniPlayerController.onIptvChannelClick == null) {
             MiniPlayerController.onIptvChannelClick = { tvShow ->
                 if (tvShow.id == MiniPlayerController.currentChannelId) {
-                    Log.d("HomeTv", "Same channel clicked, flagging for transfer (onResume): ${tvShow.title}")
-                    MiniPlayerController.transitioningToFullscreen = true
-                    if (_binding != null) { binding.miniPlayerView.player = null }
+                    if (MiniPlayerController.isPlaying()) {
+                        Log.d("HomeTv", "Same channel clicked (READY), flagging for transfer (onResume): ${tvShow.title}")
+                        MiniPlayerController.transitioningToFullscreen = true
+                        if (_binding != null) { binding.miniPlayerView.player = null }
+                    } else {
+                        Log.d("HomeTv", "Same channel clicked (NOT READY), stopping mini player (onResume): ${tvShow.title}")
+                        MiniPlayerController.stopAsync()
+                    }
                     false
                 } else {
                     Log.d("HomeTv", "Mini player intercept (onResume): ${tvShow.title}")
@@ -326,9 +331,17 @@ class HomeTvFragment : Fragment() {
 
         MiniPlayerController.onIptvChannelClick = { tvShow ->
             if (tvShow.id == MiniPlayerController.currentChannelId) {
-                Log.d("HomeTv", "Same channel clicked, flagging for transfer: ${tvShow.title}")
-                MiniPlayerController.transitioningToFullscreen = true
-                if (_binding != null) { binding.miniPlayerView.player = null }
+                // 2026-05-31 : ne transférer que si le mini player est READY.
+                // Si encore en chargement, stopAsync et laisser le fullscreen
+                // charger depuis zéro (évite le stuck "plus charger").
+                if (MiniPlayerController.isPlaying()) {
+                    Log.d("HomeTv", "Same channel clicked (READY), flagging for transfer: ${tvShow.title}")
+                    MiniPlayerController.transitioningToFullscreen = true
+                    if (_binding != null) { binding.miniPlayerView.player = null }
+                } else {
+                    Log.d("HomeTv", "Same channel clicked (NOT READY), stopping mini player: ${tvShow.title}")
+                    MiniPlayerController.stopAsync()
+                }
                 false
             } else {
                 Log.d("HomeTv", "Mini player intercept: ${tvShow.title} (${tvShow.id})")

@@ -73,14 +73,18 @@ class TvShowViewHolder(
     _binding.root
 ) {
 
+    companion object {
+        /** 2026-05-31 : debounce GLOBAL pour éviter les double-clics rapides
+         *  quand RecyclerView réutilise un ViewHolder différent. */
+        @Volatile private var lastClickTime = 0L
+    }
+
     private val context = itemView.context
     private val database: AppDatabase
         get() = AppDatabase.getInstance(context)
     private lateinit var tvShow: TvShow
 
-    /** Debounce rapid clicks to prevent double-navigation crashes */
-    private var lastClickTime = 0L
-    private val clickDebounceMs = 600L
+    private val clickDebounceMs = 800L
 
     val childRecyclerView: RecyclerView?
         get() = when (_binding) {
