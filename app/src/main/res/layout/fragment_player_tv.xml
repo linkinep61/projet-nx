@@ -305,6 +305,44 @@
         </LinearLayout>
     </LinearLayout>
 
+    <!-- 2026-05-31 : Panel liste des chaînes IPTV (D-pad LEFT) -->
+    <LinearLayout
+        android:id="@+id/layout_channel_list"
+        android:layout_width="360dp"
+        android:layout_height="0dp"
+        android:background="#DD000000"
+        android:elevation="20dp"
+        android:focusable="false"
+        android:orientation="vertical"
+        android:padding="0dp"
+        android:visibility="gone"
+        android:translationX="-360dp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent">
+
+        <TextView
+            android:id="@+id/tv_channel_list_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Chaînes"
+            android:textColor="#FFFFFF"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
+            android:paddingTop="16dp"
+            android:paddingBottom="12dp" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rv_channel_list"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:paddingBottom="16dp" />
+    </LinearLayout>
+
     <LinearLayout
         android:id="@+id/ll_brightness"
         android:layout_width="wrap_content"

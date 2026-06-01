@@ -58,6 +58,26 @@ class MainTvActivity : FragmentActivity() {
      *  - LEFT depuis tile → focus sur le menu courant de la sidebar
      *  - UP depuis tile → focus sur iv_iptv_categories si visible (Mon IPTV) */
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        // 2026-05-31 : liste des chaînes IPTV — callbacks globaux
+        if (com.streamflixreborn.streamflix.utils.ChannelListState.isOpen) {
+            if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                when (event.keyCode) {
+                    android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+                    android.view.KeyEvent.KEYCODE_ENTER,
+                    android.view.KeyEvent.KEYCODE_NUMPAD_ENTER ->
+                        com.streamflixreborn.streamflix.utils.ChannelListState.onOkPressed?.invoke()
+                    android.view.KeyEvent.KEYCODE_DPAD_UP ->
+                        com.streamflixreborn.streamflix.utils.ChannelListState.onUpPressed?.invoke()
+                    android.view.KeyEvent.KEYCODE_DPAD_DOWN ->
+                        com.streamflixreborn.streamflix.utils.ChannelListState.onDownPressed?.invoke()
+                    android.view.KeyEvent.KEYCODE_BACK,
+                    android.view.KeyEvent.KEYCODE_DPAD_LEFT ->
+                        com.streamflixreborn.streamflix.utils.ChannelListState.onCloseRequested?.invoke()
+                }
+            }
+            return true
+        }
+
         // Abyss/Hydrax overlay: route remote keys to the WebView cursor
         // (the overlay never receives key focus on TV).
         if (event.action == android.view.KeyEvent.ACTION_DOWN) {
@@ -143,7 +163,10 @@ class MainTvActivity : FragmentActivity() {
                 // (sinon clic OK dans le picker = redirige sur le bouton settings → cassé).
                 val settingsPanel = currentFragment?.view?.findViewById<View>(R.id.settings)
                 val settingsPanelVisible = settingsPanel != null && settingsPanel.visibility == View.VISIBLE
-                if (!settingsPanelVisible && playerView != null && !playerView.isControllerFullyVisible) {
+                // 2026-05-31 : ne pas intercepter OK quand la liste des chaînes est ouverte
+                val channelListPanel2 = window.decorView.findViewById<View>(R.id.layout_channel_list)
+                val channelListOpen = channelListPanel2 != null && channelListPanel2.visibility == View.VISIBLE
+                if (!channelListOpen && !settingsPanelVisible && playerView != null && !playerView.isControllerFullyVisible) {
                     val settingsBtn = playerView.findViewById<View>(androidx.media3.ui.R.id.exo_settings)
                     playerView.showController()
                     settingsBtn?.requestFocus()

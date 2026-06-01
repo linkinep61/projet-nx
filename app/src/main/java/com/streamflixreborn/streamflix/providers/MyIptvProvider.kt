@@ -1793,20 +1793,30 @@ object MyIptvProvider : Provider, IptvProvider {
      *  (= filterFrOrFallback appliqué).
      *  Retourne liste vide si aucune source classifiée — l'UI cachera
      *  alors les boutons. */
-    private fun getOrderedLiveChannelIds(): List<String> {
+    fun getOrderedLiveChannelIds(): List<String> {
         val sources = try { IptvSourceStore.getActiveOrAll() } catch (_: Exception) { return emptyList() }
         val out = mutableListOf<String>()
         for (source in sources) {
-            val classified = classificationCache[source.id] ?: continue
-            val liveItems = classified.byType[IptvClassifier.ContentType.LIVE] ?: continue
-            val filtered = filterFrOrFallback(liveItems)
-            // Filtre par catégorie sélectionnée comme dans getHome
-            val sel = selectedCategoryLive
-            val finalList = if (sel != null) {
-                filtered.filter { (it.channel.group ?: "").trim() == sel }
-            } else filtered
-            finalList.forEach { item ->
-                out.add("myiptv-live::${item.source.id}::${item.index}")
+            val classified = classificationCache[source.id]
+            if (classified != null) {
+                val liveItems = classified.byType[IptvClassifier.ContentType.LIVE] ?: continue
+                val filtered = filterFrOrFallback(liveItems)
+                val sel = selectedCategoryLive
+                val finalList = if (sel != null) {
+                    filtered.filter { (it.channel.group ?: "").trim() == sel }
+                } else filtered
+                finalList.forEach { item ->
+                    out.add("myiptv-live::${item.source.id}::${item.index}")
+                }
+            } else {
+                // 2026-05-31 : fallback sur le cache parsé (M3U brut) quand la
+                // classification n'est pas encore faite ou a été vidée par IptvCacheManager.
+                // Permet aux boutons prev/next et à la liste des chaînes de fonctionner
+                // même sans classification.
+                val parsed = cache[source.id]?.channels ?: continue
+                parsed.forEachIndexed { index, ch ->
+                    out.add("myiptv-live::${source.id}::$index")
+                }
             }
         }
         return out
@@ -1836,6 +1846,19 @@ object MyIptvProvider : Provider, IptvProvider {
         return liveItems.find { it.index == idx }
     }
 
-    fun getChannelDisplayName(channelId: String): String? = findLiveItem(channelId)?.channel?.name
-    fun getChannelPoster(channelId: String): String? = findLiveItem(channelId)?.channel?.logo
+    /** 2026-05-31 : fallback sur le cache parsé quand la classification est vide. */
+    private fun findParsedChannel(channelId: String): M3uParser.M3uChannel? {
+        val cleaned = channelId.removePrefix("myiptv-live::")
+        val parts = cleaned.split("::")
+        if (parts.size != 2) return null
+        val sourceId = parts[0]
+        val idx = parts[1].toIntOrNull() ?: return null
+        return cache[sourceId]?.channels?.getOrNull(idx)
+    }
+
+    fun getChannelDisplayName(channelId: String): String? =
+        findLiveItem(channelId)?.channel?.name ?: findParsedChannel(channelId)?.name
+
+    fun getChannelPoster(channelId: String): String? =
+        findLiveItem(channelId)?.channel?.logo ?: findParsedChannel(channelId)?.logo
 }
