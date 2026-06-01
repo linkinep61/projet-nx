@@ -25,7 +25,7 @@ import javax.crypto.spec.SecretKeySpec
 
 /**
  * OLA TV provider — independent IPTV catalog sourced directly from OLA TV's API
- * (iptvdroid.monster). Distinct from WiTvProvider: catalog comes 100% from OLA TV
+ * (iptvdroid.monster). Catalog comes 100% from OLA TV
  * (not witv.team scraping), so it works regardless of witv.team availability.
  *
  * Strategy:
@@ -1761,7 +1761,7 @@ object OlaTvProvider : Provider, IptvProvider {
     // App-scoped supervisor for Phase 3 background work. Outlives the calling fragment scope.
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // Progressive servers flow — same pattern as WiTvProvider. Player collects this
+    // Progressive servers flow. Player collects this
     // and adds each emitted server to the "Chaîne" page so the user can switch
     // between OLA TV variants without closing the player.
     // replay = 50 so that variants emitted between getServers() and the player's

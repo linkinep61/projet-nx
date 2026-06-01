@@ -106,3 +106,6 @@ memory/
 
 # Source logos kept locally for re-processing (not committed)
 logo_sources/
+
+cloudflare-worker/.wrangler/
+run_build*.bat

@@ -11,7 +11,7 @@ import com.streamflixreborn.streamflix.models.Episode
 import com.streamflixreborn.streamflix.models.Movie
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.providers.Provider
-import com.streamflixreborn.streamflix.providers.WarmUpCapable
+// WarmUpCapable retiré avec WiTV
 import com.streamflixreborn.streamflix.ui.UserDataNotifier
 import com.streamflixreborn.streamflix.utils.EnrichmentTrigger
 import com.streamflixreborn.streamflix.utils.HomeCacheStore
@@ -456,7 +456,7 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         // NE PAS servir le cache disque tant que le warm-up n'est pas fini.
         // Sinon l'user voit les chaînes (cache) et clique avant que les
         // streams soient pré-cachés → lancement lent.
-        val warmUpPending = provider is WarmUpCapable && !provider.isWarmUpDone
+        val warmUpPending = false // WarmUpCapable retiré avec WiTV
 
         // 2026-05-26 : AnimeSama a un Cloudflare Turnstile — ne PAS servir le
         // cache avant le CF bypass, sinon le captcha pop 30s+ après l'ouverture.

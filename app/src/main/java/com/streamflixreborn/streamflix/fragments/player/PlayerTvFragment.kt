@@ -105,8 +105,6 @@ import com.streamflixreborn.streamflix.utils.setMediaServerId
 import com.streamflixreborn.streamflix.utils.setMediaServers
 import com.streamflixreborn.streamflix.utils.toSubtitleMimeType
 import com.streamflixreborn.streamflix.providers.IptvProvider
-import com.streamflixreborn.streamflix.providers.WiTvProvider
-import com.streamflixreborn.streamflix.providers.WiTvProviderV2
 import com.streamflixreborn.streamflix.utils.viewModelsFactory
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
@@ -838,12 +836,6 @@ class PlayerTvFragment : Fragment() {
                         val isTmdb = providerName.contains("TMDb", ignoreCase = true)
 
                         if (servers.isEmpty()) {
-                            if (providerName == "WiTV" || providerName == "WiTV v2") {
-                                Log.d("PlayerTvFragment", "No initial servers, waiting for OLA CID servers...")
-                                PlayerSettingsView.Settings.ChannelVariant.list.clear()
-                                binding.settings.refreshChannelVariantList()
-                                return@collect
-                            }
                             val message = if (isTmdb) {
                                 val langCode = providerName.substringAfter("(").substringBefore(")")
                                 val locale = Locale.forLanguageTag(langCode)
@@ -2036,14 +2028,6 @@ class PlayerTvFragment : Fragment() {
             val nextId: String?
 
             when (provider) {
-                is WiTvProvider -> {
-                    prevId = provider.getPreviousChannelId(args.id)
-                    nextId = provider.getNextChannelId(args.id)
-                }
-                is WiTvProviderV2 -> {
-                    prevId = provider.getPreviousChannelId(args.id)
-                    nextId = provider.getNextChannelId(args.id)
-                }
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> {
                     prevId = provider.getPreviousChannelId(args.id)
                     nextId = provider.getNextChannelId(args.id)
@@ -2131,8 +2115,6 @@ class PlayerTvFragment : Fragment() {
 
         private fun showChannelOverlay(channelId: String, channelNumber: Int, provider: Any?) {
             val channelName = when (provider) {
-                is WiTvProvider -> provider.getChannelDisplayName(channelId)
-                is WiTvProviderV2 -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(channelId)
@@ -2142,8 +2124,6 @@ class PlayerTvFragment : Fragment() {
                 .removePrefix("ola::").removePrefix("vegeta::").removePrefix("livehub::")
                 .removePrefix("vavoo::")
             val channelLogo = when (provider) {
-                is WiTvProvider -> provider.getChannelPoster(channelId)
-                is WiTvProviderV2 -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(channelId)
@@ -2356,8 +2336,6 @@ class PlayerTvFragment : Fragment() {
             viewLifecycleOwner.lifecycleScope.launch {
                 val items = withContext(kotlinx.coroutines.Dispatchers.Default) {
                     val channelIds: List<String> = when (provider) {
-                        is WiTvProviderV2 -> provider.getOrderedChannelIds()
-                        is WiTvProvider -> provider.getOrderedChannelIds()
                         is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getOrderedChannelIds()
                         is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getOrderedChannelIds()
                         is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getOrderedChannelIds()
@@ -2367,8 +2345,6 @@ class PlayerTvFragment : Fragment() {
                     }
                     channelIds.mapNotNull { id ->
                         val name = when (provider) {
-                            is WiTvProviderV2 -> provider.getChannelDisplayName(id)
-                            is WiTvProvider -> provider.getChannelDisplayName(id)
                             is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(id)
                             is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(id)
                             is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(id)
@@ -2377,8 +2353,6 @@ class PlayerTvFragment : Fragment() {
                             else -> null
                         } ?: return@mapNotNull null
                         val logo = when (provider) {
-                            is WiTvProviderV2 -> provider.getChannelPoster(id)
-                            is WiTvProvider -> provider.getChannelPoster(id)
                             is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(id)
                             is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(id)
                             is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(id)
@@ -2439,8 +2413,6 @@ class PlayerTvFragment : Fragment() {
 
         private fun navigateToChannel(channelId: String, provider: Any?) {
             val channelName = when (provider) {
-                is WiTvProvider -> provider.getChannelDisplayName(channelId)
-                is WiTvProviderV2 -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(channelId)
@@ -2449,8 +2421,6 @@ class PlayerTvFragment : Fragment() {
                 else -> null
             } ?: channelId
             val channelPoster = when (provider) {
-                is WiTvProvider -> provider.getChannelPoster(channelId)
-                is WiTvProviderV2 -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(channelId)
                 is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(channelId)
@@ -3206,12 +3176,7 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
                             args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                         if (isIptv) {
-                            val provider = UserPreferences.currentProvider
-                            if (provider is WiTvProvider) {
-                                viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-                                    provider.preloadAdjacentChannels(args.id)
-                                }
-                            }
+                            // WiTvProvider preload removed — provider deleted
                         }
 
                         // 2026-05-17 v31 (user "pré-scan pour réparer avant le bug") :

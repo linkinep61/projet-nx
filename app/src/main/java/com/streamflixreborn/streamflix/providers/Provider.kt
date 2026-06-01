@@ -135,10 +135,8 @@ interface Provider {
             // (catalogue MediaHubMX, ping signature via lokke.app/api/app/ping).
             // Home organisé par genre, TNT order pour les chaînes principales.
             VavooProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
-            // 2026-05-31 : WiTV désactivé — consommait trop de quota Firebase (IptvChannelIndexService).
+            // 2026-05-31 : WiTV supprimé — consommait trop de quota Firebase (IptvChannelIndexService).
             // OlaTV couvre les mêmes chaînes.
-            // WiTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
-            // WiTvProviderV2 to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             OlaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             VegetaTvProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             // 2026-05-17 : 3BoxTV/BoxXtemus complètement retiré (fichier supprimé).

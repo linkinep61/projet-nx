@@ -32,7 +32,6 @@ import com.streamflixreborn.streamflix.utils.CacheUtils
 import com.streamflixreborn.streamflix.utils.LoggingUtils
 import com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
 import com.streamflixreborn.streamflix.providers.IptvProvider
-import com.streamflixreborn.streamflix.providers.WiTvProvider
 import kotlinx.coroutines.launch
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -239,10 +238,8 @@ class HomeMobileFragment : Fragment() {
     private fun initializeMiniPlayer() {
         val provider = UserPreferences.currentProvider
         val isIptv = provider is IptvProvider
-        // WiTV v2 : pas de mini-player, 1 clic = fullscreen direct
-        val isWiTv = provider?.name?.contains("WiTV") == true
-        Log.d("HomeMobile", "initializeMiniPlayer: provider=${provider?.name} (${provider?.javaClass?.simpleName}), isIptv=$isIptv, isWiTv=$isWiTv, miniPlayerEnabled=${UserPreferences.miniPlayerEnabled}")
-        if (!isIptv || !UserPreferences.miniPlayerEnabled || isWiTv) {
+        Log.d("HomeMobile", "initializeMiniPlayer: provider=${provider?.name} (${provider?.javaClass?.simpleName}), isIptv=$isIptv, miniPlayerEnabled=${UserPreferences.miniPlayerEnabled}")
+        if (!isIptv || !UserPreferences.miniPlayerEnabled) {
             binding.miniPlayerContainer.visibility = View.GONE
             MiniPlayerController.onIptvChannelClick = null
             return
@@ -479,7 +476,6 @@ class HomeMobileFragment : Fragment() {
         val currentProv = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
         val isMyIptv = currentProv is com.streamflixreborn.streamflix.providers.MyIptvProvider
         val isVavoo = currentProv is com.streamflixreborn.streamflix.providers.VavooProvider
-        val isWiTvV2 = currentProv is com.streamflixreborn.streamflix.providers.WiTvProviderV2
 
         if (isMyIptv) {
             binding.ivProviderLogo.setOnClickListener {
@@ -499,9 +495,9 @@ class HomeMobileFragment : Fragment() {
             binding.ivIptvCategories.visibility = View.GONE
         }
 
-        // 2026-05-23 : bouton globe langue visible sur MyIptv, Vavoo et WiTV v2
+        // 2026-05-23 : bouton globe langue visible sur MyIptv et Vavoo
         // (aligné avec le comportement TV — sidebar iptv_language_menu).
-        if (isMyIptv || isVavoo || isWiTvV2) {
+        if (isMyIptv || isVavoo) {
             binding.ivIptvLanguage.visibility = View.VISIBLE
             binding.ivIptvLanguage.setOnClickListener {
                 showIptvLanguageFilterPicker()
@@ -580,7 +576,6 @@ class HomeMobileFragment : Fragment() {
         val currentProv = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
         when {
             currentProv is com.streamflixreborn.streamflix.providers.VavooProvider -> showVavooCountryPicker()
-            currentProv is com.streamflixreborn.streamflix.providers.WiTvProviderV2 -> showWiTvV2GroupPicker()
             else -> showMyIptvLanguageFilterPicker()
         }
     }
@@ -678,53 +673,6 @@ class HomeMobileFragment : Fragment() {
                 android.widget.Toast.makeText(
                     ctx,
                     "Miroir Vavoo : ${picked.label} — chargement…",
-                    android.widget.Toast.LENGTH_SHORT,
-                ).show()
-                kotlin.runCatching {
-                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
-                }
-            }
-            .setNegativeButton("Annuler", null)
-            .show()
-    }
-
-    /** 2026-05-23 : picker groupe/langue WiTV v2 (mobile, même logique que MainTvActivity). */
-    private fun showWiTvV2GroupPicker() {
-        val ctx = requireContext()
-        val current = com.streamflixreborn.streamflix.providers.WiTvProviderV2.getSelectedGroup()
-        val groups = com.streamflixreborn.streamflix.providers.WiTvProviderV2.getAvailableGroups()
-
-        val labels = mutableListOf("🇫🇷 France${if (current.isBlank()) "  ✓" else ""}")
-        if (groups.isEmpty()) {
-            labels.add("⏳ Chargement des groupes…")
-            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-                try {
-                    com.streamflixreborn.streamflix.providers.WiTvProviderV2.ensureOtfCache()
-                } catch (_: Exception) {}
-            }
-        } else {
-            labels.addAll(groups.map { "$it${if (it.equals(current, true)) "  ✓" else ""}" })
-        }
-
-        androidx.appcompat.app.AlertDialog.Builder(ctx)
-            .setTitle("Langue / Groupe")
-            .setItems(labels.toTypedArray()) { _, idx ->
-                if (groups.isEmpty()) {
-                    android.widget.Toast.makeText(ctx, "Chargement en cours, réessayez…", android.widget.Toast.LENGTH_SHORT).show()
-                    return@setItems
-                }
-                val picked = if (idx == 0) "" else groups.getOrElse(idx - 1) { "" }
-                if (picked.equals(current, true)) return@setItems
-                com.streamflixreborn.streamflix.providers.WiTvProviderV2.setSelectedGroup(picked)
-                kotlin.runCatching {
-                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
-                        ctx.applicationContext,
-                        com.streamflixreborn.streamflix.providers.WiTvProviderV2,
-                    )
-                }
-                android.widget.Toast.makeText(
-                    ctx,
-                    if (picked.isBlank()) "France — catalogue TNT" else "$picked — chargement…",
                     android.widget.Toast.LENGTH_SHORT,
                 ).show()
                 kotlin.runCatching {
