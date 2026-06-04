@@ -10,19 +10,6 @@
         app:iconSpaceReserved="false">
 
         <PreferenceCategory
-            android:key="pc_extractor_management"
-            android:title="Sources vidéo"
-            app:iconSpaceReserved="false">
-
-            <Preference
-                android:key="p_settings_extractor_toggle"
-                android:title="Gérer les sources"
-                android:summary="Activer/désactiver les extracteurs vidéo, mettre en favori"
-                app:iconSpaceReserved="false" />
-
-        </PreferenceCategory>
-
-        <PreferenceCategory
             android:key="pc_provider_settings"
             android:title="@string/settings_category_provider_title"
             app:iconSpaceReserved="false">
@@ -141,6 +128,20 @@
                 android:entryValues="@array/iptv_language_filter_values"
                 android:defaultValue="auto"
                 app:iconSpaceReserved="false" />
+        </PreferenceCategory>
+
+        <!-- 2026-05-31 : Sources vidéo déplacé après Mon IPTV -->
+        <PreferenceCategory
+            android:key="pc_extractor_management"
+            android:title="Sources vidéo"
+            app:iconSpaceReserved="false">
+
+            <Preference
+                android:key="p_settings_extractor_toggle"
+                android:title="Gérer les sources"
+                android:summary="Activer/désactiver les extracteurs vidéo, mettre en favori"
+                app:iconSpaceReserved="false" />
+
         </PreferenceCategory>
 
         <PreferenceCategory
@@ -311,13 +312,6 @@
                 android:defaultValue="false"
                 app:iconSpaceReserved="false" />
 
-            <SwitchPreference
-                android:key="PROFILE_PICKER_ENABLED"
-                android:title="@string/settings_profile_picker"
-                android:summary="@string/settings_profile_picker_summary"
-                android:defaultValue="true"
-                app:iconSpaceReserved="false" />
-
             <ListPreference
                 android:key="preferred_player"
                 android:title="@string/settings_trailer_player_title"
@@ -382,6 +376,15 @@
                 android:summaryOn="@string/settings_immersive_mode_on"
                 android:summaryOff="@string/settings_immersive_mode_off"
                 android:defaultValue="false"
+                app:iconSpaceReserved="false" />
+
+            <!-- 2026-06-03 (user "il faut le mettre dans Apparence") :
+                 déplacé depuis screen_playback. -->
+            <SwitchPreference
+                android:key="PROFILE_PICKER_ENABLED"
+                android:title="@string/settings_profile_picker"
+                android:summary="@string/settings_profile_picker_summary"
+                android:defaultValue="true"
                 app:iconSpaceReserved="false" />
         </PreferenceCategory>
     </PreferenceScreen>

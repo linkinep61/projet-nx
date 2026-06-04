@@ -23,9 +23,19 @@ class SeasonViewModel(
     seasonId: String,
     private val tvShowId: String,
     private val database: AppDatabase,
+    // 2026-06-01 — métadonnées navigation pour enrichir les shells TvShow/Season
+    // passés aux épisodes. Avant ce fix, les shells étaient vides (juste id) →
+    // EpisodeFavorites.Entry se sauvait avec showTitle="" et seasonNumber=0,
+    // ce qui causait des collisions de clé unique entre saisons sur les providers
+    // qui ne stockent pas tout en DB locale (typiquement AnimeSama).
+    private val tvShowTitleArg: String? = null,
+    private val tvShowPosterArg: String? = null,
+    private val tvShowBannerArg: String? = null,
+    private val seasonNumberArg: Int = 0,
+    private val seasonTitleArg: String? = null,
 ) : ViewModel() {
-    var seasonNumber = 0
-    var tvShowTitle = ""
+    var seasonNumber = seasonNumberArg
+    var tvShowTitle = tvShowTitleArg ?: ""
     private val _state = MutableStateFlow<State>(State.LoadingEpisodes)
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -106,8 +116,19 @@ class SeasonViewModel(
                         }
                 }
 
-                val tvShow = TvShow(tvShowId)
-                val season = Season(seasonId)
+                // 2026-06-01 — shells enrichis avec les args de navigation (titre,
+                // numéro de saison, posters) pour que EpisodeFavorites.Entry contienne
+                // de vraies métadonnées, pas juste des IDs. Fix pour AnimeSama et tout
+                // autre provider qui n'est pas obligatoirement en cache Room.
+                val tvShow = TvShow(tvShowId).apply {
+                    tvShowTitleArg?.takeIf { it.isNotBlank() }?.let { title = it }
+                    tvShowPosterArg?.takeIf { it.isNotBlank() }?.let { poster = it }
+                    tvShowBannerArg?.takeIf { it.isNotBlank() }?.let { banner = it }
+                }
+                val season = Season(seasonId).apply {
+                    if (seasonNumberArg > 0) number = seasonNumberArg
+                    seasonTitleArg?.takeIf { it.isNotBlank() }?.let { title = it }
+                }
                 episodes.forEach { episode ->
                     episode.tvShow = tvShow
                     episode.season = season

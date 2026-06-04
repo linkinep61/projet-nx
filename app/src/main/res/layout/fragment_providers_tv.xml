@@ -69,10 +69,10 @@
         android:focusableInTouchMode="false"
         android:contentDescription="Favoris"
         android:background="@drawable/bg_tv_button_focus"
-        app:layout_constraintBottom_toBottomOf="@id/tv_providers_label"
+        app:layout_constraintBottom_toBottomOf="@id/btn_providers_settings"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="@id/tv_providers_label"
+        app:layout_constraintTop_toTopOf="@id/btn_providers_settings"
         tools:ignore="UseAppTint" />
 
     <ImageView
@@ -87,18 +87,21 @@
         android:focusableInTouchMode="false"
         android:visibility="gone"
         android:background="@drawable/bg_tv_button_focus"
-        app:layout_constraintBottom_toBottomOf="@id/tv_providers_label"
+        app:layout_constraintBottom_toBottomOf="@id/btn_providers_settings"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toTopOf="@id/tv_providers_label"
+        app:layout_constraintTop_toTopOf="@id/btn_providers_settings"
         tools:ignore="ContentDescription,UseAppTint" />
 
     <!-- 2026-05-08 : Bouton Paramètres en haut à GAUCHE — symétrique du
          cadenas/téléchargements à droite. D-pad friendly via bg_tv_button_focus. -->
+    <!-- 2026-06-03 (user "icônes pas collées aux onglets") : ancrées en haut
+         avec marginTop fixe (au lieu de tv_providers_label qui bouge avec tabs). -->
     <ImageView
         android:id="@+id/btn_providers_settings"
         android:layout_width="48dp"
         android:layout_height="48dp"
         android:layout_marginStart="32dp"
+        android:layout_marginTop="32dp"
         android:padding="10dp"
         android:src="@drawable/ic_menu_settings"
         android:tint="#FFFFFF"
@@ -106,9 +109,8 @@
         android:focusableInTouchMode="false"
         android:contentDescription="Paramètres"
         android:background="@drawable/bg_tv_button_focus"
-        app:layout_constraintBottom_toBottomOf="@id/tv_providers_label"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="@id/tv_providers_label"
+        app:layout_constraintTop_toTopOf="parent"
         tools:ignore="UseAppTint" />
 
     <!-- 2026-05-12 : Bouton "Changer de profil" — à droite du bouton Paramètres.
@@ -125,9 +127,9 @@
         android:focusableInTouchMode="false"
         android:contentDescription="Changer de profil"
         android:background="@drawable/bg_tv_button_focus"
-        app:layout_constraintBottom_toBottomOf="@id/tv_providers_label"
+        app:layout_constraintBottom_toBottomOf="@id/btn_providers_settings"
         app:layout_constraintStart_toEndOf="@id/btn_providers_settings"
-        app:layout_constraintTop_toTopOf="@id/tv_providers_label"
+        app:layout_constraintTop_toTopOf="@id/btn_providers_settings"
         tools:ignore="UseAppTint" />
 
     <!-- 2026-05-05 : Bouton cadenas pour le contrôle parental.
@@ -145,9 +147,9 @@
         android:focusableInTouchMode="false"
         android:contentDescription="Contrôle parental"
         android:background="@drawable/bg_tv_button_focus"
-        app:layout_constraintBottom_toBottomOf="@id/tv_providers_label"
+        app:layout_constraintBottom_toBottomOf="@id/btn_providers_settings"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toTopOf="@id/tv_providers_label"
+        app:layout_constraintTop_toTopOf="@id/btn_providers_settings"
         tools:ignore="UseAppTint" />
 
     <!--

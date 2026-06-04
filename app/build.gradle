@@ -5,7 +5,12 @@ plugins {
     id 'kotlin-parcelize'
     id 'com.google.devtools.ksp'
     id 'org.jetbrains.kotlin.plugin.serialization'
-    id 'com.google.gms.google-services'
+    // 2026-06-02 : Firebase complètement retiré.
+    //   - RatingService.kt + LanguageReportService.kt déjà migrés vers
+    //     Cloudflare Workers (streamflix-api.logami61250.workers.dev)
+    //   - IptvChannelIndexService.kt supprimé (orphelin, ne servait plus
+    //     depuis suppression de WiTV)
+    //   - google-services.json + plugin gms retirés.
 }
 
 android {
@@ -42,8 +47,8 @@ android {
         applicationId "com.streamfr.app"
         minSdk 23
         targetSdk 35
-        versionCode 10907
-        versionName "1.7.207"
+        versionCode 10908
+        versionName "1.7.208"
 
         // 2026-05-11 : RESTAURATION x86 (32-bit) — abandonné en v19 par erreur.
         // Certains émulateurs (Genymotion, AVD images anciennes) et surtout les
@@ -93,6 +98,13 @@ android {
 
     buildTypes {
         debug {
+            // 2026-06-02 : suffix .debug pour permettre l'installation
+            //   côte-à-côte avec la version release (com.streamfr.app).
+            //   La debug devient com.streamfr.app.debug + suffix "-debug"
+            //   au versionName. Long-press icône → "App info" affiche
+            //   "com.streamfr.app.debug" pour distinction claire.
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
@@ -168,6 +180,10 @@ dependencies {
     implementation "androidx.room:room-runtime:2.7.0-rc01"
     implementation "androidx.room:room-ktx:2.7.0-rc01"
     implementation 'com.google.android.material:material:1.12.0'
+
+    // 2026-05-31 : Google Cast SDK pour envoyer le flux vidéo à la Chromecast
+    implementation 'com.google.android.gms:play-services-cast-framework:22.0.0'
+    implementation 'androidx.mediarouter:mediarouter:1.7.0'
     ksp 'androidx.room:room-compiler:2.7.0-rc01'
 
     implementation("org.mozilla:rhino:1.8.0")

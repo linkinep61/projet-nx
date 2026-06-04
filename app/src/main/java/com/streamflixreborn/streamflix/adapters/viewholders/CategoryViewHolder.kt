@@ -31,6 +31,7 @@ import com.streamflixreborn.streamflix.utils.toActivity
 import java.util.Locale
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.providers.Provider
+import kotlinx.coroutines.launch
 
 class CategoryViewHolder(
     private val _binding: ViewBinding
@@ -61,6 +62,45 @@ class CategoryViewHolder(
         swiperCallback?.let { swiperViewPager?.unregisterOnPageChangeCallback(it) }
         swiperCallback = null
         swiperViewPager = null
+    }
+
+    /**
+     * 2026-05-31 : Picker de groupe OTF TV (🌍 France / USA / Spain / etc.)
+     * Affiche un AlertDialog avec les groupes disponibles, change le groupe
+     * sélectionné et recharge le home.
+     */
+    private fun showOtfGroupPicker(anchor: View) {
+        val ctx = anchor.context
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            val groups = try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.streamflixreborn.streamflix.utils.OtfTvService.getGroups()
+                }
+            } catch (_: Exception) { emptyList() }
+            if (groups.isEmpty()) return@launch
+
+            val current = com.streamflixreborn.streamflix.utils.OtfTvService.selectedGroup.ifBlank { "France" }
+            val items = groups.toTypedArray()
+            val checkedIndex = groups.indexOf(current).coerceAtLeast(0)
+
+            android.app.AlertDialog.Builder(ctx)
+                .setTitle("OTF TV — Choisir le catalogue")
+                .setSingleChoiceItems(items, checkedIndex) { dialog, which ->
+                    val chosen = groups[which]
+                    com.streamflixreborn.streamflix.utils.OtfTvService.selectedGroup = chosen
+                    dialog.dismiss()
+                    // Recharger le home — clear cache + notify pour re-render
+                    // Le cache OTF en mémoire (fetchChannels) reste valide 30 min,
+                    // seul le HomeCacheStore (sections) est vidé pour re-filtrer par groupe.
+                    val provider = UserPreferences.currentProvider
+                    if (provider != null) {
+                        com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(ctx, provider)
+                    }
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
     }
 
     val childRecyclerView: RecyclerView?
@@ -101,6 +141,31 @@ class CategoryViewHolder(
     ) {
         binding.tvCategoryTitle.text = category.name
 
+        // 2026-05-31 : OTF TV — icône globe COLLÉE au texte, cliquable
+        if (category.name.contains("OTF TV")) {
+            try {
+                val icon = androidx.core.content.ContextCompat.getDrawable(
+                    context, android.R.drawable.ic_menu_mapmode
+                )!!
+                val size = (18 * context.resources.displayMetrics.density).toInt()
+                icon.setBounds(0, 0, size, size)
+                icon.setTint(0xFFFFFFFF.toInt())
+                val spannable = android.text.SpannableString("${category.name}  ") // espace pour l'icône
+                val imgSpan = android.text.style.ImageSpan(icon, android.text.style.ImageSpan.ALIGN_BASELINE)
+                spannable.setSpan(imgSpan, spannable.length - 1, spannable.length, android.text.Spannable.SPAN_INCLUSIVE_EXCLUSIVE)
+                binding.tvCategoryTitle.text = spannable
+            } catch (_: Exception) {
+                binding.tvCategoryTitle.text = category.name
+            }
+            binding.tvCategoryTitle.setCompoundDrawables(null, null, null, null)
+            binding.tvCategoryTitle.setOnClickListener {
+                showOtfGroupPicker(it)
+            }
+        } else {
+            binding.tvCategoryTitle.setCompoundDrawables(null, null, null, null)
+            binding.tvCategoryTitle.setOnClickListener(null)
+        }
+
         binding.rvCategory.apply {
             setHasFixedSize(true)
             setRecycledViewPool(sharedPool)
@@ -123,6 +188,37 @@ class CategoryViewHolder(
         onTvShowClick: ((TvShow) -> Unit)?
     ) {
         binding.tvCategoryTitle.text = category.name
+
+        // 2026-06-01 : OTF TV — globe + picker langue sur TV (focusable au D-pad)
+        if (category.name.contains("OTF TV")) {
+            try {
+                val icon = androidx.core.content.ContextCompat.getDrawable(
+                    context, android.R.drawable.ic_menu_mapmode
+                )!!
+                val size = (18 * context.resources.displayMetrics.density).toInt()
+                icon.setBounds(0, 0, size, size)
+                icon.setTint(0xFFFFFFFF.toInt())
+                val spannable = android.text.SpannableString("${category.name}  ")
+                val imgSpan = android.text.style.ImageSpan(icon, android.text.style.ImageSpan.ALIGN_BASELINE)
+                spannable.setSpan(imgSpan, spannable.length - 1, spannable.length, android.text.Spannable.SPAN_INCLUSIVE_EXCLUSIVE)
+                binding.tvCategoryTitle.text = spannable
+            } catch (_: Exception) {}
+            binding.tvCategoryTitle.isFocusable = true
+            binding.tvCategoryTitle.isFocusableInTouchMode = false
+            binding.tvCategoryTitle.setOnClickListener { showOtfGroupPicker(it) }
+            // Style focus pour que le D-pad montre le titre sélectionné
+            binding.tvCategoryTitle.setOnFocusChangeListener { v, hasFocus ->
+                v.alpha = if (hasFocus) 1.0f else 0.7f
+                if (hasFocus) v.setBackgroundColor(0x33FFFFFF) else v.setBackgroundColor(0x00000000)
+            }
+            binding.tvCategoryTitle.alpha = 0.7f
+        } else {
+            binding.tvCategoryTitle.isFocusable = false
+            binding.tvCategoryTitle.setOnClickListener(null)
+            binding.tvCategoryTitle.setOnFocusChangeListener(null)
+            binding.tvCategoryTitle.alpha = 1.0f
+            binding.tvCategoryTitle.setBackgroundColor(0x00000000)
+        }
         binding.hgvCategory.apply {
             setHasFixedSize(true)
             setRecycledViewPool(sharedPool)

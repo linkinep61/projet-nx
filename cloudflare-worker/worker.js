@@ -45,6 +45,8 @@ export default {
           return await ratingGet(db, body);
         case '/rating/vote':
           return await ratingVote(db, body);
+        case '/rating/import':
+          return await ratingImport(db, body);
 
         // ── LANGUAGE VOTES ───────────────────────────────────
         case '/lang/get':
@@ -53,6 +55,8 @@ export default {
           return await langVote(db, body);
         case '/lang/remove':
           return await langRemove(db, body);
+        case '/lang/import':
+          return await langImport(db, body);
 
         // ── DEVICE SYNC ──────────────────────────────────────
         case '/sync/send':
@@ -104,6 +108,34 @@ async function ratingGet(db, { contentKey }) {
     totalVotes: rating?.total_votes || 0,
     title: rating?.title || null,
   });
+}
+
+// ── IMPORT (migration Firebase → D1) ──
+async function ratingImport(db, { contentKey, title, averageRating, totalVotes }) {
+  if (!contentKey) return json({ error: 'contentKey required' }, 400);
+  await db.prepare(
+    `INSERT INTO ratings (content_key, title, average_rating, total_votes)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(content_key) DO UPDATE SET
+       title = COALESCE(excluded.title, title),
+       average_rating = excluded.average_rating,
+       total_votes = excluded.total_votes`
+  ).bind(contentKey, title || null, averageRating || 0, totalVotes || 0).run();
+  return json({ ok: true });
+}
+
+async function langImport(db, { contentKey, votesVF, votesVOSTFR, votesVO }) {
+  if (!contentKey) return json({ error: 'contentKey required' }, 400);
+  // Upsert les compteurs langue directement
+  await db.prepare(
+    `INSERT INTO language_counts (content_key, votes_vf, votes_vostfr, votes_vo)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(content_key) DO UPDATE SET
+       votes_vf = excluded.votes_vf,
+       votes_vostfr = excluded.votes_vostfr,
+       votes_vo = excluded.votes_vo`
+  ).bind(contentKey, votesVF || 0, votesVOSTFR || 0, votesVO || 0).run();
+  return json({ ok: true });
 }
 
 async function ratingVote(db, { contentKey, deviceId, rating, title }) {

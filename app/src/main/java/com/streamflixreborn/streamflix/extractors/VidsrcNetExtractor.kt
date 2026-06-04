@@ -13,8 +13,9 @@ import retrofit2.http.Url
 class VidsrcNetExtractor : Extractor() {
 
     override val name = "Vidsrc.net"
-    override val mainUrl = "https://vidsrc-embed.ru"
-    override val aliasUrls = listOf("https://vsembed.ru")
+    // 2026-06-02 : vidsrc-embed.ru redirige vers vsembed.ru (rename).
+    override val mainUrl = "https://vsembed.ru"
+    override val aliasUrls = listOf("https://vidsrc-embed.ru")
 
     fun server(videoType: Video.Type): Video.Server {
         return Video.Server(

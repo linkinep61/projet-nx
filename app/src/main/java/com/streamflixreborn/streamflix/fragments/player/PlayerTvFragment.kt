@@ -985,8 +985,8 @@ class PlayerTvFragment : Fragment() {
                                 }
                                 // Étape 3 : reconstruire la liste : actifs d'abord, bannis tout en bas
                                 PlayerSettingsView.Settings.Server.list.clear()
-                                PlayerSettingsView.Settings.Server.list.addAll(activeOnly)
-                                PlayerSettingsView.Settings.Server.list.addAll(bannedOnly)
+                                PlayerSettingsView.Settings.Server.addAllUnique(activeOnly)
+                                PlayerSettingsView.Settings.Server.addAllUnique(bannedOnly)
                                 Log.d("PlayerTvFragment", "Server picker reorganized: ${activeOnly.size} actifs + ${bannedOnly.size} bannis")
                             }
                             binding.settings.refreshServerList()
@@ -997,8 +997,27 @@ class PlayerTvFragment : Fragment() {
                             binding.settings.refreshChannelVariantList()
                         }
 
-                        // Chaîne starts empty — clear old entries from previous channel
-                        PlayerSettingsView.Settings.ChannelVariant.list.clear()
+                        // 2026-06-03 (user "Les chaînes étaient présentes puis ont disparu") :
+                        //   Ne CLEAR que si la liste contient des variantes d'une AUTRE
+                        //   chaîne. Si on est encore sur la même chaîne (re-emit ViewModel),
+                        //   on garde les variantes déjà ajoutées via additionalServer.
+                        //   Avant : clear inconditionnel → progressives wipées si re-emit.
+                        // 2026-06-03 v2 : channelKey peut être stocké sous 2 formats —
+                        //   "tf1" (juste la clé chaîne, ex: depuis l'extracteur olaKey)
+                        //   "ola::tf1" (préfixé, ex: depuis args.id direct).
+                        //   Normaliser les 2 côtés avant comparaison.
+                        fun normKey(k: String): String =
+                            k.removePrefix("ola_ep::").removePrefix("ola::").removePrefix("vegeta_ep::").removePrefix("vegeta::")
+                        val curList = PlayerSettingsView.Settings.ChannelVariant.list
+                        val curKeyNorm = normKey(args.id)
+                        val needsClear = curList.isNotEmpty() &&
+                            curList.any { it.channelKey.isNotEmpty() && normKey(it.channelKey) != curKeyNorm }
+                        if (needsClear || (curList.isNotEmpty() && curKeyNorm.isEmpty())) {
+                            Log.d("PlayerTvFragment", "ChannelVariant.list CLEAR (channel change: ${curList.firstOrNull()?.channelKey} → ${args.id})")
+                            curList.clear()
+                        } else {
+                            Log.d("PlayerTvFragment", "ChannelVariant.list NOT cleared (same channel '$curKeyNorm', ${curList.size} entries kept)")
+                        }
                         binding.settings.refreshChannelVariantList()
 
                         // 2026-05-08 : favoris multi-server (max 5) + skip bannis
@@ -1312,7 +1331,7 @@ class PlayerTvFragment : Fragment() {
                                 MediaServer(id = it.id, name = it.name)
                             })
                             .build()
-                        PlayerSettingsView.Settings.Server.list.add(
+                        PlayerSettingsView.Settings.Server.addUnique(
                             PlayerSettingsView.Settings.Server(id = server.id, name = server.name)
                         )
                         scheduleServerRefresh()
@@ -1374,7 +1393,7 @@ class PlayerTvFragment : Fragment() {
                     val prevSelectedId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isSelected }?.id
                     val prevLoadingId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isLoading }?.id
                     PlayerSettingsView.Settings.Server.list.clear()
-                    PlayerSettingsView.Settings.Server.list.addAll(nonOla.map {
+                    PlayerSettingsView.Settings.Server.addAllUnique(nonOla.map {
                         PlayerSettingsView.Settings.Server(id = it.id, name = it.name).apply {
                             isSelected = (it.id == prevSelectedId)
                             isLoading = (it.id == prevLoadingId)
@@ -1569,6 +1588,14 @@ class PlayerTvFragment : Fragment() {
             super.onDestroyView()
             hideWebViewOverlay()
 
+            // 2026-06-02 : clear le picker quand on quitte le player. Sinon
+            //   les serveurs du film précédent restent dans Settings.Server.list
+            //   (singleton companion object) et pollue le suivant.
+            try {
+                com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsView
+                    .Settings.Server.list.clear()
+            } catch (_: Exception) { }
+
             // 2026-05-17 v32 : stop SCOUT serveur
             scoutJob?.cancel()
             scoutJob = null
@@ -1757,7 +1784,20 @@ class PlayerTvFragment : Fragment() {
                     if (EpisodeManager.listIsEmpty(type)) {
                         EpisodeManager.clearEpisodes()
                         lifecycleScope.launch(Dispatchers.IO) {
-                            EpisodeManager.addEpisodesFromDb(type, database)
+                            // 2026-06-02 : currentProvider peut être null si l'user
+                            //   a navigué entre providers pendant l'init du player.
+                            //   On bail silencieusement plutôt que crash IllegalStateException.
+                            if (UserPreferences.currentProvider == null) {
+                                Log.w("PlayerTvFragment",
+                                    "currentProvider null dans addEpisodesFromDb — skip")
+                                return@launch
+                            }
+                            try { EpisodeManager.addEpisodesFromDb(type, database) }
+                            catch (e: Exception) {
+                                Log.w("PlayerTvFragment",
+                                    "addEpisodesFromDb fail: ${e.message}")
+                                return@launch
+                            }
                             withContext(Dispatchers.Main) {
                                 EpisodeManager.setCurrentEpisode(type)
                                 updatePlayerHeader(type)
@@ -5812,7 +5852,11 @@ class PlayerTvFragment : Fragment() {
                     }
                     player.trackSelectionParameters = builder.build()
 
+                    // 2026-06-02 : setId unique pour éviter le crash
+                    //   "IllegalStateException: Session ID must be unique"
+                    //   quand le player TV est recréé rapidement (BACK + ré-entrée).
                     mediaSession = MediaSession.Builder(requireContext(), player)
+                        .setId("streamflix-tv-${System.currentTimeMillis()}-${kotlin.random.Random.nextInt(100000)}")
                         .build()
                 }
 

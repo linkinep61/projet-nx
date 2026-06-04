@@ -42,20 +42,30 @@ class VidHideExtractor: Extractor() {
         Log.d(TAG, "extract() link=$link")
         val mainLink = URL(link).protocol + "://" + URL(link).host
         val fallback = URL(link).protocol + "://" + URL(link).host
-        val referer = try {
-            UserPreferences.currentProvider?.baseUrl ?: fallback
-        } catch (_: Throwable) {
-            fallback
+
+        // 2026-06-02 : Minochinos a un anti-hotlink tres strict. Seul un appel
+        // avec les headers Sec-Fetch-* d'un iframe browser (Dest=iframe,
+        // Site=cross-site, Mode=navigate) + Referer/Origin=lecteurvideo.com
+        // debloque la vraie page player (16k vs 4k "restricted"). Valide par curl.
+        val isMinochinos = URL(link).host.contains("minochinos")
+        val referer = if (isMinochinos) {
+            "https://lecteurvideo.com/"
+        } else {
+            try { UserPreferences.currentProvider?.baseUrl ?: fallback }
+            catch (_: Throwable) { fallback }
         }
-        val origin = referer
-        Log.d(TAG, "referer=$referer origin=$origin")
+        val origin = if (isMinochinos) "https://lecteurvideo.com" else referer
+        Log.d(TAG, "referer=$referer origin=$origin isMinochinos=$isMinochinos")
 
         val service = Extractor.createJsoupService<Service>(mainLink, referer)
         val source = service.getSource(
             url = link,
             referer = referer,
             origin = origin,
-            userAgent = Extractor.DEFAULT_USER_AGENT
+            userAgent = Extractor.DEFAULT_USER_AGENT,
+            secFetchDest = if (isMinochinos) "iframe" else "empty",
+            secFetchSite = if (isMinochinos) "cross-site" else "same-origin",
+            secFetchMode = if (isMinochinos) "navigate" else "cors"
         )
         Log.d(TAG, "HTML length=${source.toString().length}")
 
@@ -109,7 +119,10 @@ class VidHideExtractor: Extractor() {
             @Url url: String,
             @Header("Referer") referer: String,
             @Header("Origin") origin: String,
-            @Header("User-Agent") userAgent: String = Extractor.DEFAULT_USER_AGENT
+            @Header("User-Agent") userAgent: String = Extractor.DEFAULT_USER_AGENT,
+            @Header("Sec-Fetch-Dest") secFetchDest: String = "empty",
+            @Header("Sec-Fetch-Site") secFetchSite: String = "same-origin",
+            @Header("Sec-Fetch-Mode") secFetchMode: String = "cors"
         ): Document
     }
 }

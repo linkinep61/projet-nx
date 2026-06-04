@@ -605,6 +605,28 @@ class PlayerViewModel(
         var firstEmitted = false
         progressiveStillCollecting = true
         Log.d("ServDiag", "PROG enter id=$id")
+        // 2026-06-03 (user "patch qui attend qui est vraiment du FR. Si y a pas
+        //   on se rabat sur VOSTFR/VO. Sur tous les providers SAUF anime") :
+        //   si le 1er lot ne contient que VOSTFR/VO, on attend max FR_GRACE_MS
+        //   qu'un VRAI FR arrive avant de lancer l'auto-play. Évite que l'user
+        //   tombe sur VOSTFR alors qu'un FR Wiflix/etc. arrivait 2-3 sec plus
+        //   tard. Désactivé sur providers anime (VOSTFR = comportement attendu).
+        val providerName = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name ?: ""
+        val isAnimeProvider = providerName.contains("Anime", ignoreCase = true) ||
+            providerName.contains("Manga", ignoreCase = true) ||
+            providerName.equals("Franime", ignoreCase = true) ||
+            providerName.equals("DessinAnime", ignoreCase = true)
+        val FR_GRACE_MS: Long = if (isAnimeProvider) 0L else 6_000L
+        val gracePeriodStartedAt = mutableListOf<Long>()  // wrapper pour val mutable
+        fun isVf(s: Video.Server): Boolean {
+            val n = s.name.lowercase()
+            // VRAI FR = pas VOSTFR + pas VO. bucket 0 dans orderByFrenchBuckets.
+            if (n.contains("vostfr") || n.contains("sous-titr")) return false
+            val voRegex = Regex("""(^|[^a-z])vo([^a-z]|$)""")
+            if (voRegex.containsMatchIn(n)) return false
+            if (n.contains(Regex("\\b(raw|eng|english|spa|ita|german|deu|jap)\\b"))) return false
+            return true
+        }
         try {
             provider.getServersProgressive(id, videoType).collect { batch ->
                 Log.d("ServDiag", "PROG batch reçu size=${batch.size} firstEmitted=$firstEmitted")
@@ -618,6 +640,24 @@ class PlayerViewModel(
                     return@collect
                 }
                 if (!firstEmitted) {
+                    val hasFr = ordered.any { isVf(it) }
+                    if (!hasFr) {
+                        // Pas encore de VRAI FR — démarre/check grace period
+                        if (gracePeriodStartedAt.isEmpty()) {
+                            gracePeriodStartedAt.add(System.currentTimeMillis())
+                            Log.i("ServDiag", "PROG NO FR yet, waiting up to ${FR_GRACE_MS}ms for a VF source")
+                            return@collect
+                        }
+                        val elapsed = System.currentTimeMillis() - gracePeriodStartedAt[0]
+                        if (elapsed < FR_GRACE_MS) {
+                            Log.d("ServDiag", "PROG still no FR (${elapsed}ms / ${FR_GRACE_MS}ms), keep waiting")
+                            return@collect
+                        }
+                        Log.w("ServDiag", "PROG FR grace EXPIRED (${elapsed}ms) — fallback on VOSTFR/VO")
+                    } else if (gracePeriodStartedAt.isNotEmpty()) {
+                        val elapsed = System.currentTimeMillis() - gracePeriodStartedAt[0]
+                        Log.i("ServDiag", "PROG FR ARRIVED after ${elapsed}ms grace — auto-play sur VF")
+                    }
                     firstEmitted = true
                     // 2026-05-24 : reprise de lecture — prioriser le dernier serveur
                     val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext

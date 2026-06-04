@@ -1370,23 +1370,58 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                 val selected: Server?
                     get() = list.find { it.isSelected }
 
+                /** 2026-06-02 — Ajoute un Server dans `list` SI son id canonique
+                 *  n'est pas deja present. Utilise par les fragments du player qui
+                 *  empilent des servers via emission progressive (en bypassant init).
+                 *  Sans ce check, le meme serveur servi via plusieurs chemins
+                 *  (natif + wrapper backup) apparait 2-3 fois d'affilée dans le picker. */
+                fun addUnique(server: Server): Boolean {
+                    if (list.any { it.id == server.id }) return false
+                    list.add(server)
+                    return true
+                }
+
+                fun addAllUnique(servers: Iterable<Server>): Int {
+                    var added = 0
+                    for (s in servers) if (addUnique(s)) added++
+                    return added
+                }
+
                 fun init(player: ExoPlayer) {
-                    list.clear()
-                    list.addAll(player.playlistMetadata.mediaServers.map {
-                        Server(
-                            id = it.id,
-                            name = it.name,
-                        )
-                    })
-                    // 2026-05-09 v17 : ne pas systématiquement marquer le 1er.
-                    // Si le player connaît déjà mediaServerId (chaîne IPTV en cours
-                    // de lecture), on sélectionne ce server-là pour afficher la coche.
-                    // Fallback sur le 1er si rien n'est encore en lecture.
+                    // 2026-06-02 - MERGE intelligent + DEDUP PAR ID strict.
+                    // Le canonicalId() qui strippait les prefixes wrappers a ete
+                    // retire le 2026-06-02 : on a fixe le probleme a la racine en
+                    // empechant Movix de re-call ses backups quand il est appele
+                    // comme backup (MovixProvider.getServersAsBackup). Du coup la
+                    // dedup semantique est devenue inutile ET risquait de masquer
+                    // des sources legitimement distinctes ayant un id similaire.
+                    val newServers = player.playlistMetadata.mediaServers
+                    val existingIds = list.map { it.id }.toHashSet()
+                    val newIds = newServers.map { it.id }.toHashSet()
+                    val hasOverlap = existingIds.intersect(newIds).isNotEmpty()
+                    val seenIds = existingIds.toHashSet()
+                    if (!hasOverlap && newIds.isNotEmpty()) {
+                        list.clear()
+                        seenIds.clear()
+                        newServers.forEach { ms ->
+                            if (seenIds.add(ms.id)) {
+                                list.add(Server(id = ms.id, name = ms.name))
+                            }
+                        }
+                    } else {
+                        newServers.forEach { ms ->
+                            if (seenIds.add(ms.id)) {
+                                list.add(Server(id = ms.id, name = ms.name))
+                            }
+                        }
+                    }
                     val currentId = player.mediaMetadata.mediaServerId
                     val matched = if (!currentId.isNullOrBlank()) {
                         list.firstOrNull { it.id == currentId }
                     } else null
+                    list.forEach { it.isSelected = false }
                     (matched ?: list.firstOrNull())?.isSelected = true
+
                 }
 
                 fun refresh(player: ExoPlayer) {

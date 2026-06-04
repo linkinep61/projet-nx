@@ -92,13 +92,12 @@ class ProvidersMobileFragment : Fragment() {
             startActivity(intent)
         }
 
-        // 2026-05-05 : contrôle parental — bouton cadenas
-        binding.ivParentalLock.setOnClickListener {
-            com.streamflixreborn.streamflix.ui.PinDialog.showAuth(
-                context = requireContext(),
-                title = "Contrôle parental",
-                onSuccess = { showLockManagementDialog() }
-            )
+        // Bouton café Ko-fi
+        binding.ivKofi.setOnClickListener {
+            try {
+                startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse("https://ko-fi.com/nanico")))
+            } catch (_: Exception) {}
         }
 
         viewLifecycleOwner.lifecycleScope.launch {

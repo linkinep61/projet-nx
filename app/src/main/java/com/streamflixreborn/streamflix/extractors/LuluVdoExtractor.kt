@@ -32,8 +32,9 @@ import kotlin.coroutines.resume
 class LuluVdoExtractor : Extractor() {
 
     override val name = "LuluVdo"
-    override val mainUrl = "https://luluvdo.com/"
-    override val aliasUrls = listOf("https://luluvdoo.com", "https://luluvid.com", "https://lulustream.com")
+    // 2026-06-02 : luluvdo.com redirige vers lulustream.com (rename).
+    override val mainUrl = "https://lulustream.com/"
+    override val aliasUrls = listOf("https://luluvdo.com", "https://luluvdoo.com", "https://luluvid.com")
 
     companion object {
         private const val TAG = "LuluVdoExtractor"
@@ -245,6 +246,25 @@ class LuluVdoExtractor : Extractor() {
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 super.onPageFinished(view, url)
                                 Log.d(TAG, "Page finished: $url")
+
+                                // 2026-06-02 (Coflix Zootopie 2) : fast-fail si la page hoster
+                                // affiche "File is no longer available as it expired or has been
+                                // deleted" (HTML ~1.2 ko). Sans ce check, l'extracteur attendait
+                                // les 25s du timeout pour un m3u8 qui ne viendra jamais → la
+                                // rotation auto vers le serveur suivant prend 25s+ au lieu de <1s.
+                                if (url != null && (url.contains("luluvdo") || url.contains("lulustream"))) {
+                                    view?.evaluateJavascript(
+                                        "(function(){var t=(document.body&&document.body.innerText)||'';" +
+                                        "return /no longer available|has been deleted|file expired|video not found|file not found/i.test(t)?'DEAD':'OK';})();"
+                                    ) { result ->
+                                        if (result?.contains("DEAD") == true && !resolved) {
+                                            Log.w(TAG, "fast-fail: LuluVdo dead-content détecté → resume(null) immédiat")
+                                            resolved = true
+                                            cleanup()
+                                            if (continuation.isActive) continuation.resume(null)
+                                        }
+                                    }
+                                }
 
                                 // blank.html loaded → fetch M3U8 via CORS-free XHR (file:// origin)
                                 if (pendingM3u8Fetch && url?.startsWith("file:") == true) {

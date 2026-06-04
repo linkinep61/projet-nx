@@ -6,16 +6,25 @@
     android:layout_height="wrap_content"
     android:orientation="vertical">
 
-    <!-- Bouton URL personnalisée en haut du picker -->
+    <!-- Bouton URL personnalisée en haut du picker
+         2026-06-03 (user "il y a un message tellement petit") : agrandi +
+         contrasté + wording explicite (Tenor/Giphy). Avant : OutlinedButton
+         minuscule presque invisible sur fond noir. -->
     <Button
         android:id="@+id/btn_custom_url"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginHorizontal="16dp"
-        android:layout_marginTop="8dp"
-        android:text="Coller une URL d'image"
+        android:layout_marginTop="12dp"
+        android:layout_marginBottom="4dp"
+        android:minHeight="48dp"
+        android:paddingVertical="12dp"
+        android:text="🔗  Coller une URL d'image (Tenor, Giphy, etc.)"
         android:textAllCaps="false"
-        style="@style/Widget.MaterialComponents.Button.OutlinedButton" />
+        android:textColor="@android:color/white"
+        android:textSize="15sp"
+        android:textStyle="bold"
+        style="@style/Widget.MaterialComponents.Button" />
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rv_emoji_picker"

@@ -1011,7 +1011,12 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                 if (url.contains("vid=&", ignoreCase = true)) return@forEach
                 if (ignoreSource(playerName, url)) return@forEach
                 if (!seen.add(url)) return@forEach
-                val displayName = "${playerName.replaceFirstChar { it.uppercase() }} ($versionLabel)"
+                // 2026-06-02 : voir commentaire dans le parser épisode (idem).
+                val realName = com.streamflixreborn.streamflix.extractors.Extractor
+                    .identifyServiceName(url)
+                    ?.takeIf { it.isNotBlank() }
+                    ?: playerName.replaceFirstChar { it.uppercase() }
+                val displayName = "$realName ($versionLabel)"
                 out.add(Video.Server(
                     id = "fs_film_${playerName}_$versionKey",
                     name = displayName,
@@ -1046,7 +1051,17 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                 if (url.contains("vid=&", ignoreCase = true)) return@forEachPlayer
                 if (ignoreSource(playerName, url)) return@forEachPlayer
                 if (!seen.add(url)) return@forEachPlayer
-                val displayName = "${playerName.replaceFirstChar { it.uppercase() }} ($label)"
+                // 2026-06-02 : la clé JSON FS (playerName) ment parfois sur le vrai
+                //   extracteur (ex: clé "voe" mais URL kokoflix.lol/osaka_go.php
+                //   qui redirect en réalité vers maryspecialwatch.com = Voe).
+                //   On préfère le nom déduit de l'URL via identifyServiceName.
+                //   kokoflix.lol/osaka_go.php → désormais matché par VoeExtractor
+                //   (déplacé de Dood vers Voe via aliasUrls + rotatingDomain).
+                val realName = com.streamflixreborn.streamflix.extractors.Extractor
+                    .identifyServiceName(url)
+                    ?.takeIf { it.isNotBlank() }
+                    ?: playerName.replaceFirstChar { it.uppercase() }
+                val displayName = "$realName ($label)"
                 out.add(Video.Server(
                     id = "fs_ajax_${key}_${episodeNumber}_${playerName}",
                     name = displayName,
@@ -1199,8 +1214,13 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                             // Global dedupe across players too
                             if (!seen.add(url)) return@forEach
                             if (ignoreSource(playerName, url)) return@forEach
+                            // 2026-06-02 : same as ajax/film, prefer URL-detected name
+                            val realName = com.streamflixreborn.streamflix.extractors.Extractor
+                                .identifyServiceName(url)
+                                ?.takeIf { it.isNotBlank() }
+                                ?: playerName
                             val displayName = if (versionName == "Default")
-                                playerName else "$playerName ($versionName)"
+                                realName else "$realName ($versionName)"
                             out.add(Video.Server(
                                 id = "fs_player_${i}_${versionName}",
                                 name = displayName,
@@ -1328,7 +1348,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                 is Video.Type.Movie -> "$tmdbIdResolved"
                 is Video.Type.Episode -> "$tmdbIdResolved-s${videoType.season.number}e${videoType.number}"
             }
-            MovixProvider.getServers(movixId, movixVideoType)
+            MovixProvider.getServersAsBackup(movixId, movixVideoType)
                 // Filtrer les sources fstream de Movix (on les a déjà en natif)
                 .filter { srv -> !srv.id.startsWith("fstream-") }
         }.getOrNull().orEmpty() else emptyList()
@@ -1438,7 +1458,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             is Video.Type.Movie -> "$tmdbId"
             is Video.Type.Episode -> "$tmdbId-s${videoType.season.number}e${videoType.number}"
         }
-        MovixProvider.getServers(movixId, movixVideoType)
+        MovixProvider.getServersAsBackup(movixId, movixVideoType)
             // Filtrer les sources fstream de Movix (on les a déjà en natif)
             .filter { srv -> !srv.id.startsWith("fstream-") }
     }.getOrNull().orEmpty()

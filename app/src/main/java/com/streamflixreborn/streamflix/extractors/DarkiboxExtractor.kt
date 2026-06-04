@@ -10,11 +10,17 @@ import java.net.URL
 class DarkiboxExtractor : Extractor() {
 
     override val name = "Darkibox"
-    override val mainUrl = "https://darkibox.com"
+    // 2026-06-02 : darkibox.com a ete renomme en hydracker.com (301 redirect,
+    // meme contenu). On bascule mainUrl, on garde l'ancien en alias pour que
+    // les URLs darkibox.com legacy (caches providers) restent reconnues par
+    // ce extracteur.
+    override val mainUrl = "https://hydracker.com"
+    override val aliasUrls = listOf("https://darkibox.com")
 
-    // Match dl[N].darkibox.com subdomains for direct HLS streaming URLs
+    // Match dl[N] subdomains for direct HLS streaming URLs (les 2 domaines)
     override val rotatingDomain: List<Regex> = listOf(
-        Regex("""dl\d+\.darkibox\.com""")
+        Regex("""dl\d+\.darkibox\.com"""),
+        Regex("""dl\d+\.hydracker\.com""")
     )
 
     override suspend fun extract(link: String): Video {

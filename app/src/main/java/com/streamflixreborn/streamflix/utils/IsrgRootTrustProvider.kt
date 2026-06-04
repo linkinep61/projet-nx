@@ -15,25 +15,36 @@ import javax.net.ssl.X509TrustManager
 
 /**
  * Security Provider that wraps the default TrustManagerFactory to include
- * the ISRG Root X1 certificate (Let's Encrypt) on older Android versions
- * where the system CA store doesn't include it.
+ * the ISRG Root X1 + X2 certificates (Let's Encrypt) so that ALL HTTPS calls
+ * trust them, indépendamment de l'OEM/version Android.
  *
- * Registered BEFORE Conscrypt so that ALL OkHttpClient instances
- * automatically trust Let's Encrypt without code changes per provider.
+ *  - ISRG Root X1 (RSA) : présent dans Android ≥ 7.1.1 (API 25+), absent
+ *    avant → l'install était précédemment skip si API ≥ P.
+ *  - ISRG Root X2 (ECDSA) : ajouté plus tard à AOSP, présence inconsistante
+ *    selon OEM (vu absent sur OPPO ColorOS Android 13 → coflix.cymru tombait
+ *    en `Unacceptable certificate: CN=ISRG Root X2` 2026-06-02). Donc on
+ *    l'injecte systématiquement, quelle que soit l'API.
+ *
+ * Registered BEFORE Conscrypt so que tous les OkHttpClient en bénéficient
+ * sans code par provider.
  */
-class IsrgRootTrustProvider : Provider("IsrgRootTrust", 1.0, "Adds ISRG Root X1 to TrustManagerFactory") {
+class IsrgRootTrustProvider : Provider("IsrgRootTrust", 1.0, "Adds ISRG Root X1 + X2 to TrustManagerFactory") {
 
     companion object {
         private const val TAG = "IsrgRootTrust"
 
         fun install() {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) return
-
+            // 2026-06-02 : on n'a plus de skip par API.
+            //   X1 reste utile pour les anciens devices (< 7.1.1 = API 25).
+            //   X2 manque toujours sur certains OEMs même en API 33+ (OPPO,
+            //   Xiaomi, …) → l'install systématique est ce qui débloque
+            //   Coflix (cert ECDSA Let's Encrypt) et tout autre site qui
+            //   bascule sur X2 à l'avenir.
             try {
                 java.security.Security.insertProviderAt(IsrgRootTrustProvider(), 1)
-                Log.i(TAG, "ISRG Root X1 TrustProvider installed for API ${Build.VERSION.SDK_INT}")
+                Log.i(TAG, "ISRG Root X1+X2 TrustProvider installed for API ${Build.VERSION.SDK_INT}")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to install ISRG Root X1 TrustProvider: ${e.message}")
+                Log.e(TAG, "Failed to install ISRG Root TrustProvider: ${e.message}")
             }
         }
 
@@ -54,14 +65,22 @@ class IsrgRootTrustProvider : Provider("IsrgRootTrust", 1.0, "Adds ISRG Root X1 
                 ks.setCertificateEntry("system_$i", cert)
             }
 
-            // Add ISRG Root X1
+            // Add ISRG Root X1 (RSA — Let's Encrypt classique)
             val cf = CertificateFactory.getInstance("X.509")
-            val isrgCert = StreamFlixApp.instance.resources.openRawResource(R.raw.isrg_root_x1).use {
+            val isrgX1 = StreamFlixApp.instance.resources.openRawResource(R.raw.isrg_root_x1).use {
                 cf.generateCertificate(it)
             }
-            ks.setCertificateEntry("isrg_root_x1", isrgCert)
+            ks.setCertificateEntry("isrg_root_x1", isrgX1)
 
-            Log.d(TAG, "Merged KeyStore built: ${ks.size()} certificates")
+            // Add ISRG Root X2 (ECDSA — Let's Encrypt nouvelle racine, manque
+            // sur certains OEMs même en API 33+ → indispensable pour Coflix et
+            // d'autres sites qui basculent sur cette CA).
+            val isrgX2 = StreamFlixApp.instance.resources.openRawResource(R.raw.isrg_root_x2).use {
+                cf.generateCertificate(it)
+            }
+            ks.setCertificateEntry("isrg_root_x2", isrgX2)
+
+            Log.d(TAG, "Merged KeyStore built: ${ks.size()} certificates (incl. ISRG X1+X2)")
             ks
         }
 

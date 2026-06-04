@@ -11,7 +11,10 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
+import android.widget.ImageView
 import androidx.fragment.app.FragmentActivity
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.PagerSnapHelper
 import androidx.recyclerview.widget.RecyclerView
 import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.activities.main.MainMobileActivity
@@ -32,20 +35,61 @@ import kotlinx.coroutines.launch
  */
 class ProfilePickerActivity : FragmentActivity() {
 
+    // 2026-06-03 v6 (carrousel PagerSnap + transparence ARGB) : 1 profil au
+    //   centre, swipe horizontal ou flèches g/d. Avatars URL transparents.
     private lateinit var rvProfiles: RecyclerView
+    private lateinit var btnPrev: ImageView
+    private lateinit var btnNext: ImageView
+    private lateinit var tvPageIndicator: TextView
     private lateinit var btnManage: Button
+    private val snapHelper = PagerSnapHelper()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_profile_picker)
         rvProfiles = findViewById(R.id.rv_profiles)
+        btnPrev = findViewById(R.id.btn_profile_prev)
+        btnNext = findViewById(R.id.btn_profile_next)
+        tvPageIndicator = findViewById(R.id.tv_page_indicator)
         btnManage = findViewById(R.id.btn_manage_profiles)
         btnManage.setOnClickListener { openManagementDialog() }
+
+        rvProfiles.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
+        snapHelper.attachToRecyclerView(rvProfiles)
+
+        btnPrev.setOnClickListener {
+            val pos = getCurrentPosition()
+            if (pos > 0) rvProfiles.smoothScrollToPosition(pos - 1)
+        }
+        btnNext.setOnClickListener {
+            val pos = getCurrentPosition()
+            val total = rvProfiles.adapter?.itemCount ?: 0
+            if (pos < total - 1) rvProfiles.smoothScrollToPosition(pos + 1)
+        }
+        rvProfiles.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
+                if (newState == RecyclerView.SCROLL_STATE_IDLE) updatePageIndicator()
+            }
+        })
     }
 
     override fun onResume() {
         super.onResume()
         refreshList()
+    }
+
+    private fun getCurrentPosition(): Int {
+        val lm = rvProfiles.layoutManager as? LinearLayoutManager ?: return 0
+        val view = snapHelper.findSnapView(lm) ?: return 0
+        return lm.getPosition(view)
+    }
+
+    private fun updatePageIndicator() {
+        val total = rvProfiles.adapter?.itemCount ?: 0
+        val pos = getCurrentPosition()
+        tvPageIndicator.text = if (total > 0) "${pos + 1} / $total" else ""
+        btnPrev.alpha = if (pos == 0) 0.3f else 1f
+        btnNext.alpha = if (pos >= total - 1) 0.3f else 1f
     }
 
     private fun refreshList() {
@@ -55,6 +99,7 @@ class ProfilePickerActivity : FragmentActivity() {
             onProfileClick = ::onProfileClicked,
             onAddProfileClick = ::openAddProfileDialog,
         )
+        rvProfiles.post { updatePageIndicator() }
     }
 
     private fun onProfileClicked(profile: Profile) {

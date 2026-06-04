@@ -18,7 +18,7 @@ plugins {
     id 'org.jetbrains.kotlin.android' version '2.2.10' apply false
     id 'com.google.devtools.ksp' version '2.3.2' apply false
     id 'org.jetbrains.kotlin.plugin.serialization' version '2.2.10' apply false
-    id 'com.google.gms.google-services' version '4.4.4' apply false
+    // 2026-06-02 : plugin Firebase retiré — voir commentaire dans app/build.gradle
 }
 
 tasks.register('clean', Delete) {

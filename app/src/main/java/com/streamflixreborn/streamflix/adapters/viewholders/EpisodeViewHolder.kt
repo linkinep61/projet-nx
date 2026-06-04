@@ -203,7 +203,10 @@ class EpisodeViewHolder(
 
     private fun displayTvItem(binding: ItemEpisodeTvBinding) {
         binding.root.apply {
+            // 2026-06-01 : forcer longClickable AVANT setOnClickListener
+            isLongClickable = true
             setOnClickListener {
+                android.util.Log.d("EpisodeVH", "onClick (short click) on ${episode.title}")
                 // Sub-folder: navigate to Season instead of Player
                 if (episode.overview == "@subfolder") {
                     val realSeasonId = episode.id.removePrefix("@subfolder:")
@@ -264,8 +267,12 @@ class EpisodeViewHolder(
                     )
                 )
             }
-            // 2026-05-22 : appui long → ajoute/retire l'épisode des favoris.
-            setOnLongClickListener { toggleEpisodeFavorite() }
+            // 2026-06-01 : appui long → ajoute/retire l'épisode des favoris.
+            isLongClickable = true
+            setOnLongClickListener {
+                android.util.Log.d("EpisodeVH", "Long click detected on ${episode.title}")
+                toggleEpisodeFavorite()
+            }
             setOnFocusChangeListener { _, hasFocus ->
                 val animation = when {
                     hasFocus -> AnimationUtils.loadAnimation(context, R.anim.zoom_in)

@@ -235,7 +235,7 @@ class IptvFavoritesMobileFragment : Fragment() {
         }
     }
 
-    private fun loadFavorites() {
+    fun loadFavorites() {
         val provider = UserPreferences.currentProvider ?: return
         if (provider !is IptvProvider) {
             appAdapter.submitList(emptyList())

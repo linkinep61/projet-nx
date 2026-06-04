@@ -4,6 +4,7 @@ import android.util.Log
 import com.streamflixreborn.streamflix.extractors.Extractor
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.TitleNormalizer
+import com.streamflixreborn.streamflix.utils.TmdbUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
@@ -43,12 +44,19 @@ object CoflixSourceProvider {
 
     /** Liste des miroirs connus du site. On essaie dans l'ordre jusqu'à un 200. */
     private val MIRRORS = listOf(
+        "https://coflix.cymru",
         "https://coflix.date",
-        "https://coflix.blog",
         "https://coflix.click",
     )
 
     @Volatile private var lastWorkingMirror: String = MIRRORS.first()
+
+    /** 2026-06-02 — Backoff après HTTP 429. Quand un mirror Coflix renvoie 429,
+     *  on marque Coflix comme indispo pendant 30 min : tous les calls suivants
+     *  retournent null instantanement, sans frapper le serveur. Ca evite le
+     *  ban CF qui s'aggrave a force de hammer-and-retry. */
+    private const val COOLDOWN_AFTER_429_MS = 30L * 60L * 1000L // 30 min
+    @Volatile private var coflixCooldownUntilMs: Long = 0L
 
     /** Headers communs pour les calls Coflix. */
     private fun headers(): Map<String, String> = mapOf(
@@ -59,15 +67,29 @@ object CoflixSourceProvider {
 
     private val httpClient by lazy { Extractor.sharedClient }
 
-    private suspend fun httpGet(url: String): String? = withContext(Dispatchers.IO) {
+    private suspend fun httpGet(url: String, customReferer: String? = null): String? = withContext(Dispatchers.IO) {
         try {
             val req = Request.Builder()
                 .url(url)
-                .apply { headers().forEach { (k, v) -> header(k, v) } }
+                .apply {
+                    headers().forEach { (k, v) ->
+                        // 2026-06-02 : Referer overridable. lecteurvideo.com renvoie 403/520
+                        // (CF bloque) si on envoie le Referer global (lastWorkingMirror) au lieu
+                        // de l'URL de la page Coflix d'origine. Validé par curl : sans Referer
+                        // 403, avec Referer = coflix.cymru/film/X → 200.
+                        if (k == "Referer" && customReferer != null) header(k, customReferer)
+                        else header(k, v)
+                    }
+                }
                 .build()
             httpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     Log.d(TAG, "GET $url → HTTP ${resp.code}")
+                    if (resp.code == 429) {
+                        // Coflix CF rate-limit. On gèle tous les appels pour 30 min.
+                        coflixCooldownUntilMs = System.currentTimeMillis() + COOLDOWN_AFTER_429_MS
+                        Log.w(TAG, "Coflix global cooldown 30 min apres HTTP 429")
+                    }
                     return@withContext null
                 }
                 resp.body?.string()
@@ -86,8 +108,24 @@ object CoflixSourceProvider {
      * @return Liste de [Video.Server] (un par hoster Coflix), ou empty si
      *         aucun match ou erreur.
      */
-    suspend fun getMovieSources(title: String, year: Int? = null): List<Video.Server> {
-        val match = searchBest(title, year, type = "movies") ?: return emptyList()
+    suspend fun getMovieSources(title: String, year: Int? = null, altTitle: String? = null): List<Video.Server> {
+        // 2026-06-03 (user "Pourquoi ce film là Il est pas trouvé par Ce site
+        //   Dans l'application" pour Aventures croisées 2026) : essai du titre
+        //   principal puis fallback titre alternatif (souvent le titre original
+        //   anglais quand TMDB FR n'a pas encore traduit, ou inversement). Le
+        //   slug Coflix dépend du titre VF (ex : "aventures-croisees") alors
+        //   que TMDB peut renvoyer "Swapped" pour les films récents → on ratait.
+        val match = searchBest(title, year, type = "movies")
+            ?: altTitle?.takeIf { it.isNotBlank() && !it.equals(title, ignoreCase = true) }
+                ?.let { searchBest(it, year, type = "movies") }
+            // Dernier recours : on demande à TMDB la version FR du titre puis
+            //   on retente. Couvre les films récents où Cloudstream/Movix ont
+            //   le titre EN ("Swapped") mais Coflix indexe en FR ("aventures-
+            //   croisees").
+            ?: resolveFrenchTitleViaTmdb(title, year, isMovie = true)
+                ?.takeIf { !it.equals(title, ignoreCase = true) }
+                ?.let { Log.d(TAG, "Coflix fallback FR title TMDB: '$title' -> '$it'"); searchBest(it, year, type = "movies") }
+            ?: return emptyList()
         return extractFromCoflixPage(match.url, label = "Coflix")
     }
 
@@ -104,8 +142,16 @@ object CoflixSourceProvider {
         year: Int? = null,
         seasonNumber: Int,
         episodeNumber: Int,
+        altShowTitle: String? = null,
     ): List<Video.Server> {
-        val match = searchBest(showTitle, year, type = "series") ?: return emptyList()
+        // 2026-06-03 : même fallback titre alternatif que pour les films.
+        val match = searchBest(showTitle, year, type = "series")
+            ?: altShowTitle?.takeIf { it.isNotBlank() && !it.equals(showTitle, ignoreCase = true) }
+                ?.let { searchBest(it, year, type = "series") }
+            ?: resolveFrenchTitleViaTmdb(showTitle, year, isMovie = false)
+                ?.takeIf { !it.equals(showTitle, ignoreCase = true) }
+                ?.let { Log.d(TAG, "Coflix fallback FR series TMDB: '$showTitle' -> '$it'"); searchBest(it, year, type = "series") }
+            ?: return emptyList()
         // L'URL du serie s'appelle `/serie/{slug}/`. On en extrait le slug pour
         // construire l'URL épisode `/episode/{slug}-{season}x{episode}/`.
         val serieSlug = match.url
@@ -129,17 +175,76 @@ object CoflixSourceProvider {
     private suspend fun searchBest(rawTitle: String, year: Int?, type: String): CoflixMatch? {
         val cleanTitle = TitleNormalizer.cleanForTmdbSearch(rawTitle).ifBlank { rawTitle }
         if (cleanTitle.isBlank()) return null
+        if (System.currentTimeMillis() < coflixCooldownUntilMs) {
+            val remainSec = (coflixCooldownUntilMs - System.currentTimeMillis()) / 1000
+            Log.d(TAG, "Coflix en cooldown 429 (${remainSec}s restants) — skip")
+            return null
+        }
         val encoded = URLEncoder.encode(cleanTitle, "UTF-8")
-        // Essaie chaque miroir jusqu'à un succès
-        val mirrors = listOf(lastWorkingMirror) + MIRRORS.filter { it != lastWorkingMirror }
+        // 2026-06-02 : on essaie d'abord le miroir DECOUVERT via coflix.blog
+        // (toujours a jour), puis lastWorkingMirror, puis le pool statique.
+        val discovered = CoflixMirrorDiscovery.discover()
+        val mirrors = buildList {
+            if (discovered != null) add(discovered)
+            if (lastWorkingMirror !in this) add(lastWorkingMirror)
+            MIRRORS.forEach { if (it !in this) add(it) }
+        }
         for (mirror in mirrors) {
             val url = "$mirror/suggest.php?query=$encoded"
             val body = httpGet(url) ?: continue
             lastWorkingMirror = mirror
-            return pickBest(body, cleanTitle, year, type) ?: continue
+            pickBest(body, cleanTitle, year, type)?.let { return it }
+        }
+        // 2026-06-02 : fallback slug-direct.
+        // /suggest.php est souvent rate-limited (HTTP 429) — Coflix protege son API
+        // anti-DDoS. La page film elle, /film/<slug>/, n'est PAS rate-limited.
+        // → on construit l'URL directement a partir du titre slugifie. Validation
+        // par la presence d'une iframe lecteurvideo dans la page.
+        val slug = slugify(cleanTitle)
+        if (slug.isNotBlank()) {
+            val pathSegment = if (type == "movies") "film" else "serie"
+            for (mirror in mirrors) {
+                val directUrl = "$mirror/$pathSegment/$slug/"
+                val body = httpGet(directUrl) ?: continue
+                if (body.contains("lecteurvideo")) {
+                    lastWorkingMirror = mirror
+                    Log.d(TAG, "Coflix slug-direct fallback: '$cleanTitle' → $directUrl")
+                    return CoflixMatch(cleanTitle, directUrl, year?.toString())
+                }
+            }
+            Log.d(TAG, "Coflix slug-direct fallback: aucun mirror n'a /$pathSegment/$slug/ avec iframe valide")
         }
         return null
     }
+
+    /** 2026-06-03 : Résout le titre FR d'un film/série via TMDB.
+     *  Sert de pont quand le caller passe le titre EN ("Swapped") alors que
+     *  Coflix indexe en FR ("aventures-croisees"). On demande TMDB en fr-FR
+     *  pour récupérer la traduction officielle, puis on retente Coflix avec.
+     *  Retourne null si TMDB ne connaît pas le film ou si la version FR
+     *  n'apporte rien (= égale à l'input). */
+    private suspend fun resolveFrenchTitleViaTmdb(rawTitle: String, year: Int?, isMovie: Boolean): String? = try {
+        if (isMovie) {
+            TmdbUtils.getMovie(rawTitle, year, language = "fr-FR")?.title?.takeIf { it.isNotBlank() }
+        } else {
+            TmdbUtils.getTvShow(rawTitle, year, language = "fr-FR")?.title?.takeIf { it.isNotBlank() }
+        }
+    } catch (e: Exception) {
+        Log.d(TAG, "TMDB FR resolve failed for '$rawTitle' ($year): ${e.message}")
+        null
+    }
+
+    /** Slugifie un titre pour construire une URL Coflix.
+     *  "Super Charlie" → "super-charlie", "L'Été" → "l-ete". */
+    private fun slugify(title: String): String =
+        title.lowercase()
+            .replace("é", "e").replace("è", "e").replace("ê", "e").replace("ë", "e")
+            .replace("à", "a").replace("â", "a").replace("ä", "a")
+            .replace("ô", "o").replace("ö", "o")
+            .replace("ù", "u").replace("û", "u").replace("ü", "u")
+            .replace("ç", "c").replace("î", "i").replace("ï", "i")
+            .replace(Regex("[^a-z0-9]+"), "-")
+            .trim('-')
 
     /** Parse le JSON suggest et pioche le meilleur match. */
     private fun pickBest(json: String, query: String, year: Int?, type: String): CoflixMatch? {
@@ -204,7 +309,9 @@ object CoflixSourceProvider {
             ?.groupValues?.get(1)
             ?: Regex("""<iframe[^>]*src="(https?://[^"]+)"""").find(pageHtml)?.groupValues?.get(1)
             ?: return emptyList()
-        val embedHtml = httpGet(iframeUrl) ?: return emptyList()
+        // 2026-06-02 : passe la coflixPageUrl en Referer pour que lecteurvideo.com
+        // ne renvoie pas 403/520 (CF anti-hotlink).
+        val embedHtml = httpGet(iframeUrl, customReferer = coflixPageUrl) ?: return emptyList()
         // Extrait les `onclick="showVideo('<base64>', '...')"` patterns
         val regex = Regex("""onclick="showVideo\('([^']+)',\s*'[^']*'\)"""")
         val results = mutableListOf<Video.Server>()

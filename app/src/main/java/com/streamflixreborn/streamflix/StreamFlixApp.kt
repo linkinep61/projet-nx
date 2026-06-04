@@ -134,6 +134,17 @@ class StreamFlixApp : Application() {
         super.onCreate()
         instance = this
 
+        // 2026-06-03 : eager-load de l'index IPTV (seed Firebase + cache user).
+        //   Avant : chargé uniquement quand l'user ouvrait OLA TV (lazy).
+        //   Maintenant : chargé au démarrage de l'app, sur un thread BG pour
+        //   ne pas bloquer le main. Comme ça quand OLA TV s'ouvre, les
+        //   fast-tracks sont déjà en mémoire → chaînes démarrent direct.
+        Thread {
+            try {
+                com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex.loadLocalCache()
+            } catch (_: Throwable) {}
+        }.start()
+
         // 2026-05-18 : UncaughtExceptionHandler — sauvegarde le stack trace
         //   dans last_crash.txt (lu par CrashActivity + buildBugReport).
         //   Sans ça, le fichier n'était jamais écrit, donc le rapport bug
@@ -231,6 +242,19 @@ class StreamFlixApp : Application() {
             DnsResolver.setDnsUrl(UserPreferences.dohProviderUrl)
         } catch (e: Throwable) {
             Log.e("StreamFlixApp", "UserPreferences/DNS setup failed: ${e.message}", e)
+        }
+
+        // 2026-05-31 : Google Cast — init CastContext pour la découverte Chromecast
+        try {
+            com.google.android.gms.cast.framework.CastContext.getSharedInstance(
+                this, java.util.concurrent.Executors.newSingleThreadExecutor()
+            ).addOnSuccessListener {
+                Log.d("StreamFlixApp", "CastContext initialized OK")
+            }.addOnFailureListener {
+                Log.w("StreamFlixApp", "CastContext init failed: ${it.message}")
+            }
+        } catch (e: Throwable) {
+            Log.w("StreamFlixApp", "CastContext init exception: ${e.message}")
         }
 
         // 2026-05-12 : setup ProfileStore (multi-utilisateur Netflix-style).

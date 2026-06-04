@@ -137,26 +137,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         HubChannel("Canal+ Sport", "canalsport", "canalplussport", "Sport"),
         HubChannel("Canal+ Sport 360", "canalsport360", "canalplussport360", "Sport"),
         HubChannel("Canal+ Foot", "canalfoot", "canalplusfoot", "Sport"),
-        // 2026-05-09 : catégorie dédiée "Canal+ Live"
-        HubChannel("Canal+ Live 1", "canalpluslive1", "canalpluslive1", "Canal+ Live"),
-        HubChannel("Canal+ Live 2", "canalpluslive2", "canalpluslive2", "Canal+ Live"),
-        HubChannel("Canal+ Live 3", "canalpluslive3", "canalpluslive3", "Canal+ Live"),
-        HubChannel("Canal+ Live 4", "canalpluslive4", "canalpluslive4", "Canal+ Live"),
-        HubChannel("Canal+ Live 5", "canalpluslive5", "canalpluslive5", "Canal+ Live"),
-        HubChannel("Canal+ Live 6", "canalpluslive6", "canalpluslive6", "Canal+ Live"),
-        HubChannel("Canal+ Live 7", "canalpluslive7", "canalpluslive7", "Canal+ Live"),
-        HubChannel("Canal+ Live 8", "canalpluslive8", "canalpluslive8", "Canal+ Live"),
-        HubChannel("Canal+ Live 9", "canalpluslive9", "canalpluslive9", "Canal+ Live"),
-        HubChannel("Canal+ Live 10", "canalpluslive10", "canalpluslive10", "Canal+ Live"),
-        HubChannel("Canal+ Live 11", "canalpluslive11", "canalpluslive11", "Canal+ Live"),
-        HubChannel("Canal+ Live 12", "canalpluslive12", "canalpluslive12", "Canal+ Live"),
-        HubChannel("Canal+ Live 13", "canalpluslive13", "canalpluslive13", "Canal+ Live"),
-        HubChannel("Canal+ Live 14", "canalpluslive14", "canalpluslive14", "Canal+ Live"),
-        HubChannel("Canal+ Live 15", "canalpluslive15", "canalpluslive15", "Canal+ Live"),
-        HubChannel("Canal+ Live 16", "canalpluslive16", "canalpluslive16", "Canal+ Live"),
-        HubChannel("Canal+ Live 17", "canalpluslive17", "canalpluslive17", "Canal+ Live"),
-        HubChannel("Canal+ Live 18", "canalpluslive18", "canalpluslive18", "Canal+ Live"),
-        HubChannel("Canal+ Live 19", "canalpluslive19", "canalpluslive19", "Canal+ Live"),
+        // 2026-05-31 : Canal+ Live 1-19 RETIRÉS (ne fonctionnent pas)
         HubChannel("beIN Sports 1", "beinsports1", "beinsports1", "Sport"),
         HubChannel("beIN Sports 2", "beinsports2", "beinsports2", "Sport"),
         HubChannel("beIN Sports 3", "beinsports3", "beinsports3", "Sport"),
@@ -224,7 +205,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
 
     /** Ordre fixe des catégories au home (cohérent avec WiTV/Ola/Vegeta). */
     private val categoryOrder: List<String> = listOf(
-        "Généraliste", "Cinéma", "Canal+ Live", "Info", "Sport", "Musique", "Documentaire", "Enfants",
+        "Généraliste", "Cinéma", "Info", "Sport", "Musique", "Documentaire", "Enfants",
     )
 
     // ═══════════════════════════════════════════════════════════════
@@ -273,13 +254,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
         BonusChannel("Eurosport 2", 16, "Sport"),
         BonusChannel("RMC Sport 1", 17, "Sport"),
         BonusChannel("Automoto", 19, "Sport"),
-    ) + (2..9).map { n ->
-        // ─── Canal+ Live 2-9 (ids 32-39) ───
-        // 2026-05-15 : audit batch — supprimé Canal+ Live 1 (B31) et Canal+ Live
-        // 10-18 (B40-B48) → tous TIMEOUT (chaînes mortes côté serveur bolaloca).
-        // Ne reste que les 8 qui répondent réellement.
-        BonusChannel("Canal+ Live $n", 30 + n, "Canal+ Live")
-    }
+    )
+    // 2026-05-31 : Canal+ Live 2-9 bonus RETIRÉS (ne fonctionnent pas)
 
     /** ID Dailymotion pour Sport en France. Pas d'extraction WebView nécessaire
      *  — DailymotionExtractor gère déjà. */
@@ -486,9 +462,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
             sections.add(Category(name = cat, list = list.map { channelToTvShow(it) }))
         }
 
-        // 2026-05-15 : sections BONUS (chaînes mirror bolaloca/cartelive/embedme
-        // + Dailymotion Sport en France). Visibles pour tous les users, pas
-        // besoin de favoris.
+        // 2026-05-15 : sections BONUS — wrappé dans try/catch pour ne pas bloquer OTF
+        try {
         val bonusBanned = { id: String ->
             com.streamflixreborn.streamflix.fragments.player.settings
                 .IptvBannedChannels.isBanned(id)
@@ -533,13 +508,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 sections.add(Category(name = "Cinéma", list = cinemaBonus))
             }
         }
-        // Canal+ Live : section dédiée (1-18). Inséré APRÈS Cinéma, AVANT Info.
-        val canalPlusLive = bonusByCat["Canal+ Live"].orEmpty().map { bonusToTvShow(it) }
-        if (canalPlusLive.isNotEmpty()) {
-            val insertAt = sections.indexOfFirst { it.name == "Info" }
-                .takeIf { it >= 0 } ?: sections.size
-            sections.add(insertAt, Category(name = "Canal+ Live", list = canalPlusLive))
-        }
+        // 2026-05-31 : Canal+ Live section RETIRÉE (chaînes ne fonctionnent pas)
 
         // 2026-05-15 : 48 chaînes freeshot.live (TF1, M6, BFM*, CANAL+ FR/DOCS,
         // DAZN, Eurosport, France 2-5, L'Equipe Live, CNews, etc.) merged dans
@@ -560,6 +529,63 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 sections.add(Category(name = cat, list = tvShows))
             }
         }
+
+        } catch (e: Exception) {
+            Log.w(TAG, "Bonus/freeshot sections failed: ${e.message}")
+        }
+
+        // 2026-05-31 : OTF TV — chaînes dynamiques depuis l'API OTF.
+        // Timeout 8s pour ne pas bloquer le home si l'API est lente.
+        val otfService = com.streamflixreborn.streamflix.utils.OtfTvService
+        val otfChannelsFromApi = try {
+            kotlinx.coroutines.withTimeoutOrNull(8_000L) {
+                otfService.fetchChannels()
+            } ?: emptyList()
+        } catch (_: Exception) { emptyList() }
+
+        val selectedGroup = otfService.selectedGroup.ifBlank { "France" }
+        val otfFiltered = otfChannelsFromApi.filter { it.group == selectedGroup }
+
+        // normalizedKey = ID unique par chaîne (catId est l'ID du GROUPE, pas de la chaîne)
+        val seen = HashSet<String>()
+        val otfShows = otfFiltered.filter { seen.add(it.normalizedKey) }.map { ch ->
+            TvShow(id = "livehub::otf::${ch.normalizedKey}", title = ch.name).apply {
+                providerName = "TV Hub"
+                poster = ch.logo
+            }
+        }
+        val otfSectionName = "OTF TV - $selectedGroup"
+        sections.add(Category(name = otfSectionName, list = otfShows))
+
+        // 2026-05-31 : section "Favoris" OTF — inclut les chaînes OTF marquées favorites
+        try {
+            // getFavorites retourne "livehub::" + clé normalisée (ex: "livehub::otfcanaldecale")
+            val allFavs = com.streamflixreborn.streamflix.utils.IptvFavoritesStore
+                .getFavorites("TV Hub")
+            val otfFavKeys = allFavs
+                .filter { it.startsWith("livehub::otf") }
+                .map { it.removePrefix("livehub::otf") } // "canaldecale"
+            if (otfFavKeys.isNotEmpty()) {
+                val otfFavShows = otfFavKeys.mapNotNull { favKey ->
+                    val ch = otfChannelsFromApi.firstOrNull { it.normalizedKey == favKey }
+                    ch?.let {
+                        TvShow(id = "livehub::otf::${it.normalizedKey}", title = it.name).apply {
+                            providerName = "TV Hub"
+                            poster = it.logo
+                        }
+                    }
+                }
+                if (otfFavShows.isNotEmpty()) {
+                    // Insérer en haut de la liste (après les sections OLA/Vegeta existantes, avant OTF)
+                    val otfIdx = sections.indexOfFirst { it.name.startsWith("OTF TV") }
+                    if (otfIdx >= 0) {
+                        sections.add(otfIdx, Category(name = "Favoris", list = otfFavShows))
+                    } else {
+                        sections.add(Category(name = "Favoris", list = otfFavShows))
+                    }
+                }
+            }
+        } catch (_: Throwable) {}
 
         // 2026-05-08 : section "✕ Chaînes bannies" EN BAS du home.
         try {
@@ -651,6 +677,25 @@ object LiveTvHubProvider : Provider, IptvProvider {
      *  "canalplus", mais le Hub cherchait sous "canal" (witvKey) → fallback
      *  déclenché à tort, l'user voyait toute la liste agrégée. */
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        // 2026-05-31 : OTF TV — chaînes directes depuis le catalogue OTF
+        if (id.startsWith("livehub::otf::")) {
+            val key = id.removePrefix("livehub::otf::").split("::").first()
+            val urls = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.streamflixreborn.streamflix.utils.OtfTvService.getUrlsForChannel(key)
+            }
+            Log.d(TAG, "OTF getServers: key=$key, urls=${urls.size}")
+            // Debug nettoyé
+            if (urls.isEmpty()) {
+                Log.w(TAG, "OTF getServers: no URLs for key=$key")
+            }
+            return urls.mapIndexed { i, url ->
+                Video.Server(
+                    id = "livehub::otf::${key}::$i",
+                    name = "OTF #${i + 1}",
+                    src = url,
+                )
+            }
+        }
         // 2026-05-15 : bonus channels — 3 mirrors par chaîne pour bolaloca
         if (id.startsWith("livehub::bonus::")) {
             val num = id.removePrefix("livehub::bonus::").toIntOrNull() ?: return emptyList()
@@ -738,13 +783,27 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 }.getOrElse { emptyList() }
             }
 
-            val all = olaD.await() + vegetaD.await()
-            // Dédup par URL (la même chaîne peut être diffusée via la même URL
-            // sur plusieurs providers — pas la peine de doubler)
+            // 2026-05-31 : OTF TV — URLs m3u8 directes (pas de portail MAC)
+            val otfD = async {
+                runCatching {
+                    withTimeoutOrNull(8_000L) {
+                        val urls = com.streamflixreborn.streamflix.utils.OtfTvService.getUrlsForChannel(c.olaVegetaKey)
+                        urls.mapIndexed { i, url ->
+                            Video.Server(
+                                id = "livehub::otf::${c.olaVegetaKey}::$i",
+                                name = "OTF #${i + 1}",
+                                src = url,
+                            )
+                        }
+                    } ?: emptyList()
+                }.getOrElse { emptyList() }
+            }
+
+            val all = olaD.await() + vegetaD.await() + otfD.await()
             val seenSrc = HashSet<String>()
             val deduped = all.filter { srv -> seenSrc.add(srv.src.ifBlank { srv.id }) }
 
-            Log.d(TAG, "getServers '${c.displayName}' → ${deduped.size} (fallback agrégé : pas de ❤ favori)")
+            Log.d(TAG, "getServers '${c.displayName}' → ${deduped.size} (fallback agrégé OLA+Vegeta+OTF)")
             deduped
         }
     }
@@ -754,6 +813,19 @@ object LiveTvHubProvider : Provider, IptvProvider {
     override suspend fun getVideo(server: Video.Server): Video {
         // 2026-05-15 : bonus channels — délègue à Extractor.extract qui route
         // vers Hoca8Extractor (bolaloca/cartelive/embedme) ou DailymotionExtractor.
+        // 2026-05-31 : OTF TV — URLs directes m3u8, pas d'extraction
+        if (server.id.startsWith("livehub::otf::")) {
+            // 2026-05-31 : User-Agent = celui d'ExoPlayer 2.19.1 (l'app OTF originale).
+            // Le CDN stm.linkip.org accepte ce UA sans couper après 60s.
+            return Video(
+                source = server.src,
+                subtitles = emptyList(),
+                type = "application/vnd.apple.mpegurl",
+                headers = mapOf(
+                    "User-Agent" to "ExoPlayerLib/2.19.1",
+                ),
+            )
+        }
         if (server.id.startsWith("livehub::bonus::") ||
             server.id.startsWith("livehub::dailymotion::") ||
             server.id.startsWith("livehub::freeshot::")) {

@@ -931,7 +931,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     settingsView.onServerBanned?.invoke(item)
                 }
                 // 2026-05-09 v18 : long-press OK = menu contextuel Favori/Bannir
-                // (fallback fiable, indépendant du focus chain D-pad RIGHT).
+                binding.root.isLongClickable = true
                 binding.root.setOnLongClickListener {
                     val ctx = binding.root.context
                     val opts = arrayOf(
@@ -977,6 +977,11 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                 }
 
                 // D-pad : right row → favorite → ban
+                // 2026-06-01 : rendre le cœur et le ban focusables pour la télécommande
+                binding.ivSettingFavorite.isFocusable = true
+                binding.ivSettingFavorite.isFocusableInTouchMode = false
+                binding.ivSettingBan.isFocusable = true
+                binding.ivSettingBan.isFocusableInTouchMode = false
                 binding.root.nextFocusRightId = R.id.iv_setting_favorite
                 binding.ivSettingFavorite.nextFocusRightId = R.id.iv_setting_ban
                 binding.ivSettingBan.nextFocusRightId = View.NO_ID
@@ -1009,9 +1014,23 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                         settingsView.refreshServerList()
                     }
                     // D-pad : right row → favorite
+                    binding.ivSettingFavorite.isFocusable = true
+                    binding.ivSettingFavorite.isFocusableInTouchMode = false
                     binding.root.nextFocusRightId = R.id.iv_setting_favorite
                     binding.ivSettingFavorite.nextFocusRightId = View.NO_ID
-                    // Long-press menu contextuel
+                    // 2026-06-02 : le FocusFinder du panel parent saute parfois
+                    // la row VOD vers le panel latéral (Serveurs/Sous-titres) au
+                    // lieu d'aller sur le cœur. On force le focus via KeyListener.
+                    binding.root.setOnKeyListener { _, keyCode, event ->
+                        if (event.action == android.view.KeyEvent.ACTION_DOWN &&
+                            keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT &&
+                            binding.ivSettingFavorite.visibility == View.VISIBLE) {
+                            binding.ivSettingFavorite.requestFocus()
+                            true
+                        } else false
+                    }
+                    // Long-press menu contextuel — isLongClickable AVANT
+                    binding.root.isLongClickable = true
                     binding.root.setOnLongClickListener {
                         val ctx = binding.root.context
                         val label = if (isFav) "♥ Retirer du favori" else "♥ Marquer favori"
@@ -1087,7 +1106,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     settingsView.refreshChannelVariantList()
                 }
                 // 2026-05-09 v18 : long-press OK = menu contextuel Favori/Bannir
-                // (fallback fiable, indépendant du focus chain D-pad RIGHT).
+                binding.root.isLongClickable = true
                 binding.root.setOnLongClickListener {
                     val ctx = binding.root.context
                     val opts = arrayOf(
@@ -1106,6 +1125,10 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                 }
 
                 // D-pad: right goes to favorite, then ban
+                binding.ivSettingFavorite.isFocusable = true
+                binding.ivSettingFavorite.isFocusableInTouchMode = false
+                binding.ivSettingBan.isFocusable = true
+                binding.ivSettingBan.isFocusableInTouchMode = false
                 binding.root.nextFocusRightId = R.id.iv_setting_favorite
                 binding.ivSettingFavorite.nextFocusRightId = R.id.iv_setting_ban
                 binding.ivSettingBan.nextFocusRightId = View.NO_ID

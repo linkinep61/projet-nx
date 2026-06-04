@@ -13,7 +13,9 @@ import javax.crypto.spec.SecretKeySpec
 class VidrockExtractor : Extractor() {
 
     override val name = "Vidrock"
-    override val mainUrl = "https://vidrock.net"
+    // 2026-06-02 : vidrock.net redirige vers vidrock.ru (TLD migration).
+    override val mainUrl = "https://vidrock.ru"
+    override val aliasUrls = listOf("https://vidrock.net")
 
     private val passphrase = "x7k9mPqT2rWvY8zA5bC3nF6hJ2lK4mN9"
 

@@ -218,6 +218,41 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         // pour que le user voie où il est dans la hiérarchie de paramètres.
         toolbar.title = currentScreenState.title ?: "Paramètres"
 
+        // 2026-05-31 : cadenas contrôle parental dans la toolbar — verrouillage providers
+        val lockIcon = wrapper.findViewById<android.widget.ImageView>(R.id.iv_parental_lock_settings)
+        if (lockIcon != null) {
+            lockIcon.visibility = android.view.View.VISIBLE
+            lockIcon.setOnClickListener {
+                com.streamflixreborn.streamflix.ui.PinDialog.showAuth(
+                    context = requireContext(),
+                    title = "Contrôle parental",
+                    onSuccess = {
+                        // Ouvrir le dialog de verrouillage des providers
+                        val ctx = requireContext()
+                        val allProviders = com.streamflixreborn.streamflix.providers.Provider.providers.keys.map { it.name }.distinct().sorted()
+                        if (allProviders.isEmpty()) return@showAuth
+                        val locked = com.streamflixreborn.streamflix.utils.ProviderLockStore.getLockedProviders(ctx)
+                        val workingState = allProviders.map { it in locked }.toBooleanArray()
+                        android.app.AlertDialog.Builder(ctx)
+                            .setTitle("Verrouiller des providers")
+                            .setMultiChoiceItems(allProviders.toTypedArray(), workingState) { _, which, isChecked ->
+                                workingState[which] = isChecked
+                            }
+                            .setPositiveButton("Valider") { d, _ ->
+                                allProviders.forEachIndexed { i, name ->
+                                    if (workingState[i]) com.streamflixreborn.streamflix.utils.ProviderLockStore.lockProvider(ctx, name)
+                                    else com.streamflixreborn.streamflix.utils.ProviderLockStore.unlockProvider(ctx, name)
+                                }
+                                android.widget.Toast.makeText(ctx, "Configuration enregistrée", android.widget.Toast.LENGTH_SHORT).show()
+                                d.dismiss()
+                            }
+                            .setNegativeButton("Annuler", null)
+                            .show()
+                    }
+                )
+            }
+        }
+
         // PreferenceFragmentCompat inflate sa propre RecyclerView ; on la place
         // dans notre FrameLayout en dessous de la Toolbar.
         val original = super.onCreateView(inflater, host, savedInstanceState)

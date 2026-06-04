@@ -15,7 +15,11 @@ import com.streamflixreborn.streamflix.StreamFlixApp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.net.HttpURLConnection
 import java.net.URL
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * 2026-05-20 (user "des trucs design cool" / "les emojis systeme sont pourris") :
@@ -184,22 +188,150 @@ object ProfileEmojiArt {
         return File(dir, localFileName(emojiValue))
     }
 
-    /** Télécharge l'image Fluent et la sauvegarde en local. Appelé au moment
-     *  du CHOIX d'un emoji dans le picker → 1 seul appel réseau, puis plus
-     *  jamais tant que l'avatar ne change pas. */
-    suspend fun cacheLocally(context: Context, emojiValue: String) {
-        val url = urlForValue(emojiValue) ?: return
+    /** CoroutineScope interne pour les téléchargements fire-and-forget
+     *  déclenchés depuis [bind] quand l'avatar n'est pas encore en cache
+     *  local (cas des avatars choisis avant ce fix). */
+    private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Télécharge l'image (Fluent OU URL custom — PNG, JPG, GIF animé, WebP)
+     *  et la sauvegarde en local. Appelé au moment du CHOIX d'un emoji dans
+     *  le picker → 1 seul appel réseau, puis plus jamais tant que l'avatar
+     *  ne change pas.
+     *
+     *  Robuste face aux hébergeurs anti-hotlink (Tenor, Giphy, Imgur,
+     *  Discord CDN…) grâce à un User-Agent navigateur + Accept + suivi de
+     *  redirections + timeout. Valide les magic-bytes après download pour
+     *  éviter de sauvegarder une page HTML d'erreur 403/404 par accident.
+     *  Plafonné à 10 MB pour ne pas remplir le stockage avec un GIF géant. */
+    /** True si l'avatar est déjà cached localement (visible sans internet).
+     *  Utilisé par EmojiPickerDialog pour donner un feedback "OK hors-ligne". */
+    fun hasLocalCache(context: Context, emojiValue: String): Boolean {
         val file = localFile(context, emojiValue)
-        if (file.exists() && file.length() > 100) return // déjà en cache
-        withContext(Dispatchers.IO) {
+        return file.exists() && file.length() > 100 && isImageFile(file)
+    }
+
+    suspend fun cacheLocally(context: Context, emojiValue: String) {
+        val rawUrl = urlForValue(emojiValue) ?: return
+        // 2026-06-03 (user "si y a pas d'internet, y a plus d'image") :
+        //   Si l'URL est une page Tenor/Giphy/Imgur (HTML), on la résout AVANT
+        //   le download pour garantir qu'on télécharge un vrai fichier image.
+        //   Sinon download → content-type=text/html → reject → pas de cache local
+        //   → image dépend du réseau pour s'afficher → KO offline.
+        val url = withContext(Dispatchers.IO) {
             try {
-                val bytes = URL(url).openStream().use { it.readBytes() }
-                file.writeBytes(bytes)
-                Log.d(TAG, "avatar cached: ${file.name} (${bytes.size} bytes)")
+                if (rawUrl.contains("tenor.com") || rawUrl.contains("giphy.com") ||
+                    rawUrl.contains("imgur.com")) {
+                    com.streamflixreborn.streamflix.utils.AvatarUrlResolver
+                        .resolveBlocking(rawUrl) ?: rawUrl
+                } else rawUrl
+            } catch (_: Throwable) { rawUrl }
+        }
+        val file = localFile(context, emojiValue)
+        // Déjà en cache valide → rien à faire.
+        if (file.exists() && file.length() > 100 && isImageFile(file)) return
+        // Vestige d'un ancien download cassé (HTML d'erreur sauvé par l'ancien
+        // code) → on le vire avant de retenter.
+        if (file.exists()) file.delete()
+
+        withContext(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 10_000
+                    readTimeout = 15_000
+                    instanceFollowRedirects = true
+                    setRequestProperty(
+                        "User-Agent",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                                "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+                    )
+                    setRequestProperty("Accept", "image/*,*/*;q=0.8")
+                }
+
+                val code = conn.responseCode
+                if (code !in 200..299) {
+                    Log.w(TAG, "cache download HTTP $code pour $emojiValue")
+                    return@withContext
+                }
+
+                val contentType = conn.contentType?.lowercase() ?: ""
+                if (contentType.isNotEmpty() && !contentType.startsWith("image/")) {
+                    Log.w(TAG, "cache download Content-Type invalide ($contentType) pour $emojiValue")
+                    return@withContext
+                }
+
+                val maxSize = 10 * 1024 * 1024 // 10 MB
+                val buffer = java.io.ByteArrayOutputStream()
+                conn.inputStream.use { stream ->
+                    val chunk = ByteArray(8192)
+                    var total = 0
+                    while (true) {
+                        val n = stream.read(chunk)
+                        if (n < 0) break
+                        total += n
+                        if (total > maxSize) {
+                            Log.w(TAG, "cache download trop volumineux (>10MB) pour $emojiValue")
+                            return@withContext
+                        }
+                        buffer.write(chunk, 0, n)
+                    }
+                }
+                val bytes = buffer.toByteArray()
+
+                if (!isImageBytes(bytes)) {
+                    Log.w(TAG, "cache download n'est pas une image valide (magic-bytes) pour $emojiValue")
+                    return@withContext
+                }
+
+                // Écriture atomique : tmp puis rename → si le process meurt en
+                // plein download, on ne se retrouve pas avec un fichier
+                // tronqué qui passerait le test length > 100.
+                val tmp = File(file.parentFile, file.name + ".tmp")
+                tmp.writeBytes(bytes)
+                if (!tmp.renameTo(file)) {
+                    tmp.delete()
+                    Log.w(TAG, "cache rename échoué pour $emojiValue")
+                    return@withContext
+                }
+
+                Log.d(TAG, "avatar cached: ${file.name} (${bytes.size} bytes, $contentType)")
             } catch (e: Exception) {
                 Log.w(TAG, "cache download failed for $emojiValue: ${e.message}")
+            } finally {
+                try { conn?.disconnect() } catch (_: Exception) {}
             }
         }
+    }
+
+    /** Vérifie les magic-bytes d'un buffer pour s'assurer qu'on a une vraie
+     *  image (et pas une page HTML d'erreur, du JSON, etc.). Couvre les
+     *  formats supportés par Glide : GIF, PNG, JPEG, WebP, BMP. */
+    private fun isImageBytes(bytes: ByteArray): Boolean {
+        if (bytes.size < 12) return false
+        // GIF : "GIF87a" ou "GIF89a"
+        if (bytes[0] == 'G'.code.toByte() && bytes[1] == 'I'.code.toByte() && bytes[2] == 'F'.code.toByte()) return true
+        // PNG : 89 50 4E 47 0D 0A 1A 0A
+        if (bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() && bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()) return true
+        // JPEG : FF D8 FF
+        if (bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte()) return true
+        // WebP : "RIFF" .... "WEBP"
+        if (bytes[0] == 'R'.code.toByte() && bytes[1] == 'I'.code.toByte() && bytes[2] == 'F'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
+            bytes[8] == 'W'.code.toByte() && bytes[9] == 'E'.code.toByte() && bytes[10] == 'B'.code.toByte() && bytes[11] == 'P'.code.toByte()) return true
+        // BMP : "BM"
+        if (bytes[0] == 'B'.code.toByte() && bytes[1] == 'M'.code.toByte()) return true
+        return false
+    }
+
+    /** Vérifie qu'un fichier sur disque est bien une image (ne lit que les
+     *  12 premiers octets, pas tout le fichier en mémoire). */
+    private fun isImageFile(file: File): Boolean {
+        return try {
+            file.inputStream().use { stream ->
+                val head = ByteArray(12)
+                val n = stream.read(head)
+                n >= 12 && isImageBytes(head)
+            }
+        } catch (_: Exception) { false }
     }
 
     /**
@@ -221,15 +353,36 @@ object ProfileEmojiArt {
             return
         }
 
-        // 1) Essayer le fichier local d'abord (pas de réseau)
+        // 1) Essayer le fichier local d'abord (pas de réseau).
+        //    On exige que ce soit une vraie image (magic-bytes), sinon on
+        //    ignore un éventuel vestige corrompu (ex: HTML 403 sauvé par
+        //    l'ancienne version du code) et on retombe sur l'URL.
         val ctx = image.context.applicationContext
         val local = emoji?.let { localFile(ctx, it) }
-        val source: Any = if (local != null && local.exists() && local.length() > 100) local else url
+        val source: Any = if (local != null && local.exists() && local.length() > 100 && isImageFile(local)) {
+            local
+        } else {
+            // Pas de cache local valide → on lance un download fire-and-forget
+            // en tâche de fond pour que la prochaine ouverture l'ait en local.
+            // cacheLocally nettoiera tout vestige corrompu avant de retenter.
+            if (emoji != null) backgroundScope.launch { cacheLocally(ctx, emoji) }
+            url
+        }
 
         fallback?.apply { visibility = View.VISIBLE; text = fallbackText }
         image.visibility = View.VISIBLE
+        // 2026-06-03 v4 (user "le but c'est que le fond d'écran actuel apparaisse
+        //   au fond, comme Deadpool") : LA VRAIE CAUSE du fond blanc opaque était
+        //   le DecodeFormat par défaut de Glide = PREFER_RGB_565 → PERD L'ALPHA.
+        //   Force ARGB_8888 pour préserver la transparence du PNG Tenor → on voit
+        //   bien le wallpaper de l'app à travers les zones transparentes.
+        //   Pas de clipToOutline ni circleCrop : l'image PNG transparente est
+        //   déjà bien découpée par l'auteur, on l'affiche telle quelle.
+        image.clipToOutline = false
+        image.outlineProvider = null
         Glide.with(image)
             .load(source)
+            .format(com.bumptech.glide.load.DecodeFormat.PREFER_ARGB_8888)
             .fitCenter()
             .listener(object : RequestListener<Drawable> {
                 override fun onLoadFailed(

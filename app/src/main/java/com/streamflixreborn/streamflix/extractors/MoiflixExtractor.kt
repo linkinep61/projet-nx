@@ -41,11 +41,12 @@ import kotlin.coroutines.resume
  */
 open class MoiflixExtractor : Extractor() {
     override val name = "Moiflix"
-    // 2026-05-21 : moiflix.com redirige désormais vers moiflix.click (domaine actif,
-    //   vérifié dans le navigateur). On charge .click directement ; .com/.org gardés
-    //   en alias pour le matching d'URL.
-    override val mainUrl = "https://moiflix.click/"
-    override val aliasUrls = listOf("https://moiflix.com", "https://moiflix.org")
+    // 2026-06-01 : moiflix.click redirige désormais 301 vers moiflix.dad (vérif :
+    //   les 3 anciens TLDs .click/.com/.org pointent tous vers .dad maintenant).
+    //   On charge .dad directement ; les anciens .click/.com/.org gardés en alias
+    //   pour le matching d'URL si un vieux lien arrive de quelque part.
+    override val mainUrl = "https://moiflix.dad/"
+    override val aliasUrls = listOf("https://moiflix.click", "https://moiflix.com", "https://moiflix.org")
 
     private val context = StreamFlixApp.instance.applicationContext
 
@@ -230,7 +231,8 @@ open class MoiflixExtractor : Extractor() {
 
     companion object {
         private val ALLOWED_HOSTS = listOf(
-            "moiflix.click", // 2026-05-21 : domaine actif (moiflix.com y redirige)
+            "moiflix.dad",   // 2026-06-01 : domaine actif (les 3 anciens y redirigent)
+            "moiflix.click", // gardé : ancien domaine actif, peut être appelé depuis cache/anciens liens
             "moiflix.com",
             "moiflix.org",
             "xtremestream.xyz",

@@ -47,6 +47,22 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
      *  avec appels parallèles mais en pratique le user clique 1 film à la fois. */
     @Volatile var skipBackupsForBackupCall: Boolean = false
 
+    /** 2026-06-02 — Helper a utiliser par TOUS les providers qui appellent
+     *  Movix comme backup (FS, Wiflix, Moviebox, Frembed, Papa, aplouf, etc.).
+     *  Set le flag skipBackupsForBackupCall=true pendant l'appel pour eviter
+     *  que Movix re-call ses propres backups (FS direct, Wiflix direct…) qui
+     *  produisent des doublons "fs_direct__movix_backup__XXX" dans le picker.
+     *  Restaure la valeur precedente dans le finally (safe pour multi-callers). */
+    suspend fun getServersAsBackup(id: String, videoType: com.streamflixreborn.streamflix.models.Video.Type): List<com.streamflixreborn.streamflix.models.Video.Server> {
+        val prev = skipBackupsForBackupCall
+        skipBackupsForBackupCall = true
+        return try {
+            getServers(id, videoType)
+        } finally {
+            skipBackupsForBackupCall = prev
+        }
+    }
+
     override val name = "Movix"
     override val defaultBaseUrl: String = "https://api.movix.cloud/"  // v90 2026-05-27 : movix.tax mort NXDOMAIN, domaine actif = movix.cloud
     override val baseUrl: String = defaultBaseUrl
@@ -101,8 +117,8 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     // 4s c'était over-conservative et bottleneck-ait getServers via awaitAll
     // (qui attend le plus lent). 2.5s = bonne tolérance réseau sans plomber.
     private const val ENDPOINT_TIMEOUT_MS = 2_500L
-    private const val ENDPOINT_FAILURE_THRESHOLD = 5
-    private const val ENDPOINT_DISABLED_MS = 30L * 60L * 1000L // 30 min
+    private const val ENDPOINT_FAILURE_THRESHOLD = 10 // plus tolérant
+    private const val ENDPOINT_DISABLED_MS = 2L * 60L * 1000L // 2 min seulement
     private data class EndpointHealth(
         var consecutiveFailures: Int = 0,
         var disabledUntilMs: Long = 0L,
@@ -116,25 +132,18 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         endpointName: String,
         crossinline block: suspend () -> T,
     ): List<Video.Server> {
-        val health = endpointHealth.getOrPut(endpointName) { EndpointHealth() }
-        val now = System.currentTimeMillis()
-        if (now < health.disabledUntilMs) {
-            return emptyList()
-        }
+        // 2026-06-01 : circuit breaker DÉSACTIVÉ (causait des blocages serveurs).
+        // On garde juste le timeout par requête (ENDPOINT_TIMEOUT_MS).
         val result = try {
             withTimeoutOrNull(ENDPOINT_TIMEOUT_MS) { block() }
         } catch (e: Exception) {
             Log.w("MovixProvider", "Endpoint '$endpointName' threw: ${e.message}")
             null
         }
+        val health = endpointHealth.getOrPut(endpointName) { EndpointHealth() }
         synchronized(health) {
             if (result.isNullOrEmpty()) {
                 health.consecutiveFailures++
-                if (health.consecutiveFailures >= ENDPOINT_FAILURE_THRESHOLD) {
-                    health.disabledUntilMs = System.currentTimeMillis() + ENDPOINT_DISABLED_MS
-                    Log.w("MovixProvider", "Endpoint '$endpointName' disabled for 30min after ${health.consecutiveFailures} consecutive failures")
-                    health.consecutiveFailures = 0
-                }
             } else {
                 health.consecutiveFailures = 0
             }
@@ -398,7 +407,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     // Avantages : audio FR garanti (testé), pas de CF challenge, pas de
     // login, search JSON propre. Le bouton "Continuer" sur la page episode
     // est auto-cliqué par MoiflixExtractor.
-    private const val MOIFLIX_BASE = "https://moiflix.click/" // 2026-05-21 : .com redirige vers .click (domaine actif)
+    private const val MOIFLIX_BASE = "https://moiflix.dad/" // 2026-06-01 : .click redirige à son tour vers .dad (domaine actif)
 
     /** Cherche un titre sur moiflix via l'AJAX search public.
      *  Retourne le path /movie/{slug} ou /show/{slug} du meilleur match, ou null. */
@@ -1407,8 +1416,37 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             catch (e: Exception) { Log.d("MovixProvider", "FS direct failed: ${e.message}") }
         }
 
+        // 2026-06-02 : dédup par URL embed (src) — élimine les doublons quand
+        //   2 chemins remontent le MÊME hoster URL avec des id différents.
+        val seenSrc = HashSet<String>()
+        val dedupedBySrc = servers.filter { srv ->
+            val key = srv.src.trim()
+            if (key.isBlank()) true
+            else seenSrc.add(key)
+        }
+        if (dedupedBySrc.size < servers.size) {
+            Log.d("MovixProvider", "Dedup src: ${servers.size} → ${dedupedBySrc.size} (-${servers.size - dedupedBySrc.size} doublons)")
+        }
+
+        // 2026-06-02 : si plusieurs entrées partagent le MÊME display name
+        //   (= même hoster + même langue mais URLs upload différentes — ex :
+        //   2 uploads Voe distincts du même épisode), on ajoute un suffix
+        //   "#2", "#3"... à partir du 2e pour que l'user les distingue.
+        //   Sinon il voit "FS · Voe (VF - HD)" ×2 sans savoir lequel cliquer.
+        val nameCount = mutableMapOf<String, Int>()
+        val disambiguated = dedupedBySrc.map { srv ->
+            val baseName = srv.name
+            val seenCount = (nameCount[baseName] ?: 0) + 1
+            nameCount[baseName] = seenCount
+            if (seenCount > 1) srv.copy(name = "$baseName #$seenCount") else srv
+        }
+        val renamedCount = disambiguated.count { it.name != dedupedBySrc.find { d -> d.id == it.id }?.name }
+        if (renamedCount > 0) {
+            Log.d("MovixProvider", "Disambiguated $renamedCount doublons de noms (suffix #N)")
+        }
+
         // Tri global : VF d'abord, VOSTFR ensuite, VO en dernier (toutes sources confondues)
-        val finalList = sortServersByLanguage(servers)
+        val finalList = sortServersByLanguage(disambiguated)
 
         // 2026-05-04 : on cache l'agrégat (TTL 5 min). Les m3u8 individuels
         // sont re-extracted à la demande (cache séparé Extractor.cacheTtlMs)
@@ -1449,8 +1487,16 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                         if (url.isBlank()) return@forEach
                                         val displayLang = formatLang(lang)
                                         val quality = player.quality?.takeIf { it.isNotBlank() } ?: "HD"
-                                        val playerName = player.player?.takeIf { it.isNotBlank() }
-                                            ?: guessPlayerName(url)
+                                        // 2026-06-02 : préférer le vrai extracteur deviné depuis l'URL.
+                                        //   L'API Movix mislabel parfois (ex: claim "Voe" mais URL kokoflix.lol=Doodstream).
+                                        //   Sans ça l'user clique "FS · Voe" → lance DoodStream → fail trompeur.
+                                        val urlBasedName = guessPlayerName(url)
+                                        val apiClaimedName = player.player?.takeIf { it.isNotBlank() } ?: ""
+                                        val playerName = when {
+                                            urlBasedName.isNotBlank() && !urlBasedName.equals("Unknown", true) -> urlBasedName
+                                            apiClaimedName.isNotBlank() -> apiClaimedName
+                                            else -> "Lecteur"
+                                        }
                                         list.add(Video.Server(id = "fstream-$lang-${list.size}", name = "FS · $playerName ($displayLang - $quality)", src = url))
                                     }
                                 }
@@ -1850,19 +1896,22 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             servers.addAll(movieboxBackup)
         }
 
-        // 2026-05-06 : Papadustream EN DERNIER — captcha CF friction, on l'utilise
-        // que si rien d'autre n'a marché. (User request : ne pas mettre Papa dans
-        // les premiers fournisseurs car son captcha popup est ugly.)
-        val papaBackup = try {
-            PapadustreamProvider.getPapaSourcesByTmdbId(id, videoType)
-        } catch (e: Exception) {
-            Log.d("MovixProvider", "Papadustream backup failed for $id: ${e.message}")
-            emptyList()
-        }
-        if (papaBackup.isNotEmpty()) {
-            Log.d("MovixProvider", "+ Papadustream backup (last resort) : ${papaBackup.size} sources")
-            servers.addAll(papaBackup)
-        }
+        // 2026-06-02 : Papadustream DÉSACTIVÉ comme backup (user request).
+        //   Le captcha Cloudflare Turnstile sur chaque source est trop intrusif
+        //   et casse l'UX (popup d'écran qui interrompt la lecture). On laisse
+        //   le provider Papa fonctionnel en accès direct si l'user choisit
+        //   explicitement "Papadustream" dans la sélection de providers — mais
+        //   il n'apparaît plus dans le picker de serveurs des autres providers.
+        // val papaBackup = try {
+        //     PapadustreamProvider.getPapaSourcesByTmdbId(id, videoType)
+        // } catch (e: Exception) {
+        //     Log.d("MovixProvider", "Papadustream backup failed for $id: ${e.message}")
+        //     emptyList()
+        // }
+        // if (papaBackup.isNotEmpty()) {
+        //     Log.d("MovixProvider", "+ Papadustream backup (last resort) : ${papaBackup.size} sources")
+        //     servers.addAll(papaBackup)
+        // }
 
         // 2026-05-05 : Coflix backup — site français multi-hosters (Lulustream,
         // VOE, Vidoza, Darkibox, Veev, Goodstream...). Recherche par titre via
@@ -1978,7 +2027,10 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
 
             val typeSlug = when (videoType) {
                 is Video.Type.Movie -> "film-en-streaming/"
-                is Video.Type.Episode -> "serie/"
+                // 2026-06-02 : flemmix.team utilise /serie-en-streaming/ (PAS
+                //   /serie/) pour les séries. L'ancien filtre "serie/" éliminait
+                //   100% des résultats séries → 0 backup Wiflix sur tous les épisodes.
+                is Video.Type.Episode -> "serie-en-streaming/"
             }
 
             for (query in queries) {
@@ -2018,15 +2070,47 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     val typed = results.filter { it.groupValues[1].contains(typeSlug) }
                     wfLog("${typed.size} after type filter ($typeSlug)")
 
-                    // Matching : titre normalisé
+                    // 2026-06-02 : matching qui préfère le titre LE PLUS PROCHE
+                    //   de la query (= moins de suffixes parasites). Avant on
+                    //   prenait `firstOrNull` → pour "Spider-Noir" on tombait sur
+                    //   "Spider-Noir Version Noir et Blanc" (VOSTFR) au lieu de
+                    //   "Spider-Noir" tout court (VF). On classe par diff de
+                    //   longueur normQuery vs normResult — le candidat qui a le
+                    //   moins de caractères additionnels gagne.
+                    // 2026-06-03 (user "FS Ah le bon film lui" — les serveurs
+                    //   FS jouent le bon film, les Wiflix · ... lancent Marvel.
+                    //   Cause : (1) le fallback `?: typed.firstOrNull()` prenait
+                    //   N'IMPORTE QUEL résultat Wiflix si aucun candidate ne
+                    //   matchait → on jouait un random film. (2) `contains` était
+                    //   trop laxiste : query "Scary Movie" matche "Scary Movie 5",
+                    //   "Scary Movie The Sequel", etc. → mauvais film.
+                    //   Maintenant : (a) match strict = égalité de titre normalisé
+                    //   OU le résultat commence par la query suivie d'un séparateur ;
+                    //   (b) PLUS de fallback firstOrNull → mieux vaut 0 backup que
+                    //   le mauvais film ; (c) validation d'année si possible.
                     val normQuery = normalizeTitle(query)
-                    val match = typed.firstOrNull {
-                        val normResult = normalizeTitle(it.groupValues[2].replace(Regex("<[^>]+>"), ""))
-                        normResult.contains(normQuery) || normQuery.contains(normResult)
-                    } ?: typed.firstOrNull()
-
+                    fun isStrictMatch(normResult: String): Boolean {
+                        if (normResult == normQuery) return true
+                        // Résultat commence par la query + séparateur (espace, tiret, parenthèse)
+                        if (normResult.startsWith("$normQuery ") ||
+                            normResult.startsWith("$normQuery-") ||
+                            normResult.startsWith("$normQuery(")) return true
+                        // Query commence par le résultat + séparateur (cas inverse)
+                        if (normQuery.startsWith("$normResult ") ||
+                            normQuery.startsWith("$normResult-") ||
+                            normQuery.startsWith("$normResult(")) return true
+                        return false
+                    }
+                    val candidates = typed.mapNotNull { m ->
+                        val rawTitle = m.groupValues[2].replace(Regex("<[^>]+>"), "")
+                        val normResult = normalizeTitle(rawTitle)
+                        if (isStrictMatch(normResult)) {
+                            Triple(m, normResult, kotlin.math.abs(normResult.length - normQuery.length))
+                        } else null
+                    }
+                    val match = candidates.minByOrNull { it.third }?.first
                     if (match == null) {
-                        wfLog("no match for '$query'")
+                        wfLog("STRICT match failed for '$query' (had ${typed.size} typed results) — drop backup (mieux que mauvais film)")
                         continue
                     }
 
@@ -2046,25 +2130,101 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     pageResp.close()
                     wfLog("page HTTP ${pageResp.code} len=${pageHtml.length} in ${System.currentTimeMillis() - t1}ms")
 
-                    // ④ Parser les serveurs : loadVideo('URL', this)...<span>Name</span>
-                    val serverPattern = Regex("""loadVideo\('([^']+)',\s*this\).*?<span>([^<]+)</span>""")
-                    val servers = serverPattern.findAll(pageHtml).toList()
-                    wfLog("parsed ${servers.size} servers from page")
+                    // ④ Pour les SÉRIES, chaque épisode a DEUX blocs sur flemmix.team :
+                    //    <div class="ep{N}vf"> = serveurs VF (Lecteur 1/2/3)
+                    //    <div class="ep{N}vs"> = serveurs VOSTFR (Lecteur 1/2/3)
+                    //    Avant on ne lisait que "vs" → 100 % VOSTFR, jamais VF.
+                    //    Maintenant : VF prioritaire, VOSTFR en fallback ET ajouté
+                    //    en complément si dispo (l'user voit les 2 packs taggés).
+                    //    Pour les FILMS : on prend tout (pas de wrapper epXxx).
+                    // 2026-06-02 : accepte loadVideo('URL') OU loadVideo('URL', this) ou loadVideo('URL', autre)
+//   Wiflix utilise les deux formats : séries = sans 2e arg, films = `, this`.
+val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span[^>]*>([^<]+)</span>""")
 
-                    if (servers.isEmpty()) continue
+                    fun extractEpBlock(suffix: String): String? {
+                        val epNum = (videoType as Video.Type.Episode).number
+                        val pattern = Regex(
+                            """<div\s+class="ep${epNum}${suffix}"[^>]*>(.*?)</div>""",
+                            RegexOption.DOT_MATCHES_ALL
+                        )
+                        return pattern.find(pageHtml)?.groupValues?.get(1)
+                    }
 
-                    val result = servers.mapIndexed { idx, srv ->
-                        val embedUrl = srv.groupValues[1]
-                        val serverName = srv.groupValues[2].trim()
-                        // Détecter la langue : si le nom contient "vostfr" → VOSTFR
-                        val langTag = if (serverName.lowercase().contains("vostfr")) " [VOSTFR]" else ""
+                    val allServers = mutableListOf<Pair<String, String>>()  // (url, name)
+                    val isEpisode = videoType is Video.Type.Episode
+                    if (isEpisode) {
+                        // 2026-06-02 (user request) : on ne lit QUE le bloc VF.
+                        //   Avant on émettait aussi les VOSTFR mais le user n'en
+                        //   veut pas en backup ("Et tu retires aussi Wiflix VOSTFR").
+                        //   Si pas de VF dispo → fallback VOSTFR pour ne pas perdre
+                        //   complètement la source (sinon série anglais récente = 0 backup).
+                        extractEpBlock("vf")?.let { blockHtml ->
+                            wfLog("scoped to ep${(videoType as Video.Type.Episode).number}vf (len=${blockHtml.length})")
+                            serverPattern.findAll(blockHtml).forEach { m ->
+                                allServers.add(m.groupValues[1] to "${m.groupValues[2].trim()} [VF]")
+                            }
+                        }
+                        // VOSTFR uniquement en fallback si VF absent.
+                        if (allServers.isEmpty()) {
+                            extractEpBlock("vs")?.let { blockHtml ->
+                                wfLog("VF absent, fallback ep${(videoType as Video.Type.Episode).number}vs (len=${blockHtml.length})")
+                                serverPattern.findAll(blockHtml).forEach { m ->
+                                    allServers.add(m.groupValues[1] to "${m.groupValues[2].trim()} [VOSTFR]")
+                                }
+                            }
+                        }
+                        if (allServers.isEmpty()) {
+                            wfLog("WARN: ni ep${(videoType as Video.Type.Episode).number}vf ni vs trouvé, fallback full page")
+                            serverPattern.findAll(pageHtml).forEach { m ->
+                                allServers.add(m.groupValues[1] to m.groupValues[2].trim())
+                            }
+                        }
+                    } else {
+                        // Film : pas de wrapper, parse la page entière
+                        serverPattern.findAll(pageHtml).forEach { m ->
+                            allServers.add(m.groupValues[1] to m.groupValues[2].trim())
+                        }
+                    }
+
+                    wfLog("parsed ${allServers.size} servers from scoped HTML (VF first if present)")
+
+                    if (allServers.isEmpty()) continue
+
+                    // Dédup par URL embed + filtre robuste contre faux serveurs
+                    //   (2026-06-03 user "y a un WIFLIX SAVE ça existe même pas")
+                    //   Le regex `loadVideo\('([^']+)'` capture aussi des URLs
+                    //   non-HTTP (javascript:void(0), ancres, hashes, vides) qui
+                    //   apparaissent comme faux serveurs (ex: bouton "Save" du
+                    //   site Wiflix). On exige une vraie URL HTTP(S) et un nom
+                    //   qui ressemble à un host de streaming (pas un mot anglais
+                    //   isolé comme "Save", "Download", etc.).
+                    val seenUrls = HashSet<String>()
+                    val knownNonServerNames = setOf(
+                        "save", "download", "telecharger", "sauvegarder",
+                        "favoris", "favorite", "share", "partager",
+                    )
+                    val result = allServers.mapNotNull { (embedUrl, name) ->
+                        // Filtre 1 : URL doit être HTTP/S valide
+                        if (embedUrl.isBlank() ||
+                            !embedUrl.startsWith("http", ignoreCase = true)) {
+                            wfLog("DROPPED non-http server: name='$name' url='$embedUrl'")
+                            return@mapNotNull null
+                        }
+                        // Filtre 2 : nom ne doit pas être un libellé bouton
+                        val cleanName = name.lowercase().trim()
+                            .removeSuffix(" [vf]").removeSuffix(" [vostfr]").trim()
+                        if (cleanName in knownNonServerNames) {
+                            wfLog("DROPPED button-named server: name='$name' url='$embedUrl'")
+                            return@mapNotNull null
+                        }
+                        if (!seenUrls.add(embedUrl)) return@mapNotNull null
                         Video.Server(
-                            id = "wiflix_direct__${idx}_${serverName.lowercase().replace(" ", "_")}",
-                            name = "Wiflix · $serverName$langTag",
+                            id = "wiflix_direct__${seenUrls.size - 1}_${name.lowercase().replace(" ", "_").replace("[","").replace("]","")}",
+                            name = "Wiflix · $name",
                             src = embedUrl,
                         )
                     }
-                    wfLog("SUCCESS: ${result.size} Wiflix servers!")
+                    wfLog("SUCCESS: ${result.size} Wiflix servers (after dedup) !")
                     return@withContext result
 
                 } catch (e: Exception) {
@@ -2208,10 +2368,73 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         videoType: Video.Type,
     ): Flow<List<Video.Server>> = channelFlow {
         initializeService()
+        // 2026-06-02 : état partagé cross-emits pour dédup + disambiguation.
+        //   Avant : chaque batch (native, backups, wiflix, fs) émis séparément
+        //   sans coordination → doublons par src + noms identiques dans le picker.
+        //   Maintenant : seenSrc/nameCount partagés par tous les launch{} en
+        //   utilisant Mutex pour synchroniser les modifications concurrentes.
+        val seenSrc = HashSet<String>()
+        val nameCount = mutableMapOf<String, Int>()
+        val mutex = kotlinx.coroutines.sync.Mutex()
+
+        // 2026-06-02 : pré-calcul des extracteurs en échec récent. On ne les
+        //   SUPPRIME PAS (l'user a explicitement demandé de garder Videasy &
+        //   autres : "c'est pas parce qu'il fonctionne pas sur cette vidéo
+        //   qu'il va pas fonctionner sur les autres"). On les DÉPRIORISE en
+        //   fin de batch pour que l'auto-play ne tombe pas dessus en 1er.
+        val deadExtractors = try {
+            com.streamflixreborn.streamflix.utils.ExtractorFailureTracker
+                .getFailures()
+                .filter { it.count >= 5 }
+                .map { it.name.lowercase() }
+                .toSet()
+        } catch (e: Exception) { emptySet() }
+        if (deadExtractors.isNotEmpty()) {
+            Log.d("MovixProvider", "Progressive: extracteurs déprioritisés (fin de liste) = $deadExtractors")
+        }
+
+        fun isDeadServer(srv: Video.Server): Boolean {
+            val srvNameLower = srv.name.lowercase()
+            val extractorName = com.streamflixreborn.streamflix.utils.ExtractorRanker
+                .resolveExtractorName(srv)?.lowercase()
+            return deadExtractors.any { dead ->
+                srvNameLower.contains(dead) || (extractorName != null && extractorName == dead)
+            }
+        }
+
+        suspend fun emitDeduped(batch: List<Video.Server>) {
+            val cleaned = mutex.withLock {
+                batch.mapNotNull { srv ->
+                    val key = srv.src.trim()
+                    if (key.isNotBlank() && !seenSrc.add(key)) return@mapNotNull null
+                    val cnt = (nameCount[srv.name] ?: 0) + 1
+                    nameCount[srv.name] = cnt
+                    if (cnt > 1) srv.copy(name = "${srv.name} #$cnt") else srv
+                }
+            }
+            if (cleaned.isNotEmpty()) {
+                // Sort : VF (alive) → VOSTFR (alive) → VO (alive) → ANY (dead, last)
+                val sorted = sortServersByLanguage(cleaned)
+                val (alive, dead) = sorted.partition { !isDeadServer(it) }
+                if (alive.isEmpty()) {
+                    // 2026-06-02 : batch ne contient QUE des serveurs DEAD
+                    //   (>= 5 échecs récents). Ne PAS émettre — sinon l'auto-play
+                    //   prend la 1ère entrée du batch (ex: "Chamber (Videasy
+                    //   VOSTFR)" seul → 12 échecs, casse l'UX). On attend qu'un
+                    //   batch suivant apporte des sources alive. Videasy reste
+                    //   visible dans les autres vidéos via le batch FS direct
+                    //   qui contiendra des sources alive PLUS Videasy.
+                    Log.d("MovixProvider", "Skip emit : batch all-dead (${dead.size} serveurs) — attend backups")
+                } else {
+                    send(alive + dead)
+                }
+            }
+        }
+
         launch {
             try {
                 val native = fetchNativeMovixServers(id, videoType)
-                if (native.isNotEmpty()) send(native)
+                if (native.isNotEmpty()) emitDeduped(native)
             } catch (e: Exception) {
                 Log.w("MovixProvider", "Progressive native failed: ${e.message}")
             }
@@ -2220,7 +2443,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             launch {
                 try {
                     val backups = fetchMovixBackups(id, videoType)
-                    if (backups.isNotEmpty()) send(backups)
+                    if (backups.isNotEmpty()) emitDeduped(backups)
                 } catch (e: Exception) {
                     Log.w("MovixProvider", "Progressive backups failed: ${e.message}")
                 }
@@ -2229,7 +2452,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             launch {
                 try {
                     val wf = fetchWiflixDirectBackup(id, videoType)
-                    if (wf.isNotEmpty()) send(wf)
+                    if (wf.isNotEmpty()) emitDeduped(wf)
                 } catch (e: Exception) {
                     Log.w("MovixProvider", "Progressive Wiflix direct failed: ${e.message}")
                 }
@@ -2237,7 +2460,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             launch {
                 try {
                     val fs = fetchFrenchStreamDirectBackup(id, videoType)
-                    if (fs.isNotEmpty()) send(fs)
+                    if (fs.isNotEmpty()) emitDeduped(fs)
                 } catch (e: Exception) {
                     Log.w("MovixProvider", "Progressive FS direct failed: ${e.message}")
                 }
@@ -2589,6 +2812,9 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         suspend fun searchMovix(
             @Query("title") title: String
         ): MovixSearchResponse
+
+        // Custom Links / SeekStreaming (bysebuho, rumble) déjà intégrés via
+        // getLinksMovie / getLinksTv ci-dessus (api/links/movie et api/links/tv)
     }
 
     private interface TmdbService {

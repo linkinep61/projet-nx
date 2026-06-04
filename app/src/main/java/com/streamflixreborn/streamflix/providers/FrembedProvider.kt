@@ -514,7 +514,7 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
             is Video.Type.Movie -> "$tmdbId"
             is Video.Type.Episode -> "$tmdbId-s${videoType.season.number}e${videoType.number}"
         }
-        MovixProvider.getServers(movixId, movixVideoType)
+        MovixProvider.getServersAsBackup(movixId, movixVideoType)
             .map { srv -> srv.copy(id = "movix_backup__${srv.id}") }
     }.getOrNull().orEmpty()
 
