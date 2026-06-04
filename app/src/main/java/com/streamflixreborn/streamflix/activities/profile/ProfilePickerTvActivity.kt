@@ -10,8 +10,10 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
+import android.widget.ImageView
 import androidx.fragment.app.FragmentActivity
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.PagerSnapHelper
 import androidx.recyclerview.widget.RecyclerView
 import com.streamflixreborn.streamflix.R
 import com.streamflixreborn.streamflix.activities.main.MainTvActivity
@@ -31,27 +33,64 @@ import kotlinx.coroutines.launch
  */
 class ProfilePickerTvActivity : FragmentActivity() {
 
+    // 2026-06-03 (user "pareil TV avec télécommande") : carrousel PagerSnap +
+    //   D-pad. Item focusable → D-pad LEFT/RIGHT bouge focus naturellement,
+    //   RV scrolle pour suivre, PagerSnap snape au prochain item. OK = sélectionne.
     private lateinit var rvProfiles: RecyclerView
+    private lateinit var btnPrev: ImageView
+    private lateinit var btnNext: ImageView
+    private lateinit var tvPageIndicator: TextView
     private lateinit var btnManage: Button
+    private val snapHelper = PagerSnapHelper()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_profile_picker_tv)
         rvProfiles = findViewById(R.id.rv_profiles)
-        rvProfiles.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
-        // 2026-05-12 (user "on peut pas aller sur les 3 carrés") : force le
-        // RV à laisser le focus passer à ses enfants. Sans ça, sur TV, le
-        // focus reste sur le bouton "Gérer les profils" et ne remonte pas
-        // aux cards.
-        rvProfiles.isFocusable = true
-        rvProfiles.descendantFocusability = android.view.ViewGroup.FOCUS_AFTER_DESCENDANTS
+        btnPrev = findViewById(R.id.btn_profile_prev)
+        btnNext = findViewById(R.id.btn_profile_next)
+        tvPageIndicator = findViewById(R.id.tv_page_indicator)
         btnManage = findViewById(R.id.btn_manage_profiles)
         btnManage.setOnClickListener { openManagementDialog() }
+
+        rvProfiles.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
+        rvProfiles.isFocusable = true
+        rvProfiles.descendantFocusability = android.view.ViewGroup.FOCUS_AFTER_DESCENDANTS
+        snapHelper.attachToRecyclerView(rvProfiles)
+
+        btnPrev.setOnClickListener {
+            val pos = getCurrentPosition()
+            if (pos > 0) rvProfiles.smoothScrollToPosition(pos - 1)
+        }
+        btnNext.setOnClickListener {
+            val pos = getCurrentPosition()
+            val total = rvProfiles.adapter?.itemCount ?: 0
+            if (pos < total - 1) rvProfiles.smoothScrollToPosition(pos + 1)
+        }
+        rvProfiles.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
+                if (newState == RecyclerView.SCROLL_STATE_IDLE) updatePageIndicator()
+            }
+        })
     }
 
     override fun onResume() {
         super.onResume()
         refreshList()
+    }
+
+    private fun getCurrentPosition(): Int {
+        val lm = rvProfiles.layoutManager as? LinearLayoutManager ?: return 0
+        val view = snapHelper.findSnapView(lm) ?: return 0
+        return lm.getPosition(view)
+    }
+
+    private fun updatePageIndicator() {
+        val total = rvProfiles.adapter?.itemCount ?: 0
+        val pos = getCurrentPosition()
+        tvPageIndicator.text = if (total > 0) "${pos + 1} / $total" else ""
+        btnPrev.alpha = if (pos == 0) 0.3f else 1f
+        btnNext.alpha = if (pos >= total - 1) 0.3f else 1f
     }
 
     private fun refreshList() {
@@ -62,10 +101,7 @@ class ProfilePickerTvActivity : FragmentActivity() {
             onAddProfileClick = ::openAddProfileDialog,
             itemLayoutRes = R.layout.item_profile_tv,
         )
-        // 2026-05-12 (user "on peut pas aller sur les 3 carrés") : focus initial
-        // robuste — on retry plusieurs fois car les viewholders peuvent prendre
-        // 50-100ms à apparaître après setAdapter. Boucle jusqu'à ce que le
-        // 1er item soit attaché OU 1s écoulée.
+        rvProfiles.post { updatePageIndicator() }
         val handler = android.os.Handler(android.os.Looper.getMainLooper())
         val startTime = System.currentTimeMillis()
         lateinit var tryFocus: () -> Unit

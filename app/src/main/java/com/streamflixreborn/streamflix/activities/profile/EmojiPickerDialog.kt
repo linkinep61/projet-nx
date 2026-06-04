@@ -14,6 +14,8 @@ import androidx.appcompat.app.AlertDialog
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.streamflixreborn.streamflix.R
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.launch
 
 /**
  * 2026-05-12 : dialog de sélection d'emoji pour l'avatar de profil. Affiche
@@ -34,7 +36,9 @@ object EmojiPickerDialog {
         val view = LayoutInflater.from(context)
             .inflate(R.layout.dialog_emoji_picker, null, false)
         val rv = view.findViewById<RecyclerView>(R.id.rv_emoji_picker)
-        rv.layoutManager = GridLayoutManager(context, 6)
+        // 2026-06-03 (user "réduire une ligne pour faire que 5 colonnes, ça
+        //   fait pas beau et ça tasse") : 6 → 5 colonnes pour respirer.
+        rv.layoutManager = GridLayoutManager(context, 5)
 
         var dialogRef: AlertDialog? = null
         // 2026-05-20 : set COMPLET Fluent (~1581) au lieu des 67 curés.
@@ -90,7 +94,41 @@ object EmojiPickerDialog {
             .setPositiveButton("OK") { _, _ ->
                 val url = input.text.toString().trim()
                 if (url.startsWith("http://") || url.startsWith("https://")) {
-                    onConfirm(url)
+                    // 2026-06-03 : URLs Tenor/Giphy/Imgur sont des pages HTML —
+                    //   résoudre vers le fichier image direct (og:image) sinon
+                    //   Glide ne peut pas afficher.
+                    val pendingToast = if (url.contains("tenor.com") || url.contains("giphy.com") ||
+                                           url.contains("imgur.com")) {
+                        Toast.makeText(context, "Résolution du lien…", Toast.LENGTH_SHORT).also { it.show() }
+                    } else null
+                    com.streamflixreborn.streamflix.utils.AvatarUrlResolver.resolveAsync(url) { resolved ->
+                        pendingToast?.cancel()
+                        // 2026-06-03 (user "y a plus d'image" sans internet) :
+                        //   Confirme l'emoji direct (UI réactive) ET en parallèle
+                        //   force le download local AVEC feedback Toast. Si OK →
+                        //   "Avatar enregistré ✓". Si KO → "Échec : besoin
+                        //   d'internet pour télécharger". L'user sait si offline-ok.
+                        onConfirm(resolved)
+                        val dlToast = Toast.makeText(context, "Téléchargement avatar…", Toast.LENGTH_SHORT).also { it.show() }
+                        MainScope().launch {
+                            try {
+                                com.streamflixreborn.streamflix.activities.profile.ProfileEmojiArt
+                                    .cacheLocally(context, resolved)
+                                val cached = com.streamflixreborn.streamflix.activities.profile.ProfileEmojiArt
+                                    .hasLocalCache(context, resolved)
+                                dlToast.cancel()
+                                Toast.makeText(
+                                    context,
+                                    if (cached) "Avatar enregistré ✓ (visible hors-ligne)"
+                                    else "Avatar enregistré (Note : besoin d'internet — téléchargement local échoué)",
+                                    if (cached) Toast.LENGTH_SHORT else Toast.LENGTH_LONG,
+                                ).show()
+                            } catch (e: Exception) {
+                                dlToast.cancel()
+                                Toast.makeText(context, "Échec téléchargement : ${e.message}", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
                 } else if (url.isNotEmpty()) {
                     Toast.makeText(
                         context,

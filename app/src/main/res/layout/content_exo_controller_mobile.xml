@@ -247,9 +247,38 @@
             android:src="@drawable/exo_styled_controls_lock"
             app:tint="#FFFFFF"
             app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@id/btn_exo_picture_in_picture"
+            app:layout_constraintEnd_toStartOf="@id/btn_exo_cast"
             app:layout_constraintTop_toTopOf="parent"
             tools:ignore="ContentDescription,PrivateResource" />
+
+        <!-- 2026-05-31 : Bouton Cast — envoie le flux vidéo à la Chromecast -->
+        <androidx.mediarouter.app.MediaRouteButton
+            android:id="@+id/btn_exo_cast"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="16dp"
+            android:padding="12dp"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toStartOf="@id/btn_exo_wireless"
+            app:layout_constraintTop_toTopOf="parent"
+            app:mediaRouteButtonTint="#FFFFFF" />
+
+        <!-- 2026-06-03 : Bouton "Diffuser écran" — ouvre Settings.ACTION_CAST_SETTINGS
+             Android système qui détecte les Miracast wireless displays (TV LG webOS,
+             Samsung, etc.) que le MediaRouteButton/Cast SDK ne voit pas. -->
+        <ImageView
+            android:id="@+id/btn_exo_wireless"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="16dp"
+            android:padding="12dp"
+            android:src="@drawable/ic_screen_share"
+            android:contentDescription="Diffuser l'écran sur TV (Miracast/LG/Samsung)"
+            app:tint="#FFFFFF"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toStartOf="@id/btn_exo_picture_in_picture"
+            app:layout_constraintTop_toTopOf="parent"
+            tools:ignore="PrivateResource" />
 
         <ImageView
             android:id="@+id/btn_exo_picture_in_picture"

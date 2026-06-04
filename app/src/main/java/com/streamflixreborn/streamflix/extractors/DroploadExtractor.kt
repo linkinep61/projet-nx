@@ -9,8 +9,9 @@ import java.net.URI
 
 class DroploadExtractor : Extractor() {
     override val name = "Dropload"
-    override val mainUrl = "https://dropload.tv"
-    override val aliasUrls = listOf("https://dropload.io", "https://dropload.pro","https://dr0pstream.com")
+    // 2026-06-02 : dropload.tv et .io redirigent vers .pro (le main actif).
+    override val mainUrl = "https://dropload.pro"
+    override val aliasUrls = listOf("https://dropload.io", "https://dropload.tv", "https://dr0pstream.com")
 
     private val service = Extractor.createGsonService<DroploadService>(mainUrl)
 

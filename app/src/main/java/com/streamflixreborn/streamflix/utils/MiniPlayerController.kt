@@ -21,6 +21,10 @@ import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.providers.IptvProvider
 import com.streamflixreborn.streamflix.providers.Provider
+import com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+import com.streamflixreborn.streamflix.providers.OlaTvProvider
+import com.streamflixreborn.streamflix.providers.VegetaTvProvider
+import com.streamflixreborn.streamflix.providers.VavooProvider
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -93,6 +97,14 @@ object MiniPlayerController {
     private var retryCycle: Int = 0
     @Volatile private var serversExhausted: Boolean = false
 
+    /**
+     * 2026-06-03 — Le server actuellement joué est-il un fast-track pré-caché ?
+     * Si oui, HTTP 403/404/410/5xx = mort confirmé → skip immédiat (pas de retry
+     * exponentiel 31 sec). Pour les autres servers (Xtream natif), on garde le
+     * retry exponentiel qui masque les rate-limit transitoires.
+     */
+    @Volatile private var currentServerIsFastTrack: Boolean = false
+
     // 2026-05-17 v18 (user "faire un jumelage pour éviter la coupure") :
     //   pré-buffer d'un BACKUP MediaItem dans la queue ExoPlayer. Quand
     //   le primary cut (STATE_BUFFERING extended), on bascule INSTANTANÉMENT
@@ -131,13 +143,53 @@ object MiniPlayerController {
             //   → server 456 → onPlayerError → loop CPU 250% → ANR → crash.
             val cause = error.cause
             val httpCode = if (cause is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) cause.responseCode else -1
+            // 2026-06-03 : sur HTTP 456/401/402/451 = HARD FAIL, on saute au server
+            //   SUIVANT au lieu de stop(). Le palier resilientLoadErrorPolicy a déjà
+            //   empêché le retry-loop sur le MÊME server (C.TIME_UNSET).
+            //   Le cap availableServers.size dans tryNextServer empêche la boucle.
+            //   Sinon : 1 seul fast-track dead du seed Firebase → toute la chaîne
+            //   bloque → user voit "Serveur saturé" alors qu'il y a 56 fast-tracks
+            //   viables en attente derrière.
             if (httpCode == 456 || httpCode == 401 || httpCode == 402 || httpCode == 451) {
-                Log.e(TAG, "HARD FAIL HTTP $httpCode — stopping retry to prevent crash. User must wait for rate-limit clear.")
-                val chId = currentChannelId
-                if (chId != null) {
-                    _state.value = State.Error(chId, "Serveur saturé (HTTP $httpCode) — réessaye dans 5-10 min")
+                Log.w(TAG, "HARD FAIL HTTP $httpCode on [$currentServerIndex/${availableServers.size}] — skip to next server (avoid loop via DefaultLoadErrorHandlingPolicy)")
+                val playingUri = player?.currentMediaItem?.localConfiguration?.uri?.toString()
+                if (!playingUri.isNullOrBlank()) {
+                    recordHostFail(playingUri)
+                    try {
+                        com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
+                    } catch (_: Throwable) {}
+                    // Invalide le fast-track pré-caché : ce CID est dead côté CDN.
+                    // 2026-06-03 : on N'EFFACE PAS l'URL du cache (le 456 = rate-limit
+                    //   transitoire). On la marque "morte" 24h → getCachedStreamUrls()
+                    //   la rétrograde en bas de la liste. Au bout des 24h, on re-tente.
+                    try {
+                        com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex.markUrlDead(playingUri)
+                    } catch (_: Throwable) {}
                 }
-                player?.stop()
+                tryNextServer()
+                return
+            }
+            // 2026-05-31 : OTF TV — le CDN coupe la connexion après ~60s.
+            // Au lieu de passer au serveur suivant (il n'y en a qu'un),
+            // on relance le même flux (reconnexion silencieuse).
+            val chId = currentChannelId
+            if (chId != null && chId.startsWith("livehub::otf::")) {
+                Log.d(TAG, "OTF reconnect: source error on $serverName — relaunching same stream")
+                scope.launch {
+                    delay(1000) // petit délai avant reconnexion
+                    if (currentChannelId == chId) {
+                        val p = player ?: return@launch
+                        try {
+                            p.seekToDefaultPosition()
+                            p.prepare()
+                            p.play()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "OTF reconnect failed: ${e.message}")
+                            // En dernier recours, relancer via playChannel
+                            playChannel(chId, currentChannelName ?: "", currentChannelPoster)
+                        }
+                    }
+                }
                 return
             }
             // Report the dead URL so OlaTvProvider blacklists it for the rest of the session.
@@ -147,6 +199,15 @@ object MiniPlayerController {
                 try {
                     com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
                 } catch (_: Throwable) { }
+                // 2026-06-03 : si c'était un fast-track + HTTP 403/404/410 = mort
+                //   confirmé. markUrlDead 24h pour rétrograder à la prochaine visite.
+                if (currentServerIsFastTrack &&
+                    (httpCode == 403 || httpCode == 404 || httpCode == 410 ||
+                     httpCode == 500 || httpCode == 502 || httpCode == 503)) {
+                    try {
+                        com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex.markUrlDead(playingUri)
+                    } catch (_: Throwable) {}
+                }
             }
             tryNextServer()
         }
@@ -195,18 +256,26 @@ object MiniPlayerController {
                     if (!playingUri.isNullOrBlank()) {
                         try {
                             val serverId = availableServers.getOrNull(currentServerIndex)?.id ?: ""
-                            // A MAC portal server's cmd contains "localhost" or "127.0.0.1".
-                            // Fast-track servers (ola_fasttrack::) played a previously-cached
-                            // URL — don't re-cache to avoid perpetuating stale entries.
                             val isMacPortal = serverId.contains("localhost") || serverId.contains("127.0.0.1")
                             val isFastTrack = serverId.startsWith("ola_fasttrack::")
                             val isDirect = !isMacPortal && !isFastTrack
                             val channelKey = chId.removePrefix("ola_ep::").removePrefix("ola::")
-                            // Always report for host scoring (probeOkCache), but only
-                            // persist to disk (channelKey) for direct streams.
+                            // 2026-06-03 : extraction CID + mesure latence pour alimenter
+                            //   LocalIptvChannelIndex. Format des serverIds OLA :
+                            //   ola_stream::<cid>::<label>::<url>  → cid = parts[1]
+                            //   ola_fasttrack::<key>::<url>        → pas de CID (skip)
+                            val extractedCid = if (serverId.startsWith("ola_stream::")) {
+                                serverId.removePrefix("ola_stream::").substringBefore("::")
+                            } else null
+                            // Latence = temps entre BUFFERING et READY (warm-up du stream)
+                            val latencyMs = if (bufferingStartMs > 0) {
+                                System.currentTimeMillis() - bufferingStartMs
+                            } else null
                             com.streamflixreborn.streamflix.providers.OlaTvProvider.reportWorkingStreamUrl(
                                 playingUri,
-                                if (isDirect) channelKey else null
+                                if (isDirect) channelKey else null,
+                                cid = if (isDirect) extractedCid else null,
+                                latencyMs = if (isDirect) latencyMs else null,
                             )
                         } catch (_: Throwable) { }
                     }
@@ -297,6 +366,15 @@ object MiniPlayerController {
                 if (code == 456 || code == 401 || code == 402 || code == 451) {
                     Log.w(TAG, "Mini LoadError HARD FAIL HTTP $code (rate-limit/auth) — no retry")
                     return C.TIME_UNSET // signal "don't retry"
+                }
+                // 2026-06-03 : si fast-track pré-caché → 403/404/410/5xx = mort
+                //   confirmé → skip immédiat (pas de retry 31 sec). Pour les
+                //   serveurs natifs Xtream, on garde le retry exponentiel.
+                if (currentServerIsFastTrack &&
+                    (code == 403 || code == 404 || code == 410 ||
+                     code == 500 || code == 502 || code == 503)) {
+                    Log.w(TAG, "Mini LoadError FAST-TRACK HARD FAIL HTTP $code — no retry, skip fast")
+                    return C.TIME_UNSET
                 }
                 if (code == 403 || code == 500 || code == 502 || code == 503 || code == 509 || code == 429) {
                     val attempt = loadErrorInfo.errorCount
@@ -433,11 +511,15 @@ object MiniPlayerController {
         loadJob?.cancel()
         loadJob = scope.launch {
             try {
-                val provider = UserPreferences.currentProvider
-                if (provider !is IptvProvider) {
-                    _state.value = State.Error(channelId, "Not an IPTV provider")
-                    return@launch
-                }
+                // 2026-05-31 : résoudre le provider IPTV depuis le préfixe de l'ID
+                // plutôt que UserPreferences.currentProvider. Quand le user est sur
+                // un provider Films/Séries (Cloudstream, Movix) et navigue dans le
+                // TV Hub, currentProvider n'est PAS un IptvProvider → playback échoue.
+                val provider = resolveIptvProvider(channelId)
+                    ?: run {
+                        _state.value = State.Error(channelId, "Not an IPTV provider")
+                        return@launch
+                    }
 
                 // Build VideoType for the channel
                 val videoType = Video.Type.Episode(
@@ -469,7 +551,7 @@ object MiniPlayerController {
 
                 // Start collecting progressive OLA TV servers (variants) — works for any
                 // IPTV provider since IptvProvider declares additionalServersFlow.
-                startCollectingProgressiveServers(channelId, provider)
+                startCollectingProgressiveServers(channelId, provider as IptvProvider)
 
                 if (servers.isEmpty()) {
                     Log.w(TAG, "No initial servers for $channelName, waiting for progressive servers...")
@@ -678,6 +760,10 @@ object MiniPlayerController {
         serversExhausted = false
         currentServerIndex = index
         val server = availableServers[index]
+
+        // 2026-06-03 : marquer si c'est un fast-track pour que le LoadErrorHandling-
+        //   Policy fasse skip rapide sur 403/404/410 au lieu de retry exponentiel.
+        currentServerIsFastTrack = server.id.startsWith("ola_fasttrack::")
 
         triedServerUrls.add(server.id)
         Log.d(TAG, "Trying server [$index/${availableServers.size}] ${server.name}")
@@ -890,7 +976,11 @@ object MiniPlayerController {
             //   → watchdog 6s → source error → écran noir. Pour les TS
             //   progressifs, on garde 1 seul MediaItem, sans JUMELAGE.
             //   HLS (Vegeta, Ola, Vavoo) reste avec JUMELAGE.
-            if (isLiveChannel && (isHls || isDash)) {
+            // 2026-05-31 : SKIP le backup SAME URL pour les chaînes OTF (livehub::otf::).
+            // Le CDN stm.linkip.org ne supporte pas 2 connexions simultanées avec offset
+            // → le backup cause un Source error → servers exhausted → retry loop infini.
+            val isOtfChannel = channelId.startsWith("livehub::otf::")
+            if (isLiveChannel && (isHls || isDash) && !isOtfChannel) {
                 backupJob?.cancel()
                 backupJob = scope.launch {
                     try {
@@ -1187,5 +1277,40 @@ object MiniPlayerController {
         } else {
             p.play()
         }
+    }
+
+    /**
+     * 2026-05-31 : Résout le bon provider IPTV depuis le préfixe du channelId.
+     * Permet de jouer les chaînes TV Hub, OLA, Vegeta, etc. même quand le
+     * provider courant (UserPreferences.currentProvider) est un provider
+     * Films/Séries (Cloudstream, Movix, etc.).
+     */
+    /**
+     * Retourne un Provider qui implémente aussi IptvProvider.
+     * Le cast IptvProvider est vérifié ; les appelants peuvent appeler getServers()
+     * (méthode de Provider) ET additionalServersFlow (méthode de IptvProvider).
+     */
+    private fun resolveIptvProvider(channelId: String): Provider? {
+        // D'abord, essayer le provider courant (cas normal : on est déjà sur un IPTV)
+        val current = UserPreferences.currentProvider
+        if (current is IptvProvider) return current
+
+        // Sinon, résoudre par le préfixe de l'ID
+        val resolved: Provider? = when {
+            channelId.startsWith("livehub::") -> LiveTvHubProvider
+            channelId.startsWith("ola::") || channelId.startsWith("ola_ep::") -> OlaTvProvider
+            channelId.startsWith("vegeta::") || channelId.startsWith("vegeta_ep::") -> VegetaTvProvider
+            channelId.startsWith("vavoo::") -> VavooProvider
+            channelId.startsWith("myiptv-") -> {
+                Provider.providers.keys.find { it is com.streamflixreborn.streamflix.providers.MyIptvProvider }
+            }
+            channelId.startsWith("sportlive::") -> {
+                Provider.providers.keys.find { it.name == "Sport Live" }
+            }
+            else -> null
+        }
+        Log.d(TAG, "resolveIptvProvider: channelId=$channelId → current=${current?.name}, resolved=${resolved?.name}")
+        // Vérifier que le provider résolu est bien IPTV
+        return if (resolved is IptvProvider) resolved else null
     }
 }

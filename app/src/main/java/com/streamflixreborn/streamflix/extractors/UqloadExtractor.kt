@@ -62,7 +62,29 @@ class UqloadExtractor : Extractor() {
         Log.d(TAG, "extract() link=$link")
         val embedResult = fetchEmbedViaCronet(link)
             ?: fetchEmbedViaOkHttpDoH(link)
-            ?: throw Exception("Uqload: embed fetch failed (Cronet+DoH) for $link")
+
+        if (embedResult == null) {
+            // 2026-06-02 : Cronet + OkHttp+DoH ont echoue (typiquement HTTP 522
+            //   Cloudflare = CF rejette le TLS fingerprint Cronet alors que le
+            //   meme URL marche dans Chrome). Dernier recours : WebView, qui a
+            //   le TLS fingerprint Chrome accepte par CF. La WebView intercepte
+            //   directement le m3u8/mp4 du player, on bypass tout le pipeline
+            //   html→unpack→regex.
+            Log.w(TAG, "Cronet+DoH failed, fallback to WebView for $link")
+            val directUrl = extractViaWebView(link)
+                ?: throw Exception("Uqload: embed fetch failed (Cronet+DoH+WebView) for $link")
+            val isHls = directUrl.contains(".m3u8", ignoreCase = true)
+            Log.d(TAG, "WebView extracted: $directUrl (hls=$isHls)")
+            return@withContext Video(
+                source = directUrl,
+                headers = mapOf(
+                    "Referer" to link,
+                    "User-Agent" to CHROME_DESKTOP_UA,
+                    "Origin" to "https://uqload.is",
+                ),
+                type = if (isHls) androidx.media3.common.MimeTypes.APPLICATION_M3U8 else null,
+            )
+        }
         val fullHtml = embedResult.first
         val cookies = embedResult.second
         Log.d(TAG, "Embed fetched via Cronet: ${fullHtml.length} bytes, cookies=${cookies.take(200)}")

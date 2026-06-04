@@ -36,8 +36,9 @@ import kotlin.coroutines.resume
  */
 open class MeritendExtractor : Extractor() {
     override val name = "Meritend"
-    override val mainUrl = "https://meritend.net/"
-    override val aliasUrls = listOf(
+    // 2026-06-02 : meritend.net renomme en xstream.to (301 redirect, meme contenu).
+    override val mainUrl = "https://xstream.to/"
+    override val aliasUrls = listOf("https://meritend.net",
         "https://v3.sportssonline.click/",
         "https://sportssonline.click/",
         "https://sportsonline.vc/",

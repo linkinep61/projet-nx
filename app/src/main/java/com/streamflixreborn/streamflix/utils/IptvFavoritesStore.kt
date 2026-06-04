@@ -90,6 +90,12 @@ object IptvFavoritesStore {
             return "dm" + channelId.removePrefix("livehub::dailymotion::")
                 .substringBefore("::").lowercase().trim()
         }
+        // 2026-05-31 : OTF TV — clé unique par chaîne (catId numérique)
+        // Format: livehub::otf::<catId> → "otf<catId>"
+        if (channelId.startsWith("livehub::otf::")) {
+            return "otf" + channelId.removePrefix("livehub::otf::")
+                .substringBefore("::").lowercase().trim()
+        }
 
         return channelId
             .removePrefix("vegeta_ep::")

@@ -76,7 +76,7 @@
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginStart="32dp"
-        android:layout_marginTop="14dp"
+        android:layout_marginTop="26dp"
         android:layout_marginEnd="32dp"
         android:background="@android:color/transparent"
         app:tabIndicatorColor="#FFFFFF"
@@ -146,18 +146,17 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- 2026-05-05 : Bouton cadenas pour le contrôle parental -->
+    <!-- Bouton café Ko-fi (remplace le cadenas déplacé dans Paramètres) -->
     <ImageView
-        android:id="@+id/iv_parental_lock"
+        android:id="@+id/iv_kofi"
         android:layout_width="44dp"
         android:layout_height="44dp"
         android:layout_marginEnd="4dp"
         android:layout_marginTop="12dp"
         android:padding="10dp"
-        android:src="@drawable/ic_lock"
+        android:src="@drawable/ic_coffee_heart"
         android:background="?attr/selectableItemBackgroundBorderless"
-        android:contentDescription="Contrôle parental"
-        app:tint="@android:color/white"
+        android:contentDescription="Soutenir le projet"
         android:elevation="4dp"
         app:layout_constraintEnd_toStartOf="@id/iv_downloads"
         app:layout_constraintTop_toTopOf="parent" />

@@ -24,18 +24,12 @@ open class DoodLaExtractor : Extractor() {
         "https://dood.work",
         "https://doply.net",
         "https://doodstream.me",
-        // FrenchStream Dood gateway — kokoflix.lol/<XXX>_go.php?id=...
-        // does a 302 to playmogo.com. The OkHttp follow-redirect chain
-        // inside extract() captures the final URL via
-        // response.raw().request.url, so we just need it in aliasUrls
-        // for the extractor selector to pick this class.
-        // NOTE: kakaflix.lol was tested and is a phantom domain (LiteSpeed
-        // serving an empty directory, every endpoint returns 404). It's
-        // filtered upstream in FrenchStreamProvider.ignoreSource(), so we
-        // intentionally do NOT add it here — preventing /moon2/ (Filmoon)
-        // or /voe1/ (Voe) URLs from being mis-routed to DoodStream during
-        // failover.
-        "https://kokoflix.lol"
+        // 2026-06-02 : kokoflix.lol RETIRÉ — c'est un proxy multi-host de FS
+        //   qui route selon le suffix /<XXX>_go.php : osaka_go.php = VOE (pas
+        //   Dood !), grandline_go.php = autre host. Le router auto le mettait
+        //   sur DoodLaExtractor qui échouait sur le vrai contenu (Voe).
+        //   VoeExtractor a maintenant kokoflix.lol/osaka_go.php dans son
+        //   rotatingDomain pour matcher correctement.
     )
 
     private val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"

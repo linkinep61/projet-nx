@@ -59,7 +59,18 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     // sur ces redirects → 403/contenu invalide → provider cassé.
     // flemmix.prof est le site principal officiel (icône 🚨 sur wiflix-adresses.fun)
     // et héberge le vrai contenu Wiflix (template `flemmixnew` reconnu par le code).
-    override val defaultBaseUrl: String = "https://flemmix.win/"  // v86 2026-05-20 : flemmix.prof mort, nouveau domaine actif = flemmix.win (cf wiflix-adresses.fun)
+    // 2026-06-02 : flemmix.win bloqué par les FAI (cf portail wiflix-adresses.fun
+    //   qui le liste comme "Ancien domaine - bloqué"). Nouveau lien principal =
+    //   flemmix.team (badge "Actif" / "LIEN PRINCIPAL" sur le portail).
+    override val defaultBaseUrl: String = "https://flemmix.team/"
+    // Liste des domaines morts/bloqués connus. Si le cache PROVIDER_URL est sur
+    // un de ceux-ci, on force un refresh au prochain initializeService() au lieu
+    // de rester coincé dessus à vie. Mettre à jour quand le portail évolue.
+    private val knownBlockedDomains = listOf(
+        "flemmix.win", "flemmix.prof", "flemmix.irish", "flemmix.wales",
+        "flemmix.vip", "flemmix.casa", "wiflix.re", "wiflix.eu", "wiflix.org",
+        "flemmix.farm"
+    )
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
@@ -889,9 +900,21 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 document.select("div.$rel a").
                     filter { ignoreSource(it.text().trim() ) == false }.
                     mapIndexedNotNull { index, it ->
-                        val src = it.attr("onclick")
-                            .substringAfter("loadVideo('").substringBefore("'")
-                        if (src.isBlank()) return@mapIndexedNotNull null
+                        val onclick = it.attr("onclick")
+                        // 2026-06-03 (user "y a un WIFLIX SAVE Ça existe même pas
+                        //   ça") : ne ramener un serveur QUE si le onclick contient
+                        //   bien "loadVideo('...')". Avant : substringAfter sans
+                        //   le "loadVideo('" → retournait un fragment de JS pour
+                        //   les <a> qui sont en réalité des boutons "Sauvegarder
+                        //   en favoris" ou autres liens parasites du HTML Wiflix.
+                        //   Résultat : faux serveur "Save" qui n'existe pas.
+                        if (!onclick.contains("loadVideo('")) return@mapIndexedNotNull null
+                        val src = onclick.substringAfter("loadVideo('").substringBefore("'")
+                        // Filtre robuste : le src doit être une vraie URL HTTP(S),
+                        //   sinon c'est un fragment JS qui s'est faufilé.
+                        if (src.isBlank() || !src.startsWith("http", ignoreCase = true)) {
+                            return@mapIndexedNotNull null
+                        }
                         val spanText = it.selectFirst("span")?.text()?.trim() ?: ""
                         val serviceName = Extractor.identifyServiceName(src)
                         val displayName = when {
@@ -917,9 +940,21 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 document.select("div.tabs-sel a").
                     filter { ignoreSource(it.text().trim() ) == false }.
                     mapIndexedNotNull { index, it ->
-                        val src = it.attr("onclick")
-                            .substringAfter("loadVideo('").substringBefore("'")
-                        if (src.isBlank()) return@mapIndexedNotNull null
+                        val onclick = it.attr("onclick")
+                        // 2026-06-03 (user "y a un WIFLIX SAVE Ça existe même pas
+                        //   ça") : ne ramener un serveur QUE si le onclick contient
+                        //   bien "loadVideo('...')". Avant : substringAfter sans
+                        //   le "loadVideo('" → retournait un fragment de JS pour
+                        //   les <a> qui sont en réalité des boutons "Sauvegarder
+                        //   en favoris" ou autres liens parasites du HTML Wiflix.
+                        //   Résultat : faux serveur "Save" qui n'existe pas.
+                        if (!onclick.contains("loadVideo('")) return@mapIndexedNotNull null
+                        val src = onclick.substringAfter("loadVideo('").substringBefore("'")
+                        // Filtre robuste : le src doit être une vraie URL HTTP(S),
+                        //   sinon c'est un fragment JS qui s'est faufilé.
+                        if (src.isBlank() || !src.startsWith("http", ignoreCase = true)) {
+                            return@mapIndexedNotNull null
+                        }
                         val spanText = it.selectFirst("span")?.text()?.trim() ?: ""
                         val serviceName = Extractor.identifyServiceName(src)
                         val displayName = when {
@@ -972,7 +1007,15 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     //   identique à FrenchStreamProvider.
     // ─────────────────────────────────────────────────────────────────────
 
-    /** Résout le tmdbId via TMDB par titre (nécessaire pour les backups). */
+    /** Résout le tmdbId via TMDB par titre (nécessaire pour les backups).
+     *  2026-06-03 (user "j'ai changé carrément de film et c'est encore ce
+     *  film là qui revient") : validation STRICTE. Avant : on acceptait
+     *  n'importe quel résultat TMDB → un mauvais match (ex: "Intouchables"
+     *  → un Marvel) faisait que le backup Movix renvoyait les serveurs d'un
+     *  film qui n'a rien à voir → un VOE Marvel dans le picker Intouchables.
+     *  Maintenant : on compare le titre TMDB et l'année avec le titre Wiflix
+     *  d'origine ; si la similarité est insuffisante ou l'écart d'année ≥3
+     *  ans → on retourne null = pas de backup (mieux que faux backup). */
     private suspend fun resolveWiflixTmdbId(videoType: Video.Type): Int? = runCatching {
         val title = when (videoType) {
             is Video.Type.Movie -> videoType.title
@@ -987,11 +1030,58 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             is Video.Type.Movie -> TmdbUtils.getMovie(cleanTitle, year, "fr-FR")
             is Video.Type.Episode -> TmdbUtils.getTvShow(cleanTitle, year, "fr-FR")
         }
-        when (tmdbItem) {
-            is Movie -> tmdbItem.id.toIntOrNull()
-            is TvShow -> tmdbItem.id.toIntOrNull()
-            else -> null
+        // Extraire titre/année du résultat TMDB pour validation.
+        //   Movie.released / TvShow.released = Calendar? (pas String), donc on
+        //   passe par Calendar.YEAR pour récupérer l'année.
+        val (tmdbTitle, tmdbYear, tmdbId) = when (tmdbItem) {
+            is Movie -> Triple(
+                tmdbItem.title,
+                tmdbItem.released?.get(java.util.Calendar.YEAR),
+                tmdbItem.id.toIntOrNull(),
+            )
+            is TvShow -> Triple(
+                tmdbItem.title,
+                tmdbItem.released?.get(java.util.Calendar.YEAR),
+                tmdbItem.id.toIntOrNull(),
+            )
+            else -> Triple("", null, null)
         }
+        if (tmdbId == null) return@runCatching null
+        // ── Validation titre (similarité normalisée) ────────────────────
+        fun normalize(s: String) = s.lowercase()
+            .replace(Regex("[^a-z0-9 ]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        val aNorm = normalize(cleanTitle)
+        val bNorm = normalize(tmdbTitle)
+        if (aNorm.isBlank() || bNorm.isBlank()) {
+            Log.w("Wiflix", "Backup TMDB validation: titre vide (a='$aNorm' b='$bNorm') → drop")
+            return@runCatching null
+        }
+        // Similarité simple : tokens partagés / max(tokens). Seuil 0.6 = ≥60%
+        //   des tokens du titre Wiflix doivent être dans le titre TMDB.
+        val aTokens = aNorm.split(" ").filter { it.length > 1 }.toSet()
+        val bTokens = bNorm.split(" ").filter { it.length > 1 }.toSet()
+        if (aTokens.isEmpty() || bTokens.isEmpty()) {
+            Log.w("Wiflix", "Backup TMDB validation: tokens vides → drop")
+            return@runCatching null
+        }
+        val shared = aTokens.intersect(bTokens).size
+        val ratio = shared.toDouble() / maxOf(aTokens.size, bTokens.size)
+        if (ratio < 0.6) {
+            Log.w("Wiflix", "Backup TMDB validation: titre mismatch '$cleanTitle' ≠ '$tmdbTitle' (ratio=$ratio) → drop")
+            return@runCatching null
+        }
+        // ── Validation année (±3 ans max) ──────────────────────────────
+        if (year != null && tmdbYear != null) {
+            val diff = kotlin.math.abs(year - tmdbYear)
+            if (diff >= 3) {
+                Log.w("Wiflix", "Backup TMDB validation: année mismatch $year vs $tmdbYear (diff=$diff) → drop")
+                return@runCatching null
+            }
+        }
+        Log.d("Wiflix", "Backup TMDB validation OK : '$cleanTitle' → tmdbId=$tmdbId ('$tmdbTitle' $tmdbYear)")
+        tmdbId
     }.getOrNull()
 
     private suspend fun fetchWiflixMovixBackup(tmdbId: Int, videoType: Video.Type): List<Video.Server> = runCatching {
@@ -1002,10 +1092,17 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             is Video.Type.Movie -> "$tmdbId"
             is Video.Type.Episode -> "$tmdbId-s${videoType.season.number}e${videoType.number}"
         }
-        MovixProvider.getServers(movixId, movixVideoType)
+        MovixProvider.getServersAsBackup(movixId, movixVideoType)
             // Filtrer les sources wiflix de Movix (on les a déjà en natif)
             .filter { srv -> !srv.id.startsWith("wiflix-") }
-            .map { srv -> srv.copy(id = "movix_backup__${srv.id}") }
+            // 2026-06-03 (user "1 VOE qui s'est mélangé par un film que j'avais
+            //   regardé avant") : tagger visuellement les backups Movix pour que
+            //   l'user distingue les serveurs natifs Wiflix (fiables, garantis
+            //   sur CE film) des backups Movix (résolus par titre/année TMDB,
+            //   risque de fausse association si matching imprécis). Avant : pas
+            //   de préfixe → un VOE backup d'un autre film ressemblait à un VOE
+            //   natif Wiflix → confusion. Pattern identique au backup CS.
+            .map { srv -> srv.copy(id = "movix_backup__${srv.id}", name = "Movix — ${srv.name}") }
     }.getOrNull().orEmpty()
 
     private suspend fun fetchWiflixCloudstreamBackup(tmdbId: Int, videoType: Video.Type): List<Video.Server> = runCatching {
@@ -1024,24 +1121,20 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         id: String, videoType: Video.Type,
     ): Flow<List<Video.Server>> = channelFlow {
         initializeService()
-        // Natif : part tout de suite (pas besoin du tmdbId).
+        // 2026-06-03 (user "il devrait y avoir QUE des serveurs normal qui
+        //   arrive normalement") : backups Movix/Cloudstream DÉSACTIVÉS. Ils
+        //   créaient des faux positifs (ex: VOE Marvel apparaissant dans le
+        //   picker Intouchables à cause d'un mauvais match TMDB par titre).
+        //   On garde uniquement le scrape natif Wiflix qui est fiable (ID
+        //   newsid → page Wiflix → embeds réels du bon film). Les helpers
+        //   fetchWiflixMovixBackup / fetchWiflixCloudstreamBackup /
+        //   resolveWiflixTmdbId restent dans le fichier au cas où on veut
+        //   les ré-activer plus tard (avec un matching TMDB durci).
         launch {
             try {
                 val native = getServers(id, videoType)
                 if (native.isNotEmpty()) send(native)
             } catch (e: Exception) { Log.w("Wiflix", "Progressive native failed: ${e.message}") }
-        }
-        // Backups : après résolution tmdbId, lancés en parallèle.
-        launch {
-            val tid = resolveWiflixTmdbId(videoType) ?: return@launch
-            launch {
-                try { val mx = fetchWiflixMovixBackup(tid, videoType); if (mx.isNotEmpty()) send(mx) }
-                catch (e: Exception) { Log.w("Wiflix", "Progressive Movix failed: ${e.message}") }
-            }
-            launch {
-                try { val cs = fetchWiflixCloudstreamBackup(tid, videoType); if (cs.isNotEmpty()) send(cs) }
-                catch (e: Exception) { Log.w("Wiflix", "Progressive CS failed: ${e.message}") }
-            }
         }
     }
 
@@ -1120,8 +1213,16 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                             UserPreferences.PROVIDER_LOGO,
                             formattedUrl + "templates/flemmixnew/images/favicon.png"
                         )
+                        Log.i("WiflixProvider",
+                            "onChangeUrl OK : nouveau domaine = $formattedUrl (parmi ${candidates.size} candidats)")
+                    } else {
+                        Log.w("WiflixProvider",
+                            "onChangeUrl : aucun candidat trouvé (candidates=${candidates.size}). " +
+                                "On reste sur $baseUrl. Le portail wiflix-adresses.fun a peut-être changé de structure.")
                     }
                 } catch (e: Exception) {
+                    Log.e("WiflixProvider",
+                        "onChangeUrl FAIL : ${e.message}. On reste sur $baseUrl.", e)
                     // In case of failure, we'll use the default URL
                     // No need to throw as we already have a fallback URL
                 }
@@ -1137,7 +1238,20 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         initializationMutex.withLock {
             if (serviceInitialized) return
 
-            onChangeUrl()
+            // 2026-06-02 : si le cache est sur un domaine connu mort/bloqué
+            //   (flemmix.win / .prof / .irish etc.), on FORCE un refresh pour
+            //   éviter de rester collé dessus à vie. Sans ce check, un user
+            //   coincé sur flemmix.win depuis l'install ne se mettait jamais
+            //   à jour même si l'auto-update est activé (le cache 1ère valeur
+            //   l'emporte sur defaultBaseUrl).
+            val cachedUrl = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
+            val forceRefresh = cachedUrl.isNotBlank() &&
+                knownBlockedDomains.any { cachedUrl.contains(it) }
+            if (forceRefresh) {
+                Log.w("WiflixProvider",
+                    "Cache sur domaine bloqué ($cachedUrl) → force refresh")
+            }
+            onChangeUrl(forceRefresh = forceRefresh)
         }
     }
 

@@ -1037,19 +1037,19 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             }
         }
 
-        // 4) Papadustream — captcha CF, dernier recours
-        try {
-            val papa = PapadustreamProvider.getPapaSourcesByTmdbId(ids.tmdbId, videoType)
-            if (papa.isNotEmpty()) {
-                Log.d(TAG, "+ Papa backup : ${papa.size} sources")
-                servers.addAll(papa.map { it.copy(
-                    id = "nm_papa__${it.id}",
-                    name = "Papa — ${it.name}",
-                )})
-            }
-        } catch (e: Exception) {
-            Log.d(TAG, "Papa backup failed: ${e.message}")
-        }
+        // 4) Papadustream DÉSACTIVÉ (2026-06-02) — captcha CF intrusif (user request)
+        // try {
+        //     val papa = PapadustreamProvider.getPapaSourcesByTmdbId(ids.tmdbId, videoType)
+        //     if (papa.isNotEmpty()) {
+        //         Log.d(TAG, "+ Papa backup : ${papa.size} sources")
+        //         servers.addAll(papa.map { it.copy(
+        //             id = "nm_papa__${it.id}",
+        //             name = "Papa — ${it.name}",
+        //         )})
+        //     }
+        // } catch (e: Exception) {
+        //     Log.d(TAG, "Papa backup failed: ${e.message}")
+        // }
 
         // 5) Coflix backup — multi-hosters FR
         if (tmdbIdInt != null) {
@@ -1246,16 +1246,16 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                 } catch (e: Exception) { Log.d(TAG, "Prog Moviebox failed: ${e.message}") }
             }
 
-            // 4) Papa — captcha, lent
-            launch {
-                try {
-                    val papa = PapadustreamProvider.getPapaSourcesByTmdbId(ids.tmdbId, videoType)
-                    if (papa.isNotEmpty()) {
-                        Log.d(TAG, "+ Papa backup (prog) : ${papa.size} sources")
-                        send(papa.map { it.copy(id = "nm_papa__${it.id}", name = "Papa — ${it.name}") })
-                    }
-                } catch (e: Exception) { Log.d(TAG, "Prog Papa failed: ${e.message}") }
-            }
+            // 4) Papa DÉSACTIVÉ (2026-06-02) — captcha CF intrusif (user request)
+            // launch {
+            //     try {
+            //         val papa = PapadustreamProvider.getPapaSourcesByTmdbId(ids.tmdbId, videoType)
+            //         if (papa.isNotEmpty()) {
+            //             Log.d(TAG, "+ Papa backup (prog) : ${papa.size} sources")
+            //             send(papa.map { it.copy(id = "nm_papa__${it.id}", name = "Papa — ${it.name}") })
+            //         }
+            //     } catch (e: Exception) { Log.d(TAG, "Prog Papa failed: ${e.message}") }
+            // }
 
             // 5) Coflix
             if (tmdbIdInt != null) launch {

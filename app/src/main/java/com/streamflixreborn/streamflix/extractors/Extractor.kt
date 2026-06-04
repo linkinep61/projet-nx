@@ -153,7 +153,7 @@ abstract class Extractor {
             StreamWishExtractor.SwiftPlayersExtractor(),
             TwoEmbedExtractor(),
             ChillxExtractor(),
-            ChillxExtractor.JeanExtractor(),
+            // JeanExtractor retiré (NXDOMAIN)
             MoviesapiExtractor(),
             CloseloadExtractor(),
             LuluVdoExtractor(),
@@ -750,6 +750,19 @@ abstract class Extractor {
                 return filtered
             }
 
+            // 2026-06-03 (user "il nous manque un extracteur" pour
+            //   cdn.fastflux.xyz/movies/Aventures-Croisees-2026.mp4) : avant
+            //   de jeter, si l'URL ressemble à un fichier média DIRECT
+            //   (.mp4 / .m3u8 / .mpd, éventuellement avec query string),
+            //   on la renvoie telle quelle. ExoPlayer sait les lire seul,
+            //   pas besoin d'un extracteur HTML/JS dédié. Couvre les CDN
+            //   "open" type fastflux.xyz, fastly, etc.
+            val directMediaRegex = Regex("""\.(mp4|m3u8|mpd)(\?|$|#)""", RegexOption.IGNORE_CASE)
+            if (directMediaRegex.containsMatchIn(finalLink)) {
+                Log.i("Extractor", "No extractor matched, but URL looks like a direct media file → pass-through: $finalLink")
+                val direct = com.streamflixreborn.streamflix.models.Video(source = finalLink)
+                return enforceFrenchSubtitlesOnly(direct)
+            }
             Log.e("Extractor", "No extractors found for URL: $finalLink (original: $link)")
             throw Exception("No extractors found for URL: $finalLink")
         }

@@ -48,6 +48,12 @@ object IptvFavorites {
             return "dm" + channelKey.removePrefix("livehub::dailymotion::")
                 .substringBefore("::").lowercase().trim()
         }
+        // 2026-05-31 : OTF TV — la clé normalisée doit être le nom de la chaîne,
+        // pas "otf" (sinon toutes les chaînes OTF partagent le même favori).
+        if (channelKey.startsWith("livehub::otf::")) {
+            return channelKey.removePrefix("livehub::otf::")
+                .substringBefore("::").lowercase().trim()
+        }
         return channelKey
             .removePrefix("vegeta_ep::")
             .removePrefix("vegeta::")

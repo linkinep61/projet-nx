@@ -18,11 +18,6 @@
         app:layout_constraintTop_toTopOf="parent"
         tools:ignore="ContentDescription" />
 
-    <!-- 2026-05-14 (user "sur mobile tu pourrais pas redescendre un peu
-         l'ensemble que ça fasse plus jolie") : title+RV regroupés en chain
-         vertical centré dans l'écran (au lieu de coller en haut avec un grand
-         vide en dessous). Le RV est wrap_content et le chain centre l'ensemble
-         entre top parent et top du bouton "Gérer". -->
     <TextView
         android:id="@+id/tv_profile_picker_title"
         android:layout_width="0dp"
@@ -39,24 +34,64 @@
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintBottom_toTopOf="@id/rv_profiles"
         app:layout_constraintVertical_chainStyle="packed"
-        app:layout_constraintVertical_bias="0.55" />
+        app:layout_constraintVertical_bias="0.5" />
+
+    <ImageView
+        android:id="@+id/btn_profile_prev"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:src="@drawable/ic_chevron_left"
+        android:contentDescription="Profil précédent"
+        android:padding="10dp"
+        android:background="@null"
+        app:tint="#FFFFFFFF"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="@id/rv_profiles"
+        app:layout_constraintBottom_toBottomOf="@id/rv_profiles"
+        android:layout_marginStart="8dp" />
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rv_profiles"
         android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="40dp"
-        android:layout_marginStart="32dp"
-        android:layout_marginEnd="32dp"
+        android:layout_height="320dp"
+        android:layout_marginHorizontal="56dp"
+        android:layout_marginTop="24dp"
         android:clipToPadding="false"
-        app:layoutManager="androidx.recyclerview.widget.GridLayoutManager"
-        app:spanCount="3"
-        app:layout_constraintBottom_toTopOf="@id/btn_manage_profiles"
-        app:layout_constraintEnd_toEndOf="parent"
+        android:orientation="horizontal"
+        app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager"
         app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toBottomOf="@id/tv_profile_picker_title"
+        app:layout_constraintBottom_toTopOf="@id/tv_page_indicator"
         tools:itemCount="3"
         tools:listitem="@layout/item_profile_mobile" />
+
+    <ImageView
+        android:id="@+id/btn_profile_next"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:src="@drawable/ic_chevron_right"
+        android:contentDescription="Profil suivant"
+        android:padding="10dp"
+        android:background="@null"
+        app:tint="#FFFFFFFF"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="@id/rv_profiles"
+        app:layout_constraintBottom_toBottomOf="@id/rv_profiles"
+        android:layout_marginEnd="8dp" />
+
+    <TextView
+        android:id="@+id/tv_page_indicator"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:textColor="#CCCCCC"
+        android:textSize="14sp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/rv_profiles"
+        app:layout_constraintBottom_toTopOf="@id/btn_manage_profiles"
+        tools:text="1 / 3" />
 
     <Button
         android:id="@+id/btn_manage_profiles"

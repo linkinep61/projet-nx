@@ -242,6 +242,12 @@ class HomeMobileFragment : Fragment() {
         if (!isIptv || !UserPreferences.miniPlayerEnabled) {
             binding.miniPlayerContainer.visibility = View.GONE
             MiniPlayerController.onIptvChannelClick = null
+            // 2026-05-31 : TOUJOURS observer le state du MiniPlayer, même quand le
+            // provider courant n'est pas IPTV. Les chaînes OTF dans le TV Hub peuvent
+            // lancer le MiniPlayer via handleDirectPlay → MiniPlayerController.playChannel
+            // (qui résout le provider depuis l'ID). Sans cet observer, le container reste
+            // GONE et la PlayerView n'est jamais attachée → écran noir.
+            observeMiniPlayerState()
             return
         }
 
@@ -261,42 +267,7 @@ class HomeMobileFragment : Fragment() {
         }
 
         // Observe mini player state
-        viewLifecycleOwner.lifecycleScope.launch {
-            MiniPlayerController.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
-                when (state) {
-                    is MiniPlayerController.State.Idle -> {
-                        binding.miniPlayerContainer.visibility = View.GONE
-                    }
-                    is MiniPlayerController.State.Loading -> {
-                        binding.miniPlayerContainer.visibility = View.VISIBLE
-                        binding.miniPlayerChannelName.text = state.channelName
-                        binding.miniPlayerLoading.visibility = View.VISIBLE
-                    }
-                    is MiniPlayerController.State.Playing -> {
-                        binding.miniPlayerContainer.visibility = View.VISIBLE
-                        binding.miniPlayerChannelName.text = state.channelName
-                        binding.miniPlayerLoading.visibility = View.GONE
-                        updatePauseButton()
-                        state.channelPoster?.let { poster ->
-                            Glide.with(this@HomeMobileFragment)
-                                .load(poster)
-                                .into(binding.miniPlayerChannelLogo)
-                        }
-                    }
-                    is MiniPlayerController.State.Error -> {
-                        binding.miniPlayerLoading.visibility = View.GONE
-                        Log.e("HomeMobile", "Mini player error: ${state.message}")
-                        // Keep the container visible, user can close manually
-                        // 2026-05-14 (user "tu vois pas que la vidéo mouline depuis tout
-                        // à l'heure") : feedback visible pour ne pas laisser le user
-                        // dans le flou.
-                        Toast.makeText(requireContext(),
-                            "Stream indisponible — essaie une autre chaîne",
-                            Toast.LENGTH_LONG).show()
-                    }
-                }
-            }
-        }
+        observeMiniPlayerState()
 
         // Close button
         binding.miniPlayerClose.setOnClickListener {
@@ -386,6 +357,90 @@ class HomeMobileFragment : Fragment() {
         }
 
         cs.applyTo(root)
+    }
+
+    /**
+     * 2026-05-31 : Observer le state du MiniPlayer. Extrait de initializeMiniPlayer
+     * pour pouvoir être appelé AUSSI quand le provider courant n'est pas IPTV
+     * (ex: chaînes OTF dans le TV Hub cliquées depuis Cloudstream).
+     * Quand le state passe à Loading/Playing, on attache dynamiquement la
+     * PlayerView et les boutons si ce n'est pas déjà fait.
+     */
+    private var miniPlayerObserverJob: kotlinx.coroutines.Job? = null
+    private fun observeMiniPlayerState() {
+        if (miniPlayerObserverJob?.isActive == true) return
+        miniPlayerObserverJob = viewLifecycleOwner.lifecycleScope.launch {
+            MiniPlayerController.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
+                if (_binding == null) return@collect
+                when (state) {
+                    is MiniPlayerController.State.Idle -> {
+                        binding.miniPlayerContainer.visibility = View.GONE
+                    }
+                    is MiniPlayerController.State.Loading -> {
+                        ensureMiniPlayerAttached()
+                        binding.miniPlayerContainer.visibility = View.VISIBLE
+                        binding.miniPlayerChannelName.text = state.channelName
+                        binding.miniPlayerLoading.visibility = View.VISIBLE
+                    }
+                    is MiniPlayerController.State.Playing -> {
+                        ensureMiniPlayerAttached()
+                        binding.miniPlayerContainer.visibility = View.VISIBLE
+                        binding.miniPlayerChannelName.text = state.channelName
+                        binding.miniPlayerLoading.visibility = View.GONE
+                        updatePauseButton()
+                        state.channelPoster?.let { poster ->
+                            Glide.with(this@HomeMobileFragment)
+                                .load(poster)
+                                .into(binding.miniPlayerChannelLogo)
+                        }
+                    }
+                    is MiniPlayerController.State.Error -> {
+                        binding.miniPlayerLoading.visibility = View.GONE
+                        Log.e("HomeMobile", "Mini player error: ${state.message}")
+                        Toast.makeText(requireContext(),
+                            "Stream indisponible — essaie une autre chaîne",
+                            Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 2026-05-31 : Attache la PlayerView au MiniPlayerController si pas encore fait.
+     * Appelé dynamiquement quand une chaîne IPTV lance le MiniPlayer depuis un
+     * provider non-IPTV (TV Hub OTF depuis Cloudstream). Setup aussi les boutons.
+     */
+    private var miniPlayerWired = false
+    private fun ensureMiniPlayerAttached() {
+        if (_binding == null) return
+        val player = MiniPlayerController.getPlayer() ?: return
+        if (binding.miniPlayerView.player !== player) {
+            Log.d("HomeMobile", "ensureMiniPlayerAttached: attaching player to view")
+            binding.miniPlayerView.player = player
+        }
+        if (miniPlayerWired) return
+        miniPlayerWired = true
+        // Wire buttons une seule fois
+        binding.miniPlayerClose.setOnClickListener { MiniPlayerController.stop() }
+        binding.miniPlayerPause.setOnClickListener {
+            MiniPlayerController.togglePause()
+            updatePauseButton()
+        }
+        binding.miniPlayerFullscreen.setOnClickListener { navigateToFullPlayer() }
+        binding.miniPlayerView.setOnClickListener { navigateToFullPlayer() }
+        // Set interceptor if not set
+        if (MiniPlayerController.onIptvChannelClick == null) {
+            MiniPlayerController.onIptvChannelClick = { tvShow ->
+                if (tvShow.id == MiniPlayerController.currentChannelId) {
+                    MiniPlayerController.stopAsync()
+                    false
+                } else {
+                    MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
+                    true
+                }
+            }
+        }
     }
 
     private fun updatePauseButton() {

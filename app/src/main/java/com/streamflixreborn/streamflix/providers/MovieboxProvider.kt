@@ -999,7 +999,7 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
                 Log.w(TAG, "No TMDB match for '$normalizedTitle' (year=$backupYear) — skip Movix backup")
                 emptyList()
             } else when (videoType) {
-                is Video.Type.Movie -> MovixProvider.getServers("$tmdbId", videoType)
+                is Video.Type.Movie -> MovixProvider.getServersAsBackup("$tmdbId", videoType)
                 is Video.Type.Episode -> {
                     // 2026-05-05 v3 : MovixProvider lit `videoType.tvShow.id` pour
                     // tirer le tmdbId TV — mais ici on a un Episode venant de
@@ -1011,7 +1011,7 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
                     )
                     val movixEpisodeId = "$tmdbId-s${videoType.season.number}e${videoType.number}"
                     Log.d(TAG, "Movix backup Episode: tmdbId=$tmdbId s${videoType.season.number}e${videoType.number}")
-                    MovixProvider.getServers(movixEpisodeId, movixVideoType)
+                    MovixProvider.getServersAsBackup(movixEpisodeId, movixVideoType)
                 }
             }
         }.getOrElse {
@@ -1143,11 +1143,11 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
             launch {
                 try {
                     val movix = when (videoType) {
-                        is Video.Type.Movie -> MovixProvider.getServers("$resolvedTmdbId", videoType)
+                        is Video.Type.Movie -> MovixProvider.getServersAsBackup("$resolvedTmdbId", videoType)
                         is Video.Type.Episode -> {
                             val mvt = videoType.copy(tvShow = videoType.tvShow.copy(id = "$resolvedTmdbId"))
                             val meid = "$resolvedTmdbId-s${sNum}e${eNum}"
-                            MovixProvider.getServers(meid, mvt)
+                            MovixProvider.getServersAsBackup(meid, mvt)
                         }
                     }
                     if (movix.isNotEmpty()) send(movix)

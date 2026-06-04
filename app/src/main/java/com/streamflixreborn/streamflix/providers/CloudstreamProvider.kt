@@ -23,6 +23,8 @@ import com.streamflixreborn.streamflix.utils.TitleNormalizer
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
@@ -2005,31 +2007,137 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         id: String, videoType: Video.Type,
     ): Flow<List<Video.Server>> = channelFlow {
         val (tmdbId, se, ep) = parseCsIds(id, videoType)
+
+        // 2026-06-02 : port du pipeline Movix — dedup src + disambiguation #N +
+        //   skip all-dead-batches + sort par langue. Sans ça, le 1er emit
+        //   (souvent natif) peut contenir seulement "Chamber (Videasy VOSTFR)"
+        //   qui est dead → auto-play casse tout. Idem dedup cross-batch.
+        val seenSrc = HashSet<String>()
+        val nameCount = mutableMapOf<String, Int>()
+        val mutex = Mutex()
+        val deadExtractors = try {
+            com.streamflixreborn.streamflix.utils.ExtractorFailureTracker
+                .getFailures()
+                .filter { it.count >= 5 }
+                .map { it.name.lowercase() }
+                .toSet()
+        } catch (e: Exception) { emptySet() }
+
+        fun isDeadServer(srv: Video.Server): Boolean {
+            val srvNameLower = srv.name.lowercase()
+            val extractorName = com.streamflixreborn.streamflix.utils.ExtractorRanker
+                .resolveExtractorName(srv)?.lowercase()
+            return deadExtractors.any { dead ->
+                srvNameLower.contains(dead) || (extractorName != null && extractorName == dead)
+            }
+        }
+
+        suspend fun emitDeduped(batch: List<Video.Server>) {
+            val cleaned: List<Video.Server> = mutex.withLock {
+                batch.mapNotNull { srv: Video.Server ->
+                    val key = srv.src.trim()
+                    if (key.isNotBlank() && !seenSrc.add(key)) return@mapNotNull null
+                    val cnt = (nameCount[srv.name] ?: 0) + 1
+                    nameCount[srv.name] = cnt
+                    if (cnt > 1) srv.copy(name = "${srv.name} #$cnt") else srv
+                }
+            }
+            if (cleaned.isNotEmpty()) {
+                // Trier par langue (VF d'abord), puis pousser les dead en fin
+                val sorted = cleaned.sortedBy { srv: Video.Server ->
+                    val n = srv.name.uppercase()
+                    when {
+                        n.contains("VFF") || n.contains("TRUEFRENCH") -> 0
+                        n.contains("VF") && !n.contains("VOSTFR") -> 1
+                        n.contains("VOSTFR") || n.contains("VOST") -> 5
+                        n.contains("VO") -> 6
+                        else -> 3
+                    }
+                }
+                val alive = sorted.filter { !isDeadServer(it) }
+                val dead = sorted.filter { isDeadServer(it) }
+                if (alive.isEmpty()) {
+                    Log.d(TAG, "Skip emit : batch all-dead (${dead.size} serveurs) — attend backups")
+                } else {
+                    send(alive + dead)
+                }
+            }
+        }
+
         launch {
-            try { val n = fetchNativeCloudstreamServers(id, videoType); if (n.isNotEmpty()) send(n) }
+            try { val n = fetchNativeCloudstreamServers(id, videoType); if (n.isNotEmpty()) emitDeduped(n) }
             catch (e: Exception) { Log.w(TAG, "Progressive native failed: ${e.message}") }
         }
         launch {
-            try { val k = fetchNakiosBackup(tmdbId, videoType, se, ep); if (k.isNotEmpty()) send(k) }
+            try { val k = fetchNakiosBackup(tmdbId, videoType, se, ep); if (k.isNotEmpty()) emitDeduped(k) }
             catch (e: Exception) { Log.w(TAG, "Progressive Nakios failed: ${e.message}") }
         }
         launch {
-            // Progressif non bloquant → on relâche le plafond (15 s) pour ne pas
-            // jeter les sources Movix juste à la fin (Moiflix lent à ~8 s).
-            try { val m = fetchMovixBackupForCs(tmdbId, videoType, timeoutMs = 15_000L); if (m.isNotEmpty()) send(m) }
+            try { val m = fetchMovixBackupForCs(tmdbId, videoType, timeoutMs = 15_000L); if (m.isNotEmpty()) emitDeduped(m) }
             catch (e: Exception) { Log.w(TAG, "Progressive Movix failed: ${e.message}") }
         }
         // 2026-05-28 : scrape direct Wiflix + FrenchStream (HTTP simple, ~3s)
         if (tmdbId != null) {
             launch {
-                try { val wf = MovixProvider.fetchWiflixDirectBackup(tmdbId, videoType); if (wf.isNotEmpty()) send(wf) }
+                try { val wf = MovixProvider.fetchWiflixDirectBackup(tmdbId, videoType); if (wf.isNotEmpty()) emitDeduped(wf) }
                 catch (e: Exception) { Log.w(TAG, "Progressive Wiflix direct failed: ${e.message}") }
             }
             launch {
-                try { val fs = MovixProvider.fetchFrenchStreamDirectBackup(tmdbId, videoType); if (fs.isNotEmpty()) send(fs) }
+                try { val fs = MovixProvider.fetchFrenchStreamDirectBackup(tmdbId, videoType); if (fs.isNotEmpty()) emitDeduped(fs) }
                 catch (e: Exception) { Log.w(TAG, "Progressive FS direct failed: ${e.message}") }
             }
+            // 2026-06-03 (user "Comment ça se fait qu'il n'était pas dans la
+            //   liste Y avait que Movix") : Coflix manquait dans les backups
+            //   Cloudstream → films comme Aventures croisées 2026 qui sont sur
+            //   Coflix mais pas sur MovieBox+/Nakios/Movix → 0 source. On
+            //   résout title+year via TMDB puis on appelle CoflixSourceProvider.
+            launch {
+                try { val cf = fetchCoflixBackup(tmdbId, videoType, se, ep); if (cf.isNotEmpty()) emitDeduped(cf) }
+                catch (e: Exception) { Log.w(TAG, "Progressive Coflix failed: ${e.message}") }
+            }
         }
+    }
+
+    /** 2026-06-03 — Backup Coflix. Cloudstream est tmdbId-based ; Coflix est
+     *  titre/année-based. On résout via TMDB puis on appelle
+     *  CoflixSourceProvider.getMovie/EpisodeSources (qui ont eux-mêmes un
+     *  fallback titre original + traduction FR via TMDB). */
+    private suspend fun fetchCoflixBackup(
+        tmdbId: String?,
+        videoType: Video.Type,
+        se: Int?,
+        ep: Int?,
+    ): List<Video.Server> = runCatching {
+        val tmdbIdInt = tmdbId?.toIntOrNull() ?: return@runCatching emptyList()
+        when (videoType) {
+            is Video.Type.Movie -> {
+                val details = TMDb3.Movies.details(movieId = tmdbIdInt, language = "fr-FR")
+                val title = details.title.takeIf { it.isNotBlank() }
+                    ?: details.originalTitle?.takeIf { it.isNotBlank() }
+                    ?: return@runCatching emptyList()
+                val year = details.releaseDate?.take(4)?.toIntOrNull()
+                CoflixSourceProvider.getMovieSources(title, year, altTitle = details.originalTitle)
+            }
+            is Video.Type.Episode -> {
+                val sn = se ?: videoType.season.number
+                val en = ep ?: videoType.number
+                val details = TMDb3.TvSeries.details(seriesId = tmdbIdInt, language = "fr-FR")
+                val showTitle = details.name.takeIf { it.isNotBlank() }
+                    ?: details.originalName?.takeIf { it.isNotBlank() }
+                    ?: return@runCatching emptyList()
+                val year = details.firstAirDate?.take(4)?.toIntOrNull()
+                CoflixSourceProvider.getEpisodeSources(
+                    showTitle = showTitle,
+                    year = year,
+                    seasonNumber = sn,
+                    episodeNumber = en,
+                    altShowTitle = details.originalName,
+                )
+            }
+        }
+    }.getOrElse {
+        Log.w(TAG, "fetchCoflixBackup failed: ${it.message}")
+        emptyList()
     }
 
     /** Vrai si la réponse `/get` liste un dub `fr` dans `data.dubs[]`.
@@ -2352,6 +2460,15 @@ $url
         // (VidSonic hex, Voe decrypt, etc.). Sans ça, ExoPlayer reçoit la page
         // HTML embed au lieu du stream → crash immédiat → rouge à tort.
         if (server.id.startsWith("wiflix_direct__") || server.id.startsWith("fs_direct__")) {
+            return com.streamflixreborn.streamflix.extractors.Extractor.extract(server.src, server)
+        }
+        // 2026-06-03 (user "tous les serveurs ne fonctionnent pas comme la
+        //   dernière fois sur movix") : pareil pour les serveurs Coflix
+        //   (id = "coflix_N", source = embed hoster Lulustream/Voe/Minochinos/
+        //   etc.). Sans Extractor.extract, ExoPlayer recevait la page HTML
+        //   embed → UnrecognizedInputFormatException sur minochinos.com/embed/
+        //   xxx.html et lulustream.com/e/xxx (vus dans les logs).
+        if (server.id.startsWith("coflix_")) {
             return com.streamflixreborn.streamflix.extractors.Extractor.extract(server.src, server)
         }
         // MovieBox+ direct (MP4 1080p max). Master m3u8 multi-quality testé via

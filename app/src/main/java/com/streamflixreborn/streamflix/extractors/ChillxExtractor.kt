@@ -101,15 +101,9 @@ open class ChillxExtractor : Extractor() {
         }
     }
 
-    class JeanExtractor : ChillxExtractor() {
-        override val name = "Jean"
-        override val mainUrl = "https://player.jeansaispasplus.homes/"
-    }
-
-    class MoviesapiExtractor : ChillxExtractor() {
-        override val name = "Moviesapi"
-        override val mainUrl = "https://moviesapi.club/"
-    }
+    // 2026-06-01 : JeanExtractor (jeansaispasplus.homes) SUPPRIMÉ — NXDOMAIN
+    // 2026-06-01 : MoviesapiExtractor Chillx (moviesapi.club) SUPPRIMÉ — NXDOMAIN
+    //   Le standalone MoviesapiExtractor (moviesapi.to) reste actif.
 
 
     private interface Service {

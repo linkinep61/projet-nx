@@ -46,6 +46,13 @@ install_output.txt
 adb_devices.txt
 agent_status.txt
 trigger.txt
+debug_*.png
+release_2apk/
+
+# Certificats (jamais exposer une cle privee potentielle)
+*.p12
+*.pfx
+*.pem
 
 # Keystore (ne pas exposer)
 streamflix-release.jks

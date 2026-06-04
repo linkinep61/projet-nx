@@ -38,6 +38,14 @@ class SeasonTvFragment : Fragment() {
             args.seasonId,
             args.tvShowId,
             database,
+            // 2026-06-01 — métadonnées passées au ViewModel pour enrichir les
+            // shells TvShow/Season → EpisodeFavorites a un vrai title/numéro,
+            // évite les collisions et l'affichage vide dans le cœur global.
+            tvShowTitleArg = args.tvShowTitle,
+            tvShowPosterArg = args.tvShowPoster,
+            tvShowBannerArg = args.tvShowBanner,
+            seasonNumberArg = args.seasonNumber,
+            seasonTitleArg = args.seasonTitle,
         )
     }
 

@@ -803,16 +803,34 @@ object OlaTvProvider : Provider, IptvProvider {
 
     /** Player reports a successful playback — we promote the host so its other streams
      *  bubble up in the rotation across other channels. Also persists the working
-     *  stream info for this channel so the next app session starts with the best server. */
+     *  stream info for this channel so the next app session starts with the best server.
+     *  2026-06-03 : ajout cid + latencyMs pour alimenter LocalIptvChannelIndex
+     *  (index local persistant qui apprend les couples chaîne→CID au fil de l'usage). */
     @JvmStatic
-    fun reportWorkingStreamUrl(url: String, channelKey: String? = null) {
+    fun reportWorkingStreamUrl(
+        url: String,
+        channelKey: String? = null,
+        cid: String? = null,
+        latencyMs: Long? = null,
+    ) {
         if (url.isNotBlank()) {
             recordHostOk(url)
             probeOkCache.add(url)
-            // Persist the working URL for this channel
             if (!channelKey.isNullOrBlank()) {
                 workingChannelUrls[channelKey] = url
                 saveWorkingChannelUrls()
+                // Alimente l'index local : si on a le CID, on stocke la latence + URL.
+                if (!cid.isNullOrBlank()) {
+                    if (latencyMs != null && latencyMs > 0) {
+                        com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex
+                            .reportCidLatency(channelKey, cid, latencyMs)
+                    } else {
+                        com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex
+                            .reportCid(channelKey, cid)
+                    }
+                    com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex
+                        .reportStreamUrl(channelKey, cid, url)
+                }
             }
         }
     }
@@ -1060,9 +1078,51 @@ object OlaTvProvider : Provider, IptvProvider {
     }
 
     private fun markDomainDead(domain: String) {
-        if (domain.isNotBlank()) {
-            deadDomains[domain] = System.currentTimeMillis()
-            Log.d(TAG, "Domain blacklisted: $domain")
+        if (domain.isBlank()) return
+        deadDomains[domain] = System.currentTimeMillis()
+        Log.d(TAG, "Domain blacklisted: $domain")
+        // Fix 2026-06-01 (Fix B1) — purger immédiatement le pool + caches.
+        // Sans ça, les Server objects déjà émis au player pointent vers les
+        // URLs de ce host mort ; le watchdog rotate vers le serveur suivant
+        // qui retombe sur le même host → boucle de gel observée sur M6 avec
+        // main2.cwdn.cx après HTTP 456 (rate-limit MAC).
+        var purgedPool = 0
+        var purgedEmitted = 0
+        synchronized(registryLock) {
+            fullStreamPool.keys.toList().forEach { key ->
+                val pool = fullStreamPool[key] ?: return@forEach
+                val filtered = pool.filter { stream ->
+                    val raw = stream.url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
+                    val host = try { java.net.URI(raw).host ?: "" } catch (_: Exception) { "" }
+                    host != domain
+                }
+                if (filtered.size != pool.size) {
+                    purgedPool += pool.size - filtered.size
+                    fullStreamPool[key] = filtered
+                }
+                emittedStreamUrls[key]?.let { set ->
+                    val before = set.size
+                    set.removeAll { url ->
+                        val raw = url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
+                        val host = try { java.net.URI(raw).host ?: "" } catch (_: Exception) { "" }
+                        host == domain
+                    }
+                    purgedEmitted += before - set.size
+                }
+            }
+        }
+        // Purger aussi le cache de résolution — sinon une résolution mise en
+        // cache continuerait de retourner l'URL crâmée pendant RESOLVED_URL_TTL_MS.
+        val keysToDrop = resolvedUrlCache.entries.filter { (_, url) ->
+            val host = try { java.net.URI(url).host ?: "" } catch (_: Exception) { "" }
+            host == domain
+        }.map { it.key }
+        keysToDrop.forEach {
+            resolvedUrlCache.remove(it)
+            resolvedUrlTs.remove(it)
+        }
+        if (purgedPool > 0 || purgedEmitted > 0 || keysToDrop.isNotEmpty()) {
+            Log.d(TAG, "Pool/cache purged for $domain: pool=$purgedPool emitted=$purgedEmitted resolved=${keysToDrop.size}")
         }
     }
 
@@ -1657,6 +1717,8 @@ object OlaTvProvider : Provider, IptvProvider {
         if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return
         // Load persistent caches on first call
         if (workingChannelUrls.isEmpty()) loadWorkingChannelUrls()
+        // 2026-06-03 : load l'index local (CIDs + URLs + latences persistés)
+        com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex.loadLocalCache()
         if (deadDomains.isEmpty()) loadDeadDomains()
         registryMutex.withLock {
             if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return@withLock
@@ -2166,8 +2228,13 @@ object OlaTvProvider : Provider, IptvProvider {
                     name = "OLA TV - Last Working",
                 ))
             }
-
-            // Build a Video.Server for the first stream
+            // 2026-06-03 (user "On est censé avoir divers chaînes TF1 HD SD") :
+            //   ORDRE CORRECT pour le picker UI :
+            //     1. Primary natif (TF1 HEVC FRANCE, ce que l'user veut voir en 1er)
+            //     2. Fast-tracks cached (en SOUS-listing, max 30)
+            //   Les progressive natifs (HD, FHD, SD…) seront émis ensuite via le flow.
+            //   Avant : fast-tracks en tête → l'user voyait 80x "OLA TV - Cached (cid XXX)"
+            //   et devait scroller pour trouver les variantes natives "TF1 HD FRANCE".
             val first = streamsSnapshot.firstOrNull()
             if (first != null) {
                 Log.d(TAG, "  primary[0] cid=${first.cid} label='${first.label}' cmd=${first.url.take(80)}")
@@ -2176,6 +2243,43 @@ object OlaTvProvider : Provider, IptvProvider {
                     name = "OLA TV - ${first.label}",
                 ))
             }
+            // 2026-06-03 : index local persistant — injecte les URLs pré-résolues
+            //   APRÈS le primary natif. Cap UI = 30 (au-delà : pollue le picker).
+            val cachedFastTracks = com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex
+                .getCachedStreamUrls(key)
+            val FAST_TRACK_UI_CAP = 30
+            var ftAdded = 0
+            for ((cid, url) in cachedFastTracks) {
+                if (ftAdded >= FAST_TRACK_UI_CAP) break
+                if (url == fastTrackUrl) continue  // skip duplicate
+                Log.d(TAG, "  local-index fast-track cid=$cid: ${url.take(80)}")
+                initialServers.add(Video.Server(
+                    id = "ola_fasttrack::$key::$url",
+                    name = "OLA TV - Cached (cid $cid)",
+                ))
+                ftAdded++
+            }
+            if (cachedFastTracks.size > FAST_TRACK_UI_CAP) {
+                Log.d(TAG, "  local-index : ${cachedFastTracks.size - FAST_TRACK_UI_CAP} fast-tracks supplémentaires masqués du picker (cap UI=$FAST_TRACK_UI_CAP)")
+            }
+            // 2026-06-03 — CI MULTI-SOURCE : probe HEAD parallèle des fast-tracks
+            //   en BACKGROUND (n'impacte pas la lecture immédiate). Marque dead
+            //   les URLs qui ne répondent pas 200/206 → la prochaine visite de
+            //   cette chaîne aura les URLs morts déjà rétrogradés en bas.
+            //
+            // 2026-06-03 v2 (user "ça peut freiner le cast") : SKIP le probe si
+            //   une session Cast est active/en cours. 30 HEAD parallèles peuvent
+            //   saturer le pool OkHttp + bande passante pendant le handshake
+            //   Chromecast (mDNS + TLS 8009). Le probe re-tournera au prochain
+            //   clic chaîne sans session Cast (throttle 10 min toujours respecté).
+            try {
+                val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
+                if (com.streamflixreborn.streamflix.utils.CastHelper.isCastingOrPending(ctx)) {
+                    Log.d(TAG, "  local-index probe SKIPPED — Cast session active/pending (évite saturation réseau)")
+                } else {
+                    com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex.probeFastTracks(key)
+                }
+            } catch (_: Throwable) {}
 
             // Cancel any previous emit job (channel switch) and start a new one.
             currentEmitJob?.cancel()
@@ -2294,6 +2398,13 @@ object OlaTvProvider : Provider, IptvProvider {
             if (server.id.startsWith("ola_fasttrack::")) {
                 val ftParts = server.id.removePrefix("ola_fasttrack::").split("::", limit = 2)
                 val ftUrl = ftParts.getOrNull(1) ?: throw Exception("Bad fast-track id")
+                // Fix 2026-06-01 (Fix B2) — refus immédiat si host blacklisté.
+                // Sans ça, le watchdog reproposait sans cesse les fast-track créés
+                // avant le blacklist (boucle de gel M6).
+                val ftHost = try { java.net.URI(ftUrl).host ?: "" } catch (_: Exception) { "" }
+                if (ftHost.isNotBlank() && isDomainDead(ftHost)) {
+                    throw Exception("Fast-track host $ftHost is blacklisted — skipping")
+                }
                 Log.d(TAG, "getVideo fast-track → ${ftUrl.take(120)}")
                 return@withContext Video(ftUrl, headers = mapOf("User-Agent" to USER_AGENT))
             }
@@ -2329,6 +2440,15 @@ object OlaTvProvider : Provider, IptvProvider {
                     resolvedUrlTs["$cid::$cmd"] = System.currentTimeMillis()
                     resolved
                 }
+            }
+            // Fix 2026-06-01 (Fix B2) — refus immédiat si l'URL résolue pointe vers
+            // un host blacklisté. Le pool est déjà purgé par markDomainDead, mais
+            // les Server objects émis AVANT le blacklist (queue ExoPlayer) restent
+            // tentés par le watchdog → on les fait échouer rapide pour rotation
+            // immédiate vers un host vivant.
+            val streamHost = try { java.net.URI(streamUrl).host ?: "" } catch (_: Exception) { "" }
+            if (streamHost.isNotBlank() && isDomainDead(streamHost)) {
+                throw Exception("Stream host $streamHost is blacklisted — skipping")
             }
             // Soft HEAD probe — demotes streams that fail but does NOT block playback.
             // The player's buffering watchdog (10s) handles truly dead streams.
@@ -2396,6 +2516,20 @@ object OlaTvProvider : Provider, IptvProvider {
                 Log.w(TAG, "refreshServerUrl create_link failed: ${e.message}")
                 null
             } ?: return@withContext null
+            // Fix 2026-06-01 (Fix A) — validation anti-URL-tronquée.
+            // L'upstream OLA renvoie parfois une réponse partielle (vu sur
+            // M6 : "stream=&extension=t") quand son rate-limit MAC est atteint
+            // ou que le create_link a foiré silencieusement. Switcher sur une
+            // telle URL fige immédiatement la lecture pendant 10s avant que
+            // le watchdog kicke → cause directe du gel observé en prod.
+            // → on REFUSE et on garde le serveur courant.
+            val streamParamOk = newUrl.contains(Regex("[?&]stream=[^&]+"))
+            val extParamOk = !newUrl.contains(Regex("[?&]extension=[a-zA-Z]?(?:&|$)"))
+            if (!streamParamOk || !extParamOk) {
+                Log.w(TAG, "refreshServerUrl: URL incomplète refusée pour cid=$cid " +
+                    "(stream/extension tronqué): ${newUrl.take(120)}")
+                return@withContext null
+            }
             Log.d(TAG, "refreshServerUrl: cid=$cid → fresh token URL ${newUrl.take(80)}")
             // Note : on ne modifie PAS l'OlaStreamRef en mémoire — la cmd
             // canonique reste identique, c'est juste le token résolu qui change.

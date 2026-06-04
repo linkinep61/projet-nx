@@ -641,7 +641,7 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
                 } catch (_: Exception) { emptyList() }
             }
             val movixServersD = async {
-                try { MovixProvider.getServers(id, videoType) } catch (_: Exception) { emptyList() }
+                try { MovixProvider.getServersAsBackup(id, videoType) } catch (_: Exception) { emptyList() }
             }
             val papaServersD = async { tryPapaByTmdbId(id, videoType) }
             val movieboxServersD = async {
@@ -756,7 +756,7 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             try {
                 // Format Movix episode id : "<tmdbId>-s<S>e<E>"
                 val movixEpisodeId = "$tmdbId-s${parts[2]}e${parts[3]}"
-                MovixProvider.getServers(movixEpisodeId, videoType)
+                MovixProvider.getServersAsBackup(movixEpisodeId, videoType)
                     .also { Log.d(TAG, "+ Movix sources via TMDB id $tmdbId : ${it.size}") }
             } catch (e: Exception) {
                 Log.d(TAG, "Movix backup failed for $papaShowId: ${e.message}")

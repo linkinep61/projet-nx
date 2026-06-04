@@ -189,11 +189,13 @@ class TvShowViewHolder(
                         Toast.makeText(context, "${tvShow.title} — $msg", Toast.LENGTH_SHORT).show()
                     }
                 }
-                // Refresh home pour que les changements soient visibles
-                try {
-                    val current = UserPreferences.currentProvider
-                    if (current != null) UserPreferences.currentProvider = current
-                } catch (_: Throwable) { }
+                // Refresh home — seulement si PAS OTF (le reload OTF est lent)
+                if (!tvShow.id.startsWith("livehub::otf::")) {
+                    try {
+                        val current = UserPreferences.currentProvider
+                        if (current != null) UserPreferences.currentProvider = current
+                    } catch (_: Throwable) { }
+                }
             }
             .show()
         return true
@@ -273,6 +275,10 @@ class TvShowViewHolder(
         if (!isStalkerEpisode && interceptor != null && interceptor(tvShow)) {
             return // interceptor handled the click (playing in mini player)
         }
+        // 2026-05-31 : si l'interceptor est null (le provider courant n'est pas IPTV,
+        // donc le mini player n'a pas été initialisé) mais qu'on clique sur une chaîne
+        // IPTV (TV Hub, OLA, etc.), le flow tombe dans le fullscreen player ci-dessous.
+        // MiniPlayerController.resolveIptvProvider résout le bon provider depuis l'ID.
         // Interceptor returned false or not set OR isStalkerEpisode → navigate to full player
 
         // If mini player is active, flag transition so onPause doesn't release it.
@@ -441,6 +447,13 @@ class TvShowViewHolder(
             if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
                 showFavoriteLongPressDialog(context, tvShow.title, onRemove = {
                     cf.removeFavorite(tvShow.id, false)
+                }, onDownload = null)
+            // 2026-05-31 : retirer favori IPTV depuis l'onglet Favoris IPTV
+            } else if (cf is com.streamflixreborn.streamflix.fragments.iptv_favorites.IptvFavoritesMobileFragment) {
+                showFavoriteLongPressDialog(context, tvShow.title, onRemove = {
+                    val provName = tvShow.providerName ?: UserPreferences.currentProvider?.name ?: "TV Hub"
+                    com.streamflixreborn.streamflix.utils.IptvFavoritesStore.toggle(provName, tvShow.id)
+                    cf.loadFavorites()
                 }, onDownload = null)
             } else if (!handleIptvFavoriteLongPress()) {
                 ShowOptionsMobileDialog(context, tvShow).show()

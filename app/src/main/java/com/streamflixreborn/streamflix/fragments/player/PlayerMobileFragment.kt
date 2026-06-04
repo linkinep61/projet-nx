@@ -532,6 +532,55 @@ class PlayerMobileFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // 2026-06-03 (user "Miracast / AirPlay 2 → il faut qu'on ajoute ça") :
+        //   Le bouton Cast actuel ne détecte QUE les Chromecast. On étend le
+        //   MediaRouteSelector pour inclure aussi CATEGORY_LIVE_VIDEO et
+        //   CATEGORY_REMOTE_PLAYBACK → MediaRouter listera AUSSI les wireless
+        //   displays (Miracast) comme la LG webOS UP75006LF. Un seul bouton
+        //   qui montre Chromecast + Miracast dans le même picker.
+        view.post {
+            try {
+                // 2026-06-03 v3 (user "il trouve rien, autres users pareil") :
+                //   Hook le MediaRouteButton au Cast SDK pour que le picker liste
+                //   les Chromecast. Confirmé : sans ce call, picker vide.
+                val castBtn = binding.pvPlayer.findViewById<androidx.mediarouter.app.MediaRouteButton>(R.id.btn_exo_cast)
+                if (castBtn != null) {
+                    try {
+                        com.google.android.gms.cast.framework.CastButtonFactory
+                            .setUpMediaRouteButton(requireContext().applicationContext, castBtn)
+                        Log.d("PlayerMobile", "CastButtonFactory.setUpMediaRouteButton OK")
+                    } catch (e: Throwable) {
+                        Log.w("PlayerMobile", "CastButtonFactory failed: ${e.message}")
+                    }
+                }
+
+                // 2026-06-03 : bouton "Diffuser TV externe" → lance Settings
+                //   ACTION_CAST_SETTINGS Android natif qui détecte les Miracast
+                //   wireless displays (LG webOS, Samsung etc) que le Cast SDK
+                //   ne voit pas. Fallback : ouvrir wifi display settings.
+                val wirelessBtn = binding.pvPlayer.findViewById<android.widget.ImageView>(R.id.btn_exo_wireless)
+                wirelessBtn?.setOnClickListener {
+                    try {
+                        val intent = android.content.Intent("android.settings.CAST_SETTINGS")
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(intent)
+                    } catch (_: Throwable) {
+                        try {
+                            startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
+                        } catch (_: Throwable) {
+                            android.widget.Toast.makeText(
+                                requireContext(),
+                                "Impossible d'ouvrir les paramètres Cast",
+                                android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("PlayerMobile", "Failed to setup cast buttons: ${e.message}")
+            }
+        }
+
         // 2026-05-15 (user "vire cette foutue roulette pour Mon IPTV") : force
         // GONE de tout overlay loading dès l'init pour les contenus IPTV. Belt-
         // and-suspenders : showLoadingOverlay() est déjà no-op pour ces ids
@@ -745,8 +794,23 @@ class PlayerMobileFragment : Fragment() {
                                 viewModel.reloadServersAfterBypass()
                             }
 
-                            // Chaîne starts empty — clear old entries from previous channel
-                            PlayerSettingsView.Settings.ChannelVariant.list.clear()
+                            // 2026-06-03 v2 (user "Elles disparaissent") : ne CLEAR que sur
+                            //   changement de chaîne. Avant : clear inconditionnel à chaque
+                            //   émission SuccessLoadingServers wipait les variantes ajoutées
+                            //   via additionalServer. channelKey format peut être "tf1" ou
+                            //   "ola::tf1" → normaliser les 2 côtés.
+                            fun normKey(k: String): String =
+                                k.removePrefix("ola_ep::").removePrefix("ola::").removePrefix("vegeta_ep::").removePrefix("vegeta::")
+                            val curList = PlayerSettingsView.Settings.ChannelVariant.list
+                            val curKeyNorm = normKey(args.id)
+                            val needsClear = curList.isNotEmpty() &&
+                                curList.any { it.channelKey.isNotEmpty() && normKey(it.channelKey) != curKeyNorm }
+                            if (needsClear || (curList.isNotEmpty() && curKeyNorm.isEmpty())) {
+                                Log.d("PlayerMobileFragment", "ChannelVariant.list CLEAR (channel change: ${curList.firstOrNull()?.channelKey} → ${args.id})")
+                                curList.clear()
+                            } else {
+                                Log.d("PlayerMobileFragment", "ChannelVariant.list NOT cleared (same channel '$curKeyNorm', ${curList.size} entries kept)")
+                            }
                             binding.settings.refreshChannelVariantList()
 
                             // 2026-05-08 : continuité mini→fullscreen + favoris multi.
@@ -1056,7 +1120,7 @@ class PlayerMobileFragment : Fragment() {
                             MediaServer(id = it.id, name = it.name)
                         })
                         .build()
-                    PlayerSettingsView.Settings.Server.list.add(
+                    PlayerSettingsView.Settings.Server.addUnique(
                         PlayerSettingsView.Settings.Server(id = server.id, name = server.name)
                     )
                     scheduleServerRefresh()
@@ -1088,7 +1152,7 @@ class PlayerMobileFragment : Fragment() {
                 val prevSelectedId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isSelected }?.id
                 val prevLoadingId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isLoading }?.id
                 PlayerSettingsView.Settings.Server.list.clear()
-                PlayerSettingsView.Settings.Server.list.addAll(nonOla.map {
+                PlayerSettingsView.Settings.Server.addAllUnique(nonOla.map {
                     PlayerSettingsView.Settings.Server(id = it.id, name = it.name).apply {
                         isSelected = (it.id == prevSelectedId)
                         isLoading = (it.id == prevLoadingId)
@@ -1256,6 +1320,14 @@ class PlayerMobileFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
         hideWebViewOverlay()
+
+        // 2026-06-02 : clear le picker quand on quitte le player. Sinon
+        //   les serveurs du film précédent restent dans Settings.Server.list
+        //   (singleton companion object) et pollue le suivant.
+        try {
+            com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsView
+                .Settings.Server.list.clear()
+        } catch (_: Exception) { }
 
         // Cleanup Handler leaks
         if (::progressHandler.isInitialized && ::progressRunnable.isInitialized) {
@@ -2439,6 +2511,30 @@ class PlayerMobileFragment : Fragment() {
 
     private fun displayVideo(video: Video, server: Video.Server) {
         currentVideo = video
+        // 2026-06-03 (user "ça déclenche pas la Chromecast") : pre-set la pending
+        //   video dans CastHelper dès qu'on commence à jouer une vidéo. Si l'user
+        //   clique le bouton Cast et sélectionne la Chromecast → le listener
+        //   enverra automatiquement cette URL. Sans ce hook : Cast sélectionné =
+        //   session ouverte mais aucune vidéo envoyée.
+        try {
+            val title = args.title ?: server.name
+            val poster: String? = null  // args.poster n'existe pas, on laisse vide
+            val contentType = when {
+                video.source.contains(".m3u8", true) -> "application/x-mpegURL"
+                video.source.contains(".mpd", true) -> "application/dash+xml"
+                video.source.contains(".mp4", true) -> "video/mp4"
+                else -> "application/x-mpegURL"
+            }
+            com.streamflixreborn.streamflix.utils.CastHelper.castVideo(
+                requireContext().applicationContext,
+                video.source,
+                title,
+                poster,
+                contentType,
+            )
+        } catch (e: Throwable) {
+            Log.w("PlayerMobile", "CastHelper pre-set failed: ${e.message}")
+        }
         // 2026-05-21 : statut serveurs PAR TITRE (couleurs picker liées à ce contenu).
         com.streamflixreborn.streamflix.utils.TitleServerStatus.setCurrentTitle(args.id)
         // Reset IPTV stickiness when switching to a different server (manual or auto).

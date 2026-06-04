@@ -9,8 +9,9 @@ import retrofit2.http.Url
 class VtubeExtractor : Extractor() {
 
     override val name = "Vtube"
+    // 2026-06-02 : vtube.to redirige vers vtube.network → ajout en alias.
     override val mainUrl = "https://vtbe.to"
-    override val aliasUrls = listOf("https://vtube.to")
+    override val aliasUrls = listOf("https://vtube.to", "https://vtube.network")
 
     override suspend fun extract(link: String): Video {
         val service = Extractor.createJsoupService<Service>(mainUrl)
