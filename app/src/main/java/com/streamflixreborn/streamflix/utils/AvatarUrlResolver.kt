@@ -59,21 +59,42 @@ object AvatarUrlResolver {
      * (ou l'URL d'origine si pas de résolution nécessaire / échec).
      */
     fun resolveAsync(url: String, onResolved: (resolved: String) -> Unit) {
-        if (!needsResolution(url)) {
-            onResolved(url)
+        // 2026-06-05 : si l'URL est directe (media.tenor.com/...AAAAd|AAAAC|AAAAi/...)
+        //   on applique le patch suffixe deprecie avant de retourner. Couvre les
+        //   URLs collees direct par l'user, sans og:image necessaire.
+        val patched = patchTenorDeadSuffixes(url)
+        if (!needsResolution(patched)) {
+            onResolved(patched)
             return
         }
         GlobalScope.launch(Dispatchers.IO) {
             val resolved = try {
-                resolveBlocking(url) ?: url  // fallback URL d'origine si échec
+                resolveBlocking(patched) ?: patched
             } catch (e: Exception) {
-                Log.w(TAG, "resolveAsync failed for $url: ${e.message}")
-                url
+                Log.w(TAG, "resolveAsync failed for $patched: ${e.message}")
+                patched
             }
             withContext(Dispatchers.Main) {
-                onResolved(resolved)
+                onResolved(patchTenorDeadSuffixes(resolved))
             }
         }
+    }
+
+    /** Patch URLs Tenor dont le suffixe est deprecie (renvoie 404 sur les
+     *  GIFs recents). On force AAAAd|AAAAC vers AAAAM (Medium GIF, leger ~400KB
+     *  et stable). AAAAi laisse tel quel : sur les GIFs qui le servent encore
+     *  il preserve la transparence (ex Deadpool). */
+    private fun patchTenorDeadSuffixes(url: String): String {
+        if (!url.contains("tenor.com")) return url
+        val deadPattern = Regex("""https?://media\d*\.tenor\.com/(?:m/)?([A-Za-z0-9_-]+?)(AAAAd|AAAAC)(/[^?#]+)""")
+        deadPattern.find(url)?.let { m ->
+            val baseId = m.groupValues[1]
+            val suffix = m.groupValues[3]
+            val patched = "https://media.tenor.com/${baseId}AAAAM${suffix}"
+            Log.d(TAG, "Tenor patch dead suffix: $url -> $patched")
+            return patched
+        }
+        return url
     }
 
     /**
@@ -148,17 +169,10 @@ object AvatarUrlResolver {
      *   suffixe "AAAAC" → "AAAAi". Si l'URL ne match pas le pattern, retourne tel quel.
      */
     private fun upgradeTenorToFullQuality(imageUrl: String): String {
-        if (!imageUrl.contains("tenor.com")) return imageUrl
-        // Pattern : media1.tenor.com/m/<id>AAAAC/name.gif → media.tenor.com/<id>AAAAi/name.gif
-        val tenorPattern = Regex("""https?://media\d*\.tenor\.com/m/([^/]+?)AAAAC/(.+)""")
-        tenorPattern.find(imageUrl)?.let { match ->
-            val baseId = match.groupValues[1]
-            val filename = match.groupValues[2]
-            val upgraded = "https://media.tenor.com/${baseId}AAAAi/${filename}"
-            Log.d(TAG, "Tenor upgrade: $imageUrl → $upgraded")
-            return upgraded
-        }
-        return imageUrl
+        // 2026-06-05 : AAAAi (Full HD) est 404 sur la majorite des GIFs Tenor
+        //   recents. On delegue la transformation au patchTenorDeadSuffixes qui
+        //   force vers AAAAM (Medium GIF, leger et stable, marche partout).
+        return patchTenorDeadSuffixes(imageUrl)
     }
 
     /**

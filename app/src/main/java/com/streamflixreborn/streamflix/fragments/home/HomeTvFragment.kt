@@ -242,7 +242,15 @@ class HomeTvFragment : Fragment() {
         // Re-set interceptor if cleared
         if (MiniPlayerController.onIptvChannelClick == null) {
             MiniPlayerController.onIptvChannelClick = { tvShow ->
-                if (tvShow.id == MiniPlayerController.currentChannelId) {
+                // 2026-06-04 (user "le mini Player est toujours activé quand
+                //   on clique sur otf TV") : OTF bypass mini player → fullscreen
+                //   direct = OtfPlayerTvActivity.
+                if (tvShow.id.startsWith("livehub::otf::")) {
+                    Log.d("HomeTv", "OTF: bypass mini player (onResume) → fullscreen direct (${tvShow.title})")
+                    MiniPlayerController.stopAsync()
+                    try { binding.miniPlayerContainer.visibility = View.GONE } catch (_: Exception) {}
+                    false
+                } else if (tvShow.id == MiniPlayerController.currentChannelId) {
                     if (MiniPlayerController.isPlaying()) {
                         Log.d("HomeTv", "Same channel clicked (READY), flagging for transfer (onResume): ${tvShow.title}")
                         MiniPlayerController.transitioningToFullscreen = true
@@ -327,7 +335,15 @@ class HomeTvFragment : Fragment() {
         binding.miniPlayerView.setOnClickListener { navigateToFullPlayer() }
 
         MiniPlayerController.onIptvChannelClick = { tvShow ->
-            if (tvShow.id == MiniPlayerController.currentChannelId) {
+            // 2026-06-04 (user "le mini Player est toujours activé quand on
+            //   clique sur otf TV") : OTF bypass mini player → fullscreen
+            //   direct = OtfPlayerTvActivity.
+            if (tvShow.id.startsWith("livehub::otf::")) {
+                Log.d("HomeTv", "OTF: bypass mini player → fullscreen direct (${tvShow.title})")
+                MiniPlayerController.stopAsync()
+                try { binding.miniPlayerContainer.visibility = View.GONE } catch (_: Exception) {}
+                false
+            } else if (tvShow.id == MiniPlayerController.currentChannelId) {
                 // 2026-05-31 : ne transférer que si le mini player est READY.
                 // Si encore en chargement, stopAsync et laisser le fullscreen
                 // charger depuis zéro (évite le stuck "plus charger").

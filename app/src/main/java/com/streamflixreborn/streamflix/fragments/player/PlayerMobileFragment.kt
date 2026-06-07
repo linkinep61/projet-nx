@@ -532,6 +532,37 @@ class PlayerMobileFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // 2026-06-04 (user "garde le pattern OTF comme l'application originelle
+        //   jusqu'à l'ExoPlayer de la vidéo") : pour les flux OTF on bascule
+        //   immédiatement vers OtfPlayerActivity qui utilise ExoPlayer 2.19.1
+        //   (laxiste discontinuities) au lieu de Media3 1.8.0 (strict, crash).
+        if (args.id.startsWith("livehub::otf::")) {
+            viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                val key = args.id.removePrefix("livehub::otf::").substringBefore("::")
+                val urls = try {
+                    com.streamflixreborn.streamflix.utils.OtfTvService.getUrlsForChannel(key)
+                } catch (_: Exception) { emptyList() }
+                val url = urls.firstOrNull()
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    if (url != null && context != null) {
+                        Log.d("PlayerMobileFragment", "OTF stream → redirect to OtfPlayerActivity (ExoPlayer 2.19.1)")
+                        val intent = android.content.Intent(
+                            requireContext(),
+                            com.streamflixreborn.streamflix.activities.player.OtfPlayerActivity::class.java,
+                        ).apply {
+                            putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerActivity.EXTRA_URL, url)
+                            putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerActivity.EXTRA_TITLE, args.title)
+                        }
+                        startActivity(intent)
+                        findNavController().popBackStack()
+                    } else {
+                        Log.w("PlayerMobileFragment", "OTF: pas d'URL pour key=$key, fallback Media3")
+                    }
+                }
+            }
+            return
+        }
+
         // 2026-06-03 (user "Miracast / AirPlay 2 → il faut qu'on ajoute ça") :
         //   Le bouton Cast actuel ne détecte QUE les Chromecast. On étend le
         //   MediaRouteSelector pour inclure aussi CATEGORY_LIVE_VIDEO et
@@ -889,6 +920,12 @@ class PlayerMobileFragment : Fragment() {
                     }
 
                     is PlayerViewModel.State.FailedLoadingServers -> {
+                        // 2026-06-06 : auto-skip anime — si on est sur un épisode
+                        // d'un provider anime et que le provider ne renvoie AUCUN
+                        // serveur, on tente l'épisode suivant plutôt que de fermer.
+                        if (tryAutoSkipBrokenAnimeEpisode()) {
+                            return@collect
+                        }
                         Toast.makeText(
                             requireContext(),
                             state.error.message ?: "",
@@ -917,6 +954,11 @@ class PlayerMobileFragment : Fragment() {
                     is PlayerViewModel.State.SuccessLoadingVideo -> {
                         // Channel works — unmark as failed if it was, cancel any pending wait
                         UserPreferences.unmarkChannelFailed(args.id)
+                        // 2026-06-06 : un épisode a chargé OK → reset le compteur de
+                        // sauts consécutifs de l'auto-skip anime (sinon un user qui
+                        // a "consommé" 4 sauts d'affilée hier resterait à 4 pour
+                        // toujours).
+                        com.streamflixreborn.streamflix.utils.AnimeAutoSkipState.onSuccess()
                         cancelAwaitMoreServers()
                         cancelPatienceMessages()
                         // Cache l'overlay de chargement — on a un Video prêt,
@@ -983,6 +1025,12 @@ class PlayerMobileFragment : Fragment() {
                                 }
                                 startAwaitMoreServers()
                             } else {
+                                // 2026-06-06 : auto-skip anime (dernier recours) — si
+                                // épisode anime et tous les serveurs sont morts, on
+                                // saute à l'épisode suivant au lieu de fermer le player.
+                                if (tryAutoSkipBrokenAnimeEpisode()) {
+                                    return@collect
+                                }
                                 val providerName = provider?.name ?: ""
                                 val isTmdb = providerName.contains("TMDb", ignoreCase = true)
 
@@ -2417,6 +2465,41 @@ class PlayerMobileFragment : Fragment() {
         }
     }
 
+    /**
+     * 2026-06-06 (user) : « si aucun épisode n'est fonctionnel pour les
+     * providers animés, passe automatiquement à l'épisode suivant — sinon
+     * l'app retourne en plein écran et il ne se passe plus rien ». Dernier
+     * recours UX pour la lecture en kids/anime, déclenché UNIQUEMENT quand :
+     *  - on regarde un épisode (pas un film),
+     *  - le provider courant est dans ProviderGroup.ANIME,
+     *  - le compteur AnimeAutoSkipState autorise encore un saut
+     *    (plafond = 5 sauts consécutifs, anti-boucle infinie si toute la
+     *    saison est cassée).
+     *
+     * Renvoie `true` si l'auto-skip a été déclenché → le caller doit alors
+     * NE PAS appeler navigateUp(). Renvoie `false` sinon → caller garde son
+     * comportement standard (Toast + navigateUp).
+     */
+    private fun tryAutoSkipBrokenAnimeEpisode(): Boolean {
+        if (args.videoType !is Video.Type.Episode) return false
+        val provider = UserPreferences.currentProvider ?: return false
+        if (com.streamflixreborn.streamflix.providers.Provider.getGroup(provider)
+            != com.streamflixreborn.streamflix.providers.Provider.Companion.ProviderGroup.ANIME) {
+            return false
+        }
+        if (!com.streamflixreborn.streamflix.utils.AnimeAutoSkipState.tryConsumeSkip()) {
+            Log.w("PlayerMobileFragment", "Anime auto-skip plafond atteint (5 sauts) — arrêt")
+            return false
+        }
+        Toast.makeText(
+            requireContext(),
+            "Épisode indisponible — passage au suivant",
+            Toast.LENGTH_SHORT
+        ).show()
+        playNextEpisodeAcrossSeasons(autoplay = false)
+        return true
+    }
+
     private fun decodeBase64Uri(uri: String): String? {
         return try {
             val parts = uri.split(",")
@@ -2703,11 +2786,15 @@ class PlayerMobileFragment : Fragment() {
                     .setMediaServerId(server.id)
                     .build()
             )
-        if (isLiveIptvChannel) {
+        val isOtfBypass = args.id.startsWith("livehub::otf::") ||
+            (currentServer?.id?.startsWith("livehub::otf::") == true)
+        if (isLiveIptvChannel && !isOtfBypass) {
             // 2026-05-20 (parité PlayerTvFragment) : aligné sur TV — cible 45s
             //   derrière live edge (cushion plus large), et surtout JAMAIS de
             //   speedup (max 1.0 au lieu de 1.03). Le 1.03× faisait rattraper le
             //   live edge → vidait le buffer → coupures. min 20s / max 120s.
+            // 2026-06-04 : OTF bypass — OTF TV V3.2 n'a pas de LiveConfiguration
+            //   custom, le flux est traité comme du contenu standard. Reproduire.
             mediaItemBuilder.setLiveConfiguration(
                 MediaItem.LiveConfiguration.Builder()
                     .setTargetOffsetMs(45_000L)
@@ -3139,6 +3226,19 @@ class PlayerMobileFragment : Fragment() {
                 // playlist qui a de nouveaux segments). Surtout PAS displayVideo()
                 // qui recrée le MediaItem (= reset complet = coupe le rendu).
                 // STATE_IDLE = blip réseau transient (même traitement).
+                // 2026-06-05 (user "série enfants 5min ne switch pas vers
+                //   l'épisode suivant") : sur les vidéos courtes, ExoPlayer
+                //   peut sauter le isPlaying=false et passer direct STATE_ENDED.
+                //   Le handler autoplay dans onIsPlayingChanged ne se déclenche
+                //   pas alors. On déclenche aussi sur STATE_ENDED pour VOD.
+                if (!isLiveIptvStream && playbackState == Player.STATE_ENDED
+                    && args.videoType is Video.Type.Episode
+                    && UserPreferences.autoplay
+                ) {
+                    Log.d("PlayerMobileFragment", "STATE_ENDED VOD episode → autoplay next")
+                    playNextEpisodeAcrossSeasons(autoplay = true)
+                }
+
                 if (isLiveIptvStream && (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE)) {
                     if (playbackState == Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
                     if (preemptiveReloadInFlight) return
@@ -4243,7 +4343,17 @@ class PlayerMobileFragment : Fragment() {
         // Per user request: precharge as much as possible so the live stream
         // never cuts. Bigger buffer windows + longer rebuffer threshold.
         // 2026-05-09 v11 : recovery ULTRA RAPIDE après cut (1s).
-        val loadControl = if (isLiveIptv) {
+        // 2026-06-04 (capture APK OTF TV V3.2 décompilé) : OTF utilise les
+        //   constructeurs PAR DÉFAUT — aucun setBufferDurationsMs, aucun
+        //   setEnableDecoderFallback, aucun setExtensionRendererMode dans
+        //   l'APK officiel. Donc pour reproduire EXACTEMENT son comportement
+        //   on utilise DefaultLoadControl() sans config + DefaultRenderersFactory
+        //   sans setter (plus bas).
+        val isOtfForLoadCtrl = args.id.startsWith("livehub::otf::") ||
+            (currentServer?.id?.startsWith("livehub::otf::") == true)
+        val loadControl = if (isOtfForLoadCtrl) {
+            DefaultLoadControl()  // Strictement comme OTF TV V3.2 : aucun setter
+        } else if (isLiveIptv) {
             // 2026-05-20 (parité PlayerTvFragment) : aligné sur les valeurs TV
             //   tunées — min 30→60s (plus d'avance, moins de cuts), start 10→1s
             //   (démarrage 10× plus rapide), rebuffer 1000→500ms (reprise 2× plus

@@ -1149,22 +1149,45 @@ object VavooProvider : Provider, IptvProvider {
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> = try {
         val vavooId = id.removePrefix("vavoo::")
         ensureRegistry()
-        val ch = synchronized(registryLock) {
-            channelRegistry.find { it.id == vavooId }
-        }
+        val all = synchronized(registryLock) { channelRegistry.toList() }
+        val ch = all.find { it.id == vavooId }
 
         if (ch != null) {
-            // Resolve on-demand — plusieurs edges distincts pour fallback anti-freeze
-            val urls = resolveStreamUrlsMulti(ch, 3)
-            if (urls.isEmpty()) {
-                // fallback comportement d'origine (1 résolution séquentielle)
+            // 2026-06-05 (user "Canal+ Sport 360 E parle russe, H bon contenu —
+            //   il faut afficher tous les doublons sur tous les providers IPTV") :
+            //   Le picker Serveurs liste maintenant TOUTES les variantes ayant le
+            //   meme canonicalKey (E / H / D / FHD / Backup / etc.). L'user peut
+            //   switcher dans le player pour trouver la bonne version.
+            val variants = all.filter { it.canonicalKey == ch.canonicalKey }
+                .sortedWith(compareBy({ it.id != ch.id }, { it.name }))
+            //  ↑ La variante demandee en 1er (pour auto-play), puis autres tries.
+
+            val servers = mutableListOf<Video.Server>()
+
+            // Variante demandee : resolue tout de suite (multi-edges fallback).
+            val mainUrls = resolveStreamUrlsMulti(ch, 3)
+            val mainLabel = "Vavoo ${ch.name.trim()}"
+            if (mainUrls.isEmpty()) {
                 val streamUrl = withContext(Dispatchers.IO) { resolveStreamUrl(ch) }
-                listOf(Video.Server("m3u8::$streamUrl", "Vavoo"))
+                servers.add(Video.Server("m3u8::$streamUrl", mainLabel))
             } else {
-                urls.mapIndexed { i, u ->
-                    Video.Server("m3u8::$u", if (urls.size > 1) "Vavoo ${i + 1}" else "Vavoo")
+                mainUrls.forEachIndexed { i, u ->
+                    val suffix = if (mainUrls.size > 1) " #${i + 1}" else ""
+                    servers.add(Video.Server("m3u8::$u", "$mainLabel$suffix"))
                 }
             }
+
+            // Autres variantes : lazy (resolues a la demande quand l'user clique).
+            //   Evite de bloquer le picker 5-15 sec pour resoudre toutes les
+            //   variantes a l'avance — l'user clique souvent juste 1 ou 2.
+            for (variant in variants) {
+                if (variant.id == ch.id) continue
+                servers.add(Video.Server(
+                    "lazy::vavoo::${variant.id}",
+                    "Vavoo ${variant.name.trim()}",
+                ))
+            }
+            servers
         } else {
             Log.w(TAG, "Channel not found: $vavooId")
             emptyList()
@@ -1176,14 +1199,28 @@ object VavooProvider : Provider, IptvProvider {
 
     override suspend fun getVideo(server: Video.Server): Video {
         val url = server.id
-        if (url.startsWith("m3u8::")) {
-            val m3u8 = url.removePrefix("m3u8::")
-            return Video(
-                source = m3u8,
-                headers = mapOf("User-Agent" to VAVOO_UA)
-            )
+        when {
+            url.startsWith("m3u8::") -> {
+                val m3u8 = url.removePrefix("m3u8::")
+                return Video(
+                    source = m3u8,
+                    headers = mapOf("User-Agent" to VAVOO_UA)
+                )
+            }
+            url.startsWith("lazy::vavoo::") -> {
+                // Resolution a la demande d'une variante doublon.
+                val vavooId = url.removePrefix("lazy::vavoo::")
+                val ch = synchronized(registryLock) {
+                    channelRegistry.find { it.id == vavooId }
+                } ?: throw Exception("Channel not found: $vavooId")
+                val streamUrl = withContext(Dispatchers.IO) { resolveStreamUrl(ch) }
+                return Video(
+                    source = streamUrl,
+                    headers = mapOf("User-Agent" to VAVOO_UA)
+                )
+            }
+            else -> throw Exception("Unknown server format: $url")
         }
-        throw Exception("Unknown server format: $url")
     }
 
     // ═══════════════════════════════════════════

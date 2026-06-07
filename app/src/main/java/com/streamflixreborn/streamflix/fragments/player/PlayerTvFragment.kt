@@ -668,6 +668,37 @@ class PlayerTvFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // 2026-06-04 (user "faut faire la même chose pour la version TV mais
+        //   que pour OTF bien sûr") : pour les flux OTF on bascule vers
+        //   OtfPlayerTvActivity qui utilise ExoPlayer 2.19.1 (laxiste discon-
+        //   tinuities) au lieu de Media3 1.8.0 (strict, crash).
+        if (args.id.startsWith("livehub::otf::")) {
+            viewLifecycleOwner.lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                val key = args.id.removePrefix("livehub::otf::").substringBefore("::")
+                val urls = try {
+                    com.streamflixreborn.streamflix.utils.OtfTvService.getUrlsForChannel(key)
+                } catch (_: Exception) { emptyList() }
+                val url = urls.firstOrNull()
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    if (url != null && context != null) {
+                        Log.d("PlayerTvFragment", "OTF stream → redirect to OtfPlayerTvActivity (ExoPlayer 2.19.1)")
+                        val intent = android.content.Intent(
+                            requireContext(),
+                            com.streamflixreborn.streamflix.activities.player.OtfPlayerTvActivity::class.java,
+                        ).apply {
+                            putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerTvActivity.EXTRA_URL, url)
+                            putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerTvActivity.EXTRA_TITLE, args.title)
+                        }
+                        startActivity(intent)
+                        findNavController().popBackStack()
+                    } else {
+                        Log.w("PlayerTvFragment", "OTF: pas d'URL pour key=$key, fallback Media3")
+                    }
+                }
+            }
+            return
+        }
+
         // 2026-05-15 (user "vire cette foutue roulette pour Mon IPTV") : force
         // GONE de tout overlay loading dès l'init pour les contenus IPTV.
         if (isIptvChannelContext()) {
@@ -1106,6 +1137,11 @@ class PlayerTvFragment : Fragment() {
 
                     }
                         is PlayerViewModel.State.FailedLoadingServers -> {
+                            // 2026-06-06 : auto-skip anime — si épisode anime et
+                            // aucun serveur, on saute au suivant au lieu de fermer.
+                            if (tryAutoSkipBrokenAnimeEpisode()) {
+                                return@collect
+                            }
                             Toast.makeText(
                                 requireContext(),
                                 state.error.message ?: "",
@@ -1132,6 +1168,9 @@ class PlayerTvFragment : Fragment() {
                         is PlayerViewModel.State.SuccessLoadingVideo -> {
                             // Channel works — unmark as failed if it was, cancel any pending wait
                             UserPreferences.unmarkChannelFailed(args.id)
+                            // 2026-06-06 : reset compteur auto-skip anime (cf
+                            // PlayerMobileFragment pour le pourquoi).
+                            com.streamflixreborn.streamflix.utils.AnimeAutoSkipState.onSuccess()
                             cancelAwaitMoreServers()
                             // 2026-05-10 : reset flag anti-rentrance car nouveau serveur OK
                             vodAutoSwitchInFlight = false
@@ -1210,6 +1249,10 @@ class PlayerTvFragment : Fragment() {
                                     }
                                     startAwaitMoreServers()
                                 } else {
+                                    // 2026-06-06 : auto-skip anime (dernier recours).
+                                    if (tryAutoSkipBrokenAnimeEpisode()) {
+                                        return@collect
+                                    }
                                     val providerName = provider?.name ?: ""
                                     val isTmdb = providerName.contains("TMDb", ignoreCase = true)
 
@@ -1712,6 +1755,31 @@ class PlayerTvFragment : Fragment() {
 
             viewModel.playNextEpisode()
         }
+    }
+
+    /**
+     * 2026-06-06 (user) : auto-skip anime — voir le commentaire du même nom
+     * dans PlayerMobileFragment. Renvoie `true` si l'auto-skip a été déclenché
+     * (le caller doit alors NE PAS appeler navigateUp), `false` sinon.
+     */
+    private fun tryAutoSkipBrokenAnimeEpisode(): Boolean {
+        if (args.videoType !is Video.Type.Episode) return false
+        val provider = UserPreferences.currentProvider ?: return false
+        if (com.streamflixreborn.streamflix.providers.Provider.getGroup(provider)
+            != com.streamflixreborn.streamflix.providers.Provider.Companion.ProviderGroup.ANIME) {
+            return false
+        }
+        if (!com.streamflixreborn.streamflix.utils.AnimeAutoSkipState.tryConsumeSkip()) {
+            Log.w("PlayerTvFragment", "Anime auto-skip plafond atteint (5 sauts) — arrêt")
+            return false
+        }
+        Toast.makeText(
+            requireContext(),
+            "Épisode indisponible — passage au suivant",
+            Toast.LENGTH_SHORT
+        ).show()
+        playNextEpisodeAcrossSeasons(autoplay = false)
+        return true
     }
 
 
@@ -3288,6 +3356,20 @@ class PlayerTvFragment : Fragment() {
                     //
                     //   Fix : on REMET le MediaItem from scratch. ExoPlayer ré-ouvre
                     //   une connexion HTTP fraîche au CDN Xtream → vrai contenu live.
+                    // 2026-06-05 (user "série enfants 5min ne switch pas
+                    //   automatiquement vers l'épisode suivant") : sur les
+                    //   vidéos courtes, ExoPlayer peut sauter le isPlaying=false
+                    //   et passer direct à STATE_ENDED. Le handler autoplay
+                    //   dans onIsPlayingChanged ne se déclenche pas alors.
+                    //   On déclenche aussi sur STATE_ENDED pour les VOD Episode.
+                    if (!isLiveIptvStream && playbackState == Player.STATE_ENDED
+                        && args.videoType is Video.Type.Episode
+                        && UserPreferences.autoplay
+                    ) {
+                        Log.d("PlayerTvFragment", "STATE_ENDED VOD episode → autoplay next")
+                        playNextEpisodeAcrossSeasons(autoplay = true)
+                    }
+
                     if (isLiveIptvStream && (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE)) {
                         if (playbackState == Player.STATE_IDLE && !iptvCurrentStreamHasWorked) return
                         if (preemptiveReloadInFlight) return
@@ -4967,6 +5049,21 @@ class PlayerTvFragment : Fragment() {
         binding.pvPlayer.hideController()
         binding.pvPlayer.controllerAutoShow = false
         updateNextEpisodeOverlayFocusBindings(true)
+        // 2026-06-04 : pose les callbacks Activity-level pour que OK aille
+        //   sur « Lire maintenant » même si exoSettings garde le focus visuel.
+        com.streamflixreborn.streamflix.utils.NextEpisodeOverlayState.onConfirm = {
+            if (_binding != null && binding.layoutNextEpisodeOverlay.isVisible) {
+                try { binding.pvPlayer.clearFocus() } catch (_: Exception) {}
+                binding.btnNextEpisodeAction.requestFocus()
+                binding.btnNextEpisodeAction.performClick()
+            }
+        }
+        com.streamflixreborn.streamflix.utils.NextEpisodeOverlayState.onDismiss = {
+            if (_binding != null && binding.layoutNextEpisodeOverlay.isVisible) {
+                binding.btnNextEpisodeDismiss.performClick()
+            }
+        }
+        com.streamflixreborn.streamflix.utils.NextEpisodeOverlayState.isVisible = true
         binding.tvNextEpisodeMeta.text = getString(
             R.string.tv_show_item_season_number_episode_number,
             nextEpisode.season.number,
@@ -5002,10 +5099,27 @@ class PlayerTvFragment : Fragment() {
             binding.layoutNextEpisodeOverlay.bringToFront()
             binding.layoutNextEpisodeOverlay.startAnimation(fadeIn)
             binding.layoutNextEpisodeOverlay.isVisible = true
-            binding.btnNextEpisodeAction.post {
-                if (_binding == null || !binding.layoutNextEpisodeOverlay.isVisible) return@post
-                binding.btnNextEpisodeAction.requestFocus()
+            // 2026-06-04 (user "À l'ouverture de ce machin le focus doit être
+            //   entièrement dessus quoi qu'il arrive") : on grab le focus de
+            //   façon AGRESSIVE — on clear le focus du PlayerView ET on
+            //   redemande le focus plusieurs fois pour vaincre les transitions
+            //   du controller qui peuvent voler le focus juste après.
+            try { binding.pvPlayer.clearFocus() } catch (_: Exception) {}
+            try { binding.pvPlayer.controller.binding.exoPlayPause.clearFocus() } catch (_: Exception) {}
+            binding.btnNextEpisodeAction.isFocusable = true
+            binding.btnNextEpisodeAction.isFocusableInTouchMode = true
+            binding.btnNextEpisodeAction.requestFocus()
+            val grabFocus = Runnable {
+                if (_binding == null || !binding.layoutNextEpisodeOverlay.isVisible) return@Runnable
+                if (!binding.btnNextEpisodeAction.hasFocus()) {
+                    try { binding.pvPlayer.clearFocus() } catch (_: Exception) {}
+                    binding.btnNextEpisodeAction.requestFocus()
+                }
             }
+            binding.btnNextEpisodeAction.post(grabFocus)
+            binding.btnNextEpisodeAction.postDelayed(grabFocus, 120L)
+            binding.btnNextEpisodeAction.postDelayed(grabFocus, 300L)
+            binding.btnNextEpisodeAction.postDelayed(grabFocus, 600L)
         }
     }
 
@@ -5014,6 +5128,10 @@ class PlayerTvFragment : Fragment() {
         binding.pvPlayer.isNextEpisodeOverlayActive = false
         binding.pvPlayer.controllerAutoShow = true
         updateNextEpisodeOverlayFocusBindings(false)
+        // 2026-06-04 : dépose les callbacks Activity-level.
+        com.streamflixreborn.streamflix.utils.NextEpisodeOverlayState.isVisible = false
+        com.streamflixreborn.streamflix.utils.NextEpisodeOverlayState.onConfirm = null
+        com.streamflixreborn.streamflix.utils.NextEpisodeOverlayState.onDismiss = null
         if (binding.layoutNextEpisodeOverlay.isVisible) {
             val fadeOut = android.view.animation.AnimationUtils.loadAnimation(
                 requireContext(),

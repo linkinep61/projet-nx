@@ -58,6 +58,35 @@ class MainTvActivity : FragmentActivity() {
      *  - LEFT depuis tile → focus sur le menu courant de la sidebar
      *  - UP depuis tile → focus sur iv_iptv_categories si visible (Mon IPTV) */
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        // 2026-06-04 : overlay « À SUIVRE » — intercept Activity-level pour
+        //   forcer OK → Lire maintenant même si le focus visuel est resté
+        //   sur exoSettings (controller). PRIORITÉ MAXIMALE sinon le bouton
+        //   focused du controller consomme OK.
+        if (com.streamflixreborn.streamflix.utils.NextEpisodeOverlayState.isVisible) {
+            if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                when (event.keyCode) {
+                    android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+                    android.view.KeyEvent.KEYCODE_ENTER,
+                    android.view.KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                        com.streamflixreborn.streamflix.utils.NextEpisodeOverlayState.onConfirm?.invoke()
+                        return true
+                    }
+                    android.view.KeyEvent.KEYCODE_BACK -> {
+                        com.streamflixreborn.streamflix.utils.NextEpisodeOverlayState.onDismiss?.invoke()
+                        return true
+                    }
+                }
+            } else if (event.action == android.view.KeyEvent.ACTION_UP) {
+                // Avale l'ACTION_UP qui suit, sinon le controller le reçoit isolé.
+                when (event.keyCode) {
+                    android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+                    android.view.KeyEvent.KEYCODE_ENTER,
+                    android.view.KeyEvent.KEYCODE_NUMPAD_ENTER,
+                    android.view.KeyEvent.KEYCODE_BACK -> return true
+                }
+            }
+        }
+
         // 2026-05-31 : liste des chaînes IPTV — callbacks globaux
         if (com.streamflixreborn.streamflix.utils.ChannelListState.isOpen) {
             if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
