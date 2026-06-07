@@ -62,17 +62,34 @@ class MainTvActivity : FragmentActivity() {
         //   forcer OK → Lire maintenant même si le focus visuel est resté
         //   sur exoSettings (controller). PRIORITÉ MAXIMALE sinon le bouton
         //   focused du controller consomme OK.
-        if (com.streamflixreborn.streamflix.utils.NextEpisodeOverlayState.isVisible) {
+        // 2026-06-07 (BUG v1.7.209 : « provider reste en background quand on
+        //   fait retour », rapporté Freebox mini 4K + MiBox) : garde-fou anti-
+        //   orphan — si isVisible reste à true alors que les callbacks ont été
+        //   GC (PlayerTvFragment détruit sans passer par hideNextEpisodeOverlay)
+        //   on consommait TOUS les BACK suivants → écrans s'empilaient. Auto-
+        //   reset si on détecte l'état orphan (callbacks null), puis on n'inter-
+        //   cepte plus.
+        val nextEpOverlay = com.streamflixreborn.streamflix.utils.NextEpisodeOverlayState
+        if (nextEpOverlay.isVisible &&
+            nextEpOverlay.onConfirm == null &&
+            nextEpOverlay.onDismiss == null) {
+            android.util.Log.w(
+                "MainTvActivity",
+                "NextEpisodeOverlayState orphan détecté (isVisible=true, callbacks null) → reset"
+            )
+            nextEpOverlay.isVisible = false
+        }
+        if (nextEpOverlay.isVisible) {
             if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
                 when (event.keyCode) {
                     android.view.KeyEvent.KEYCODE_DPAD_CENTER,
                     android.view.KeyEvent.KEYCODE_ENTER,
                     android.view.KeyEvent.KEYCODE_NUMPAD_ENTER -> {
-                        com.streamflixreborn.streamflix.utils.NextEpisodeOverlayState.onConfirm?.invoke()
+                        nextEpOverlay.onConfirm?.invoke()
                         return true
                     }
                     android.view.KeyEvent.KEYCODE_BACK -> {
-                        com.streamflixreborn.streamflix.utils.NextEpisodeOverlayState.onDismiss?.invoke()
+                        nextEpOverlay.onDismiss?.invoke()
                         return true
                     }
                 }

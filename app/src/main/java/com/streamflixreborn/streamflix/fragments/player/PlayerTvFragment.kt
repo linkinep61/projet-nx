@@ -1631,6 +1631,19 @@ class PlayerTvFragment : Fragment() {
             super.onDestroyView()
             hideWebViewOverlay()
 
+            // 2026-06-07 (bug v1.7.209) : reset l'état overlay « À SUIVRE »
+            //   IMPÉRATIVEMENT — si on quitte le fragment alors que l'overlay
+            //   est encore affiché (BACK rapide, crash, recreate…) et que
+            //   hideNextEpisodeOverlay() n'est pas appelé, isVisible reste
+            //   à true et MainTvActivity.dispatchKeyEvent avale TOUS les BACK
+            //   suivants → écrans s'empilent (rapport Freebox mini 4K + MiBox).
+            try {
+                val st = com.streamflixreborn.streamflix.utils.NextEpisodeOverlayState
+                st.isVisible = false
+                st.onConfirm = null
+                st.onDismiss = null
+            } catch (_: Exception) { }
+
             // 2026-06-02 : clear le picker quand on quitte le player. Sinon
             //   les serveurs du film précédent restent dans Settings.Server.list
             //   (singleton companion object) et pollue le suivant.
