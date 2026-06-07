@@ -535,10 +535,11 @@ object LiveTvHubProvider : Provider, IptvProvider {
         }
 
         // 2026-05-31 : OTF TV — chaînes dynamiques depuis l'API OTF.
-        // Timeout 8s pour ne pas bloquer le home si l'API est lente.
+        // 2026-06-04 : timeout 8s → 4s (couplé au cache négatif 60s dans
+        //   OtfTvService) pour ne pas faire patienter quand OTF est down.
         val otfService = com.streamflixreborn.streamflix.utils.OtfTvService
         val otfChannelsFromApi = try {
-            kotlinx.coroutines.withTimeoutOrNull(8_000L) {
+            kotlinx.coroutines.withTimeoutOrNull(4_000L) {
                 otfService.fetchChannels()
             } ?: emptyList()
         } catch (_: Exception) { emptyList() }
@@ -630,6 +631,27 @@ object LiveTvHubProvider : Provider, IptvProvider {
             id.startsWith("livehub::freeshot::") -> {
                 val fid = id.removePrefix("livehub::freeshot::").substringBefore("::")
                 freeshotChannels.firstOrNull { it.id == fid }?.let { freeshotToTvShow(it) }
+            }
+            // 2026-06-04 (user "OTF TV coupe sur téléphone") : avant, on tombait
+            //   ligne 646 sur `channelById[id]` (keyed sur livehub::<witvKey>) qui
+            //   n'a JAMAIS les ids `livehub::otf::<key>` → throw IllegalArgument
+            //   "Channel inconnue" → la fiche détaillée échouait, le mini-player
+            //   ne pouvait pas init proprement. Maintenant : on récupère la
+            //   chaîne directement depuis le catalogue OTF.
+            id.startsWith("livehub::otf::") -> {
+                val key = id.removePrefix("livehub::otf::").substringBefore("::")
+                val otfChannels = try {
+                    com.streamflixreborn.streamflix.utils.OtfTvService.fetchChannels()
+                } catch (e: Exception) {
+                    Log.w(TAG, "OTF fetchChannels failed in getTvShow($id): ${e.message}")
+                    emptyList()
+                }
+                otfChannels.firstOrNull { it.normalizedKey == key }?.let { ch ->
+                    TvShow(id = id, title = ch.name).apply {
+                        providerName = "TV Hub"
+                        poster = ch.logo
+                    }
+                }
             }
             else -> null
         }

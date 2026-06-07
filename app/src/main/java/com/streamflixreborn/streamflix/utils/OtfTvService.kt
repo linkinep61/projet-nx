@@ -37,26 +37,39 @@ object OtfTvService {
     private var cachedChannels: List<OtfChannel>? = null
     private var cacheTimestamp = 0L
     private const val CACHE_TTL = 30 * 60 * 1000L
+    // 2026-06-04 (user "le TV hub galère à se charger et s'ouvrir" quand OTF est
+    //   down) : cache négatif — si le fetch échoue ou timeout, on bloque les
+    //   re-tentatives pendant 60s pour ne pas faire patienter à chaque
+    //   navigation home.
+    @Volatile private var lastFailureTimestamp = 0L
+    private const val FAILURE_COOLDOWN_MS = 60 * 1000L
 
     /**
      * Récupère toutes les chaînes OTF TV avec leurs URLs m3u8.
-     * Cache 30 min en mémoire.
+     * Cache 30 min en mémoire + cooldown 60s sur échec.
      */
     suspend fun fetchChannels(): List<OtfChannel> {
         val cached = cachedChannels
         if (cached != null && System.currentTimeMillis() - cacheTimestamp < CACHE_TTL) {
             return cached
         }
+        // Si fetch a fail récemment, return ce qu'on a (souvent emptyList) sans
+        // refaire un appel réseau qui re-timeout 8s.
+        if (System.currentTimeMillis() - lastFailureTimestamp < FAILURE_COOLDOWN_MS) {
+            Log.d(TAG, "fetchChannels: skipped (last failure ${(System.currentTimeMillis() - lastFailureTimestamp) / 1000}s ago, cooldown ${FAILURE_COOLDOWN_MS / 1000}s)")
+            return cached ?: emptyList()
+        }
 
         return try {
             val channels = fetchFromApi()
             cachedChannels = channels
             cacheTimestamp = System.currentTimeMillis()
+            lastFailureTimestamp = 0L
             Log.d(TAG, "Fetched ${channels.size} OTF channels")
             channels
         } catch (e: Exception) {
             Log.e(TAG, "Failed to fetch OTF channels: ${e.message}")
-            // Pas de debug file en prod
+            lastFailureTimestamp = System.currentTimeMillis()
             cached ?: emptyList()
         }
     }
@@ -187,6 +200,72 @@ object OtfTvService {
         val nfd = java.text.Normalizer.normalize(name.lowercase(), java.text.Normalizer.Form.NFD)
         return nfd.replace(Regex("\\p{InCombiningDiacriticalMarks}"), "")
             .replace(Regex("[^a-z0-9]"), "")
+    }
+
+    /**
+     * 2026-06-04 (user "trier les chaînes OTF dans l'ordre des chaînes France") :
+     * ordre TNT français standard pour les chaînes mainstream + bouquets Canal+
+     * + sport + cinéma. Les chaînes hors de cette liste passent ensuite par ordre
+     * alphabétique. À utiliser avec [sortChannelsFrenchTntOrder].
+     */
+    private val FRENCH_TNT_ORDER: List<String> = listOf(
+        // Bouquet TNT clair (canaux 1-27)
+        "tf1", "france2", "france3", "canal", "canalplus", "france5", "m6",
+        "arte", "c8", "w9", "tmc", "tfx", "nrj12", "lcp", "publicsenat",
+        "france4", "franceinfo", "cnews", "cstar", "gulli",
+        "tf1seriesfilms", "tf1seriefilms", "lequipe", "6ter",
+        "rmcstory", "rmcdecouverte", "cherie25",
+        // 22-30 — chaînes locales/régionales
+        "lci", "franceinfotv",
+        // Bouquet Canal+ payantes
+        "canalplus", "canalplussport", "canalplussport360", "canalplussportplus",
+        "canalplusgrandsport", "canalplusfoot",
+        "canalpluscinema", "canalplusgrandsclassiques", "canalplusgrandsecran",
+        "canalplusbox", "canalplusinternational", "canalpluskids",
+        "canalplusseries", "canalplusdocs", "canalplusofflive",
+        // Sport
+        "beinsports1", "beinsports2", "beinsports3", "beinsportsmax4",
+        "beinsportsmax5", "beinsportsmax6", "beinsportsmax7", "beinsportsmax8",
+        "rmcsport1", "rmcsport2", "rmcsport3", "rmcsport4",
+        "eurosport1", "eurosport2",
+        "ligue1plus", "infosport", "infosportplus",
+        "dazn1", "dazn2",
+        // Cinéma
+        "ocsmax", "ocscity", "ocschoc", "ocsgeants",
+        "tcmcinema", "tcm", "tcmclassic",
+        "polar", "actionchasseetpeche",
+        "paramountchannel", "paramount", "wbtv", "warnertv",
+        // Découverte
+        "natgeo", "natgeowild", "natgeohd",
+        "discovery", "discoveryscience", "discoveryinvestigation",
+        "histoire", "rmcstoryplus", "ushuaiatv", "voyage",
+        "planeteplus", "planetenoplus", "trekplus",
+        // Info / Politique
+        "bfmtv", "bfmparis", "bfmlyon", "bfmbusiness",
+        "francetv", "tv5monde",
+        // Jeunesse
+        "boomerang", "cartoonnetwork", "disneychannel", "disneyjunior",
+        "nickelodeon", "nickjr", "tiji", "piwiplus", "gullimax",
+        // Musique
+        "mtv", "mtvhits", "mcm", "mcmtop", "mtvclub",
+        "trace", "tracetropical", "traceurban",
+        // Style de vie
+        "13rue", "13erue",
+    )
+
+    /**
+     * Trie une liste de chaînes par ordre TNT français (chaînes mainstream)
+     * puis alphabétique. Insensible à la casse et aux accents/séparateurs grâce
+     * au normalizedKey utilisé en clé. Utilisé par OtfPlayerActivity (mobile)
+     * et OtfPlayerTvActivity (TV) pour le panel chaînes / boutons prev/next.
+     */
+    fun sortChannelsFrenchTntOrder(channels: List<OtfChannel>): List<OtfChannel> {
+        return channels.sortedWith(
+            compareBy<OtfChannel> { ch ->
+                val idx = FRENCH_TNT_ORDER.indexOf(ch.normalizedKey)
+                if (idx < 0) Int.MAX_VALUE else idx
+            }.thenBy { it.name.lowercase() }
+        )
     }
 
     /** Retourne le logo d'une chaîne par sa clé normalisée. */

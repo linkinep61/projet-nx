@@ -47,8 +47,8 @@ android {
         applicationId "com.streamfr.app"
         minSdk 23
         targetSdk 35
-        versionCode 10908
-        versionName "1.7.208"
+        versionCode 10909
+        versionName "1.7.209"
 
         // 2026-05-11 : RESTAURATION x86 (32-bit) — abandonné en v19 par erreur.
         // Certains émulateurs (Genymotion, AVD images anciennes) et surtout les
@@ -153,6 +153,18 @@ dependencies {
     implementation 'androidx.media3:media3-exoplayer-hls:1.8.0'
     implementation 'androidx.media3:media3-session:1.8.0'
     implementation 'androidx.media3:media3-ui:1.8.0'
+    // 2026-06-04 (user OTF "garde le pattern OTF comme l'application originelle
+    //   jusqu'à l'ExoPlayer de la vidéo") : Embarquement d'ExoPlayer 2.19.1 EN
+    //   PLUS de Media3 1.8.0. Packages distincts (com.google.android.exoplayer2
+    //   vs androidx.media3) → coexistent dans le même APK sans conflit.
+    //   Usage : strictement OTF (livehub::otf::*) via OtfPlayerActivity dédiée.
+    //   Le reste de Streamflix (Vavoo/Ola/Vegeta/Movix/Wiflix/etc.) continue
+    //   d'utiliser Media3 1.8.0 inchangé. Media3 1.8.0 a un AudioSink strict
+    //   qui rejette les discontinuities timestamp audio (flux OTF en a), 2.19.1
+    //   est laxiste → reproduit l'exact comportement de l'app OTF TV V3.2 officielle.
+    implementation 'com.google.android.exoplayer:exoplayer-core:2.19.1'
+    implementation 'com.google.android.exoplayer:exoplayer-hls:2.19.1'
+    implementation 'com.google.android.exoplayer:exoplayer-ui:2.19.1'
     // 2026-05-09 v15 : nextlib via JitPack — codec pack FFmpeg pour Media3.
     // Permet de décoder AC3, E-AC3, MP2, FLAC, et tous les codecs exotiques que
     // ExoPlayer ne supporte pas en natif. Active via EXTENSION_RENDERER_MODE_PREFER.

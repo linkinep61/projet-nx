@@ -106,6 +106,14 @@
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/Theme.AppCompat.NoActionBar" />
 
+        <!-- 2026-06-04 : Activity OTF TV dédiée — ExoPlayer 2.19.1 strict pattern. -->
+        <activity
+            android:name=".activities.player.OtfPlayerTvActivity"
+            android:exported="false"
+            android:hardwareAccelerated="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+
         <service
             android:name=".download.DownloadService"
             android:foregroundServiceType="dataSync"
