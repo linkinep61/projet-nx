@@ -287,9 +287,21 @@ object GenericStreamResolver {
             if (match != null) {
                 return match.groupValues[1].replace("\\/", "/")
             }
+            // 2026-06-12 — CRITIQUE : si un token est attendu mais le bloc
+            // fetch correspondant n'est PAS trouvé, on retourne null. SURTOUT
+            // PAS de fallback "première .m3u8 du body" : le RSS de
+            // rsseverything contient TF1 en tête de liste, donc on tombait
+            // systématiquement sur TF1 quel que soit le token demandé (= bug
+            // signalé "toutes les chaînes jouent TF1" en asm170 et de retour
+            // sur World TV). Mieux vaut null (= la chaîne ne marche pas) que
+            // de jouer la mauvaise chaîne.
+            return null
         }
 
-        // 3. Fallback : chercher une URL m3u8/mpd directe dans le body.
+        // 3. Fallback : chercher une URL m3u8/mpd directe dans le body, MAIS
+        //    UNIQUEMENT quand aucun token n'était attendu (= pipeline générique
+        //    sans tpol UA). Si un token était attendu et n'a pas matché, on
+        //    aurait déjà retourné null au-dessus.
         val mediaPattern = Regex(
             """https?:[^"'\s<>]*?\.(?:m3u8|mpd)(?:\?[^"'\s<>]*)?""",
             RegexOption.IGNORE_CASE,
