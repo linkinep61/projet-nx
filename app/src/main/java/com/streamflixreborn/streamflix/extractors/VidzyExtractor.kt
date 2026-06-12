@@ -48,12 +48,46 @@ class VidzyExtractor : Extractor() {
     }
 
     fun extractSubtitles(text: String): List<Video.Subtitle> {
-        val loadTracksRegex = Regex("""loadTracks\s*\(\s*\[(.*?)]\s*\)""")
-        val tracksContent = loadTracksRegex.find(text)?.groupValues?.get(1) ?: return emptyList()
+        // 2026-06-09 v2 (user "ne s'active pas") : la page Vidzy a changé.
+        //   Plusieurs patterns possibles selon les versions du player JS :
+        //   - loadTracks([...])        ← ancien
+        //   - tracks:[...]             ← jwplayer style
+        //   - subtitle:'...'           ← player older
+        //   - subtitles:[...]          ← plyr style
+        //   On essaie en cascade et on log ce qu'on trouve.
+        var tracksContent: String? = null
+        val patterns = listOf(
+            "loadTracks" to Regex("""loadTracks\s*\(\s*\[(.*?)]\s*\)""", RegexOption.DOT_MATCHES_ALL),
+            "tracks:[]" to Regex("""tracks\s*:\s*\[(.*?)]""", RegexOption.DOT_MATCHES_ALL),
+            "subtitles:[]" to Regex("""subtitles\s*:\s*\[(.*?)]""", RegexOption.DOT_MATCHES_ALL),
+            "captions:[]" to Regex("""captions\s*:\s*\[(.*?)]""", RegexOption.DOT_MATCHES_ALL),
+        )
+        for ((name, rx) in patterns) {
+            val m = rx.find(text)
+            if (m != null) {
+                tracksContent = m.groupValues[1]
+                Log.d(TAG, "extractSubtitles: matched pattern '$name' (len=${tracksContent.length})")
+                break
+            }
+        }
+        if (tracksContent == null) {
+            Log.d(TAG, "extractSubtitles: NO subtitle pattern matched (autoSubDis=${UserPreferences.serverAutoSubtitlesDisabled})")
+            // Diagnostic : portions de la page autour des mots clés sub.
+            val hints = listOf("loadTracks", "_fre", "_fra", ".vtt", "srtproxy", "dxsrv", "addTextTrack", "srclang", "kind=", "kind:")
+            for (h in hints) {
+                val idx = text.indexOf(h, ignoreCase = true)
+                if (idx >= 0) {
+                    val s = maxOf(0, idx - 80)
+                    val e = minOf(text.length, idx + 300)
+                    Log.d(TAG, "extractSubtitles diag '$h' @$idx: ${text.substring(s, e).replace("\n", "\\n")}")
+                }
+            }
+            return emptyList()
+        }
 
         val objectRegex = Regex("""\{(.*?)\}""")
 
-        return objectRegex.findAll(tracksContent).mapNotNull { match ->
+        val result = objectRegex.findAll(tracksContent).mapNotNull { match ->
             val obj = match.groupValues[1]
 
             val label = Regex("""label:'([^']+)'""").find(obj)?.groupValues?.get(1)
@@ -68,6 +102,8 @@ class VidzyExtractor : Extractor() {
                 default = if (UserPreferences.serverAutoSubtitlesDisabled) false else default
             )
         }.toList()
+        Log.d(TAG, "extractSubtitles: found ${result.size} subs (autoSubDis=${UserPreferences.serverAutoSubtitlesDisabled}) — labels=${result.joinToString { "${it.label}(def=${it.default})" }}")
+        return result
     }
 
     override suspend fun extract(link: String): Video {
@@ -240,11 +276,56 @@ class VidzyExtractor : Extractor() {
             Log.d(TAG, "Passing ${allCookies.size} cookies to player")
         }
 
+        // 2026-06-09 (user "j'ai pas les sous-titres VOSTFR") : Vidzy a
+        //   désactivé l'injection inline `loadTracks([...])` au profit d'un
+        //   appel `player.loadTracks(...)` situé après notre fenêtre de
+        //   parsing du packed JS. Heureusement le sub est accessible via
+        //   un endpoint stable `srtproxy` qui se déduit du stream URL :
+        //
+        //   Stream  : https://{srv}.vidzy.cc/hls2/{disk}/{dx}/,{vid}_n,.urlset/master.m3u8
+        //   Sub fr  : https://vidzy.live/srtproxy/{vid}_fre.vtt?dx={dx}&srv={srv}&disk={disk}
+        //
+        //   Le proxy redirige (302) vers le vrai .vtt hébergé (testé OK
+        //   2026-06-09 : 31KB WEBVTT FR sur dc9ldrhhieke). ExoPlayer suit
+        //   la 302 automatiquement.
+        val parsedSubs = extractSubtitles(searchText).toMutableList()
+        if (parsedSubs.isEmpty()) {
+            try {
+                val rx = Regex("""https://([^./]+)\.vidzy\.cc/hls2?/(\d+)/(\d+)/,([a-zA-Z0-9]+)_""")
+                val m = rx.find(streamUrl)
+                if (m != null) {
+                    val srv = m.groupValues[1]
+                    val disk = m.groupValues[2]
+                    val dx = m.groupValues[3]
+                    val vid = m.groupValues[4]
+                    // 2026-06-09 v4 (user "404 sur certains films") : le
+                    //   srtproxy fait du re-routing (disk varie côté cible).
+                    //   On peut PAS deviner la cible. On passe l'URL srtproxy
+                    //   et OkHttp (côté overlay) follow la 302 automatiquement
+                    //   et récupère le VTT final.
+                    val resolvedUrl = "https://vidzy.live/srtproxy/${vid}_fre.vtt?dx=$dx&srv=$srv&disk=$disk"
+                    Log.d(TAG, "extractSubtitles: srtproxy sub URL: $resolvedUrl")
+                    parsedSubs.add(
+                        Video.Subtitle(
+                            file = resolvedUrl,
+                            label = "French",
+                            initialDefault = true,
+                            default = if (UserPreferences.serverAutoSubtitlesDisabled) false else true,
+                        )
+                    )
+                } else {
+                    Log.d(TAG, "extractSubtitles: stream URL does not match expected pattern → cannot derive sub")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "extractSubtitles: derive sub URL failed: ${t.message}")
+            }
+        }
+
         return Video(
             source = streamUrl,
             type = if (isM3u8) MimeTypes.APPLICATION_M3U8 else null,
             headers = headers,
-            subtitles = extractSubtitles(searchText),
+            subtitles = parsedSubs,
             useServerSubtitleSetting = true
         )
     }
