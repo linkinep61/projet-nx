@@ -15,6 +15,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -462,6 +463,14 @@ object LiveTvHubProvider : Provider, IptvProvider {
             sections.add(Category(name = cat, list = list.map { channelToTvShow(it) }))
         }
 
+        // 2026-06-08 (user "Canal+ en position 0 de OTF") : déclaré hors du
+        //   try pour rester accessible quand on construit otfShows plus bas.
+        var canalPlusBonusForOtf: TvShow? = null
+        // 2026-06-08 (user "LCI tu peux la mettre") : capturée depuis TF1+
+        //   blacklistée mais sauvée car son shortcut TF1 mediainfo marche.
+        //   Insérée en position 1 de OTF (juste après Canal+).
+        var lciForOtf: TvShow? = null
+
         // 2026-05-15 : sections BONUS — wrappé dans try/catch pour ne pas bloquer OTF
         try {
         val bonusBanned = { id: String ->
@@ -495,19 +504,14 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 sections.add(Category(name = "Sport", list = listOf(dmShow)))
             }
         }
-        // Cinéma bonus (Canal+ standalone)
-        val cinemaBonus = bonusByCat["Cinéma"].orEmpty().map { bonusToTvShow(it) }
-        if (cinemaBonus.isNotEmpty()) {
-            val existingIdx = sections.indexOfFirst { it.name == "Cinéma" }
-            if (existingIdx >= 0) {
-                sections[existingIdx] = Category(
-                    name = "Cinéma",
-                    list = sections[existingIdx].list + cinemaBonus,
-                )
-            } else {
-                sections.add(Category(name = "Cinéma", list = cinemaBonus))
-            }
-        }
+        // 2026-06-08 (user "fusionne Canal+ à OTF en position 0, supprime cat
+        //   Cinéma qui prend la place pour rien") : capture Canal+ bonus (id=11)
+        //   pour l'insérer plus bas en position 0 de la section "OTF TV - France".
+        //   Pas de section "Cinéma" dédiée. Routing inchangé : ID reste
+        //   `livehub::bonus::11` → bonusShow dans getTvShow → pipeline natif.
+        canalPlusBonusForOtf = bonusByCat["Cinéma"]
+            ?.firstOrNull { it.id == 11 }
+            ?.let { bonusToTvShow(it) }
         // 2026-05-31 : Canal+ Live section RETIRÉE (chaînes ne fonctionnent pas)
 
         // 2026-05-15 : 48 chaînes freeshot.live (TF1, M6, BFM*, CANAL+ FR/DOCS,
@@ -549,14 +553,28 @@ object LiveTvHubProvider : Provider, IptvProvider {
 
         // normalizedKey = ID unique par chaîne (catId est l'ID du GROUPE, pas de la chaîne)
         val seen = HashSet<String>()
-        val otfShows = otfFiltered.filter { seen.add(it.normalizedKey) }.map { ch ->
-            TvShow(id = "livehub::otf::${ch.normalizedKey}", title = ch.name).apply {
-                providerName = "TV Hub"
-                poster = ch.logo
+        val otfShows = otfFiltered.filter { seen.add(it.normalizedKey) }
+            .mapNotNull { ch ->
+                val id = "livehub::otf::${ch.normalizedKey}"
+                // 2026-06-08 : skip si bannie
+                if (com.streamflixreborn.streamflix.fragments.player.settings
+                        .IptvBannedChannels.isBanned(id)) return@mapNotNull null
+                TvShow(id = id, title = ch.name).apply {
+                    providerName = "TV Hub"
+                    poster = ch.logo
+                }
             }
-        }
+        // 2026-06-08 (user "Canal+ en première chaîne, décaler un peu OTF") :
+        //   prepend Canal+ bonus en position 0. Garde le même look visuel
+        //   que les chaînes OTF (rebadgé TV Hub via bonusToTvShow).
+        // 2026-06-08 (user "LCI tu peux la mettre") : LCI en position 1
+        //   juste après Canal+ (sauvée de TF1+ blacklistée).
+        val prepended = mutableListOf<TvShow>()
+        if (canalPlusBonusForOtf != null) prepended.add(canalPlusBonusForOtf!!)
+        if (lciForOtf != null) prepended.add(lciForOtf!!)
+        val otfShowsFinal = if (prepended.isNotEmpty()) prepended + otfShows else otfShows
         val otfSectionName = "OTF TV - $selectedGroup"
-        sections.add(Category(name = otfSectionName, list = otfShows))
+        sections.add(Category(name = otfSectionName, list = otfShowsFinal))
 
         // 2026-05-31 : section "Favoris" OTF — inclut les chaînes OTF marquées favorites
         try {
@@ -588,6 +606,169 @@ object LiveTvHubProvider : Provider, IptvProvider {
             }
         } catch (_: Throwable) {}
 
+        // 2026-06-08 (user "remettre la source 3BoxTV dans le TV hub sous le
+        //   nom France TV") : on délègue à BoxXtemusProvider (restauré depuis
+        //   git après suppression v1.7.192). 12 catégories FR (TF1+, Canal+,
+        //   M6+, RTBF/Suisse, TNT Sat, Cinéma, Replay, Sports, etc.). Le
+        //   préfixe `livehub::francetv::` reroute getTvShow/getServers/getVideo
+        //   vers BoxXtemusProvider sans dupliquer la logique.
+        try {
+            val francetvSections = com.streamflixreborn.streamflix.providers
+                .BoxXtemusProvider.getHome()
+            // 2026-06-08 (user "cette catégorie-là retirée") : sections du
+            //   JSON 3BoxTV à NE PAS exposer dans le Hub France TV (doublons,
+            //   irrelevant, etc.). Étendre cette liste si besoin.
+            val francetvBlacklistedSections = setOf(
+                "IPTV Daily",  // doublon — pas de la VRAIE France TV
+                // 2026-06-10 (user "Sport peut revenir, ça va sûrement marcher") :
+                //   "Sports" RETIRÉ du blacklist. Le bypass WebView qu'on vient
+                //   d'implémenter résout maintenant le pipeline html.bet, donc
+                //   les chaînes Sport devraient fonctionner.
+            )
+            for (cat in francetvSections) {
+                // Skip section "Favoris" interne de BoxXtemus — les favoris du
+                // Hub sont gérés au niveau hub, pas du sous-provider.
+                if (cat.name.equals("Favoris", ignoreCase = true)) continue
+                // 2026-06-08 : avant de skip une cat blacklistée, on capture
+                //   LCI si elle est dans TF1+ (= sauvée par mediainfo shortcut).
+                if (cat.name.equals("TF1+", ignoreCase = true)) {
+                    val lci = (cat.list as? List<*>)?.mapNotNull { it as? TvShow }
+                        ?.firstOrNull {
+                            it.title?.uppercase()?.contains("LCI") == true ||
+                            it.id.contains("lci", ignoreCase = true)
+                        }
+                    if (lci != null) {
+                        lciForOtf = TvShow(
+                            id = "livehub::francetv::${lci.id}",
+                            title = "LCI",
+                        ).apply {
+                            providerName = "TV Hub"
+                            poster = lci.poster
+                            banner = lci.banner
+                        }
+                    }
+                }
+                // 2026-06-08 : trim + lowercase pour blinder le match (le
+                //   nom de cat peut avoir un trailing space dans le JSON).
+                val catNameNorm = cat.name.trim().lowercase()
+                if (francetvBlacklistedSections.any { it.trim().lowercase() == catNameNorm }) continue
+                // 2026-06-10 : filtre catégorie utilisateur (BoxXtemusCategorySettings).
+                val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
+                if (!com.streamflixreborn.streamflix.providers
+                        .BoxXtemusCategorySettings.matches(ctx, cat.name)) continue
+                val rebadged = (cat.list as? List<*>)?.mapNotNull { item ->
+                    val tv = item as? TvShow ?: return@mapNotNull null
+                    val newId = "livehub::francetv::${tv.id}"
+                    // 2026-06-08 (user "active ban pour TV hub") : skip si bannie
+                    if (com.streamflixreborn.streamflix.fragments.player.settings
+                            .IptvBannedChannels.isBanned(newId)) return@mapNotNull null
+                    TvShow(id = newId, title = tv.title ?: "").apply {
+                        providerName = "TV Hub"
+                        poster = tv.poster
+                        banner = tv.banner
+                    }
+                } ?: emptyList()
+                if (rebadged.isNotEmpty()) {
+                    sections.add(Category(name = "France TV - ${cat.name}", list = rebadged))
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "France TV (BoxXtemus) getHome failed: ${t.message}")
+        }
+
+        // 2026-06-08 (user "appareil non compatible avec l'API complexe de
+        //   3TVBOX V2 → essayer Dric4rTV plus simple") : sections Dric4rTV
+        //   (Ligue1+, US Sports & NBA, Horse, Nature, Live & DJ, Muzik,
+        //   R4di0, Locales TV). Format JSON simple, URLs directes — pas
+        //   de pipeline html.bet. Les IDs sont déjà préfixés `livehub::dric4rtv::`
+        //   dans Dric4rTvProvider, donc on les passe tels quels.
+        try {
+            val dricSections = com.streamflixreborn.streamflix.providers
+                .Dric4rTvProvider.getHome()
+            for (cat in dricSections) {
+                val rebadged = (cat.list as? List<*>)?.mapNotNull { item ->
+                    val tv = item as? TvShow ?: return@mapNotNull null
+                    // 2026-06-08 : skip si bannie
+                    if (com.streamflixreborn.streamflix.fragments.player.settings
+                            .IptvBannedChannels.isBanned(tv.id)) return@mapNotNull null
+                    // L'id contient déjà "livehub::dric4rtv::..." — pas besoin de re-préfixer.
+                    TvShow(id = tv.id, title = tv.title).apply {
+                        providerName = "TV Hub"
+                        poster = tv.poster
+                        banner = tv.banner
+                    }
+                } ?: emptyList()
+                if (rebadged.isNotEmpty()) {
+                    // 2026-06-08 (user "renomme Dric4rTV en France TV pour
+                    //   unifier") : ces sections viennent du provider Dric4rTV
+                    //   mais on les affiche comme "France TV - X" pour fondre
+                    //   visuellement avec les autres sections France TV.
+                    sections.add(Category(name = "France TV - ${cat.name}", list = rebadged))
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Dric4rTV getHome failed: ${t.message}")
+        }
+
+        // 2026-06-08 (user "favoris ça marche sur OTF mais pas France TV /
+        //   Dric4rTV") : section "Favoris France TV" qui agrège les chaînes
+        //   favorites de BoxXtemus + Dric4rTV. On parcourt les sections déjà
+        //   construites et on garde celles dont l'ID matche un favKey du store.
+        try {
+            val allFavs = com.streamflixreborn.streamflix.utils.IptvFavoritesStore
+                .getFavorites("TV Hub")  // = livehub::ftv* + livehub::dric*
+            val ftvFavKeys = allFavs
+                .filter { it.startsWith("livehub::ftv") || it.startsWith("livehub::dric") }
+                .map { it.removePrefix("livehub::") }  // "ftv<name>" ou "dric<name>"
+                .toSet()
+            if (ftvFavKeys.isNotEmpty()) {
+                val ftvFavShows = mutableListOf<TvShow>()
+                val seenIds = HashSet<String>()
+                // Re-normalize l'ID de chaque chaîne France TV/Dric4rTV des sections
+                // déjà collectées et compare à ftvFavKeys.
+                for (sec in sections) {
+                    if (!sec.name.startsWith("France TV - ")) continue
+                    (sec.list as? List<*>)?.forEach { item ->
+                        val tv = item as? TvShow ?: return@forEach
+                        if (!seenIds.add(tv.id)) return@forEach
+                        val normalizedKey = when {
+                            tv.id.startsWith("livehub::francetv::") ->
+                                "ftv" + tv.id.substringAfterLast("::").lowercase().trim()
+                            tv.id.startsWith("livehub::dric4rtv::") ->
+                                "dric" + tv.id.substringAfterLast("::").lowercase().trim()
+                            else -> return@forEach
+                        }
+                        if (normalizedKey in ftvFavKeys) {
+                            ftvFavShows.add(
+                                TvShow(id = tv.id, title = tv.title).apply {
+                                    providerName = "TV Hub"
+                                    poster = tv.poster
+                                    banner = tv.banner
+                                }
+                            )
+                        }
+                    }
+                }
+                if (ftvFavShows.isNotEmpty()) {
+                    // Insérer JUSTE AVANT la première section "France TV - ..."
+                    val firstFtvIdx = sections.indexOfFirst { it.name.startsWith("France TV - ") }
+                    val favSection = Category(name = "Favoris France TV", list = ftvFavShows)
+                    if (firstFtvIdx >= 0) {
+                        sections.add(firstFtvIdx, favSection)
+                    } else {
+                        sections.add(favSection)
+                    }
+                    Log.d(TAG, "Favoris France TV: ${ftvFavShows.size} chaînes")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Favoris France TV section failed: ${t.message}")
+        }
+
+        // 2026-06-08 (user "il faudrait dupliquer le TV Hub. Ce qu'on vient
+        //   d'ajouter là, le mettre dans un autre TV Hub +") : World Live TV
+        //   déplacé dans LiveTvHubPlusProvider pour ne pas surcharger ce Hub.
+
         // 2026-05-08 : section "✕ Chaînes bannies" EN BAS du home.
         try {
             val banned = channels.filter {
@@ -598,21 +779,67 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 sections.add(Category(name = "✕ Chaînes bannies", list = banned.map { channelToTvShow(it) }))
             }
         } catch (_: Throwable) { }
+        // 2026-06-08 (user "quand on fait LEFT, faut TOUTES les catégories de
+        //   chaînes, pas qu'une seule") : populate le cache `homeChannelsCache`
+        //   qui agrège TOUTES les sections (sauf "Favoris" + "Chaînes bannies")
+        //   pour que getOrderedChannelIds() et getChannelDisplayName() puissent
+        //   lister WiTV + OTF + France TV + Vavoo + n'importe quelle catégorie.
+        try {
+            val cache = mutableListOf<Pair<String, String>>()
+            for (cat in sections) {
+                if (cat.name.equals("Favoris", ignoreCase = true)) continue
+                if (cat.name.startsWith("✕")) continue
+                (cat.list as? List<*>)?.forEach { item ->
+                    val tv = item as? TvShow ?: return@forEach
+                    if (tv.id.isNotBlank()) {
+                        val title = tv.title.ifBlank { tv.id }
+                        cache.add(tv.id to title)
+                    }
+                }
+            }
+            // Dedup par id (préserve l'ordre — 1re occurrence gardée)
+            val seenIds = HashSet<String>()
+            homeChannelsCache = cache.filter { seenIds.add(it.first) }
+            Log.d(TAG, "homeChannelsCache populated: ${homeChannelsCache.size} channels across ${sections.size} sections")
+        } catch (t: Throwable) {
+            Log.w(TAG, "homeChannelsCache populate failed: ${t.message}")
+        }
         return sections
+    }
+
+    /** 2026-06-08 (user "dans l'onglet toutes les chaînes qui sert à rien pour
+     *  l'instant on peut afficher toutes les chaînes qu'il y a dans le home
+     *  entier TV hub") : on aplatit getHome() — toutes les sections sauf les
+     *  méta-sections (Favoris, Favoris France TV, ✕ Chaînes bannies). Dedup
+     *  par ID, ordre préservé. */
+    private suspend fun allHomeChannels(): List<TvShow> {
+        val home = getHome()
+        val out = mutableListOf<TvShow>()
+        val seen = HashSet<String>()
+        for (cat in home) {
+            val n = cat.name
+            if (n.equals("Favoris", ignoreCase = true)) continue
+            if (n.equals("Favoris France TV", ignoreCase = true)) continue
+            if (n.startsWith("✕")) continue
+            (cat.list as? List<*>)?.forEach { item ->
+                val tv = item as? TvShow ?: return@forEach
+                if (seen.add(tv.id)) out.add(tv)
+            }
+        }
+        return out
     }
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
         if (page > 1) return emptyList()
-        return favoriteChannels().map { channelToTvShow(it) }
+        return allHomeChannels()
     }
 
     override suspend fun search(query: String, page: Int): List<TvShow> {
         if (page > 1) return emptyList()
         val q = query.trim().lowercase()
-        val favs = favoriteChannels()
-        if (q.isBlank()) return favs.map { channelToTvShow(it) }
-        return favs.filter { it.displayName.lowercase().contains(q) }
-            .map { channelToTvShow(it) }
+        val all = allHomeChannels()
+        if (q.isBlank()) return all
+        return all.filter { (it.title ?: "").lowercase().contains(q) }
     }
 
     override suspend fun getMovies(page: Int): List<Movie> = emptyList()
@@ -651,6 +878,43 @@ object LiveTvHubProvider : Provider, IptvProvider {
                         providerName = "TV Hub"
                         poster = ch.logo
                     }
+                }
+            }
+            // 2026-06-08 : France TV (BoxXtemus) — strip prefix + délègue
+            id.startsWith("livehub::francetv::") -> {
+                val nativeId = id.removePrefix("livehub::francetv::")
+                try {
+                    val tv = com.streamflixreborn.streamflix.providers
+                        .BoxXtemusProvider.getTvShow(nativeId)
+                    // Réémet avec l'ID Hub + saison "En Direct" (cf bonusShow)
+                    tv.copy(id = id).apply { providerName = "TV Hub" }
+                } catch (e: Exception) {
+                    Log.w(TAG, "France TV getTvShow failed for $id: ${e.message}")
+                    null
+                }
+            }
+            // 2026-06-08 : Dric4rTV — délègue
+            id.startsWith("livehub::dric4rtv::") -> {
+                try {
+                    val tv = com.streamflixreborn.streamflix.providers
+                        .Dric4rTvProvider.getTvShow(id)
+                    tv.apply { providerName = "TV Hub" }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Dric4rTV getTvShow failed for $id: ${e.message}")
+                    null
+                }
+            }
+            // 2026-06-08 : World Live TV — délègue, providerName "TV Hub"
+            //   pour partager les réglages (favoris/bans).
+            id.startsWith("livehub::worldlivetv::") -> {
+                val nativeId = id.removePrefix("livehub::worldlivetv::")
+                try {
+                    val tv = com.streamflixreborn.streamflix.providers
+                        .WorldLiveTvProvider.getTvShow(nativeId)
+                    tv.copy(id = id).apply { providerName = "TV Hub" }
+                } catch (e: Exception) {
+                    Log.w(TAG, "World Live TV getTvShow failed for $id: ${e.message}")
+                    null
                 }
             }
             else -> null
@@ -699,6 +963,46 @@ object LiveTvHubProvider : Provider, IptvProvider {
      *  "canalplus", mais le Hub cherchait sous "canal" (witvKey) → fallback
      *  déclenché à tort, l'user voyait toute la liste agrégée. */
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        // 2026-06-08 : France TV (BoxXtemus) — délègue au provider natif. Le
+        //   Video.Server retourné aura un id préfixé "bxt-ch::" qui sera
+        //   routé dans getVideo() vers BoxXtemusProvider.getVideo().
+        if (id.startsWith("livehub::francetv::")) {
+            val nativeId = id.removePrefix("livehub::francetv::")
+            return try {
+                com.streamflixreborn.streamflix.providers
+                    .BoxXtemusProvider.getServers(nativeId, videoType)
+            } catch (e: Exception) {
+                Log.w(TAG, "France TV getServers failed for $id: ${e.message}")
+                emptyList()
+            }
+        }
+        // 2026-06-08 : Dric4rTV — Video.Server.id sera préfixé "dric-st::"
+        //   qui sera routé dans getVideo() vers Dric4rTvProvider.getVideo().
+        if (id.startsWith("livehub::dric4rtv::")) {
+            return try {
+                com.streamflixreborn.streamflix.providers
+                    .Dric4rTvProvider.getServers(id, videoType)
+            } catch (e: Exception) {
+                Log.w(TAG, "Dric4rTV getServers failed for $id: ${e.message}")
+                emptyList()
+            }
+        }
+        // 2026-06-08 : World Live TV — routing partagé avec LiveTvHubPlus.
+        //   Les chaînes World Live TV (préfixe `livehub::worldlivetv::`)
+        //   apparaissent uniquement dans le provider "World Live", mais le
+        //   routing est dans LiveTvHubProvider pour que les bans/favoris
+        //   fonctionnent avec le même channelKey normalisé.
+        if (id.startsWith("livehub::worldlivetv::")) {
+            val nativeId = id.removePrefix("livehub::worldlivetv::")
+            return try {
+                com.streamflixreborn.streamflix.providers
+                    .WorldLiveTvProvider.getServers(nativeId, videoType)
+            } catch (e: Exception) {
+                Log.w(TAG, "World Live TV getServers failed for $id: ${e.message}")
+                emptyList()
+            }
+        }
+
         // 2026-05-31 : OTF TV — chaînes directes depuis le catalogue OTF
         if (id.startsWith("livehub::otf::")) {
             val key = id.removePrefix("livehub::otf::").split("::").first()
@@ -833,6 +1137,26 @@ object LiveTvHubProvider : Provider, IptvProvider {
     /** getVideo : délègue au provider d'origine selon le prefix de l'id.
      *  Couvre tous les providers IPTV via IptvCrossDelegate. */
     override suspend fun getVideo(server: Video.Server): Video {
+        // 2026-06-08 : France TV (BoxXtemus) — server.id préfixé "bxt-ch::"
+        //   par BoxXtemusProvider.getServers. Pipeline résolution :
+        //   RSS feed, ftven auth, anti-bot HTML — tout est encapsulé dans
+        //   BoxXtemusProvider.getVideo. On délègue tel quel.
+        if (server.id.startsWith("bxt-ch::")) {
+            return com.streamflixreborn.streamflix.providers
+                .BoxXtemusProvider.getVideo(server)
+        }
+        // 2026-06-08 : Dric4rTV — délègue, URL directe + headers du JSON
+        if (server.id.startsWith("dric-st::")) {
+            return com.streamflixreborn.streamflix.providers
+                .Dric4rTvProvider.getVideo(server)
+        }
+        // 2026-06-08 : World Live TV — délègue. URL directe + headers UA/Ref
+        //   capturés du M3U (#EXTVLCOPT).
+        if (server.id.startsWith("wltv-ch::")) {
+            return com.streamflixreborn.streamflix.providers
+                .WorldLiveTvProvider.getVideo(server)
+        }
+
         // 2026-05-15 : bonus channels — délègue à Extractor.extract qui route
         // vers Hoca8Extractor (bolaloca/cartelive/embedme) ou DailymotionExtractor.
         // 2026-05-31 : OTF TV — URLs directes m3u8, pas d'extraction
@@ -861,9 +1185,93 @@ object LiveTvHubProvider : Provider, IptvProvider {
     // 2026-05-08 : boutons ⏮ ⏭ pour zapper entre chaînes dans le Hub.
     // L'ordre suit getHome (favorites uniquement, par catégorie, bannies exclues).
 
+    // 2026-06-08 : cache populé par getHome() — agrège TOUTES les catégories
+    //   du Hub (WiTV, OTF, France TV, Vavoo, …) sous forme (id, displayName).
+    //   Sert à getOrderedChannelIds() + getChannelDisplayName() pour que la
+    //   liste D-pad LEFT en fullscreen inclue tout, pas juste WiTV.
+    @Volatile private var homeChannelsCache: List<Pair<String, String>> = emptyList()
+
     /** Returns la liste ordonnée des channelIds du Hub (= ordre du home,
-     *  par catégorie, favorites uniquement, bannies exclues). */
-    fun getOrderedChannelIds(): List<String> {
+     *  par catégorie, favorites uniquement, bannies exclues).
+     *  2026-06-08 : si [currentChannelId] est fourni et appartient à un sous-groupe
+     *  (France TV, OTF, …), la liste est filtrée pour ne contenir QUE ce groupe.
+     *  C'est pour que le panel D-pad LEFT en fullscreen affiche les chaînes du
+     *  MÊME provider que celle qu'on regarde (ex: en plein France 3, on voit
+     *  les 385 chaînes France TV, pas les WiTV mixées). */
+    fun getOrderedChannelIds(currentChannelId: String? = null): List<String> {
+        // 2026-06-08 : si le cache est dispo (= getHome a tourné au moins une
+        //   fois), on retourne les chaînes du groupe courant. Sinon fallback
+        //   sur l'ancien comportement WiTV-only (1er boot, getHome pas encore).
+        var cache = homeChannelsCache
+        // 2026-06-08 (user "quand on fait gauche y a plus rien") : si on est
+        //   sur une chaîne France TV et que le cache est vide (parce que
+        //   getHome n'a pas été refresh depuis cette session), on FORCE un
+        //   fetch direct BoxXtemus pour ne pas afficher "Chaînes (0)". Le
+        //   caller est dans Dispatchers.Default donc runBlocking est OK.
+        if (cache.isEmpty() && currentChannelId?.startsWith("livehub::francetv::") == true) {
+            try {
+                cache = kotlinx.coroutines.runBlocking {
+                    val sections = com.streamflixreborn.streamflix.providers
+                        .BoxXtemusProvider.getHome()
+                    val out = mutableListOf<Pair<String, String>>()
+                    val seen = HashSet<String>()
+                    for (cat in sections) {
+                        if (cat.name.equals("Favoris", ignoreCase = true)) continue
+                        (cat.list as? List<*>)?.forEach { item ->
+                            val tv = item as? TvShow ?: return@forEach
+                            val id = "livehub::francetv::${tv.id}"
+                            if (seen.add(id)) out.add(id to tv.title.ifBlank { tv.id })
+                        }
+                    }
+                    out
+                }
+                homeChannelsCache = cache
+                Log.d(TAG, "homeChannelsCache populated lazy (France TV only): ${cache.size}")
+            } catch (t: Throwable) {
+                Log.w(TAG, "Lazy France TV channels fetch failed: ${t.message}")
+            }
+        }
+        // 2026-06-08 (user "chaînes du bas du Hub : prev/next pas, liste vide") :
+        //   lazy populate pour les chaînes Dric4rTV (= "France TV - Ligue1+/
+        //   Muzik/etc."). Sans ça, l'user clique sur une chaîne Dric4rTV
+        //   alors que le cache n'a pas encore été populé → fallback WiTV →
+        //   0 chaîne dans le filter.
+        if (cache.isEmpty() && currentChannelId?.startsWith("livehub::dric4rtv::") == true) {
+            try {
+                cache = kotlinx.coroutines.runBlocking {
+                    val sections = com.streamflixreborn.streamflix.providers
+                        .Dric4rTvProvider.getHome()
+                    val out = mutableListOf<Pair<String, String>>()
+                    val seen = HashSet<String>()
+                    for (cat in sections) {
+                        (cat.list as? List<*>)?.forEach { item ->
+                            val tv = item as? TvShow ?: return@forEach
+                            if (seen.add(tv.id)) out.add(tv.id to tv.title.ifBlank { tv.id })
+                        }
+                    }
+                    out
+                }
+                homeChannelsCache = cache
+                Log.d(TAG, "homeChannelsCache populated lazy (Dric4rTV only): ${cache.size}")
+            } catch (t: Throwable) {
+                Log.w(TAG, "Lazy Dric4rTV channels fetch failed: ${t.message}")
+            }
+        }
+        if (cache.isNotEmpty()) {
+            val groupPrefix = currentChannelId?.let { id ->
+                when {
+                    id.startsWith("livehub::francetv::") -> "livehub::francetv::"
+                    id.startsWith("livehub::otf::") -> "livehub::otf::"
+                    id.startsWith("livehub::dric4rtv::") -> "livehub::dric4rtv::"
+                    else -> null
+                }
+            }
+            return if (groupPrefix != null) {
+                cache.filter { it.first.startsWith(groupPrefix) }.map { it.first }
+            } else {
+                cache.map { it.first }
+            }
+        }
         val favs = favoriteChannels()
         val notBanned = favs.filter {
             !com.streamflixreborn.streamflix.fragments.player.settings
@@ -881,22 +1289,33 @@ object LiveTvHubProvider : Provider, IptvProvider {
         return ids
     }
 
-    /** Returns l'id de la chaîne avant [currentId] dans la liste ordonnée. */
+    /** Returns l'id de la chaîne avant [currentId] dans la liste ordonnée.
+     *  2026-06-08 : passe currentId à getOrderedChannelIds pour filtrer par
+     *  groupe (= ne pas zapper de France TV vers WiTV). */
     fun getPreviousChannelId(currentId: String): String? {
-        val list = getOrderedChannelIds()
+        val list = getOrderedChannelIds(currentId)
         val idx = list.indexOf(currentId)
         return if (idx > 0) list[idx - 1] else null
     }
 
-    /** Returns l'id de la chaîne après [currentId] dans la liste ordonnée. */
+    /** Returns l'id de la chaîne après [currentId] dans la liste ordonnée.
+     *  2026-06-08 : passe currentId à getOrderedChannelIds pour filtrer par
+     *  groupe (= ne pas zapper de France TV vers WiTV). */
     fun getNextChannelId(currentId: String): String? {
-        val list = getOrderedChannelIds()
+        val list = getOrderedChannelIds(currentId)
         val idx = list.indexOf(currentId)
         return if (idx in 0 until list.lastIndex) list[idx + 1] else null
     }
 
-    /** Returns le displayName de la chaîne pour [channelId]. */
+    /** Returns le displayName de la chaîne pour [channelId].
+     *  2026-06-08 : consulte d'abord [homeChannelsCache] (qui contient TOUS les
+     *  providers du Hub — France TV, OTF, …) sinon fallback sur channelById
+     *  qui est WiTV-only. Sans ce fix, le panel D-pad LEFT en fullscreen
+     *  affichait "Chaînes (0)" pour France TV (les ids livehub::francetv::*
+     *  n'étaient pas dans channelById WiTV). */
     fun getChannelDisplayName(channelId: String): String? {
+        val cached = homeChannelsCache.firstOrNull { it.first == channelId }?.second
+        if (cached != null) return cached
         return channelById[channelId]?.displayName
     }
 
