@@ -52,6 +52,17 @@ class LiveReconnectingHttpDataSource(
         //
         // Si MARQUEUR HLS détecté → désactive reconnect, ExoPlayer gère la
         // séquence des segments lui-même via HlsMediaSource.
+        // 2026-06-08 (user "mini marche, grand player boucle sur Canal 4") :
+        //   le pattern `name-12345.ts` (= segment HLS classique numéroté) était
+        //   détecté à tort comme "Xtream live progressive" → reconnect en
+        //   boucle qui rewind le même segment au début. La VRAIE distinction :
+        //     - HLS segment chunked : `cwnxpjnjlive-2090.ts` (basename + - + N)
+        //     - Xtream live progressive : `12345.ts` (juste l'ID chaîne)
+        //   On regarde le filename : s'il contient un - ou _ + chiffres avant
+        //   .ts, c'est un segment HLS → pas de reconnect.
+        val filenameNoExt = urlPath.substringAfterLast('/').substringBefore('.')
+        val isHlsNumberedSegment = filenameNoExt.matches(Regex(".+[-_]\\d+$"))
+
         val hasHlsMarker = urlFull.contains("seq=") ||
             urlPath.contains("/tok_") ||
             urlPath.contains("/chunk-") ||
@@ -60,6 +71,7 @@ class LiveReconnectingHttpDataSource(
             urlPath.contains("/seg-") ||
             urlPath.contains("/segment-") ||
             urlPath.contains(".m4s") ||
+            isHlsNumberedSegment ||  // ← name-N.ts ou name_N.ts
             // HLS hosts CDN connus
             urlFull.contains("akamaized.net") ||
             urlFull.contains("cloudfront.net") ||

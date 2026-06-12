@@ -44,6 +44,17 @@ object MiniPlayerController {
      *  Return true = click handled (play in mini player), false = let normal player handle it. */
     var onIptvChannelClick: ((TvShow) -> Boolean)? = null
 
+    /** 2026-06-08 (user "pour les radios on est obligé d'ouvrir le lecteur en
+     *  vrai juste pour avoir le son") : helper public — détecte les chaînes
+     *  RADIO. Les radios doivent jouer en mini-bar audio uniquement, jamais
+     *  en fullscreen.
+     *  2026-06-08 bis : ajout des stations RadioBrowser API (préfixe radio::). */
+    fun isRadioChannel(id: String?): Boolean {
+        if (id.isNullOrBlank()) return false
+        return id.startsWith("livehub::dric4rtv::r4di0::") ||
+            id.startsWith("radio::")
+    }
+
     sealed class State {
         data object Idle : State()
         data class Loading(val channelId: String, val channelName: String) : State()
@@ -68,6 +79,10 @@ object MiniPlayerController {
     private const val BUFFERING_WATCHDOG_MS = 6_000L
 
     private var player: ExoPlayer? = null
+    // 2026-06-09 : appContext stocké pour pouvoir lancer/arrêter le
+    //   RadioPlaybackService depuis n'importe quelle fonction.
+    @Volatile private var appContext: Context? = null
+    @Volatile private var radioServiceRunning: Boolean = false
     // Promoted to field so we can apply per-channel headers (Referer/Origin)
     // before each play. Necessary for sources like meritend.net that 403
     // sans Referer correct.
@@ -85,6 +100,82 @@ object MiniPlayerController {
         private set
     var currentChannelPoster: String? = null
         private set
+
+    // 2026-06-09 (user "le mini player est ouvert dans les providers pour la
+    //   radio") : provider d'origine quand on a démarré une radio. Permet aux
+    //   fragments de masquer le mini-player VISUEL quand on est sur un autre
+    //   provider (l'audio continue via le RadioPlaybackService).
+    @Volatile
+    var radioOriginProviderName: String? = null
+        private set
+
+    // 2026-06-09 (user "quand on va cliquer dessus il joue directement la
+    //   dernière radio qui a été utilisée") : mémoire de la dernière radio
+    //   jouée, persistée pour reprise rapide depuis le bouton Radio.
+    data class LastRadio(
+        val id: String,
+        val name: String,
+        val poster: String?,
+        val streamUrl: String?
+    )
+
+    private const val PREF_LAST_RADIO = "mini_player_last_radio"
+    private const val KEY_LAST_RADIO_ID = "last_radio_id"
+    private const val KEY_LAST_RADIO_NAME = "last_radio_name"
+    private const val KEY_LAST_RADIO_POSTER = "last_radio_poster"
+    private const val KEY_LAST_RADIO_STREAM = "last_radio_stream"
+
+    private fun lastRadioPrefs(ctx: android.content.Context) =
+        ctx.getSharedPreferences(PREF_LAST_RADIO, android.content.Context.MODE_PRIVATE)
+
+    fun rememberLastRadio(ctx: android.content.Context, id: String, name: String, poster: String?, streamUrl: String?) {
+        try {
+            lastRadioPrefs(ctx).edit()
+                .putString(KEY_LAST_RADIO_ID, id)
+                .putString(KEY_LAST_RADIO_NAME, name)
+                .putString(KEY_LAST_RADIO_POSTER, poster)
+                .putString(KEY_LAST_RADIO_STREAM, streamUrl)
+                .apply()
+        } catch (_: Throwable) {}
+    }
+
+    fun getLastRadio(ctx: android.content.Context): LastRadio? {
+        val p = lastRadioPrefs(ctx)
+        val id = p.getString(KEY_LAST_RADIO_ID, null) ?: return null
+        val name = p.getString(KEY_LAST_RADIO_NAME, null) ?: return null
+        return LastRadio(
+            id = id,
+            name = name,
+            poster = p.getString(KEY_LAST_RADIO_POSTER, null),
+            streamUrl = p.getString(KEY_LAST_RADIO_STREAM, null)
+        )
+    }
+
+    /** True si le mini-player VISUEL doit être masqué sur l'écran courant :
+     *  = la chaîne en cours est une radio démarrée sur UN AUTRE provider que
+     *  le provider sélectionné actuellement. L'audio continue, seul l'overlay
+     *  est masqué pour ne pas gêner la navigation. Renvoie false pour toutes
+     *  les chaînes IPTV/TV normales (= comportement inchangé). */
+    fun shouldHideMiniPlayerVisualOnCurrentScreen(): Boolean {
+        val id = currentChannelId ?: return false
+        if (!isRadioChannel(id)) return false
+        // 2026-06-09 v2 : pour les radios, on ne montre JAMAIS le visuel du
+        //   mini-player sauf si on est sur le provider qui a démarré la radio.
+        //   (Avant : si origin OU current = null on renvoyait false → mini-player
+        //   visible partout. Fix : si null on cache aussi, l'audio suffit.)
+        val origin = radioOriginProviderName ?: return true
+        val current = UserPreferences.currentProvider?.name ?: return true
+        return origin != current
+    }
+
+    /** Helper utilisé par les fragments hosts du mini-player. Si on est dans
+     *  le cas "radio jouant dans un autre provider", on force GONE. Sinon on
+     *  applique la visibility demandée. Sécurise tous les sites en un point. */
+    fun applyMiniPlayerVisibility(view: android.view.View, requested: Int) {
+        view.visibility = if (shouldHideMiniPlayerVisualOnCurrentScreen())
+            android.view.View.GONE
+        else requested
+    }
 
     // Server fallback tracking
     private val availableServers: MutableList<Video.Server> = mutableListOf()
@@ -133,6 +224,23 @@ object MiniPlayerController {
     fun getPlayer(): ExoPlayer? = player
 
     private val playerListener = object : Player.Listener {
+        override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+            // 2026-06-10 (debug user "j'ai activé sous-titres j'en vois pas") :
+            //   dump les text tracks dispo pour diagnostiquer la présence ou
+            //   l'absence de subs dans le flux IPTV. Visible dans logcat.
+            try {
+                val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+                Log.d(TAG, "Tracks changed: ${textGroups.size} text track groups for $currentChannelName")
+                textGroups.forEachIndexed { gi, group ->
+                    for (i in 0 until group.length) {
+                        val f = group.getTrackFormat(i)
+                        Log.d(TAG, "  [text $gi/$i] lang=${f.language} label=${f.label} role=${f.roleFlags} sampleMime=${f.sampleMimeType} selected=${group.isTrackSelected(i)}")
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "onTracksChanged dump failed: ${e.message}")
+            }
+        }
         override fun onPlayerError(error: PlaybackException) {
             val serverName = availableServers.getOrNull(currentServerIndex)?.name ?: "?"
             Log.e(TAG, "Player error on server [$currentServerIndex] $serverName: ${error.message}")
@@ -391,6 +499,8 @@ object MiniPlayerController {
     }
 
     fun initPlayer(context: Context) {
+        // 2026-06-09 : stocker l'appContext pour le foreground service.
+        appContext = context.applicationContext
         if (player != null) return
 
         // 2026-05-31 : OkHttpDataSource au lieu de DefaultHttpDataSource.
@@ -415,13 +525,49 @@ object MiniPlayerController {
             .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
+            // 2026-06-12 (user "Vavoo sert la pub VYPN même avec MediaHubMX/2") :
+            //   forcer HTTP/1.1 (au lieu d'HTTP/2 par défaut). Test : curl en
+            //   HTTP/2 sert le vrai TF1 → c'est probablement le fingerprint
+            //   HTTP/2 settings frames d'OkHttp Android que Vavoo détecte
+            //   pour servir le clip pub VYPN. HTTP/1.1 = pas de SETTINGS,
+            //   fingerprint moins distinctif.
+            .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
             .build()
 
         val httpDataSource = OkHttpDataSource.Factory(okHttpClient)
             .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         httpDataSourceFactory = httpDataSource
 
-        val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSource)
+        // 2026-06-12 (user "Vavoo sert toujours la pub VYPN même avec HTTP/1.1") :
+        //   Vavoo détecte le fingerprint TLS de Conscrypt (la lib SSL/TLS d'Android
+        //   utilisée par OkHttp). En swap vers CronetDataSource qui utilise BoringSSL
+        //   (= la lib SSL de Chrome), le JA3 fingerprint matche un browser standard
+        //   → Vavoo nous voit comme un browser légitime → pas de pub.
+        //   Fallback OkHttp si Cronet pas dispo (= Chromecast vieux, etc.).
+        val cronetEngine = try {
+            com.streamflixreborn.streamflix.StreamFlixApp.getCronetEngine(context)
+        } catch (_: Throwable) { null }
+        val baseHttpFactory: androidx.media3.datasource.DataSource.Factory = if (cronetEngine != null) {
+            try {
+                val cronetClass = Class.forName("androidx.media3.datasource.cronet.CronetDataSource\$Factory")
+                val engineClass = Class.forName("org.chromium.net.CronetEngine")
+                val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+                val ctor = cronetClass.getConstructor(engineClass, java.util.concurrent.Executor::class.java)
+                val factory = ctor.newInstance(cronetEngine, executor)
+                cronetClass.getMethod("setUserAgent", String::class.java)
+                    .invoke(factory, "MediaHubMX/2")
+                Log.d(TAG, "Using CronetDataSource (BoringSSL TLS) for streams")
+                factory as androidx.media3.datasource.DataSource.Factory
+            } catch (e: Throwable) {
+                Log.w(TAG, "CronetDataSource init failed (${e.message}), fallback to OkHttp")
+                httpDataSource
+            }
+        } else {
+            Log.d(TAG, "CronetEngine unavailable, using OkHttpDataSource")
+            httpDataSource
+        }
+
+        val dataSourceFactory = DefaultDataSource.Factory(context, baseHttpFactory)
 
         // 2026-05-13 (user "le mini lecteur charge longtemps") : démarrage
         // ultra rapide — on commence à jouer dès qu'1s de buffer est dispo
@@ -449,7 +595,31 @@ object MiniPlayerController {
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
             .setLoadErrorHandlingPolicy(resilientLoadErrorPolicy)
 
-        player = ExoPlayer.Builder(context)
+        // 2026-06-10 (user "le mini-player perd l'image au bout d'un moment,
+        //   le son reste") : hypothèse hardware decoder qui se met en sleep
+        //   en surface petite (MTK/Amlogic Chromecast). Fix : utilise
+        //   NextRenderersFactory + EXTENSION_RENDERER_MODE_PREFER pour les
+        //   chaînes IPTV mini-player → software FFmpeg en priorité = pas
+        //   d'optimisation power-saving qui kill la surface vidéo.
+        val miniRenderersFactory = try {
+            io.github.anilbeesetti.nextlib.media3ext.ffdecoder
+                .NextRenderersFactory(context).apply {
+                    setEnableDecoderFallback(true)
+                    setExtensionRendererMode(
+                        androidx.media3.exoplayer.DefaultRenderersFactory
+                            .EXTENSION_RENDERER_MODE_PREFER
+                    )
+                }
+        } catch (e: Throwable) {
+            Log.w(TAG, "NextRenderersFactory unavailable, fallback default: ${e.message}")
+            null
+        }
+        val playerBuilder = if (miniRenderersFactory != null) {
+            ExoPlayer.Builder(context, miniRenderersFactory)
+        } else {
+            ExoPlayer.Builder(context)
+        }
+        player = playerBuilder
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
             .setAudioAttributes(
@@ -471,12 +641,343 @@ object MiniPlayerController {
                 } catch (e: Exception) {
                     Log.w(TAG, "PreloadConfiguration not available: ${e.message}")
                 }
+                // 2026-06-10 (user "chaîne de dessin animé sous-titré, les
+                //   subs n'y sont pas") : toggle iptvShowSubtitlesFr :
+                //   - OFF (par défaut) → désactive CEA-608/708 + autres
+                //     text tracks (= ancien comportement HUGO! HUGO! fix)
+                //   - ON → préfère FR auto si dispo, ne désactive rien
+                try {
+                    val showSubs = UserPreferences.iptvShowSubtitlesFr
+                    trackSelectionParameters = if (showSubs) {
+                        // 2026-06-10 v2 (logs : `selected=false` malgré
+                        //   preferredTextLanguage(fr)) : faut EXPLICITEMENT
+                        //   désactiver le TrackTypeDisabled + clear overrides
+                        //   + autoriser undetermined + listes "fr"/"fre"/"fra".
+                        trackSelectionParameters.buildUpon()
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                            .setPreferredTextLanguages("fr", "fre", "fra")
+                            .setSelectUndeterminedTextLanguage(true)
+                            .build().also {
+                                Log.d(TAG, "IPTV subs ENABLED (FR preferred, undetermined OK)")
+                            }
+                    } else {
+                        trackSelectionParameters.buildUpon()
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                            .build().also {
+                                Log.d(TAG, "IPTV subs DISABLED (toggle off)")
+                            }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not configure text tracks: ${e.message}")
+                }
             }
         Log.d(TAG, "ExoPlayer initialized")
     }
 
+    /**
+     * 2026-06-08 (user "ajoute l'API RadioBrowser") : lance directement une URL
+     * de stream audio (radio web) sans passer par un provider IPTV. Utilisé
+     * pour les stations RadioBrowser (préfixe `radio::browser::`).
+     */
+    /** 2026-06-09 : helpers publics pour les boutons de la notif radio
+     *  (Play/Pause, Suivant, Précédent). Appelés par RadioPlaybackService. */
+    fun toggleRadioPlayPause() {
+        try {
+            player?.let { p ->
+                p.playWhenReady = !p.playWhenReady
+                Log.d(TAG, "toggleRadioPlayPause: playWhenReady=${p.playWhenReady}")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "toggleRadioPlayPause failed: ${t.message}")
+        }
+    }
+
+    fun isRadioPlaying(): Boolean = try { player?.playWhenReady == true } catch (_: Throwable) { false }
+
+    fun nextRadio() = jumpRadio(+1)
+    fun previousRadio() = jumpRadio(-1)
+
+    private fun jumpRadio(delta: Int) {
+        val currentId = currentChannelId ?: return
+        if (!isRadioChannel(currentId)) return
+        scope.launch {
+            try {
+                val list = com.streamflixreborn.streamflix.utils.RadioCatalog.list()
+                if (list.isEmpty()) return@launch
+                val idx = list.indexOfFirst { it.id == currentId }
+                if (idx < 0) return@launch
+                val target = (idx + delta + list.size) % list.size
+                val next = list[target]
+                val url = next.streamUrl
+                if (!url.isNullOrBlank()) {
+                    playRadioDirect(next.id, next.name, next.poster, url)
+                } else {
+                    // Pas d'URL directe (= Dric4rTV) : déléguer au flow normal.
+                    playChannel(next.id, next.name, next.poster)
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "jumpRadio failed: ${t.message}")
+            }
+        }
+    }
+
+    /** 2026-06-09 : démarre/maintient le RadioPlaybackService (foreground)
+     *  pour empêcher Android de suspendre l'app écran éteint. */
+    private fun startRadioForegroundService(title: String, subtitle: String?) {
+        val ctx = appContext ?: return
+        try {
+            val intent = android.content.Intent(
+                ctx,
+                com.streamflixreborn.streamflix.services.RadioPlaybackService::class.java,
+            ).apply {
+                action = com.streamflixreborn.streamflix.services
+                    .RadioPlaybackService.ACTION_START
+                putExtra(
+                    com.streamflixreborn.streamflix.services
+                        .RadioPlaybackService.EXTRA_TITLE,
+                    title,
+                )
+                subtitle?.let {
+                    putExtra(
+                        com.streamflixreborn.streamflix.services
+                            .RadioPlaybackService.EXTRA_SUBTITLE,
+                        it,
+                    )
+                }
+            }
+            androidx.core.content.ContextCompat.startForegroundService(ctx, intent)
+            radioServiceRunning = true
+            Log.d(TAG, "RadioPlaybackService started ($title)")
+        } catch (t: Throwable) {
+            Log.w(TAG, "startRadioForegroundService failed: ${t.message}")
+        }
+    }
+
+    /** Arrête le RadioPlaybackService si actif. No-op sinon. */
+    private fun stopRadioForegroundService() {
+        if (!radioServiceRunning) return
+        val ctx = appContext ?: return
+        try {
+            ctx.stopService(
+                android.content.Intent(
+                    ctx,
+                    com.streamflixreborn.streamflix.services.RadioPlaybackService::class.java,
+                )
+            )
+            radioServiceRunning = false
+            Log.d(TAG, "RadioPlaybackService stopped")
+        } catch (t: Throwable) {
+            Log.w(TAG, "stopRadioForegroundService failed: ${t.message}")
+        }
+    }
+
+    fun playRadioDirect(channelId: String, channelName: String, channelPoster: String?, streamUrl: String) {
+        Log.d(TAG, "playRadioDirect: $channelName ($channelId) → $streamUrl")
+        // 2026-06-09 : keep-alive foreground pour audio écran éteint.
+        startRadioForegroundService(channelName, "Radio")
+        // 2026-06-09 : retenir le provider d'origine pour pouvoir masquer
+        //   le mini-player VISUEL quand on switche de provider.
+        radioOriginProviderName = UserPreferences.currentProvider?.name
+        // 2026-06-09 : mémoriser la dernière radio jouée pour la reprise rapide
+        //   via le bouton Radio (clic court = relance la dernière).
+        try {
+            appContext?.let { rememberLastRadio(it, channelId, channelName, channelPoster, streamUrl) }
+        } catch (_: Throwable) {}
+        // Stop l'ancien stream
+        try {
+            player?.let { p ->
+                p.stop()
+                p.clearMediaItems()
+            }
+        } catch (_: Throwable) {}
+        currentChannelId = channelId
+        currentChannelName = channelName
+        currentChannelPoster = channelPoster
+        availableServers.clear()
+        triedServerUrls.clear()
+        hostFailCounts.clear()
+        currentServerIndex = 0
+        retryCycle = 0
+        serversExhausted = false
+        retryJob?.cancel()
+        progressiveServerJob?.cancel()
+        cancelBufferingWatchdog()
+        _state.value = State.Playing(channelId, channelName, channelPoster)
+
+        loadJob?.cancel()
+        loadJob = scope.launch {
+            try {
+                val p = player ?: return@launch
+                val mediaItem = MediaItem.Builder()
+                    .setUri(streamUrl.toUri())
+                    .build()
+                p.setMediaItem(mediaItem)
+                p.prepare()
+                p.playWhenReady = true
+                Log.d(TAG, "playRadioDirect: prepared $channelName")
+            } catch (t: Throwable) {
+                Log.w(TAG, "playRadioDirect failed: ${t.message}")
+                _state.value = State.Error(channelId, t.message ?: "Erreur lecture radio")
+            }
+        }
+    }
+
+    /** 2026-06-10 (user "2e clic = fullscreen depuis le folder dialog") :
+     *  navigate vers le fullscreen player avec la chaîne actuellement
+     *  jouée dans le mini-player. Appelable depuis n'importe quel context
+     *  (= sans avoir besoin du Fragment Home). */
+    fun navigateToFullscreenForCurrent() {
+        val activity = com.streamflixreborn.streamflix.StreamFlixApp.currentActivity
+            as? androidx.fragment.app.FragmentActivity ?: run {
+            Log.w(TAG, "navigateToFullscreenForCurrent: no FragmentActivity")
+            return
+        }
+        val channelId = currentChannelId ?: run {
+            Log.w(TAG, "navigateToFullscreenForCurrent: no current channel")
+            return
+        }
+        val channelName = currentChannelName ?: channelId
+        val channelPoster = currentChannelPoster
+
+        // Cut le mini-player (= comme HomeTvFragment.navigateToFullPlayer).
+        stopAsync()
+
+        val videoType = com.streamflixreborn.streamflix.models.Video.Type.Episode(
+            id = channelId, number = 1, title = channelName, poster = channelPoster,
+            overview = null,
+            tvShow = com.streamflixreborn.streamflix.models.Video.Type.Episode.TvShow(
+                id = channelId, title = channelName, poster = channelPoster,
+                banner = null, releaseDate = null, imdbId = null,
+            ),
+            season = com.streamflixreborn.streamflix.models.Video.Type.Episode.Season(
+                number = 1, title = "Live",
+            ),
+        )
+        val args = android.os.Bundle().apply {
+            putString("id", channelId)
+            putString("title", channelName)
+            putString("subtitle", channelName)
+            putSerializable("videoType", videoType)
+        }
+        try {
+            val navHost = activity.supportFragmentManager
+                .findFragmentById(com.streamflixreborn.streamflix.R.id.nav_main_fragment)
+                as? androidx.navigation.fragment.NavHostFragment
+            navHost?.navController?.navigate(
+                com.streamflixreborn.streamflix.R.id.action_global_player, args,
+            ) ?: Log.w(TAG, "navigateToFullscreenForCurrent: no NavHostFragment")
+        } catch (e: Exception) {
+            Log.w(TAG, "navigateToFullscreenForCurrent failed: ${e.message}")
+        }
+    }
+
+    /** 2026-06-10 : lookup folderPath en cherchant dans folderContents par
+     *  ID. Le folder ID est de la forme `livehub::worldlivetv::wltv::<group>::folder::<sub>-<idx>`
+     *  → on doit retrouver le folderPath qui a stocké ce folder. */
+    private fun resolveFolderPathFromId(id: String): String? {
+        // Format folderPath : `<groupSlug>/<subSlug>/<idx>` OU `<groupSlug>/<subSlug>/u<hash>`
+        // Format nativeId : `wltv::<groupSlug>::folder::<subSlug>-<idx>`
+        val nativeId = id.removePrefix("livehub::worldlivetv::")
+        val nidParts = nativeId.removePrefix("wltv::").split("::folder::")
+        if (nidParts.size != 2) return null
+        val groupSlug = nidParts[0]
+        val subAndIdx = nidParts[1]
+        val lastDash = subAndIdx.lastIndexOf('-')
+        if (lastDash <= 0) return null
+        val subSlug = subAndIdx.substring(0, lastDash)
+        val idx = subAndIdx.substring(lastDash + 1)
+        val folderContents = com.streamflixreborn.streamflix.providers
+            .WorldLiveTvProvider.folderContents
+        // 1. Tente exact match (= mêmes format ID et folderPath)
+        val exactPath = "$groupSlug/$subSlug/$idx"
+        if (folderContents.containsKey(exactPath)) return exactPath
+        // 2. 2026-06-10 (user "IPTV-Org ne ouvre plus la liste") : si le
+        //    folder ID est ancien format mais folderContents a été regen
+        //    avec nouveau format (u<hash>), fallback par PREFIX. Cherche le
+        //    1er path qui commence par "<groupSlug>/<subSlug>/".
+        val expectedPrefix = "$groupSlug/$subSlug/"
+        for ((path, items) in folderContents) {
+            if (path.startsWith(expectedPrefix) && items.isNotEmpty()) {
+                Log.d(TAG, "resolveFolderPathFromId: fallback prefix match ($id → $path)")
+                return path
+            }
+        }
+        Log.w(TAG, "resolveFolderPathFromId: no match for $id (expected prefix=$expectedPrefix)")
+        return null
+    }
+
     fun playChannel(channelId: String, channelName: String, channelPoster: String?) {
         Log.d(TAG, "playChannel: $channelName ($channelId)")
+        // 2026-06-10 (user "j'ai activé sous-titres j'en vois pas") : applique
+        //   le toggle iptvShowSubtitlesFr À CHAQUE switch de chaîne. initPlayer
+        //   skip si player existe déjà → les params de track selection
+        //   restaient bloqués sur l'ancien state. Maintenant on les force ici
+        //   sur le player vivant.
+        try {
+            val p = player
+            if (p != null) {
+                val showSubs = UserPreferences.iptvShowSubtitlesFr
+                p.trackSelectionParameters = if (showSubs) {
+                    p.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                        .setPreferredTextLanguages("fr", "fre", "fra")
+                        .setSelectUndeterminedTextLanguage(true)
+                        .build().also {
+                            Log.d(TAG, "playChannel: IPTV subs ENABLED for $channelName")
+                        }
+                } else {
+                    p.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                        .build().also {
+                            Log.d(TAG, "playChannel: IPTV subs DISABLED for $channelName")
+                        }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "playChannel: could not configure text tracks: ${e.message}")
+        }
+        // 2026-06-10 (user "comme Wiseplay : dossiers explorables") : si
+        //   l'ID est un folder World Live → ouvre le dialog explorer au lieu
+        //   de tenter de jouer (un folder n'a pas de stream).
+        if (channelId.contains("::folder::")) {
+            val folderPath = resolveFolderPathFromId(channelId)
+            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.currentActivity
+            if (folderPath != null && ctx != null) {
+                com.streamflixreborn.streamflix.providers.WorldLiveFolderDialog.showFolder(
+                    ctx, folderPath, channelName,
+                ) { ch ->
+                    // Quand l'user clique sur une chaîne feuille du folder,
+                    //   on relance playChannel avec son id préfixé.
+                    val leafId = "livehub::worldlivetv::${ch.id}"
+                    playChannel(leafId, ch.name, ch.logo)
+                }
+            } else {
+                Log.w(TAG, "playChannel: folder id but no path/activity ($channelId)")
+            }
+            return
+        }
+        // 2026-06-09 (user "ça joue sur mon téléphone et j'ai pas de
+        //   notification persistante pour l'audio") : les radios Dric4rTV
+        //   passent par playChannel (pas par playRadioDirect). Si la
+        //   nouvelle chaîne EST une radio → démarrer le keep-alive.
+        //   Si c'est une chaîne TV normale → arrêter le keep-alive radio
+        //   si actif (= switch radio → TV).
+        if (isRadioChannel(channelId)) {
+            startRadioForegroundService(channelName, "Radio")
+            // 2026-06-09 : retenir le provider d'origine pour le visual hide.
+            radioOriginProviderName = UserPreferences.currentProvider?.name
+            // 2026-06-09 : mémoriser la dernière radio jouée. streamUrl est
+            //   inconnu ici (résolu plus tard par getServers) → null, le
+            //   replay passera par playChannel à nouveau (résoudra à nouveau).
+            try {
+                appContext?.let { rememberLastRadio(it, channelId, channelName, channelPoster, null) }
+            } catch (_: Throwable) {}
+        } else {
+            stopRadioForegroundService()
+            radioOriginProviderName = null
+        }
         // 2026-05-09 : STOP le player avant de switcher de canal, sinon si le
         // fetch du nouveau canal foire, la chaîne précédente continue de jouer
         // (bug : "je clique BFMTV et le player joue Canal+ que j'avais cliqué avant").
@@ -1142,6 +1643,9 @@ object MiniPlayerController {
     }
 
     fun stopAsync() {
+        // 2026-06-09 : arrêter le keep-alive radio si actif.
+        stopRadioForegroundService()
+        radioOriginProviderName = null
         loadJob?.cancel()
         retryJob?.cancel()
         progressiveServerJob?.cancel()

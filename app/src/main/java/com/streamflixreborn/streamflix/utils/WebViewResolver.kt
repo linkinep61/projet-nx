@@ -43,7 +43,10 @@ class WebViewResolver(private val context: Context) {
     private val isTv = context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
 
     private val challengeKeywords = listOf(
-        "Just a moment...", "cf-browser-verification", "challenge-running", "Checking your browser", "cloudflare"
+        // EN
+        "Just a moment...", "cf-browser-verification", "challenge-running", "Checking your browser", "cloudflare",
+        // FR (2026-06-09 : DessinAnime CF challenge en français)
+        "Un instant", "Veuillez patienter", "Vérification en cours", "Vérifie votre navigateur"
     )
 
     /** Si silent=true, désactive le dialog "challenge visible" — pour les
@@ -90,9 +93,11 @@ class WebViewResolver(private val context: Context) {
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, currentUrl: String?) {
                     Log.d(TAG, "[WebView] onPageFinished: $currentUrl")
+                    // 2026-06-09 v2 : 500ms → 100ms — check immédiat des liens
+                    //   réels du site. Si page chargée → SUCCESS direct.
                     mainHandler.postDelayed({
                         if (webView != null) checkChallengeStatus(view, currentUrl ?: url, continuation)
-                    }, 1500)
+                    }, 100)
                 }
             }
             loadUrl(url, headers)
@@ -117,14 +122,37 @@ class WebViewResolver(private val context: Context) {
                              cleanHtml.contains("block-main") || cleanHtml.contains("mov-t") ||
                              cleanHtml.contains("mov-list") || cleanHtml.contains("posterimg") || // Wiflix
                              cleanHtml.contains("grabScroll") || cleanHtml.contains("catalog-card") ||
-                             cleanHtml.contains("fadeJours") || cleanHtml.contains("anime-card-premium") // AnimeSama
+                             cleanHtml.contains("fadeJours") || cleanHtml.contains("anime-card-premium") || // AnimeSama
+                             // 2026-06-09 (user "la page devrait être instantanée") :
+                             //   DessinAnime est en Next.js → garde "_next/" et
+                             //   "__NEXT_DATA__" comme marqueurs de content.
+                             cleanHtml.contains("_next/") || cleanHtml.contains("__NEXT_DATA__") ||
+                             cleanHtml.contains("dessinanime")
 
             Log.d(TAG, "[WebView] Status -> Challenge: $isChallenge, Content: $hasContent, Clearance: $hasClearance, Polling: $pollingCount")
 
             // 2026-05-26 : un ancien cookie cf_clearance PÉRIMÉ peut être présent
             // alors que le challenge est toujours actif → ne PAS court-circuiter
             // sur hasClearance si isChallenge=true (sinon le dialog ne s'affiche jamais).
-            if ((!isChallenge && hasContent && cleanHtml.length > 1000) || (hasClearance && !isChallenge)) {
+            //
+            // 2026-06-09 (DessinAnime) : 3e condition pour les sites dont le
+            //   HTML normal contient le mot "cloudflare" (scripts analytics) →
+            //   isChallenge reste toujours true mais le contenu est là.
+            //   Après 3 polls (~6s), si on a du contenu volumineux + clearance,
+            //   on considère le bypass réussi (false positive du keyword).
+            // 2026-06-09 : SUCCESS si la page contient des liens RÉELS du site
+            //   (href="/movie/" ou "/tv/") — c'est le contenu, peu importe si
+            //   "cloudflare" ou "Un instant" traînent encore dans des scripts.
+            val hasRealSiteLinks = cleanHtml.contains("href=\"/movie/") ||
+                cleanHtml.contains("href=\"/tv/") ||
+                // 2026-06-09 v2 : page film avec iframe lecteur (PAS Turnstile)
+                (cleanHtml.contains("<iframe", ignoreCase = true) &&
+                    !cleanHtml.contains("challenges.cloudflare.com", ignoreCase = true) &&
+                    cleanHtml.contains("dessinanime", ignoreCase = true))
+            if (hasRealSiteLinks
+                || (!isChallenge && hasContent && cleanHtml.length > 1000)
+                || (hasClearance && !isChallenge)
+                || (!isChallenge && hasContent && hasClearance && cleanHtml.length > 5000 && pollingCount >= 3)) {
                 Log.d(TAG, "[WebView] SUCCESS detected! Closing bypass.")
                 cookieManager.flush()
                 if (continuation.isActive) {
@@ -143,14 +171,22 @@ class WebViewResolver(private val context: Context) {
                 cleanup()
                 return@evaluateJavascript
             }
-            if (!silentMode && dialog == null && pollingCount >= 2 && !hasContent) {
-                Log.d(TAG, "[WebView] Content not found, forcing Visible Challenge UI")
+            if (!silentMode && dialog == null && (
+                    (pollingCount >= 2 && !hasContent) ||
+                    // 2026-06-09 (user "la page met 30 secondes") : si challenge
+                    //   actif détecté au polling 0 → dialog IMMÉDIATEMENT (pas
+                    //   d'attente 2-3 polls).
+                    isChallenge
+                )) {
+                Log.d(TAG, "[WebView] Challenge active (poll=$pollingCount) — forcing Visible Challenge UI")
                 showVisibleChallenge(continuation)
             }
 
             pollingCount++
             if (pollingCount < 80) {
-                mainHandler.postDelayed({ checkChallengeStatus(view, currentUrl, continuation) }, 2000)
+                // 2026-06-09 v3 : 800ms → 300ms pour détection SUCCESS quasi-
+                //   instantanée dès que les liens réels du site apparaissent.
+                mainHandler.postDelayed({ checkChallengeStatus(view, currentUrl, continuation) }, 300)
             } else {
                 Log.w(TAG, "[WebView] Max polling reached")
                 if (continuation.isActive) continuation.resume("<html>$cleanHtml</html>")
@@ -163,8 +199,23 @@ class WebViewResolver(private val context: Context) {
         if (dialog != null || webView == null) return
         mainHandler.post {
             try {
+                // 2026-06-09 : utiliser la currentActivity au moment EXACT du
+                //   show, pas le context du constructor (qui peut pointer vers
+                //   une Activity détruite). Évite BadTokenException.
+                val liveAct = try {
+                    com.streamflixreborn.streamflix.StreamFlixApp.currentActivity?.takeIf {
+                        !it.isFinishing && !it.isDestroyed
+                    }
+                } catch (_: Throwable) { null }
+                if (liveAct == null) {
+                    Log.w(TAG, "[WebView] No live Activity for dialog — aborting bypass")
+                    if (continuation.isActive) continuation.resume("<html><!-- no live activity --></html>")
+                    cleanup()
+                    return@post
+                }
+                val dialogCtx: android.content.Context = liveAct
                 // CONTAINER TV: Intercetta i tasti globalmente (Soluzione "Meravigliosa")
-                val rootContainer = object : RelativeLayout(context) {
+                val rootContainer = object : RelativeLayout(dialogCtx) {
                     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
                         if (event.action == KeyEvent.ACTION_DOWN) {
                             if (isTv) {
@@ -198,20 +249,20 @@ class WebViewResolver(private val context: Context) {
                 }
 
                 if (isTv) {
-                    val btnInfo = Button(context).apply {
+                    val btnInfo = Button(dialogCtx).apply {
                         id = View.generateViewId()
-                        text = context.getString(R.string.bypass_tv_instructions)
+                        text = dialogCtx.getString(R.string.bypass_tv_instructions)
                         setBackgroundColor(Color.parseColor("#4CAF50"))
                         setTextColor(Color.WHITE)
                         textSize = 20f
-                        stateListAnimator = null 
+                        stateListAnimator = null
                         isFocusable = false
                     }
                     val infoParams = RelativeLayout.LayoutParams(-1, 200)
                     infoParams.addRule(RelativeLayout.ALIGN_PARENT_TOP)
                     rootContainer.addView(btnInfo, infoParams)
 
-                    val webContainer = FrameLayout(context).apply {
+                    val webContainer = FrameLayout(dialogCtx).apply {
                         id = View.generateViewId()
                         setBackgroundColor(Color.WHITE)
                     }
@@ -222,7 +273,7 @@ class WebViewResolver(private val context: Context) {
                     (webView?.parent as? ViewGroup)?.removeView(webView)
                     webContainer.addView(webView, FrameLayout.LayoutParams(-1, -1))
 
-                    virtualCursor = ImageView(context).apply {
+                    virtualCursor = ImageView(dialogCtx).apply {
                         setImageResource(android.R.drawable.ic_menu_mylocation) 
                         setColorFilter(Color.RED)
                         layoutParams = FrameLayout.LayoutParams(80, 80)
@@ -235,7 +286,7 @@ class WebViewResolver(private val context: Context) {
                     rootContainer.addView(webView, RelativeLayout.LayoutParams(-1, -1))
                 }
 
-                dialog = AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_NoActionBar_Fullscreen)
+                dialog = AlertDialog.Builder(dialogCtx, android.R.style.Theme_DeviceDefault_NoActionBar_Fullscreen)
                     .setView(rootContainer)
                     .setCancelable(true)
                     .setOnCancelListener {
@@ -298,7 +349,7 @@ class WebViewResolver(private val context: Context) {
         }
     }
 
-    private fun cleanup() {
+    fun cleanup() {
         mainHandler.post {
             try {
                 dialog?.dismiss(); dialog = null
