@@ -1718,9 +1718,18 @@ object BoxXtemusProvider : Provider, IptvProvider {
                 if (!it.isSuccessful) return null
                 it.body?.string() ?: return null
             }
-            // Pattern : `==="<rssKey>") {fetch(("<url>")...`
+            // Pattern : `==="<rssKey>"<JS_optionnel>) {fetch(("<url>")...`
+            // 2026-06-12 — Le RSS peut contenir du JS ADDITIONNEL entre la
+            // clôture du token literal et la parenthèse fermante de la
+            // condition `if (...)`, ex:
+            //   `==="w9"&&!/http/.test(document.referrer)) {fetch(...)`
+            // Sans `[^)]*` la regex ne matchait QUE la forme stricte
+            // `==="w9") {fetch(...)` → pour W9/F2/M6 etc. elle échouait → le
+            // caller fallback sur TF1 → bug "toutes les chaînes jouent TF1"
+            // signalé par les users. Symétrique du fix asm171 dans
+            // GenericStreamResolver.kt.
             val pattern = Regex(
-                """=\s*=\s*=\s*"$rssKey"\s*\)\s*\{\s*fetch\s*\(\s*\(\s*"([^"]+)"""",
+                """=\s*=\s*=\s*"$rssKey"\s*[^)]*\)\s*\{\s*fetch\s*\(\s*\(\s*"([^"]+)"""",
                 RegexOption.IGNORE_CASE,
             )
             val match = pattern.find(body) ?: return null
