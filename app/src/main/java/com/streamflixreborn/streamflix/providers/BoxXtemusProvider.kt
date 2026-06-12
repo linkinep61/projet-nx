@@ -732,35 +732,17 @@ object BoxXtemusProvider : Provider, IptvProvider {
                 // été altéré par downstream code).
                 src = ch.streamUrl
 
-                // 2026-06-12 (user "le chargement est trop long après le clic"):
-                //   COURT-CIRCUIT pour les chaînes mappées (TF1+/F-TV/Canal+/M6+/
-                //   Sports/etc.) : si latvdefranceShortcut peut résoudre
-                //   directement, on SAUTE GenericResolver (qui fait 7 hops
-                //   inutiles ~13s pour ces chaînes). Gain mesuré : 29s → ~10s
-                //   sur TMC.
-                val fastTrackLdf = try {
-                    latvdefranceShortcut(
-                        ch.channelName + " " + ch.name,
-                        ch.userAgent.takeIf { it.isNotBlank() },
-                    )
-                } catch (_: Throwable) { null }
-                if (fastTrackLdf != null) {
-                    Log.d(TAG, "FAST-TRACK latvdefrance for ${ch.channelName}: $fastTrackLdf")
-                    sfrUrlCache[server.id] = CachedSfrUrl(
-                        fastTrackLdf, System.currentTimeMillis() + 30 * 60 * 1000L,
-                    )
-                    return Video(
-                        source = fastTrackLdf,
-                        type = "application/vnd.apple.mpegurl",
-                        headers = mapOf(
-                            "User-Agent" to "Mozilla/5.0 (Linux; Android 14) " +
-                                    "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                                    "Chrome/131.0.0.0 Mobile Safari/537.36",
-                            "Referer" to "https://www.latvdefrance.com/",
-                        ),
-                        subtitles = emptyList(),
-                    )
-                }
+                // 2026-06-12 (user "il y a un truc qui a cassé même la
+                //   chaine LCI ne fonctionne plus") : FAST-TRACK
+                //   latvdefranceShortcut DÉSACTIVÉ car maintenant que le RSS
+                //   est empoisonné, la reconstruction de l URL retourne une
+                //   URL latvdefrance qui répond 403. Or LCI/F2/F3/F4/F5
+                //   marchent via leurs pipelines officiels respectifs
+                //   (mediainfo.tf1.fr / ftven.fr) — il faut donc NE PAS
+                //   court-circuiter ces pipelines. Pour TF1/TMC/etc. qui
+                //   n ont pas de pipeline officiel sans auth, on tombera en
+                //   fallback final sur latvdefranceShortcut (ligne ~800)
+                //   qui tentera quand même la reconstruction.
 
                 // 2026-06-11 (user "modèle Wiseplay générique, arrête de
                 //   hardcoder 60 chaînes") : AVANT les shortcuts hardcodés
@@ -784,7 +766,17 @@ object BoxXtemusProvider : Provider, IptvProvider {
                         genericTry.url.contains(".mpd"))) {
                     Log.d(TAG, "GENERIC resolver SUCCESS: ${genericTry.url}")
                     val finalUa = genericTry.headers["User-Agent"] ?: customUa
-                    val finalReferer = genericTry.headers["Referer"] ?: customReferer
+                    // 2026-06-12 : si l URL retournée est latvdefrance.com
+                    //   (= reconstruction du pattern empoisonné), on force le
+                    //   Referer rsseverything (= la source du token, comme un
+                    //   client Wiseplay le ferait). Sinon latvdefrance répond
+                    //   403. Pour les autres URLs (diff.tf1.fr, ftven.fr,
+                    //   etc.) on garde le Referer naturel du resolver.
+                    val finalReferer = if (genericTry.url.contains("latvdefrance.com")) {
+                        "https://rsseverything.com/feed/c779e9bb-48ac-497a-aafc-f44683061c6a.xml"
+                    } else {
+                        genericTry.headers["Referer"] ?: customReferer
+                    }
                     sfrUrlCache[server.id] = CachedSfrUrl(
                         genericTry.url, System.currentTimeMillis() + 30 * 60 * 1000L,
                     )
@@ -827,11 +819,34 @@ object BoxXtemusProvider : Provider, IptvProvider {
                         src = tf1MediaUrl
                         customUa = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
                         customReferer = "https://www.tf1.fr/"
+                    } else if (paraTvShortcut(ch.userAgent.takeIf { it.isNotBlank() })?.also { paraUrl ->
+                            // 2026-06-12 — JACKPOT bypass alternatif :
+                            //   tvradiozap.eu/<token> → redirect 303 → m3u8
+                            //   GitHub Paradise-91/ParaTV → CDN officiel TF1.
+                            //   Token extrait du UA Wiseplay (~fra<N>~).
+                            //   Pas de IP-binding type SFR → marche depuis
+                            //   Tahiti. Générique pour TOUT le groupe TF1+/
+                            //   Canal+/M6+/etc. qui a un token ~fra<N>~.
+                            Log.d(TAG, "TF1 PARATV shortcut → $paraUrl")
+                            src = paraUrl
+                            customUa = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                            customReferer = "https://tvradiozap.eu/"
+                            sfrUrlCache[server.id] = CachedSfrUrl(
+                                paraUrl, System.currentTimeMillis() + 30 * 60 * 1000L,
+                            )
+                        } != null) {
+                        // déjà appliqué dans le also{}
                     } else if (latvdefranceShortcut(ch.channelName + " " + ch.name, ch.userAgent.takeIf { it.isNotBlank() })?.also { ldfUrl ->
                             Log.d(TAG, "TF1 LATVDEFRANCE shortcut → $ldfUrl")
                             src = ldfUrl
+                            // 2026-06-12 (logs OPPO Tahiti : latvdefrance retourne
+                            //   403 systematique) : essai avec un UA + Referer
+                            //   rsseverything (= la source du token) au lieu de
+                            //   latvdefrance self-referer. latvdefrance pourrait
+                            //   verifier l origine du fetch via Referer (= leur
+                            //   client Wiseplay envoie le RSS comme Referer).
                             customUa = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-                            customReferer = "https://www.latvdefrance.com/"
+                            customReferer = "https://rsseverything.com/feed/c779e9bb-48ac-497a-aafc-f44683061c6a.xml"
                             sfrUrlCache[server.id] = CachedSfrUrl(
                                 ldfUrl, System.currentTimeMillis() + 30 * 60 * 1000L,
                             )
@@ -857,6 +872,8 @@ object BoxXtemusProvider : Provider, IptvProvider {
                                     .followRedirects(true)
                                     .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
                                     .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                                    // 2026-06-12 : CookieJar partagé avec LocalHlsProxy
+                                    .cookieJar(com.streamflixreborn.streamflix.utils.LocalHlsProxy.getCookieJar())
                                     .build()
                                 val sfrDirect = bypassFranceTvSfr(customUa, directClient)
                                 if (sfrDirect != null) {
@@ -992,6 +1009,11 @@ object BoxXtemusProvider : Provider, IptvProvider {
             .followSslRedirects(true)
             .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            // 2026-06-12 : partage le CookieJar du LocalHlsProxy. Les cookies
+            //   posés par u301.com seront persistés et retransmis quand le
+            //   proxy fera les calls m3u8/segments. Sans ça SFR rejette la
+            //   requête m3u8 si le cookie session manque.
+            .cookieJar(com.streamflixreborn.streamflix.utils.LocalHlsProxy.getCookieJar())
             .build()
 
         // 2026-05-12 : SKIP resolve step si src est déjà un stream URL identifié.
@@ -1531,7 +1553,14 @@ object BoxXtemusProvider : Provider, IptvProvider {
                 //   le replace end=&→end=END&. u301 retourne l'URL avec
                 //   end= vide (= live infini) et SFR refuse end=END comme
                 //   timestamp invalide. Garder l'URL telle quelle.
-                return expandedUrl
+                //
+                // 2026-06-12 v2 — WRAP l URL via le mini proxy local pour que
+                //   la requete m3u8 + segments parte par notre OkHttpClient
+                //   (= meme connection pool que u301 → meme IP CF). Sinon
+                //   ExoPlayer utilise Cronet = autre stack reseau = autre IP
+                //   = SFR rejette en 400 (IP mismatch).
+                return com.streamflixreborn.streamflix.utils.LocalHlsProxy
+                    .wrapUrl(expandedUrl)
             }
             null
         } catch (e: Exception) {
@@ -1665,7 +1694,64 @@ object BoxXtemusProvider : Provider, IptvProvider {
     //   différents — sécurité, garde un mapping ; en pratique 1 seul UA actif
     //   à la fois donc cache effectif).
     private val rssBodyCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, String>>()
-    private val RSS_CACHE_TTL_MS = 5 * 60 * 1000L
+    private val RSS_CACHE_TTL_MS = 30 * 1000L  // 5min → 30s (test fresh fetch)
+
+    /** 2026-06-12 (jackpot : RSS Wiseplay 67acd004 contient 6 routes de
+     *  bypass — on n utilisait QUE la route 1 (c779e9bb empoisonnée)) :
+     *
+     *  Le UA signé Wiseplay contient des tokens pour chaque route :
+     *  - `~tpoltf1~` → route c779e9bb (= empoisonnée)
+     *  - `~fra<N>~`  → route tvradiozap.eu/<N> (= GitHub Paradise-91/ParaTV)
+     *  - `~stp<N>~`  → route jmp2.uk/stvp-<N>
+     *  - `~pop<N>~`  → route fe482548 RSS
+     *  - `~my<N>~`   → route fe67cfd9 RSS
+     *  - `~vav<N>~`  → route Vavoo
+     *
+     *  La route tvradiozap.eu redirige (303) vers une m3u8 hébergée sur
+     *  GitHub (`raw.githubusercontent.com/Paradise-91/ParaTV/...`) qui
+     *  contient le VRAI stream CDN officiel TF1/Canal+/M6+ (= equivalent
+     *  diff.tf1.fr utilisé par LCI). Pas de IP-binding type SFR, marche
+     *  depuis Tahiti.
+     *
+     *  Cette fonction extrait le token `~fra<N>~` du UA signé, call
+     *  tvradiozap.eu/<N>, suit la redirection 303, et retourne l URL m3u8
+     *  finale. Générique : marche pour TOUTES les chaînes qui ont un
+     *  token `~fra<N>~` dans leur UA Wiseplay.
+     */
+    private fun paraTvShortcut(signedUa: String?): String? {
+        if (signedUa.isNullOrBlank()) return null
+        val token = Regex("""~fra(\d+)~""").find(signedUa)?.groupValues?.get(1)
+            ?: return null
+        return try {
+            val client = okhttp3.OkHttpClient.Builder()
+                .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                .followRedirects(true)
+                .build()
+            val req = okhttp3.Request.Builder()
+                .url("https://tvradiozap.eu/$token")
+                .header("User-Agent",
+                    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 " +
+                            "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "paraTvShortcut[fra=$token]: HTTP ${resp.code}")
+                    return null
+                }
+                val finalUrl = resp.request.url.toString()
+                Log.d(TAG, "paraTvShortcut[fra=$token] → $finalUrl (HTTP ${resp.code})")
+                // Vérifie qu on a bien une m3u8 (pas une page d erreur)
+                if (finalUrl.contains(".m3u8") || finalUrl.contains(".mpd") ||
+                    finalUrl.contains("raw.githubusercontent.com")) {
+                    finalUrl
+                } else null
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "paraTvShortcut[fra=$token] failed: ${e.message}")
+            null
+        }
+    }
 
     private fun latvdefranceShortcut(channelKey: String, signedUa: String? = null): String? {
         val key = channelKey.uppercase()
@@ -1780,16 +1866,42 @@ object BoxXtemusProvider : Provider, IptvProvider {
                 Log.d(TAG, "latvdefranceShortcut[$rssKey]: RSS cache HIT (${cached.second.length} chars)")
                 cached.second
             } else {
-                val req = okhttp3.Request.Builder().url(rssUrl)
+                // 2026-06-12 (user "Wiseplay marche, trouve la faille") :
+                //   on enrichit la requête avec les headers que Wiseplay
+                //   envoie probablement à rsseverything pour OBTENIR un RSS
+                //   avec token frais. Cache-buster en query string pour
+                //   éviter tout cache intermédiaire CloudFlare/CDN. On
+                //   ajoute aussi :
+                //   - Accept: application/rss+xml (= demande RSS explicite)
+                //   - Accept-Language: fr-FR (= cohérence avec FR feed)
+                //   - Cache-Control: no-cache, max-age=0 (= forcer fresh)
+                //   - X-Wiseplay-Client: 8.5.3 (= se faire passer pour Wiseplay)
+                //   Le `?_=<timestamp>` est invisible côté serveur si pas
+                //   reconnu, mais bypass CDN cache si oui.
+                val cacheBuster = System.currentTimeMillis()
+                val freshUrl = if (rssUrl.contains("?")) "$rssUrl&_=$cacheBuster"
+                    else "$rssUrl?_=$cacheBuster"
+                val req = okhttp3.Request.Builder().url(freshUrl)
                     .header("User-Agent", effectiveUa)
+                    .header("Accept", "application/rss+xml, application/xml, text/xml, */*")
+                    .header("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
+                    .header("Cache-Control", "no-cache, max-age=0")
+                    .header("Pragma", "no-cache")
+                    .header("X-Wiseplay-Client", "8.5.3")
                     .build()
-                val fresh = client.newCall(req).execute().use {
+                val resp = client.newCall(req).execute()
+                val httpCode = resp.code
+                val fresh = resp.use {
                     if (!it.isSuccessful) return null
                     it.body?.string() ?: return null
                 }
                 rssBodyCache[cacheKey] = now to fresh
+                // 2026-06-12 : log le token extrait pour comparer avec runs
+                //   précédents et voir si rsseverything régénère ou pas.
+                val tokenSample = Regex("""\d{10}-\d{10}""").find(fresh)?.value ?: "?"
                 Log.d(TAG, "latvdefranceShortcut[$rssKey]: RSS body ${fresh.length} chars, " +
-                        "signedUa=${signedUa != null} (fetched + cached)")
+                        "signedUa=${signedUa != null}, http=$httpCode, token=$tokenSample " +
+                        "(fetched cacheBust=$cacheBuster)")
                 fresh
             }
             // 2026-06-12 (logs OPPO post-fix-UA) : le RSS débloqué fait 58 KB
@@ -1803,36 +1915,47 @@ object BoxXtemusProvider : Provider, IptvProvider {
             val tokenIdx = body.indexOf(tokenLiteral, ignoreCase = true)
             var proximityUrl: String? = null
             if (tokenIdx >= 0) {
-                // 2026-06-12 v3 (RSS change format : URL en clair →
-                //   atob() base64 concaténés). On tente 2 stratégies :
-                //   A) URL .m3u8/.mpd directe dans 5000 chars
-                //   B) Déobfuscation `atob("base64")+"literal"+...`
-                //   (= bypass générique de l'obfuscation)
-                val windowEnd = (tokenIdx + 5000).coerceAtMost(body.length)
+                // 2026-06-12 v4 : fenêtre 5000 → 15000 chars + itère sur
+                //   TOUTES les URLs candidates pour trouver une non
+                //   empoisonnée (= peut-être un backup non-empoisonné
+                //   après le primary empoisonné dans le bloc fetch).
+                val windowEnd = (tokenIdx + 15000).coerceAtMost(body.length)
                 val window = body.substring(tokenIdx, windowEnd)
-                // Stratégie A
-                val mediaInWindow = Regex(
+                val adultHosts = listOf("adultiptv", "porniptv", "xxxiptv",
+                    "mycamtv", "livejasmin", "bongacams", "chaturbate",
+                    "camsoda", "stripchat", "pornhub", "xnxx", "xvideos",
+                    "redtube", "youporn")
+                fun isAdult(u: String) = adultHosts.any { u.lowercase().contains(it) }
+
+                // Stratégie A : itère sur TOUTES les URLs directes
+                val mediaPattern = Regex(
                     """(https?:[^"'\s<>]*?\.(?:m3u8|mpd)(?:\?[^"'\s<>]*)?)""",
                     RegexOption.IGNORE_CASE,
-                ).find(window)
-                if (mediaInWindow != null) {
-                    val candidate = mediaInWindow.value.replace("\\/", "/")
-                    // 2026-06-12 — Garde-fou : rejette les URLs vers hosts
-                    // empoisonnés (= rsseverything a remplace les URLs
-                    // latvdefrance par cdn.adultiptv.net en represailles).
-                    val isAdult = listOf("adultiptv", "porniptv", "xxxiptv",
-                        "mycamtv", "livejasmin", "bongacams", "chaturbate",
-                        "camsoda", "stripchat", "pornhub", "xnxx", "xvideos",
-                        "redtube", "youporn").any { candidate.lowercase().contains(it) }
-                    if (!isAdult) {
+                )
+                for (m in mediaPattern.findAll(window)) {
+                    val candidate = m.value.replace("\\/", "/")
+                    if (!isAdult(candidate)) {
                         proximityUrl = candidate
                         Log.d(TAG, "latvdefranceShortcut[$rssKey] PROXIMITY MATCH: $proximityUrl")
+                        break
                     } else {
-                        Log.w(TAG, "latvdefranceShortcut[$rssKey]: REJECTED adult URL: $candidate")
+                        // 2026-06-12 : tente la reconstruction du pattern
+                        //   empoisonné (= rsseverything a remplacé le prefixe
+                        //   latvdefrance par adultiptv, mais la queue avec
+                        //   token est conservée).
+                        val reconstructed = com.streamflixreborn.streamflix.utils
+                            .GenericStreamResolver.reconstructFromPoisonedPattern(candidate)
+                        if (reconstructed != null) {
+                            proximityUrl = reconstructed
+                            Log.d(TAG, "latvdefranceShortcut[$rssKey] RECONSTRUCTED from poisoned: $reconstructed")
+                            break
+                        }
+                        Log.d(TAG, "latvdefranceShortcut[$rssKey]: skip adult URL: $candidate")
                     }
                 }
                 if (proximityUrl == null) {
-                    // Stratégie B : tentative déobfuscation atob
+                    // Stratégie B : déobfuscation atob+literal (itère aussi en
+                    //   interne sur tous les fetch)
                     val deobfuscated = com.streamflixreborn.streamflix.utils
                         .GenericStreamResolver.deobfuscateAtobUrlPublic(window)
                     if (deobfuscated != null) {
