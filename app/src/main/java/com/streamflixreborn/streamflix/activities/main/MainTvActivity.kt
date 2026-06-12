@@ -286,10 +286,35 @@ class MainTvActivity : FragmentActivity() {
             android.util.Log.e("MainTvActivity", "setContentView failed: ${e.message}", e)
             return
         }
+        // 2026-06-09 : applique le fond d'écran perso sur le root de l'activity
+        //   (= derrière la sidebar + le NavHostFragment). Quand l'user rend la
+        //   sidebar transparente, le wallpaper devient visible derrière.
+        com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(binding.root)
+        // 2026-06-09 : applique l'opacité de la sidebar selon UserPreferences.
+        applySidebarOpacity()
+
         // 2026-05-15 (user "éviter que les écrans mettre en veille tous les
         // 5 minutes") : applique le flag KEEP_SCREEN_ON si l'option est ON.
         if (UserPreferences.keepScreenOnApp) {
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+
+        // 2026-06-09 : permission POST_NOTIFICATIONS pour le RadioPlaybackService
+        //   (Android 13+). Sans elle, startForeground échoue sur Android 14+
+        //   et l'audio radio se coupe écran éteint.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            try {
+                val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                    this, android.Manifest.permission.POST_NOTIFICATIONS
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (!granted) {
+                    androidx.core.app.ActivityCompat.requestPermissions(
+                        this,
+                        arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                        4231,
+                    )
+                }
+            } catch (_: Throwable) {}
         }
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ runInitStep4() }, 100)
     }
@@ -416,26 +441,40 @@ class MainTvActivity : FragmentActivity() {
             // ouvrir.
             when (menuItem.itemId) {
                 R.id.iptv_categories_menu -> {
-                    // 2026-05-13 (user "et ça s'active que le 2e clic" +
-                    // wrong categories shown) : utilise la destination COURANTE
-                    // pour choisir le bon type de catégories (LIVE/MOVIE/SERIES).
-                    val currentDestId = navController.currentDestination?.id ?: R.id.home
-                    val pickerType = when (currentDestId) {
-                        R.id.movies -> R.id.movies
-                        R.id.tv_shows -> R.id.tv_shows
-                        else -> R.id.home
+                    val provider = UserPreferences.currentProvider
+                    if (provider is com.streamflixreborn.streamflix.providers.LiveTvHubProvider) {
+                        showTvHubCategoryPicker()
+                    } else if (provider is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider) {
+                        // 2026-06-10 : World TV — catégories via WorldLiveCategorySettings.
+                        showWorldLiveCategoryPicker()
+                    } else {
+                        // 2026-05-13 : MyIptv (catégories LIVE/MOVIE/SERIES)
+                        val currentDestId = navController.currentDestination?.id ?: R.id.home
+                        val pickerType = when (currentDestId) {
+                            R.id.movies -> R.id.movies
+                            R.id.tv_shows -> R.id.tv_shows
+                            else -> R.id.home
+                        }
+                        showIptvCategoryPickerPublic(pickerType)
                     }
-                    showIptvCategoryPickerPublic(pickerType)
                     return@setOnItemSelectedListener false
                 }
                 R.id.iptv_language_menu -> {
                     val provider = UserPreferences.currentProvider
-                    Log.d("MainTv", "iptv_language_menu clicked, provider=${provider?.name}, isVavoo=${provider is com.streamflixreborn.streamflix.providers.VavooProvider}")
                     if (provider is com.streamflixreborn.streamflix.providers.VavooProvider) {
                         showVavooCountryPicker()
+                    } else if (provider is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider) {
+                        showWorldLiveCategoryPicker()
                     } else {
                         showIptvLanguageFilterPicker()
                     }
+                    return@setOnItemSelectedListener false
+                }
+                R.id.world_live_sources_menu -> {
+                    // 2026-06-10 (user "bouton apparent dans la barre") :
+                    //   ouvre le manager des sources World TV style Wiseplay.
+                    com.streamflixreborn.streamflix.providers.WorldLiveSourcesDialog
+                        .showManager(this)
                     return@setOnItemSelectedListener false
                 }
                 R.id.catalog_filter_menu -> {
@@ -494,7 +533,14 @@ class MainTvActivity : FragmentActivity() {
                 val palette = ThemeManager.palette(UserPreferences.selectedTheme)
                 header.tvNavigationHeaderTitle.setTextColor(palette.tvHeaderPrimary)
                 header.tvNavigationHeaderSubtitle.setTextColor(palette.tvHeaderSecondary)
-                setBackgroundColor(palette.tvNavBackground)
+                // 2026-06-09 (user "bandeau noir reste sur header") : applique
+                //   l'opacité globale au lieu du background opaque dur.
+                val sidebarOpacity = com.streamflixreborn.streamflix.utils.UserPreferences.sidebarOpacity
+                val headerAlpha = (255 * sidebarOpacity / 100).coerceIn(0, 255)
+                val headerBg = android.graphics.drawable.ColorDrawable(
+                    (palette.tvNavBackground and 0x00FFFFFF) or (headerAlpha shl 24)
+                )
+                background = headerBg
 
                 setOnOpenListener {
                     header.tvNavigationHeaderTitle.visibility = View.VISIBLE
@@ -617,6 +663,12 @@ class MainTvActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.checkUpdate()
+        // 2026-06-09 : refresh fond + opacité sidebar (l'user a pu modifier
+        //   les prefs depuis Settings dans une autre activity).
+        try {
+            com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(binding.root)
+            applySidebarOpacity()
+        } catch (_: Throwable) {}
         // 2026-05-17 : touch timestamp pour qu'une recréation de process
         // dans les 30 prochaines minutes ne re-bounce pas vers ProfilePicker
         // (cf StreamFlixApp.onCreate logique smart-cold-start).
@@ -646,6 +698,49 @@ class MainTvActivity : FragmentActivity() {
             com.streamflixreborn.streamflix.utils.ProfileStore.clearLastActiveTimestamp()
         }
         super.onDestroy()
+    }
+
+    /**
+     * 2026-06-09 : applique l'opacité de la sidebar TV. 100 = opaque,
+     * 0 = totalement transparent. L'alpha est multiplié sur la couleur du
+     * background de nav_main (palette.tvNavBackground).
+     */
+    private fun applySidebarOpacity() {
+        try {
+            val opacity = com.streamflixreborn.streamflix.utils.UserPreferences.sidebarOpacity
+            val palette = com.streamflixreborn.streamflix.utils.ThemeManager
+                .palette(com.streamflixreborn.streamflix.utils.UserPreferences.selectedTheme)
+            // 2026-06-09 v6 (user screenshot Frembed : le bandeau header reste
+            //   noir opaque même après v5) : binding.navMain.headerView ne pointe
+            //   peut-être pas vers le NavigationSlideHeaderView inflated. On
+            //   parcourt RÉCURSIVEMENT tous les descendants de navMain et on
+            //   transparent leur background SI c'est un ViewGroup (et pas un
+            //   TextView/ImageView qu'on garde opaque pour la lisibilité).
+            val newAlpha = (255 * opacity / 100).coerceIn(0, 255)
+            val color = (palette.tvNavBackground and 0x00FFFFFF) or (newAlpha shl 24)
+
+            binding.navMain.alpha = 1f
+            binding.navMain.background = android.graphics.drawable.ColorDrawable(color)
+
+            // Walk tous les descendants — on transparent les backgrounds des
+            //   ViewGroup conteneurs (= panels, header, etc.) mais on laisse
+            //   TextView/ImageView/Button intacts (= texte/icons opaques).
+            fun walk(v: android.view.View) {
+                if (v === binding.navMain) {
+                    // déjà traité au-dessus
+                } else if (v is android.view.ViewGroup &&
+                    v !is android.widget.TextView &&
+                    v !is android.widget.ImageView &&
+                    v !is android.widget.Button) {
+                    try { v.background = android.graphics.drawable.ColorDrawable(color) } catch (_: Throwable) {}
+                }
+                if (v is android.view.ViewGroup) {
+                    for (i in 0 until v.childCount) walk(v.getChildAt(i))
+                }
+            }
+            walk(binding.navMain)
+            android.util.Log.d("Sidebar", "applySidebarOpacity v6: alpha=$newAlpha (opacity=$opacity%)")
+        } catch (_: Throwable) {}
     }
 
     private fun applyThemeNavigationChrome() {
@@ -999,14 +1094,201 @@ class MainTvActivity : FragmentActivity() {
         // MyIptv ou Vavoo est actif. Catégories seulement pour MyIptv (Vavoo
         // n'a pas de catégories user-pickable).
         val isVavoo = provider is com.streamflixreborn.streamflix.providers.VavooProvider
-        binding.navMain.menu.findItem(R.id.iptv_categories_menu)?.isVisible = isMyIptv
+        // 2026-06-08 : item picker langue visible aussi pour World Live (=
+        //   LiveTvHubPlusProvider) — filtre des chaînes IPTV par langue.
+        val isWorldLive = provider is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider
+        // 2026-06-10 (user "il faut le rajouter dans le TV hub") : bouton aussi
+        //   visible sur le TV Hub principal pour le filtre catégorie BoxXtemus.
+        val isTvHub = provider is com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+        // 2026-06-10 (user "non payé langue ne convient pas, c'est plus
+        //   catégories qu'il faut") : pour TV Hub, on affiche l'item "Catégories"
+        //   (pas "Pays/langue") qui ouvre le picker BoxXtemusCategorySettings.
+        // 2026-06-10 (user "modifier le bouton payer langue en catégorie") :
+        //   le bouton "Catégories" est visible aussi pour World TV (= au lieu de
+        //   "Pays/langue") car ça filtre par catégorie, pas par langue.
+        binding.navMain.menu.findItem(R.id.iptv_categories_menu)?.isVisible = isMyIptv || isTvHub || isWorldLive
         binding.navMain.menu.findItem(R.id.iptv_language_menu)?.isVisible = isMyIptv || isVavoo
+        // 2026-06-10 : bouton "Sources" visible quand on est sur World TV.
+        binding.navMain.menu.findItem(R.id.world_live_sources_menu)?.isVisible = isWorldLive
         // 2026-05-21 : filtre catalogue (sous Paramètres) uniquement pour les
         //   providers TMDB compatibles (Cloudstream).
         binding.navMain.menu.findItem(R.id.catalog_filter_menu)?.isVisible =
             com.streamflixreborn.streamflix.utils.CatalogFilter.isSupported(provider.name)
         // 2026-05-26 : filtre genre TMDB = re-clic sur Films/Séries
         // (pas d'item sidebar, géré par setOnItemReselectedListener)
+    }
+
+    /** 2026-06-08 : picker langue World Live (item sidebar). Filtre les
+     *  chaînes par langue (FR, EN, ES, etc.) ou "Toutes". */
+    fun showWorldLiveLanguagePicker() {
+        val current = com.streamflixreborn.streamflix.providers.WorldLiveLanguageSettings.getCurrent(this)
+        val list = com.streamflixreborn.streamflix.providers.WorldLiveLanguageSettings.list
+        val items = list.map {
+            "${it.flag} ${it.label}${if (it.code == current.code) "  ✓" else ""}"
+        }.toTypedArray()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Langue World Live")
+            .setItems(items) { _, idx ->
+                val picked = list[idx]
+                if (picked.code == current.code) return@setItems
+                com.streamflixreborn.streamflix.providers.WorldLiveLanguageSettings.setCurrent(this, picked)
+                // Clear le cache home disque pour ce provider afin que les
+                //   nouvelles chaînes soient affichées.
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                        this,
+                        com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider,
+                    )
+                }
+                android.widget.Toast.makeText(
+                    this,
+                    "World Live : ${picked.flag} ${picked.label} — chargement…",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                // Notifie le home pour qu'il reload.
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** 2026-06-09 (user "on va tout condenser comme dans les IPTV") :
+     *  picker catégorie World Live — remplace l'empilement de 11+ sections
+     *  par UNE seule section dont le contenu dépend du choix utilisateur.
+     *
+     *  2026-06-09 v2 (user "il est censé avoir les vraies catégories qui
+     *  y sont disponibles, tu m'as limité l'application") : la liste est
+     *  CHARGÉE DYNAMIQUEMENT depuis WorldLiveTvProvider.getHome() →
+     *  les ~30 vraies catégories de la playlist apparaissent dans le
+     *  dialog (France, Brazil, USA, Cinema, Sport, News, etc.). */
+    fun showWorldLiveCategoryPicker() {
+        val ctx = this
+        val currentCode = com.streamflixreborn.streamflix.providers.WorldLiveCategorySettings.getCurrentCode(ctx)
+        // 2026-06-10 (user "le picker met longtemps à s'ouvrir") : tente
+        //   d'abord le cache (= instantané). Fallback getHome si vide.
+        val fastNames = com.streamflixreborn.streamflix.providers
+            .WorldLiveTvProvider.getCategoryNamesFast()
+        if (fastNames.isNotEmpty()) {
+            openWlCategoryDialog(currentCode, fastNames)
+            return
+        }
+        val loadingToast = android.widget.Toast.makeText(ctx,
+            "Chargement des catégories…", android.widget.Toast.LENGTH_SHORT)
+        loadingToast.show()
+        lifecycleScope.launch {
+            val realSections = try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.streamflixreborn.streamflix.providers.WorldLiveTvProvider.getHome()
+                }
+            } catch (_: Throwable) { emptyList() }
+            loadingToast.cancel()
+            openWlCategoryDialog(currentCode,
+                realSections.map { it.name }.filter { it.isNotBlank() }.distinct())
+        }
+    }
+
+    private fun openWlCategoryDialog(currentCode: String, sectionNames: List<String>) {
+        val ctx = this
+        run {
+            val codes = mutableListOf(
+                com.streamflixreborn.streamflix.providers.WorldLiveCategorySettings.ALL_CODE
+            )
+            codes.addAll(sectionNames)
+            val labels = codes.map { code ->
+                val label = if (code == com.streamflixreborn.streamflix.providers
+                        .WorldLiveCategorySettings.ALL_CODE) {
+                    com.streamflixreborn.streamflix.providers.WorldLiveCategorySettings.ALL_LABEL
+                } else code
+                "${label}${if (code.equals(currentCode, ignoreCase = true)) "  ✓" else ""}"
+            }.toTypedArray()
+            android.app.AlertDialog.Builder(ctx)
+                .setTitle("Catégorie World Live")
+                .setItems(labels) { _, idx ->
+                    val pickedCode = codes[idx]
+                    if (pickedCode.equals(currentCode, ignoreCase = true)) return@setItems
+                    com.streamflixreborn.streamflix.providers.WorldLiveCategorySettings.setCurrent(ctx, pickedCode)
+                    val displayLabel = if (pickedCode == com.streamflixreborn.streamflix.providers
+                            .WorldLiveCategorySettings.ALL_CODE) {
+                        com.streamflixreborn.streamflix.providers.WorldLiveCategorySettings.ALL_LABEL
+                    } else pickedCode
+                    kotlin.runCatching {
+                        com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                            ctx,
+                            com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider,
+                        )
+                    }
+                    android.widget.Toast.makeText(ctx,
+                        "World Live : $displayLabel — chargement…",
+                        android.widget.Toast.LENGTH_SHORT).show()
+                    kotlin.runCatching {
+                        com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
+                            .notifyProviderChanged(forceRelaunch = true)
+                    }
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
+    }
+
+    /** 2026-06-10 : picker catégorie TV Hub (BoxXtemus = chaînes France TV).
+     *  Pareil que World Live mais pour le provider TV Hub principal. */
+    fun showTvHubCategoryPicker() {
+        val ctx = this
+        val currentCode = com.streamflixreborn.streamflix.providers
+            .BoxXtemusCategorySettings.getCurrentCode(ctx)
+        val loadingToast = android.widget.Toast.makeText(ctx,
+            "Chargement des catégories…", android.widget.Toast.LENGTH_SHORT)
+        loadingToast.show()
+        lifecycleScope.launch {
+            val realSections = try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.streamflixreborn.streamflix.providers.BoxXtemusProvider.getHome()
+                }
+            } catch (_: Throwable) { emptyList() }
+            loadingToast.cancel()
+            val codes = mutableListOf(
+                com.streamflixreborn.streamflix.providers.BoxXtemusCategorySettings.ALL_CODE
+            )
+            codes.addAll(
+                realSections.map { it.name }
+                    .filter { it.isNotBlank() && !it.equals("Favoris", ignoreCase = true) }
+                    .distinct()
+            )
+            val labels = codes.map { code ->
+                val label = if (code == com.streamflixreborn.streamflix.providers
+                        .BoxXtemusCategorySettings.ALL_CODE) {
+                    com.streamflixreborn.streamflix.providers.BoxXtemusCategorySettings.ALL_LABEL
+                } else code
+                "${label}${if (code.equals(currentCode, ignoreCase = true)) "  ✓" else ""}"
+            }.toTypedArray()
+            android.app.AlertDialog.Builder(ctx)
+                .setTitle("Catégorie TV Hub")
+                .setItems(labels) { _, idx ->
+                    val pickedCode = codes[idx]
+                    if (pickedCode.equals(currentCode, ignoreCase = true)) return@setItems
+                    com.streamflixreborn.streamflix.providers.BoxXtemusCategorySettings.setCurrent(ctx, pickedCode)
+                    val displayLabel = if (pickedCode == com.streamflixreborn.streamflix.providers
+                            .BoxXtemusCategorySettings.ALL_CODE) {
+                        com.streamflixreborn.streamflix.providers.BoxXtemusCategorySettings.ALL_LABEL
+                    } else pickedCode
+                    kotlin.runCatching {
+                        com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                            ctx,
+                            com.streamflixreborn.streamflix.providers.LiveTvHubProvider,
+                        )
+                    }
+                    android.widget.Toast.makeText(ctx,
+                        "TV Hub : $displayLabel — chargement…",
+                        android.widget.Toast.LENGTH_SHORT).show()
+                    kotlin.runCatching {
+                        com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                    }
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
     }
 
     /** 2026-05-13 : picker pays Vavoo (item sidebar). */

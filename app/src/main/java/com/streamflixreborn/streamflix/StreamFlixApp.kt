@@ -134,6 +134,24 @@ class StreamFlixApp : Application() {
         super.onCreate()
         instance = this
 
+        // 2026-06-09 (user "VIDZY y a plus ces sous-titres embarqués d'origine
+        //   comme avant") : MIGRATION ONE-SHOT. Si la pref SERVER_AUTO_
+        //   SUBTITLES_DISABLED a été persistée à `true` (default historique),
+        //   on la reset à `false` une fois pour redonner accès aux subs
+        //   embarqués VOSTFR auto-sélectionnés des extracteurs (Vidzy etc.).
+        //   Un sentinel `subs_default_migration_v2` empêche de re-tripper si
+        //   l'user re-toggle ensuite via le picker player.
+        try {
+            val sp = androidx.preference.PreferenceManager
+                .getDefaultSharedPreferences(this)
+            if (!sp.getBoolean("subs_default_migration_v2", false)) {
+                sp.edit()
+                    .putBoolean("SERVER_AUTO_SUBTITLES_DISABLED", false)
+                    .putBoolean("subs_default_migration_v2", true)
+                    .apply()
+            }
+        } catch (_: Throwable) {}
+
         // 2026-06-03 : eager-load de l'index IPTV (seed Firebase + cache user).
         //   Avant : chargé uniquement quand l'user ouvrait OLA TV (lazy).
         //   Maintenant : chargé au démarrage de l'app, sur un thread BG pour
