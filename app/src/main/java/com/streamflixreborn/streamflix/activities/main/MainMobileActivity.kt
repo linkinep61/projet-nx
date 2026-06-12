@@ -124,6 +124,27 @@ class MainMobileActivity : FragmentActivity() {
         setContentView(binding.root)
         applyThemeNavigationChrome()
 
+        // 2026-06-09 (user "ça joue sur mon téléphone et j'ai pas de
+        //   notification persistante pour l'audio") : demander la
+        //   permission POST_NOTIFICATIONS (Android 13+, API 33+) au boot.
+        //   Sans elle, le RadioPlaybackService échoue startForeground sur
+        //   Android 14+ → audio coupé écran éteint. Sur Android 12 et
+        //   moins, la permission est implicite — pas de demande.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            try {
+                val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                    this, android.Manifest.permission.POST_NOTIFICATIONS
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (!granted) {
+                    androidx.core.app.ActivityCompat.requestPermissions(
+                        this,
+                        arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                        4231,
+                    )
+                }
+            } catch (_: Throwable) {}
+        }
+
         // 2026-05-15 (user "éviter que les écrans mettre en veille tous les
         // 5 minutes") : applique le flag KEEP_SCREEN_ON si l'option est ON.
         if (UserPreferences.keepScreenOnApp) {
@@ -319,6 +340,12 @@ class MainMobileActivity : FragmentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 2026-06-09 (user "fond d'écran dans les providers n'apparaît pas") :
+        //   parité avec MainTvActivity.onResume. AppearanceManager.applyTo
+        //   pose le wallpaper en INDEX 0 du root → couvre tous les fragments.
+        try {
+            com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(binding.root)
+        } catch (_: Throwable) {}
         // 2026-05-17 : touch timestamp pour qu'une recréation de process
         // dans les 30 prochaines minutes ne re-bounce pas vers ProfilePicker
         // (cf StreamFlixApp.onCreate logique smart-cold-start).
