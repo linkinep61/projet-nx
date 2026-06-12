@@ -495,6 +495,15 @@ object MiniPlayerController {
                     Log.w(TAG, "Mini LoadError FAST-TRACK HARD FAIL HTTP $code — no retry, skip fast")
                     return C.TIME_UNSET
                 }
+                // 2026-06-12 (user "ça charge en boucle sur TF1 World Live") :
+                //   pour les IPTV live mono-serveur, le retry n a aucun sens
+                //   sur 4xx (token signé, géo-block, auth) puisqu il n y a
+                //   personne sur qui basculer. On fail fast.
+                if (availableServers.size <= 1 &&
+                    (code == 403 || code == 404 || code == 410)) {
+                    Log.w(TAG, "Mini LoadError MONO-SERVER HARD FAIL HTTP $code — no retry, abandon")
+                    return C.TIME_UNSET
+                }
                 if (code == 403 || code == 500 || code == 502 || code == 503 || code == 509 || code == 429) {
                     val attempt = loadErrorInfo.errorCount
                     if (attempt < 6) {
