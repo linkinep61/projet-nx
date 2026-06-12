@@ -124,12 +124,33 @@ private val BANNER_OPTIONS = RequestOptions()
  *     weserv (préfixe ssl: pour les origines https).
  * targetWidthPx = largeur d'affichage cible (~400 poster, ~800 bannière).
  */
+/** 2026-06-12 (user "toutes les chaines World TV ont la meme pub XXX
+ *  dans le carrousel hero") : blacklist d hosts connus pour servir des
+ *  bandeaux publicitaires adultes. Ces hosts peuvent etre injectes par
+ *  les playlists IPTV communautaires comme URL de logo/banner et imposer
+ *  un overlay pub XXX dans le swiper. On retourne null → Glide tombe sur
+ *  le placeholder nom de chaine. */
+private val ADULT_AD_HOSTS = listOf(
+    "mycamtv", "livejasmin", "xcam", "sexcam", "bongacams",
+    "chaturbate", "camsoda", "stripchat", "cams.com",
+    "xnxx", "xvideos", "pornhub", "redtube", "youporn",
+    "spankbang", "tnaflix", "hclips", "porn.com",
+)
+
+private fun isAdultAdHost(url: String): Boolean {
+    val lower = url.lowercase()
+    return ADULT_AD_HOSTS.any { lower.contains(it) }
+}
+
 fun optimizeArtworkUrl(url: String?, targetWidthPx: Int): String? {
     if (url.isNullOrBlank()) return url
     if (url.contains("images.weserv.nl")) return url
     val isHttp = url.startsWith("http://")
     val isHttps = url.startsWith("https://")
     if (!isHttp && !isHttps) return url
+    // 2026-06-12 — Si l URL provient d un host pub XXX connu (banner
+    // hijacké), on retourne null pour que Glide bascule sur le placeholder.
+    if (isAdultAdHost(url)) return null
     if (url.contains("image.tmdb.org/t/p/")) {
         // 2026-05-21 : ajout palier w1280 pour la bannière hero plein écran
         //   (1080p+ sur grande TV) — net mais bien plus léger que /original/.
