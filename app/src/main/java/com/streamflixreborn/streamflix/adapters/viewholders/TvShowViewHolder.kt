@@ -189,6 +189,18 @@ class TvShowViewHolder(
                         Toast.makeText(context, "${tvShow.title} — $msg", Toast.LENGTH_SHORT).show()
                     }
                 }
+                // 2026-06-08 (user "les chaînes bannies se mettent enfoncées
+                //   mais restent présentes") : le HomeCacheStore garde l'ancien
+                //   home en mémoire + disque, donc le filter isBanned de
+                //   getHome() ne tournait pas après le toggle. Clear le cache
+                //   du provider courant pour FORCER un re-getHome au refresh.
+                try {
+                    val current = UserPreferences.currentProvider
+                    if (current != null) {
+                        com.streamflixreborn.streamflix.utils.HomeCacheStore
+                            .clear(context, current)
+                    }
+                } catch (_: Throwable) { }
                 // Refresh home — seulement si PAS OTF (le reload OTF est lent)
                 if (!tvShow.id.startsWith("livehub::otf::")) {
                     try {
@@ -223,12 +235,15 @@ class TvShowViewHolder(
         // Match OlaTv (ola::, ola_ep::), Vegeta TV (vegeta::,
         // vegeta_ep::), Sport Live (sportlive::), Movix LiveTV (movixlivetv::),
         // TV Hub (livehub::) IDs, plus les providerNames.
+        // 2026-06-08 : ajout World Live (livehubplus::) — duplicate de TV Hub
+        //   pour les playlists Wiseplay supplémentaires (World Live TV).
         return tvShow.providerName == "OLA TV"
             || tvShow.providerName == "Vegeta TV"
             || tvShow.providerName == "Vavoo TV"
             || tvShow.providerName == "Sport Live"
             || tvShow.providerName == "Movix LiveTV"
             || tvShow.providerName == "TV Hub"
+            || tvShow.providerName == "World Live"
             || tvShow.providerName == "Mon IPTV"
             || tvShow.id.startsWith("ch::")
             || tvShow.id.startsWith("sport::")
@@ -241,6 +256,7 @@ class TvShowViewHolder(
             || tvShow.id.startsWith("match::")
             || tvShow.id.startsWith("movixlivetv::")
             || tvShow.id.startsWith("livehub::")
+            || tvShow.id.startsWith("livehubplus::")
             || tvShow.id.startsWith("myiptv-live::")
     }
 
@@ -267,13 +283,29 @@ class TvShowViewHolder(
         // player prend channel.url qui est VIDE pour les séries Stalker → fail
         // silencieux + skip getVideo() → ExoPlayer crash "No extractors for URL: ".
         // Seules les chaînes live IPTV doivent passer par le mini player.
-        val isStalkerEpisode = tvShow.id.startsWith("myiptv-ep::") ||
+        // 2026-06-08 (user "j'aimerais que le mini lecteur revienne pour les
+        //   chaînes TV normales") : France TV + Dric4rTV RETIRÉS du bypass.
+        //   Le mini lecteur reprend du service, le re-clic transitionne en
+        //   fullscreen via transferPlayer() (handoff propre — pas de re-create
+        //   ExoPlayer). Stalker épisodes/films restent au bypass (URL vide).
+        val bypassMiniPlayer = tvShow.id.startsWith("myiptv-ep::") ||
             tvShow.id.startsWith("myiptv-movie::") ||
             tvShow.id.startsWith("myiptv-ep-stk::")
         val interceptor = MiniPlayerController.onIptvChannelClick
-        Log.d("TvShowViewHolder", "handleDirectPlay: interceptor=${if (interceptor != null) "SET" else "NULL"}, isStalkerEpisode=$isStalkerEpisode, tvShow=${tvShow.title}")
-        if (!isStalkerEpisode && interceptor != null && interceptor(tvShow)) {
+        Log.d("TvShowViewHolder", "handleDirectPlay: interceptor=${if (interceptor != null) "SET" else "NULL"}, bypassMiniPlayer=$bypassMiniPlayer, tvShow=${tvShow.title}")
+        if (!bypassMiniPlayer && interceptor != null && interceptor(tvShow)) {
             return // interceptor handled the click (playing in mini player)
+        }
+        // 2026-06-08 (user "pour les radios on est obligé d'ouvrir le lecteur
+        //   en vrai juste pour avoir le son") : une chaîne RADIO ne s'ouvre
+        //   JAMAIS en fullscreen. Si on est ici, l'interceptor a renvoyé false
+        //   (= même chaîne re-cliquée, mini déjà actif). On laisse le mini
+        //   tourner et on stoppe net le flow fullscreen. Clear le flag de
+        //   transition pour ne pas laisser une trace orpheline.
+        if (MiniPlayerController.isRadioChannel(tvShow.id)) {
+            Log.d("TvShowViewHolder", "Radio channel — pas de fullscreen (mini-bar audio uniquement): ${tvShow.title}")
+            try { MiniPlayerController.clearTransitionFlag() } catch (_: Exception) {}
+            return
         }
         // 2026-05-31 : si l'interceptor est null (le provider courant n'est pas IPTV,
         // donc le mini player n'a pas été initialisé) mais qu'on clique sur une chaîne
@@ -283,7 +315,21 @@ class TvShowViewHolder(
 
         // If mini player is active, flag transition so onPause doesn't release it.
         // PlayerTvFragment.onViewCreated will call transferPlayer() to reuse it.
-        if (MiniPlayerController.isPlaying()) {
+        // 2026-06-08 (user "ça lance la mauvaise chaîne / plus aucune chaîne marche") :
+        //   si bypassMiniPlayer=true (Stalker / France TV), il NE FAUT PAS
+        //   reprendre le mini-player dans le fullscreen — ni son flag (qui peut
+        //   avoir été setté par un clic précédent), ni son ExoPlayer (qui peut
+        //   jouer une autre chaîne). On FORCE le reset du flag de transition +
+        //   STOP du mini s'il était actif. PlayerTvFragment initialisera alors
+        //   un nouveau player propre via viewModel.getVideo() pour notre item.
+        if (bypassMiniPlayer) {
+            MiniPlayerController.transitioningToFullscreen = false
+            try {
+                if (MiniPlayerController.isPlaying()) {
+                    MiniPlayerController.stopAsync()
+                }
+            } catch (_: Exception) {}
+        } else if (MiniPlayerController.isPlaying()) {
             MiniPlayerController.transitioningToFullscreen = true
         }
 
@@ -370,11 +416,18 @@ class TvShowViewHolder(
                 // .placeholder() alone won't reset it because the underlying
                 // RequestOptions has been merged already.
                 val transparentDrawable = android.graphics.drawable.ColorDrawable(0)
+                // 2026-06-12 — Placeholder universel : peu importe la playlist
+                // (World Live / 3boxTv / Dric4r / Fire TV / Cineverse / etc.), si
+                // le logo est absent (404, URL vide, host mort), on dessine le
+                // nom de la chaîne sur fond SEMI-TRANSPARENT pour laisser passer
+                // le card backdrop derrière. Plus de tuiles vides.
+                val placeholder = com.streamflixreborn.streamflix.utils
+                    .ChannelPlaceholderDrawable(tvShow.title)
                 apply(
                     com.bumptech.glide.request.RequestOptions()
                         .placeholder(transparentDrawable)
-                        .fallback(transparentDrawable)
-                        .error(transparentDrawable)
+                        .fallback(placeholder)
+                        .error(placeholder)
                 )
                 // For OlaTv we also have a curated fallback URL (initials avatar).
                 if (tvShow.providerName == "OLA TV") {
@@ -386,8 +439,8 @@ class TvShowViewHolder(
                             .apply(
                                 com.bumptech.glide.request.RequestOptions()
                                     .placeholder(transparentDrawable)
-                                    .fallback(transparentDrawable)
-                                    .error(transparentDrawable)
+                                    .fallback(placeholder)
+                                    .error(placeholder)
                             )
                     )
                 }
@@ -404,8 +457,8 @@ class TvShowViewHolder(
                             .apply(
                                 com.bumptech.glide.request.RequestOptions()
                                     .placeholder(transparentDrawable)
-                                    .fallback(transparentDrawable)
-                                    .error(transparentDrawable)
+                                    .fallback(placeholder)
+                                    .error(placeholder)
                             )
                     )
                 }
