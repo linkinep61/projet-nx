@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="160dp"
+    android:layout_margin="6dp"
+    android:focusable="true"
+    android:clickable="true"
+    android:foreground="?android:attr/selectableItemBackground"
+    android:background="@drawable/bg_tv_button_focus">
+
+    <ImageView
+        android:id="@+id/iv_thumb"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:background="#222222"
+        android:contentDescription="@null" />
+
+    <TextView
+        android:id="@+id/tv_resolution"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:padding="4dp"
+        android:background="#88000000"
+        android:textColor="@android:color/white"
+        android:textSize="10sp"
+        android:layout_margin="4dp" />
+
+</FrameLayout>
