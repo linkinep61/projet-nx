@@ -272,6 +272,30 @@ class CategoryViewHolder(
         onTvShowClick: ((TvShow) -> Unit)?,
         onSwiperPageChanged: ((bannerUrl: String?) -> Unit)? = null
     ) {
+        // 2026-06-09 (user "bouton carrousel mobile ne désactive pas") : même
+        //   logique que TV — toggle OFF = HIDE complet du swiper.
+        if (!UserPreferences.carouselAsBackground) {
+            // hide tous les enfants visibles (root layout est wrap_content,
+            //   shrink à 0 quand tous les enfants GONE).
+            binding.vpCategorySwiper.visibility = android.view.View.GONE
+            try { binding.tvCategoryTitle.visibility = android.view.View.GONE } catch (_: Throwable) {}
+            itemView.visibility = android.view.View.GONE
+            val lp = itemView.layoutParams
+            if (lp != null && lp.height != 0) {
+                lp.height = 0
+                itemView.layoutParams = lp
+            }
+            return
+        }
+        // Restore visibilité (au cas où le toggle a été remis ON)
+        binding.vpCategorySwiper.visibility = android.view.View.VISIBLE
+        try { binding.tvCategoryTitle.visibility = android.view.View.VISIBLE } catch (_: Throwable) {}
+        itemView.visibility = android.view.View.VISIBLE
+        val lp = itemView.layoutParams
+        if (lp != null && lp.height != androidx.recyclerview.widget.RecyclerView.LayoutParams.WRAP_CONTENT) {
+            lp.height = androidx.recyclerview.widget.RecyclerView.LayoutParams.WRAP_CONTENT
+            itemView.layoutParams = lp
+        }
         binding.tvCategoryTitle.text = category.name
         val handler = Handler(Looper.getMainLooper())
         swiperHandler = handler
@@ -384,13 +408,34 @@ class CategoryViewHolder(
 
         when (val fragment = context.toActivity()?.getCurrentFragment()) {
             is HomeTvFragment -> {
-                if (poster != null) {
-                    fragment.updateBackground(poster, false) // Imposta lo sfondo senza marcare come focalizzato
+                // 2026-06-09 (user "sur OFF tu désactives ce carrousel") :
+                //   toggle OFF = HIDE complet du swiper item + clear background.
+                //   Toggle ON = comportement actuel (image fullscreen background).
+                if (!UserPreferences.carouselAsBackground) {
+                    // Cache l'item entier (height=0 pour que RecyclerView ne lui réserve plus d'espace)
+                    itemView.visibility = android.view.View.GONE
+                    val lp = itemView.layoutParams
+                    if (lp != null && lp.height != 0) {
+                        lp.height = 0
+                        itemView.layoutParams = lp
+                    }
+                    binding.ivSwiperBannerInline.visibility = android.view.View.GONE
+                } else {
+                    // Restore visibilité
+                    itemView.visibility = android.view.View.VISIBLE
+                    val lp = itemView.layoutParams
+                    if (lp != null && lp.height != androidx.recyclerview.widget.RecyclerView.LayoutParams.WRAP_CONTENT) {
+                        lp.height = androidx.recyclerview.widget.RecyclerView.LayoutParams.WRAP_CONTENT
+                        itemView.layoutParams = lp
+                    }
+                    binding.ivSwiperBannerInline.visibility = android.view.View.GONE
+                    if (poster != null) {
+                        fragment.updateBackground(poster, false)
+                    }
                 }
 
-                // Se l'elemento è stato appena selezionato (indice cambiato), assicura che l'aggiornamento sia visibile
                 if (category.selectedIndex == category.list.indexOf(selected)) {
-                    fragment.resetSwiperSchedule() // Riavvia lo scheduler per assicurarsi che continui
+                    fragment.resetSwiperSchedule()
                 }
             }
         }

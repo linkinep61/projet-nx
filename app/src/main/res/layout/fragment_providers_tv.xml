@@ -7,6 +7,7 @@
     tools:context=".fragments.providers.ProvidersTvFragment">
 
     <ImageView
+        android:id="@+id/iv_providers_default_bg"
         android:layout_width="0dp"
         android:layout_height="0dp"
         android:scaleType="centerCrop"
@@ -73,6 +74,26 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="@id/btn_providers_settings"
+        tools:ignore="UseAppTint" />
+
+    <!-- 2026-06-08 (user "à gauche du cœur tu vas mettre une petite radio") :
+         bouton radio = catalogue de chaînes radio accessibles sans écran via
+         le mini-bar audio. Phase 1 = 17 radios Dric4rTV. -->
+    <ImageView
+        android:id="@+id/btn_radio"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_marginEnd="16dp"
+        android:padding="10dp"
+        android:src="@drawable/ic_radio"
+        android:tint="#FFFFFF"
+        android:focusable="true"
+        android:focusableInTouchMode="false"
+        android:contentDescription="Radio"
+        android:background="@drawable/bg_tv_button_focus"
+        app:layout_constraintBottom_toBottomOf="@id/btn_global_favorites"
+        app:layout_constraintEnd_toStartOf="@id/btn_global_favorites"
+        app:layout_constraintTop_toTopOf="@id/btn_global_favorites"
         tools:ignore="UseAppTint" />
 
     <ImageView
@@ -151,6 +172,28 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="@id/btn_providers_settings"
         tools:ignore="UseAppTint" />
+
+    <!-- 2026-06-07 (user "tasse de café sur la version TV au même endroit que
+         le téléphone, click affiche un QR code vers Naniko Café") :
+         équivalent TV de iv_kofi mobile. Sur mobile le click ouvre direct le
+         navigateur ; sur TV pas de navigateur ergonomique → on affiche un
+         dialog avec QR code généré (QrUtils) pointant vers ko-fi.com/nanico,
+         l'user scanne avec son téléphone. -->
+    <ImageView
+        android:id="@+id/btn_providers_kofi"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_marginEnd="8dp"
+        android:padding="10dp"
+        android:src="@drawable/ic_coffee_heart"
+        android:focusable="true"
+        android:focusableInTouchMode="false"
+        android:contentDescription="Soutenir le projet"
+        android:background="@drawable/bg_tv_button_focus"
+        app:layout_constraintBottom_toBottomOf="@id/btn_providers_lock"
+        app:layout_constraintEnd_toStartOf="@id/btn_providers_lock"
+        app:layout_constraintTop_toTopOf="@id/btn_providers_lock"
+        tools:ignore="ContentDescription" />
 
     <!--
         TV uses a Leanback theme that does NOT extend Theme.AppCompat.

@@ -44,7 +44,12 @@ class ProviderViewHolder(
         // contenu. Back depuis MainActivity → retour ici. Comme ça il peut
         // changer de source à tout moment sans clear app data.
         if (provider.provider is com.streamflixreborn.streamflix.providers.MyIptvProvider) {
-            MiniPlayerController.stop()
+            // 2026-06-09 (user "on peut pas faire durer la radio dans tous les
+            //   providers jusqu'à tant qu'on ait trouvé quelque chose") : ne
+            //   stoppe le mini-player QUE si ce n'est PAS une radio.
+            if (!MiniPlayerController.isRadioChannel(MiniPlayerController.currentChannelId)) {
+                MiniPlayerController.stop()
+            }
             UserPreferences.currentProvider = provider.provider
             // 2026-05-13 (user "enlève cet écran on la met dans les paramètres") :
             // le clic sur Mon IPTV va TOUJOURS direct à la home — pas d'IptvSourcesActivity
@@ -64,11 +69,23 @@ class ProviderViewHolder(
             return
         }
         // Stop & release mini player before switching provider
-        MiniPlayerController.stop()
+        // 2026-06-09 : sauf si c'est une radio (laisse jouer en arrière-plan).
+        if (!MiniPlayerController.isRadioChannel(MiniPlayerController.currentChannelId)) {
+            MiniPlayerController.stop()
+        }
         // 2026-05-26 : vider le cache AnimeSama AVANT le restart activité
         // pour forcer un vrai getHome() + CF bypass au retour.
         try { com.streamflixreborn.streamflix.providers.AnimeSamaProvider.resetState() } catch (_: Throwable) {}
+        // 2026-06-09 (user "les cookies CF doivent rester, le home doit se
+        //   recharger, vider à la fermeture") : pareil pour DessinAnime.
+        try { com.streamflixreborn.streamflix.providers.DessinAnimeProvider.resetState() } catch (_: Throwable) {}
         UserPreferences.currentProvider = provider.provider
+        // 2026-06-09 : si l'user a sélectionné DessinAnime, déclencher le
+        //   bypass CF immédiatement (dialog s'affiche direct au lieu d'attendre
+        //   le 1er fetch du home).
+        if (provider.provider.name == "DessinAnime") {
+            try { com.streamflixreborn.streamflix.providers.DessinAnimeProvider.prefetchCfBypassIfNeeded() } catch (_: Throwable) {}
+        }
         com.streamflixreborn.streamflix.StreamFlixApp.instance
             .refreshProviderUrlAsync(provider.provider)
         context.toActivity()?.apply {

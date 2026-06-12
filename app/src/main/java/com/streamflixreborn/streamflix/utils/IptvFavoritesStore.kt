@@ -96,6 +96,26 @@ object IptvFavoritesStore {
             return "otf" + channelId.removePrefix("livehub::otf::")
                 .substringBefore("::").lowercase().trim()
         }
+        // 2026-06-08 (user "favoris ça marche sur OTF mais pas France TV /
+        //   Dric4rTV") : sans ce cas, le default substringBefore("::") faisait
+        //   que TOUTES les chaînes France TV partageaient la même clé ("bxt").
+        //   On extrait le dernier segment = nom de chaîne unique.
+        // Format: livehub::francetv::bxt::<cat>::<channel> → "ftv<channel>"
+        if (channelId.startsWith("livehub::francetv::")) {
+            return "ftv" + channelId.substringAfterLast("::").lowercase().trim()
+        }
+        // Format: livehub::dric4rtv::<cat>::<channel> → "dric<channel>"
+        if (channelId.startsWith("livehub::dric4rtv::")) {
+            return "dric" + channelId.substringAfterLast("::").lowercase().trim()
+        }
+        // 2026-06-09 (user "les favoris ne marchent pas" sur World Live) :
+        //   les IDs sont `livehub::worldlivetv::wltv::<groupSlug>::<chSlug>`.
+        //   Le default substringBefore("::") collapse TOUS les World Live sur
+        //   "worldlivetv". On extrait le dernier segment = nom unique de la
+        //   chaîne, préfixé `wl` pour ne pas collisionner cross-provider.
+        if (channelId.startsWith("livehub::worldlivetv::")) {
+            return "wl" + channelId.substringAfterLast("::").lowercase().trim()
+        }
 
         return channelId
             .removePrefix("vegeta_ep::")

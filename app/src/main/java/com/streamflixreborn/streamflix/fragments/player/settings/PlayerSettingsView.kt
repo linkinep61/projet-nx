@@ -184,6 +184,12 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
                         .build()
                     UserPreferences.subtitleName = null
+                    // 2026-06-09 (user "logique que ton bouton soit dans ce
+                    //   picker") : stop aussi l'overlay sous-titres externe
+                    //   (Vidzy etc.) quand l'user clique "Désactivé".
+                    try {
+                        com.streamflixreborn.streamflix.utils.ExternalSubtitleOverlay.stopGlobal()
+                    } catch (_: Throwable) {}
                 }
 
                 is Settings.Subtitle.TextTrackInformation -> {
@@ -198,6 +204,19 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                         .setTrackTypeDisabled(subtitle.trackGroup.type, false)
                         .build()
                     UserPreferences.subtitleName = (subtitle.language ?: subtitle.label).substringBefore(" ")
+                }
+
+                Settings.Subtitle.ExternalServerSubtitles -> {
+                    // 2026-06-09 : toggle l'overlay externe (Vidzy).
+                    val overlay = com.streamflixreborn.streamflix.utils
+                        .ExternalSubtitleOverlay.globalInstance
+                    if (overlay?.isRunning() == true) {
+                        com.streamflixreborn.streamflix.utils
+                            .ExternalSubtitleOverlay.stopGlobal()
+                    } else {
+                        com.streamflixreborn.streamflix.utils
+                            .ExternalSubtitleOverlay.startGlobalIfPossible()
+                    }
                 }
 
                 else -> {}
@@ -775,6 +794,9 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
                             .sortedBy { it.language ?: it.label }
                     )
                     list.add(LocalSubtitles)
+                    // 2026-06-09 : item "Sous-titres serveur (VOSTFR)" — ré-active
+                    //   l'overlay externe Vidzy s'il existe.
+                    if (ExternalServerSubtitles.isAvailable) list.add(ExternalServerSubtitles)
                     list.add(OpenSubtitles)
                     // Add SubDL only if an API key is configured
                     if (UserPreferences.subdlApiKey.isNotEmpty()) {
@@ -1202,6 +1224,16 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
             }
 
             data object LocalSubtitles : Subtitle()
+
+            /** 2026-06-09 (user "tu mets un nouveau bouton à activer, c'est
+             *  pas très grave, et tu le nommes autrement") : item dédié au
+             *  re-activation de l'overlay sous-titres externe (Vidzy). Ne
+             *  s'affiche que si un overlay est dispo (= globalInstance != null). */
+            data object ExternalServerSubtitles : Subtitle() {
+                val isAvailable: Boolean
+                    get() = com.streamflixreborn.streamflix.utils
+                        .ExternalSubtitleOverlay.globalInstance != null
+            }
 
             sealed class OpenSubtitles : Item {
 

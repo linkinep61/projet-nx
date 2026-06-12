@@ -84,7 +84,7 @@ class IptvFavoritesTvFragment : Fragment() {
                 } else {
                     binding.miniPlayerView.player = MiniPlayerController.getPlayer()
                 }
-                binding.miniPlayerContainer.visibility = View.VISIBLE
+                com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                 binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
                 MiniPlayerController.currentChannelPoster?.let { poster ->
                     Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
@@ -133,7 +133,7 @@ class IptvFavoritesTvFragment : Fragment() {
         binding.miniPlayerView.player = MiniPlayerController.getPlayer()
 
         if (MiniPlayerController.currentChannelId != null) {
-            binding.miniPlayerContainer.visibility = View.VISIBLE
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
             binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
             MiniPlayerController.currentChannelPoster?.let { poster ->
                 Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
@@ -148,12 +148,12 @@ class IptvFavoritesTvFragment : Fragment() {
                         binding.miniPlayerContainer.visibility = View.GONE
                     }
                     is MiniPlayerController.State.Loading -> {
-                        binding.miniPlayerContainer.visibility = View.VISIBLE
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.VISIBLE
                     }
                     is MiniPlayerController.State.Playing -> {
-                        binding.miniPlayerContainer.visibility = View.VISIBLE
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.GONE
                         updatePauseButton()
@@ -269,13 +269,19 @@ class IptvFavoritesTvFragment : Fragment() {
                     } else {
                         val cached = com.streamflixreborn.streamflix.utils.HomeCacheStore
                             .read(requireContext().applicationContext, provider as com.streamflixreborn.streamflix.providers.Provider)
-                        val favCategory = cached?.firstOrNull { it.name == "Favoris" }
-                        if (favCategory != null) {
-                            favCategory.list.filterIsInstance<TvShow>()
+                        // 2026-06-08 (user "les favoris n'apparaissent pas
+                        //   dans le cœur favori de ce provider") : le Hub a 2
+                        //   sections favoris ("Favoris" et "Favoris France TV").
+                        //   On matche TOUTES les cats qui commencent par "Favoris".
+                        val favCategories = cached?.filter {
+                            it.name.startsWith("Favoris", ignoreCase = true)
+                        }
+                        if (!favCategories.isNullOrEmpty()) {
+                            favCategories.flatMap { it.list.filterIsInstance<TvShow>() }
                         } else {
                             val home = provider.getHome()
-                            home.firstOrNull { it.name == "Favoris" }
-                                ?.list?.filterIsInstance<TvShow>() ?: emptyList()
+                            home.filter { it.name.startsWith("Favoris", ignoreCase = true) }
+                                .flatMap { it.list.filterIsInstance<TvShow>() }
                         }
                     }
                 }

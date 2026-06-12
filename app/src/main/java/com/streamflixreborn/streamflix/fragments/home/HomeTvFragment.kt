@@ -43,6 +43,9 @@ import com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
 class HomeTvFragment : Fragment() {
 
     private var hasAutoCleared409: Boolean = false
+    /** 2026-06-08 : dernier state observé via le collect, pour pouvoir
+     *  détecter au onResume si on est resté stuck en Loading et relancer. */
+    private var lastObservedState: HomeViewModel.State? = null
 
     private var _binding: FragmentHomeTvBinding? = null
     private val binding get() = _binding!!
@@ -62,6 +65,50 @@ class HomeTvFragment : Fragment() {
 
     private val swiperHandler = Handler(Looper.getMainLooper())
     private var isBackgroundPinned = false
+
+    // 2026-06-09 — paging World Live grid (60 items/chunk).
+    private var worldLivePagedItems: List<AppAdapter.Item> = emptyList()
+    private var worldLivePagedLoaded: Int = 0
+    private val worldLivePageSize: Int = 60
+    private var worldLiveScrollListener: androidx.recyclerview.widget.RecyclerView.OnScrollListener? = null
+
+    private fun loadMoreWorldLive() {
+        if (worldLivePagedLoaded >= worldLivePagedItems.size) return
+        val next = (worldLivePagedLoaded + worldLivePageSize).coerceAtMost(worldLivePagedItems.size)
+        appAdapter.submitList(worldLivePagedItems.subList(0, next))
+        worldLivePagedLoaded = next
+    }
+
+    private fun attachWorldLivePagingScrollListener() {
+        if (worldLiveScrollListener != null) return
+        val listener = object : androidx.recyclerview.widget.RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: androidx.recyclerview.widget.RecyclerView, dx: Int, dy: Int) {
+                if (dy <= 0) return
+                val lm = rv.layoutManager ?: return
+                val total = lm.itemCount
+                val lastVisible = when (lm) {
+                    is androidx.recyclerview.widget.GridLayoutManager -> lm.findLastVisibleItemPosition()
+                    is androidx.recyclerview.widget.LinearLayoutManager -> lm.findLastVisibleItemPosition()
+                    is androidx.leanback.widget.VerticalGridView -> {
+                        // Leanback : pas de findLastVisibleItemPosition direct, on
+                        //   approxime avec rv.childCount + position du premier child.
+                        val first = rv.getChildAdapterPosition(rv.getChildAt(0) ?: return)
+                        first + rv.childCount - 1
+                    }
+                    else -> return
+                }
+                if (lastVisible >= total - 10) loadMoreWorldLive()
+            }
+        }
+        worldLiveScrollListener = listener
+        try { binding.vgvHome.addOnScrollListener(listener) } catch (_: Throwable) {}
+    }
+
+    private fun detachWorldLivePagingScrollListener() {
+        val listener = worldLiveScrollListener ?: return
+        try { binding.vgvHome.removeOnScrollListener(listener) } catch (_: Throwable) {}
+        worldLiveScrollListener = null
+    }
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -122,6 +169,7 @@ class HomeTvFragment : Fragment() {
 
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
+                lastObservedState = state
                 Log.d("HomeTv", "State: ${state::class.simpleName} ${if (state is HomeViewModel.State.SuccessLoading) "(${state.categories.size} cats)" else ""}")
                 when (state) {
                     HomeViewModel.State.Loading -> binding.isLoading.apply {
@@ -216,6 +264,42 @@ class HomeTvFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         if (_binding == null) return
+
+        // 2026-06-09 : applique le fond d'écran personnalisé (s'il existe) à
+        //   chaque retour sur l'écran, au cas où il a été changé.
+        com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(binding.root)
+
+        // 2026-06-09 v3 : si toggle OFF, clear iv_home_background pour révéler
+        //   le wallpaper.
+        if (!com.streamflixreborn.streamflix.utils.UserPreferences.carouselAsBackground) {
+            try {
+                com.bumptech.glide.Glide.with(requireContext()).clear(binding.ivHomeBackground)
+                binding.ivHomeBackground.setImageDrawable(null)
+                binding.ivHomeBackground.background = null
+                isBackgroundPinned = false
+                swiperHasLastFocus = false
+            } catch (_: Throwable) {}
+        }
+        // 2026-06-09 (user "ça ne désactive pas") : force le refresh de
+        //   l'adapter pour que displayTvSwiper soit re-appelé avec la nouvelle
+        //   valeur de carouselAsBackground (sinon le swiper item garde son
+        //   état précédent jusqu'à un scroll/refocus).
+        try { binding.vgvHome.adapter?.notifyDataSetChanged() } catch (_: Throwable) {}
+
+        // 2026-06-08 (user "des fois quand on lance une lecture et qu'on revient
+        //   sur le home du TV Hub il n'y a plus de chaînes affichées et un long
+        //   chargement, obligé de quitter le hub et revenir pour réparer") :
+        //   si le state observé est resté coincé sur Loading (job précédent
+        //   cancellé sans émission, ou ProviderChangeNotifier qui n'a pas re-tiré),
+        //   on FORCE un nouveau getHome() au retour. Quitter le Hub déclenchait
+        //   un providerChangeFlow → ce fix obtient le même effet sans navigation.
+        try {
+            if (lastObservedState is HomeViewModel.State.Loading) {
+                Log.d("HomeTv", "onResume: state stuck Loading → retrigger getHome()")
+                viewModel.getHome()
+            }
+        } catch (_: Throwable) {}
+
         val channelId = MiniPlayerController.currentChannelId ?: return
 
         // If the player was released (e.g. went to fullscreen), re-init and replay
@@ -232,7 +316,7 @@ class HomeTvFragment : Fragment() {
             binding.miniPlayerView.player = MiniPlayerController.getPlayer()
         }
 
-        binding.miniPlayerContainer.visibility = View.VISIBLE
+        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
         binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
         MiniPlayerController.currentChannelPoster?.let { poster ->
             Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
@@ -251,15 +335,24 @@ class HomeTvFragment : Fragment() {
                     try { binding.miniPlayerContainer.visibility = View.GONE } catch (_: Exception) {}
                     false
                 } else if (tvShow.id == MiniPlayerController.currentChannelId) {
-                    if (MiniPlayerController.isPlaying()) {
-                        Log.d("HomeTv", "Same channel clicked (READY), flagging for transfer (onResume): ${tvShow.title}")
-                        MiniPlayerController.transitioningToFullscreen = true
-                        if (_binding != null) { binding.miniPlayerView.player = null }
+                    // 2026-06-08 : radio re-cliquée = no-op (mini-bar reste,
+                    //   pas de fullscreen — pas la peine pour le son seul).
+                    if (MiniPlayerController.isRadioChannel(tvShow.id)) {
+                        Log.d("HomeTv", "Radio same channel (onResume) — no-op: ${tvShow.title}")
+                        @Suppress("LiftReturnOrAssignment")
+                        true
                     } else {
-                        Log.d("HomeTv", "Same channel clicked (NOT READY), stopping mini player (onResume): ${tvShow.title}")
+                        // 2026-06-08 (user "y a pas besoin de transfert ils
+                        //   coupent on clique une 2e fois ça ouvre le grand
+                        //   point barre le 2e recommence") : on KILL le mini
+                        //   complètement (peu importe READY ou pas), le grand
+                        //   lecteur redémarre depuis zéro. Plus simple, plus
+                        //   propre, pas de risque de 2 ExoPlayer simultanés.
+                        Log.d("HomeTv", "Same channel clicked → KILL mini, fullscreen redémarre (onResume): ${tvShow.title}")
                         MiniPlayerController.stopAsync()
+                        if (_binding != null) { binding.miniPlayerContainer.visibility = View.GONE }
+                        false
                     }
-                    false
                 } else {
                     Log.d("HomeTv", "Mini player intercept (onResume): ${tvShow.title}")
                     MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
@@ -282,7 +375,7 @@ class HomeTvFragment : Fragment() {
         binding.miniPlayerView.player = MiniPlayerController.getPlayer()
 
         if (MiniPlayerController.currentChannelId != null) {
-            binding.miniPlayerContainer.visibility = View.VISIBLE
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
             binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
             MiniPlayerController.currentChannelPoster?.let { poster ->
                 Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
@@ -297,13 +390,13 @@ class HomeTvFragment : Fragment() {
                         updateHomeGridForMiniPlayer(false)
                     }
                     is MiniPlayerController.State.Loading -> {
-                        binding.miniPlayerContainer.visibility = View.VISIBLE
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                         updateHomeGridForMiniPlayer(true)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.VISIBLE
                     }
                     is MiniPlayerController.State.Playing -> {
-                        binding.miniPlayerContainer.visibility = View.VISIBLE
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                         updateHomeGridForMiniPlayer(true)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.GONE
@@ -344,18 +437,20 @@ class HomeTvFragment : Fragment() {
                 try { binding.miniPlayerContainer.visibility = View.GONE } catch (_: Exception) {}
                 false
             } else if (tvShow.id == MiniPlayerController.currentChannelId) {
-                // 2026-05-31 : ne transférer que si le mini player est READY.
-                // Si encore en chargement, stopAsync et laisser le fullscreen
-                // charger depuis zéro (évite le stuck "plus charger").
-                if (MiniPlayerController.isPlaying()) {
-                    Log.d("HomeTv", "Same channel clicked (READY), flagging for transfer: ${tvShow.title}")
-                    MiniPlayerController.transitioningToFullscreen = true
-                    if (_binding != null) { binding.miniPlayerView.player = null }
+                // 2026-06-08 : radio re-cliquée = no-op (pas de fullscreen).
+                if (MiniPlayerController.isRadioChannel(tvShow.id)) {
+                    Log.d("HomeTv", "Radio same channel — no-op: ${tvShow.title}")
+                    true
                 } else {
-                    Log.d("HomeTv", "Same channel clicked (NOT READY), stopping mini player: ${tvShow.title}")
+                    // 2026-06-08 (user "le transfert a toujours causé des
+                    //   problèmes — on clique 1x mini s'ouvre, 2x ils se ferment
+                    //   et le grand lecteur s'ouvre") : KILL le mini, fullscreen
+                    //   redémarre depuis zéro. Pas de handoff ExoPlayer.
+                    Log.d("HomeTv", "Same channel clicked → KILL mini, fullscreen redémarre: ${tvShow.title}")
                     MiniPlayerController.stopAsync()
+                    if (_binding != null) { binding.miniPlayerContainer.visibility = View.GONE }
+                    false
                 }
-                false
             } else {
                 Log.d("HomeTv", "Mini player intercept: ${tvShow.title} (${tvShow.id})")
                 MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
@@ -472,6 +567,17 @@ class HomeTvFragment : Fragment() {
 
     private var swiperHasLastFocus: Boolean = false
     fun updateBackground(uri: String?, swiperHasFocus: Boolean? = false) {
+        // 2026-06-09 v3 : toggle OFF = l'image est gérée par
+        //   CategoryViewHolder.displayTvSwiper qui la met DANS le swiper item
+        //   (ivSwiperBannerInline). Ici on clear iv_home_background fullscreen.
+        if (!UserPreferences.carouselAsBackground) {
+            try {
+                Glide.with(requireContext()).clear(binding.ivHomeBackground)
+                binding.ivHomeBackground.setImageDrawable(null)
+                binding.ivHomeBackground.background = null
+            } catch (_: Throwable) {}
+            return
+        }
         // IPTV channel logos don't work as backgrounds — skip
         if (UserPreferences.currentProvider is IptvProvider) return
         if (swiperHasFocus == null && isBackgroundPinned) return
@@ -485,6 +591,15 @@ class HomeTvFragment : Fragment() {
     }
 
     fun pinBackground(uri: String?) {
+        // 2026-06-09 : même garde que updateBackground.
+        if (!UserPreferences.carouselAsBackground) {
+            try {
+                Glide.with(requireContext()).clear(binding.ivHomeBackground)
+                binding.ivHomeBackground.setImageDrawable(null)
+                binding.ivHomeBackground.background = null
+            } catch (_: Throwable) {}
+            return
+        }
         // IPTV channel logos don't work as backgrounds — skip
         if (UserPreferences.currentProvider is IptvProvider) return
         isBackgroundPinned = true
@@ -631,6 +746,14 @@ class HomeTvFragment : Fragment() {
     }
 
     private fun displayHome(categories: List<Category>) {
+        // 2026-06-09 (user "t'as abusé sur l'affichage et on voit même plus
+        //   les favoris") : revert du mode grille pour World Live — ça
+        //   cassait la section Favoris et l'affichage était trop gros.
+        //   Comportement standard (row horizontale) pour tous les providers.
+        try { binding.vgvHome.setNumColumns(1) } catch (_: Throwable) {}
+        detachWorldLivePagingScrollListener()
+        worldLivePagedItems = emptyList()
+        worldLivePagedLoaded = 0
         categories
             .find { it.name == Category.FEATURED }
             ?.also {

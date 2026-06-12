@@ -247,6 +247,10 @@ class PlayerTvFragment : Fragment() {
     // preventing listener leaks across retries (each old listener used to keep firing).
     private var activePlayerListener: androidx.media3.common.Player.Listener? = null
 
+    // 2026-06-09 (user "Vidzy n'a pas aimé tes changements ça fonctionne plus" →
+    //   après revert player core, sub overlay isolé pour les VTT externes). */
+    private var externalSubOverlay: com.streamflixreborn.streamflix.utils.ExternalSubtitleOverlay? = null
+
     /** IPTV retry counter — when a brief stall triggers onPlayerError, we re-prepare
      *  the SAME stream up to N times before giving up and switching servers. Resets
      *  to 0 on successful playback (STATE_READY) or when the user changes server. */
@@ -477,7 +481,6 @@ class PlayerTvFragment : Fragment() {
             if (_binding == null) return
             val pv = binding.pvPlayer
             val overlay = try { binding.root.findViewById<android.widget.ImageView>(R.id.swap_freeze_overlay) } catch (_: Exception) { null } ?: return
-            // SurfaceView est dans le PlayerView. On cherche le SurfaceView enfant.
             val surface = findSurfaceView(pv) ?: return
             val w = pv.width
             val h = pv.height
@@ -546,72 +549,16 @@ class PlayerTvFragment : Fragment() {
         } catch (_: Exception) { null }
     }
 
-    // v52 + v54 + v58 : cross-fade audio + freeze frame + re-add backup post-swap.
-    //   Élimine la fenêtre de risque ~14s où hasNext=false (entre swap et next LAZY).
+    // 2026-06-09 TEST 9 (bug ami v1.7.192) : version MINIMALE — pas de fade,
+    //   pas de capture frame, pas de re-add backup. Juste seekToNext + default.
+    //   Si freeze disparaît → coupable = un de ces 3. Si freeze persiste → ailleurs.
     private suspend fun swapToNextWithAudioFade(player: androidx.media3.exoplayer.ExoPlayer) {
-        val savedVolume = try { player.volume } catch (_: Exception) { 1f }
         try {
-            // v54 : capture frame AVANT le swap
-            captureLastFrameToOverlay()
-            // Fade out 150ms (10 steps de 15ms)
-            for (i in 9 downTo 0) {
-                player.volume = savedVolume * (i / 10f)
-                kotlinx.coroutines.delay(15L)
-            }
             player.seekToNextMediaItem()
-            // 2026-05-20 (user "retours sur écran avec son et image qui se
-            //   répètent") : après swap, le backup est à une position PLUS
-            //   ANCIENNE → replay de contenu déjà vu. seekToDefaultPosition
-            //   force le saut au live edge (targetOffset derrière).
             player.seekToDefaultPosition()
-            android.util.Log.d("PlayerTvFragment", "seekToDefaultPosition après swap (anti-replay)")
-            // v58 : re-ajoute IMMÉDIATEMENT un backup pour que hasNext reste true
-            //   en permanence → tout swap futur passe par la smooth path JUMELAGE,
-            //   jamais par le path CRITIQUE destructif viewModel.getVideo.
-            try {
-                val nextBackup = buildLiveBackupItem(player)
-                if (nextBackup != null) {
-                    player.addMediaItem(nextBackup)
-                    android.util.Log.d("PlayerTvFragment", "v58: backup re-ajouté post-swap → hasNext=true garanti")
-                }
-            } catch (e: Exception) {
-                android.util.Log.w("PlayerTvFragment", "v58 re-add backup failed: ${e.message}")
-            }
-            // Petit délai pour laisser le décodeur amorcer
-            kotlinx.coroutines.delay(80L)
-            // Fade in 240ms (12 steps de 20ms)
-            for (i in 1..12) {
-                player.volume = savedVolume * (i / 12f)
-                kotlinx.coroutines.delay(20L)
-            }
-            player.volume = savedVolume
-            // v54 : attendre que le player rejoue (STATE_READY + buffer > 1s)
-            //   puis cacher l'overlay. Au pire 2s timeout.
-            val deadline = System.currentTimeMillis() + 2_000L
-            while (System.currentTimeMillis() < deadline) {
-                try {
-                    if (player.playbackState == androidx.media3.common.Player.STATE_READY &&
-                        player.isPlaying) {
-                        break
-                    }
-                } catch (_: Exception) {}
-                kotlinx.coroutines.delay(40L)
-            }
-            // Fade out de l'overlay pour transition douce (vs hard hide)
-            try {
-                val overlay = binding.root.findViewById<android.widget.ImageView>(R.id.swap_freeze_overlay)
-                if (overlay != null && overlay.visibility == View.VISIBLE) {
-                    for (a in 10 downTo 0) {
-                        overlay.alpha = a / 10f
-                        kotlinx.coroutines.delay(20L)
-                    }
-                }
-            } catch (_: Exception) {}
-            hideFreezeOverlay()
+            android.util.Log.d("PlayerTvFragment", "TEST9 swap minimal (no fade/capture/readd)")
         } catch (e: Exception) {
-            try { player.volume = savedVolume } catch (_: Exception) {}
-            hideFreezeOverlay()
-            android.util.Log.w("PlayerTvFragment", "swapToNextWithAudioFade: ${e.message}")
+            android.util.Log.w("PlayerTvFragment", "swapToNextWithAudioFade TEST9: ${e.message}")
         }
     }
 
@@ -726,11 +673,47 @@ class PlayerTvFragment : Fragment() {
                 if (isIptvCtx) args.id else null
         }
 
+        // 2026-06-08 (user "ça lance pas directement sur le premier lecteur
+        //   FR venu" — logs : "Skip viewModel.getVideo() — player already
+        //   running (transferred from mini), currentServer=Wiflix · Voe") :
+        //   le mini IPTV laissé actif transférait son player même quand on
+        //   lance un film Cloudstream VOD → bloque sur un vieux mauvais
+        //   serveur, empêche la liste réordonnée par langue de s'appliquer.
+        // Le handoff reste UTILE pour les chaînes IPTV (transition rapide
+        //   mini → fullscreen, pas de re-chargement du stream). On le bloque
+        //   pour les VOD et pour Stalker (URL vide).
+        val isIptvChannelId = args.id.startsWith("ch::") ||
+            args.id.startsWith("sport::") ||
+            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+            args.id.startsWith("vavoo::") ||
+            args.id.startsWith("sportlive::") ||
+            args.id.startsWith("movixlivetv::") ||
+            args.id.startsWith("match::")
+        val isBypassMiniPlayerId = args.id.startsWith("myiptv-ep::") ||
+            args.id.startsWith("myiptv-movie::") ||
+            args.id.startsWith("myiptv-ep-stk::") ||
+            args.id.startsWith("livehub::") ||
+            !isIptvChannelId  // VOD = bypass = pas de handoff
+        // Sécurité : si on lance un VOD et qu'un mini IPTV est encore actif,
+        //   on le KILL avant le fullscreen pour libérer le player et éviter
+        //   que transferPlayer() ne récupère ce mauvais player.
+        if (!isIptvChannelId) {
+            try {
+                if (MiniPlayerController.isPlaying() ||
+                    MiniPlayerController.currentChannelId != null) {
+                    Log.d("PlayerTvFragment", "VOD launch, mini actif → stopAsync (kill)")
+                    MiniPlayerController.stopAsync()
+                }
+            } catch (_: Exception) {}
+        }
+
         // Defer ExoPlayer creation to allow the layout to inflate and render first.
         // Codec enumeration is pre-warmed in StreamFlixApp so build() is fast (~100ms).
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             if (isAdded && _binding != null) {
-                val transferred = MiniPlayerController.transferPlayer()
+                val transferred = if (isBypassMiniPlayerId) null
+                    else MiniPlayerController.transferPlayer()
                 if (transferred != null) {
                     attachTransferredPlayer(transferred)
                 } else {
@@ -1630,6 +1613,9 @@ class PlayerTvFragment : Fragment() {
         override fun onDestroyView() {
             super.onDestroyView()
             hideWebViewOverlay()
+            // 2026-06-09 : release sub overlay externe pour éviter leak.
+            try { externalSubOverlay?.release() } catch (_: Throwable) {}
+            externalSubOverlay = null
 
             // 2026-06-07 (bug v1.7.209) : reset l'état overlay « À SUIVRE »
             //   IMPÉRATIVEMENT — si on quitte le fragment alors que l'overlay
@@ -2459,7 +2445,8 @@ class PlayerTvFragment : Fragment() {
                     val channelIds: List<String> = when (provider) {
                         is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getOrderedChannelIds()
                         is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getOrderedChannelIds()
-                        is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getOrderedChannelIds()
+                        is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider -> provider.getOrderedChannelIds()
+                        is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getOrderedChannelIds(args.id)
                         is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getOrderedChannelIds()
                         is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getOrderedLiveChannelIds()
                         else -> emptyList()
@@ -2468,6 +2455,7 @@ class PlayerTvFragment : Fragment() {
                         val name = when (provider) {
                             is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(id)
                             is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(id)
+                            is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider -> provider.getChannelDisplayName(id)
                             is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(id)
                             is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelDisplayName(id)
                             is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getChannelDisplayName(id)
@@ -2476,6 +2464,7 @@ class PlayerTvFragment : Fragment() {
                         val logo = when (provider) {
                             is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(id)
                             is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(id)
+                            is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider -> provider.getChannelPoster(id)
                             is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(id)
                             is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelPoster(id)
                             is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getChannelPoster(id)
@@ -2533,6 +2522,40 @@ class PlayerTvFragment : Fragment() {
         }
 
         private fun navigateToChannel(channelId: String, provider: Any?) {
+            // 2026-06-10 (user "panel D-pad LEFT en plein écran fait écran
+            //   noir si on clique sur IPTV Daily folder") : si l'ID est un
+            //   folder World Live → ouvre le dialog explorer au lieu de
+            //   tenter de jouer (un folder n'a pas de stream).
+            if (channelId.contains("::folder::")) {
+                val ctx = context ?: return
+                val nativeId = channelId.removePrefix("livehub::worldlivetv::")
+                val nidParts = nativeId.removePrefix("wltv::").split("::folder::")
+                if (nidParts.size == 2) {
+                    val groupSlug = nidParts[0]
+                    val subAndIdx = nidParts[1]
+                    val lastDash = subAndIdx.lastIndexOf('-')
+                    if (lastDash > 0) {
+                        val subSlug = subAndIdx.substring(0, lastDash)
+                        val idx = subAndIdx.substring(lastDash + 1)
+                        val folderPath = "$groupSlug/$subSlug/$idx"
+                        val folderName = when (provider) {
+                            is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider ->
+                                provider.getChannelDisplayName(channelId) ?: subSlug
+                            else -> subSlug
+                        }
+                        com.streamflixreborn.streamflix.providers.WorldLiveFolderDialog
+                            .showFolder(ctx, folderPath, folderName) { ch ->
+                                // Quand l'user clique une chaîne dans le dialog,
+                                //   on navigate vers cette chaîne (= switch player).
+                                val leafId = "livehub::worldlivetv::${ch.id}"
+                                navigateToChannel(leafId, provider)
+                            }
+                        return
+                    }
+                }
+                Log.w("PlayerTv", "navigateToChannel: folder id parse failed ($channelId)")
+                return
+            }
             val channelName = when (provider) {
                 is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(channelId)
                 is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(channelId)
@@ -2887,14 +2910,34 @@ class PlayerTvFragment : Fragment() {
                 //   micro coupures Vegeta. Frame freeze < écran noir.
                 binding.pvPlayer.setKeepContentOnPlayerReset(true)
             } catch (_: Exception) {}
+            Log.d("PlayerTvFragment", "displayVideo: video.subtitles.size=${video.subtitles.size}, defaults=${video.subtitles.count { it.default }}, labels=${video.subtitles.joinToString { "${it.label}(def=${it.default})" }}")
+            // 2026-06-09 (user "manip plat ne va pas casser ce qui avait
+            //   existant") : on isole STRICTEMENT le sub Vidzy (= host
+            //   "vidzy" dans l'URL). Les subs des autres extracteurs
+            //   (Filemoon, StreamWish, OpenSubtitles, custom upload, etc.)
+            //   passent NORMALEMENT au MediaItem comme avant — comportement
+            //   100% identique pour eux.
+            val vidzySub = video.subtitles.firstOrNull { it.file.contains("vidzy", ignoreCase = true) }
+            val externalSubUrl: String? = vidzySub?.file
+            val mediaItemSubs = video.subtitles.filter { it !== vidzySub }
+            val noDefaultSub = mediaItemSubs.isNotEmpty() && mediaItemSubs.none { it.default }
             val mediaItemBuilder = MediaItem.Builder()
                 .setUri(video.source.toUri())
                 .setMimeType(video.type)
-                .setSubtitleConfigurations(video.subtitles.map { subtitle ->
+                .setSubtitleConfigurations(mediaItemSubs.mapIndexed { idx, subtitle ->
+                    val isDefault = subtitle.default || (noDefaultSub && idx == 0)
                     MediaItem.SubtitleConfiguration.Builder(subtitle.file.toUri())
                         .setMimeType(subtitle.file.toSubtitleMimeType())
                         .setLabel(subtitle.label)
-                        .setSelectionFlags(if (subtitle.default) C.SELECTION_FLAG_DEFAULT else 0)
+                        .apply {
+                            val lower = subtitle.label.lowercase()
+                            if (lower.contains("fr") || lower.contains("français") ||
+                                lower.contains("francais") || lower.contains("vostfr") ||
+                                lower.contains("vf")) {
+                                setLanguage("fr")
+                            }
+                        }
+                        .setSelectionFlags(if (isDefault) C.SELECTION_FLAG_DEFAULT else 0)
                         .build()
                 })
                 .setMediaMetadata(
@@ -2929,6 +2972,55 @@ class PlayerTvFragment : Fragment() {
                         .setMaxPlaybackSpeed(1.0f)   // JAMAIS de speedup (pas de boost)
                         .build()
                 )
+                // 2026-06-08 (user "soustitres bizarres jaune sur noir -HUGO !
+                //   HUGO ! HUGO ! ça crée du bazar") : désactive le rendu des
+                //   CEA-608/708 closed captions embarqués dans les flux HLS
+                //   live (France TV pousse des CC pour malentendants). UNIQUEMENT
+                //   pour IPTV — les sous-titres VOD (films/séries) restent
+                //   intacts via la branche standard subtitle config plus haut.
+                try {
+                    // 2026-06-10 (user "dessin animé sous-titré, les subs
+                    //   n'y sont pas + pouvoir les désactiver via paramètres") :
+                    //   honore le toggle iptvShowSubtitlesFr.
+                    player.trackSelectionParameters = if (UserPreferences.iptvShowSubtitlesFr) {
+                        player.trackSelectionParameters.buildUpon()
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                            .setPreferredTextLanguages("fr", "fre", "fra")
+                            .setSelectUndeterminedTextLanguage(true)
+                            .build()
+                    } else {
+                        player.trackSelectionParameters.buildUpon()
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                            .build()
+                    }
+                } catch (e: Exception) {
+                    Log.w("PlayerTvFragment", "Could not configure text track for IPTV: ${e.message}")
+                }
+            } else {
+                // VOD : ré-activer text track au cas où on switch d'une IPTV
+                //   vers un film. Sans ça, les sous-titres VOD ne s'afficheraient
+                //   plus après avoir regardé une chaîne.
+                // 2026-06-09 (user "j'ai pas les soustitres qui sont intégrés
+                //   à la catégorie Manga sur les épisodes") : juste désactiver=
+                //   false ne relance pas l'auto-sélection des text tracks
+                //   embarqués sur les animes VOSTFR. Il faut aussi :
+                //   - clearOverridesOfType : reset des overrides hérités d'une
+                //     session précédente
+                //   - setPreferredTextLanguages("fr") : préférence FR pour
+                //     VOSTFR / VOSTFR-RAP / French subs
+                //   - setSelectUndeterminedTextLanguage(true) : sélectionne le
+                //     track même si label vide ("Track 1", "Subtitle"...) =
+                //     cas courant des embedded subs anime.
+                try {
+                    player.trackSelectionParameters = player.trackSelectionParameters
+                        .buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                        .setPreferredTextLanguages("fr", "fre", "fra")
+                        .setSelectUndeterminedTextLanguage(true)
+                        .build()
+                } catch (_: Exception) {}
             }
             val mediaItem = mediaItemBuilder.build()
 
@@ -2985,6 +3077,16 @@ class PlayerTvFragment : Fragment() {
                     // 2026-05-17 v8 : custom PlaylistTracker avec tolérance 30x
                     //   targetDuration. Évite PlaylistStuckException prématurée
                     //   sur les Xtream servers qui ne refresh pas leur manifest.
+                    // 2026-06-08 (user "mini player marche, grand player bug
+                    //   sur Canal 4 boucle") : la tolérance 30x = ne refresh
+                    //   pas le manifest pendant 120s pour cibleDur=4s. Si la
+                    //   fenêtre live du serveur ne fait que 80s, on finit par
+                    //   jouer en boucle les segments cached. Le mini utilise
+                    //   le tracker DEFAULT (3.5x = 14s) → suit le live OK.
+                    //   On désactive la tolérance 30x pour les chaînes
+                    //   BoxXtemus (livehub::francetv::) qui ont des fenêtres
+                    //   live courtes. Garde 30x pour Vegeta/WiTV (rate-limit).
+                    val needsStuckTolerance30x = !args.id.startsWith("livehub::francetv::")
                     val playlistTrackerFactory = androidx.media3.exoplayer.hls.playlist.HlsPlaylistTracker.Factory {
                         dsFactory2, loadPolicy, parserFactory, cmcdConfig ->
                         androidx.media3.exoplayer.hls.playlist.DefaultHlsPlaylistTracker(
@@ -2994,10 +3096,12 @@ class PlayerTvFragment : Fragment() {
                     val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(dataSourceFactory)
                         .setAllowChunklessPreparation(true)
                         .setExtractorFactory(hlsExtractorFactory)
-                        .setPlaylistTrackerFactory(playlistTrackerFactory)
+                        .apply {
+                            if (needsStuckTolerance30x) setPlaylistTrackerFactory(playlistTrackerFactory)
+                        }
                         .createMediaSource(mediaItem)
                     player.setMediaSource(hlsSource)
-                    Log.d("PlayerDebug", "TV: HlsMediaSource (explicit, smoothChunkJoin, stuckTolerance30x)")
+                    Log.d("PlayerDebug", "TV: HlsMediaSource (chunkless, stuckTolerance=${if (needsStuckTolerance30x) "30x" else "default"})")
                 } else if (isDash) {
                     val dashSource = androidx.media3.exoplayer.dash.DashMediaSource.Factory(dataSourceFactory)
                         .createMediaSource(mediaItem)
@@ -3010,6 +3114,24 @@ class PlayerTvFragment : Fragment() {
                 usingWebView = false
             }
 
+            // 2026-06-09 : démarre l'overlay sub externe si on a une URL VTT.
+            //   100% isolé d'ExoPlayer/Media3 → si le fetch foire, la vidéo
+            //   continue normalement sans crash.
+            try {
+                externalSubOverlay?.stop()
+                if (!externalSubUrl.isNullOrBlank() &&
+                    !UserPreferences.externalSubsOverlayDisabled) {
+                    if (externalSubOverlay == null) {
+                        externalSubOverlay = com.streamflixreborn.streamflix.utils
+                            .ExternalSubtitleOverlay(requireContext(), binding.pvPlayer, player)
+                    }
+                    externalSubOverlay?.start(externalSubUrl)
+                    Log.d("PlayerTvFragment", "External sub overlay started: $externalSubUrl")
+                }
+            } catch (t: Throwable) {
+                Log.w("PlayerTvFragment", "External sub overlay failed: ${t.message}")
+            }
+
             // Hide external player button on TV to prevent Projectivy Launcher
             // (or any other launcher) from intercepting the ACTION_VIEW intent
             // and overlaying on top of our built-in ExoPlayer.
@@ -3018,6 +3140,17 @@ class PlayerTvFragment : Fragment() {
             // Remove previous listener (if any) to avoid leaks across displayVideo() retries.
             activePlayerListener?.let { try { player.removeListener(it) } catch (_: Exception) {} }
             val newListener = object : Player.Listener {
+                // 2026-06-09 (user "j'ai des voix mais pas de sous-titres") :
+                //   log les Cues pour confirmer qu'ExoPlayer DÉCODE bien le
+                //   sub. Si onCues est appelé avec du texte → l'affichage
+                //   visuel échoue (SubtitleView problem). Si jamais appelé →
+                //   sub track pas sélectionné OU pas décodé.
+                override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
+                    super.onCues(cueGroup)
+                    if (cueGroup.cues.isNotEmpty()) {
+                        Log.d("PlayerTvFragment", "onCues: ${cueGroup.cues.size} cue(s) — first='${cueGroup.cues.first().text}'")
+                    }
+                }
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     super.onPlaybackStateChanged(playbackState)
                     wireCenterFocus()
@@ -3115,19 +3248,18 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                             args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
                             args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
-                        // 2026-05-11 (user) : 2 règles selon état du stream :
-                        // (A) Pré-READY (extracteur silencieux) → skip 20s
-                        //     (était 10s, repassé à 20s 2026-05-18 — sur Chromecast
-                        //     les serveurs internationaux type Sibnet (Russie) depuis
-                        //     Tahiti mettent souvent 12-15s à démarrer le streaming,
-                        //     et étaient marqués broken à tort. 20s = compromis entre
-                        //     vrai-mort et juste-lent.)
-                        // (B) Post-READY (coupure réseau) → 15s super-buffer same server
+                        // 2026-06-09 (user "les serveurs ont pas le temps d'arriver
+                        //   que ça zappe" puis "si y a pas de serveur ça va attendre,
+                        //   les gens vont zapper") : compromis = on garde l'auto-skip
+                        //   MAIS on laisse 35s (au lieu de 20s) pour les sources
+                        //   animes lentes (Sibnet/VidMoLy/Vidsonic depuis Tahiti).
+                        // (A) Pré-READY (extracteur silencieux) → skip 35s
+                        // (B) Post-READY (coupure réseau) → 25s super-buffer same server
                         if (!isLiveIptv && bufferingWatchdog == null) {
                             val initialPosition = player.currentPosition
                             bufferingWatchdog = viewLifecycleOwner.lifecycleScope.launch {
                                 if (!vodCurrentStreamHasWorked) {
-                                    kotlinx.coroutines.delay(20_000L)
+                                    kotlinx.coroutines.delay(35_000L)
                                     if (player.playbackState == Player.STATE_BUFFERING &&
                                         player.currentPosition == initialPosition &&
                                         !vodCurrentStreamHasWorked) {
@@ -3168,7 +3300,9 @@ class PlayerTvFragment : Fragment() {
                                         if (nextServer != null) viewModel.getVideo(nextServer)
                                     }
                                 } else {
-                                    kotlinx.coroutines.delay(15_000L)
+                                    // 2026-06-09 : 15s → 25s post-READY (cohérent avec
+                                    //   pre-READY 35s, évite faux-skip sur buffering lent).
+                                    kotlinx.coroutines.delay(25_000L)
                                     if (player.playbackState == Player.STATE_BUFFERING &&
                                         player.currentPosition == initialPosition) {
                                         if (!currentExtraBuffering) {
@@ -3178,7 +3312,7 @@ class PlayerTvFragment : Fragment() {
                                             if (server != null && video != null) {
                                                 val savedPos = player.currentPosition
                                                 Log.w("PlayerNetwork",
-                                                    "Post-READY 15s freeze on ${server.name} → ExtraBuffering ON @${savedPos}ms")
+                                                    "Post-READY 25s freeze on ${server.name} → ExtraBuffering ON @${savedPos}ms")
                                                 PlayerSettingsView.Settings.ExtraBuffering.init(true)
                                                 initializePlayer(true, currentSoftwareDecoder, video.source)
                                                 displayVideo(video, server)
@@ -5268,6 +5402,9 @@ class PlayerTvFragment : Fragment() {
                 //   train de rattraper le buffer (cause des "rame" perceptibles).
                 //   Max 300→600s (10 min) — VOD peut bufferer largement, le
                 //   serveur a le fichier entier. Rebuffer 3→1s = reprise instantanée.
+                // 2026-06-09 (user "ça a rien changé tu peux remettre comme avant
+                //   c'était pas ça") : restauration après test révèle que le
+                //   LoadControl n'est PAS le coupable du freeze ami.
                 DefaultLoadControl.Builder()
                     .setBufferDurationsMs(
                         60_000,    // min : 60s d'avance (vs 30s) pour cushion confortable
@@ -5282,24 +5419,18 @@ class PlayerTvFragment : Fragment() {
             val baseBuilder = if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1 && !currentSoftwareDecoder) {
                 ExoPlayer.Builder(requireContext())
             } else {
-                // 2026-05-15 (user "fais en sorte qu'elle supporte tous les
-                // formats audio vidéo") : NextRenderersFactory (nextlib FFmpeg)
-                // activé pour TOUS les contenus, pas seulement IPTV live. Apporte
-                // le fallback software pour les codecs audio (AC3/EAC3/DTS/
-                // TrueHD/Vorbis exotique) et certains codecs vidéo (HEVC/AV1)
-                // que le HW ne sait pas décoder.
-                //
-                // IMPORTANT — Chromecast : la vidéo H264 DOIT rester sur le décodeur
-                // hardware Amlogic (sinon écran noir car FFmpeg software H264 trop
-                // lent). Donc MODE_ON par défaut (HW d'abord, FFmpeg fallback
-                // uniquement quand HW refuse). MODE_PREFER seulement si user a
-                // explicitement activé le toggle Settings.
-                val mode = if (currentSoftwareDecoder)
+                // 2026-06-10 : toggle Settings "Forcer le décodeur logiciel".
+                //   OFF par défaut = HW prioritaire (= comportement v1.7.197
+                //   d'origine, OK chez la plupart des devices). ON = software
+                //   FFmpeg en priorité (fix pour Google TV Streamer kirkwood/MTK
+                //   et autres devices avec HW buggué qui freeze silencieusement).
+                val prefSw = UserPreferences.preferSoftwareDecoder
+                val mode = if (currentSoftwareDecoder || prefSw)
                     DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
                 else
                     DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
                 Log.d("PlayerTvFragment",
-                    "Using NextRenderersFactory (FFmpeg fallback) — mode=${if (currentSoftwareDecoder) "PREFER" else "ON"}, isLiveIptv=$isLiveIptv")
+                    "RenderersFactory mode=$mode (isLiveIptv=$isLiveIptv, swDec=$currentSoftwareDecoder)")
                 val renderersFactory = io.github.anilbeesetti.nextlib.media3ext.ffdecoder
                     .NextRenderersFactory(requireContext()).apply {
                         setEnableDecoderFallback(true)

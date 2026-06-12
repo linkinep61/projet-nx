@@ -5,6 +5,22 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content">
 
+    <!-- 2026-06-09 (user "le carrousel coulisse mais l'image n'est pas
+         accrochée dessus") : ImageView bannière DANS le swiper item (scroll
+         avec lui). Visible UNIQUEMENT si carouselAsBackground=OFF (sinon
+         iv_home_background fullscreen prend le relais). Géré dans
+         CategoryViewHolder.displayTvSwiper. -->
+    <ImageView
+        android:id="@+id/iv_swiper_banner_inline"
+        android:layout_width="0dp"
+        android:layout_height="500dp"
+        android:scaleType="centerCrop"
+        android:visibility="gone"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:ignore="ContentDescription" />
+
     <TextView
         android:id="@+id/tv_category_title"
         android:layout_width="0dp"

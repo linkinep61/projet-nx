@@ -244,6 +244,21 @@
             app:iconSpaceReserved="false">
 
             <SwitchPreference
+                android:key="PREFER_SOFTWARE_DECODER"
+                android:title="Forcer le décodeur logiciel"
+                android:summary="À activer si la lecture freeze (image figée, son OK). Plus lent mais compatible avec tous les formats."
+                android:defaultValue="false"
+                app:iconSpaceReserved="false" />
+
+            <!-- 2026-06-10 : sous-titres FR IPTV (dessins animés VOSTFR). -->
+            <SwitchPreference
+                android:key="IPTV_SHOW_SUBTITLES_FR"
+                android:title="Sous-titres FR sur IPTV"
+                android:summary="Affiche les sous-titres français quand ils sont dans le flux (dessin animé VOSTFR, etc.). Désactiver si les CC malentendants gênent."
+                android:defaultValue="false"
+                app:iconSpaceReserved="false" />
+
+            <SwitchPreference
                 android:key="AUTOPLAY"
                 android:title="@string/settings_autoplay"
                 android:defaultValue="true"
@@ -338,8 +353,21 @@
                 android:summary="@string/settings_server_voe_summary"
                 android:defaultValue="true"
                 app:iconSpaceReserved="false" />
+
+            <!-- 2026-06-09 (user "Imagine on tombe sur une vidéo française et
+                 ça se met à faire des sous titres") : toggle overlay externe. -->
+            <SwitchPreference
+                android:key="EXTERNAL_SUBS_OVERLAY_DISABLED"
+                android:title="Désactiver l'overlay sous-titres externe"
+                android:summary="Désactive l'affichage automatique des VOSTFR récupérés depuis l'extracteur (Vidzy). Utile si la vidéo est déjà en VF."
+                android:defaultValue="false"
+                app:iconSpaceReserved="false" />
         </PreferenceCategory>
     </PreferenceScreen>
+
+    <!-- 2026-06-10 : entrée Mes sources World TV retirée (redondante avec
+         le bouton "Sources" sidebar TV + l'icône home mobile). -->
+
 
     <PreferenceScreen
         android:key="screen_appearance"
@@ -385,6 +413,42 @@
                 android:title="@string/settings_profile_picker"
                 android:summary="@string/settings_profile_picker_summary"
                 android:defaultValue="true"
+                app:iconSpaceReserved="false" />
+
+            <!-- 2026-06-09 : toggle global "carrousel comme fond d'écran". -->
+            <SwitchPreference
+                android:key="CAROUSEL_AS_BACKGROUND"
+                android:title="Carrousel comme fond d'écran"
+                android:summary="Affiche la bannière du film/série en focus en fond. Désactive pour un fond statique."
+                android:defaultValue="true"
+                app:iconSpaceReserved="false" />
+
+            <!-- 2026-06-09 : fond d'écran personnalisé. -->
+            <Preference
+                android:key="WALLPAPER_GALLERY"
+                android:title="Galerie en ligne (4K Wallhaven)"
+                android:summary="Parcourir des millions de wallpapers HD par mot-clé"
+                app:iconSpaceReserved="false" />
+
+            <Preference
+                android:key="WALLPAPER_PICK"
+                android:title="Importer une image perso"
+                android:summary="Choisir une image depuis ton appareil (clé USB, photos, Drive, etc.)"
+                app:iconSpaceReserved="false" />
+
+            <Preference
+                android:key="WALLPAPER_CLEAR"
+                android:title="Retirer le fond personnalisé"
+                android:summary="Revient au fond par défaut de l'application"
+                app:iconSpaceReserved="false" />
+
+            <ListPreference
+                android:key="WALLPAPER_DIM"
+                android:title="Assombrir le fond personnalisé"
+                android:summary="Pour la lisibilité si l'image est très claire"
+                android:entries="@array/wallpaper_dim_names"
+                android:entryValues="@array/wallpaper_dim_values"
+                android:defaultValue="none"
                 app:iconSpaceReserved="false" />
         </PreferenceCategory>
     </PreferenceScreen>

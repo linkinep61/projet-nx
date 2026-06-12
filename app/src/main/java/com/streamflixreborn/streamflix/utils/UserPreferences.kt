@@ -265,6 +265,25 @@ object UserPreferences {
             Key.KEEP_SCREEN_ON_WHEN_PAUSED.setBoolean(value)
         }
 
+    /** 2026-06-09 (user "tu coches actives tout tu la décoches désactive tous") :
+     *  toggle global "carrousel comme fond d'écran". Si false, updateBackground
+     *  et pinBackground ne touchent plus à ivHomeBackground → le fond du
+     *  layout reste visible. Default true pour ne rien casser. */
+    var carouselAsBackground: Boolean
+        get() = Key.CAROUSEL_AS_BACKGROUND.getBoolean() ?: true
+        set(value) {
+            Key.CAROUSEL_AS_BACKGROUND.setBoolean(value)
+        }
+
+    /** 2026-06-09 (user "rendre transparente la bande noire que tu vois sur la
+     *  gauche pour voir le fond d'écran") : opacité 0-100 de la sidebar TV.
+     *  100 = opaque (= comportement actuel), 0 = totalement transparente. */
+    var sidebarOpacity: Int
+        get() = Key.SIDEBAR_OPACITY.getInt() ?: 100
+        set(value) {
+            Key.SIDEBAR_OPACITY.setInt(value.coerceIn(0, 100))
+        }
+
     /** Écran "Qui regarde ?" au lancement + verrouillage auto Home.
      *  Activé par défaut. Si désactivé, pas de ProfilePicker auto,
      *  l'user change de profil manuellement via les paramètres. */
@@ -278,6 +297,27 @@ object UserPreferences {
         get() = Key.PLAYER_GESTURES.getBoolean() ?: true
         set(value) {
             Key.PLAYER_GESTURES.setBoolean(value)
+        }
+
+    /** 2026-06-10 (bug ami Google TV Streamer kirkwood/MTK MT8696) : force
+     *  le décodeur software FFmpeg en priorité. Par défaut OFF (= HW
+     *  prioritaire, comportement standard). À activer si la lecture freeze
+     *  (image figée, son OK) ou si certains formats ne se lisent pas. */
+    var preferSoftwareDecoder: Boolean
+        get() = Key.PREFER_SOFTWARE_DECODER.getBoolean() ?: false
+        set(value) {
+            Key.PREFER_SOFTWARE_DECODER.setBoolean(value)
+        }
+
+    /** 2026-06-10 (user "j'ai ouvert une chaîne de dessin animé sous-titré
+     *  mais les sous-titres n'y sont pas") : active les sous-titres FR
+     *  embarqués dans les chaînes IPTV (WebVTT HLS / TTML DASH). Par défaut
+     *  OFF pour rester compatible avec l'ancien comportement qui désactivait
+     *  les CC pour éviter les "HUGO! HUGO!" gênants. */
+    var iptvShowSubtitlesFr: Boolean
+        get() = Key.IPTV_SHOW_SUBTITLES_FR.getBoolean() ?: false
+        set(value) {
+            Key.IPTV_SHOW_SUBTITLES_FR.setBoolean(value)
         }
 
     var immersiveMode: Boolean
@@ -299,9 +339,24 @@ object UserPreferences {
         }
 
     var serverAutoSubtitlesDisabled: Boolean
-        get() = Key.SERVER_AUTO_SUBTITLES_DISABLED.getBoolean() ?: true
+        // 2026-06-09 (user "VIDZY y a plus ces sous-titres embarqués d'origine
+        //   comme avant, je vais sur l'autre version ça fonctionne") : default
+        //   FALSE = laisse passer le flag `default=true` des subs extracteur
+        //   (Vidzy/etc.) → ExoPlayer auto-sélectionne le sous-titre VOSTFR
+        //   embarqué d'origine avec la vidéo (comme avant).
+        get() = Key.SERVER_AUTO_SUBTITLES_DISABLED.getBoolean() ?: false
         set(value) {
             Key.SERVER_AUTO_SUBTITLES_DISABLED.setBoolean(value)
+        }
+
+    // 2026-06-09 (user "Imagine on tombe sur une vidéo française et ça se met
+    //   à faire des sous titres") : toggle pour DÉSACTIVER l'overlay de subs
+    //   externe (ExternalSubtitleOverlay). True = pas d'overlay même si
+    //   l'extracteur fournit une URL VTT. Default false = overlay actif.
+    var externalSubsOverlayDisabled: Boolean
+        get() = Key.EXTERNAL_SUBS_OVERLAY_DISABLED.getBoolean() ?: false
+        set(value) {
+            Key.EXTERNAL_SUBS_OVERLAY_DISABLED.setBoolean(value)
         }
 
     // 2026-05-15 (user "ajoute le sub anglais pour ceux qui veulent dans Open
@@ -655,14 +710,19 @@ object UserPreferences {
         AUTOPLAY,
         PROVIDER_CACHE,
         KEEP_SCREEN_ON_WHEN_PAUSED,
+        CAROUSEL_AS_BACKGROUND,
+        SIDEBAR_OPACITY,
         KEEP_SCREEN_ON_APP,
         PLAYER_GESTURES,
+        PREFER_SOFTWARE_DECODER,
+        IPTV_SHOW_SUBTITLES_FR,
         IMMERSIVE_MODE,
         TMDB_API_KEY,
         SUBDL_API_KEY,
         FORCE_EXTRA_BUFFERING,
         AUTOPLAY_BUFFER,
         SERVER_AUTO_SUBTITLES_DISABLED,
+        EXTERNAL_SUBS_OVERLAY_DISABLED,
         ENABLE_ENGLISH_SUBTITLES,
         ENABLE_TMDB,
         PARENTAL_CONTROL_PIN,
@@ -692,7 +752,13 @@ object UserPreferences {
         }
 
         fun getInt(): Int? = when {
-            prefs.contains(name) -> prefs.getInt(name, 0)
+            prefs.contains(name) -> try {
+                prefs.getInt(name, 0)
+            } catch (_: ClassCastException) {
+                // 2026-06-09 : ListPreference stocke en String. Si la valeur
+                //   est une String, on essaye de la parser en Int.
+                try { prefs.getString(name, null)?.toIntOrNull() } catch (_: Throwable) { null }
+            }
             else -> null
         }
 

@@ -53,10 +53,22 @@ class ProvidersMobileFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // 2026-06-09 : applique le fond d'écran personnalisé. Cache aussi le bg par défaut.
+        com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(view)
+        view.findViewById<android.widget.ImageView>(R.id.iv_providers_default_bg)
+            ?.visibility = if (com.streamflixreborn.streamflix.utils.AppearanceManager
+                .hasWallpaper(requireContext())) android.view.View.GONE
+            else android.view.View.VISIBLE
+
         // 2026-05-12 : kill le mini-player IPTV qui pourrait encore tourner
         // en background. Quand l'user revient au home picker provider, il
         // ne doit PLUS entendre le son d'une chaîne TV qu'il venait de quitter.
-        com.streamflixreborn.streamflix.utils.MiniPlayerController.stop()
+        // 2026-06-09 (user "l'ouverture d'un provider coupe toujours la radio") :
+        //   exception pour les radios — on les laisse jouer entre providers.
+        val mpc = com.streamflixreborn.streamflix.utils.MiniPlayerController
+        if (!mpc.isRadioChannel(mpc.currentChannelId)) {
+            mpc.stop()
+        }
 
         initializeProviders()
 
@@ -67,6 +79,20 @@ class ProvidersMobileFragment : Fragment() {
         // 2026-05-20 : cœur favoris global — favoris de tous les providers (sauf TV)
         binding.ivGlobalFavorites.setOnClickListener {
             findNavController().navigate(R.id.global_favorites)
+        }
+
+        // 2026-06-08 (user "à gauche du cœur tu vas mettre une petite radio") :
+        //   bouton radio → dialog liste 17 radios Dric4rTV. Au clic, démarre
+        //   le mini-bar audio sans naviguer.
+        binding.ivRadio.setOnClickListener {
+            showRadioPicker()
+        }
+        // 2026-06-09 : long-press = TOUJOURS le picker (pour changer de radio
+        //   sans interrompre l'écoute si une dernière radio est mémorisée).
+        binding.ivRadio.setOnLongClickListener {
+            com.streamflixreborn.streamflix.utils.RadioPickerDialog
+                .show(requireContext(), viewLifecycleOwner)
+            true
         }
 
         // 2026-05-08 : raccourci Paramètres depuis le Home Fournisseur
@@ -331,5 +357,40 @@ class ProvidersMobileFragment : Fragment() {
         appAdapter.submitList(filtered.onEach {
             it.itemType = AppAdapter.Type.PROVIDER_MOBILE_ITEM
         })
+    }
+
+    /**
+     * 2026-06-08 : ouvre le dialog picker de radios (centralisé). Dric4rTV +
+     * RadioBrowser API + favoris (long-press) + bouton Arrêter.
+     *
+     * 2026-06-09 (user "quand on va cliquer dessus il joue directement la
+     *   dernière radio") : clic court = relance la dernière radio si pas
+     *   de radio en cours. Si radio déjà en cours OU jamais de dernière →
+     *   ouvre le picker. Long-press = toujours picker.
+     */
+    private fun showRadioPicker() {
+        val mp = com.streamflixreborn.streamflix.utils.MiniPlayerController
+        val playingRadio = mp.currentChannelId?.let { mp.isRadioChannel(it) } == true
+        if (!playingRadio) {
+            val last = mp.getLastRadio(requireContext())
+            if (last != null) {
+                try {
+                    mp.initPlayer(requireContext())
+                    if (last.streamUrl != null) {
+                        mp.playRadioDirect(last.id, last.name, last.poster, last.streamUrl)
+                    } else {
+                        mp.playChannel(last.id, last.name, last.poster)
+                    }
+                    android.widget.Toast.makeText(
+                        requireContext(),
+                        "${last.name} — reprise",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                    return
+                } catch (_: Throwable) {}
+            }
+        }
+        com.streamflixreborn.streamflix.utils.RadioPickerDialog
+            .show(requireContext(), viewLifecycleOwner)
     }
 }

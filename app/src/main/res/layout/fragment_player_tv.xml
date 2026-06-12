@@ -37,6 +37,7 @@
         app:layout_constraintTop_toTopOf="parent"
         tools:visibility="visible" />
 
+
     <!-- 2026-05-17 : la 2e seek bar de chargement est maintenant intégrée
          dans le controller player (content_exo_controller_tv.xml) — pas
          d'overlay décoratif ici. -->

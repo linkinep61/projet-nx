@@ -29,7 +29,14 @@ object IptvBannedChannels {
     }
 
     /** Normalise un channelKey IPTV (strip prefixes provider). Cohérent
-     *  avec IptvFavorites/IptvBannedServers. */
+     *  avec IptvFavorites/IptvBannedServers.
+     *  2026-06-08 (user "active le ban pour tout le TV hub") : changement
+     *  substringBefore("::") → substringAfterLast("::"). Les IDs Hub
+     *  multi-segments (livehub::francetv::bxt::canal::cstar,
+     *  livehub::dric4rtv::ligue1::ligue_1, livehub::otf::canalplus) ont
+     *  le NOM DE CHAÎNE en DERNIER segment, pas en premier. Avec
+     *  substringBefore, bannir "CStar" bannissait TOUT France TV.
+     *  Avec substringAfterLast → ban scoped à la vraie chaîne. */
     private fun normalize(channelKey: String): String {
         if (channelKey.isBlank()) return channelKey
         return channelKey
@@ -42,7 +49,7 @@ object IptvBannedChannels {
             .removePrefix("movixlivetv::")
             .removePrefix("sport::")
             .removePrefix("ch::")
-            .substringBefore("::")
+            .substringAfterLast("::")  // = nom chaîne (dernier segment)
             .lowercase()
             .trim()
     }

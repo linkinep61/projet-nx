@@ -195,6 +195,23 @@
         app:layout_constraintEnd_toStartOf="@id/iv_downloads"
         app:layout_constraintTop_toTopOf="parent" />
 
+    <!-- 2026-06-10 (user "bouton apparent dans la barre") : sélecteur de
+         source World TV (style Wiseplay). À gauche du globe. -->
+    <ImageView
+        android:id="@+id/iv_world_live_sources"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginEnd="4dp"
+        android:layout_marginTop="16dp"
+        android:padding="8dp"
+        android:src="@drawable/ic_menu_iptv_sources"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="Mes sources World TV"
+        android:visibility="gone"
+        app:tint="@android:color/white"
+        app:layout_constraintEnd_toStartOf="@id/iv_iptv_language"
+        app:layout_constraintTop_toTopOf="parent" />
+
     <!-- 2026-05-20 (user "sur les providers compatibles on pourrait choisir par
          quoi trier — toutes régions, FR, etc.") : bouton filtre catalogue,
          visible uniquement sur les providers TMDB (Cloudstream). Même slot que

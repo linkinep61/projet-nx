@@ -388,6 +388,10 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
     @Volatile
     private var currentlyLoadingProvider: String? = null
 
+    /** 2026-06-10 : dernière sequence du forceRelaunch acknowledgée par CE
+     *  ViewModel (= pattern epoch pour gérer multi-collectors). */
+    private var lastSeenForceSequence: Long = 0L
+
     fun getHome() {
         // Cancel any previous getHome() — without this, init + ProviderChangeNotifier
         // can race and launch 2-4 concurrent enrichments that each rebuild the
@@ -406,7 +410,14 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         // cycle frais à chaque ouverture, le job précédent peut avoir émis du
         // vieux cache ou un état CF périmé). Les autres providers gardent le
         // skip pour éviter les cancel-boucles (Cloudflare lent).
-        val forceRelaunch = newProviderKey == "AnimeSama"
+        // 2026-06-10 (user "sur mobile la home galère à s'afficher quand on
+        //   change de source") : pattern "epoch" — chaque ViewModel garde
+        //   sa propre dernière sequence vue. Si la sequence globale a
+        //   incrémenté → forceRelaunch. Pas de race condition entre plusieurs
+        //   ViewModels qui consomment le même flag.
+        val forceFromNotifier = ProviderChangeNotifier.shouldForceRelaunch(lastSeenForceSequence)
+        if (forceFromNotifier) lastSeenForceSequence = ProviderChangeNotifier.forceRelaunchSequence
+        val forceRelaunch = newProviderKey == "AnimeSama" || forceFromNotifier
         if (!forceRelaunch && activeJob != null && activeJob.isActive && currentlyLoadingProvider == newProviderKey) {
             android.util.Log.d("HomeViewModel", "getHome() skip — job déjà actif pour $newProviderKey")
             return
@@ -500,6 +511,20 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
 
         try {
             Log.d("HomeBoot", "[${provider.name}] getHome() START +${System.currentTimeMillis() - t0}ms (cacheAge=${cacheAgeMs?.div(1000)}s)")
+            // 2026-06-10 (user "chargement différé qui arrive au fur et à
+            //   mesure") : si le provider implémente ProgressiveHomeProvider
+            //   on collecte le flow et émet à chaque update incrémentale.
+            //   Sinon comportement classique (1 appel bloquant + 1 émission).
+            if (provider is com.streamflixreborn.streamflix.providers.ProgressiveHomeProvider) {
+                var lastSnapshot: List<com.streamflixreborn.streamflix.models.Category>? = null
+                provider.getHomeProgressive().collect { snapshot ->
+                    lastSnapshot = snapshot
+                    _state.emit(State.SuccessLoading(snapshot.toMutableList()))
+                }
+                lastSnapshot?.let { HomeCacheStore.write(appContext, provider, it) }
+                Log.d("HomeBoot", "[${provider.name}] progressive END +${System.currentTimeMillis() - t0}ms (categories=${lastSnapshot?.size ?: 0})")
+                return
+            }
             val categories = provider.getHome().toMutableList()
             Log.d("HomeBoot", "[${provider.name}] getHome() END +${System.currentTimeMillis() - t0}ms (categories=${categories.size})")
 

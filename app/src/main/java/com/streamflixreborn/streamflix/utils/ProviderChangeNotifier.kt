@@ -33,16 +33,30 @@ object ProviderChangeNotifier {
     )
     val providerChangeFlow: Flow<Unit> = _flow.asSharedFlow()
 
+    /** 2026-06-10 (user "sur mobile la home galère à s'afficher quand on
+     *  change de source") : pattern "epoch" — compteur monotone incrémenté
+     *  à chaque forceRelaunch. Chaque ViewModel garde sa propre dernière
+     *  sequence vue et compare. AINSI tous les collectors peuvent détecter
+     *  un forceRelaunch indépendamment, sans race condition (ce qui était
+     *  le cas avec l'ancien flag Boolean qui se reset au 1er lecteur). */
+    @Volatile var forceRelaunchSequence: Long = 0L
+        private set
+
+    /** Compat ancien code — vérifie si ma dernière sequence connue est
+     *  derrière l'actuelle. Si oui → forceRelaunch détecté. */
+    fun shouldForceRelaunch(myLastSeenSeq: Long): Boolean =
+        forceRelaunchSequence > myLastSeenSeq
+
     /**
      * Notify all listeners that the provider has changed.
-     * Non-suspending — utilise tryEmit qui retourne true si l'emit a été
-     * accepté (toujours true ici grâce au buffer + DROP_OLDEST).
+     * @param forceRelaunch true → incrémente forceRelaunchSequence (tous les
+     *   ViewModels qui lisent shouldForceRelaunch() verront true jusqu'à ce
+     *   qu'ils acknowledge la sequence).
      */
-    fun notifyProviderChanged() {
+    fun notifyProviderChanged(forceRelaunch: Boolean = false) {
+        if (forceRelaunch) forceRelaunchSequence++
         _flow.tryEmit(Unit)
         purgePreviousProviderArtwork()
-        // 2026-05-26 : reset AnimeSama CF state + cache au changement de provider
-        // pour qu'à la réouverture, le contrôle CF soit refait proprement.
         try { com.streamflixreborn.streamflix.providers.AnimeSamaProvider.resetState() } catch (_: Throwable) {}
     }
 

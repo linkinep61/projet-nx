@@ -98,7 +98,23 @@ class PeopleViewModel(private val id: String, database: AppDatabase) : ViewModel
 
         try {
             val provider = UserPreferences.currentProvider ?: return@launch
-            val people = provider.getPeople(id)
+            // 2026-06-08 (user "acteurs en médaillon + filmographie comme
+            //   sur Wiflix pour tous les providers") : fallback TMDB Person
+            //   si le provider ne renvoie pas de filmography (= la majorité
+            //   des providers n'ont pas cette donnée nativement).
+            var people = try {
+                provider.getPeople(id)
+            } catch (_: Throwable) {
+                null
+            }
+            if (people == null || people.filmography.isEmpty()) {
+                val enriched = com.streamflixreborn.streamflix.utils
+                    .TmdbCreditsEnricher.fetchPersonDetails(id)
+                if (enriched != null) people = enriched
+            }
+            if (people == null) {
+                throw IllegalStateException("Impossible de charger les détails de la personne")
+            }
 
             page = 1
 
