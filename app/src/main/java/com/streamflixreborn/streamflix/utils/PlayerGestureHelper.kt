@@ -42,6 +42,16 @@ class PlayerGestureHelper(
     private var currentVolumeFloat = 0f
     private var maxVolume = 0
 
+    /** 2026-06-12 (user "verrou enfant : qu'on puisse pas toucher à rien
+     *  à part le cadenas") : flag global qui désactive TOUS les gestures
+     *  (swipe brightness/volume, double-tap seek, pinch-zoom) tant qu'on est
+     *  en mode locked. Le code touch listener fait early-return true (=
+     *  consomme l'event sans le traiter) → ExoPlayer ne reçoit même pas le
+     *  tap → controller ne s'affiche pas. Seul le btnExoUnlock reste
+     *  cliquable car il vit au-dessus en z-order.
+     */
+    var isLocked: Boolean = false
+
     init {
         maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
 
@@ -120,8 +130,16 @@ class PlayerGestureHelper(
             }
             if (isManualZoom) return@setOnTouchListener false
 
+            // 2026-06-12 — Verrou enfant : on SAUTE les detectors (pas de
+            // swipe brightness/volume/seek, pas de double-tap, pas de
+            // pinch-zoom) MAIS on laisse le tap simple propager vers
+            // ExoPlayer pour qu'un tap affiche le controller (= seul le
+            // btnExoUnlock devient visible car g_controls_lock est GONE).
+            // Le btnExoUnlock reste alors cliquable et permet de déverrouiller.
+            if (isLocked) return@setOnTouchListener false
+
             if (!UserPreferences.playerGestures) return@setOnTouchListener false
-            
+
             scaleGestureDetector.onTouchEvent(event)
             
             if (!isScaling) {

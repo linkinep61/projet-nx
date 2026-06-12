@@ -294,6 +294,12 @@ class PlayerMobileFragment : Fragment() {
     private var servers = listOf<Video.Server>()
     private var zoomToast: Toast? = null
 
+    /** 2026-06-12 — Verrou enfant. True quand l'écran est en mode lock.
+     *  Lu par la touche back (OnBackPressedCallback) pour ignorer la sortie
+     *  fullscreen tant que pas déverrouillé. */
+    private var isScreenLocked: Boolean = false
+    private var screenLockBackCallback: androidx.activity.OnBackPressedCallback? = null
+
     // IPTV: when all initial servers fail but progressive (OLA) servers may still arrive,
     // keep the player open and wait for additionalServer emissions instead of navigating up.
     private var awaitingMoreServers = false
@@ -531,6 +537,25 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+
+        // 2026-06-12 — Verrou enfant : intercepter le back hardware tant que
+        // l'écran est locked → l'enfant ne peut pas quitter le fullscreen.
+        requireActivity().onBackPressedDispatcher.addCallback(viewLifecycleOwner,
+            object : androidx.activity.OnBackPressedCallback(false) {
+                override fun handleOnBackPressed() {
+                    // No-op : on consomme l'event sans rien faire.
+                    Toast.makeText(
+                        requireContext(),
+                        "Écran verrouillé — appuie sur le cadenas pour déverrouiller",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }.also { cb ->
+                // Le callback est piloté par isScreenLocked : on l'enable
+                // quand on verrouille, disable quand on déverrouille.
+                screenLockBackCallback = cb
+            },
+        )
 
         // 2026-06-04 (user "garde le pattern OTF comme l'application originelle
         //   jusqu'à l'ExoPlayer de la vidéo") : pour les flux OTF on bascule
@@ -1519,14 +1544,44 @@ class PlayerMobileFragment : Fragment() {
             player.seekTo(0)
         }
 
+        // 2026-06-12 (user "crée une page transparente qui verrouille
+        //   carrément le truc, seul le cadenas le déverrouille") :
+        //   approche overlay-fullscreen.
+        //
+        //   layout_screen_lock = FrameLayout invisible par défaut, mais
+        //   quand visible il :
+        //   - intercepte TOUS les taps (clickable=true + focusable=true)
+        //     → impossible de toucher la PlayerView ni les contrôles dessous
+        //   - contient SEULEMENT btn_screen_unlock qui est le seul
+        //     élément cliquable au-dessus de l'overlay
+        //
+        //   Tap sur le cadenas (controller) → overlay VISIBLE + controller
+        //   caché + gestures bloqués + back hardware bloqué.
+        //   Tap sur btn_screen_unlock → overlay GONE + tout revient.
         binding.pvPlayer.controller.binding.btnExoLock.setOnClickListener {
-            binding.pvPlayer.controller.binding.gControlsLock.isGone = true
-            binding.pvPlayer.controller.binding.btnExoUnlock.isVisible = true
+            engageScreenLock()
         }
 
-        binding.pvPlayer.controller.binding.btnExoUnlock.setOnClickListener {
-            binding.pvPlayer.controller.binding.gControlsLock.isVisible = true
-            binding.pvPlayer.controller.binding.btnExoUnlock.isGone = true
+        binding.layoutScreenLock.setOnClickListener {
+            // Tap N'IMPORTE OÙ sur l'overlay → on flashe le cadenas
+            // brièvement (auto-hide 3s) pour signaler à l'user où taper
+            // pour déverrouiller. C'est la "lampe torche" pour trouver
+            // le cadenas dans le noir.
+            flashUnlockButton()
+        }
+
+        binding.btnScreenUnlock.setOnClickListener {
+            disengageScreenLock()
+        }
+
+        // 2026-06-12 (user "ajoute un bouton liste des chaines a cote du
+        //   cadenas en bas, pour TOUS les providers IPTV - PAS pour les
+        //   films et series") : équivalent du LEFT D-pad sur TV. Visible
+        //   seulement si on est sur une chaîne IPTV. Tap → BottomSheet avec
+        //   toute la liste, tap sur une chaîne = switch rapide.
+        binding.pvPlayer.controller.binding.btnExoChannelList.isVisible = isIptvChannelContext()
+        binding.pvPlayer.controller.binding.btnExoChannelList.setOnClickListener {
+            showIptvChannelListBottomSheet()
         }
 
         binding.pvPlayer.controller.binding.btnExoPictureInPicture.setOnClickListener {
@@ -2016,6 +2071,271 @@ class PlayerMobileFragment : Fragment() {
             id.startsWith("myiptv-movie::") || id.startsWith("myiptv-ep::") ||
             id.startsWith("myiptv-show::") || id.startsWith("myiptv-season::") ||
             id.startsWith("myiptv-stalkerep::")
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  2026-06-12 — Verrou enfant style "overlay plein écran".
+    //  Voir setupListeners() pour le wiring des boutons.
+    // ═══════════════════════════════════════════════════════════════
+
+    private var unlockFlashJob: kotlinx.coroutines.Job? = null
+
+    /** Active l'overlay verrou : intercepte tous les taps, bloque les
+     *  gestures + le back hardware, cache le controller ExoPlayer. */
+    private fun engageScreenLock() {
+        if (_binding == null) return
+        isScreenLocked = true
+        screenLockBackCallback?.isEnabled = true
+        gestureHelper.isLocked = true
+        binding.pvPlayer.hideController()
+        // L'overlay couvre tout l'écran et bloque tous les taps.
+        binding.layoutScreenLock.visibility = View.VISIBLE
+        // Le cadenas est affiché au tap initial (= 3s flash) puis
+        // s'auto-cache. L'user retape n'importe où pour le retrouver.
+        flashUnlockButton()
+        Toast.makeText(
+            requireContext(),
+            "Écran verrouillé — tape le cadenas pour déverrouiller",
+            Toast.LENGTH_SHORT,
+        ).show()
+    }
+
+    /** Désactive l'overlay verrou : restaure les gestures, le back, le
+     *  controller ExoPlayer. */
+    private fun disengageScreenLock() {
+        if (_binding == null) return
+        isScreenLocked = false
+        screenLockBackCallback?.isEnabled = false
+        gestureHelper.isLocked = false
+        unlockFlashJob?.cancel()
+        binding.layoutScreenLock.visibility = View.GONE
+        binding.btnScreenUnlock.visibility = View.VISIBLE
+    }
+
+    /** Affiche le cadenas 3 secondes puis le fade-out. */
+    private fun flashUnlockButton() {
+        if (_binding == null) return
+        unlockFlashJob?.cancel()
+        binding.btnScreenUnlock.apply {
+            alpha = 1f
+            visibility = View.VISIBLE
+        }
+        unlockFlashJob = viewLifecycleOwner.lifecycleScope.launch {
+            kotlinx.coroutines.delay(3_000)
+            if (_binding == null) return@launch
+            binding.btnScreenUnlock.animate()
+                .alpha(0f)
+                .setDuration(400)
+                .withEndAction {
+                    if (_binding != null) binding.btnScreenUnlock.visibility = View.INVISIBLE
+                }
+                .start()
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  2026-06-12 (user "ajoute un bouton liste des chaines a cote du
+    //   cadenas en bas") : équivalent mobile du LEFT D-pad TV.
+    //  Tap sur le bouton btnExoChannelList → BottomSheet plein hauteur
+    //  avec toutes les chaînes du provider IPTV courant. Tap sur une
+    //  chaîne → navigate(R.id.player) avec popUpTo (= replace le player
+    //  par la nouvelle chaîne sans empiler).
+    // ═══════════════════════════════════════════════════════════════
+
+    private fun showIptvChannelListBottomSheet() {
+        val provider = UserPreferences.currentProvider ?: return
+        val ctx = context ?: return
+
+        // Layout container du BottomSheet
+        val container = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(0, 32, 0, 0)
+            setBackgroundColor(0xFF1A1A1A.toInt())
+        }
+
+        val titleView = android.widget.TextView(ctx).apply {
+            text = "Chaînes — chargement…"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 18f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(40, 24, 40, 16)
+        }
+        container.addView(titleView)
+
+        val rv = androidx.recyclerview.widget.RecyclerView(ctx).apply {
+            layoutManager = androidx.recyclerview.widget.LinearLayoutManager(ctx)
+            setPadding(0, 0, 0, 32)
+            clipToPadding = false
+        }
+        container.addView(rv, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            1f,
+        ))
+
+        val sheet = com.google.android.material.bottomsheet.BottomSheetDialog(ctx)
+        sheet.setContentView(container)
+        sheet.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
+        sheet.behavior.peekHeight = (resources.displayMetrics.heightPixels * 0.75f).toInt()
+        sheet.show()
+
+        // Charger les chaînes en background (= même logique que PlayerTvFragment)
+        viewLifecycleOwner.lifecycleScope.launch {
+            val items = withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val channelIds: List<String> = when (provider) {
+                    is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getOrderedChannelIds()
+                    is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getOrderedChannelIds()
+                    is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider -> provider.getOrderedChannelIds()
+                    is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getOrderedChannelIds(args.id)
+                    is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getOrderedChannelIds()
+                    is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getOrderedLiveChannelIds()
+                    else -> emptyList()
+                }
+                channelIds.mapNotNull { id ->
+                    val name = when (provider) {
+                        is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(id)
+                        is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(id)
+                        is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider -> provider.getChannelDisplayName(id)
+                        is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(id)
+                        is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelDisplayName(id)
+                        is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getChannelDisplayName(id)
+                        else -> null
+                    } ?: return@mapNotNull null
+                    val logo = when (provider) {
+                        is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(id)
+                        is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(id)
+                        is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider -> provider.getChannelPoster(id)
+                        is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(id)
+                        is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelPoster(id)
+                        is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getChannelPoster(id)
+                        else -> null
+                    }
+                    Triple(id, name, logo)
+                }
+            }
+
+            if (!isAdded || _binding == null) return@launch
+            titleView.text = "Chaînes (${items.size})"
+            rv.adapter = IptvChannelListMobileAdapter(items, args.id) { selectedId ->
+                sheet.dismiss()
+                switchToIptvChannel(selectedId, provider)
+            }
+            // Scroll vers la chaîne actuelle
+            val currentIdx = items.indexOfFirst { it.first == args.id }
+            if (currentIdx >= 0) rv.scrollToPosition(currentIdx)
+        }
+    }
+
+    private fun switchToIptvChannel(channelId: String, provider: com.streamflixreborn.streamflix.providers.Provider) {
+        val channelName = when (provider) {
+            is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(channelId)
+            is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(channelId)
+            is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider -> provider.getChannelDisplayName(channelId)
+            is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(channelId)
+            is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelDisplayName(channelId)
+            is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getChannelDisplayName(channelId)
+            else -> null
+        } ?: channelId
+        val channelPoster = when (provider) {
+            is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(channelId)
+            is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(channelId)
+            is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider -> provider.getChannelPoster(channelId)
+            is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(channelId)
+            is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelPoster(channelId)
+            is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getChannelPoster(channelId)
+            else -> null
+        }
+
+        val videoType = Video.Type.Episode(
+            id = channelId,
+            number = 1,
+            title = channelName,
+            poster = channelPoster,
+            overview = null,
+            tvShow = Video.Type.Episode.TvShow(
+                id = channelId,
+                title = channelName,
+                poster = channelPoster,
+                banner = null,
+                releaseDate = null,
+                imdbId = null,
+            ),
+            season = Video.Type.Episode.Season(
+                number = 1,
+                title = "Live",
+            ),
+        )
+        val navArgs = android.os.Bundle().apply {
+            putString("id", channelId)
+            putString("title", channelName)
+            putString("subtitle", channelName)
+            putSerializable("videoType", videoType)
+        }
+        findNavController().navigate(
+            R.id.player,
+            navArgs,
+            androidx.navigation.NavOptions.Builder()
+                .setPopUpTo(R.id.player, true)
+                .build(),
+        )
+    }
+
+    /** Adapter simple pour la BottomSheet liste chaînes IPTV mobile. */
+    private class IptvChannelListMobileAdapter(
+        private val items: List<Triple<String, String, String?>>,
+        private val currentId: String,
+        private val onClick: (String) -> Unit,
+    ) : androidx.recyclerview.widget.RecyclerView.Adapter<IptvChannelListMobileAdapter.VH>() {
+        class VH(val root: android.widget.LinearLayout) : androidx.recyclerview.widget.RecyclerView.ViewHolder(root)
+
+        override fun onCreateViewHolder(parent: android.view.ViewGroup, viewType: Int): VH {
+            val ctx = parent.context
+            val row = android.widget.LinearLayout(ctx).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                setPadding(40, 24, 40, 24)
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                isClickable = true
+                isFocusable = true
+                background = android.graphics.drawable.ColorDrawable(0x00000000)
+            }
+            val logo = android.widget.ImageView(ctx).apply {
+                layoutParams = android.widget.LinearLayout.LayoutParams(72, 72)
+                scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+            }
+            row.addView(logo)
+            val name = android.widget.TextView(ctx).apply {
+                textSize = 16f
+                setTextColor(0xFFFFFFFF.toInt())
+                setPadding(32, 0, 0, 0)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            row.addView(name, android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+            ))
+            return VH(row)
+        }
+
+        override fun getItemCount() = items.size
+
+        override fun onBindViewHolder(holder: VH, position: Int) {
+            val (id, displayName, logoUrl) = items[position]
+            val logo = holder.root.getChildAt(0) as android.widget.ImageView
+            val name = holder.root.getChildAt(1) as android.widget.TextView
+            name.text = displayName
+            val isCurrent = id == currentId
+            holder.root.setBackgroundColor(if (isCurrent) 0x33FFFFFF else 0x00000000)
+            name.setTypeface(name.typeface,
+                if (isCurrent) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            if (!logoUrl.isNullOrBlank()) {
+                com.bumptech.glide.Glide.with(logo).load(logoUrl).into(logo)
+            } else {
+                logo.setImageDrawable(com.streamflixreborn.streamflix.utils
+                    .ChannelPlaceholderDrawable(displayName, bgAlpha = 100))
+            }
+            holder.root.setOnClickListener { onClick(id) }
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════

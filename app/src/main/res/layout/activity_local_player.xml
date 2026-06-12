@@ -70,4 +70,33 @@
         </LinearLayout>
     </LinearLayout>
 
+    <!-- 2026-06-12 — Overlay verrou enfant : couvre tout l'écran et
+         consomme tous les taps. Le btn_screen_unlock est le seul élément
+         interactif au-dessus → seul moyen de déverrouiller. -->
+    <FrameLayout
+        android:id="@+id/layout_screen_lock"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#00000000"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone">
+
+        <!-- 2026-06-12 (user "le cadenas trop grand au milieu, l'enfant
+             va cliquer dessus direct - mets-le en haut a gauche et plus
+             petit") : 40dp en top|start. -->
+        <ImageView
+            android:id="@+id/btn_screen_unlock"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_gravity="top|start"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="16dp"
+            android:padding="10dp"
+            android:src="@drawable/exo_styled_controls_unlock"
+            android:contentDescription="Déverrouiller l'écran"
+            android:background="@drawable/bg_screen_unlock_circle"
+            app:tint="#FFFFFF" />
+    </FrameLayout>
+
 </FrameLayout>
