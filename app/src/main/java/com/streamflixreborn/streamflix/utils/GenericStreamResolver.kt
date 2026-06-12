@@ -275,26 +275,46 @@ object GenericStreamResolver {
         } else null
 
         if (!token.isNullOrBlank()) {
-            val tokenEscaped = Regex.escape(token)
-            // Le pattern peut contenir du JS optionnel entre `"<token>"` et
-            // `) {fetch` (ex: `&&!/http/.test(document.referrer)`). On accepte
-            // n'importe quel contenu hors `)` entre les deux.
-            val pattern = Regex(
-                """=\s*=\s*=\s*"$tokenEscaped"\s*[^)]*\)\s*\{\s*fetch\s*\(\s*\(\s*"([^"]+)"""",
-                RegexOption.IGNORE_CASE,
-            )
-            val match = pattern.find(body)
-            if (match != null) {
-                return match.groupValues[1].replace("\\/", "/")
+            // 2026-06-12 (user "on était censé avoir fait un bypass générique
+            //   qui change pas tous les quatre matins") : Approche RÉSILIENTE.
+            //
+            //   1) Cherche le token literal `"<token>"` dans le body
+            //   2) Tente la stratégie A : URL directe `.m3u8`/`.mpd` dans
+            //      les 5000 chars qui suivent
+            //   3) Si A échoue → stratégie B (= "déobfuscation atob+literal")
+            //      le RSS a évolué pour cacher les URLs en base64 via des
+            //      `atob("...")+"segment"+atob("...")+"..."` concaténés
+            //      autour d'un `fetch((...))`. On reconstruit l'URL en
+            //      décodant + concaténant tous les segments.
+            //
+            //   Avec A + B, on est résilient à :
+            //   - changements de syntaxe JS (= == === ==== conditions add.)
+            //   - allongement du JS entre token et URL
+            //   - obfuscation atob() partielle ou totale
+            //   - mélange URLs en clair / chiffrées
+            //   tant que le token literal reste référencé avant la cible.
+            val tokenLiteral = "\"$token\""
+            val tokenIdx = body.indexOf(tokenLiteral, ignoreCase = true)
+            if (tokenIdx >= 0) {
+                val windowEnd = (tokenIdx + 5000).coerceAtMost(body.length)
+                val window = body.substring(tokenIdx, windowEnd)
+                // Stratégie A : URL directe
+                val mediaInWindow = Regex(
+                    """(https?:[^"'\s<>]*?\.(?:m3u8|mpd)(?:\?[^"'\s<>]*)?)""",
+                    RegexOption.IGNORE_CASE,
+                ).find(window)
+                if (mediaInWindow != null) {
+                    return mediaInWindow.value.replace("\\/", "/")
+                }
+                // Stratégie B : déobfuscation atob+literal
+                val deobfuscated = deobfuscateAtobUrl(window)
+                if (deobfuscated != null) {
+                    return deobfuscated
+                }
             }
-            // 2026-06-12 — CRITIQUE : si un token est attendu mais le bloc
-            // fetch correspondant n'est PAS trouvé, on retourne null. SURTOUT
-            // PAS de fallback "première .m3u8 du body" : le RSS de
-            // rsseverything contient TF1 en tête de liste, donc on tombait
-            // systématiquement sur TF1 quel que soit le token demandé (= bug
-            // signalé "toutes les chaînes jouent TF1" en asm170 et de retour
-            // sur World TV). Mieux vaut null (= la chaîne ne marche pas) que
-            // de jouer la mauvaise chaîne.
+            // Token attendu mais URL non trouvée à proximité → null pour
+            // permettre au caller de tenter d'autres pipelines (bypassSfr,
+            // etc.) sans risquer de jouer la mauvaise chaîne.
             return null
         }
 
@@ -312,6 +332,63 @@ object GenericStreamResolver {
         }
 
         return null
+    }
+
+    /**
+     * 2026-06-12 — Déobfusque une URL construite par concaténation de
+     * `atob("base64")` + segments littéraux dans un bloc JS du style :
+     *
+     *   fetch((atob("aHR0cHM6...")+"02\/1\/"+atob("aW5kZXg...")+"39a17b..."
+     *     ).replaceAll("\/","/"))
+     *
+     * Algo : on cherche le `fetch((` qui ouvre le bloc, on parse l'expression
+     * de concaténation jusqu'à `.replaceAll`, en extrayant alternativement
+     * les `atob("X")` (à décoder en base64) et les `"literal"` (à garder
+     * tels quels). Concatène le tout, applique `.replaceAll("\\/", "/")`,
+     * valide que ça commence par `http`. Retourne null si rien n'est
+     * extractable.
+     *
+     * Indépendant du domaine cible — marche pour latvdefrance, n'importe
+     * quel CDN futur, n'importe quel ordre d'atob/literal.
+     */
+    /** Variante publique pour réutilisation depuis BoxXtemusProvider
+     *  (= latvdefranceShortcut). Sinon strictement identique. */
+    fun deobfuscateAtobUrlPublic(window: String): String? = deobfuscateAtobUrl(window)
+
+    private fun deobfuscateAtobUrl(window: String): String? {
+        val fetchStart = window.indexOf("fetch((")
+        if (fetchStart < 0) return null
+        // Borne supérieure : la fin du bloc de concaténation se reconnaît
+        // au `).replaceAll` ou à `)).then` ou simplement à `))` après une
+        // séquence de + et de littéraux/atob. On prend large.
+        val concatEnd = listOf(
+            window.indexOf(".replaceAll", fetchStart),
+            window.indexOf(").then", fetchStart),
+            window.indexOf("))", fetchStart + 7),
+        ).filter { it > 0 }.minOrNull() ?: return null
+
+        val concatRegion = window.substring(fetchStart + "fetch((".length, concatEnd)
+        // Match alternance : `atob("BASE64")` OU `"literal"`
+        val pattern = Regex("""atob\("([^"]+)"\)|"([^"]*)"""")
+        val parts = mutableListOf<String>()
+        for (m in pattern.findAll(concatRegion)) {
+            val b64 = m.groupValues[1]
+            val lit = m.groupValues[2]
+            if (b64.isNotEmpty()) {
+                val decoded = try {
+                    String(android.util.Base64.decode(b64, android.util.Base64.DEFAULT))
+                } catch (_: Throwable) { return null }
+                parts.add(decoded)
+            } else {
+                parts.add(lit)
+            }
+        }
+        if (parts.isEmpty()) return null
+        val raw = parts.joinToString("")
+        val url = raw.replace("\\/", "/")
+        return if (url.startsWith("http", ignoreCase = true) &&
+            (url.contains(".m3u8") || url.contains(".mpd") || url.contains(".ts"))
+        ) url else null
     }
 
     /**

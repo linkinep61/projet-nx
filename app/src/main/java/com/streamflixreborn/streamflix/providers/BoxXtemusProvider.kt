@@ -1795,17 +1795,31 @@ object BoxXtemusProvider : Provider, IptvProvider {
             val tokenIdx = body.indexOf(tokenLiteral, ignoreCase = true)
             var proximityUrl: String? = null
             if (tokenIdx >= 0) {
-                val windowEnd = (tokenIdx + 800).coerceAtMost(body.length)
+                // 2026-06-12 v3 (RSS change format : URL en clair →
+                //   atob() base64 concaténés). On tente 2 stratégies :
+                //   A) URL .m3u8/.mpd directe dans 5000 chars
+                //   B) Déobfuscation `atob("base64")+"literal"+...`
+                //   (= bypass générique de l'obfuscation)
+                val windowEnd = (tokenIdx + 5000).coerceAtMost(body.length)
                 val window = body.substring(tokenIdx, windowEnd)
-                val m3u8InWindow = Regex(
-                    """(https?:[^"'\s<>]*?\.m3u8(?:\?[^"'\s<>]*)?)""",
+                // Stratégie A
+                val mediaInWindow = Regex(
+                    """(https?:[^"'\s<>]*?\.(?:m3u8|mpd)(?:\?[^"'\s<>]*)?)""",
                     RegexOption.IGNORE_CASE,
                 ).find(window)
-                if (m3u8InWindow != null) {
-                    proximityUrl = m3u8InWindow.value.replace("\\/", "/")
+                if (mediaInWindow != null) {
+                    proximityUrl = mediaInWindow.value.replace("\\/", "/")
                     Log.d(TAG, "latvdefranceShortcut[$rssKey] PROXIMITY MATCH: $proximityUrl")
                 } else {
-                    Log.w(TAG, "latvdefranceShortcut[$rssKey]: token at $tokenIdx but no m3u8 next 800")
+                    // Stratégie B : tentative déobfuscation atob
+                    val deobfuscated = com.streamflixreborn.streamflix.utils
+                        .GenericStreamResolver.deobfuscateAtobUrlPublic(window)
+                    if (deobfuscated != null) {
+                        proximityUrl = deobfuscated
+                        Log.d(TAG, "latvdefranceShortcut[$rssKey] DEOBFUSCATED MATCH: $proximityUrl")
+                    } else {
+                        Log.w(TAG, "latvdefranceShortcut[$rssKey]: token at $tokenIdx but no media. Sample (next 400): ${window.take(400)}")
+                    }
                 }
             } else {
                 Log.w(TAG, "latvdefranceShortcut[$rssKey]: token literal not found in RSS")
