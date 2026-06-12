@@ -296,19 +296,22 @@ object GenericStreamResolver {
             val tokenLiteral = "\"$token\""
             val tokenIdx = body.indexOf(tokenLiteral, ignoreCase = true)
             if (tokenIdx >= 0) {
-                val windowEnd = (tokenIdx + 5000).coerceAtMost(body.length)
+                // 2026-06-12 v2 : fenêtre 5000 → 15000 chars pour capturer
+                //   les éventuels backup fetch après le primary empoisonné.
+                val windowEnd = (tokenIdx + 15000).coerceAtMost(body.length)
                 val window = body.substring(tokenIdx, windowEnd)
-                // Stratégie A : URL directe
-                val mediaInWindow = Regex(
+                // Stratégie A : URLs directes (itère TOUTES, prend la 1ère
+                //   non-empoisonnée).
+                val mediaPattern = Regex(
                     """(https?:[^"'\s<>]*?\.(?:m3u8|mpd)(?:\?[^"'\s<>]*)?)""",
                     RegexOption.IGNORE_CASE,
-                ).find(window)
-                if (mediaInWindow != null) {
-                    val u = mediaInWindow.value.replace("\\/", "/")
-                    // 2026-06-12 — rejette les URLs vers hosts empoisonnés.
+                )
+                for (m in mediaPattern.findAll(window)) {
+                    val u = m.value.replace("\\/", "/")
                     if (!isPoisonedHost(u)) return u
                 }
-                // Stratégie B : déobfuscation atob+literal
+                // Stratégie B : déobfuscation atob+literal (itère aussi en
+                //   interne sur tous les fetch — voir deobfuscateAtobUrl).
                 val deobfuscated = deobfuscateAtobUrl(window)
                 if (deobfuscated != null) {
                     return deobfuscated
@@ -377,12 +380,97 @@ object GenericStreamResolver {
         return POISONED_HOSTS.any { lower.contains(it) }
     }
 
+    /** 2026-06-12 (logs OPPO : 16 fetch empoisonnés du RSS rsseverything,
+     *  tous au pattern `cdn.adultiptv.net/gay.m3u8#XX/YY/index.m3u8?token=`) :
+     *  le mainteneur du RSS a juste REMPLACÉ le préfixe
+     *  `https://www.latvdefrance.com/po/hls/transcoder` par
+     *  `http://cdn.adultiptv.net/gay.m3u8#`. Le segment derrière (`XX/YY/
+     *  index.m3u8?token=...`) est CONSERVÉ. On peut donc reconstruire
+     *  l URL latvdefrance originale en inversant ce remplacement.
+     *
+     *  Ce n est PAS une rustine spécifique à TF1/latvdefrance — c est un
+     *  undo d une corruption identifiée. Si le pattern change demain on
+     *  adaptera le mapping. Mais tant qu il reste tel quel, on récupère
+     *  ~60 chaînes FR gratis sans rien hardcoder par chaîne. */
+    fun reconstructFromPoisonedPattern(poisonedUrl: String): String? {
+        val poisonedPrefix = "://cdn.adultiptv.net/gay.m3u8#"
+        if (!poisonedUrl.contains(poisonedPrefix)) return null
+        val tail = poisonedUrl.substringAfter(poisonedPrefix)
+        if (tail.isBlank()) return null
+        // tail = ex "02/1/index.m3u8?token=..."
+        val reconstructed = "https://www.latvdefrance.com/po/hls/transcoder$tail"
+        // Sanity check : le résultat ne doit PAS être empoisonné
+        return if (!isPoisonedHost(reconstructed)) reconstructed else null
+    }
+
     private fun deobfuscateAtobUrl(window: String): String? {
+        // 2026-06-12 v2 (user "continue à chercher") : itère sur TOUS les
+        //   `fetch((...))` du window jusqu'à trouver le PREMIER avec URL
+        //   non-empoisonnée. Les RSS communautaires peuvent contenir
+        //   plusieurs fetch (= primary + fallbacks/backups CDN). Si le
+        //   primary est empoisonné, peut-être qu'un fallback est encore
+        //   propre.
+        var searchStart = 0
+        while (true) {
+            val fetchStart = window.indexOf("fetch((", searchStart)
+            if (fetchStart < 0) return null
+            searchStart = fetchStart + "fetch((".length
+            // Borne sup du bloc de concaténation
+            val concatEnd = listOf(
+                window.indexOf(".replaceAll", fetchStart),
+                window.indexOf(").then", fetchStart),
+                window.indexOf("))", fetchStart + 7),
+            ).filter { it > 0 }.minOrNull() ?: continue
+            val concatRegion = window.substring(fetchStart + "fetch((".length, concatEnd)
+            val pattern = Regex("""atob\("([^"]+)"\)|"([^"]*)"""")
+            val parts = mutableListOf<String>()
+            for (m in pattern.findAll(concatRegion)) {
+                val b64 = m.groupValues[1]
+                val lit = m.groupValues[2]
+                if (b64.isNotEmpty()) {
+                    val decoded = try {
+                        String(android.util.Base64.decode(b64, android.util.Base64.DEFAULT))
+                    } catch (_: Throwable) { null }
+                    if (decoded == null) {
+                        parts.clear(); break
+                    }
+                    parts.add(decoded)
+                } else {
+                    parts.add(lit)
+                }
+            }
+            if (parts.isEmpty()) continue
+            val raw = parts.joinToString("")
+            val url = raw.replace("\\/", "/")
+            if (isPoisonedHost(url)) {
+                // 2026-06-12 v3 (user "France 2 qui fonctionnait avant ne
+                //   fonctionne plus") : la reconstruction du pattern
+                //   empoisonné NE DOIT PAS être faite ici. Elle kidnappait
+                //   France 2/3/4/5/LCI qui devraient passer par ftven.fr ou
+                //   mediainfo.tf1.fr via les hops suivants du pipeline. On
+                //   skip simplement les fetch empoisonnés ; le GenericResolver
+                //   continuera ses hops et trouvera le bon endpoint pour les
+                //   chaînes qui en ont un. La reconstruction reste dans le
+                //   `latvdefranceShortcut` (BoxXtemusProvider étape 5) en
+                //   fallback final pour les chaînes TF1+/Canal+ qui n ont pas
+                //   de pipeline officiel.
+                android.util.Log.d("GenericResolver", "deobfuscate: skip poisoned fetch → $url")
+                continue
+            }
+            if (url.startsWith("http", ignoreCase = true) &&
+                (url.contains(".m3u8") || url.contains(".mpd") || url.contains(".ts"))
+            ) {
+                return url
+            }
+            // pas un media valide → continue à chercher
+        }
+    }
+
+    /** Ancienne implémentation conservée pour référence — non utilisée. */
+    @Suppress("unused")
+    private fun deobfuscateAtobUrlOldSingleFetch(window: String): String? {
         val fetchStart = window.indexOf("fetch((")
         if (fetchStart < 0) return null
-        // Borne supérieure : la fin du bloc de concaténation se reconnaît
-        // au `).replaceAll` ou à `)).then` ou simplement à `))` après une
-        // séquence de + et de littéraux/atob. On prend large.
         val concatEnd = listOf(
             window.indexOf(".replaceAll", fetchStart),
             window.indexOf(").then", fetchStart),
@@ -390,7 +478,6 @@ object GenericStreamResolver {
         ).filter { it > 0 }.minOrNull() ?: return null
 
         val concatRegion = window.substring(fetchStart + "fetch((".length, concatEnd)
-        // Match alternance : `atob("BASE64")` OU `"literal"`
         val pattern = Regex("""atob\("([^"]+)"\)|"([^"]*)"""")
         val parts = mutableListOf<String>()
         for (m in pattern.findAll(concatRegion)) {
@@ -408,8 +495,6 @@ object GenericStreamResolver {
         if (parts.isEmpty()) return null
         val raw = parts.joinToString("")
         val url = raw.replace("\\/", "/")
-        // 2026-06-12 — Si l'URL extraite pointe vers un host empoisonné
-        // (adultiptv.net etc.), on retourne null pour ne PAS jouer du XXX.
         if (isPoisonedHost(url)) return null
         return if (url.startsWith("http", ignoreCase = true) &&
             (url.contains(".m3u8") || url.contains(".mpd") || url.contains(".ts"))
