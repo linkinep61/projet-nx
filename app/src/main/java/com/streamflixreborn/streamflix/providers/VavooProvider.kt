@@ -60,7 +60,13 @@ object VavooProvider : Provider, IptvProvider {
             listOf("https://vavoo.to", "https://kool.to", "https://oha.to", "https://huhu.to")
         }
 
+    // 2026-06-12 (décompil VYPN bundle) : `www.vypn.net/api/app/ping` est le
+    //   nouveau endpoint officiel utilisé par l'app VYPN (= nouvelle Vavoo).
+    //   Avec package="net.vypn.app" le serveur mint un addonSig propre sans
+    //   le tag pub VYPN dans le sunshine token retourné côté CDN.
+    //   Fallback sur lokke.app/vavoo.tv si vypn.net échoue.
     private val PING_URLS = listOf(
+        "https://www.vypn.net/api/app/ping",
         "https://www.lokke.app/api/app/ping",
         "https://www.vavoo.tv/api/app/ping",
     )
@@ -555,14 +561,26 @@ object VavooProvider : Provider, IptvProvider {
             if (now < signatureExpiry) return sig
         }
 
+        // 2026-06-12 (décompil bundle VYPN) : payload aligné EXACTEMENT sur ce
+        //   que l'app VYPN officielle envoie. Différences clés vs ancien :
+        //     - package = "net.vypn.app" (= app whitelisté par Vavoo)
+        //     - version binary/js = "1.4.1"
+        //     - token: "" (= empty pour 1er ping)
+        //     - ipLocation: null
+        //     - migrationApplied + migrationTargetInstalled
+        //     - proxy.ssVersion + proxy.id
+        //     - iap.error
+        //   Le sig retourné est mintée serveur-side avec un statut "vypn-app"
+        //   qui débloque le vrai stream Vavoo (= pas la pub).
         val payload = JSONObject().apply {
+            put("token", "")
             put("reason", "app-focus")
             put("locale", "fr")
             put("theme", "dark")
             put("metadata", JSONObject().apply {
                 put("device", JSONObject().apply {
                     put("type", "phone")
-                    put("uniqueId", "sf-${android.os.Build.FINGERPRINT.hashCode().toUInt().toString(16)}")
+                    put("uniqueId", "vypn-${android.os.Build.FINGERPRINT.hashCode().toUInt().toString(16)}")
                 })
                 put("os", JSONObject().apply {
                     put("name", "android")
@@ -572,9 +590,9 @@ object VavooProvider : Provider, IptvProvider {
                 })
                 put("app", JSONObject().apply { put("platform", "android") })
                 put("version", JSONObject().apply {
-                    put("package", "tv.vavoo.app")
-                    put("binary", APP_VERSION)
-                    put("js", APP_VERSION)
+                    put("package", "net.vypn.app")
+                    put("binary", "1.4.1")
+                    put("js", "1.4.1")
                 })
             })
             put("appFocusTime", 0)
@@ -583,19 +601,27 @@ object VavooProvider : Provider, IptvProvider {
             put("devMode", false)
             put("hasAddon", true)
             put("castConnected", false)
-            put("package", "tv.vavoo.app")
-            put("version", APP_VERSION)
+            put("package", "net.vypn.app")
+            put("version", "1.4.1")
             put("process", "app")
             put("firstAppStart", now)
             put("lastAppStart", now)
+            put("ipLocation", JSONObject.NULL)
             put("adblockEnabled", true)
+            put("migrationApplied", false)
+            put("migrationTargetInstalled", false)
             put("proxy", JSONObject().apply {
                 put("supported", JSONArray(listOf("ss")))
                 put("engine", "Mu")
+                put("ssVersion", "2022")
                 put("enabled", false)
                 put("autoServer", true)
+                put("id", "")
             })
-            put("iap", JSONObject().apply { put("supported", false) })
+            put("iap", JSONObject().apply {
+                put("supported", false)
+                put("error", "")
+            })
         }
 
         for (url in PING_URLS) {
@@ -1204,7 +1230,12 @@ object VavooProvider : Provider, IptvProvider {
                 val m3u8 = url.removePrefix("m3u8::")
                 return Video(
                     source = m3u8,
-                    headers = mapOf("User-Agent" to VAVOO_UA)
+                    // 2026-06-12 (user "ça marche pas, pub VYPN qui s'affiche") :
+                    //   Vavoo sert maintenant une page anti-pub si le User-Agent
+                    //   du player n'est pas `MediaHubMX/2`. ExoPlayer envoyait
+                    //   `VAVOO/2.6` → flux remplacé par le clip pub VYPN.
+                    //   Test curl avec MediaHubMX/2 → vrai m3u8 HLS valide.
+                    headers = mapOf("User-Agent" to MEDIAHUBMX_UA)
                 )
             }
             url.startsWith("lazy::vavoo::") -> {
@@ -1216,7 +1247,12 @@ object VavooProvider : Provider, IptvProvider {
                 val streamUrl = withContext(Dispatchers.IO) { resolveStreamUrl(ch) }
                 return Video(
                     source = streamUrl,
-                    headers = mapOf("User-Agent" to VAVOO_UA)
+                    // 2026-06-12 (user "ça marche pas, pub VYPN qui s'affiche") :
+                    //   Vavoo sert maintenant une page anti-pub si le User-Agent
+                    //   du player n'est pas `MediaHubMX/2`. ExoPlayer envoyait
+                    //   `VAVOO/2.6` → flux remplacé par le clip pub VYPN.
+                    //   Test curl avec MediaHubMX/2 → vrai m3u8 HLS valide.
+                    headers = mapOf("User-Agent" to MEDIAHUBMX_UA)
                 )
             }
             else -> throw Exception("Unknown server format: $url")
