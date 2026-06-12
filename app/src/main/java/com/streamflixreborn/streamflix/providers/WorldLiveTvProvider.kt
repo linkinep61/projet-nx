@@ -245,7 +245,13 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                 val arr = foldersMap.optJSONArray(path) ?: return@forEach
                 folderContents[path] = jsonArrayToChannels(arr)
             }
-            channelRegistry = jsonArrayToChannels(registryArr)
+            // 2026-06-12 — Re-filtre les chaînes restaurées du cache disque
+            //   au cas où l'ancien cache aurait été persisté AVANT que le
+            //   filtre adulte ne soit ajouté. Garantit qu'au prochain boot
+            //   les anciennes chaînes XXX cachées sont éliminées.
+            channelRegistry = jsonArrayToChannels(registryArr).filter { ch ->
+                !isAdultChannelOrGroup(ch.name, ch.groupName)
+            }
             groupsCache = (0 until groupsArr.length()).mapNotNull { i ->
                 val obj = groupsArr.optJSONObject(i) ?: return@mapNotNull null
                 WlGroup(
@@ -975,9 +981,17 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                                     fetchM3uChannels(g)
                                 } ?: emptyList()
                             } catch (_: Throwable) { emptyList() }
+                            // 2026-06-12 (user "sur World TV, TF1 et n'importe
+                            //   quelle chaîne joue maintenant du porno") : on
+                            //   filtre les chaînes ET les groupes adultes pour
+                            //   éviter que le contenu XXX se mélange aux
+                            //   chaînes mainstream.
+                            val safeChannels = channels.filter { ch ->
+                                !isAdultChannelOrGroup(ch.name, ch.groupName)
+                            }
                             flowMutex.lock()
                             try {
-                                mutableRegistry.addAll(channels)
+                                mutableRegistry.addAll(safeChannels)
                                 channelRegistry = mutableRegistry.toList()
                                 producer.send(buildSectionsFromRegistry())
                             } finally {
@@ -993,6 +1007,28 @@ object WorldLiveTvProvider : Provider, IptvProvider {
             lastLoadedUrl = PLAYLIST_URL
             persistFolderContents()
         }
+
+    /** 2026-06-12 (user "sur World TV TF1 et autres chaines jouent du
+     *  porno") : filtre par mots-cles adultes appliques au NOM de chaine ET
+     *  au NOM de groupe. Couvre les mots-cles generiques + reseaux XXX
+     *  connus FR/intl. Espaces aux extremites pour eviter les faux positifs
+     *  (ex: "Sexy" mais pas "Essex"). */
+    private val ADULT_KEYWORDS = listOf(
+        "xxx", "adult", "porn", "porno", "erotic", "erotik", "erotique",
+        "dorcel", "xxl", "hustler", "brazzers", "private channel",
+        "playboy", "penthouse", "vivid", "hot tv", "hottv",
+        " sex ", "sex tv", "sextv", " teen ", "teens", " anal ",
+        "venus", "spice tv", "blue hustler", "redlight",
+        "exotica", "passion x", "passionx",
+    )
+
+    private fun isAdultChannelOrGroup(channelName: String?, groupName: String?): Boolean {
+        val cName = " ${(channelName ?: "").lowercase().trim()} "
+        val gName = " ${(groupName ?: "").lowercase().trim()} "
+        return ADULT_KEYWORDS.any { kw ->
+            cName.contains(kw) || gName.contains(kw)
+        }
+    }
 
     private fun buildSectionsFromRegistry(): List<Category> {
         val byGroup = channelRegistry.groupBy { it.groupName }
