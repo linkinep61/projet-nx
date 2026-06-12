@@ -797,7 +797,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
                         src = tf1MediaUrl
                         customUa = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
                         customReferer = "https://www.tf1.fr/"
-                    } else if (latvdefranceShortcut(ch.channelName + " " + ch.name)?.also { ldfUrl ->
+                    } else if (latvdefranceShortcut(ch.channelName + " " + ch.name, ch.userAgent.takeIf { it.isNotBlank() })?.also { ldfUrl ->
                             Log.d(TAG, "TF1 LATVDEFRANCE shortcut → $ldfUrl")
                             src = ldfUrl
                             customUa = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -1621,7 +1621,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
      *  rsseverything.com/fr/feed/c779e9bb-... qui contient des `<script>`
      *  JS du style `if (UA contains "~tpolTF1~") fetch("latvdefrance.com/po/hls/.../index.m3u8?token=...")`.
      *  On parse en Kotlin et on extrait l'URL pour la chaîne demandée. */
-    private fun latvdefranceShortcut(channelKey: String): String? {
+    private fun latvdefranceShortcut(channelKey: String, signedUa: String? = null): String? {
         val key = channelKey.uppercase()
         // Mapping channelName uppercase → token de comparaison utilisé dans le RSS
         // 2026-06-11 (user "les chaînes du même type que TF1 sont déjà HS") :
@@ -1709,15 +1709,54 @@ object BoxXtemusProvider : Provider, IptvProvider {
                 .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
+            // 2026-06-12 (logs OPPO Tahiti) : le RSS rsseverything bloque les
+            // UA Chrome/standard et renvoie un décoy ("DailyArt Magazine
+            // Stories") → regex ne match jamais → null → fallback bypassSfr
+            // u301 → URL SFR signée avec IP CloudFlare US → 403 depuis Tahiti.
+            // Le ch.userAgent contient déjà le UA signé `~tpol<token>~...` que
+            // Wiseplay envoie ; quand fourni, on l'utilise pour passer
+            // l'anti-bot. Fallback UA Chrome si pas de UA signé dispo.
+            val effectiveUa = if (!signedUa.isNullOrBlank()) signedUa else
+                "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 " +
+                        "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
             val req = okhttp3.Request.Builder().url(rssUrl)
-                .header("User-Agent",
-                    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 " +
-                            "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+                .header("User-Agent", effectiveUa)
                 .build()
             val body = client.newCall(req).execute().use {
                 if (!it.isSuccessful) return null
                 it.body?.string() ?: return null
             }
+            Log.d(TAG, "latvdefranceShortcut[$rssKey]: RSS body ${body.length} chars, " +
+                    "signedUa=${signedUa != null}")
+            // 2026-06-12 (logs OPPO post-fix-UA) : le RSS débloqué fait 58 KB
+            // mais la regex strict `==="<token>"...) {fetch((...)` ne match
+            // pas car le JS du RSS est minifié sans `{` ni `((`, ex:
+            //   `==="tmc"&&!/http/.test(document.referrer))fetch("...m3u8?token=...")`
+            // Plus robuste : chercher la position du token literal `"<rssKey>"`
+            // dans le body, puis prendre la 1ère URL m3u8 dans la fenêtre de
+            // ~800 chars qui suit (= portée du bloc fetch correspondant).
+            val tokenLiteral = "\"$rssKey\""
+            val tokenIdx = body.indexOf(tokenLiteral, ignoreCase = true)
+            var proximityUrl: String? = null
+            if (tokenIdx >= 0) {
+                val windowEnd = (tokenIdx + 800).coerceAtMost(body.length)
+                val window = body.substring(tokenIdx, windowEnd)
+                val m3u8InWindow = Regex(
+                    """(https?:[^"'\s<>]*?\.m3u8(?:\?[^"'\s<>]*)?)""",
+                    RegexOption.IGNORE_CASE,
+                ).find(window)
+                if (m3u8InWindow != null) {
+                    proximityUrl = m3u8InWindow.value.replace("\\/", "/")
+                    Log.d(TAG, "latvdefranceShortcut[$rssKey] PROXIMITY MATCH: $proximityUrl")
+                } else {
+                    Log.w(TAG, "latvdefranceShortcut[$rssKey]: token at $tokenIdx but no m3u8 next 800")
+                }
+            } else {
+                Log.w(TAG, "latvdefranceShortcut[$rssKey]: token literal not found in RSS")
+            }
+            if (proximityUrl != null) return proximityUrl
+            // Tombe dans la regex strict (= fallback historique, souvent
+            // inutile mais inoffensif).
             // Pattern : `==="<rssKey>"<JS_optionnel>) {fetch(("<url>")...`
             // 2026-06-12 — Le RSS peut contenir du JS ADDITIONNEL entre la
             // clôture du token literal et la parenthèse fermante de la
