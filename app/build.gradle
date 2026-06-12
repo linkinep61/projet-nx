@@ -47,8 +47,8 @@ android {
         applicationId "com.streamfr.app"
         minSdk 23
         targetSdk 35
-        versionCode 10910
-        versionName "1.7.210"
+        versionCode 10911
+        versionName "1.7.211"
 
         // 2026-05-11 : RESTAURATION x86 (32-bit) — abandonné en v19 par erreur.
         // Certains émulateurs (Genymotion, AVD images anciennes) et surtout les
@@ -196,6 +196,8 @@ dependencies {
     // 2026-05-31 : Google Cast SDK pour envoyer le flux vidéo à la Chromecast
     implementation 'com.google.android.gms:play-services-cast-framework:22.0.0'
     implementation 'androidx.mediarouter:mediarouter:1.7.0'
+    // 2026-06-09 : MediaStyle pour la notif RadioPlaybackService
+    implementation 'androidx.media:media:1.7.0'
     ksp 'androidx.room:room-compiler:2.7.0-rc01'
 
     implementation("org.mozilla:rhino:1.8.0")
