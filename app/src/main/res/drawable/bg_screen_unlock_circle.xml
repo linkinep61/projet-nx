@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  2026-06-12 — Fond cercle semi-transparent pour le bouton "déverrouiller"
+  de l'overlay verrou enfant. Le fond est suffisamment opaque (~70 %)
+  pour bien voir le cadenas blanc dessus, sans gâcher la lecture vidéo.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <solid android:color="#B3000000" />
+    <stroke android:width="2dp" android:color="#FFFFFF" />
+</shape>

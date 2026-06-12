@@ -247,9 +247,28 @@
             android:src="@drawable/exo_styled_controls_lock"
             app:tint="#FFFFFF"
             app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@id/btn_exo_cast"
+            app:layout_constraintEnd_toStartOf="@id/btn_exo_channel_list"
             app:layout_constraintTop_toTopOf="parent"
             tools:ignore="ContentDescription,PrivateResource" />
+
+        <!-- 2026-06-12 (user "bouton liste chaines a cote du cadenas") :
+             Visible UNIQUEMENT pour les providers IPTV (Vavoo, World Live,
+             OLA, etc.). Tap → BottomSheet avec toutes les chaines du
+             provider, tap sur une chaine = switch rapide (= equivalent
+             touche LEFT D-pad sur TV). -->
+        <ImageView
+            android:id="@+id/btn_exo_channel_list"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="16dp"
+            android:padding="12dp"
+            android:src="@drawable/ic_channel_list"
+            android:contentDescription="Liste des chaines"
+            android:visibility="gone"
+            app:tint="#FFFFFF"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toStartOf="@id/btn_exo_cast"
+            app:layout_constraintTop_toTopOf="parent" />
 
         <!-- 2026-05-31 : Bouton Cast — envoie le flux vidéo à la Chromecast -->
         <androidx.mediarouter.app.MediaRouteButton
@@ -361,11 +380,20 @@
         tools:ignore="ContentDescription,PrivateResource"
         tools:visibility="visible" />
 
+    <!-- 2026-06-12 (user "le cadenas ne verrouille pas vraiment tout — il
+         peut encore toucher la progress bar, les fleches prev/next,
+         changer de chaine") : Group ÉTENDU pour couvrir TOUS les boutons
+         et widgets interactifs du controller. Le `btn_exo_lock` (=
+         interrupteur) et le `btn_exo_unlock` (= déverrouillage) restent
+         EN DEHORS du Group → ils restent les seuls cliquables en mode
+         verrouillé. Le `exo_bottom_bar` couvrait déjà les boutons
+         à droite mais pas les boutons custom prev/next ni les
+         widgets ajoutés post-asm161 ; on les liste explicitement. -->
     <androidx.constraintlayout.widget.Group
         android:id="@+id/g_controls_lock"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:visibility="visible"
-        app:constraint_referenced_ids="btn_exo_back,tv_exo_title,tv_exo_subtitle,btn_exo_external_player,exo_center_controls,exo_progress,exo_bottom_bar" />
+        app:constraint_referenced_ids="btn_exo_back,tv_exo_title,tv_exo_subtitle,btn_exo_external_player,exo_center_controls,exo_progress,exo_bottom_bar,btn_custom_prev,btn_custom_next,btn_exo_channel_list,btn_exo_cast,btn_exo_wireless,btn_exo_picture_in_picture,btn_live_record,btn_exo_aspect_ratio,btn_skip_intro" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

@@ -50,6 +50,10 @@ class LocalPlayerActivity : AppCompatActivity() {
     private lateinit var playerView: PlayerView
     private lateinit var topBar: LinearLayout
 
+    /** 2026-06-12 — Verrou enfant : True quand l'écran est en mode lock.
+     *  Lu par onBackPressed() pour ignorer le back tant que pas déverrouillé. */
+    private var isScreenLocked: Boolean = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -90,8 +94,15 @@ class LocalPlayerActivity : AppCompatActivity() {
             playerView.setControllerVisibilityListener(
                 PlayerView.ControllerVisibilityListener { visibility ->
                     if (visibility == View.VISIBLE) {
-                        topBar.visibility = View.VISIBLE
-                        topBar.animate().alpha(1f).setDuration(200).start()
+                        // 2026-06-12 — Lecteur download : si écran verrouillé,
+                        // on cache le topBar (titre/back) aussi → seul le
+                        // btnExoUnlock reste visible (déjà géré côté layout).
+                        if (isScreenLocked) {
+                            topBar.visibility = View.GONE
+                        } else {
+                            topBar.visibility = View.VISIBLE
+                            topBar.animate().alpha(1f).setDuration(200).start()
+                        }
                     } else {
                         topBar.animate().alpha(0f).setDuration(200).withEndAction {
                             topBar.visibility = View.GONE
@@ -99,6 +110,13 @@ class LocalPlayerActivity : AppCompatActivity() {
                     }
                 }
             )
+
+            // 2026-06-12 (user "le lecteur des videos téléchargées doit aussi
+            //   pouvoir etre verrouillé pour les enfants") : Verrou enfant
+            //   sur le LocalPlayerActivity. Câble les mêmes boutons
+            //   btn_exo_lock / btn_exo_unlock que le PlayerMobileFragment,
+            //   sans gestureHelper (le LocalPlayer n'a pas de swipe gestures).
+            setupScreenLock()
 
             initPlayer(filePath)
         } catch (e: Exception) {
@@ -194,6 +212,80 @@ class LocalPlayerActivity : AppCompatActivity() {
             android.widget.Toast.makeText(this, "Impossible de lire la vidéo", android.widget.Toast.LENGTH_SHORT).show()
         }
         finish()
+    }
+
+    /** 2026-06-12 (user "crée une page transparente qui verrouille
+     *  carrément le truc") : verrou via overlay plein écran.
+     *  - Tap sur le cadenas du controller → layout_screen_lock VISIBLE
+     *    (consomme tous les taps) + cadenas flash 3s puis fade out
+     *  - Tap sur btn_screen_unlock → overlay GONE → tout revient
+     *  - Tap n'importe où sur l'overlay → re-flash le cadenas 3s
+     */
+    private var unlockFlashRunnable: Runnable? = null
+
+    private fun setupScreenLock() {
+        val btnLock = playerView.findViewById<android.widget.ImageButton>(
+            com.streamflixreborn.streamflix.R.id.btn_exo_lock,
+        )
+        val overlay = findViewById<android.widget.FrameLayout>(
+            com.streamflixreborn.streamflix.R.id.layout_screen_lock,
+        )
+        val btnUnlock = findViewById<android.widget.ImageView>(
+            com.streamflixreborn.streamflix.R.id.btn_screen_unlock,
+        )
+        if (btnLock == null || overlay == null || btnUnlock == null) return
+
+        btnLock.setOnClickListener {
+            isScreenLocked = true
+            playerView.hideController()
+            topBar.visibility = View.GONE
+            overlay.visibility = View.VISIBLE
+            flashUnlockButton(overlay, btnUnlock)
+            android.widget.Toast.makeText(
+                this,
+                "Écran verrouillé — tape le cadenas pour déverrouiller",
+                android.widget.Toast.LENGTH_SHORT,
+            ).show()
+        }
+
+        overlay.setOnClickListener {
+            flashUnlockButton(overlay, btnUnlock)
+        }
+
+        btnUnlock.setOnClickListener {
+            isScreenLocked = false
+            overlay.visibility = View.GONE
+            btnUnlock.visibility = View.VISIBLE
+            topBar.visibility = View.VISIBLE
+            unlockFlashRunnable?.let { playerView.removeCallbacks(it) }
+        }
+    }
+
+    /** Affiche le cadenas 3 secondes puis le cache (= "lampe torche"). */
+    private fun flashUnlockButton(overlay: View, btnUnlock: View) {
+        unlockFlashRunnable?.let { playerView.removeCallbacks(it) }
+        btnUnlock.alpha = 1f
+        btnUnlock.visibility = View.VISIBLE
+        unlockFlashRunnable = Runnable {
+            btnUnlock.animate().alpha(0f).setDuration(400).withEndAction {
+                btnUnlock.visibility = View.INVISIBLE
+            }.start()
+        }.also { playerView.postDelayed(it, 3_000) }
+    }
+
+    /** 2026-06-12 — Bloque le back hardware tant que l'écran est locked. */
+    @Suppress("MissingSuperCall", "OVERRIDE_DEPRECATION")
+    override fun onBackPressed() {
+        if (isScreenLocked) {
+            android.widget.Toast.makeText(
+                this,
+                "Écran verrouillé — appuie sur le cadenas pour déverrouiller",
+                android.widget.Toast.LENGTH_SHORT,
+            ).show()
+            return
+        }
+        @Suppress("DEPRECATION")
+        super.onBackPressed()
     }
 
     private fun hideSystemBars() {

@@ -317,4 +317,47 @@
             app:tint="#FFFFFF" />
     </LinearLayout>
 
+    <!-- 2026-06-12 (user "crée une page transparente qui verrouille
+         carrément le truc, seul le cadenas le déverrouille") :
+         Overlay plein écran qui mange TOUS les taps quand visible.
+         Cliquable + focusable + intercepte le toucher → rien ne peut
+         atteindre le PlayerView ou les contrôles dessous. Le bouton
+         btn_screen_unlock est posé PAR-DESSUS l'overlay (= z-order)
+         et reste cliquable pour déverrouiller.
+
+         Le fond est volontairement transparent pour ne pas gâcher la
+         lecture vidéo. Au tap n'importe où, on flashe brièvement le
+         cadenas (3s) puis on le fade out. -->
+    <FrameLayout
+        android:id="@+id/layout_screen_lock"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="#00000000"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <!-- 2026-06-12 (user "le cadenas trop grand au milieu, l'enfant
+             va cliquer dessus direct - mets-le en haut a gauche et plus
+             petit") : 40dp en top|start avec marges pour qu'il soit
+             clairement visible mais pas au centre où un enfant taperait
+             par réflexe. -->
+        <ImageView
+            android:id="@+id/btn_screen_unlock"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_gravity="top|start"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="16dp"
+            android:padding="10dp"
+            android:src="@drawable/exo_styled_controls_unlock"
+            android:contentDescription="Déverrouiller l'écran"
+            android:background="@drawable/bg_screen_unlock_circle"
+            app:tint="#FFFFFF" />
+    </FrameLayout>
+
 </androidx.constraintlayout.widget.ConstraintLayout>

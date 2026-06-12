@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  2026-06-12 — Icône bouton "liste des chaînes" pour le player mobile IPTV.
+  Trois lignes horizontales (= liste) avec une petite puce au début de
+  chaque ligne. Symbole universel "liste".
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFF">
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M4,6h2v2H4zM4,11h2v2H4zM4,16h2v2H4zM8,6h12v2H8zM8,11h12v2H8zM8,16h12v2H8z" />
+</vector>
