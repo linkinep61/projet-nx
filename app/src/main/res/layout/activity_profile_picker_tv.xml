@@ -7,7 +7,21 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@drawable/bg_wallpaper_tv">
+    android:background="@android:color/black">
+
+    <!-- 2026-06-09 : bg par défaut en ImageView (au lieu de @drawable sur le
+         root) → permet de le cacher quand l'user a un wallpaper perso. -->
+    <ImageView
+        android:id="@+id/iv_profile_picker_default_bg"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:scaleType="centerCrop"
+        android:src="@drawable/bg_wallpaper_tv"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        tools:ignore="ContentDescription" />
 
     <LinearLayout
         android:id="@+id/ll_picker_block"

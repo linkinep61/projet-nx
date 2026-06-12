@@ -75,6 +75,11 @@ class ProfilePickerActivity : FragmentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 2026-06-09 : applique le wallpaper au ProfilePicker mobile.
+        try {
+            val root = findViewById<android.view.View>(android.R.id.content) as? android.view.ViewGroup
+            root?.let { com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(it) }
+        } catch (_: Throwable) {}
         refreshList()
     }
 

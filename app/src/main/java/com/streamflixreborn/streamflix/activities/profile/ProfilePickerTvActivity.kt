@@ -46,6 +46,14 @@ class ProfilePickerTvActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_profile_picker_tv)
+        // 2026-06-09 : applique le fond perso et cache le bg par défaut.
+        val root = (findViewById<android.view.View>(android.R.id.content) as android.view.ViewGroup)
+            .getChildAt(0) as android.view.ViewGroup
+        com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(root)
+        root.findViewById<android.widget.ImageView>(R.id.iv_profile_picker_default_bg)
+            ?.visibility = if (com.streamflixreborn.streamflix.utils.AppearanceManager
+                .hasWallpaper(this)) android.view.View.GONE
+            else android.view.View.VISIBLE
         rvProfiles = findViewById(R.id.rv_profiles)
         btnPrev = findViewById(R.id.btn_profile_prev)
         btnNext = findViewById(R.id.btn_profile_next)
