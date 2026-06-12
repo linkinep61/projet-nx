@@ -732,6 +732,36 @@ object BoxXtemusProvider : Provider, IptvProvider {
                 // été altéré par downstream code).
                 src = ch.streamUrl
 
+                // 2026-06-12 (user "le chargement est trop long après le clic"):
+                //   COURT-CIRCUIT pour les chaînes mappées (TF1+/F-TV/Canal+/M6+/
+                //   Sports/etc.) : si latvdefranceShortcut peut résoudre
+                //   directement, on SAUTE GenericResolver (qui fait 7 hops
+                //   inutiles ~13s pour ces chaînes). Gain mesuré : 29s → ~10s
+                //   sur TMC.
+                val fastTrackLdf = try {
+                    latvdefranceShortcut(
+                        ch.channelName + " " + ch.name,
+                        ch.userAgent.takeIf { it.isNotBlank() },
+                    )
+                } catch (_: Throwable) { null }
+                if (fastTrackLdf != null) {
+                    Log.d(TAG, "FAST-TRACK latvdefrance for ${ch.channelName}: $fastTrackLdf")
+                    sfrUrlCache[server.id] = CachedSfrUrl(
+                        fastTrackLdf, System.currentTimeMillis() + 30 * 60 * 1000L,
+                    )
+                    return Video(
+                        source = fastTrackLdf,
+                        type = "application/vnd.apple.mpegurl",
+                        headers = mapOf(
+                            "User-Agent" to "Mozilla/5.0 (Linux; Android 14) " +
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                                    "Chrome/131.0.0.0 Mobile Safari/537.36",
+                            "Referer" to "https://www.latvdefrance.com/",
+                        ),
+                        subtitles = emptyList(),
+                    )
+                }
+
                 // 2026-06-11 (user "modèle Wiseplay générique, arrête de
                 //   hardcoder 60 chaînes") : AVANT les shortcuts hardcodés
                 //   (ftven/tf1Mediainfo/latvdefrance/SFR), tenter une
@@ -1621,6 +1651,14 @@ object BoxXtemusProvider : Provider, IptvProvider {
      *  rsseverything.com/fr/feed/c779e9bb-... qui contient des `<script>`
      *  JS du style `if (UA contains "~tpolTF1~") fetch("latvdefrance.com/po/hls/.../index.m3u8?token=...")`.
      *  On parse en Kotlin et on extrait l'URL pour la chaîne demandée. */
+    // 2026-06-12 — Cache du RSS rsseverything c779e9bb 5 min : le RSS coûte
+    //   ~2s à fetch (avec UA signé), inutile de le retéléchargen à chaque clic.
+    //   Keyed par signedUa (= différents UAs peuvent renvoyer des contenus
+    //   différents — sécurité, garde un mapping ; en pratique 1 seul UA actif
+    //   à la fois donc cache effectif).
+    private val rssBodyCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, String>>()
+    private val RSS_CACHE_TTL_MS = 5 * 60 * 1000L
+
     private fun latvdefranceShortcut(channelKey: String, signedUa: String? = null): String? {
         val key = channelKey.uppercase()
         // Mapping channelName uppercase → token de comparaison utilisé dans le RSS
@@ -1719,15 +1757,33 @@ object BoxXtemusProvider : Provider, IptvProvider {
             val effectiveUa = if (!signedUa.isNullOrBlank()) signedUa else
                 "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 " +
                         "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-            val req = okhttp3.Request.Builder().url(rssUrl)
-                .header("User-Agent", effectiveUa)
-                .build()
-            val body = client.newCall(req).execute().use {
-                if (!it.isSuccessful) return null
-                it.body?.string() ?: return null
+            // 2026-06-12 — Cache RSS body 5 min. Si déjà en cache et frais →
+            // skip le fetch (= ~1s économisé par clic après le 1er).
+            // Keyed par rssUrl (= constant `c779e9bb...xml`) — vérifié dans
+            // les logs : les 3 chaînes TF1/TMC/F2 renvoient toutes 58031 chars
+            // de body, c'est le MÊME RSS quel que soit le UA signé (la
+            // signature ne fait que passer l'auth, pas changer le contenu).
+            // Du coup le cache hit entre chaînes → 1 seul fetch RSS par 5min
+            // pour TOUT World Live.
+            val cacheKey = rssUrl
+            val now = System.currentTimeMillis()
+            val cached = rssBodyCache[cacheKey]
+            val body = if (cached != null && (now - cached.first) < RSS_CACHE_TTL_MS) {
+                Log.d(TAG, "latvdefranceShortcut[$rssKey]: RSS cache HIT (${cached.second.length} chars)")
+                cached.second
+            } else {
+                val req = okhttp3.Request.Builder().url(rssUrl)
+                    .header("User-Agent", effectiveUa)
+                    .build()
+                val fresh = client.newCall(req).execute().use {
+                    if (!it.isSuccessful) return null
+                    it.body?.string() ?: return null
+                }
+                rssBodyCache[cacheKey] = now to fresh
+                Log.d(TAG, "latvdefranceShortcut[$rssKey]: RSS body ${fresh.length} chars, " +
+                        "signedUa=${signedUa != null} (fetched + cached)")
+                fresh
             }
-            Log.d(TAG, "latvdefranceShortcut[$rssKey]: RSS body ${body.length} chars, " +
-                    "signedUa=${signedUa != null}")
             // 2026-06-12 (logs OPPO post-fix-UA) : le RSS débloqué fait 58 KB
             // mais la regex strict `==="<token>"...) {fetch((...)` ne match
             // pas car le JS du RSS est minifié sans `{` ni `((`, ex:
