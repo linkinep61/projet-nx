@@ -304,7 +304,9 @@ object GenericStreamResolver {
                     RegexOption.IGNORE_CASE,
                 ).find(window)
                 if (mediaInWindow != null) {
-                    return mediaInWindow.value.replace("\\/", "/")
+                    val u = mediaInWindow.value.replace("\\/", "/")
+                    // 2026-06-12 — rejette les URLs vers hosts empoisonnés.
+                    if (!isPoisonedHost(u)) return u
                 }
                 // Stratégie B : déobfuscation atob+literal
                 val deobfuscated = deobfuscateAtobUrl(window)
@@ -355,6 +357,26 @@ object GenericStreamResolver {
      *  (= latvdefranceShortcut). Sinon strictement identique. */
     fun deobfuscateAtobUrlPublic(window: String): String? = deobfuscateAtobUrl(window)
 
+    /** 2026-06-12 (logs OPPO : "FAST-TRACK latvdefrance for TF1: http://
+     *  cdn.adultiptv.net/gay.m3u8…") : le RSS communautaire rsseverything
+     *  a empoisonné toutes ses URLs en redirigeant TF1/F2/CStar/etc. vers
+     *  `cdn.adultiptv.net` (= riposte contre les apps qui exploitent
+     *  leur service gratuit). On bloque ces URLs au niveau du résolveur
+     *  pour éviter de jouer du contenu adulte sous le nom de TF1.
+     *  Liste de hosts pirates connus pour servir du XXX à la place du
+     *  contenu mainstream. */
+    private val POISONED_HOSTS = listOf(
+        "adultiptv", "adultiptv.net", "porniptv", "xxxiptv",
+        "mycamtv", "livejasmin", "xcam", "bongacams",
+        "chaturbate", "camsoda", "stripchat", "pornhub",
+        "xnxx", "xvideos", "redtube", "youporn",
+    )
+
+    private fun isPoisonedHost(url: String): Boolean {
+        val lower = url.lowercase()
+        return POISONED_HOSTS.any { lower.contains(it) }
+    }
+
     private fun deobfuscateAtobUrl(window: String): String? {
         val fetchStart = window.indexOf("fetch((")
         if (fetchStart < 0) return null
@@ -386,6 +408,9 @@ object GenericStreamResolver {
         if (parts.isEmpty()) return null
         val raw = parts.joinToString("")
         val url = raw.replace("\\/", "/")
+        // 2026-06-12 — Si l'URL extraite pointe vers un host empoisonné
+        // (adultiptv.net etc.), on retourne null pour ne PAS jouer du XXX.
+        if (isPoisonedHost(url)) return null
         return if (url.startsWith("http", ignoreCase = true) &&
             (url.contains(".m3u8") || url.contains(".mpd") || url.contains(".ts"))
         ) url else null
