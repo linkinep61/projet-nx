@@ -240,6 +240,23 @@ object DeviceSyncManager {
         }
         root.put("continueWatchingDismissed", dismissedObj)
 
+        // 12. Sources World Live (playlists custom ajoutées via le bouton +)
+        //     2026-06-10 (user "il faut que ce soit transféré au moment du
+        //     partage") : sync les sources perso + l'index active. Les BUILTIN
+        //     sont déjà dans le code, pas besoin de les transférer.
+        val wlSourcesPrefs = PreferenceManager.getDefaultSharedPreferences(context)
+        val wlSourcesObj = JSONObject()
+        wlSourcesPrefs.getString("world_live_sources_list", null)?.let {
+            wlSourcesObj.put("list", it)
+        }
+        if (wlSourcesPrefs.contains("world_live_sources_active_index")) {
+            wlSourcesObj.put(
+                "activeIndex",
+                wlSourcesPrefs.getInt("world_live_sources_active_index", 0),
+            )
+        }
+        if (wlSourcesObj.length() > 0) root.put("worldLiveSources", wlSourcesObj)
+
         return root
     }
 
@@ -583,6 +600,27 @@ object DeviceSyncManager {
             }
             editor.apply()
             Log.d(TAG, "Continue-watching dismissed imported")
+        }
+
+        // 12. Sources World Live (playlists custom)
+        //     2026-06-10 : restaure la liste des sources perso et l'index
+        //     active. Le provider est invalidé pour re-fetch la nouvelle
+        //     source au prochain affichage.
+        payload.optJSONObject("worldLiveSources")?.let { obj ->
+            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+            val editor = prefs.edit()
+            obj.optString("list", "").takeIf { it.isNotBlank() }?.let {
+                editor.putString("world_live_sources_list", it)
+            }
+            if (obj.has("activeIndex")) {
+                editor.putInt("world_live_sources_active_index", obj.optInt("activeIndex", 0))
+            }
+            editor.apply()
+            try {
+                com.streamflixreborn.streamflix.providers
+                    .WorldLiveTvProvider.invalidateCache()
+            } catch (_: Throwable) {}
+            Log.d(TAG, "World Live sources imported")
         }
     }
 

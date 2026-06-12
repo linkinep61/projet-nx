@@ -84,7 +84,7 @@ class IptvFavoritesMobileFragment : Fragment() {
                     MiniPlayerController.initPlayer(requireContext())
                 }
                 binding.miniPlayerView.player = MiniPlayerController.getPlayer()
-                binding.miniPlayerContainer.visibility = View.VISIBLE
+                com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                 binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
                 MiniPlayerController.currentChannelPoster?.let { poster ->
                     Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
@@ -135,7 +135,7 @@ class IptvFavoritesMobileFragment : Fragment() {
         binding.miniPlayerView.player = MiniPlayerController.getPlayer()
 
         if (MiniPlayerController.currentChannelId != null) {
-            binding.miniPlayerContainer.visibility = View.VISIBLE
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
             binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
             MiniPlayerController.currentChannelPoster?.let { poster ->
                 Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
@@ -150,12 +150,12 @@ class IptvFavoritesMobileFragment : Fragment() {
                         binding.miniPlayerContainer.visibility = View.GONE
                     }
                     is MiniPlayerController.State.Loading -> {
-                        binding.miniPlayerContainer.visibility = View.VISIBLE
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.VISIBLE
                     }
                     is MiniPlayerController.State.Playing -> {
-                        binding.miniPlayerContainer.visibility = View.VISIBLE
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.GONE
                         updatePauseButton()
@@ -271,13 +271,17 @@ class IptvFavoritesMobileFragment : Fragment() {
                         // fallback getHome() seulement si cache vide.
                         val cached = com.streamflixreborn.streamflix.utils.HomeCacheStore
                             .read(requireContext().applicationContext, provider as com.streamflixreborn.streamflix.providers.Provider)
-                        val favCategory = cached?.firstOrNull { it.name == "Favoris" }
-                        if (favCategory != null) {
-                            favCategory.list.filterIsInstance<TvShow>()
+                        // 2026-06-08 : match TOUTES les cats "Favoris*"
+                        //   (Hub a "Favoris" + "Favoris France TV").
+                        val favCategories = cached?.filter {
+                            it.name.startsWith("Favoris", ignoreCase = true)
+                        }
+                        if (!favCategories.isNullOrEmpty()) {
+                            favCategories.flatMap { it.list.filterIsInstance<TvShow>() }
                         } else {
                             val home = provider.getHome()
-                            home.firstOrNull { it.name == "Favoris" }
-                                ?.list?.filterIsInstance<TvShow>() ?: emptyList()
+                            home.filter { it.name.startsWith("Favoris", ignoreCase = true) }
+                                .flatMap { it.list.filterIsInstance<TvShow>() }
                         }
                     }
                 }

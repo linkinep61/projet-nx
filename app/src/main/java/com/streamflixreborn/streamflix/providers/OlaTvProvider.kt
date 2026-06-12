@@ -518,7 +518,10 @@ object OlaTvProvider : Provider, IptvProvider {
      *  Pages are fetched in **parallel** (after page 1 reveals the total count) to keep the
      *  initial load short — primary cid was 50s sequential, ~10s parallel.
      *  Returns channel name → cmd. We resolve cmd to actual stream URLs lazily in getServers. */
-    private suspend fun olaListMacPortalChannels(baseUrl: String, mac: String, forceAllGenres: Boolean = false): List<MacChannel> {
+    private suspend fun olaListMacPortalChannels(baseUrl: String, mac: String, forceAllGenres: Boolean = false): List<MacChannel> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        // 2026-06-10 (user "ANR app crashe quand on est sur TV Hub si OlaTV
+        //   scanne en background") : force tout le scan MAC portal sur
+        //   Dispatchers.IO pour éviter de bloquer le main thread.
         val results = mutableListOf<MacChannel>()
         val encodedMac = java.net.URLEncoder.encode(mac, "UTF-8")
         val portalBase = "${baseUrl.trimEnd('/')}/portal.php"
@@ -533,7 +536,7 @@ object OlaTvProvider : Provider, IptvProvider {
             val hsBody = probeClient.newCall(hsReq).execute().body?.string() ?: ""
             val token = try { JSONObject(hsBody).getJSONObject("js").getString("token") } catch (_: Exception) {
                 Log.w(TAG, "MAC: no token in handshake")
-                return results
+                return@withContext results
             }
 
             // Step 2: get_profile (init session)
@@ -570,7 +573,7 @@ object OlaTvProvider : Provider, IptvProvider {
             if (frGenreIds.isEmpty()) {
                 if (!forceAllGenres) {
                     Log.d(TAG, "MAC portal $baseUrl: no FR genre found, skipping")
-                    return results
+                    return@withContext results
                 }
                 Log.d(TAG, "MAC portal $baseUrl: no FR genre found — forceAllGenres=true, using genre=*")
                 frGenreIds.add("*")
@@ -646,7 +649,7 @@ object OlaTvProvider : Provider, IptvProvider {
             Log.e(TAG, "MAC portal failed for $baseUrl: ${e.message}")
         }
         Log.d(TAG, "MAC portal $baseUrl: ${results.size} unique FR channels")
-        return results
+        return@withContext results
     }
 
     /** Resolve a "cmd" (from get_ordered_list) to an actual playable stream URL.

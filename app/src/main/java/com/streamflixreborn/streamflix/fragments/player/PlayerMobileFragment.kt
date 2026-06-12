@@ -2771,14 +2771,25 @@ class PlayerMobileFragment : Fragment() {
             )
             binding.pvPlayer.setKeepContentOnPlayerReset(false)
         } catch (_: Exception) {}
+        Log.d("PlayerMobileFragment", "displayVideo: video.subtitles.size=${video.subtitles.size}, defaults=${video.subtitles.count { it.default }}, labels=${video.subtitles.joinToString { "${it.label}(def=${it.default})" }}")
+        val noDefaultSub = video.subtitles.isNotEmpty() && video.subtitles.none { it.default }
         val mediaItemBuilder = MediaItem.Builder()
             .setUri(video.source.toUri())
             .setMimeType(video.type)
-            .setSubtitleConfigurations(video.subtitles.map { subtitle ->
+            .setSubtitleConfigurations(video.subtitles.mapIndexed { idx, subtitle ->
+                val isDefault = subtitle.default || (noDefaultSub && idx == 0)
                 MediaItem.SubtitleConfiguration.Builder(subtitle.file.toUri())
                     .setMimeType(subtitle.file.toSubtitleMimeType())
                     .setLabel(subtitle.label)
-                    .setSelectionFlags(if (subtitle.default) C.SELECTION_FLAG_DEFAULT else 0)
+                    .apply {
+                        val lower = subtitle.label.lowercase()
+                        if (lower.contains("fr") || lower.contains("français") ||
+                            lower.contains("francais") || lower.contains("vostfr") ||
+                            lower.contains("vf")) {
+                            setLanguage("fr")
+                        }
+                    }
+                    .setSelectionFlags(if (isDefault) C.SELECTION_FLAG_DEFAULT else 0)
                     .build()
             })
             .setMediaMetadata(
@@ -2805,6 +2816,48 @@ class PlayerMobileFragment : Fragment() {
                     .build()
             )
         }
+        // 2026-06-08 (user "soustitres bizarres jaune sur noir -HUGO ! HUGO !
+        //   HUGO ! ça crée du bazar") : désactive les CEA-608/708 closed
+        //   captions embarqués dans les flux HLS live (France TV pousse des CC
+        //   pour malentendants par défaut). UNIQUEMENT pour IPTV — les
+        //   sous-titres VOD restent intacts. Aligné avec PlayerTvFragment.
+        try {
+            val p = player
+            if (isLiveIptvChannel) {
+                // 2026-06-10 (user "dessin animé sous-titré + désactiver
+                //   via paramètres") : honore le toggle iptvShowSubtitlesFr.
+                p.trackSelectionParameters = if (UserPreferences.iptvShowSubtitlesFr) {
+                    p.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                        .setPreferredTextLanguages("fr", "fre", "fra")
+                        .setSelectUndeterminedTextLanguage(true)
+                        .build()
+                } else {
+                    p.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                        .build()
+                }
+            } else {
+                // VOD : ré-activer text track au cas où on switch d'une IPTV
+                //   vers un film. Sans ça, les sous-titres VOD ne s'afficheraient
+                //   plus après avoir regardé une chaîne.
+                // 2026-06-09 (user "peu importe les épisodes c'est désactivé") :
+                //   setTrackTypeDisabled(false) seul ne relance pas l'auto-
+                //   sélection sur les épisodes VOD (animes / séries). Ajout :
+                //   - clearOverridesOfType : reset overrides hérités.
+                //   - setPreferredTextLanguages("fr"/"fre"/"fra") : préférence FR.
+                //   - setSelectUndeterminedTextLanguage(true) : sélectionne
+                //     même si label vide (cas embedded subs anime).
+                p.trackSelectionParameters = p.trackSelectionParameters
+                    .buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                    .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                    .setPreferredTextLanguages("fr", "fre", "fra")
+                    .setSelectUndeterminedTextLanguage(true)
+                    .build()
+            }
+        } catch (_: Exception) {}
         val mediaItem = mediaItemBuilder.build()
 
         if (needsWebViewDs) {
@@ -3051,19 +3104,18 @@ class PlayerMobileFragment : Fragment() {
                         val initialPosition = player.currentPosition
                         bufferingWatchdog = viewLifecycleOwner.lifecycleScope.launch {
                             if (!vodCurrentStreamHasWorked) {
-                                // (A) Pré-READY : 20s puis skip server
-                                // 2026-05-18 : repassé 10s→20s — sur connexions
-                                //   internationales lentes (Sibnet Russie depuis
-                                //   Tahiti), 10s était trop court → serveur valide
-                                //   marqué broken à tort. 20s = compromis.
-                                kotlinx.coroutines.delay(20_000L)
+                                // (A) Pré-READY : 35s puis skip server
+                                // 2026-06-09 : 20s→35s (user "l'autoscip pour les animes,
+                                //   les serveurs ont pas le temps d'arriver"). Sibnet/
+                                //   VidMoLy/Vidsonic peuvent prendre 25-30s depuis Tahiti.
+                                kotlinx.coroutines.delay(35_000L)
                                 if (player.playbackState == Player.STATE_BUFFERING &&
                                     player.currentPosition == initialPosition &&
                                     !vodCurrentStreamHasWorked) {
                                     val server = currentServer
                                     val nextServer = nextAutoFallbackServer(servers, server)
                                     Log.w("PlayerNetwork",
-                                        "Pre-READY 20s freeze on ${server?.name} → skip to ${nextServer?.name}")
+                                        "Pre-READY 35s freeze on ${server?.name} → skip to ${nextServer?.name}")
                                     if (server != null) {
                                         pruneBrokenVariant(server)
                                         // 2026-05-12 : flag instantanément le serveur broken
@@ -4371,6 +4423,8 @@ class PlayerMobileFragment : Fragment() {
             // v65 (aligned with PlayerTvFragment) : bump VOD buffer.
             //   min 30→60s, max 120→300s (600 extra), start 1.5→1s, rebuffer 3→1.5s.
             //   Films/séries n'arrivent plus en bout de buffer = moins de "rame".
+            // 2026-06-09 (user "ça a rien changé tu peux remettre comme avant") :
+            //   restauration après test ami.
             DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
                     60_000,
@@ -4385,31 +4439,15 @@ class PlayerMobileFragment : Fragment() {
         val baseBuilder = if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1 && !currentSoftwareDecoder) {
             ExoPlayer.Builder(requireContext())
         } else {
-            // 2026-05-15 (user "fais en sorte qu'elle supporte tous les formats
-            // audio vidéo") : NextRenderersFactory (nextlib FFmpeg) activé pour
-            // TOUS les contenus, pas juste IPTV live. Cela apporte le fallback
-            // software pour les codecs audio (AC3/EAC3/DTS/TrueHD/Vorbis exotique)
-            // et certains codecs vidéo (HEVC/AV1) que le hardware ne sait pas
-            // décoder. Avant, seule la branche IPTV live l'utilisait → tout le
-            // reste (Mon IPTV VOD/Séries, Movix, Wiflix, etc.) tombait sur
-            // DefaultRenderersFactory sans fallback FFmpeg.
-            //
-            // Mode :
-            // - PREFER si user a explicitement activé software decoder (toggle Settings)
-            //   → utilise FFmpeg même si hardware dispo (utile sur émulateur)
-            // - ON sinon → hardware d'abord, FFmpeg en fallback uniquement quand
-            //   le hardware refuse le codec. Comportement par défaut, pas de
-            //   coût visible sur les contenus standards.
-            //
-            // Note : Dolby Vision (dvhe.*) reste NON SUPPORTÉ — c'est un format
-            // propriétaire licencié, ni FFmpeg ni les codecs Android open-source
-            // ne savent le décoder. Cf onPlayerError pour le handling spécifique.
-            val mode = if (currentSoftwareDecoder)
+            // 2026-06-10 : respecte le toggle Settings "Forcer le décodeur logiciel".
+            //   OFF par défaut = HW prioritaire. ON = software FFmpeg.
+            val prefSw = com.streamflixreborn.streamflix.utils.UserPreferences.preferSoftwareDecoder
+            val mode = if (currentSoftwareDecoder || prefSw)
                 DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
             else
                 DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
             Log.d("PlayerMobileFragment",
-                "Using NextRenderersFactory (FFmpeg fallback) — mode=${if (currentSoftwareDecoder) "PREFER" else "ON"}, isLiveIptv=$isLiveIptv")
+                "NextRenderersFactory mode=$mode (prefSw=$prefSw, swDec=$currentSoftwareDecoder, isLiveIptv=$isLiveIptv)")
             val renderersFactory = io.github.anilbeesetti.nextlib.media3ext.ffdecoder
                 .NextRenderersFactory(requireContext()).apply {
                     setEnableDecoderFallback(true)

@@ -154,6 +154,11 @@ interface Provider {
             // Comme SportLive mais pour le généraliste. Favoris/bans
             // s'appliquent cross-provider via channelKey commun.
             LiveTvHubProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
+            // 2026-06-08 (user "il faudrait dupliquer le TV Hub, ajouts dans
+            //   un autre TV Hub +") : provider séparé pour le contenu extra
+            //   (World Live TV + à venir Tiri Marrano +18). Garde TV Hub
+            //   principal léger avec uniquement les chaînes curated FR.
+            LiveTvHubPlusProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.IPTV, enrichHome = false),
             // 2026-05-12 : Mon IPTV — provider user-configurable. L'utilisateur
             // ajoute ses propres URLs M3U via IptvSourcesActivity (clic provider
             // = ouvre tableau des sources). Auto-classification TV/Films/Séries

@@ -323,6 +323,11 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                                 Settings.Subtitle.SubDLSubtitles -> {
                                     settingsView.displaySettings(Setting.SUBDL)
                                 }
+
+                                Settings.Subtitle.ExternalServerSubtitles -> {
+                                    settingsView.onSubtitleSelected.invoke(item)
+                                    settingsView.hide()
+                                }
                             }
                         }
 
@@ -717,6 +722,12 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                         Settings.Subtitle.LocalSubtitles -> context.getString(R.string.player_settings_local_subtitles_label)
                         Settings.Subtitle.OpenSubtitles -> context.getString(R.string.player_settings_open_subtitles_label)
                         Settings.Subtitle.SubDLSubtitles -> context.getString(R.string.player_settings_subdl_label)
+                        Settings.Subtitle.ExternalServerSubtitles -> {
+                            val running = com.streamflixreborn.streamflix.utils
+                                .ExternalSubtitleOverlay.globalInstance?.isRunning() == true
+                            if (running) "Désactiver les sous-titres serveur"
+                            else "Activer les sous-titres serveur"
+                        }
                     }
 
                     is Settings.Subtitle.Style -> when (item) {
@@ -1000,6 +1011,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                         Settings.Subtitle.LocalSubtitles -> View.VISIBLE
                         Settings.Subtitle.OpenSubtitles -> View.VISIBLE
                         Settings.Subtitle.SubDLSubtitles -> View.VISIBLE
+                        Settings.Subtitle.ExternalServerSubtitles -> View.GONE
                     }
 
                     is Settings.Subtitle.Style -> when (item) {

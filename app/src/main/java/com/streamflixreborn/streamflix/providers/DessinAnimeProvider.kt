@@ -12,12 +12,17 @@ import com.streamflixreborn.streamflix.models.People
 import com.streamflixreborn.streamflix.models.Season
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
+import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.utils.DnsResolver
+import com.streamflixreborn.streamflix.utils.NetworkClient
 import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.TMDb3.w1280
 import com.streamflixreborn.streamflix.utils.TitleNormalizer
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import com.streamflixreborn.streamflix.utils.WebViewResolver
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.async
@@ -63,26 +68,22 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
     override val language = "fr"
 
     private const val TAG = "DessinAnime"
-    private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
-
-    // CookieJar partagé pour éviter les boucles redirect Cloudflare
-    //   (sans cookie persistant, le serveur boucle home -> challenge -> home
-    //   et OkHttp atteint sa limite de 20 follow-ups).
-    private val cookieJar = object : okhttp3.CookieJar {
-        private val store = mutableMapOf<String, MutableList<okhttp3.Cookie>>()
-        override fun saveFromResponse(url: okhttp3.HttpUrl, cookies: List<okhttp3.Cookie>) {
-            synchronized(store) {
-                val list = store.getOrPut(url.host) { mutableListOf() }
-                cookies.forEach { c ->
-                    list.removeAll { it.name == c.name }
-                    list.add(c)
-                }
-            }
-        }
-        override fun loadForRequest(url: okhttp3.HttpUrl): List<okhttp3.Cookie> = synchronized(store) {
-            store[url.host]?.toList() ?: emptyList()
+    // 2026-06-09 : UA dynamique = celui du WebView Android pour que les
+    //   cookies cf_clearance obtenus dans la WebView soient acceptés par
+    //   OkHttp (Cloudflare lie le cookie au User-Agent).
+    private val UA: String by lazy {
+        try {
+            android.webkit.WebSettings.getDefaultUserAgent(StreamFlixApp.instance)
+        } catch (_: Throwable) {
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
         }
     }
+
+    // 2026-06-09 : CookieJar partagé avec WebView (NetworkClient.cookieJar
+    //   proxie vers WebKit CookieManager). Quand l'user complète le Cloudflare
+    //   Turnstile dans la WebView, le cookie cf_clearance est automatiquement
+    //   disponible pour OkHttp.
+    private val cookieJar = NetworkClient.cookieJar
 
     private val httpClient by lazy {
         OkHttpClient.Builder()
@@ -92,20 +93,358 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
             .followRedirects(true)
             .followSslRedirects(true)
             .cookieJar(cookieJar)
+            .cache(null) // 2026-06-09 : pas de cache HTTP (CF Turnstile rend les pages challenge cachées nocives)
             .build()
+    }
+
+    // 2026-06-09 : bypass Cloudflare Turnstile (pattern AnimeSama).
+    //   cfBypassDone est PERSISTÉ en SharedPrefs avec un TTL pour ne pas
+    //   redemander le captcha à chaque restart de l'app (le cookie cf_clearance
+    //   reste valide ~30 min-2 h côté serveur CF).
+    @Volatile private var cfBypassDoneRam = false
+    private val cfBypassMutex = Mutex()
+    // 2026-06-09 v3 (OOM-kill VmPeak 1.9 GB) : sérialise toutes les WebView
+    //   silent fetches pour éviter 8 WebViews // ~100-200 MB chacune = OOM.
+    private val webViewFetchMutex = Mutex()
+    private const val PREF_CF_BYPASS = "dessinanime_cf_bypass"
+    private const val KEY_CF_BYPASS_TS = "cf_bypass_ts"
+    // 2026-06-09 (user "comme Google, garde un moment quand même") : 2 h = max
+    //   raisonnable côté Cloudflare (cookie cf_clearance valide 30 min à 2 h
+    //   selon config du site). Si CF refuse avant les 2 h → silent retourne
+    //   page challenge → re-bypass auto (déjà géré, plus de boucle infinie).
+    private const val CF_BYPASS_TTL_MS = 2 * 60 * 60 * 1000L // 2 h
+
+    private val cfBypassDone: Boolean
+        get() {
+            if (cfBypassDoneRam) return true
+            return try {
+                val prefs = StreamFlixApp.instance.getSharedPreferences(PREF_CF_BYPASS, android.content.Context.MODE_PRIVATE)
+                val ts = prefs.getLong(KEY_CF_BYPASS_TS, 0L)
+                val fresh = ts > 0 && (System.currentTimeMillis() - ts) < CF_BYPASS_TTL_MS
+                if (fresh) {
+                    cfBypassDoneRam = true
+                    Log.d(TAG, "cfBypassDone restored from prefs (age=${(System.currentTimeMillis() - ts) / 1000}s)")
+                }
+                fresh
+            } catch (_: Throwable) { false }
+        }
+
+    private fun markCfBypassDone() {
+        cfBypassDoneRam = true
+        try {
+            StreamFlixApp.instance
+                .getSharedPreferences(PREF_CF_BYPASS, android.content.Context.MODE_PRIVATE)
+                .edit().putLong(KEY_CF_BYPASS_TS, System.currentTimeMillis()).apply()
+        } catch (_: Throwable) {}
+    }
+    private var webViewResolver: WebViewResolver? = null
+    private val challengeKeywords = listOf(
+        "Just a moment...", "cf-browser-verification", "challenge-running",
+        "Checking your browser", "cf-turnstile", "cloudflare"
+    )
+
+    /**
+     * 2026-06-09 : utiliser l'Activity courante (foreground) plutôt que
+     * l'ApplicationContext. Sinon dialog.show() throws BadTokenException
+     * ("token null is not valid; is your activity running?").
+     * Le resolver est re-créé si l'Activity courante a changé depuis.
+     */
+    private fun getResolver(): WebViewResolver {
+        val act = StreamFlixApp.currentActivity ?: StreamFlixApp.instance
+        // 2026-06-09 v2 : re-check si l'Activity courante est valide (pas
+        //   isFinishing/isDestroyed) → sinon BadTokenException quand on essaye
+        //   d'afficher le dialog.
+        val activityValid = try {
+            (act as? android.app.Activity)?.let { !it.isFinishing && !it.isDestroyed } ?: true
+        } catch (_: Throwable) { false }
+        val current = webViewResolver
+        if (current == null || lastResolverActivity !== act || !activityValid) {
+            val safeAct = if (activityValid) act else StreamFlixApp.instance
+            webViewResolver = WebViewResolver(safeAct)
+            lastResolverActivity = safeAct
+        }
+        return webViewResolver!!
+    }
+
+    @Volatile private var lastResolverActivity: android.content.Context? = null
+
+    /** Bypass CF UNE SEULE FOIS. Va DIRECT au dialog visible si pas déjà fait. */
+    private suspend fun ensureCfBypassed() {
+        if (cfBypassDone) return
+        cfBypassMutex.withLock {
+            if (cfBypassDone) return
+            // 2026-06-09 (user "le challenge cloud fire est apparu alors que
+            //   j'étais plus dans le provider") : ne pas afficher de dialog
+            //   si l'user a quitté DessinAnime.
+            if (UserPreferences.currentProvider?.name != "DessinAnime") {
+                Log.w(TAG, "ensureCfBypassed skipped — l'user a quitté DessinAnime")
+                return
+            }
+            // 2026-06-09 v2 (user "j'attends déjà depuis au moins 30 secondes") :
+            //   on saute le test silent qui prenait 30s à timeout sur ce site
+            //   (CF demande toujours interaction → silent ne réussit jamais).
+            //   Direct au dialog visible.
+            Log.d(TAG, "Bypass CF : dialog visible direct (silent skip)")
+            val html = getResolver().get(baseUrl, silent = false)
+            val cookies = android.webkit.CookieManager.getInstance().getCookie(baseUrl) ?: ""
+            val hasClearance = cookies.contains("cf_clearance")
+            val hasContent = html.contains("_next/") || html.contains("dessinanime") || html.length > 5000
+            if (hasContent || hasClearance) {
+                Log.d(TAG, "Bypass CF RÉUSSI (${html.length} chars, clearance=$hasClearance)")
+                markCfBypassDone()
+            } else {
+                Log.w(TAG, "Bypass CF ÉCHOUÉ (${html.length} chars)")
+            }
+        }
+    }
+
+    /**
+     * 2026-06-09 (user "les cookies CF doivent rester dans le cache et le home
+     *   se recharger à chaque ouverture, vider le cache à la fermeture") :
+     *   - GARDE le timestamp cfBypassDone persisté (les cookies CF/cf_clearance
+     *     dans WebKit CookieManager restent valides, pas de re-dialog).
+     *   - VIDE pageCache + HomeCacheStore pour forcer un re-fetch frais au
+     *     prochain getHome (sinon on garde l'ancien home obsolète).
+     *   - GARDE cfBypassDoneRam=true si déjà true (pour skip OkHttp direct
+     *     au prochain fetch).
+     */
+    fun resetState() {
+        pageCache.clear()
+        invalidateCfBypass()
+        try { webViewResolver?.cleanup() } catch (_: Throwable) {}
+        webViewResolver = null
+        lastResolverActivity = null
+        // 2026-06-09 v2 (user "chargement progressif, affichage instantané du
+        //   home si possible") : on GARDE HomeCacheStore = cache disque
+        //   persistant entre sessions. Au prochain accès, le home s'affiche
+        //   INSTANT depuis le cache puis refresh en background.
+        Log.d(TAG, "State reset (pageCache + cfBypass + WebViewResolver vidés ; HomeCache GARDÉ pour chargement instant)")
+    }
+
+    /**
+     * 2026-06-09 (user "au lieu d'atteindre un chargement éternel à l'ouverture
+     *   faut que ça aille direct sur la page Cloudfire si elle est demandée") :
+     *   À appeler au moment où l'user sélectionne DessinAnime depuis le picker.
+     *   Si le bypass est encore valide (TTL pas expiré) → no-op silencieux.
+     *   Sinon → déclenche immédiatement ensureCfBypassed() en background, ce
+     *   qui affiche le dialog Turnstile DIRECTEMENT au lieu d'attendre que le
+     *   1er fetch du home échoue (~3-5s de plus visible "chargement éternel").
+     */
+    fun prefetchCfBypassIfNeeded() {
+        if (cfBypassDone) {
+            Log.d(TAG, "prefetchCfBypassIfNeeded: déjà fait → skip")
+            return
+        }
+        Log.d(TAG, "prefetchCfBypassIfNeeded: lancement bypass en background")
+        kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+            try { ensureCfBypassed() }
+            catch (e: Exception) { Log.w(TAG, "prefetch bypass KO: ${e.message}") }
+        }
     }
 
     // ── HTTP helper ────────────────────────────────────────────────────
 
-    private suspend fun httpGet(url: String): String? = withContext(Dispatchers.IO) {
+    /**
+     * 2026-06-09 v2 (user "j'ai pas l'impression qu'elle va vraiment chercher
+     *   des cookies qu'on a déjà téléchargé") : cache HTML PERSISTANT par URL.
+     *   - En RAM (ConcurrentHashMap) : accès O(1) instant pendant la session
+     *   - Sur disque (SharedPrefs) : survit aux redémarrages → home + synopsis
+     *     instant à la prochaine ouverture
+     *   TTL 1h pour les pages dynamiques (catalogue), 24h pour les pages
+     *   stables (synopsis film/série qui ne changent quasi jamais).
+     */
+    private data class CachedHtml(val html: String, val ts: Long)
+    private val pageCache = java.util.concurrent.ConcurrentHashMap<String, CachedHtml>()
+    private val PAGE_CACHE_TTL_MS = 60 * 60 * 1000L // 1h
+    private const val PREF_PAGE_CACHE = "dessinanime_page_cache"
+
+    private fun loadPageFromDisk(url: String): String? {
+        return try {
+            val prefs = StreamFlixApp.instance.getSharedPreferences(PREF_PAGE_CACHE, android.content.Context.MODE_PRIVATE)
+            val ts = prefs.getLong("ts_$url", 0L)
+            if (ts == 0L) return null
+            // TTL 24h pour pages film/série (URL contient /movie/ ou /tv/ avec slug)
+            // TTL 1h pour pages catalogue / home
+            val ttl = if (url.contains("/movie/") || url.contains("/tv/")) 24 * 60 * 60 * 1000L else PAGE_CACHE_TTL_MS
+            if (System.currentTimeMillis() - ts > ttl) return null
+            prefs.getString("html_$url", null)
+        } catch (_: Throwable) { null }
+    }
+
+    private fun savePageToDisk(url: String, html: String) {
         try {
+            // Ne cache que les pages utiles (< 500kb pour éviter d'exploser SharedPrefs)
+            if (html.length > 500_000) return
+            val prefs = StreamFlixApp.instance.getSharedPreferences(PREF_PAGE_CACHE, android.content.Context.MODE_PRIVATE)
+            prefs.edit()
+                .putString("html_$url", html)
+                .putLong("ts_$url", System.currentTimeMillis())
+                .apply()
+        } catch (_: Throwable) {}
+    }
+
+    private suspend fun httpGet(url: String): String? {
+        // Cache hit RAM ?
+        pageCache[url]?.let { cached ->
+            if (System.currentTimeMillis() - cached.ts < PAGE_CACHE_TTL_MS) return cached.html
+        }
+        // 2026-06-09 v2 : cache DISK ? (persiste entre sessions)
+        // 2026-06-09 v3 (user "j'ai l'impression que l'app subit des crashes" —
+        //   VmPeak 1.9 GB / OOM-kill sur Chromecast 2 GB) : refresh background
+        //   RETIRÉ. À chaque hit disque on lançait UNE WebView (~100-200 MB
+        //   chacune) → 8 cards home = 8 WebViews // = OOM-kill. Le TTL disque
+        //   suffit à rafraîchir naturellement, ou la prochaine visite forcera
+        //   le re-fetch si le HTML est devenu obsolète.
+        loadPageFromDisk(url)?.let { diskHtml ->
+            Log.d(TAG, "httpGet $url : cache HIT disque (${diskHtml.length} chars)")
+            pageCache[url] = CachedHtml(diskHtml, System.currentTimeMillis())
+            return diskHtml
+        }
+
+        // 2026-06-09 : si le bypass CF a déjà été fait, on SKIP OkHttp direct
+        //   (qui se prend systématiquement 403 sur dessinanime.cc à cause du
+        //   TLS fingerprint OkHttp ≠ Chrome, malgré cookie + UA + headers OK).
+        //   On va direct au WebView qui est le seul à passer CF Bot Mgmt.
+        if (!cfBypassDone) {
+            // 1) Tentative OkHttp directe : rapide si pas de CF actif sur ce site.
+            val firstTry = httpGetRaw(url)
+            if (firstTry != null) {
+                val isChallenge = challengeKeywords.any { firstTry.contains(it, ignoreCase = true) }
+                if (!isChallenge && firstTry.length > 500) {
+                    pageCache[url] = CachedHtml(firstTry, System.currentTimeMillis())
+                    savePageToDisk(url, firstTry)
+                    return firstTry
+                }
+                Log.d(TAG, "CF challenge détecté sur $url → bypass visible")
+            }
+            // 2) Bypass CF visible (une seule fois — l'user complète le Turnstile).
+            ensureCfBypassed()
+        }
+
+        // 3) WebView silent (rapide si cookies valides).
+        //   2026-06-09 v3 : sérialisé via webViewFetchMutex (anti-OOM).
+        val htmlFirst = try {
+            Log.d(TAG, "WebView silent pour $url")
+            webViewFetchMutex.withLock { getResolver().get(url, silent = true) }
+        } catch (e: Exception) {
+            Log.w(TAG, "WebView silent échoué pour $url: ${e.message}")
+            ""
+        }
+        // 2026-06-09 v3 : on accepte le HTML dès qu'il est "gros" (>2k chars).
+        //   Avant on rejetait à cause du mot "cloudflare" dans les scripts
+        //   analytics CF normaux → re-bypass faussement déclenché sur 250 KB
+        //   de HTML valide. On checke maintenant uniquement les marqueurs
+        //   FORTS de challenge actif (pas juste "cloudflare").
+        // 2026-06-09 v7 : detector challenge avec keywords FR + EN. Le challenge
+        //   CF sur dessinanime.cc est rendu en FRANÇAIS ("Un instant…") car le
+        //   serveur sert la page localisée. Mon check anglais le ratait.
+        val strongChallengeKeywords = listOf(
+            // EN
+            "Just a moment...", "cf-browser-verification", "challenge-running",
+            "Checking your browser",
+            // FR
+            "Un instant", "Veuillez patienter", "Vérification",
+            "Vérifie votre navigateur"
+        )
+        val isActiveChallenge = strongChallengeKeywords.any {
+            htmlFirst.contains(it, ignoreCase = true)
+        }
+        // 2026-06-09 v8 : 3 signaux de VRAI contenu — au moins un suffit.
+        //   - hasRealLinks : page catalogue/home avec liens vers movie/tv
+        //   - hasNextData : page Next.js correctement rendue (présent partout)
+        //   - hasIframe   : page film/épisode avec lecteur vidéo intégré
+        //   Avant on exigeait hasRealLinks UNIQUEMENT → dialog jamais fermé
+        //   sur les pages film individuelles (qui n'ont pas href="/movie/").
+        val hasRealLinks = htmlFirst.contains("href=\"/movie/") || htmlFirst.contains("href=\"/tv/")
+        val hasNextData = htmlFirst.contains("__NEXT_DATA__") || htmlFirst.contains("_next/static")
+        val hasIframe = htmlFirst.contains("<iframe", ignoreCase = true) &&
+            !htmlFirst.contains("challenges.cloudflare.com", ignoreCase = true)
+        val hasContent = hasRealLinks || hasNextData || hasIframe
+        Log.d(TAG, "WebView silent result for $url: length=${htmlFirst.length} " +
+            "challenge=$isActiveChallenge hasLinks=$hasRealLinks hasNextData=$hasNextData hasIframe=$hasIframe")
+        // 2026-06-09 v9 : si HTML > 50k chars → c'est la VRAIE page (challenge
+        //   ≤ 30k). On accepte peu importe le keyword "Un instant" qui peut
+        //   apparaître dans un script footer normal.
+        val isHugePage = htmlFirst.length > 50_000
+        if (htmlFirst.length > 500 && hasContent && (!isActiveChallenge || isHugePage)) {
+            pageCache[url] = CachedHtml(htmlFirst, System.currentTimeMillis())
+            savePageToDisk(url, htmlFirst)
+            return htmlFirst
+        }
+
+        // 4) Silent a renvoyé page challenge (cookie partiellement valide).
+        //    Au lieu de boucler en silent, on fait UN fetch direct WebView
+        //    visible SUR L'URL exacte qu'on veut.
+        // 2026-06-09 (user "le challenge cloud fire est apparu alors que
+        //   j'étais plus dans le provider") : ne PAS afficher le dialog si
+        //   l'user a quitté DessinAnime entre-temps.
+        if (UserPreferences.currentProvider?.name != "DessinAnime") {
+            Log.w(TAG, "Silent insuffisant mais l'user a quitté DessinAnime → skip dialog")
+            return null
+        }
+        // 2026-06-09 v3 (user "pourquoi je me tape une page de vérification
+        //   cloudfire comme ça") : si silent retourne 33 chars (= Global Timeout
+        //   WebView Resolver) ou très peu, c'est que la WebView a timeout, pas
+        //   que le cookie est périmé. On abandonne SANS re-bypass pour éviter
+        //   la boucle infinie (Timeout → re-bypass → Timeout → re-bypass).
+        if (htmlFirst.length < 100) {
+            Log.w(TAG, "Silent retourne ${htmlFirst.length} chars (timeout WebView) → abandon, pas de re-bypass")
+            return null
+        }
+        Log.w(TAG, "Silent insuffisant (${htmlFirst.length} chars) → re-bypass sur baseUrl")
+        invalidateCfBypass()
+
+        // 5) Re-bypass sur baseUrl puis retry silent (sérialisé anti-OOM).
+        try { ensureCfBypassed() } catch (_: Exception) {}
+        return try {
+            val htmlRetry = webViewFetchMutex.withLock { getResolver().get(url, silent = true) }
+            if (htmlRetry.length > 500) {
+                pageCache[url] = CachedHtml(htmlRetry, System.currentTimeMillis())
+                savePageToDisk(url, htmlRetry)
+                htmlRetry
+            } else null
+        } catch (e: Exception) {
+            Log.w(TAG, "Retry silent échoué pour $url: ${e.message}")
+            null
+        }
+    }
+
+    /** Invalide le bypass (RAM + persisté) pour forcer un nouveau dialog. */
+    private fun invalidateCfBypass() {
+        cfBypassDoneRam = false
+        try {
+            StreamFlixApp.instance
+                .getSharedPreferences(PREF_CF_BYPASS, android.content.Context.MODE_PRIVATE)
+                .edit().remove(KEY_CF_BYPASS_TS).apply()
+        } catch (_: Throwable) {}
+    }
+
+    /** GET OkHttp brut, sans bypass. Helper interne pour httpGet. */
+    private suspend fun httpGetRaw(url: String): String? = withContext(Dispatchers.IO) {
+        try {
+            // 2026-06-09 : headers Chrome COMPLETS pour mimer le navigateur au max
+            //   (sinon Cloudflare Bot Management détecte OkHttp via fingerprint).
             val req = Request.Builder()
                 .url(url)
                 .header("User-Agent", UA)
                 .header("Referer", baseUrl)
-                .header("Accept", "text/html,application/xhtml+xml,application/json,*/*;q=0.8")
-                .header("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+                .header("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
+                .header("Accept-Encoding", "gzip, deflate, br")
+                .header("Sec-Ch-Ua", "\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
+                .header("Sec-Ch-Ua-Mobile", "?1")
+                .header("Sec-Ch-Ua-Platform", "\"Android\"")
+                .header("Sec-Fetch-Dest", "document")
+                .header("Sec-Fetch-Mode", "navigate")
+                .header("Sec-Fetch-Site", "none")
+                .header("Sec-Fetch-User", "?1")
+                .header("Upgrade-Insecure-Requests", "1")
                 .build()
+            // Debug : log les cookies envoyés (1 fois sur 10 pour ne pas spam)
+            try {
+                val ck = android.webkit.CookieManager.getInstance().getCookie(url) ?: "(none)"
+                Log.d(TAG, "GET $url cookies=${ck.take(150)}... UA=${UA.take(60)}...")
+            } catch (_: Throwable) {}
             httpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     Log.w(TAG, "GET $url → ${resp.code}")
@@ -240,11 +579,12 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
     }
 
     override suspend fun getHome(): List<Category> = kotlinx.coroutines.coroutineScope {
-        // Home : page d'accueil (récents) + 4 premières pages catalogue (mix).
-        //   Fetch en parallèle pour rester rapide depuis Tahiti.
+        // 2026-06-09 (user "le chargement du Home après le bypass est toujours
+        //   long") : ne fetch QUE la page d'accueil (1 fetch WebView ≈ 6s).
+        //   Avant : home + catalogue1 = 2 fetches séquentiels (mutex) = ~20s.
+        //   Le catalogue arrive via pagination au scroll → home instant.
         val home = async { parseHomeItems(httpGet("$baseUrl/") ?: "") }
-        val cat1 = async { fetchCatalogPage(1) }
-        val pages = listOf(home.await(), cat1.await())  // v98: home rapide, le reste via enrichment differe
+        val pages = listOf(home.await(), emptyList<AppAdapter.Item>())
 
         val seen = mutableSetOf<String>()
         val homeItems = pages[0]
@@ -394,7 +734,11 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
      *  parallele par page user (~112 items, ~40 films garantis) -> la
      *  pagination peut continuer jusqu'a atteindre la fin du catalogue
      *  (~300 pages catalog = ~38 pages user). */
-    private val PAGES_PER_USER_PAGE = 8
+    // 2026-06-09 : réduit de 8 à 3 — en mode WebView (TLS fingerprint
+    //   force tout par WebView avec mutex), 8 pages parallèles bloquent
+    //   le clic user sur une jaquette pendant ~64s. À 3, c'est ~24s max
+    //   et le clic est servi rapidement après.
+    private val PAGES_PER_USER_PAGE = 3
 
     override suspend fun getMovies(page: Int): List<Movie> = kotlinx.coroutines.coroutineScope {
         val start = (page - 1) * PAGES_PER_USER_PAGE + 1
@@ -633,6 +977,7 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                         }
                     } catch (e: Exception) { Log.w(TAG, "NM backup KO: ${e.message}"); emptyList() }
                 }
+                // 2026-06-09 v2 : retiré FS/MX/MB (doublons — déjà dans CS).
                 csD.await() + asD.await() + wfD.await() + nmD.await()
             }
         } catch (e: Exception) { Log.w(TAG, "backups KO: ${e.message}"); emptyList() }
@@ -645,20 +990,29 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
     //   Natifs émis tout de suite, puis Cloudstream et AnimeSama émis
     //   dès qu'ils répondent, en parallèle — pas d'attente bloquante.
     override fun getServersProgressive(id: String, videoType: Video.Type): Flow<List<Video.Server>> = channelFlow {
-        // 1) Natifs — émis immédiatement
-        val native = try { fetchNativeServers(id, videoType) }
-        catch (e: Exception) { Log.w(TAG, "progressive native KO: ${e.message}"); emptyList() }
-        if (native.isNotEmpty()) {
-            send(native)
-        }
-
-        // 2) Backups TOUJOURS lancés (même si natifs présents) — le progressif
-        //    affiche le natif tout de suite et les backups arrivent ensuite.
         val title = when (videoType) {
             is Video.Type.Movie -> videoType.title
             is Video.Type.Episode -> videoType.tvShow.title
         }.trim()
-        if (title.isBlank()) return@channelFlow
+
+        // 2026-06-09 (user "regarde ce que t'as fait sur les autres providers") :
+        //   déduplication par URL src — pattern repris de MovixProvider seenUrls.
+        //   Chaque backup envoie seulement les sources dont l'URL n'a pas déjà
+        //   été émise. Évite Movix·X et CS·Movix·X qui pointent vers la même
+        //   vidéo (CS inclut Movix en interne).
+        val seenUrls = java.util.Collections.synchronizedSet(HashSet<String>())
+        fun List<Video.Server>.dedup(): List<Video.Server> =
+            this.filter { srv -> srv.src.isNotBlank() && seenUrls.add(srv.src) }
+
+        // 1) Natifs — lancés en parallèle, émis quand prêts
+        val nativeJob = launch(Dispatchers.IO) {
+            try {
+                val native = fetchNativeServers(id, videoType).dedup()
+                if (native.isNotEmpty()) send(native)
+            } catch (e: Exception) { Log.w(TAG, "progressive native KO: ${e.message}") }
+        }
+        // Si pas de titre on s'arrête après le natif.
+        if (title.isBlank()) { nativeJob.join(); return@channelFlow }
 
         // Extraire le tmdbId du slug DessinAnime pour les backups
         val tmdbId = id.split("::").getOrNull(1)
@@ -685,7 +1039,7 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
             try {
                 val servers = (kotlinx.coroutines.withTimeoutOrNull(15_000L) {
                     CloudstreamProvider.getServers(tmdbId, csType)
-                } ?: emptyList()).map { it.copy(id = "csbackup__${it.id}", name = "CS · ${it.name}") }
+                } ?: emptyList()).map { it.copy(id = "csbackup__${it.id}", name = "CS · ${it.name}") }.dedup()
                 if (servers.isNotEmpty()) send(servers)
             } catch (e: Exception) { Log.w(TAG, "progressive CS backup KO: ${e.message}") }
         }
@@ -693,14 +1047,14 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
             try {
                 val servers = (kotlinx.coroutines.withTimeoutOrNull(15_000L) {
                     AnimeSamaProvider.getAnimeSamaSourcesByTitle(title, videoType)
-                } ?: emptyList()).map { it.copy(id = "asbackup__${it.id}", name = "AS · ${it.name}") }
+                } ?: emptyList()).map { it.copy(id = "asbackup__${it.id}", name = "AS · ${it.name}") }.dedup()
                 if (servers.isNotEmpty()) send(servers)
             } catch (e: Exception) { Log.w(TAG, "progressive AS backup KO: ${e.message}") }
         }
         // Backup #3 : Wiflix
         val wfJob = launch(Dispatchers.IO) {
             try {
-                val servers = fetchWiflixBackup(title, videoType)
+                val servers = fetchWiflixBackup(title, videoType).dedup()
                 if (servers.isNotEmpty()) send(servers)
             } catch (e: Exception) { Log.w(TAG, "progressive WF backup KO: ${e.message}") }
         }
@@ -709,14 +1063,46 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
             try {
                 val servers = (kotlinx.coroutines.withTimeoutOrNull(12_000L) {
                     NetMirrorProvider.getServers(tmdbId, videoType)
-                } ?: emptyList()).map { it.copy(id = "nmbackup__${it.id}", name = "NM · ${it.name}") }
+                } ?: emptyList()).map { it.copy(id = "nmbackup__${it.id}", name = "NM · ${it.name}") }.dedup()
                 if (servers.isNotEmpty()) send(servers)
             } catch (e: Exception) { Log.w(TAG, "progressive NM backup KO: ${e.message}") }
         }
+        // 2026-06-09 v3 : re-ajout FS/MX/MB avec déduplication par URL.
+        val fsJob = launch(Dispatchers.IO) {
+            try {
+                val servers = fetchFrenchStreamBackup(title, videoType).dedup()
+                if (servers.isNotEmpty()) send(servers)
+            } catch (e: Exception) { Log.w(TAG, "progressive FS backup KO: ${e.message}") }
+        }
+        val mxJob = launch(Dispatchers.IO) {
+            try {
+                val servers = (kotlinx.coroutines.withTimeoutOrNull(12_000L) {
+                    MovixProvider.getServers(tmdbId, videoType)
+                } ?: emptyList()).map { it.copy(id = "mxbackup__${it.id}", name = "MX · ${it.name}") }.dedup()
+                if (servers.isNotEmpty()) send(servers)
+            } catch (e: Exception) { Log.w(TAG, "progressive MX backup KO: ${e.message}") }
+        }
+        val mbJob = launch(Dispatchers.IO) {
+            try {
+                val type = if (videoType is Video.Type.Movie) 1 else 2
+                val servers = (kotlinx.coroutines.withTimeoutOrNull(12_000L) {
+                    MovieboxProvider.getMovieboxSourcesByTitle(
+                        title, null, type,
+                        seasonNumber = if (videoType is Video.Type.Episode) videoType.season.number else null,
+                        episodeNumber = if (videoType is Video.Type.Episode) videoType.number else null,
+                    )
+                } ?: emptyList()).map { it.copy(id = "mbbackup__${it.id}", name = "MB · ${it.name}") }.dedup()
+                if (servers.isNotEmpty()) send(servers)
+            } catch (e: Exception) { Log.w(TAG, "progressive MB backup KO: ${e.message}") }
+        }
+        nativeJob.join()
         csJob.join()
         asJob.join()
         wfJob.join()
         nmJob.join()
+        fsJob.join()
+        mxJob.join()
+        mbJob.join()
     }
 
     /**
@@ -731,11 +1117,72 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
             WiflixProvider.search(title, 1)
         } ?: return@withContext emptyList()
 
-        // Trouver le 1er résultat du bon type (Movie ou TvShow)
+        // 2026-06-09 (user "Wiflix Backup match avec des films qui ne sont pas
+        //   bons") : matching strict. Avant on prenait le 1er résultat brut →
+        //   "Mario" matchait avec n'importe quel film contenant "Mario" dans
+        //   le titre. Maintenant on score sur similarité titre + année.
+        fun normalizeForCompare(s: String): String = s.lowercase()
+            .replace(Regex("[^a-z0-9 ]"), " ")
+            .replace(Regex("\\s+"), " ").trim()
+
+        val wantTitle = normalizeForCompare(title)
+        val wantYear: Int? = when (videoType) {
+            is Video.Type.Movie -> videoType.releaseDate.take(4).toIntOrNull()
+            is Video.Type.Episode -> videoType.tvShow.releaseDate?.take(4)?.toIntOrNull()
+        }
+
+        fun scoreCandidate(candidateTitle: String?, candidateYear: Int?): Int {
+            if (candidateTitle.isNullOrBlank()) return -1000
+            val cTitle = normalizeForCompare(candidateTitle)
+            // Titre EXACT = +100, contient le souhaité comme mot = +60,
+            //   l'un dans l'autre (substring) = +30, sinon 0.
+            val titleScore = when {
+                cTitle == wantTitle -> 100
+                cTitle.split(" ").containsAll(wantTitle.split(" ")) -> 60
+                cTitle.contains(wantTitle) || wantTitle.contains(cTitle) -> 30
+                else -> {
+                    // Vérifie au moins 50% des mots du wantTitle présents dans cTitle.
+                    val wantWords = wantTitle.split(" ").filter { it.length >= 3 }
+                    if (wantWords.isEmpty()) return -100
+                    val matched = wantWords.count { cTitle.contains(it) }
+                    if (matched.toDouble() / wantWords.size >= 0.5) 10 else -100
+                }
+            }
+            // Année : ±1 = bonus, ±2 = neutre, ≥3 = grosse pénalité.
+            val yearScore = when {
+                wantYear == null || candidateYear == null -> 0
+                kotlin.math.abs(candidateYear - wantYear) <= 1 -> 30
+                kotlin.math.abs(candidateYear - wantYear) == 2 -> 0
+                else -> -60 // écart ≥3 ans = faux positif probable
+            }
+            return titleScore + yearScore
+        }
+
         val matchId: String = when (videoType) {
-            is Video.Type.Movie -> results.filterIsInstance<Movie>().firstOrNull()?.id
-            is Video.Type.Episode -> results.filterIsInstance<TvShow>().firstOrNull()?.id
-        } ?: return@withContext emptyList()
+            is Video.Type.Movie -> {
+                val candidates = results.filterIsInstance<Movie>()
+                val best = candidates
+                    .map { it to scoreCandidate(it.title, it.released?.get(java.util.Calendar.YEAR)) }
+                    .filter { it.second >= 50 } // seuil minimum pour valider le match
+                    .maxByOrNull { it.second }
+                Log.d(TAG, "WF backup match Movie '$title' (year=$wantYear) → " +
+                    "${best?.first?.title} score=${best?.second}")
+                best?.first?.id
+            }
+            is Video.Type.Episode -> {
+                val candidates = results.filterIsInstance<TvShow>()
+                val best = candidates
+                    .map { it to scoreCandidate(it.title, it.released?.get(java.util.Calendar.YEAR)) }
+                    .filter { it.second >= 50 }
+                    .maxByOrNull { it.second }
+                Log.d(TAG, "WF backup match TvShow '$title' (year=$wantYear) → " +
+                    "${best?.first?.title} score=${best?.second}")
+                best?.first?.id
+            }
+        } ?: run {
+            Log.d(TAG, "WF backup: aucun match valable pour '$title'")
+            return@withContext emptyList()
+        }
 
         val wfServers = kotlinx.coroutines.withTimeoutOrNull(10_000L) {
             WiflixProvider.getServers(matchId, videoType)
@@ -743,6 +1190,80 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
 
         wfServers.map {
             it.copy(id = "wfbackup__${it.id}", name = "WF · ${it.name}")
+        }
+    }
+
+    /**
+     * 2026-06-09 : backup FrenchStream — recherche par titre, sélection du
+     *   meilleur match (titre+année), getServers. Identique au pattern Wiflix.
+     */
+    private suspend fun fetchFrenchStreamBackup(
+        title: String,
+        videoType: Video.Type,
+    ): List<Video.Server> = withContext(Dispatchers.IO) {
+        val results = kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+            FrenchStreamProvider.search(title, 1)
+        } ?: return@withContext emptyList()
+
+        fun normalizeForCompare(s: String): String = s.lowercase()
+            .replace(Regex("[^a-z0-9 ]"), " ")
+            .replace(Regex("\\s+"), " ").trim()
+        val wantTitle = normalizeForCompare(title)
+        val wantYear: Int? = when (videoType) {
+            is Video.Type.Movie -> videoType.releaseDate.take(4).toIntOrNull()
+            is Video.Type.Episode -> videoType.tvShow.releaseDate?.take(4)?.toIntOrNull()
+        }
+
+        fun scoreCandidate(candidateTitle: String?, candidateYear: Int?): Int {
+            if (candidateTitle.isNullOrBlank()) return -1000
+            val cTitle = normalizeForCompare(candidateTitle)
+            val titleScore = when {
+                cTitle == wantTitle -> 100
+                cTitle.split(" ").containsAll(wantTitle.split(" ")) -> 60
+                cTitle.contains(wantTitle) || wantTitle.contains(cTitle) -> 30
+                else -> {
+                    val wantWords = wantTitle.split(" ").filter { it.length >= 3 }
+                    if (wantWords.isEmpty()) return -100
+                    val matched = wantWords.count { cTitle.contains(it) }
+                    if (matched.toDouble() / wantWords.size >= 0.5) 10 else -100
+                }
+            }
+            val yearScore = when {
+                wantYear == null || candidateYear == null -> 0
+                kotlin.math.abs(candidateYear - wantYear) <= 1 -> 30
+                kotlin.math.abs(candidateYear - wantYear) == 2 -> 0
+                else -> -60
+            }
+            return titleScore + yearScore
+        }
+
+        val matchId: String = when (videoType) {
+            is Video.Type.Movie -> {
+                val candidates = results.filterIsInstance<Movie>()
+                candidates
+                    .map { it to scoreCandidate(it.title, it.released?.get(java.util.Calendar.YEAR)) }
+                    .filter { it.second >= 50 }
+                    .maxByOrNull { it.second }?.first?.id
+            }
+            is Video.Type.Episode -> {
+                val candidates = results.filterIsInstance<TvShow>()
+                candidates
+                    .map { it to scoreCandidate(it.title, it.released?.get(java.util.Calendar.YEAR)) }
+                    .filter { it.second >= 50 }
+                    .maxByOrNull { it.second }?.first?.id
+            }
+        } ?: run {
+            Log.d(TAG, "FS backup: aucun match pour '$title'")
+            return@withContext emptyList()
+        }
+
+        val fsServers = kotlinx.coroutines.withTimeoutOrNull(12_000L) {
+            FrenchStreamProvider.getServers(matchId, videoType)
+        } ?: emptyList()
+
+        Log.d(TAG, "FS backup: ${fsServers.size} sources pour '$title'")
+        fsServers.map {
+            it.copy(id = "fsbackup__${it.id}", name = "FS · ${it.name}")
         }
     }
 

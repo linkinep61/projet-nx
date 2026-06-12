@@ -51,6 +51,14 @@
         android:title="Pays/langue"
         android:visible="false" />
 
+    <!-- 2026-06-10 (user "bouton apparent dans la barre") : sélecteur de
+         source World TV (style Wiseplay). -->
+    <item
+        android:id="@+id/world_live_sources_menu"
+        android:icon="@drawable/ic_menu_iptv_sources"
+        android:title="Sources"
+        android:visible="false" />
+
     <item
         android:id="@id/settings"
         android:icon="@drawable/ic_menu_settings"

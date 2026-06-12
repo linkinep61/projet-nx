@@ -106,6 +106,24 @@ class MovieViewModel(id: String, private val database: AppDatabase) : ViewModel(
             val provider = UserPreferences.currentProvider ?: return@launch
             val movie = provider.getMovie(id)
 
+            // 2026-06-08 (user "les acteurs en médaillon comme sur Wiflix
+            //   pour tous les providers") : si le provider n'a pas fourni
+            //   de cast (champ vide) ET l'id est parseable en Int (=
+            //   probablement un TMDB ID), on enrichit via TMDB Credits.
+            //   Marche pour Movix/Frembed/Cloudstream (id = tmdbId) + tous
+            //   les autres providers qui utilisent un TMDB ID comme ID.
+            if (movie.cast.isEmpty()) {
+                val enrichedCast = com.streamflixreborn.streamflix.utils
+                    .TmdbCreditsEnricher.fetchMovieCast(id)
+                if (enrichedCast.isNotEmpty()) {
+                    val withCast = movie.copy(cast = enrichedCast)
+                    database.movieDao().getById(id)?.let { withCast.merge(it) }
+                    database.movieDao().insert(withCast)
+                    _state.emit(State.SuccessLoading(withCast))
+                    return@launch
+                }
+            }
+
             database.movieDao().getById(id)?.let { movieDb ->
                 movie.merge(movieDb)
             }

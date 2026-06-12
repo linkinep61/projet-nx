@@ -136,7 +136,37 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         }
     }
 
+    // 2026-06-09 : picker pour le wallpaper personnalisé.
+    private val wallpaperPickerLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri?.let { selected ->
+            try {
+                requireContext().contentResolver.takePersistableUriPermission(
+                    selected,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Throwable) {}
+            com.streamflixreborn.streamflix.utils.AppearanceManager.setWallpaperUri(requireContext(), selected)
+            android.widget.Toast.makeText(
+                requireContext(),
+                "Fond personnalisé appliqué. Reviens à l'accueil pour voir le résultat.",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
+        // 2026-06-09 (user "ça ne désactive pas") : MAJEUR — force le
+        //   preferenceManager à utiliser le MÊME SharedPreferences que
+        //   UserPreferences (sinon SwitchPreference écrit dans
+        //   "com.streamfr.app.debug_preferences" alors que UserPreferences
+        //   lit dans "com.streamfr.app.debug.preferences" → le toggle ne
+        //   sauvait rien là où le code de lecture cherchait).
+        preferenceManager.sharedPreferencesName =
+            "${com.streamflixreborn.streamflix.BuildConfig.APPLICATION_ID}.preferences"
+        preferenceManager.sharedPreferencesMode = android.content.Context.MODE_PRIVATE
+
         currentScreenState = SettingsScreenState(rootKey = rootKey, title = null)
         renderCurrentScreen()
 
@@ -236,6 +266,23 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         SettingsListStyler.attach(view, isTv = true)
+        // 2026-06-09 (user "pourquoi il y a une barre noire en haut") : le
+        //   decor_title_container de LeanbackPreferenceFragmentCompat reste
+        //   vide (on ne setTitle nulle part) → bande noire inutile en haut.
+        //   On le masque récursivement via tous les IDs connus.
+        try {
+            val possibleIds = listOf(
+                "decor_title_container", "decor_title",
+                "title_container", "title", "preference_header",
+            )
+            possibleIds.forEach { name ->
+                val resId = view.context.resources.getIdentifier(name, "id", view.context.packageName)
+                if (resId != 0) view.findViewById<View>(resId)?.visibility = View.GONE
+                // Aussi essayer dans le namespace androidx
+                val resId2 = view.context.resources.getIdentifier(name, "id", "androidx.leanback")
+                if (resId2 != 0) view.findViewById<View>(resId2)?.visibility = View.GONE
+            }
+        } catch (_: Throwable) {}
         view.post { listView?.requestFocus() }
     }
 
@@ -287,6 +334,57 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
                 requireContext(), com.streamflixreborn.streamflix.providers.MyIptvProvider,
             )
             Toast.makeText(requireContext(), "Cache IPTV vidé — re-téléchargement au prochain clic", Toast.LENGTH_LONG).show()
+            true
+        }
+
+        // 2026-06-10 (user "ajouter les playlists dans paramètres") : gestion
+        //   des sources World TV (style Wiseplay).
+        findPreference<Preference>("world_live_sources")?.setOnPreferenceClickListener {
+            com.streamflixreborn.streamflix.providers.WorldLiveSourcesDialog.showManager(requireContext())
+            true
+        }
+
+        // 2026-06-09 : galerie en ligne Wallhaven.
+        findPreference<Preference>("WALLPAPER_GALLERY")?.setOnPreferenceClickListener {
+            try {
+                startActivity(android.content.Intent(
+                    requireContext(),
+                    com.streamflixreborn.streamflix.activities.WallhavenGalleryActivity::class.java
+                ))
+            } catch (e: Throwable) {
+                Toast.makeText(requireContext(),
+                    "Galerie indisponible : ${e.message}", Toast.LENGTH_LONG).show()
+            }
+            true
+        }
+
+        // 2026-06-09 : fond d'écran personnalisé.
+        findPreference<Preference>("WALLPAPER_PICK")?.setOnPreferenceClickListener {
+            try {
+                wallpaperPickerLauncher.launch(arrayOf("image/*"))
+            } catch (e: Throwable) {
+                Toast.makeText(requireContext(),
+                    "Picker indisponible : ${e.message}", Toast.LENGTH_LONG).show()
+            }
+            true
+        }
+        findPreference<Preference>("WALLPAPER_CLEAR")?.setOnPreferenceClickListener {
+            com.streamflixreborn.streamflix.utils.AppearanceManager.clearWallpaper(requireContext())
+            Toast.makeText(requireContext(),
+                "Fond personnalisé retiré", Toast.LENGTH_SHORT).show()
+            true
+        }
+        findPreference<androidx.preference.ListPreference>("WALLPAPER_DIM")?.setOnPreferenceChangeListener { _, newValue ->
+            com.streamflixreborn.streamflix.utils.AppearanceManager.setDimLevel(
+                requireContext(), newValue as String
+            )
+            true
+        }
+        // 2026-06-09 : slider opacité sidebar TV. La pref est sauvée par la
+        //   SeekBarPreference ; MainTvActivity.onResume re-applique au retour.
+        findPreference<androidx.preference.SeekBarPreference>("SIDEBAR_OPACITY")?.setOnPreferenceChangeListener { _, newValue ->
+            val v = (newValue as? Int) ?: 100
+            com.streamflixreborn.streamflix.utils.UserPreferences.sidebarOpacity = v
             true
         }
 

@@ -7,6 +7,7 @@
     tools:context=".fragments.providers.ProvidersMobileFragment">
 
     <ImageView
+        android:id="@+id/iv_providers_default_bg"
         android:layout_width="0dp"
         android:layout_height="0dp"
         android:scaleType="centerCrop"
@@ -69,6 +70,24 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="@id/iv_downloads"
+        tools:ignore="HardcodedText,UseAppTint" />
+
+    <!-- 2026-06-08 (user "à gauche du cœur tu vas mettre une petite radio") :
+         bouton radio = liste 17 radios Dric4rTV utilisables sans écran via
+         mini-bar audio. -->
+    <ImageView
+        android:id="@+id/iv_radio"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginEnd="16dp"
+        android:padding="4dp"
+        android:src="@drawable/ic_radio"
+        android:tint="#FFFFFF"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="Radio"
+        app:layout_constraintBottom_toBottomOf="@id/iv_global_favorites"
+        app:layout_constraintEnd_toStartOf="@id/iv_global_favorites"
+        app:layout_constraintTop_toTopOf="@id/iv_global_favorites"
         tools:ignore="HardcodedText,UseAppTint" />
 
     <com.google.android.material.tabs.TabLayout

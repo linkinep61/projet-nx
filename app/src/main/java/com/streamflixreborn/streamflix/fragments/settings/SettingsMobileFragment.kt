@@ -114,6 +114,26 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         }
     }
 
+    // 2026-06-09 : picker pour le wallpaper personnalisé.
+    private val wallpaperPickerLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri?.let { selected ->
+            try {
+                requireContext().contentResolver.takePersistableUriPermission(
+                    selected,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Throwable) {}
+            com.streamflixreborn.streamflix.utils.AppearanceManager.setWallpaperUri(requireContext(), selected)
+            android.widget.Toast.makeText(
+                requireContext(),
+                "Fond personnalisé appliqué. Reviens à l'accueil pour voir le résultat.",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
     private val scanResolverQrLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -144,6 +164,12 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
     }
 
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
+        // 2026-06-09 : force le même SharedPreferences que UserPreferences
+        //   (sinon mismatch storage et le toggle ne sauve pas où on lit).
+        preferenceManager.sharedPreferencesName =
+            "${com.streamflixreborn.streamflix.BuildConfig.APPLICATION_ID}.preferences"
+        preferenceManager.sharedPreferencesMode = android.content.Context.MODE_PRIVATE
+
         currentScreenState = SettingsScreenState(rootKey = rootKey, title = null)
         renderCurrentScreen()
 
@@ -370,6 +396,49 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
                 requireContext(), com.streamflixreborn.streamflix.providers.MyIptvProvider,
             )
             Toast.makeText(requireContext(), "Cache IPTV vidé — re-téléchargement au prochain clic", Toast.LENGTH_LONG).show()
+            true
+        }
+
+        // 2026-06-10 : gestion des sources World TV (style Wiseplay).
+        findPreference<Preference>("world_live_sources")?.setOnPreferenceClickListener {
+            com.streamflixreborn.streamflix.providers.WorldLiveSourcesDialog.showManager(requireContext())
+            true
+        }
+
+        // 2026-06-09 : galerie en ligne Wallhaven.
+        findPreference<Preference>("WALLPAPER_GALLERY")?.setOnPreferenceClickListener {
+            try {
+                startActivity(android.content.Intent(
+                    requireContext(),
+                    com.streamflixreborn.streamflix.activities.WallhavenGalleryActivity::class.java
+                ))
+            } catch (e: Throwable) {
+                Toast.makeText(requireContext(),
+                    "Galerie indisponible : ${e.message}", Toast.LENGTH_LONG).show()
+            }
+            true
+        }
+
+        // 2026-06-09 : fond d'écran personnalisé.
+        findPreference<Preference>("WALLPAPER_PICK")?.setOnPreferenceClickListener {
+            try {
+                wallpaperPickerLauncher.launch(arrayOf("image/*"))
+            } catch (e: Throwable) {
+                Toast.makeText(requireContext(),
+                    "Picker indisponible : ${e.message}", Toast.LENGTH_LONG).show()
+            }
+            true
+        }
+        findPreference<Preference>("WALLPAPER_CLEAR")?.setOnPreferenceClickListener {
+            com.streamflixreborn.streamflix.utils.AppearanceManager.clearWallpaper(requireContext())
+            Toast.makeText(requireContext(),
+                "Fond personnalisé retiré", Toast.LENGTH_SHORT).show()
+            true
+        }
+        findPreference<androidx.preference.ListPreference>("WALLPAPER_DIM")?.setOnPreferenceChangeListener { _, newValue ->
+            com.streamflixreborn.streamflix.utils.AppearanceManager.setDimLevel(
+                requireContext(), newValue as String
+            )
             true
         }
 

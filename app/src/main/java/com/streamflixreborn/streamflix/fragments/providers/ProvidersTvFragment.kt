@@ -50,10 +50,24 @@ class ProvidersTvFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // 2026-06-09 : applique le fond d'écran personnalisé. Cache aussi
+        //   l'ImageView par défaut (bg_wallpaper_tv) si l'user a setté un
+        //   wallpaper perso → sinon le perso est invisible (caché derrière).
+        com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(view)
+        view.findViewById<android.widget.ImageView>(R.id.iv_providers_default_bg)
+            ?.visibility = if (com.streamflixreborn.streamflix.utils.AppearanceManager
+                .hasWallpaper(requireContext())) android.view.View.GONE
+            else android.view.View.VISIBLE
+
         // 2026-05-12 : kill le mini-player IPTV qui pourrait encore tourner
         // en background. Quand l'user revient au home picker provider, il
         // ne doit PLUS entendre le son d'une chaîne TV qu'il venait de quitter.
-        com.streamflixreborn.streamflix.utils.MiniPlayerController.stop()
+        // 2026-06-09 (user "l'ouverture d'un provider coupe toujours la radio") :
+        //   exception pour les radios — on les laisse jouer entre providers.
+        val mpc = com.streamflixreborn.streamflix.utils.MiniPlayerController
+        if (!mpc.isRadioChannel(mpc.currentChannelId)) {
+            mpc.stop()
+        }
 
         initializeProviders()
 
@@ -71,6 +85,21 @@ class ProvidersTvFragment : Fragment() {
             findNavController().navigate(R.id.global_favorites)
         }
         binding.btnGlobalFavorites.requestFocus()
+
+        // 2026-06-08 (user "à gauche du cœur tu vas mettre une petite radio") :
+        //   bouton radio → dialog liste 17 radios Dric4rTV. Au clic, démarre
+        //   le mini-bar audio. Aucune navigation, l'user reste sur l'écran
+        //   providers (utilisable sans écran).
+        binding.btnRadio.setOnClickListener {
+            showRadioPicker()
+        }
+        // 2026-06-09 : long-press = TOUJOURS le picker (pour changer de radio
+        //   sans interrompre l'écoute si une dernière radio est mémorisée).
+        binding.btnRadio.setOnLongClickListener {
+            com.streamflixreborn.streamflix.utils.RadioPickerDialog
+                .show(requireContext(), viewLifecycleOwner)
+            true
+        }
 
         // 2026-05-12 : bouton "Changer de profil" symétrique du mobile.
         // Clear le profil actif + relance ProfilePickerTvActivity en task neuve.
@@ -93,6 +122,15 @@ class ProvidersTvFragment : Fragment() {
                 title = "Contrôle parental",
                 onSuccess = { showLockManagementDialog() }
             )
+        }
+
+        // 2026-06-07 (user "tasse de café sur TV, click → QR code Naniko") :
+        // équivalent TV de iv_kofi mobile — sur mobile c'est un Intent.ACTION_VIEW
+        // direct, sur TV on affiche un dialog avec un QR code (généré localement
+        // via QrUtils/ZXing) qui pointe vers https://ko-fi.com/nanico. L'user
+        // scanne avec son téléphone et tombe sur la page Naniko Café.
+        binding.btnProvidersKofi.setOnClickListener {
+            showKofiQrDialog()
         }
 
         viewLifecycleOwner.lifecycleScope.launch {
@@ -313,5 +351,100 @@ class ProvidersTvFragment : Fragment() {
             it.itemType = AppAdapter.Type.PROVIDER_TV_ITEM
         })
         binding.rvProviders.requestFocus()
+    }
+
+    /**
+     * 2026-06-08 : ouvre le dialog picker de radios (centralisé via
+     * RadioPickerDialog). Inclut Dric4rTV + RadioBrowser API + favoris +
+     * bouton Arrêter.
+     *
+     * 2026-06-09 (user "quand on va cliquer dessus il joue directement la
+     *   dernière radio qui a été utilisée") : clic court = relance la
+     *   dernière radio. Si une radio joue DÉJÀ → ouvre le picker (pour
+     *   changer). Si jamais de dernière radio → ouvre le picker.
+     *   Long-press sur le bouton Radio = picker.
+     */
+    private fun showRadioPicker() {
+        val mp = com.streamflixreborn.streamflix.utils.MiniPlayerController
+        val playingRadio = mp.currentChannelId?.let { mp.isRadioChannel(it) } == true
+        if (!playingRadio) {
+            val last = mp.getLastRadio(requireContext())
+            if (last != null) {
+                try {
+                    mp.initPlayer(requireContext())
+                    if (last.streamUrl != null) {
+                        mp.playRadioDirect(last.id, last.name, last.poster, last.streamUrl)
+                    } else {
+                        mp.playChannel(last.id, last.name, last.poster)
+                    }
+                    android.widget.Toast.makeText(
+                        requireContext(),
+                        "${last.name} — reprise",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                    return
+                } catch (_: Throwable) {}
+            }
+        }
+        com.streamflixreborn.streamflix.utils.RadioPickerDialog
+            .show(requireContext(), viewLifecycleOwner)
+    }
+
+    /**
+     * 2026-06-07 (user) : équivalent TV de iv_kofi mobile. On affiche un
+     * dialog avec un QR code 500×500 pointant vers https://ko-fi.com/nanico
+     * + un message d'invitation. L'user scanne avec son téléphone et tombe
+     * sur la page Naniko Café (sur mobile c'est un Intent ACTION_VIEW direct,
+     * mais sur TV pas de navigateur ergonomique → le QR est la meilleure UX).
+     */
+    private fun showKofiQrDialog() {
+        val kofiUrl = "https://ko-fi.com/nanico"
+
+        // Layout vertical centré : titre + QR + sous-titre
+        val ctx = requireContext()
+        val container = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER
+            setPadding(48, 48, 48, 48)
+        }
+
+        val title = android.widget.TextView(ctx).apply {
+            text = "Soutenir Naniko Café ☕"
+            textSize = 22f
+            setTextColor(android.graphics.Color.WHITE)
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, 0, 0, 24)
+        }
+        container.addView(title)
+
+        val qrView = android.widget.ImageView(ctx).apply {
+            val size = 500
+            val params = android.widget.LinearLayout.LayoutParams(size, size)
+            params.gravity = android.view.Gravity.CENTER
+            layoutParams = params
+            try {
+                setImageBitmap(
+                    com.streamflixreborn.streamflix.utils.QrUtils.generate(kofiUrl, size)
+                )
+            } catch (t: Throwable) {
+                Toast.makeText(ctx, "Erreur génération QR : ${t.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+        container.addView(qrView)
+
+        val subtitle = android.widget.TextView(ctx).apply {
+            text = "Scanne ce QR code avec ton téléphone\npour ouvrir ko-fi.com/nanico"
+            textSize = 16f
+            setTextColor(android.graphics.Color.LTGRAY)
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, 24, 0, 0)
+        }
+        container.addView(subtitle)
+
+        androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setView(container)
+            .setNegativeButton("Fermer", null)
+            .create()
+            .show()
     }
 }

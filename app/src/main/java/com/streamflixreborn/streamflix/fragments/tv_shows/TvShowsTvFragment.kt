@@ -133,6 +133,8 @@ class TvShowsTvFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         if (_binding == null) return
+        // 2026-06-09 : applique le fond d'écran personnalisé.
+        com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(binding.root)
         val channelId = MiniPlayerController.currentChannelId ?: return
 
         if (MiniPlayerController.getPlayer() == null) {
@@ -148,7 +150,7 @@ class TvShowsTvFragment : Fragment() {
             binding.miniPlayerView.player = MiniPlayerController.getPlayer()
         }
 
-        binding.miniPlayerContainer.visibility = View.VISIBLE
+        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
         binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
         MiniPlayerController.currentChannelPoster?.let { poster ->
             Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
@@ -158,9 +160,11 @@ class TvShowsTvFragment : Fragment() {
         if (MiniPlayerController.onIptvChannelClick == null) {
             MiniPlayerController.onIptvChannelClick = { tvShow ->
                 if (tvShow.id == MiniPlayerController.currentChannelId) {
-                    Log.d("TvShowsTv", "Same channel, flagging for transfer (onResume): ${tvShow.title}")
-                    MiniPlayerController.transitioningToFullscreen = true
-                    if (_binding != null) { binding.miniPlayerView.player = null }
+                    // 2026-06-08 (user "ils se ferment et le grand lecteur
+                    //   s'ouvre point barre") : KILL le mini, pas de handoff.
+                    Log.d("TvShowsTv", "Same channel → KILL mini (onResume): ${tvShow.title}")
+                    MiniPlayerController.stopAsync()
+                    if (_binding != null) { binding.miniPlayerContainer.visibility = View.GONE }
                     false
                 } else {
                     Log.d("TvShowsTv", "Mini player intercept (onResume): ${tvShow.title}")
@@ -264,7 +268,7 @@ class TvShowsTvFragment : Fragment() {
         binding.miniPlayerView.player = MiniPlayerController.getPlayer()
 
         if (MiniPlayerController.currentChannelId != null) {
-            binding.miniPlayerContainer.visibility = View.VISIBLE
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
             binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
             MiniPlayerController.currentChannelPoster?.let { poster ->
                 Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
@@ -280,13 +284,13 @@ class TvShowsTvFragment : Fragment() {
                         updateGridForMiniPlayer(false)
                     }
                     is MiniPlayerController.State.Loading -> {
-                        binding.miniPlayerContainer.visibility = View.VISIBLE
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.VISIBLE
                         updateGridForMiniPlayer(true)
                     }
                     is MiniPlayerController.State.Playing -> {
-                        binding.miniPlayerContainer.visibility = View.VISIBLE
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.GONE
                         updatePauseButton()
@@ -318,9 +322,10 @@ class TvShowsTvFragment : Fragment() {
 
         MiniPlayerController.onIptvChannelClick = { tvShow ->
             if (tvShow.id == MiniPlayerController.currentChannelId) {
-                Log.d("TvShowsTv", "Same channel, flagging for transfer: ${tvShow.title}")
-                MiniPlayerController.transitioningToFullscreen = true
-                if (_binding != null) { binding.miniPlayerView.player = null }
+                // 2026-06-08 : KILL le mini, pas de handoff.
+                Log.d("TvShowsTv", "Same channel → KILL mini: ${tvShow.title}")
+                MiniPlayerController.stopAsync()
+                if (_binding != null) { binding.miniPlayerContainer.visibility = View.GONE }
                 false
             } else {
                 Log.d("TvShowsTv", "Mini player intercept: ${tvShow.title} (${tvShow.id})")

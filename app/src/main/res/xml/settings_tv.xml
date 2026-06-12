@@ -205,6 +205,20 @@
 
         <PreferenceCategory android:title="@string/autoplay_settings">
 
+            <!-- 2026-06-10 : décodeur logiciel (fix freeze sur certains TV box). -->
+            <SwitchPreference
+                android:key="PREFER_SOFTWARE_DECODER"
+                android:title="Forcer le décodeur logiciel"
+                android:summary="À activer si la lecture freeze (image figée, son OK). Plus lent mais compatible avec tous les formats. Recommandé pour Google TV Streamer / certaines TV box."
+                android:defaultValue="false" />
+
+            <!-- 2026-06-10 : sous-titres FR IPTV (dessins animés VOSTFR, etc.) -->
+            <SwitchPreference
+                android:key="IPTV_SHOW_SUBTITLES_FR"
+                android:title="Sous-titres FR sur IPTV"
+                android:summary="Affiche automatiquement les sous-titres français quand ils sont disponibles dans le flux (dessin animé VOSTFR, etc.). Désactiver si les CC pour malentendants (HUGO! HUGO!) sont gênants."
+                android:defaultValue="false" />
+
             <SwitchPreference
                 android:key="AUTOPLAY"
                 android:title="@string/settings_autoplay"
@@ -244,12 +258,6 @@
                 android:title="@string/settings_keep_screen_on_app"
                 android:summary="@string/settings_keep_screen_on_app_summary"
                 android:defaultValue="false" />
-
-            <SwitchPreference
-                android:key="PROFILE_PICKER_ENABLED"
-                android:title="@string/settings_profile_picker"
-                android:summary="@string/settings_profile_picker_summary"
-                android:defaultValue="true" />
         </PreferenceCategory>
 
         <PreferenceCategory android:title="Mini Player IPTV">
@@ -286,8 +294,23 @@
                 android:title="@string/settings_server_voe_title"
                 android:summary="@string/settings_server_voe_summary"
                 android:defaultValue="true" />
+
+            <!-- 2026-06-09 (user "Imagine on tombe sur une vidéo française et
+                 ça se met à faire des sous titres") : toggle pour désactiver
+                 l'overlay sous-titres externe (Vidzy etc.). -->
+            <SwitchPreference
+                android:key="EXTERNAL_SUBS_OVERLAY_DISABLED"
+                android:title="Désactiver l'overlay sous-titres externe"
+                android:summary="Désactive l'affichage automatique des VOSTFR récupérés depuis l'extracteur (Vidzy). Utile si la vidéo est déjà en VF."
+                android:defaultValue="false" />
         </PreferenceCategory>
     </PreferenceScreen>
+
+    <!-- 2026-06-10 : entrée Mes sources World TV retirée des Paramètres
+         (l'user a un bouton "Sources" dans la sidebar TV + un icône sur
+         le home mobile, donc redondant). Gestion via WorldLiveSourcesDialog
+         accessible depuis ces 2 points. -->
+
 
     <PreferenceScreen
         android:key="screen_appearance"
@@ -310,6 +333,58 @@
                 android:entries="@array/theme_names"
                 android:entryValues="@array/theme_values"
                 android:defaultValue="default" />
+
+            <!-- 2026-06-07 (user "il devrait être dans apparence sur TV
+                 comme sur mobile") : PROFILE_PICKER_ENABLED déplacé ici
+                 depuis la PreferenceCategory "Affichage" du screen_playback. -->
+            <SwitchPreference
+                android:key="PROFILE_PICKER_ENABLED"
+                android:title="@string/settings_profile_picker"
+                android:summary="@string/settings_profile_picker_summary"
+                android:defaultValue="true" />
+
+            <!-- 2026-06-09 (user "les réglages tu les as pas mis où il faut
+                 ils sont censés être dans l'onglet apparence") : toggle
+                 global carrousel-comme-fond, déplacé depuis screen_playback. -->
+            <SwitchPreference
+                android:key="CAROUSEL_AS_BACKGROUND"
+                android:title="Carrousel comme fond d'écran"
+                android:summary="Affiche la bannière du film/série en focus en fond. Désactive pour un fond statique."
+                android:defaultValue="true" />
+
+            <!-- 2026-06-09 : fond d'écran personnalisé. -->
+            <Preference
+                android:key="WALLPAPER_GALLERY"
+                android:title="Galerie en ligne (4K Wallhaven)"
+                android:summary="Parcourir des millions de wallpapers HD par mot-clé" />
+
+            <Preference
+                android:key="WALLPAPER_PICK"
+                android:title="Importer une image perso"
+                android:summary="Choisir une image depuis ton appareil (clé USB, photos, Drive, etc.)" />
+
+            <Preference
+                android:key="WALLPAPER_CLEAR"
+                android:title="Retirer le fond personnalisé"
+                android:summary="Revient au fond par défaut de l'application" />
+
+            <ListPreference
+                android:key="WALLPAPER_DIM"
+                android:title="Assombrir le fond personnalisé"
+                android:summary="Pour la lisibilité si l'image est très claire"
+                android:entries="@array/wallpaper_dim_names"
+                android:entryValues="@array/wallpaper_dim_values"
+                android:defaultValue="none" />
+
+            <!-- 2026-06-09 (user "rendre transparente la bande noire") :
+                 opacité de la sidebar de navigation TV. -->
+            <SeekBarPreference
+                android:key="SIDEBAR_OPACITY"
+                android:title="Opacité de la barre latérale"
+                android:summary="100 = opaque, 0 = totalement transparente (voir le fond d'écran)"
+                android:defaultValue="100"
+                android:min="0"
+                android:max="100" />
         </PreferenceCategory>
 
         <PreferenceCategory

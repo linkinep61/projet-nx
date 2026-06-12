@@ -15,6 +15,20 @@
         <item>fr</item>
     </string-array>
 
+    <!-- 2026-06-09 : slider Assombrir pour le fond d'écran personnalisé. -->
+    <string-array name="wallpaper_dim_names">
+        <item>Aucun</item>
+        <item>Léger (30%)</item>
+        <item>Moyen (50%)</item>
+        <item>Fort (70%)</item>
+    </string-array>
+    <string-array name="wallpaper_dim_values">
+        <item>none</item>
+        <item>light</item>
+        <item>medium</item>
+        <item>strong</item>
+    </string-array>
+
     <string-array name="theme_names">
         <item>@string/theme_default</item>
         <item>@string/theme_nero_amoled_oled</item>

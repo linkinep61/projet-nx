@@ -231,13 +231,23 @@ class TvShowViewModel(
             }
             database.tvShowDao().insert(tvShow)
 
-            val tvShowCopy = tvShow.copy()
-            tvShow.seasons.forEach { season ->
+            // 2026-06-08 (user "acteurs en médaillon comme sur Wiflix pour
+            //   tous les providers") : enrichit le cast via TMDB Credits si
+            //   le provider n'a pas fourni le cast et que l'id est un TMDB ID.
+            //   TvShow.copy() préserve seasons par défaut.
+            val enrichedTvShow = if (tvShow.cast.isEmpty()) {
+                val cast = com.streamflixreborn.streamflix.utils
+                    .TmdbCreditsEnricher.fetchTvShowCast(id)
+                if (cast.isNotEmpty()) tvShow.copy(cast = cast) else tvShow
+            } else tvShow
+
+            val tvShowCopy = enrichedTvShow.copy()
+            enrichedTvShow.seasons.forEach { season ->
                 season.tvShow = tvShowCopy
             }
-            database.seasonDao().insertAll(tvShow.seasons)
+            database.seasonDao().insertAll(enrichedTvShow.seasons)
 
-            _state.emit(State.SuccessLoading(tvShow))
+            _state.emit(State.SuccessLoading(enrichedTvShow))
         } catch (e: Exception) {
             Log.e("TvShowViewModel", "getTvShow: ", e)
             // Ne pas écraser si on avait déjà le cache affiché

@@ -143,6 +143,8 @@ class TvShowsMobileFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         if (_binding == null) return
+        // 2026-06-09 : applique le fond d'écran personnalisé.
+        com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(binding.root)
         val channelId = MiniPlayerController.currentChannelId ?: return
 
         if (MiniPlayerController.getPlayer() == null) {
@@ -158,7 +160,7 @@ class TvShowsMobileFragment : Fragment() {
             binding.miniPlayerView.player = MiniPlayerController.getPlayer()
         }
 
-        binding.miniPlayerContainer.visibility = View.VISIBLE
+        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
         binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
         MiniPlayerController.currentChannelPoster?.let { poster ->
             Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
@@ -425,7 +427,7 @@ class TvShowsMobileFragment : Fragment() {
         binding.miniPlayerView.player = MiniPlayerController.getPlayer()
 
         if (MiniPlayerController.currentChannelId != null) {
-            binding.miniPlayerContainer.visibility = View.VISIBLE
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
             binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
             MiniPlayerController.currentChannelPoster?.let { poster ->
                 Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
@@ -439,12 +441,12 @@ class TvShowsMobileFragment : Fragment() {
                         binding.miniPlayerContainer.visibility = View.GONE
                     }
                     is MiniPlayerController.State.Loading -> {
-                        binding.miniPlayerContainer.visibility = View.VISIBLE
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.VISIBLE
                     }
                     is MiniPlayerController.State.Playing -> {
-                        binding.miniPlayerContainer.visibility = View.VISIBLE
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.GONE
                         updatePauseButton()
