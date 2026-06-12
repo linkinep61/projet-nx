@@ -863,7 +863,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
                                     Log.d(TAG, "TF1 DIRECT SFR shortcut → $sfrDirect")
                                     src = sfrDirect
                                     customUa = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Firefox/115.0"
-                                    customReferer = "https://u301.com/"
+                                    customReferer = "https://www.molotov.tv/"  // 2026-06-12 (logs OPPO Tahiti : SFR retourne HTTP 400 avec Referer u301.com — il attend un client TV légitime type molotov.tv qui distribue TF1+)
                                     // Cache pour 25 min — démarrage instantané au 2e clic
                                     sfrUrlCache[server.id] = CachedSfrUrl(
                                         sfrDirect, System.currentTimeMillis() + SFR_CACHE_TTL_MS,
@@ -1105,7 +1105,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
                                 if (wvUrl != null) {
                                     src = wvUrl
                                     customUa = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Firefox/115.0"
-                                    customReferer = "https://u301.com/"
+                                    customReferer = "https://www.molotov.tv/"  // 2026-06-12 (logs OPPO Tahiti : SFR retourne HTTP 400 avec Referer u301.com — il attend un client TV légitime type molotov.tv qui distribue TF1+)
                                     ua = customUa
                                 }
                                 // 2026-06-10 : sinon tente le bypass SFR direct (reproduit GetTKN() Kotlin)
@@ -1115,7 +1115,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
                                         Log.d(TAG, "bypassSfr resolved: $sfrBypassUrl")
                                         src = sfrBypassUrl
                                         customUa = "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
-                                        customReferer = "https://u301.com/"
+                                        customReferer = "https://www.molotov.tv/"  // 2026-06-12 (logs OPPO Tahiti : SFR retourne HTTP 400 avec Referer u301.com — il attend un client TV légitime type molotov.tv qui distribue TF1+)
                                         ua = customUa
                                     } else {
                                         src = finalUrl
@@ -1180,6 +1180,14 @@ object BoxXtemusProvider : Provider, IptvProvider {
                     } else {
                         val code = codeMatch?.groupValues?.get(1) ?: "?"
                         Log.w(TAG, "TF1 mediainfo permission denied (code=$code) — DRM/auth required")
+                        // 2026-06-12 (user "regarde les logs de plus pres") :
+                        //   BUG TROUVE — sans ce reset, src reste l URL JSON
+                        //   mediainfo.tf1.fr/... que le player tente de jouer
+                        //   comme un m3u8 -> "Source error" + crash.
+                        //   On vide src pour que le pipeline produise "No
+                        //   source found" et fallback proprement (= meme
+                        //   pattern que la ligne 1153 pour HTML generique).
+                        src = ""
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "TF1 mediainfo resolution failed: ${e.message}")
@@ -1519,12 +1527,11 @@ object BoxXtemusProvider : Provider, IptvProvider {
             Log.d(TAG, "bypassSfr: expandedUrl=$expandedUrl")
 
             if (expandedUrl.contains(".m3u8", ignoreCase = true)) {
-                // Fallback minimal : on retourne l'expandedUrl (= probablement ne marchera
-                //   pas direct à cause du check anti-bot SFR, mais c'est le dernier recours).
-                val fixedUrl = expandedUrl
-                    .replace("end=&", "end=END&")
-                    .replace(Regex("end=$"), "end=END")
-                return fixedUrl
+                // 2026-06-12 (logs OPPO Tahiti : HTTP 400 sur SFR) — RETIRE
+                //   le replace end=&→end=END&. u301 retourne l'URL avec
+                //   end= vide (= live infini) et SFR refuse end=END comme
+                //   timestamp invalide. Garder l'URL telle quelle.
+                return expandedUrl
             }
             null
         } catch (e: Exception) {
@@ -1634,11 +1641,12 @@ object BoxXtemusProvider : Provider, IptvProvider {
      */
     private fun tf1MediainfoUrlFor(ch: BxtChannel): String? {
         val key = (ch.channelName + " " + ch.name).uppercase()
+        // 2026-06-12 (rollback test L_TF1) : confirmé par log
+        //   "TF1 mediainfo permission denied (code=403) — DRM/auth required".
+        //   TF1/TMC/TFX/TF1SF demandent vraiment compte MyTF1 + DRM Widevine.
+        //   SEUL LCI fonctionne sans auth via mediainfo.tf1.fr.
         val tf1Id = when {
             Regex("\\bLCI\\b").containsMatchIn(key) -> "L_LCI"
-            // TF1/TMC/TFX/TF1 Séries demandent un compte MyTF1 + DRM → on
-            // les laisse échouer dans le pipeline html.bet original plutôt
-            // que de promettre quelque chose qui ne marchera pas.
             else -> null
         }
         return tf1Id?.let {
@@ -1808,9 +1816,22 @@ object BoxXtemusProvider : Provider, IptvProvider {
                     RegexOption.IGNORE_CASE,
                 ).find(window)
                 if (mediaInWindow != null) {
-                    proximityUrl = mediaInWindow.value.replace("\\/", "/")
-                    Log.d(TAG, "latvdefranceShortcut[$rssKey] PROXIMITY MATCH: $proximityUrl")
-                } else {
+                    val candidate = mediaInWindow.value.replace("\\/", "/")
+                    // 2026-06-12 — Garde-fou : rejette les URLs vers hosts
+                    // empoisonnés (= rsseverything a remplace les URLs
+                    // latvdefrance par cdn.adultiptv.net en represailles).
+                    val isAdult = listOf("adultiptv", "porniptv", "xxxiptv",
+                        "mycamtv", "livejasmin", "bongacams", "chaturbate",
+                        "camsoda", "stripchat", "pornhub", "xnxx", "xvideos",
+                        "redtube", "youporn").any { candidate.lowercase().contains(it) }
+                    if (!isAdult) {
+                        proximityUrl = candidate
+                        Log.d(TAG, "latvdefranceShortcut[$rssKey] PROXIMITY MATCH: $proximityUrl")
+                    } else {
+                        Log.w(TAG, "latvdefranceShortcut[$rssKey]: REJECTED adult URL: $candidate")
+                    }
+                }
+                if (proximityUrl == null) {
                     // Stratégie B : tentative déobfuscation atob
                     val deobfuscated = com.streamflixreborn.streamflix.utils
                         .GenericStreamResolver.deobfuscateAtobUrlPublic(window)
@@ -1818,7 +1839,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
                         proximityUrl = deobfuscated
                         Log.d(TAG, "latvdefranceShortcut[$rssKey] DEOBFUSCATED MATCH: $proximityUrl")
                     } else {
-                        Log.w(TAG, "latvdefranceShortcut[$rssKey]: token at $tokenIdx but no media. Sample (next 400): ${window.take(400)}")
+                        Log.w(TAG, "latvdefranceShortcut[$rssKey]: token at $tokenIdx but no media (or all adult). Sample (next 400): ${window.take(400)}")
                     }
                 }
             } else {
