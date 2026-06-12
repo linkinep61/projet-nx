@@ -435,12 +435,23 @@ object MiniPlayerController {
         cancelBufferingWatchdog()
         val channelAtArm = currentChannelId
         val indexAtArm = currentServerIndex
+        // 2026-06-12 (user "à Tahiti on est déjà considéré comme VPN — TF1
+        //   ne marche pas") : la latence Pacifique vers les CDN FR (250-400ms
+        //   par RTT vs 30ms métropole) fait que le démarrage TLS + 1ère
+        //   playlist HLS peut prendre 8-12s. Le watchdog 6s tue le flux
+        //   AVANT que la lecture démarre. Pour les IPTV live qui n'ont
+        //   souvent qu'1 seul serveur (= aucun fallback de toute façon), on
+        //   donne 15s pour laisser le temps de démarrer. Sinon le default
+        //   6s reste actif (= cas VOD multi-extracteurs où on peut basculer
+        //   vite sur un autre serveur).
+        val effectiveWatchdogMs = if (availableServers.size <= 1) 15_000L
+            else BUFFERING_WATCHDOG_MS
         bufferingWatchdogJob = scope.launch {
-            delay(BUFFERING_WATCHDOG_MS)
+            delay(effectiveWatchdogMs)
             // Only fire if we're still on the same channel + same server still buffering.
             if (currentChannelId == channelAtArm && currentServerIndex == indexAtArm) {
                 val serverName = availableServers.getOrNull(currentServerIndex)?.name ?: "?"
-                Log.w(TAG, "Buffering watchdog: $serverName stuck >${BUFFERING_WATCHDOG_MS / 1000}s, switching")
+                Log.w(TAG, "Buffering watchdog: $serverName stuck >${effectiveWatchdogMs / 1000}s, switching")
                 val playingUri = player?.currentMediaItem?.localConfiguration?.uri?.toString()
                 if (!playingUri.isNullOrBlank()) {
                     recordHostFail(playingUri)
