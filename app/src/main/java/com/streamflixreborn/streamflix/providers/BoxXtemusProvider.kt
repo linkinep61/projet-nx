@@ -819,7 +819,8 @@ object BoxXtemusProvider : Provider, IptvProvider {
                         src = tf1MediaUrl
                         customUa = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
                         customReferer = "https://www.tf1.fr/"
-                    } else if (paraTvShortcut(ch.userAgent.takeIf { it.isNotBlank() })?.also { paraUrl ->
+                    } else if ((paraTvShortcut(ch.userAgent.takeIf { it.isNotBlank() })
+                            ?: popShortcut(ch.userAgent.takeIf { it.isNotBlank() }))?.also { paraUrl ->
                             // 2026-06-12 — JACKPOT bypass alternatif :
                             //   tvradiozap.eu/<token> → redirect 303 → m3u8
                             //   GitHub Paradise-91/ParaTV → CDN officiel TF1.
@@ -1103,6 +1104,24 @@ object BoxXtemusProvider : Provider, IptvProvider {
                                 src = nxtStreamUrl
                             } else {
                                 Log.w(TAG, "2e RSS aussi only decoys — tente bypass SFR (geo-block Tahiti)")
+                                // 2026-06-12 — Avant bypassSfr/u301 (= cassé pour
+                                //   Tahiti), tente les routes Wiseplay
+                                //   alternatives en cascade :
+                                //   1. paraTvShortcut(tvradiozap.eu) — ~fra<N>~ :
+                                //      TF1 (GitHub), CStar (Dailymotion), etc.
+                                //   2. popShortcut(lovetier.bz) — ~pop<TOKEN>~ :
+                                //      Canal+, beIN Sport, etc. (no_check_ip)
+                                val paraSrc = paraTvShortcut(ua) ?: popShortcut(ua)
+                                if (paraSrc != null) {
+                                    Log.d(TAG, "WISEPLAY alt route shortcut → $paraSrc")
+                                    src = paraSrc
+                                    customUa = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                                    customReferer = "https://tvradiozap.eu/"
+                                    ua = customUa
+                                    sfrUrlCache[server.id] = CachedSfrUrl(
+                                        paraSrc, System.currentTimeMillis() + SFR_CACHE_TTL_MS,
+                                    )
+                                } else {
                                 // 2026-06-10 : cache RAM par chaîne (= démarrage instantané au 2e clic, comme Wiseplay)
                                 val channelKey = server.id
                                 val cached = sfrUrlCache[channelKey]
@@ -1144,6 +1163,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
                                     }
                                 }
                                 // Si wvUrl != null, src est déjà setté à wvUrl plus haut, ne pas écraser.
+                                }  // fin else paraSrc == null
                             }
                         } catch (e: Exception) {
                             Log.w(TAG, "Fetch 2e RSS échoué: ${e.message}")
@@ -1718,9 +1738,61 @@ object BoxXtemusProvider : Provider, IptvProvider {
      *  finale. Générique : marche pour TOUTES les chaînes qui ont un
      *  token `~fra<N>~` dans leur UA Wiseplay.
      */
+    /** 2026-06-12 v3 (Canal+ tombe sur SFR car son UA contient ~pop<X>~
+     *  pas ~fra<N>~) : implémente la ROUTE 2 du RSS Wiseplay 67acd004
+     *  (fe482548 RSS) qui mène vers `lovetier.bz/player/<TOKEN>`. La page
+     *  HTML retournée contient `streamUrl: "<URL>"` pointant vers
+     *  `lovely.lovetier.bz/<CHANNEL>/index.m3u8?token=...` avec un token
+     *  qui contient explicitement `no_check_ip` (= pas de IP-binding ! ).
+     *  Couvre Canal+, beIN Sports, et autres chaînes premium.
+     */
+    private fun popShortcut(signedUa: String?): String? {
+        if (signedUa.isNullOrBlank()) return null
+        // Le token Wiseplay : `~pop<TOKEN>~` où TOKEN est ex. "CANALPLFR".
+        val token = Regex("""~pop([A-Z][A-Z0-9_]*)~""").find(signedUa)?.groupValues?.get(1)
+            ?: return null
+        return try {
+            val client = okhttp3.OkHttpClient.Builder()
+                .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                .followRedirects(true)
+                .build()
+            val req = okhttp3.Request.Builder()
+                .url("https://lovetier.bz/player/$token")
+                .header("User-Agent",
+                    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 " +
+                            "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "popShortcut[$token]: HTTP ${resp.code}")
+                    return null
+                }
+                val body = resp.body?.string() ?: return null
+                val match = Regex("""streamUrl:\s*"([^"]+)"""").find(body)
+                if (match == null) {
+                    Log.w(TAG, "popShortcut[$token]: no streamUrl in body")
+                    return null
+                }
+                val rawUrl = match.groupValues[1]
+                val streamUrl = rawUrl.replace("\\/", "/")
+                    .replace("planetary", "beautifulpeople")
+                Log.d(TAG, "popShortcut[$token] → $streamUrl")
+                streamUrl
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "popShortcut failed: ${e.message}")
+            null
+        }
+    }
+
     private fun paraTvShortcut(signedUa: String?): String? {
         if (signedUa.isNullOrBlank()) return null
-        val token = Regex("""~fra(\d+)~""").find(signedUa)?.groupValues?.get(1)
+        // 2026-06-12 v2 (user "TV hub CStar marche pas") : le token tvradiozap
+        //   peut etre prefixe `~ofra<N>~` (= ex CStar) ou `~fra<N>~` (= ex TF1).
+        //   On match dans les 2 cas avec lookbehind plus permissif. Le prefixe
+        //   `o` est ignoré, c est juste un préfixe Wiseplay optionnel.
+        val token = Regex("""(?:~ofra|~fra)(\d+)~""").find(signedUa)?.groupValues?.get(1)
             ?: return null
         return try {
             val client = okhttp3.OkHttpClient.Builder()
@@ -1741,11 +1813,28 @@ object BoxXtemusProvider : Provider, IptvProvider {
                 }
                 val finalUrl = resp.request.url.toString()
                 Log.d(TAG, "paraTvShortcut[fra=$token] → $finalUrl (HTTP ${resp.code})")
-                // Vérifie qu on a bien une m3u8 (pas une page d erreur)
-                if (finalUrl.contains(".m3u8") || finalUrl.contains(".mpd") ||
-                    finalUrl.contains("raw.githubusercontent.com")) {
+                if (!(finalUrl.contains(".m3u8") || finalUrl.contains(".mpd") ||
+                    finalUrl.contains("raw.githubusercontent.com"))) {
+                    return null
+                }
+                // 2026-06-12 v2 (CStar Dailymotion retourne 403 sans proxy) :
+                //   pour les URLs signees avec `sec=`, `token=`, `dmTs=`,
+                //   etc., le serveur lie le token a l IP du client qui a
+                //   demande l URL. Pour que ExoPlayer (= Cronet, IP X)
+                //   reussisse, il faut que le call parte de la MEME IP que
+                //   tvradiozap.eu (= notre OkHttp, IP Y). Solution : wrapper
+                //   l URL via LocalHlsProxy qui forwarde via notre OkHttp.
+                //   Les URLs GitHub static (Paradise-91) restent directes
+                //   (= pas de check IP).
+                val isStaticGithub = finalUrl.contains("raw.githubusercontent.com")
+                if (isStaticGithub) {
                     finalUrl
-                } else null
+                } else {
+                    val wrapped = com.streamflixreborn.streamflix.utils
+                        .LocalHlsProxy.wrapUrl(finalUrl)
+                    Log.d(TAG, "paraTvShortcut[fra=$token] WRAPPED via LocalHlsProxy: $wrapped")
+                    wrapped
+                }
             }
         } catch (e: Throwable) {
             Log.w(TAG, "paraTvShortcut[fra=$token] failed: ${e.message}")
