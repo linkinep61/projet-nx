@@ -34,12 +34,13 @@ object WorldLiveSourcesStore {
     //   passe en index 1 (= toujours dispo via le picker source).
     //   Dric4rTV reste en index 2.
     val BUILTIN_SOURCES: List<Source> = listOf(
-        Source("3box TV (par défaut)", "https://box.xtemus.com/?playlist=u256y494u21596x2", isBuiltin = true),
-        // 2026-06-12 : iptv-org est une playlist M3U publique communautaire
-        //   maintenue par une org GitHub sérieuse. Contient TF1, France 2-5,
-        //   M6, Canal+, BFM, etc. avec des URLs CDN officielles. Marche
-        //   depuis Tahiti.
-        Source("iptv-org FR (alternative)", "https://iptv-org.github.io/iptv/countries/fr.m3u", isBuiltin = true),
+        // 2026-06-12 (user "tu mets iptv-org en priorite") : iptv-org est une
+        //   playlist M3U publique communautaire maintenue par une org GitHub
+        //   sérieuse (= pas un service tiers qui empoisonne ses URLs comme
+        //   rsseverything). Contient TF1, France 2-5, M6, Canal+, BFM, etc.
+        //   avec des URLs CDN officielles. Marche depuis Tahiti.
+        Source("iptv-org FR (par défaut)", "https://iptv-org.github.io/iptv/countries/fr.m3u", isBuiltin = true),
+        Source("3box TV", "https://box.xtemus.com/?playlist=u256y494u21596x2", isBuiltin = true),
         Source("World TV", "https://box.xtemus.com/?playlist=y274y486q2x2841586r2", isBuiltin = true),
         Source("Dric4rTV", "http://dric4rt.free.fr/1.json", isBuiltin = true),
     )
