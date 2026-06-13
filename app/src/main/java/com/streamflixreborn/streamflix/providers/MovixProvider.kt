@@ -57,7 +57,14 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         val prev = skipBackupsForBackupCall
         skipBackupsForBackupCall = true
         return try {
-            getServers(id, videoType)
+            // 2026-06-13 (user "le patch FS Voe HD pollue tous les providers,
+            //   ca doit etre la meme chose sur tous les providers avec backup") :
+            //   centralise le filtre `fstream-*` ici → tout provider qui
+            //   appelle getServersAsBackup recoit automatiquement la liste
+            //   nettoyee (= plus de "FS · X (VF - HD)" pollues qui jouent
+            //   mauvais contenu). Affecte Cloudstream, Frembed, FrenchStream,
+            //   Wiflix, Moviebox, Papa, aplouf, DessinAnime, NetMirror...
+            getServers(id, videoType).filter { !it.id.startsWith("fstream-") }
         } finally {
             skipBackupsForBackupCall = prev
         }
@@ -2019,56 +2026,197 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             val wiflixBase = try { WiflixProvider.baseUrl.trimEnd('/') } catch (_: Exception) { "https://flemmix.win" }
             wfLog("wiflixBase=$wiflixBase")
 
-            val client = OkHttpClient.Builder()
+            // 2026-06-13 (user "toujours pas de wiflix" apres clear data) :
+            //   flemmix.city sert un challenge CF aux POST search via HTTP brut
+            //   (= reponse 18 bytes). Le main provider Wiflix a un cookie
+            //   cf_clearance dans son cookie jar partage (NetworkClient.default)
+            //   apres son 1er bypass WebView. On reutilise ce client pour
+            //   herit du cookie CF, sans dupliquer la logique de bypass.
+            val client = com.streamflixreborn.streamflix.utils.NetworkClient.default
+                .newBuilder()
                 .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
                 .followRedirects(true)
                 .build()
 
-            val typeSlug = when (videoType) {
-                is Video.Type.Movie -> "film-en-streaming/"
-                // 2026-06-02 : flemmix.team utilise /serie-en-streaming/ (PAS
-                //   /serie/) pour les séries. L'ancien filtre "serie/" éliminait
-                //   100% des résultats séries → 0 backup Wiflix sur tous les épisodes.
-                is Video.Type.Episode -> "serie-en-streaming/"
+            // 2026-06-13 (user "pas de serveur wiflix" - refactor autonome, ne
+            //   touche PAS au main provider) :
+            //   flemmix.city sert un CF challenge sur les POST search direct
+            //   (= 18 bytes). Le scraping HTTP brut ne peut pas le passer. On
+            //   utilise WebViewResolver (utils/) en silent mode qui :
+            //     1) load l'URL dans un WebView Android (= JS execute, CF gere
+            //        tout seul, cookies poses dans CookieManager)
+            //     2) detecte le challenge + attend la resolution (timeout 30s
+            //        en silent mode = fail-fast pas de dialog au user)
+            //     3) retourne le HTML resolu
+            //   DLE accepte search en GET aussi (= ?do=search&...) donc on
+            //   construit l'URL search en GET au lieu du POST direct.
+            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
+
+            /** 2026-06-13 (user "tu touches pas a l'officiel provider" +
+             *  "toujours pas wiflix") : WebViewResolver silent mode fail-fast
+             *  apres 3 polls (~1.5s) avec "<!-- silent fail -->" si pas de
+             *  content reconnu. flemmix.city CF challenge prend 5-10s a se
+             *  resoudre → mon code echouait toujours. Helper inline : mini
+             *  WebView Android programmatique avec attente patiente de 15s
+             *  (= laisse le temps au CF de se resoudre). Le UA est celui qu'un
+             *  vrai Chrome poserait → CF accepte. Pas de dialog visible,
+             *  cleanup garanti. */
+            suspend fun getViaBypass(url: String, tag: String): String {
+                val t0 = System.currentTimeMillis()
+                return try {
+                    val html = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        kotlinx.coroutines.withTimeoutOrNull(20_000) {
+                            kotlinx.coroutines.suspendCancellableCoroutine<String> { cont ->
+                                val webView = android.webkit.WebView(ctx)
+                                webView.settings.apply {
+                                    javaScriptEnabled = true
+                                    domStorageEnabled = true
+                                    databaseEnabled = true
+                                    userAgentString = "Mozilla/5.0 (Linux; Android 13; Pixel 7) " +
+                                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 " +
+                                        "Mobile Safari/537.36"
+                                    mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                                }
+                                val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                                val resolved = java.util.concurrent.atomic.AtomicBoolean(false)
+                                var pollRunnable: Runnable? = null
+
+                                fun finish(html: String) {
+                                    if (!resolved.compareAndSet(false, true)) return
+                                    handler.removeCallbacksAndMessages(null)
+                                    try {
+                                        webView.stopLoading()
+                                        webView.destroy()
+                                    } catch (_: Throwable) {}
+                                    if (cont.isActive) cont.resume(html) {}
+                                }
+
+                                // Poll toutes les 800ms, accepte des qu'on detecte
+                                //   du contenu reconnaissable (mov-t / posterimg /
+                                //   serie-en-streaming / saison-complete / film-en-streaming).
+                                //   Sinon on attend jusqu'au timeout global (20s).
+                                val poll = object : Runnable {
+                                    var count = 0
+                                    override fun run() {
+                                        if (resolved.get()) return
+                                        count++
+                                        webView.evaluateJavascript(
+                                            "(function(){return document.documentElement.outerHTML;})();"
+                                        ) { rawJs ->
+                                            val clean = rawJs?.trim()?.removeSurrounding("\"")
+                                                ?.replace("\\u003C", "<")
+                                                ?.replace("\\\"", "\"")
+                                                ?.replace("\\n", "\n") ?: ""
+                                            val hasContent =
+                                                clean.contains("mov-t") ||
+                                                clean.contains("posterimg") ||
+                                                clean.contains("serie-en-streaming") ||
+                                                clean.contains("film-en-streaming") ||
+                                                clean.contains("saison-complete") ||
+                                                clean.contains("loadVideo")
+                                            if (hasContent && clean.length > 5000) {
+                                                finish(clean)
+                                                return@evaluateJavascript
+                                            }
+                                            if (count < 25) {
+                                                handler.postDelayed(this, 800)
+                                            }
+                                        }
+                                    }
+                                }
+                                pollRunnable = poll
+
+                                webView.webViewClient = object : android.webkit.WebViewClient() {
+                                    override fun onPageFinished(view: android.webkit.WebView?, currentUrl: String?) {
+                                        if (resolved.get()) return
+                                        // Premier check apres 500ms (= laisse le DOM
+                                        // se stabiliser + CF auto-resolve si fast)
+                                        handler.postDelayed(poll, 500)
+                                    }
+                                }
+                                webView.loadUrl(url)
+                                cont.invokeOnCancellation { finish("") }
+                            }
+                        } ?: "<html><!-- timeout 20s --></html>"
+                    }
+                    wfLog("$tag bypass HTML len=${html.length} in ${System.currentTimeMillis() - t0}ms")
+                    html
+                } catch (e: Exception) {
+                    wfLog("$tag bypass exception: ${e.message}")
+                    ""
+                }
+            }
+
+            // 2026-06-13 (user "wilflix backup n'apparaît pas" + capture
+            //   flemmix.city/saison-complete/27119-from-2022-saison-2.html) :
+            //   le nouveau domaine flemmix.city sert AUSSI les séries au format
+            //   /saison-complete/<id>-<slug>.html (= un layout différent de
+            //   /serie-en-streaming/). L'ancien filtre rejetait 100% des
+            //   resultats saison-complete → pas de backup Wiflix pour les séries
+            //   format saison. On accepte les deux slugs.
+            val typeSlugs: List<String> = when (videoType) {
+                is Video.Type.Movie -> listOf("film-en-streaming/")
+                is Video.Type.Episode -> listOf("serie-en-streaming/", "saison-complete/")
             }
 
             for (query in queries) {
                 try {
-                    // ① Recherche DLE POST
-                    wfLog("HTTP search '$query' on $wiflixBase...")
-                    val t0 = System.currentTimeMillis()
-                    val formBody = okhttp3.FormBody.Builder()
-                        .add("do", "search")
-                        .add("subaction", "search")
-                        .add("story", query)
-                        .add("search_start", "1")
-                        .add("result_from", "1")
-                        .build()
-                    val searchReq = Request.Builder()
-                        .url("$wiflixBase/")
-                        .post(formBody)
-                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
-                        .header("Referer", "$wiflixBase/")
-                        .build()
-                    val searchResp = client.newCall(searchReq).execute()
-                    val searchHtml = searchResp.body?.string() ?: ""
-                    searchResp.close()
-                    wfLog("search HTTP ${searchResp.code} len=${searchHtml.length} in ${System.currentTimeMillis() - t0}ms")
-
-                    if (searchHtml.length < 200) {
-                        wfLog("search response too short, CF blocked?")
-                        continue
+                    // ① 2026-06-13 (user autorisation : "oui si ca casse rien") :
+                    //    on remplace le WebView search bypass (qui ramait
+                    //    20s et echouait sur le bot shield de flemmix.city) par
+                    //    un appel a WiflixProvider.searchRaw — nouvelle methode
+                    //    publique qui delegue au main provider sa logique CF
+                    //    + WebView bypass deja eprouvee + retourne les hrefs
+                    //    BRUTS (sans filtrer film/serie/saison-complete).
+                    //    Avantages :
+                    //      - bypass CF/bot shield 100% gere par le main
+                    //      - From en saison-complete passe (= n'est plus rejete
+                    //        par le filtre serie-en-streaming/vf du main search)
+                    //      - zero code dupplique pour le challenge handling
+                    // 2026-06-13 (user "From apparait dans la home Wiflix mais
+                    //   la search ramene rien" + capture site Wiflix navigateur OK) :
+                    //   Le bot shield bloque le search depuis l'app. MAIS la
+                    //   home Wiflix charge sans probleme et liste From + autres
+                    //   series avec leur URL complete. On a un cache
+                    //   (WiflixUrlCache) qui se peuple opportunistement a chaque
+                    //   page Wiflix browse par l'user. On regarde D'ABORD ce
+                    //   cache → si match, on a directement l'URL → bypass total
+                    //   du search bot-shieldé.
+                    val cachedUrl = try {
+                        com.streamflixreborn.streamflix.utils.WiflixUrlCache
+                            .lookup(ctx, query)
+                    } catch (_: Throwable) { null }
+                    val rawResults: List<Pair<String, String>> = if (cachedUrl != null) {
+                        wfLog("URL cache HIT pour '$query' → $cachedUrl (skip searchRaw)")
+                        listOf(cachedUrl to query)
+                    } else {
+                        wfLog("URL cache MISS pour '$query' → fallback searchRaw")
+                        wfLog("searchRaw '$query' via WiflixProvider...")
+                        val t0 = System.currentTimeMillis()
+                        val results = try {
+                            kotlinx.coroutines.withTimeoutOrNull(20_000) {
+                                WiflixProvider.searchRaw(query, 1)
+                            } ?: emptyList()
+                        } catch (e: Exception) {
+                            wfLog("searchRaw exception: ${e.message}")
+                            emptyList()
+                        }
+                        wfLog("searchRaw '$query' returned ${results.size} results in ${System.currentTimeMillis() - t0}ms")
+                        results
                     }
+                    if (rawResults.isEmpty()) continue
 
-                    // ② Parser les résultats : <a class="mov-t" href="...">Titre</a>
-                    val resultPattern = Regex("""<a\s+class="mov-t[^"]*"\s+href="([^"]+)"[^>]*>\s*(.*?)\s*</a>""", RegexOption.DOT_MATCHES_ALL)
-                    val results = resultPattern.findAll(searchHtml).toList()
-                    wfLog("found ${results.size} search results")
+                    // Filtrer par type (film ou serie) en utilisant typeSlugs
+                    // (= serie-en-streaming/ OU saison-complete/ pour les Episodes).
+                    val typed = rawResults.filter { (href, _) ->
+                        typeSlugs.any { slug -> href.contains(slug) }
+                    }
+                    wfLog("${typed.size} after type filter ($typeSlugs)")
 
-                    // Filtrer par type (film ou série dans l'URL)
-                    val typed = results.filter { it.groupValues[1].contains(typeSlug) }
-                    wfLog("${typed.size} after type filter ($typeSlug)")
+                    // Wrapper local pour s'adapter a l'ancienne API regex
+                    // (anciennement MatchResult, maintenant Pair<href, title>).
+                    val results: List<Pair<String, String>> = typed
 
                     // 2026-06-02 : matching qui préfère le titre LE PLUS PROCHE
                     //   de la query (= moins de suffixes parasites). Avant on
@@ -2101,11 +2249,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                             normQuery.startsWith("$normResult(")) return true
                         return false
                     }
-                    val candidates = typed.mapNotNull { m ->
-                        val rawTitle = m.groupValues[2].replace(Regex("<[^>]+>"), "")
+                    val candidates = typed.mapNotNull { (href, title) ->
+                        val rawTitle = title.replace(Regex("<[^>]+>"), "")
                         val normResult = normalizeTitle(rawTitle)
                         if (isStrictMatch(normResult)) {
-                            Triple(m, normResult, kotlin.math.abs(normResult.length - normQuery.length))
+                            Triple(href to rawTitle, normResult, kotlin.math.abs(normResult.length - normQuery.length))
                         } else null
                     }
                     val match = candidates.minByOrNull { it.third }?.first
@@ -2114,21 +2262,38 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                         continue
                     }
 
-                    val matchUrl = match.groupValues[1]
-                    val matchTitle = match.groupValues[2].replace(Regex("<[^>]+>"), "").trim()
+                    val matchUrl = match.first
+                    val matchTitle = match.second.trim()
                     wfLog("match '$matchTitle' => $matchUrl")
 
-                    // ③ GET la page du film/épisode
+                    // ③ GET la page du film/episode via OkHttp simple.
+                    //    2026-06-13 : verifie en direct que flemmix.city/
+                    //    saison-complete/...html (= la page produit) n'a PAS
+                    //    de bot shield (= retourne 86KB HTML complet avec
+                    //    loadVideo embeds). Seul l'endpoint /index.php?do=search
+                    //    est bot-shielded, on le contourne via WiflixProvider
+                    //    .searchRaw au-dessus. La page produit elle-meme = OK.
                     val t1 = System.currentTimeMillis()
                     val pageReq = Request.Builder()
                         .url(matchUrl)
-                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
+                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 13; Pixel 7) " +
+                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36")
                         .header("Referer", "$wiflixBase/")
                         .build()
-                    val pageResp = client.newCall(pageReq).execute()
-                    val pageHtml = pageResp.body?.string() ?: ""
-                    pageResp.close()
-                    wfLog("page HTTP ${pageResp.code} len=${pageHtml.length} in ${System.currentTimeMillis() - t1}ms")
+                    val pageHtml = try {
+                        val resp = client.newCall(pageReq).execute()
+                        val body = resp.body?.string() ?: ""
+                        resp.close()
+                        wfLog("page HTTP ${resp.code} len=${body.length} in ${System.currentTimeMillis() - t1}ms")
+                        body
+                    } catch (e: Exception) {
+                        wfLog("page GET exception: ${e.message}")
+                        ""
+                    }
+                    if (pageHtml.length < 500) {
+                        wfLog("page empty/short → skip")
+                        continue
+                    }
 
                     // ④ Pour les SÉRIES, chaque épisode a DEUX blocs sur flemmix.team :
                     //    <div class="ep{N}vf"> = serveurs VF (Lecteur 1/2/3)
@@ -2271,7 +2436,26 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
             }
         } catch (_: Exception) { null }
 
-        val queries = listOfNotNull(title, originalTitle?.takeIf { it != title }).distinct()
+        // 2026-06-13 (user "FS Voe HD pas bon backup sur cloudstream / From
+        //   S2E5 mauvaise serie") :
+        //   FrenchStream indexe souvent les series PAR SAISON (= "FROM -
+        //   Saison 1", "FROM - Saison 2", "FROM - Saison 3"...) plutot que par
+        //   show. Avec la query "From" + matching contains() permissif, on
+        //   piochait le 1er TvShow contenant "from" = "FROM - Saison 4" (= la
+        //   plus recente, en haut de la SERP) au lieu de la S2 demandee. Puis
+        //   getServers cherchait l'ep 5 sur la page de S4 → mauvais contenu.
+        //   Strategie : pour les Episodes on tente D'ABORD une query
+        //   saisonnee "Title Saison N" avec match EXACT normalise (= verifie
+        //   qu'on tombe sur la bonne saison). Si exact-match trouve → on
+        //   l'utilise et on s'arrete. Sinon → on retombe sur le matching
+        //   permissif d'origine (zero regression pour les series mono-show).
+        val baseQueries = listOfNotNull(title, originalTitle?.takeIf { it != title }).distinct()
+        val seasonNum = (videoType as? Video.Type.Episode)?.season?.number
+        val seasonedQueries = if (seasonNum != null && seasonNum > 0) {
+            baseQueries.map { "$it Saison $seasonNum" }
+        } else emptyList()
+        val queries = (seasonedQueries + baseQueries).distinct()
+        val seasonedSet = seasonedQueries.toSet()
         Log.d("MovixProvider", "FS direct: queries=$queries (year=$year)")
 
         for (query in queries) {
@@ -2287,21 +2471,43 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
                     }
                 }
 
-                val match = typed.firstOrNull { item ->
-                    val itemTitle = when (item) {
-                        is Movie -> item.title
-                        is TvShow -> item.title
-                        else -> ""
-                    }
-                    val normItem = normalizeTitle(itemTitle)
+                val isSeasonedQuery = query in seasonedSet
+                val match = if (isSeasonedQuery) {
+                    // Pour la query saisonnee, on EXIGE match exact normalise
+                    // (= "from saison 2" = "from saison 2"). Si rien d'exact,
+                    // on passe a la query suivante (= base query non saisonnee
+                    // avec matching permissif) → on ne pioche JAMAIS la
+                    // mauvaise saison ici.
                     val normQuery = normalizeTitle(query)
-                    normItem.contains(normQuery) || normQuery.contains(normItem)
-                } ?: typed.firstOrNull()
+                    typed.firstOrNull { item ->
+                        val itemTitle = when (item) {
+                            is Movie -> item.title
+                            is TvShow -> item.title
+                            else -> ""
+                        }
+                        normalizeTitle(itemTitle) == normQuery
+                    }
+                } else {
+                    // Matching d'origine INCHANGE pour les queries non
+                    // saisonnees (= contains permissif + fallback firstOrNull).
+                    typed.firstOrNull { item ->
+                        val itemTitle = when (item) {
+                            is Movie -> item.title
+                            is TvShow -> item.title
+                            else -> ""
+                        }
+                        val normItem = normalizeTitle(itemTitle)
+                        val normQuery = normalizeTitle(query)
+                        normItem.contains(normQuery) || normQuery.contains(normItem)
+                    } ?: typed.firstOrNull()
+                }
 
                 if (match == null) {
-                    Log.d("MovixProvider", "FS direct: no match for '$query'")
+                    Log.d("MovixProvider", "FS direct: no match for '$query'" +
+                        if (isSeasonedQuery) " (seasoned, exigeait match exact)" else "")
                     continue
                 }
+                Log.d("MovixProvider", "FS direct: matched '${(match as? TvShow)?.title ?: (match as? Movie)?.title}' for query='$query'")
 
                 val matchId = when (match) {
                     is Movie -> match.id
@@ -2316,9 +2522,29 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
                     Log.w("MovixProvider", "FS direct: getServers returned empty for $matchId")
                     continue
                 }
-                Log.d("MovixProvider", "FS direct: ${servers.size} servers found!")
-
-                return servers.map { srv ->
+                // 2026-06-13 (user "FS HD pa bon" + capture serveurs From S2E5 :
+                //   "FS · Vidzy (VF - HD)" en vert joue mauvais contenu) :
+                //   FrenchStreamProvider.getServers retourne nativeServers (sx.php
+                //   = 6 sources correctes scoped a E5) + cloudstreamBackup +
+                //   movixBackup + movieboxBackup. Quand FS est appele comme
+                //   BACKUP de Cloudstream, les sources Movix/Cloudstream/Moviebox
+                //   ramenes par FS sont DUPLIQUEES avec celles que Cloudstream
+                //   collecte deja en parallele. Pire : le pipeline Movix natif
+                //   inclut un endpoint /api/search?title=FROM qui matche par
+                //   titre generique = sources d'autres shows polluees, taggees
+                //   "(VF - HD)" car quality default Movix. Ces "FS · X (VF - HD)"
+                //   jouent du mauvais contenu.
+                //   Fix : ne garder que les NATIFS FS (= "fs_ajax_..." pose par
+                //   fetchPlayersFromAjax) dans le wrap "FS · ...". Les backups
+                //   restent dispo pour le user via Cloudstream/Movix direct
+                //   (zero duplication + zero pollution).
+                val nativeFsOnly = servers.filter { it.id.startsWith("fs_ajax_") }
+                Log.d("MovixProvider", "FS direct: ${servers.size} servers total, ${nativeFsOnly.size} natifs FS retenus (filtre fs_ajax_*)")
+                if (nativeFsOnly.isEmpty()) {
+                    Log.w("MovixProvider", "FS direct: 0 natif FS pour $matchId (backups exclus exprès)")
+                    continue
+                }
+                return nativeFsOnly.map { srv ->
                     val name = if (srv.name.startsWith("FS")) srv.name else "FS · ${srv.name}"
                     srv.copy(id = "fs_direct__${srv.id}", name = name)
                 }
@@ -2434,35 +2660,24 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
         launch {
             try {
                 val native = fetchNativeMovixServers(id, videoType)
+                Log.w("MovixProvider", "[NATIF_ONLY] fetchNativeMovix retourne ${native.size} sources")
                 if (native.isNotEmpty()) emitDeduped(native)
             } catch (e: Exception) {
                 Log.w("MovixProvider", "Progressive native failed: ${e.message}")
             }
         }
+        // 2026-06-13 (user "active seulement les sources de wiflix, vu qu'il
+        //   y en a déjà pas mal comme ça") :
+        //   - fetchMovixBackups : OFF (= autres sources internes Movix)
+        //   - fetchWiflixDirectBackup : ON (= scraping direct Wiflix)
+        //   - fetchFrenchStreamDirectBackup : OFF (= scraping direct FS)
         if (!skipBackupsForBackupCall) {
-            launch {
-                try {
-                    val backups = fetchMovixBackups(id, videoType)
-                    if (backups.isNotEmpty()) emitDeduped(backups)
-                } catch (e: Exception) {
-                    Log.w("MovixProvider", "Progressive backups failed: ${e.message}")
-                }
-            }
-            // 2026-05-28 : Wiflix + FrenchStream direct en parallèle (scrape réel des sites)
             launch {
                 try {
                     val wf = fetchWiflixDirectBackup(id, videoType)
                     if (wf.isNotEmpty()) emitDeduped(wf)
                 } catch (e: Exception) {
                     Log.w("MovixProvider", "Progressive Wiflix direct failed: ${e.message}")
-                }
-            }
-            launch {
-                try {
-                    val fs = fetchFrenchStreamDirectBackup(id, videoType)
-                    if (fs.isNotEmpty()) emitDeduped(fs)
-                } catch (e: Exception) {
-                    Log.w("MovixProvider", "Progressive FS direct failed: ${e.message}")
                 }
             }
         }

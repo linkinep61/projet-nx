@@ -420,7 +420,6 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             Log.d(TAG, "findSubjectId('$cleanQuery' year=$year): 0 candidates")
             return null
         }
-
         // Stratégie de matching, par ordre décroissant de confiance :
         // 1. Match normalisé EXACT + année exacte
         // 2. Match normalisé EXACT + année ±2
@@ -1956,7 +1955,15 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             MovixProvider.skipBackupsForBackupCall = true
             try {
                 val raw = withTimeoutOrNull(timeoutMs) { MovixProvider.getServers(tid, videoType) } ?: emptyList()
-                raw.map { srv -> srv.copy(id = "movix_backup__${srv.id}") }
+                // 2026-06-13 (user "patch FS Voe HD pollue tous les providers
+                //   avec backup, ca doit etre la meme chose partout") :
+                //   on filtre les sources `fstream-*` ici aussi (= meme que le
+                //   filtre central dans MovixProvider.getServersAsBackup). Ces
+                //   sources sont labellisees "FS · X (VF - HD)" et jouent
+                //   frequemment du mauvais contenu (= URLs d'autres shows).
+                raw
+                    .filter { !it.id.startsWith("fstream-") }
+                    .map { srv -> srv.copy(id = "movix_backup__${srv.id}") }
             } finally {
                 MovixProvider.skipBackupsForBackupCall = prev
             }
