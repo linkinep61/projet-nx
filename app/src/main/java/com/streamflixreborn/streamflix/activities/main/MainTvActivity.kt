@@ -105,23 +105,38 @@ class MainTvActivity : FragmentActivity() {
         }
 
         // 2026-05-31 : liste des chaînes IPTV — callbacks globaux
+        // 2026-06-13 (user "la recherche doit être accessible via la
+        //   télécommande facilement") : si on est en zone search (1), on
+        //   intercepte SEULEMENT les D-pad / BACK et on laisse les autres
+        //   touches (lettres, BACKSPACE…) à Android pour saisie dans l'EditText.
         if (com.streamflixreborn.streamflix.utils.ChannelListState.isOpen) {
+            val zone = com.streamflixreborn.streamflix.utils.ChannelListState.focusZone
             if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
                 when (event.keyCode) {
                     android.view.KeyEvent.KEYCODE_DPAD_CENTER,
                     android.view.KeyEvent.KEYCODE_ENTER,
-                    android.view.KeyEvent.KEYCODE_NUMPAD_ENTER ->
+                    android.view.KeyEvent.KEYCODE_NUMPAD_ENTER -> {
                         com.streamflixreborn.streamflix.utils.ChannelListState.onOkPressed?.invoke()
-                    android.view.KeyEvent.KEYCODE_DPAD_UP ->
+                        return true
+                    }
+                    android.view.KeyEvent.KEYCODE_DPAD_UP -> {
                         com.streamflixreborn.streamflix.utils.ChannelListState.onUpPressed?.invoke()
-                    android.view.KeyEvent.KEYCODE_DPAD_DOWN ->
+                        return true
+                    }
+                    android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
                         com.streamflixreborn.streamflix.utils.ChannelListState.onDownPressed?.invoke()
+                        return true
+                    }
                     android.view.KeyEvent.KEYCODE_BACK,
-                    android.view.KeyEvent.KEYCODE_DPAD_LEFT ->
+                    android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {
                         com.streamflixreborn.streamflix.utils.ChannelListState.onCloseRequested?.invoke()
+                        return true
+                    }
                 }
             }
-            return true
+            // Zone 1 (search) : laisse passer toutes les autres touches
+            //   pour la saisie. Zone 0 (Retour) / 2 (Liste) : on consomme tout.
+            if (zone != 1) return true
         }
 
         // Abyss/Hydrax overlay: route remote keys to the WebView cursor

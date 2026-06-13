@@ -2153,14 +2153,61 @@ class PlayerMobileFragment : Fragment() {
             setBackgroundColor(0xFF1A1A1A.toInt())
         }
 
+        // 2026-06-13 : on declare le sheet TÔT pour pouvoir l'utiliser dans
+        //   le closure du bouton "Fermer".
+        val sheet = com.google.android.material.bottomsheet.BottomSheetDialog(ctx)
+
+        // 2026-06-13 (user "on a oublié de mettre un bouton retour pour
+        //   quitter") : ligne titre + bouton retour à droite.
+        val headerRow = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(40, 24, 24, 8)
+        }
         val titleView = android.widget.TextView(ctx).apply {
             text = "Chaînes — chargement…"
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 18f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
-            setPadding(40, 24, 40, 16)
         }
-        container.addView(titleView)
+        headerRow.addView(titleView, android.widget.LinearLayout.LayoutParams(
+            0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f,
+        ))
+        val closeBtn = android.widget.Button(ctx).apply {
+            text = "Fermer"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 12f
+            setBackgroundColor(0x33FFFFFF)
+            setPadding(24, 12, 24, 12)
+            minWidth = 0
+            minimumWidth = 0
+            setOnClickListener { sheet.dismiss() }
+        }
+        headerRow.addView(closeBtn, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+        ))
+        container.addView(headerRow)
+
+        // 2026-06-13 (user "ajoute une barre de recherche dans l'overlay des
+        //   chaines IPTV, sur mobile et TV") : EditText filtre la liste
+        //   dynamiquement par nom (case-insensitive).
+        val searchInput = android.widget.EditText(ctx).apply {
+            hint = "Rechercher une chaîne…"
+            setHintTextColor(0x88FFFFFF.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 14f
+            setBackgroundColor(0x22FFFFFF)
+            setPadding(32, 24, 32, 24)
+            isSingleLine = true
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+        }
+        val searchParams = android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { setMargins(40, 0, 40, 16) }
+        container.addView(searchInput, searchParams)
 
         val rv = androidx.recyclerview.widget.RecyclerView(ctx).apply {
             layoutManager = androidx.recyclerview.widget.LinearLayoutManager(ctx)
@@ -2173,7 +2220,7 @@ class PlayerMobileFragment : Fragment() {
             1f,
         ))
 
-        val sheet = com.google.android.material.bottomsheet.BottomSheetDialog(ctx)
+        // sheet déclaré plus haut, on le configure et l'affiche ici.
         sheet.setContentView(container)
         sheet.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
         sheet.behavior.peekHeight = (resources.displayMetrics.heightPixels * 0.75f).toInt()
@@ -2216,13 +2263,30 @@ class PlayerMobileFragment : Fragment() {
 
             if (!isAdded || _binding == null) return@launch
             titleView.text = "Chaînes (${items.size})"
-            rv.adapter = IptvChannelListMobileAdapter(items, args.id) { selectedId ->
+            val mutableItems = items.toMutableList()
+            val adapter = IptvChannelListMobileAdapter(mutableItems, args.id) { selectedId ->
                 sheet.dismiss()
                 switchToIptvChannel(selectedId, provider)
             }
+            rv.adapter = adapter
             // Scroll vers la chaîne actuelle
             val currentIdx = items.indexOfFirst { it.first == args.id }
             if (currentIdx >= 0) rv.scrollToPosition(currentIdx)
+
+            // 2026-06-13 : filtre live sur EditText
+            searchInput.addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    val q = s?.toString()?.trim()?.lowercase().orEmpty()
+                    val filtered = if (q.isBlank()) items
+                        else items.filter { it.second.lowercase().contains(q) }
+                    adapter.replaceItems(filtered)
+                    titleView.text = if (q.isBlank()) "Chaînes (${filtered.size})"
+                        else "Chaînes (${filtered.size}/${items.size})"
+                    if (filtered.isNotEmpty()) rv.scrollToPosition(0)
+                }
+            })
         }
     }
 
@@ -2280,9 +2344,10 @@ class PlayerMobileFragment : Fragment() {
         )
     }
 
-    /** Adapter simple pour la BottomSheet liste chaînes IPTV mobile. */
+    /** Adapter simple pour la BottomSheet liste chaînes IPTV mobile.
+     *  2026-06-13 : items en MutableList pour pouvoir filtrer dynamiquement. */
     private class IptvChannelListMobileAdapter(
-        private val items: List<Triple<String, String, String?>>,
+        private val items: MutableList<Triple<String, String, String?>>,
         private val currentId: String,
         private val onClick: (String) -> Unit,
     ) : androidx.recyclerview.widget.RecyclerView.Adapter<IptvChannelListMobileAdapter.VH>() {
@@ -2318,6 +2383,14 @@ class PlayerMobileFragment : Fragment() {
         }
 
         override fun getItemCount() = items.size
+
+        /** 2026-06-13 : filtre par la recherche EditText. */
+        @SuppressWarnings("NotifyDataSetChanged")
+        fun replaceItems(newItems: List<Triple<String, String, String?>>) {
+            items.clear()
+            items.addAll(newItems)
+            notifyDataSetChanged()
+        }
 
         override fun onBindViewHolder(holder: VH, position: Int) {
             val (id, displayName, logoUrl) = items[position]
