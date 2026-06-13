@@ -605,6 +605,26 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             }
         }
 
+        // 2026-06-14 : toggle "Overlay Épisode suivant" (= désactiver pour
+        //   regarder le générique sans interruption).
+        findPreference<SwitchPreference>("SHOW_NEXT_EPISODE_OVERLAY")?.apply {
+            isChecked = UserPreferences.showNextEpisodeOverlay
+            setOnPreferenceChangeListener { _, newValue ->
+                UserPreferences.showNextEpisodeOverlay = newValue as Boolean
+                true
+            }
+        }
+
+        // 2026-06-13 (user "l'épisode next en automatique a tendance à sauter
+        //   les épisodes") : toggle saut auto épisode anime cassé.
+        findPreference<SwitchPreference>("ANIME_AUTO_SKIP_BROKEN")?.apply {
+            isChecked = UserPreferences.animeAutoSkipBroken
+            setOnPreferenceChangeListener { _, newValue ->
+                UserPreferences.animeAutoSkipBroken = newValue as Boolean
+                true
+            }
+        }
+
         // 2026-05-15 (user "éviter que les écrans mettre en veille") : toggle
         // pour garder l'écran allumé pendant la navigation app.
         findPreference<SwitchPreference>("KEEP_SCREEN_ON_APP")?.apply {
