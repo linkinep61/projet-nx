@@ -49,6 +49,14 @@ object LiveTvHubProvider : Provider, IptvProvider {
 
     private const val TAG = "LiveTvHubProvider"
 
+    /** 2026-06-13 (user "masque 3boxTv du TV hub, on va faire quelque chose") :
+     *  flip a `true` pour reafficher les sections "France TV - TF1+/Canal+/..."
+     *  issues de BoxXtemusProvider (= 3boxTv). Masque par defaut pour eviter la
+     *  duplication avec World Live qui propose deja ces chaines.
+     *  La pipeline BoxXtemus (getHome + capture LCI pour OTF) tourne toujours
+     *  meme si masquee — c'est juste l'AJOUT au hub qui est skip. */
+    private const val SHOW_BOXXTEMUS_IN_HUB: Boolean = false
+
     private val _additionalServersFlow = MutableSharedFlow<Video.Server>()
     override val additionalServersFlow: SharedFlow<Video.Server> = _additionalServersFlow.asSharedFlow()
 
@@ -669,7 +677,21 @@ object LiveTvHubProvider : Provider, IptvProvider {
                     }
                 } ?: emptyList()
                 if (rebadged.isNotEmpty()) {
-                    sections.add(Category(name = "France TV - ${cat.name}", list = rebadged))
+                    // 2026-06-13 (user "masque les sources 3boxTv du TV hub vu
+                    //   qu'elles sont deja dans World Live / on la retire pas
+                    //   car on va faire quelque chose") :
+                    //   on conserve TOUTE la pipeline BoxXtemus (= getHome,
+                    //   capture LCI lignes 634-650, rebadge, blacklist, filtre
+                    //   user) MAIS on n'AJOUTE PAS les sections au hub. Effet :
+                    //   "France TV - TF1+/Canal+/M6+/..." disparaissent du hub,
+                    //   pas de duplication avec World Live. LCI reste capturee
+                    //   pour OTF (= utilisee ligne 574 prepended.add(lciForOtf)).
+                    //   Pour reactiver l'affichage : flip SHOW_BOXXTEMUS_IN_HUB
+                    //   a true ci-dessous.
+                    @Suppress("ConstantConditionIf")
+                    if (SHOW_BOXXTEMUS_IN_HUB) {
+                        sections.add(Category(name = "France TV - ${cat.name}", list = rebadged))
+                    }
                 }
             }
         } catch (t: Throwable) {

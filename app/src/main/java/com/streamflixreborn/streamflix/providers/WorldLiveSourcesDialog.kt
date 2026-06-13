@@ -183,14 +183,24 @@ object WorldLiveSourcesDialog {
                         onChanged()
                     }
                     1 -> {
-                        val personIdx = indexInAll - WorldLiveSourcesStore.BUILTIN_SOURCES.size
-                        showEditDialog(context, personIdx, source, onChanged)
+                        // 2026-06-13 : meme fix que remove, on passe la source
+                        //   directement → showEditDialog retrouve son personIdx
+                        //   via name+url (robuste au masquage built-in).
+                        showEditDialog(context, source, onChanged)
                     }
                     2 -> {
-                        val personIdx = indexInAll - WorldLiveSourcesStore.BUILTIN_SOURCES.size
-                        WorldLiveSourcesStore.remove(context, personIdx)
-                        android.widget.Toast.makeText(context,
-                            "Supprimée : ${source.name}",
+                        // 2026-06-13 (user "j'arrive pas a supprimer la source
+                        //   box que j'ai mis tout a l'heure") : utilise la
+                        //   nouvelle methode removeAtAllIndex() qui prend
+                        //   l'indexInAll directement → robuste au masquage
+                        //   conditionnel des built-in (ex: 3boxTv masque).
+                        //   L'ancien calcul `indexInAll - BUILTIN_SOURCES.size`
+                        //   donnait un personIdx negatif quand un built-in
+                        //   etait masque, → remove() ignorait silencieusement.
+                        val ok = WorldLiveSourcesStore.removeAtAllIndex(context, indexInAll)
+                        val msg = if (ok) "Supprimée : ${source.name}"
+                            else "Impossible de supprimer ${source.name}"
+                        android.widget.Toast.makeText(context, msg,
                             android.widget.Toast.LENGTH_SHORT).show()
                         onChanged()
                     }
@@ -236,9 +246,20 @@ object WorldLiveSourcesDialog {
     }
 
     private fun showEditDialog(
-        context: Context, personIdx: Int, source: WorldLiveSourcesStore.Source,
+        context: Context, source: WorldLiveSourcesStore.Source,
         onChanged: () -> Unit,
     ) {
+        // 2026-06-13 : retrouve le personIdx en interne via name+url
+        // (= robuste au masquage built-in qui decale les indices visibles).
+        val personIdx = WorldLiveSourcesStore.list(context).indexOfFirst {
+            it.name == source.name && it.url == source.url
+        }
+        if (personIdx < 0) {
+            android.widget.Toast.makeText(context,
+                "Source introuvable (peut-etre un built-in non editable)",
+                android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
         val container = android.widget.LinearLayout(context).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(48, 24, 48, 24)
