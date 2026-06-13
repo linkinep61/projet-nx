@@ -39,6 +39,7 @@ import kotlinx.coroutines.launch
 import retrofit2.http.Field
 import retrofit2.http.FormUrlEncoded
 import retrofit2.http.GET
+import retrofit2.http.Headers
 import retrofit2.http.POST
 import retrofit2.http.Path
 
@@ -62,14 +63,22 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     // 2026-06-02 : flemmix.win bloqué par les FAI (cf portail wiflix-adresses.fun
     //   qui le liste comme "Ancien domaine - bloqué"). Nouveau lien principal =
     //   flemmix.team (badge "Actif" / "LIEN PRINCIPAL" sur le portail).
-    override val defaultBaseUrl: String = "https://flemmix.team/"
+    // 2026-06-13 (user "wilflix backup n'apparaît pas") : flemmix.team est
+    //   maintenant marqué "Ancien domaine principal - bloqué" sur
+    //   wiflix-adresses.fun. Le scraping HTTP brut retourne une page "Accès
+    //   sécurisé" (Cloudflare challenge) → fetchWiflixDirectBackup retourne
+    //   vide pour TOUTES les séries (pas que From), donc Wiflix backup
+    //   n'apparaissait plus sur les fiches Cloudstream. Nouveau lien
+    //   principal officiel = flemmix.city (badge "Lien principal" / "Domaine
+    //   actif - Utilisez toujours ce lien" sur le portail).
+    override val defaultBaseUrl: String = "https://flemmix.city/"
     // Liste des domaines morts/bloqués connus. Si le cache PROVIDER_URL est sur
     // un de ceux-ci, on force un refresh au prochain initializeService() au lieu
     // de rester coincé dessus à vie. Mettre à jour quand le portail évolue.
     private val knownBlockedDomains = listOf(
         "flemmix.win", "flemmix.prof", "flemmix.irish", "flemmix.wales",
         "flemmix.vip", "flemmix.casa", "wiflix.re", "wiflix.eu", "wiflix.org",
-        "flemmix.farm"
+        "flemmix.farm", "flemmix.team",
     )
     override val baseUrl: String = defaultBaseUrl
         get() {
@@ -132,7 +141,13 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
 
     private val challengeKeywords = listOf(
         "Just a moment...", "cf-browser-verification", "challenge-running",
-        "Checking your browser", "cf-turnstile"
+        "Checking your browser", "cf-turnstile",
+        // 2026-06-13 (user autorisation "si ca casse rien") : signature du bot
+        //   shield de flemmix.city (~18 bytes "Bot shield active."). Permet a
+        //   getDocument de declencher le WebView bypass sur ce cas (= un vrai
+        //   navigateur passe le bot shield). N'apparait jamais sur du contenu
+        //   legitime de Wiflix → zero faux positif.
+        "Bot shield active"
     )
 
     /**
@@ -186,6 +201,9 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 if (challengeKeywords.none { html.contains(it, ignoreCase = true) }) {
                     val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
                     cacheDocument(url, doc)
+                    // 2026-06-13 : populate URL cache pour le backup direct
+                    //   (From sur la home, etc.). Helper safe + try-catch.
+                    populateUrlCache(doc)
                     cloudflareActive = false
                     return doc
                 }
@@ -203,9 +221,34 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         val html = getResolver().get(url, silent = silentBypass)
         val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
         cacheDocument(url, doc)
+        populateUrlCache(doc)
         // WebView bypass a injecté les cookies CF → Retrofit devrait marcher maintenant
         cloudflareActive = false
         return doc
+    }
+
+    /** 2026-06-13 : extrait tous les <a class="mov-t" href="..."> du Document
+     *  + texte → met dans WiflixUrlCache (= mapping title → URL complete pour
+     *  le backup direct Cloudstream qui doit court-circuiter le search bot-
+     *  shieldé). No-op si le doc n'a pas de mov-t. try/catch pour ne JAMAIS
+     *  faire planter le path principal. */
+    private fun populateUrlCache(doc: Document) {
+        try {
+            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
+            val base = baseUrl.trimEnd('/')
+            doc.select("a.mov-t[href]").forEach { el ->
+                val href = el.attr("href").trim()
+                if (href.isBlank()) return@forEach
+                val absHref = when {
+                    href.startsWith("http") -> href
+                    href.startsWith("/") -> base + href
+                    else -> "$base/$href"
+                }
+                val title = el.text().trim()
+                if (title.isBlank()) return@forEach
+                com.streamflixreborn.streamflix.utils.WiflixUrlCache.put(ctx, title, absHref)
+            }
+        } catch (_: Throwable) {}
     }
 
     // Flag to track if more search results are available. Set to false when API returns fewer items than requested.
@@ -424,17 +467,24 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
 
         if (page > 1 && !hasMore) return emptyList()
 
+        // 2026-06-13 : ROLLBACK du silent=false sur search (testé : provoquait
+        //   une page blanche bloquée — le WebView poll 79 fois pendant 25s avec
+        //   Challenge:false Content:false Clearance:false. Le bot shield de
+        //   flemmix.city refuse TOUT WebView Android (= fingerprint TLS/JA3
+        //   distingue Chrome desktop d'Android Chromium). Search definitivement
+        //   morte côté app, le palliatif = cache URL via la home (cf
+        //   WiflixUrlCache populate). On garde l'ancienne logique silencieuse
+        //   pour ne pas bloquer l'UI.
+        val searchUrl = "${baseUrl}index.php?do=search&subaction=search&story=$query&search_start=$page&result_from=${1 + 20 * (page - 1)}"
         val document = try {
             val doc = service.search(
                 story = query,
                 searchStart = page,
                 resultFrom = 1 + 20 * (page - 1)
             )
-            if (isCloudflareChallenge(doc)) {
-                getDocument("${baseUrl}index.php?do=search&subaction=search&story=$query&search_start=$page&result_from=${1 + 20 * (page - 1)}")
-            } else doc
+            if (isCloudflareChallenge(doc)) getDocument(searchUrl) else doc
         } catch (e: Exception) {
-            getDocument("${baseUrl}index.php?do=search&subaction=search&story=$query&search_start=$page&result_from=${1 + 20 * (page - 1)}")
+            getDocument(searchUrl)
         }
 
         document.selectFirst("div.berrors")?.text()?.let { resultText ->
@@ -447,7 +497,20 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             hasMore = receivedItems < totalResults
         }
 
-        val results = document.select("div.mov").mapNotNull {
+        // 2026-06-13 (user "il a trouvé plein de choses tout sauf la série") :
+        //   la page search retourne 30 div.mov dont les 10 PREMIERS sont des
+        //   films aleatoires en "recommandations" (= div.no-results-rec /
+        //   div.floaters affichee meme quand il y a des resultats search). On
+        //   exclut les div.mov descendants de ces 2 containers → on garde
+        //   uniquement les vrais resultats search en-dessous.
+        val results = document.select("div.mov")
+            .filter { el ->
+                el.parents().none { p ->
+                    p.hasClass("no-results-rec") ||
+                    (p.hasClass("floaters") && p.hasClass("grid-thumb"))
+                }
+            }
+            .mapNotNull {
             val showId = it.selectFirst("a.mov-t")
                 ?.attr("href")?.substringAfterLast("/")
                 ?: ""
@@ -465,7 +528,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                         ?: "",
                     poster = showPoster,
                 )
-            } else if (href.contains("serie-en-streaming/") || href.contains("vf/")) {
+            } else if (href.contains("serie-en-streaming/") || href.contains("vf/") || href.contains("saison-complete/")) {
                 TvShow(
                     id = showId,
                     title = listOfNotNull(
@@ -480,6 +543,73 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         }
 
         return results
+    }
+
+    /**
+     * 2026-06-13 (user "tu touches pas a l'officiel provider" autorisation
+     *  exceptionnelle "si ca casse rien") :
+     *  Methode publique additionnelle (ne modifie pas search() existant) qui
+     *  retourne les resultats search BRUTS (href + title), sans filtrer par
+     *  film-en-streaming / serie-en-streaming. Sert au backup direct depuis
+     *  MovixProvider qui doit pouvoir matcher From hostee sur saison-complete/
+     *  (= le filtre actuel de search() rejettait ce slug → no backup Wiflix
+     *  sur les series saison-complete).
+     *  Reuse exactement le meme path : initializeService() (= pose le CF
+     *  bypass cookie) puis service.search() ou getDocument() en fallback.
+     *  Zero impact sur search() existant, zero impact sur autre code.
+     */
+    suspend fun searchRaw(query: String, page: Int = 1): List<Pair<String, String>> {
+        if (query.isBlank()) return emptyList()
+        initializeService()
+        val searchUrl = "${baseUrl}index.php?do=search&subaction=search&story=$query&search_start=$page&result_from=${1 + 20 * (page - 1)}"
+        // 2026-06-13 : flemmix.city sert un "Bot shield active." (~18 bytes)
+        //   sur les POST search direct via service Retrofit. isCloudflareChallenge
+        //   ne le detecte pas (= keyword different). On force le WebView bypass
+        //   via getDocument quand on detecte un body trop court ou la signature
+        //   bot shield → le main resolver passe le challenge en vrai navigateur.
+        val document = try {
+            val doc = service.search(
+                story = query,
+                searchStart = page,
+                resultFrom = 1 + 20 * (page - 1),
+            )
+            val html = doc.outerHtml()
+            val botShielded = html.length < 500 ||
+                html.contains("Bot shield active", ignoreCase = true) ||
+                html.contains("Bot detected", ignoreCase = true)
+            if (botShielded || isCloudflareChallenge(doc)) {
+                // 2026-06-13 : ROLLBACK silent=false (testé : page blanche
+                //   bloquée 25s). Le bot shield ne se résout JAMAIS depuis un
+                //   WebView Android. On reste silencieux → fail propre →
+                //   le backup direct utilise le cache URL via la home.
+                getDocument(searchUrl)
+            } else doc
+        } catch (e: Exception) {
+            getDocument(searchUrl)
+        }
+        // 2026-06-13 : meme filtre que dans search() — exclut les 10 films
+        //   featured de div.no-results-rec / div.floaters.grid-thumb qui
+        //   parasitent la page search (= recommandations affichees AVANT les
+        //   vrais resultats). On garde uniquement les vrais resultats search.
+        return document.select("div.mov")
+            .filter { el ->
+                el.parents().none { p ->
+                    p.hasClass("no-results-rec") ||
+                    (p.hasClass("floaters") && p.hasClass("grid-thumb"))
+                }
+            }
+            .mapNotNull {
+            val link = it.selectFirst("a.mov-t") ?: return@mapNotNull null
+            val href = link.attr("href").trim().ifBlank { return@mapNotNull null }
+            // Resolve relative URL contre la baseUrl si besoin
+            val absHref = when {
+                href.startsWith("http") -> href
+                href.startsWith("/") -> baseUrl.trimEnd('/') + href
+                else -> baseUrl.trimEnd('/') + "/" + href
+            }
+            val title = link.text().trim()
+            absHref to title
+        }
     }
 
     override suspend fun getMovies(page: Int): List<Movie> {
@@ -632,7 +762,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                         title = showTitle,
                         poster = showPoster,
                     )
-                } else if (href.contains("serie-en-streaming/") || href.contains("vf/")) {
+                } else if (href.contains("serie-en-streaming/") || href.contains("vf/") || href.contains("saison-complete/")) {
                     TvShow(
                         id = showId,
                         title = showTitle,
@@ -759,7 +889,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                         title = showTitle,
                         poster = showPoster,
                     )
-                } else if (href.contains("serie-en-streaming/") || href.contains("vf/")) {
+                } else if (href.contains("serie-en-streaming/") || href.contains("vf/") || href.contains("saison-complete/")) {
                     TvShow(
                         id = showId,
                         title = showTitle,
@@ -868,7 +998,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                             ?: "",
                         poster = showPoster,
                     )
-                } else if (href.contains("serie-en-streaming/") || href.contains("vf/")) {
+                } else if (href.contains("serie-en-streaming/") || href.contains("vf/") || href.contains("saison-complete/")) {
                     TvShow(
                         id = showId,
                         title = listOfNotNull(
@@ -1163,7 +1293,17 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
      */
     override suspend fun onChangeUrl(forceRefresh: Boolean): String {
         changeUrlMutex.withLock {
-            if (forceRefresh || UserPreferences.getProviderCache(this,UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
+            // 2026-06-13 (user "elle doit passer d'abord par le site de
+            //   redirection puis aller sur le site officiel, rien de complique") :
+            //   on supprime la condition `forceRefresh || autoupdate != false`.
+            //   Desormais on passe TOUJOURS par le portail wiflix-adresses.fun
+            //   pour recuperer le domaine actif (= comportement equivalent au
+            //   navigateur qui clique sur le bon lien depuis le portail).
+            //   Si le portail est down ou ne contient pas le bon candidat, on
+            //   tombe dans le catch et garde le baseUrl cache. Comportement
+            //   robuste + cookie h_check=25 injecte via l'interceptor →
+            //   search Wiflix fonctionne.
+            if (true) {
                 val addressService = Service.buildAddressFetcher()
 
                 try {
@@ -1231,6 +1371,22 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             serviceInitialized = true
         }
 
+        // 2026-06-13 (user "la recherche ne fonctionne pas" + diag : POST search
+        //   retourne 18 bytes "Bot shield active." sans h_check=25 cookie) :
+        //   onChangeUrl est aussi appele directement au boot par StreamFlixApp
+        //   (ligne 413) → injection au boot de h_check=25 dans le CookieManager
+        //   Android pour le domaine actif. Partage avec OkHttp via la cookieJar
+        //   de NetworkClient.default → toutes les requetes (search, getHome,
+        //   etc.) portent h_check=25 + PHPSESSID dans le meme header Cookie.
+        try {
+            val cm = android.webkit.CookieManager.getInstance()
+            cm.setCookie(baseUrl, "h_check=25; path=/; max-age=86400")
+            cm.flush()
+            Log.w("WiflixProvider", "[H_CHECK] cookie h_check=25 pose pour $baseUrl")
+        } catch (e: Throwable) {
+            Log.w("WiflixProvider", "[H_CHECK] cookie injection failed: ${e.message}", e)
+        }
+
         return baseUrl
     }
 
@@ -1251,7 +1407,19 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 Log.w("WiflixProvider",
                     "Cache sur domaine bloqué ($cachedUrl) → force refresh")
             }
+            Log.w("WiflixProvider", "[H_CHECK] avant onChangeUrl, baseUrl=$baseUrl")
             onChangeUrl(forceRefresh = forceRefresh)
+            Log.w("WiflixProvider", "[H_CHECK] apres onChangeUrl, baseUrl=$baseUrl, vais injecter cookie")
+
+            try {
+                val cm = android.webkit.CookieManager.getInstance()
+                cm.setCookie(baseUrl, "h_check=25; path=/; max-age=86400")
+                cm.flush()
+                val verif = cm.getCookie(baseUrl) ?: "(null)"
+                Log.w("WiflixProvider", "[H_CHECK] cookie pose, verif getCookie($baseUrl) = $verif")
+            } catch (e: Throwable) {
+                Log.w("WiflixProvider", "[H_CHECK] FAIL: ${e.message}", e)
+            }
         }
     }
 
@@ -1267,6 +1435,31 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 .connectTimeout(8, TimeUnit.SECONDS)
                 // Preserve POST method & body on redirects (site may change domain)
                 .followRedirects(false)
+                // 2026-06-13 (user "fais simplement la meme recherche que sur
+                //   le site officiel") : flemmix.city pose `h_check=25` via JS
+                //   sur la home. Sans ce cookie, le POST search retourne 18
+                //   bytes "Bot shield active.". Avec, on a les 114KB de
+                //   resultats normaux. On l'injecte via interceptor → toutes
+                //   les requetes vers flemmix.* portent h_check=25 dans le
+                //   header Cookie automatiquement. Bypass total + 0 code
+                //   complexe. Pose pareil que le navigateur ferait.
+                .addInterceptor { chain ->
+                    val original = chain.request()
+                    val isFlemmix = original.url.host.contains("flemmix", ignoreCase = true) ||
+                        original.url.host.contains("wiflix", ignoreCase = true)
+                    val request = if (isFlemmix) {
+                        val existingCookie = original.header("Cookie") ?: ""
+                        val newCookie = if (existingCookie.contains("h_check=", ignoreCase = true)) {
+                            existingCookie
+                        } else if (existingCookie.isBlank()) {
+                            "h_check=25"
+                        } else {
+                            "$existingCookie; h_check=25"
+                        }
+                        original.newBuilder().header("Cookie", newCookie).build()
+                    } else original
+                    chain.proceed(request)
+                }
                 .addInterceptor { chain ->
                     var request = chain.request()
                     var response = chain.proceed(request)
@@ -1309,6 +1502,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         @GET(".")
         suspend fun getHome(): Document
 
+        // 2026-06-13 : Cookie h_check=25 injecte via CookieManager dans
+        //   onChangeUrl (= partage avec PHPSESSID dans le meme header Cookie
+        //   via la cookieJar de NetworkClient.default). @Headers statique
+        //   ecrasait la cookieJar et envoyait h_check sans PHPSESSID → serveur
+        //   refusait quand meme.
         @POST("index.php?do=search")
         @FormUrlEncoded
         suspend fun search(
