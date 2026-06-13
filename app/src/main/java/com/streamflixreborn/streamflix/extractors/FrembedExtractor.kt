@@ -28,6 +28,18 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
     override var mainUrl = newUrl.ifBlank { defaultUrl }
 
     data class listLinks (
+        // 2026-06-13 (user "il y a quelques serveurs qui ne marchent pas,
+        //   regarde si ils n'ont pas mis de nouveaux serveurs") :
+        //   Frembed API retourne pour les series un champ `link` (sans
+        //   suffixe = serveur "principal" / alias VF). C'etait ignore par
+        //   l'app → 1 serveur perdu sur chaque episode de serie. On l'ajoute
+        //   en tete (= position 0 dans toServers, donc le 1er apparait).
+        //   Pareil pour link_vostfr et link_vo qui existent aussi sur certaines
+        //   fiches. Annotation @SerializedName car Kotlin convertit
+        //   underscore en camelCase par defaut.
+        val link: String?=null,
+        @com.google.gson.annotations.SerializedName("link_vostfr") val linkMainVostfr: String?=null,
+        @com.google.gson.annotations.SerializedName("link_vo") val linkMainVo: String?=null,
         val link1: String?=null,
         val link2: String?=null,
         val link3: String?=null,
@@ -70,13 +82,17 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
     }
 
     fun listLinks.toServers(): List<Video.Server> {
-        return listOf(link1, link2, link3, link4, link5, link6, link7,
-                                         link1vostfr, link2vostfr, link3vostfr, link4vostfr, link5vostfr, link6vostfr, link7vostfr,
-                                         link1vo, link2vo, link3vo, link4vo, link5vo, link6vo, link7vo)
+        // 2026-06-13 : `link`, `link_vostfr`, `link_vo` ajoutes en TETE de chaque
+        //   bloc langue. Pour From S2E5 par exemple : link (VF) + link1-7 (VF)
+        //   + link_vostfr (VOSTFR) + link1-7 vostfr + link_vo (VO) + link1-7 vo
+        //   = jusqu'a 24 sources possibles au lieu de 21.
+        return listOf(link, link1, link2, link3, link4, link5, link6, link7,
+                      linkMainVostfr, link1vostfr, link2vostfr, link3vostfr, link4vostfr, link5vostfr, link6vostfr, link7vostfr,
+                      linkMainVo, link1vo, link2vo, link3vo, link4vo, link5vo, link6vo, link7vo)
             .mapIndexedNotNull { index, data ->
                 if (data.isNullOrEmpty()) return@mapIndexedNotNull null
-                val lang = when { index < 7 -> "French"
-                                  index < 14 -> "VOSTFR"
+                val lang = when { index < 8 -> "French"
+                                  index < 16 -> "VOSTFR"
                                   else -> "VO" }
                 (if (data.startsWith("/")) mainUrl.removeSuffix("/") + data else data).let {
                     Video.Server(id = "link$index", name = "${getExtractorName(it)} ($lang)", src = it)

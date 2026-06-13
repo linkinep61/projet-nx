@@ -284,6 +284,23 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
     }
 
     private suspend fun httpGet(url: String): String? {
+        // 2026-06-13 (user "la recherche dessin animé provider ne fonctionne
+        //   pas" + diag log : WebView silent retourne 33 chars sur /api/search,
+        //   puis API shortcut retourne 1545 chars mais "search parse failed:
+        //   ..." = signature GZIP not decoded) :
+        //   Pour les endpoints `/api/...`, on shortcut OkHttp direct ET on
+        //   force la decompression GZIP côté lecture (= httpGetRaw envoie
+        //   Accept-Encoding: gzip manuellement, donc OkHttp ne decompresse
+        //   pas auto). On fait un GET dedie sans Accept-Encoding → OkHttp
+        //   gere transparent.
+        if (url.contains("/api/")) {
+            val direct = httpGetApi(url)
+            if (!direct.isNullOrBlank() && direct.length > 20) {
+                Log.d(TAG, "httpGet API shortcut OkHttp pour $url (${direct.length} chars)")
+                return direct
+            }
+            Log.w(TAG, "httpGet API shortcut OkHttp echec pour $url, fallback path classique")
+        }
         // Cache hit RAM ?
         pageCache[url]?.let { cached ->
             if (System.currentTimeMillis() - cached.ts < PAGE_CACHE_TTL_MS) return cached.html
@@ -417,6 +434,31 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                 .getSharedPreferences(PREF_CF_BYPASS, android.content.Context.MODE_PRIVATE)
                 .edit().remove(KEY_CF_BYPASS_TS).apply()
         } catch (_: Throwable) {}
+    }
+
+    /** 2026-06-13 : GET dedie aux endpoints `/api/...` (= JSON pur, pas de CF
+     *  challenge). Sans header Accept-Encoding manuel → OkHttp gere auto la
+     *  decompression GZIP. Pas de Sec-Fetch headers (= eviter le filtrage
+     *  "navigation" sur un endpoint API). */
+    private suspend fun httpGetApi(url: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", UA)
+                .header("Referer", baseUrl)
+                .header("Accept", "application/json, text/plain, */*")
+                .header("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "GET API $url → ${resp.code}")
+                    null
+                } else resp.body?.string()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "GET API $url failed: ${e.message}")
+            null
+        }
     }
 
     /** GET OkHttp brut, sans bypass. Helper interne pour httpGet. */
