@@ -301,21 +301,44 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
             }
             Log.w(TAG, "httpGet API shortcut OkHttp echec pour $url, fallback path classique")
         }
+        // 2026-06-13 (user "DessinAnime aucun chargement page vide") :
+        //   helper soft-block detection. CF/Clerk sert un HTML d'attente
+        //   (shell Next.js 28-32 KB sans données) sans challenge keyword →
+        //   on l'acceptait à tort dans le cache. Si ce soft block est
+        //   cached sur disque (TTL 1h-24h), DessinAnime reste cassé tout
+        //   ce temps. On vérifie les markers du contenu pour invalider
+        //   le cache si nécessaire.
+        fun hasValidContent(html: String): Boolean {
+            if (html.length < 500) return false
+            if (!html.contains("_next/static/chunks/")) return false
+            return html.contains("article") ||
+                html.contains("href=\"/movie/") ||
+                html.contains("href=\"/tv/") ||
+                html.contains("__NEXT_DATA__")
+        }
+
         // Cache hit RAM ?
         pageCache[url]?.let { cached ->
-            if (System.currentTimeMillis() - cached.ts < PAGE_CACHE_TTL_MS) return cached.html
+            if (System.currentTimeMillis() - cached.ts < PAGE_CACHE_TTL_MS) {
+                if (hasValidContent(cached.html)) return cached.html
+                Log.w(TAG, "httpGet $url : cache RAM SOFT BLOCK (${cached.html.length} chars) → invalide")
+                pageCache.remove(url)
+            }
         }
         // 2026-06-09 v2 : cache DISK ? (persiste entre sessions)
-        // 2026-06-09 v3 (user "j'ai l'impression que l'app subit des crashes" —
-        //   VmPeak 1.9 GB / OOM-kill sur Chromecast 2 GB) : refresh background
-        //   RETIRÉ. À chaque hit disque on lançait UNE WebView (~100-200 MB
-        //   chacune) → 8 cards home = 8 WebViews // = OOM-kill. Le TTL disque
-        //   suffit à rafraîchir naturellement, ou la prochaine visite forcera
-        //   le re-fetch si le HTML est devenu obsolète.
         loadPageFromDisk(url)?.let { diskHtml ->
-            Log.d(TAG, "httpGet $url : cache HIT disque (${diskHtml.length} chars)")
-            pageCache[url] = CachedHtml(diskHtml, System.currentTimeMillis())
-            return diskHtml
+            if (hasValidContent(diskHtml)) {
+                Log.d(TAG, "httpGet $url : cache HIT disque (${diskHtml.length} chars)")
+                pageCache[url] = CachedHtml(diskHtml, System.currentTimeMillis())
+                return diskHtml
+            }
+            // Cache disque pollué par du soft block → invalide + continue
+            //   vers le fetch HTTP + bypass CF.
+            Log.w(TAG, "httpGet $url : cache DISQUE SOFT BLOCK (${diskHtml.length} chars) → invalide + re-fetch")
+            try {
+                val prefs = StreamFlixApp.instance.getSharedPreferences(PREF_PAGE_CACHE, android.content.Context.MODE_PRIVATE)
+                prefs.edit().remove("ts_$url").remove("html_$url").apply()
+            } catch (_: Throwable) {}
         }
 
         // 2026-06-09 : si le bypass CF a déjà été fait, on SKIP OkHttp direct
@@ -327,12 +350,25 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
             val firstTry = httpGetRaw(url)
             if (firstTry != null) {
                 val isChallenge = challengeKeywords.any { firstTry.contains(it, ignoreCase = true) }
-                if (!isChallenge && firstTry.length > 500) {
+                // 2026-06-13 (user "DessinAnime ne fonctionne pas aucun
+                //   chargement sur mobile") : détection du soft block CF/Clerk.
+                //   Avant, on acceptait toute page sans challenge keyword qui
+                //   faisait >500 chars. Mais CF/Clerk sert un HTML d'attente
+                //   (= shell Next.js sans données) qui ne contient pas de
+                //   challenge keyword → on l'acceptait à tort et le parsing
+                //   retournait 0 items. Maintenant on vérifie aussi la
+                //   présence de markers du contenu (_next/static/chunks =
+                //   le bundle SPA, article/film/série dans le HTML). Si
+                //   absent → considéré comme soft block → bypass visible.
+                val hasContentMarkers = firstTry.contains("_next/static/chunks/") &&
+                    (firstTry.contains("article") || firstTry.contains("href=\"/movie/") ||
+                     firstTry.contains("href=\"/tv/") || firstTry.contains("__NEXT_DATA__"))
+                if (!isChallenge && firstTry.length > 500 && hasContentMarkers) {
                     pageCache[url] = CachedHtml(firstTry, System.currentTimeMillis())
                     savePageToDisk(url, firstTry)
                     return firstTry
                 }
-                Log.d(TAG, "CF challenge détecté sur $url → bypass visible")
+                Log.d(TAG, "CF challenge ou soft block détecté sur $url (isChallenge=$isChallenge, hasContent=$hasContentMarkers, len=${firstTry.length}) → bypass visible")
             }
             // 2) Bypass CF visible (une seule fois — l'user complète le Turnstile).
             ensureCfBypassed()
