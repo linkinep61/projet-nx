@@ -19,6 +19,22 @@
         app:layout_constraintTop_toTopOf="parent"
         tools:ignore="ContentDescription" />
 
+    <!-- 2026-06-13 (Favorite Providers, porté upstream v1.7.224) :
+         étoile en overlay top-right du logo. Visible si le provider est
+         dans la liste UserPreferences.favoriteProviders. -->
+    <ImageView
+        android:id="@+id/iv_favorite_star"
+        android:layout_width="22dp"
+        android:layout_height="22dp"
+        android:layout_marginTop="4dp"
+        android:layout_marginEnd="4dp"
+        android:contentDescription="Favori"
+        android:src="@drawable/ic_star"
+        android:visibility="gone"
+        app:tint="#FFD700"
+        app:layout_constraintEnd_toEndOf="@id/iv_provider_logo"
+        app:layout_constraintTop_toTopOf="@id/iv_provider_logo" />
+
     <TextView
         android:id="@+id/tv_provider_name"
         android:layout_width="0dp"

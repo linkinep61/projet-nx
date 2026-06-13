@@ -347,7 +347,10 @@ class ProvidersTvFragment : Fragment() {
             val group = if (provider != null) Provider.providers[provider]?.group else null
             group == targetGroup
         }
-        appAdapter.submitList(filtered.onEach {
+        // 2026-06-13 (Favorite Providers) : trie les favoris EN TÊTE.
+        val favorites = UserPreferences.favoriteProviders
+        val sorted = filtered.sortedByDescending { favorites.contains(it.name) }
+        appAdapter.submitList(sorted.onEach {
             it.itemType = AppAdapter.Type.PROVIDER_TV_ITEM
         })
         binding.rvProviders.requestFocus()

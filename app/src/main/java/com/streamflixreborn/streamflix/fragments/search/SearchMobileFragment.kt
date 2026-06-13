@@ -141,6 +141,19 @@ class SearchMobileFragment : Fragment() {
         _binding = null
     }
 
+    /** 2026-06-13 : retourne le bon hint selon le type de provider courant.
+     *   - IptvProvider → "Rechercher des chaînes"
+     *   - Autres → "Rechercher des films, séries TV"
+     *  (porté depuis upstream v1.7.220 — search_input_hint_iptv) */
+    private fun getSearchHintRes(): Int {
+        val current = UserPreferences.currentProvider
+        return if (current is com.streamflixreborn.streamflix.providers.IptvProvider) {
+            R.string.search_input_hint_iptv
+        } else {
+            R.string.search_input_hint
+        }
+    }
+
     private fun executeSearch(query: String) {
         if (query.isBlank()) {
             Toast.makeText(requireContext(), getString(R.string.search_empty_query), Toast.LENGTH_SHORT).show()
@@ -195,6 +208,9 @@ class SearchMobileFragment : Fragment() {
             UserPreferences.isGlobalSearchEnabled = isChecked
         }
 
+        // 2026-06-13 : hint dynamique selon provider courant (IPTV vs VOD).
+        binding.etSearch.hint = getString(getSearchHintRes())
+
         // Historique de recherche (bouton → dialog)
         binding.btnSearchHistory.setOnClickListener { showHistoryDialog() }
 
@@ -210,7 +226,7 @@ class SearchMobileFragment : Fragment() {
             addTextChangedListener(object : TextWatcher {
                 override fun afterTextChanged(s: Editable?) {
                     if(s.isNullOrBlank()){
-                        binding.etSearch.hint = getString(R.string.search_input_hint)
+                        binding.etSearch.hint = getString(getSearchHintRes())
                     }
                 }
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -234,7 +250,7 @@ class SearchMobileFragment : Fragment() {
             onError = { msg ->
                 Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show()
                 binding.btnSearchVoice.clearAnimation()
-                binding.etSearch.hint = getString(R.string.search_input_hint)
+                binding.etSearch.hint = getString(getSearchHintRes())
             },
             onListeningStateChanged = { isListening ->
                 binding.btnSearchVoice.startAnimation(blink)
@@ -256,7 +272,7 @@ class SearchMobileFragment : Fragment() {
 
         binding.btnSearchClear.setOnClickListener {
             binding.etSearch.setText("")
-            binding.etSearch.hint = getString(R.string.search_input_hint)
+            binding.etSearch.hint = getString(getSearchHintRes())
             viewModel.search("")
         }
 

@@ -955,8 +955,17 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                 categories.add(Category(name = Category.FEATURED, list = featuredItems))
             }
 
+            // 2026-06-13 (user "le home Movix ne se met pas à jour, j'ai
+            //   l'impression de voir tout le temps la même chose") : pages
+            //   TMDB randomisées entre 1 et 5 pour chaque section. Cache 5 min,
+            //   donc à chaque expiration on voit des titres différents.
+            val pagePopularTv = (1..5).random()
+            val pageTopTv = (1..5).random()
+            val pagePopularMovies = (1..5).random()
+            val pageTopMovies = (1..5).random()
+
             // Séries récentes en premier
-            val popularTv = tmdbService.discoverTvShows(apiKey = TMDB_API_KEY, sortBy = "popularity.desc", withOriginalLanguage = movixCatalogOriginalLanguage())
+            val popularTv = tmdbService.discoverTvShows(apiKey = TMDB_API_KEY, page = pagePopularTv, sortBy = "popularity.desc", withOriginalLanguage = movixCatalogOriginalLanguage())
             val tvItems = popularTv.results?.map { item ->
                 TvShow(
                     id = item.id.toString(),
@@ -972,7 +981,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             }
 
             // Top rated TV
-            val topTv = tmdbService.discoverTvShows(apiKey = TMDB_API_KEY, sortBy = "vote_average.desc", withOriginalLanguage = movixCatalogOriginalLanguage(), voteCountGte = 200)
+            val topTv = tmdbService.discoverTvShows(apiKey = TMDB_API_KEY, page = pageTopTv, sortBy = "vote_average.desc", withOriginalLanguage = movixCatalogOriginalLanguage(), voteCountGte = 200)
             val topTvItems = topTv.results?.map { item ->
                 TvShow(
                     id = item.id.toString(),
@@ -988,7 +997,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             }
 
             // Puis les films
-            val popularMovies = tmdbService.discoverMovies(apiKey = TMDB_API_KEY, sortBy = "popularity.desc", withOriginalLanguage = movixCatalogOriginalLanguage())
+            val popularMovies = tmdbService.discoverMovies(apiKey = TMDB_API_KEY, page = pagePopularMovies, sortBy = "popularity.desc", withOriginalLanguage = movixCatalogOriginalLanguage())
             val movieItems = popularMovies.results?.map { item ->
                 Movie(
                     id = item.id.toString(),
@@ -1004,7 +1013,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             }
 
             // Top rated movies
-            val topMovies = tmdbService.discoverMovies(apiKey = TMDB_API_KEY, sortBy = "vote_average.desc", withOriginalLanguage = movixCatalogOriginalLanguage(), voteCountGte = 200)
+            val topMovies = tmdbService.discoverMovies(apiKey = TMDB_API_KEY, page = pageTopMovies, sortBy = "vote_average.desc", withOriginalLanguage = movixCatalogOriginalLanguage(), voteCountGte = 200)
             val topMovieItems = topMovies.results?.map { item ->
                 Movie(
                     id = item.id.toString(),

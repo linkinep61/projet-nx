@@ -28,6 +28,7 @@
     <string name="app_layout_apply">Apply</string>
 
     <string name="providers_all_languages">All languages</string>
+    <string name="providers_favorites">★ Favorites</string>
     <string name="providers_choose_title">Choose a provider</string>
 
     <string name="main_menu_change_provider">Change provider</string>
@@ -55,6 +56,7 @@
     <string name="theme_retro_neon">Retro Neon</string>
 
     <string name="search_input_hint">Search movies, TV shows</string>
+    <string name="search_input_hint_iptv">Search channels</string>
     <string name="search_no_results">Aucun résultat trouvé</string>
     <string name="global_search">Global search</string>
     <string name="global_search_films">Global search movies &amp; TV shows</string>

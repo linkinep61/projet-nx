@@ -354,7 +354,11 @@ class ProvidersMobileFragment : Fragment() {
             val group = if (provider != null) Provider.providers[provider]?.group else null
             group == targetGroup
         }
-        appAdapter.submitList(filtered.onEach {
+        // 2026-06-13 (Favorite Providers) : trie les favoris EN TÊTE de la
+        //   liste. L'user voit ses providers préférés en 1er sans rien toggler.
+        val favorites = UserPreferences.favoriteProviders
+        val sorted = filtered.sortedByDescending { favorites.contains(it.name) }
+        appAdapter.submitList(sorted.onEach {
             it.itemType = AppAdapter.Type.PROVIDER_MOBILE_ITEM
         })
     }

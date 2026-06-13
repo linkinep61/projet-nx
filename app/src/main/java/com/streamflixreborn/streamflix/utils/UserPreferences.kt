@@ -291,6 +291,42 @@ object UserPreferences {
             Key.ANIME_AUTO_SKIP_BROKEN.setBoolean(value)
         }
 
+    /** 2026-06-13 (porté upstream v1.7.224 Favorite Providers) :
+     *  Liste des noms de providers favoris (= long-press sur leur logo).
+     *  Stocké comme Set<String> de noms. Utilisé pour :
+     *   - Afficher une étoile en overlay sur la tuile du provider
+     *   - Filtrer "Favoris" dans le dropdown langue providers. */
+    var favoriteProviders: Set<String>
+        get() = Key.FAVORITE_PROVIDERS.getStringSet() ?: emptySet()
+        set(value) {
+            Key.FAVORITE_PROVIDERS.setStringSet(value)
+        }
+
+    /** Toggle un provider dans la liste des favoris. Renvoie true si ajouté,
+     *  false si retiré. */
+    fun toggleFavoriteProvider(name: String): Boolean {
+        val current = favoriteProviders.toMutableSet()
+        val isNowFavorite = if (current.contains(name)) {
+            current.remove(name)
+            false
+        } else {
+            current.add(name)
+            true
+        }
+        favoriteProviders = current
+        return isNowFavorite
+    }
+
+    fun isFavoriteProvider(name: String): Boolean = favoriteProviders.contains(name)
+
+    /** 2026-06-13 (Favorite Providers) : si true, l'écran providers affiche
+     *  uniquement les providers favoris (= filtre "Favoris" du dropdown). */
+    var providerShowFavoritesOnly: Boolean
+        get() = Key.PROVIDER_SHOW_FAVORITES_ONLY.getBoolean() ?: false
+        set(value) {
+            Key.PROVIDER_SHOW_FAVORITES_ONLY.setBoolean(value)
+        }
+
     /** 2026-06-09 (user "tu coches actives tout tu la décoches désactive tous") :
      *  toggle global "carrousel comme fond d'écran". Si false, updateBackground
      *  et pinBackground ne touchent plus à ivHomeBackground → le fond du
@@ -738,6 +774,8 @@ object UserPreferences {
         KEEP_SCREEN_ON_WHEN_PAUSED,
         SHOW_NEXT_EPISODE_OVERLAY,
         ANIME_AUTO_SKIP_BROKEN,
+        FAVORITE_PROVIDERS,
+        PROVIDER_SHOW_FAVORITES_ONLY,
         CAROUSEL_AS_BACKGROUND,
         SIDEBAR_OPACITY,
         KEEP_SCREEN_ON_APP,
@@ -831,6 +869,19 @@ object UserPreferences {
         fun setString(value: String?) = value?.let {
             with(prefs.edit()) {
                 putString(name, value)
+                apply()
+            }
+        } ?: remove()
+
+        /** 2026-06-13 (Favorite Providers) : Set<String> persistance. */
+        fun getStringSet(): Set<String>? = when {
+            prefs.contains(name) -> prefs.getStringSet(name, emptySet())
+            else -> null
+        }
+
+        fun setStringSet(value: Set<String>?) = value?.let {
+            with(prefs.edit()) {
+                putStringSet(name, value)
                 apply()
             }
         } ?: remove()
