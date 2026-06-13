@@ -514,7 +514,15 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
             is Video.Type.Movie -> "$tmdbId"
             is Video.Type.Episode -> "$tmdbId-s${videoType.season.number}e${videoType.number}"
         }
+        // 2026-06-13 (user "le patch FS Voe HD pollue tous les autres providers,
+        //   je viens de voir sur Frembed exactement le meme probleme que sur
+        //   Cloudstream") : meme filtre que CloudstreamProvider.fetchMovixBackupForCs.
+        //   L'endpoint Movix /api/fstream/tv/<tmdbId>/season/<N> retourne des
+        //   sources labellisees "FS · X (VF - HD)" qui jouent frequemment du
+        //   mauvais contenu (= URLs d'autres shows). On les ecarte ici quand
+        //   Movix est appele EN BACKUP par Frembed.
         MovixProvider.getServersAsBackup(movixId, movixVideoType)
+            .filter { !it.id.startsWith("fstream-") }
             .map { srv -> srv.copy(id = "movix_backup__${srv.id}") }
     }.getOrNull().orEmpty()
 
@@ -530,6 +538,11 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
             .map { srv -> srv.copy(id = "cs_backup__${srv.id}", name = "Cloudstream — ${srv.name}") }
     }.getOrNull().orEmpty()
 
+    /** 2026-06-13 (user "désactiver tous les backups Frembed pour test
+     *  natif" → "réactive les backup") : backups Movix + Cloudstream
+     *  ré-activés après validation que le natif marche. */
+    private val ENABLE_BACKUPS: Boolean = true
+
     override fun getServersProgressive(
         id: String, videoType: Video.Type,
     ): Flow<List<Video.Server>> = channelFlow {
@@ -540,16 +553,18 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
                 if (native.isNotEmpty()) send(native)
             } catch (e: Exception) { Log.w("Frembed", "Progressive native failed: ${e.message}") }
         }
-        // Backups : après résolution tmdbId, lancés en parallèle.
-        launch {
-            val tid = resolveFrembedTmdbId(videoType) ?: return@launch
+        // Backups : désactivés tant que ENABLE_BACKUPS=false (= test natif).
+        if (ENABLE_BACKUPS) {
             launch {
-                try { val mx = fetchFrembedMovixBackup(tid, videoType); if (mx.isNotEmpty()) send(mx) }
-                catch (e: Exception) { Log.w("Frembed", "Progressive Movix failed: ${e.message}") }
-            }
-            launch {
-                try { val cs = fetchFrembedCloudstreamBackup(tid, videoType); if (cs.isNotEmpty()) send(cs) }
-                catch (e: Exception) { Log.w("Frembed", "Progressive CS failed: ${e.message}") }
+                val tid = resolveFrembedTmdbId(videoType) ?: return@launch
+                launch {
+                    try { val mx = fetchFrembedMovixBackup(tid, videoType); if (mx.isNotEmpty()) send(mx) }
+                    catch (e: Exception) { Log.w("Frembed", "Progressive Movix failed: ${e.message}") }
+                }
+                launch {
+                    try { val cs = fetchFrembedCloudstreamBackup(tid, videoType); if (cs.isNotEmpty()) send(cs) }
+                    catch (e: Exception) { Log.w("Frembed", "Progressive CS failed: ${e.message}") }
+                }
             }
         }
     }
