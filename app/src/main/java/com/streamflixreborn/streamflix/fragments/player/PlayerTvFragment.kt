@@ -2287,10 +2287,17 @@ class PlayerTvFragment : Fragment() {
         private data class ChannelItem(val id: String, val name: String, val logo: String?)
 
         private inner class ChannelListAdapter(
-            private val items: List<ChannelItem>,
+            private val items: MutableList<ChannelItem>,
             private val currentId: String,
             private val onChannelSelected: (ChannelItem) -> Unit
         ) : androidx.recyclerview.widget.RecyclerView.Adapter<ChannelListAdapter.VH>() {
+
+            /** 2026-06-13 : permet de filtrer dynamiquement (= recherche). */
+            fun replaceItems(newItems: List<ChannelItem>) {
+                items.clear()
+                items.addAll(newItems)
+                notifyDataSetChanged()
+            }
 
             inner class VH(val view: android.view.View) : androidx.recyclerview.widget.RecyclerView.ViewHolder(view) {
                 val logo: android.widget.ImageView = view.findViewById(R.id.iv_channel_logo)
@@ -2336,30 +2343,59 @@ class PlayerTvFragment : Fragment() {
         private var channelListFocusedPosition = 0
 
         private var channelListItems: List<ChannelItem> = emptyList()
+        /** 2026-06-13 : liste COMPLÈTE (avant filtre recherche). */
+        private var channelListItemsAll: List<ChannelItem> = emptyList()
+
+        /** 2026-06-13 : zone de focus actuelle dans le panel TV.
+         *  0 = bouton Retour (en haut), 1 = barre de recherche, 2 = liste des chaînes. */
+        private var channelListFocusZone: Int = 2
 
         private fun setupChannelListPanel() {
             binding.pvPlayer.onChannelListRequested = {
                 if (channelListVisible) hideChannelListPanel() else showChannelListPanel()
             }
-            // Callbacks globaux — MainTvActivity les appelle directement
+            // 2026-06-13 : callbacks zone-aware (= 0=Retour, 1=Search, 2=Liste).
+            //   MainTvActivity les invoque, et nous on route selon focusZone.
             com.streamflixreborn.streamflix.utils.ChannelListState.onOkPressed = {
                 val provider = UserPreferences.currentProvider
-                if (channelListItems.isNotEmpty() && channelListFocusedPosition in channelListItems.indices && provider != null) {
-                    val item = channelListItems[channelListFocusedPosition]
-                    reopenChannelListAfterNavigation = true
-                    navigateToChannel(item.id, provider)
+                when (channelListFocusZone) {
+                    0 -> hideChannelListPanel()
+                    1 -> { /* OK sur EditText : pas d'action particulière */ }
+                    else -> {
+                        if (channelListItems.isNotEmpty() && channelListFocusedPosition in channelListItems.indices && provider != null) {
+                            val item = channelListItems[channelListFocusedPosition]
+                            reopenChannelListAfterNavigation = true
+                            navigateToChannel(item.id, provider)
+                        }
+                    }
                 }
             }
             com.streamflixreborn.streamflix.utils.ChannelListState.onUpPressed = {
-                if (channelListItems.isNotEmpty()) {
-                    channelListFocusedPosition = (channelListFocusedPosition - 1).coerceAtLeast(0)
-                    updateChannelListHighlight()
+                when (channelListFocusZone) {
+                    0 -> { /* déjà tout en haut */ }
+                    1 -> { channelListFocusZone = 0; com.streamflixreborn.streamflix.utils.ChannelListState.focusZone = 0; applyChannelListFocus() }
+                    else -> {
+                        if (channelListFocusedPosition <= 0) {
+                            channelListFocusZone = 1
+                            com.streamflixreborn.streamflix.utils.ChannelListState.focusZone = 1
+                            applyChannelListFocus()
+                        } else if (channelListItems.isNotEmpty()) {
+                            channelListFocusedPosition = (channelListFocusedPosition - 1).coerceAtLeast(0)
+                            updateChannelListHighlight()
+                        }
+                    }
                 }
             }
             com.streamflixreborn.streamflix.utils.ChannelListState.onDownPressed = {
-                if (channelListItems.isNotEmpty()) {
-                    channelListFocusedPosition = (channelListFocusedPosition + 1).coerceAtMost(channelListItems.size - 1)
-                    updateChannelListHighlight()
+                when (channelListFocusZone) {
+                    0 -> { channelListFocusZone = 1; com.streamflixreborn.streamflix.utils.ChannelListState.focusZone = 1; applyChannelListFocus() }
+                    1 -> { channelListFocusZone = 2; com.streamflixreborn.streamflix.utils.ChannelListState.focusZone = 2; applyChannelListFocus() }
+                    else -> {
+                        if (channelListItems.isNotEmpty()) {
+                            channelListFocusedPosition = (channelListFocusedPosition + 1).coerceAtMost(channelListItems.size - 1)
+                            updateChannelListHighlight()
+                        }
+                    }
                 }
             }
             com.streamflixreborn.streamflix.utils.ChannelListState.onCloseRequested = {
@@ -2375,39 +2411,134 @@ class PlayerTvFragment : Fragment() {
             if (!channelListVisible) return false
             val provider = UserPreferences.currentProvider ?: return false
 
-            when (keyCode) {
-                android.view.KeyEvent.KEYCODE_BACK,
-                android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {
-                    hideChannelListPanel()
-                    return true
-                }
-                android.view.KeyEvent.KEYCODE_DPAD_UP -> {
-                    if (channelListItems.isNotEmpty()) {
-                        channelListFocusedPosition = (channelListFocusedPosition - 1)
-                            .coerceAtLeast(0)
-                        updateChannelListHighlight()
-                    }
-                    return true
-                }
-                android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
-                    if (channelListItems.isNotEmpty()) {
-                        channelListFocusedPosition = (channelListFocusedPosition + 1)
-                            .coerceAtMost(channelListItems.size - 1)
-                        updateChannelListHighlight()
-                    }
-                    return true
-                }
-                android.view.KeyEvent.KEYCODE_DPAD_CENTER,
-                android.view.KeyEvent.KEYCODE_ENTER,
-                android.view.KeyEvent.KEYCODE_NUMPAD_ENTER -> {
-                    if (channelListItems.isNotEmpty() && channelListFocusedPosition in channelListItems.indices) {
-                        val item = channelListItems[channelListFocusedPosition]
-                        navigateToChannel(item.id, provider)
-                    }
-                    return true
-                }
-                else -> return true // consommer tout quand la liste est ouverte
+            // 2026-06-13 (user "la recherche doit être accessible via la
+            //   télécommande facilement, ET le bouton fermer aussi") : 3 zones
+            //   de focus dans le panel TV (0=Retour, 1=Search, 2=Liste).
+            //   D-pad UP/DOWN navigue entre les zones aux frontières (= top
+            //   de la liste UP → search, top search UP → Retour).
+
+            // BACK / D-pad LEFT → toujours fermer le panel
+            if (keyCode == android.view.KeyEvent.KEYCODE_BACK ||
+                keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT) {
+                hideChannelListPanel()
+                return true
             }
+
+            when (channelListFocusZone) {
+                0 -> { // Bouton Retour
+                    when (keyCode) {
+                        android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+                            channelListFocusZone = 1
+                            applyChannelListFocus()
+                            return true
+                        }
+                        android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+                        android.view.KeyEvent.KEYCODE_ENTER,
+                        android.view.KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                            hideChannelListPanel()
+                            return true
+                        }
+                        else -> return true
+                    }
+                }
+                1 -> { // Barre de recherche (EditText)
+                    when (keyCode) {
+                        android.view.KeyEvent.KEYCODE_DPAD_UP -> {
+                            channelListFocusZone = 0
+                            applyChannelListFocus()
+                            return true
+                        }
+                        android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+                            channelListFocusZone = 2
+                            applyChannelListFocus()
+                            return true
+                        }
+                        // Toutes les autres touches (lettres, BACKSPACE…)
+                        //   sont laissées à Android → l'EditText les reçoit
+                        //   (= clavier virtuel TV s'ouvre via SHOW_FORCED).
+                        else -> return false
+                    }
+                }
+                else -> { // Liste des chaînes
+                    when (keyCode) {
+                        android.view.KeyEvent.KEYCODE_DPAD_UP -> {
+                            if (channelListFocusedPosition <= 0) {
+                                // En haut de la liste → switch vers Search
+                                channelListFocusZone = 1
+                                applyChannelListFocus()
+                            } else if (channelListItems.isNotEmpty()) {
+                                channelListFocusedPosition = (channelListFocusedPosition - 1)
+                                    .coerceAtLeast(0)
+                                updateChannelListHighlight()
+                            }
+                            return true
+                        }
+                        android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+                            if (channelListItems.isNotEmpty()) {
+                                channelListFocusedPosition = (channelListFocusedPosition + 1)
+                                    .coerceAtMost(channelListItems.size - 1)
+                                updateChannelListHighlight()
+                            }
+                            return true
+                        }
+                        android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+                        android.view.KeyEvent.KEYCODE_ENTER,
+                        android.view.KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                            if (channelListItems.isNotEmpty() && channelListFocusedPosition in channelListItems.indices) {
+                                val item = channelListItems[channelListFocusedPosition]
+                                navigateToChannel(item.id, provider)
+                            }
+                            return true
+                        }
+                        else -> return true
+                    }
+                }
+            }
+        }
+
+        /** 2026-06-13 : applique le focus visuel selon channelListFocusZone +
+         *  ouvre / ferme le clavier virtuel TV quand on entre dans le search. */
+        private fun applyChannelListFocus() {
+            if (_binding == null) return
+            val close = binding.btnChannelListClose
+            val et = binding.etChannelSearch
+            val rv = binding.rvChannelList
+            // Reset highlight visuel
+            close.setBackgroundColor(if (channelListFocusZone == 0) 0x55FFFFFF.toInt() else 0x22FFFFFF.toInt())
+            et.setBackgroundColor(if (channelListFocusZone == 1) 0x55FFFFFF.toInt() else 0x22FFFFFF.toInt())
+            // Focus + IME selon zone
+            when (channelListFocusZone) {
+                0 -> {
+                    close.requestFocus()
+                    hideImeFromChannelSearch()
+                }
+                1 -> {
+                    et.requestFocus()
+                    showImeOnChannelSearch()
+                }
+                2 -> {
+                    hideImeFromChannelSearch()
+                    rv.post {
+                        val vh = rv.findViewHolderForAdapterPosition(channelListFocusedPosition)
+                        vh?.itemView?.requestFocus()
+                        updateChannelListHighlight()
+                    }
+                }
+            }
+        }
+
+        private fun showImeOnChannelSearch() {
+            if (_binding == null) return
+            val imm = requireContext().getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                as android.view.inputmethod.InputMethodManager
+            imm.showSoftInput(binding.etChannelSearch, android.view.inputmethod.InputMethodManager.SHOW_FORCED)
+        }
+
+        private fun hideImeFromChannelSearch() {
+            if (_binding == null) return
+            val imm = requireContext().getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                as android.view.inputmethod.InputMethodManager
+            imm.hideSoftInputFromWindow(binding.etChannelSearch.windowToken, 0)
         }
 
         private fun updateChannelListHighlight() {
@@ -2438,6 +2569,10 @@ class PlayerTvFragment : Fragment() {
             binding.pvPlayer.hideController()
             binding.pvPlayer.controllerAutoShow = false
             com.streamflixreborn.streamflix.utils.ChannelListState.isOpen = true
+            // 2026-06-13 : zone par défaut = liste (= comportement initial pour
+            //   l'user qui veut zapper rapidement avec D-pad UP/DOWN).
+            channelListFocusZone = 2
+            com.streamflixreborn.streamflix.utils.ChannelListState.focusZone = 2
 
             // Charger les chaînes en background
             viewLifecycleOwner.lifecycleScope.launch {
@@ -2476,14 +2611,47 @@ class PlayerTvFragment : Fragment() {
 
                 if (_binding == null || !channelListVisible) return@launch
 
+                // 2026-06-13 (user "ajoute une barre de recherche dans
+                //   l'overlay des chaînes IPTV") : on garde la liste COMPLETE
+                //   dans channelListItemsAll, et channelListItems = ce qu'on
+                //   affiche (= filtree par la query saisie dans EditText).
+                channelListItemsAll = items
                 channelListItems = items
                 binding.tvChannelListTitle.text = "Chaînes (${items.size})"
-                val adapter = ChannelListAdapter(items, args.id) { item ->
+                val adapter = ChannelListAdapter(items.toMutableList(), args.id) { item ->
                     navigateToChannel(item.id, provider)
                 }
                 channelListAdapter = adapter
                 rv.layoutManager = androidx.recyclerview.widget.LinearLayoutManager(requireContext())
                 rv.adapter = adapter
+
+                // 2026-06-13 : bouton retour explicite (= en plus de BACK/LEFT
+                //   D-pad) pour quitter le panel.
+                binding.btnChannelListClose.setOnClickListener {
+                    hideChannelListPanel()
+                }
+
+                // Branche le TextWatcher sur la barre de recherche
+                val et = binding.etChannelSearch
+                et.setText("")
+                et.addTextChangedListener(object : android.text.TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                    override fun afterTextChanged(s: android.text.Editable?) {
+                        val query = s?.toString()?.trim()?.lowercase() ?: ""
+                        val filtered = if (query.isBlank()) channelListItemsAll
+                            else channelListItemsAll.filter { it.name.lowercase().contains(query) }
+                        channelListItems = filtered
+                        channelListAdapter?.replaceItems(filtered)
+                        binding.tvChannelListTitle.text =
+                            if (query.isBlank()) "Chaînes (${filtered.size})"
+                            else "Chaînes (${filtered.size}/${channelListItemsAll.size})"
+                        // Reset focus au 1er
+                        channelListFocusedPosition = 0
+                        binding.pvPlayer.channelListSelectedPosition = 0
+                        if (filtered.isNotEmpty()) rv.scrollToPosition(0)
+                    }
+                })
 
                 // Scroll vers la chaîne actuelle + focus
                 val currentIndex = items.indexOfFirst { it.id == args.id }
