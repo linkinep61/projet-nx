@@ -1221,7 +1221,17 @@ class PlayerTvFragment : Fragment() {
                                 // For IPTV providers (WiTv / OlaTv) keep the player open and wait
                                 // for additional progressive servers instead of closing immediately.
                                 val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
-                                if (isIptv) {
+                                // 2026-06-12 (user "si le serveur est mort au
+                                //   lancement, ça s'arrête direct au lieu
+                                //   d'attendre les autres serveurs — ça doit être
+                                //   sur tous les providers") : pour les providers
+                                //   progressifs (Cloudstream, Movix, FS, Frembed,
+                                //   Wiflix, Papa…), on attend les backups
+                                //   asynchrones (additionalServer) même si le flow
+                                //   .collect a fini. Timeout court (20 s) pour
+                                //   VOD, long (90 s) pour IPTV.
+                                val isProgressive = provider is com.streamflixreborn.streamflix.providers.ProgressiveServersProvider
+                                if (isIptv || viewModel.progressiveStillCollecting || isProgressive) {
                                     if (!awaitingMoreServers) {
                                         Log.d("PlayerTvFragment", "All initial servers failed — awaiting progressive sources…")
                                         Toast.makeText(
@@ -1230,7 +1240,8 @@ class PlayerTvFragment : Fragment() {
                                             Toast.LENGTH_SHORT
                                         ).show()
                                     }
-                                    startAwaitMoreServers()
+                                    val timeoutMs = if (isIptv) 90_000L else 20_000L
+                                    startAwaitMoreServers(timeoutMs)
                                 } else {
                                     // 2026-06-06 : auto-skip anime (dernier recours).
                                     if (tryAutoSkipBrokenAnimeEpisode()) {
@@ -1739,8 +1750,27 @@ class PlayerTvFragment : Fragment() {
         }
     }
 
+    // 2026-06-13 (user "Cloudstream Silo S1 — l'épisode next en automatique
+    //   a tendance à sauter des épisodes") : EpisodeManager.getNextEpisode()
+    //   a un effet de bord (incrémente currentIndex à chaque appel). Quand
+    //   l'épisode finit, STATE_ENDED + onIsPlayingChanged peuvent déclencher
+    //   2 appels à playNextEpisodeAcrossSeasons rapprochés → 2 incréments
+    //   → 1 épisode sauté.
+    private var autoplayConsumedForEpisodeId: String? = null
+
     private fun playNextEpisodeAcrossSeasons(autoplay: Boolean = false) {
         val type = args.videoType as? Video.Type.Episode ?: return
+
+        Log.w("AutoplayDiag", "→ playNextEpisodeAcrossSeasons(autoplay=$autoplay) ep=${type.id} consumedForId=$autoplayConsumedForEpisodeId")
+
+        // Anti double-call : SYNCHRONE, AVANT le launch{} (sinon les 2 callers
+        //   parallèles voient encore null et entrent tous les 2 dans le scope
+        //   → 2 incréments de currentIndex → saut d'un épisode).
+        if (autoplay && autoplayConsumedForEpisodeId == type.id) {
+            Log.w("AutoplayDiag", "✕ BLOCKED double-autoplay sur ${type.id}")
+            return
+        }
+        if (autoplay) autoplayConsumedForEpisodeId = type.id
 
         lifecycleScope.launch {
             val hasNextEpisode = withContext(Dispatchers.IO) {
@@ -1749,10 +1779,18 @@ class PlayerTvFragment : Fragment() {
 
             setupEpisodeNavigationButtons()
 
-            if (!hasNextEpisode) return@launch
-            if (autoplay && !UserPreferences.autoplay) return@launch
+            if (!hasNextEpisode) {
+                Log.w("AutoplayDiag", "  ↳ pas d'épisode suivant")
+                return@launch
+            }
+            if (autoplay && !UserPreferences.autoplay) {
+                Log.w("AutoplayDiag", "  ↳ autoplay pref off")
+                return@launch
+            }
 
+            Log.w("AutoplayDiag", "  ↳ viewModel.playNextEpisode() — currentIndex avant=${com.streamflixreborn.streamflix.utils.EpisodeManager.currentIndex}")
             viewModel.playNextEpisode()
+            Log.w("AutoplayDiag", "  ↳ APRÈS playNextEpisode — currentIndex=${com.streamflixreborn.streamflix.utils.EpisodeManager.currentIndex}")
         }
     }
 
@@ -1766,6 +1804,13 @@ class PlayerTvFragment : Fragment() {
         val provider = UserPreferences.currentProvider ?: return false
         if (com.streamflixreborn.streamflix.providers.Provider.getGroup(provider)
             != com.streamflixreborn.streamflix.providers.Provider.Companion.ProviderGroup.ANIME) {
+            return false
+        }
+        // 2026-06-13 (user "l'épisode next en automatique a tendance à
+        //   sauter les épisodes") : respecte le toggle UserPreferences.
+        //   Par défaut désactivé → ne saute plus en cascade.
+        if (!UserPreferences.animeAutoSkipBroken) {
+            Log.d("PlayerTvFragment", "Anime auto-skip désactivé par l'user — pas de saut")
             return false
         }
         if (!com.streamflixreborn.streamflix.utils.AnimeAutoSkipState.tryConsumeSkip()) {
@@ -3681,7 +3726,7 @@ class PlayerTvFragment : Fragment() {
                         && args.videoType is Video.Type.Episode
                         && UserPreferences.autoplay
                     ) {
-                        Log.d("PlayerTvFragment", "STATE_ENDED VOD episode → autoplay next")
+                        Log.w("AutoplayDiag", "[TRIGGER A] STATE_ENDED VOD ep=${(args.videoType as? Video.Type.Episode)?.id} → playNextEpisodeAcrossSeasons(autoplay=true)")
                         playNextEpisodeAcrossSeasons(autoplay = true)
                     }
 
@@ -4023,6 +4068,7 @@ class PlayerTvFragment : Fragment() {
                             args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
                         if (player.hasReallyFinished() && !isLiveIptvNoAutoSkip) {
                             if (UserPreferences.autoplay) {
+                                Log.w("AutoplayDiag", "[TRIGGER B] hasReallyFinished ep=${(args.videoType as? Video.Type.Episode)?.id} pos=${player.currentPosition} dur=${player.duration} → playNextEpisodeAcrossSeasons(autoplay=true)")
                                 playNextEpisodeAcrossSeasons(autoplay = true)
                             }
                         }
@@ -5318,6 +5364,14 @@ class PlayerTvFragment : Fragment() {
         val remainingMs = (duration - player.currentPosition).coerceAtLeast(0L)
 
         if (nextEpisodeOverlayDismissed) {
+            hideNextEpisodeOverlay()
+            return
+        }
+
+        // 2026-06-14 (user "ajoute option pour désactiver l'overlay
+        //   épisode suivant, pour ceux qui veulent aller jusqu'à la fin") :
+        //   respect du toggle Settings → Paramètres du lecteur.
+        if (!UserPreferences.showNextEpisodeOverlay) {
             hideNextEpisodeOverlay()
             return
         }

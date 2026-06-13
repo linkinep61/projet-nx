@@ -40,7 +40,12 @@ object WorldLiveSourcesStore {
         //   rsseverything). Contient TF1, France 2-5, M6, Canal+, BFM, etc.
         //   avec des URLs CDN officielles. Marche depuis Tahiti.
         Source("iptv-org FR (par défaut)", "https://iptv-org.github.io/iptv/countries/fr.m3u", isBuiltin = true),
-        Source("3box TV", "https://box.xtemus.com/?playlist=u256y494u21596x2", isBuiltin = true),
+        // 2026-06-14 (user "3tvbox a fermé, on nettoie sauf l'alias") :
+        //   l'entree builtin 3boxTv est retiree. La pipeline generique
+        //   (BoxXtemusProvider + GenericStreamResolver + WorldLiveTvProvider)
+        //   reste intacte, donc si l'URL revient un jour, l'user n'aura qu'a
+        //   l'ajouter manuellement via le picker ou taper "3 TV Box" dans le
+        //   champ URL (l'alias URL_ALIASES plus bas la traduit toujours).
         Source("World TV", "https://box.xtemus.com/?playlist=y274y486q2x2841586r2", isBuiltin = true),
         Source("Dric4rTV", "http://dric4rt.free.fr/1.json", isBuiltin = true),
     )
@@ -58,46 +63,11 @@ object WorldLiveSourcesStore {
         } catch (_: Throwable) { emptyList() }
     }
 
-    /** 2026-06-13 (user "masque la source 3 TV Box du picker, on la retire pas
-     *  / si quelqu'un la rajoute manuellement par nom elle se reactive
-     *  automatiquement") : masquage PROVISOIRE de "3box TV" parmi les
-     *  built-in. Le code reste intact, la source reste utilisable, mais elle
-     *  est filtree de allSources(). Reactivation auto si l'user a deja ajoute
-     *  manuellement une source dont le nom contient "3box" (case insensitive)
-     *  ou "3 tv box" -> on remet alors le builtin (= reactive). Sinon il
-     *  apparaitra juste comme une source perso normale.
-     *  Pour reactiver permanent : flip HIDE_3BOXTV_BUILTIN a false. */
-    private const val HIDE_3BOXTV_BUILTIN: Boolean = true
-
-    private fun isUserReactivated(userSources: List<Source>): Boolean {
-        return userSources.any { src ->
-            val n = src.name.lowercase()
-            n.contains("3box") || n.contains("3 box") ||
-            n.contains("3 tv box") || n.contains("3tvbox") ||
-            n.contains("3 tvbox") || n.contains("3boxtv")
-        }
-    }
-
-    /** Toutes les sources (built-in connues + ajoutées par l'user).
-     *  2026-06-13 (user "pourquoi elle est apparue en predefini quand je l'ai
-     *  ajoutee manuellement") : SI l'user a une source perso 3box-like, on
-     *  ne reactive PAS le built-in (= sinon doublon visuel confus). La source
-     *  perso suffit. Le built-in ne reapparait que si l'user retire toutes
-     *  ses sources 3box perso. Plus simple, plus clair. */
+    /** Toutes les sources (built-in connues + ajoutées par l'user). */
     fun allSources(context: Context): List<Source> {
         val out = mutableListOf<Source>()
-        val userList = list(context)
-        val hasUser3box = isUserReactivated(userList)
-        // Le built-in 3box est masque SI HIDE_3BOXTV_BUILTIN actif. La presence
-        // d'une source perso 3box-like remplace deja le built-in (= pas de
-        // doublon).
-        BUILTIN_SOURCES.forEach { src ->
-            val isBox = src.name.contains("3box", ignoreCase = true) ||
-                src.name.contains("3 box", ignoreCase = true)
-            if (isBox && (HIDE_3BOXTV_BUILTIN || hasUser3box)) return@forEach
-            out.add(src)
-        }
-        out.addAll(userList)
+        out.addAll(BUILTIN_SOURCES)
+        out.addAll(list(context))
         return out
     }
 

@@ -2022,6 +2022,11 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         val seenSrc = HashSet<String>()
         val nameCount = mutableMapOf<String, Int>()
         val mutex = Mutex()
+        // 2026-06-13 : track si un batch alive a déjà été émis. Si oui, on
+        //   peut émettre les batches all-dead suivants en fin de liste sans
+        //   risque de pourrir l'auto-play (déjà fixé sur un alive). Sinon
+        //   on skip pour ne pas que l'auto-play tombe sur un mort certain.
+        var hasEmittedAlive = false
         val deadExtractors = try {
             com.streamflixreborn.streamflix.utils.ExtractorFailureTracker
                 .getFailures()
@@ -2063,10 +2068,21 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                 }
                 val alive = sorted.filter { !isDeadServer(it) }
                 val dead = sorted.filter { isDeadServer(it) }
-                if (alive.isEmpty()) {
-                    Log.d(TAG, "Skip emit : batch all-dead (${dead.size} serveurs) — attend backups")
-                } else {
-                    send(alive + dead)
+                // 2026-06-13 (user "tu as pas mis un filtre qui masque les
+                //   serveurs sans faire exprès je suis sur un episode et pas
+                //   de wiflix + plein d'autres serveurs ne sont pas présents") :
+                //   la protection hasEmittedAlive masquait trop. Les batches
+                //   all-dead arrivant AVANT un alive (= Wiflix sur des
+                //   épisodes où toutes ses sources pointent vers VOE déprio)
+                //   étaient skippés définitivement → invisibles. Maintenant
+                //   on émet TOUJOURS, alive en tête + dead en fin de liste.
+                //   Le risque "auto-play sur dead" est déjà mitigé par
+                //   startAwaitMoreServers (attend les backups si tous foirent).
+                if (alive.isNotEmpty() || dead.isNotEmpty()) {
+                    hasEmittedAlive = hasEmittedAlive || alive.isNotEmpty()
+                    val emitted = alive + dead
+                    Log.w("ServDiag", "CloudstreamProvider emit ${emitted.size} (alive=${alive.size} dead=${dead.size}) : ${emitted.joinToString(" | ") { it.name }}")
+                    send(emitted)
                 }
             }
         }
@@ -2098,7 +2114,14 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             //   Cloudstream → films comme Aventures croisées 2026 qui sont sur
             //   Coflix mais pas sur MovieBox+/Nakios/Movix → 0 source. On
             //   résout title+year via TMDB puis on appelle CoflixSourceProvider.
+            // 2026-06-12 (user "retarde le lancement de Coflix, il a tendance
+            //   à foutre un peu la merde, faire appel à lui en dernier") :
+            //   on attend 8 s avant de lancer Coflix → les autres backups
+            //   (MovieBox+, Nakios, Movix, Wiflix, FS) ont le temps de
+            //   répondre en premier. Coflix arrive en dernier si toujours
+            //   pertinent (films absents ailleurs comme Aventures croisées).
             launch {
+                kotlinx.coroutines.delay(8_000L)
                 try { val cf = fetchCoflixBackup(tmdbId, videoType, se, ep); if (cf.isNotEmpty()) emitDeduped(cf) }
                 catch (e: Exception) { Log.w(TAG, "Progressive Coflix failed: ${e.message}") }
             }

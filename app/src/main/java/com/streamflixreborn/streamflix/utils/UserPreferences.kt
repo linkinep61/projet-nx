@@ -265,6 +265,32 @@ object UserPreferences {
             Key.KEEP_SCREEN_ON_WHEN_PAUSED.setBoolean(value)
         }
 
+    /** 2026-06-14 (user "à chaque fin d'épisode il y a un overlay pour passer
+     *  à l'épisode suivant, ajoute une option pour le désactiver pour ceux qui
+     *  veulent aller jusqu'à la fin") : si false, on ne montre PAS l'overlay
+     *  "Lancer maintenant / dans Xs" en fin d'épisode → les users qui aiment
+     *  regarder le générique jusqu'au bout ne sont pas interrompus visuellement.
+     *  Default true (= comportement actuel preservé). */
+    var showNextEpisodeOverlay: Boolean
+        get() = Key.SHOW_NEXT_EPISODE_OVERLAY.getBoolean() ?: true
+        set(value) {
+            Key.SHOW_NEXT_EPISODE_OVERLAY.setBoolean(value)
+        }
+
+    /** 2026-06-13 (user "l'épisode next en automatique a tendance à sauter
+     *  les épisodes") : toggle pour désactiver l'auto-skip d'épisode anime
+     *  cassé. Quand activé (= comportement historique), si tous les serveurs
+     *  d'un épisode anime échouent, on passe automatiquement à l'épisode
+     *  suivant (jusqu'à 5 sauts en cascade max). Quand désactivé, on reste
+     *  sur l'épisode courant + retour à la fiche série au lieu de sauter →
+     *  l'user peut choisir manuellement le prochain épisode. Default false
+     *  (= ne saute plus par défaut, l'user activera s'il veut le binge). */
+    var animeAutoSkipBroken: Boolean
+        get() = Key.ANIME_AUTO_SKIP_BROKEN.getBoolean() ?: false
+        set(value) {
+            Key.ANIME_AUTO_SKIP_BROKEN.setBoolean(value)
+        }
+
     /** 2026-06-09 (user "tu coches actives tout tu la décoches désactive tous") :
      *  toggle global "carrousel comme fond d'écran". Si false, updateBackground
      *  et pinBackground ne touchent plus à ivHomeBackground → le fond du
@@ -710,6 +736,8 @@ object UserPreferences {
         AUTOPLAY,
         PROVIDER_CACHE,
         KEEP_SCREEN_ON_WHEN_PAUSED,
+        SHOW_NEXT_EPISODE_OVERLAY,
+        ANIME_AUTO_SKIP_BROKEN,
         CAROUSEL_AS_BACKGROUND,
         SIDEBAR_OPACITY,
         KEEP_SCREEN_ON_APP,

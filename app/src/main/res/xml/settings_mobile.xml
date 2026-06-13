@@ -266,6 +266,27 @@
                 android:summaryOff="@string/settings_autoplay_off"
                 app:iconSpaceReserved="false" />
 
+            <!-- 2026-06-14 (user "ajoute une option pour désactiver l'overlay
+                 épisode suivant pour ceux qui veulent aller jusqu'à la fin") -->
+            <SwitchPreference
+                android:key="SHOW_NEXT_EPISODE_OVERLAY"
+                android:title="Overlay « Épisode suivant »"
+                android:summaryOn="L'overlay s'affiche en fin d'épisode pour passer au suivant."
+                android:summaryOff="Désactivé : pas d'interruption visuelle, tu peux regarder le générique jusqu'à la fin."
+                android:defaultValue="true"
+                app:iconSpaceReserved="false" />
+
+            <!-- 2026-06-13 (user "l'épisode next en automatique a tendance à
+                 sauter les épisodes") : default false = ne saute plus en
+                 cascade quand un anime échoue → l'user reprend la main. -->
+            <SwitchPreference
+                android:key="ANIME_AUTO_SKIP_BROKEN"
+                android:title="Saut auto épisode anime cassé"
+                android:summaryOn="Si tous les serveurs d'un épisode anime échouent, l'app saute à l'épisode suivant (max 5 sauts en cascade)."
+                android:summaryOff="Désactivé : reste sur l'épisode courant et retour à la fiche série au lieu de sauter."
+                android:defaultValue="false"
+                app:iconSpaceReserved="false" />
+
             <EditTextPreference
                 android:key="p_settings_autoplay_buffer"
                 android:title="@string/settings_autoplay_buffer_title"

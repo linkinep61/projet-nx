@@ -659,6 +659,22 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             true
         }
 
+        // 2026-06-14 : toggle "Overlay Épisode suivant" (= désactiver pour
+        //   regarder le générique sans interruption).
+        findPreference<SwitchPreference>("SHOW_NEXT_EPISODE_OVERLAY")?.isChecked = UserPreferences.showNextEpisodeOverlay
+        findPreference<SwitchPreference>("SHOW_NEXT_EPISODE_OVERLAY")?.setOnPreferenceChangeListener { _, newValue ->
+            UserPreferences.showNextEpisodeOverlay = newValue as Boolean
+            true
+        }
+
+        // 2026-06-13 (user "l'épisode next en automatique a tendance à sauter
+        //   les épisodes") : toggle saut auto épisode anime cassé.
+        findPreference<SwitchPreference>("ANIME_AUTO_SKIP_BROKEN")?.isChecked = UserPreferences.animeAutoSkipBroken
+        findPreference<SwitchPreference>("ANIME_AUTO_SKIP_BROKEN")?.setOnPreferenceChangeListener { _, newValue ->
+            UserPreferences.animeAutoSkipBroken = newValue as Boolean
+            true
+        }
+
         // 2026-05-15 : toggle "Garder l'écran toujours allumé"
         findPreference<SwitchPreference>("KEEP_SCREEN_ON_APP")?.apply {
             isChecked = UserPreferences.keepScreenOnApp

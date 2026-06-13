@@ -49,14 +49,6 @@ object LiveTvHubProvider : Provider, IptvProvider {
 
     private const val TAG = "LiveTvHubProvider"
 
-    /** 2026-06-13 (user "masque 3boxTv du TV hub, on va faire quelque chose") :
-     *  flip a `true` pour reafficher les sections "France TV - TF1+/Canal+/..."
-     *  issues de BoxXtemusProvider (= 3boxTv). Masque par defaut pour eviter la
-     *  duplication avec World Live qui propose deja ces chaines.
-     *  La pipeline BoxXtemus (getHome + capture LCI pour OTF) tourne toujours
-     *  meme si masquee — c'est juste l'AJOUT au hub qui est skip. */
-    private const val SHOW_BOXXTEMUS_IN_HUB: Boolean = false
-
     private val _additionalServersFlow = MutableSharedFlow<Video.Server>()
     override val additionalServersFlow: SharedFlow<Video.Server> = _additionalServersFlow.asSharedFlow()
 
@@ -474,10 +466,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2026-06-08 (user "Canal+ en position 0 de OTF") : déclaré hors du
         //   try pour rester accessible quand on construit otfShows plus bas.
         var canalPlusBonusForOtf: TvShow? = null
-        // 2026-06-08 (user "LCI tu peux la mettre") : capturée depuis TF1+
-        //   blacklistée mais sauvée car son shortcut TF1 mediainfo marche.
-        //   Insérée en position 1 de OTF (juste après Canal+).
-        var lciForOtf: TvShow? = null
+        // 2026-06-14 : `lciForOtf` retiré avec le bloc BoxXtemus.
 
         // 2026-05-15 : sections BONUS — wrappé dans try/catch pour ne pas bloquer OTF
         try {
@@ -575,11 +564,11 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2026-06-08 (user "Canal+ en première chaîne, décaler un peu OTF") :
         //   prepend Canal+ bonus en position 0. Garde le même look visuel
         //   que les chaînes OTF (rebadgé TV Hub via bonusToTvShow).
-        // 2026-06-08 (user "LCI tu peux la mettre") : LCI en position 1
-        //   juste après Canal+ (sauvée de TF1+ blacklistée).
+        // 2026-06-14 : LCI prepended retiré (= venait du bloc BoxXtemus 3boxTv,
+        //   retiré dans ce commit). Si LCI doit revenir dans OTF un jour, le
+        //   capturer autrement (= via WiTV / OLA / Vegeta qui ont LCI nativement).
         val prepended = mutableListOf<TvShow>()
         if (canalPlusBonusForOtf != null) prepended.add(canalPlusBonusForOtf!!)
-        if (lciForOtf != null) prepended.add(lciForOtf!!)
         val otfShowsFinal = if (prepended.isNotEmpty()) prepended + otfShows else otfShows
         val otfSectionName = "OTF TV - $selectedGroup"
         sections.add(Category(name = otfSectionName, list = otfShowsFinal))
@@ -614,89 +603,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
             }
         } catch (_: Throwable) {}
 
-        // 2026-06-08 (user "remettre la source 3BoxTV dans le TV hub sous le
-        //   nom France TV") : on délègue à BoxXtemusProvider (restauré depuis
-        //   git après suppression v1.7.192). 12 catégories FR (TF1+, Canal+,
-        //   M6+, RTBF/Suisse, TNT Sat, Cinéma, Replay, Sports, etc.). Le
-        //   préfixe `livehub::francetv::` reroute getTvShow/getServers/getVideo
-        //   vers BoxXtemusProvider sans dupliquer la logique.
-        try {
-            val francetvSections = com.streamflixreborn.streamflix.providers
-                .BoxXtemusProvider.getHome()
-            // 2026-06-08 (user "cette catégorie-là retirée") : sections du
-            //   JSON 3BoxTV à NE PAS exposer dans le Hub France TV (doublons,
-            //   irrelevant, etc.). Étendre cette liste si besoin.
-            val francetvBlacklistedSections = setOf(
-                "IPTV Daily",  // doublon — pas de la VRAIE France TV
-                // 2026-06-10 (user "Sport peut revenir, ça va sûrement marcher") :
-                //   "Sports" RETIRÉ du blacklist. Le bypass WebView qu'on vient
-                //   d'implémenter résout maintenant le pipeline html.bet, donc
-                //   les chaînes Sport devraient fonctionner.
-            )
-            for (cat in francetvSections) {
-                // Skip section "Favoris" interne de BoxXtemus — les favoris du
-                // Hub sont gérés au niveau hub, pas du sous-provider.
-                if (cat.name.equals("Favoris", ignoreCase = true)) continue
-                // 2026-06-08 : avant de skip une cat blacklistée, on capture
-                //   LCI si elle est dans TF1+ (= sauvée par mediainfo shortcut).
-                if (cat.name.equals("TF1+", ignoreCase = true)) {
-                    val lci = (cat.list as? List<*>)?.mapNotNull { it as? TvShow }
-                        ?.firstOrNull {
-                            it.title?.uppercase()?.contains("LCI") == true ||
-                            it.id.contains("lci", ignoreCase = true)
-                        }
-                    if (lci != null) {
-                        lciForOtf = TvShow(
-                            id = "livehub::francetv::${lci.id}",
-                            title = "LCI",
-                        ).apply {
-                            providerName = "TV Hub"
-                            poster = lci.poster
-                            banner = lci.banner
-                        }
-                    }
-                }
-                // 2026-06-08 : trim + lowercase pour blinder le match (le
-                //   nom de cat peut avoir un trailing space dans le JSON).
-                val catNameNorm = cat.name.trim().lowercase()
-                if (francetvBlacklistedSections.any { it.trim().lowercase() == catNameNorm }) continue
-                // 2026-06-10 : filtre catégorie utilisateur (BoxXtemusCategorySettings).
-                val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
-                if (!com.streamflixreborn.streamflix.providers
-                        .BoxXtemusCategorySettings.matches(ctx, cat.name)) continue
-                val rebadged = (cat.list as? List<*>)?.mapNotNull { item ->
-                    val tv = item as? TvShow ?: return@mapNotNull null
-                    val newId = "livehub::francetv::${tv.id}"
-                    // 2026-06-08 (user "active ban pour TV hub") : skip si bannie
-                    if (com.streamflixreborn.streamflix.fragments.player.settings
-                            .IptvBannedChannels.isBanned(newId)) return@mapNotNull null
-                    TvShow(id = newId, title = tv.title ?: "").apply {
-                        providerName = "TV Hub"
-                        poster = tv.poster
-                        banner = tv.banner
-                    }
-                } ?: emptyList()
-                if (rebadged.isNotEmpty()) {
-                    // 2026-06-13 (user "masque les sources 3boxTv du TV hub vu
-                    //   qu'elles sont deja dans World Live / on la retire pas
-                    //   car on va faire quelque chose") :
-                    //   on conserve TOUTE la pipeline BoxXtemus (= getHome,
-                    //   capture LCI lignes 634-650, rebadge, blacklist, filtre
-                    //   user) MAIS on n'AJOUTE PAS les sections au hub. Effet :
-                    //   "France TV - TF1+/Canal+/M6+/..." disparaissent du hub,
-                    //   pas de duplication avec World Live. LCI reste capturee
-                    //   pour OTF (= utilisee ligne 574 prepended.add(lciForOtf)).
-                    //   Pour reactiver l'affichage : flip SHOW_BOXXTEMUS_IN_HUB
-                    //   a true ci-dessous.
-                    @Suppress("ConstantConditionIf")
-                    if (SHOW_BOXXTEMUS_IN_HUB) {
-                        sections.add(Category(name = "France TV - ${cat.name}", list = rebadged))
-                    }
-                }
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "France TV (BoxXtemus) getHome failed: ${t.message}")
-        }
+        // 2026-06-14 (user "3tvbox a fermé, on nettoie sauf l'alias") :
+        //   bloc BoxXtemus retiré (= ne pollue plus le hub avec ses 12 catégories
+        //   "France TV - TF1+/Canal+/...", qui faisaient doublon avec World Live).
+        //   La pipeline BoxXtemus reste 100% fonctionnelle pour World Live si
+        //   l'user ajoute manuellement une URL playlist via le picker — c'est
+        //   juste son injection automatique dans CE hub qui disparait.
 
         // 2026-06-08 (user "appareil non compatible avec l'API complexe de
         //   3TVBOX V2 → essayer Dric4rTV plus simple") : sections Dric4rTV

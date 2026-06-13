@@ -2602,6 +2602,10 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
         val seenSrc = HashSet<String>()
         val nameCount = mutableMapOf<String, Int>()
         val mutex = kotlinx.coroutines.sync.Mutex()
+        // 2026-06-13 : track si un batch alive a déjà été émis. Si oui, on
+        //   peut émettre les batches all-dead suivants en fin de liste
+        //   (= ne casse pas l'auto-play : il s'est déjà fixé sur un alive).
+        var hasEmittedAlive = false
 
         // 2026-06-02 : pré-calcul des extracteurs en échec récent. On ne les
         //   SUPPRIME PAS (l'user a explicitement demandé de garder Videasy &
@@ -2642,17 +2646,17 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
                 // Sort : VF (alive) → VOSTFR (alive) → VO (alive) → ANY (dead, last)
                 val sorted = sortServersByLanguage(cleaned)
                 val (alive, dead) = sorted.partition { !isDeadServer(it) }
-                if (alive.isEmpty()) {
-                    // 2026-06-02 : batch ne contient QUE des serveurs DEAD
-                    //   (>= 5 échecs récents). Ne PAS émettre — sinon l'auto-play
-                    //   prend la 1ère entrée du batch (ex: "Chamber (Videasy
-                    //   VOSTFR)" seul → 12 échecs, casse l'UX). On attend qu'un
-                    //   batch suivant apporte des sources alive. Videasy reste
-                    //   visible dans les autres vidéos via le batch FS direct
-                    //   qui contiendra des sources alive PLUS Videasy.
-                    Log.d("MovixProvider", "Skip emit : batch all-dead (${dead.size} serveurs) — attend backups")
-                } else {
-                    send(alive + dead)
+                // 2026-06-13 (user "tu as pas mis un filtre qui masque les
+                //   serveurs sans faire exprès") : on émet TOUJOURS, même les
+                //   batches all-dead. La protection hasEmittedAlive masquait
+                //   trop (Wiflix VOE-only invisible). Auto-play sur dead est
+                //   couvert par startAwaitMoreServers côté fragments.
+                if (alive.isNotEmpty() || dead.isNotEmpty()) {
+                    hasEmittedAlive = hasEmittedAlive || alive.isNotEmpty()
+                    val emitted = alive + dead
+                    val names = emitted.joinToString(" | ") { it.name }
+                    Log.w("ServDiag", "MovixProvider emit ${emitted.size} (alive=${alive.size} dead=${dead.size}) : $names")
+                    send(emitted)
                 }
             }
         }
