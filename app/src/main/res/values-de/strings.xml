@@ -37,6 +37,7 @@
     <string name="theme_nero_amoled_oled">Nero Amoled/Oled</string>
 
     <string name="search_input_hint">Filme / Serien suchen</string>
+    <string name="search_input_hint_iptv">Kanäle suchen</string>
     <string name="global_search">Globale Suche</string>
     <string name="searching">Suche läuft...</string>
     <string name="search_empty_query">Bitte geben Sie einen Suchbegriff ein</string>

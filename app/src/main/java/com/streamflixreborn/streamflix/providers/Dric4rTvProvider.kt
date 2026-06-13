@@ -274,7 +274,17 @@ object Dric4rTvProvider {
 
                     tasks.add(async { fetchCategoryChannels(catName, catUrl) })
                 }
-                val allChannels = tasks.awaitAll().flatten()
+                val baseChannels = tasks.awaitAll().flatten()
+                // 2026-06-13 (user "tu peux ajouter cette radio vidéo dans le
+                //   bouquet France TV Muzik ?") : injection de chaînes custom
+                //   après le fetch du JSON Dric4rTV. Permet d'ajouter une
+                //   chaîne hardcodée dans n'importe quel bouquet sans toucher
+                //   au JSON externe.
+                // 2026-06-13 (user "tu l'as pas mis devant je la vois pas") :
+                //   on met les custom EN TÊTE pour qu'elles apparaissent en
+                //   1er dans leur bouquet (groupBy préserve l'ordre).
+                val customChannels = buildCustomChannels()
+                val allChannels = customChannels + baseChannels
 
                 synchronized(registryLock) {
                     channelRegistry.clear()
@@ -282,11 +292,44 @@ object Dric4rTvProvider {
                     loaded = true
                     lastLoad = System.currentTimeMillis()
                 }
-                Log.d(TAG, "Loaded ${allChannels.size} channels across ${allChannels.map { it.category }.distinct().size} categories")
+                Log.d(TAG, "Loaded ${baseChannels.size} channels + ${customChannels.size} custom = ${allChannels.size} total across ${allChannels.map { it.category }.distinct().size} categories")
             }
         } catch (t: Throwable) {
             Log.w(TAG, "loadAllChannels failed: ${t.message}")
         }
+    }
+
+    /** 2026-06-13 (user "tu peux ajouter cette radio vidéo dans le bouquet
+     *  France TV Muzik ?") : chaînes custom hardcodées, injectées en plus
+     *  des chaînes du JSON Dric4rTV.
+     *  Format URL pour le pipeline : `coolstream://<channelId>` — sera
+     *  intercepté par le pipeline IPTV (LiveTvHubProvider.getVideo) qui
+     *  lancera l'extracteur coolstreaming approprié. */
+    private fun buildCustomChannels(): List<DricChannel> {
+        return listOf(
+            DricChannel(
+                id = "livehub::dric4rtv::muzik::90isgoodit",
+                name = "90 Is Good (IT)",
+                image = "https://www.coolstreaming.us/img/ch/image40300666727.jpg",
+                category = "Muzik",
+                stations = listOf(
+                    DricStation(
+                        name = "90 Is Good (IT)",
+                        // 2026-06-13 : URL m3u8 directe Wowza (sniffée depuis
+                        //   l'iframe coolstreaming.us/blog/player/consolle_flash19.php).
+                        //   Pas de token, pas de Referer requis (testé via HTTP HEAD).
+                        //   Si elle casse un jour, refaire le sniff sur la page
+                        //   coolstreaming.us/channelnew/75846/90IsGood.html.
+                        url = "https://64b16f23efbee.streamlock.net/isgoodforyou/isgoodforyou/playlist.m3u8",
+                        image = "https://www.coolstreaming.us/img/ch/image40300666727.jpg",
+                        info = "Chaîne italienne musique 90s (Pop/Dance/Rock/Hip-Hop) — IsGoodForYou × Fascino TV",
+                        referer = "",
+                        userAgent = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+                        headers = emptyMap(),
+                    ),
+                ),
+            ),
+        )
     }
 
     /** Fetch une catégorie de Dric4rTV. Supporte 2 formats :

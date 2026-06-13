@@ -692,10 +692,23 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         // withOriginalLanguage="fr" pour ne garder QUE le contenu de langue
         // originale française. Featured = TMDB Trending DAY filtré côté client par
         // originalLanguage=="fr".
+        // 2026-06-13 (user "le home Cloudstream et Movix ne se met pas à jour
+        //   j'ai l'impression de voir tout le temps la même chose") : on
+        //   randomise la page TMDB entre 1 et 5 pour chaque section. Comme ça
+        //   à chaque expiration du cache (5 min), de nouveaux titres apparaissent
+        //   au lieu des mêmes top 20 populaires. On reste dans les 100 premiers
+        //   les plus populaires, donc pas de titres confidentiels.
+        //   Page indépendante PAR SECTION pour pas que tout vienne du même
+        //   batch (= sinon trending et popular afficheraient les mêmes items).
+        val pageTrending = (1..5).random()
+        val pagePopularMovies = (1..5).random()
+        val pageTopMovies = (1..5).random()
+        val pagePopularTv = (1..5).random()
+        val pageTopTv = (1..5).random()
         val trendingD = async {
             runCatching {
                 TMDb3.Discover.movie(
-                    page = 1, language = language, region = "FR",
+                    page = pageTrending, language = language, region = "FR",
                     sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
                     withOriginalLanguage = csOriginalLanguageBuilder(),
                     voteCount = TMDb3.Params.Range(50, null),
@@ -705,7 +718,7 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         val popularMoviesD = async {
             runCatching {
                 TMDb3.Discover.movie(
-                    page = 1, language = language, region = "FR",
+                    page = pagePopularMovies, language = language, region = "FR",
                     sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
                     withOriginalLanguage = csOriginalLanguageBuilder(),
                 ).results
@@ -714,7 +727,7 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         val topMoviesD = async {
             runCatching {
                 TMDb3.Discover.movie(
-                    page = 1, language = language, region = "FR",
+                    page = pageTopMovies, language = language, region = "FR",
                     sortBy = TMDb3.Params.SortBy.Movie.VOTE_AVERAGE_DESC,
                     withOriginalLanguage = csOriginalLanguageBuilder(),
                     voteCount = TMDb3.Params.Range(200, null),
@@ -724,7 +737,7 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         val popularTvD = async {
             runCatching {
                 TMDb3.Discover.tv(
-                    page = 1, language = language,
+                    page = pagePopularTv, language = language,
                     sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
                     withOriginalLanguage = csOriginalLanguageBuilder(),
                 ).results
@@ -733,7 +746,7 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         val topTvD = async {
             runCatching {
                 TMDb3.Discover.tv(
-                    page = 1, language = language,
+                    page = pageTopTv, language = language,
                     sortBy = TMDb3.Params.SortBy.Tv.VOTE_AVERAGE_DESC,
                     withOriginalLanguage = csOriginalLanguageBuilder(),
                     voteCount = TMDb3.Params.Range(50, null),

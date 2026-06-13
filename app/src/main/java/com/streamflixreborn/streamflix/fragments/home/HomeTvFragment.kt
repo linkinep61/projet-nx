@@ -754,6 +754,8 @@ class HomeTvFragment : Fragment() {
         detachWorldLivePagingScrollListener()
         worldLivePagedItems = emptyList()
         worldLivePagedLoaded = 0
+        // 2026-06-13 : revert du fallback carrousel (asm243) — régression
+        //   DessinAnime. Retour au comportement d'origine v1.7.220.
         categories
             .find { it.name == Category.FEATURED }
             ?.also {

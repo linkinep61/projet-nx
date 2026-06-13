@@ -929,6 +929,9 @@ class HomeMobileFragment : Fragment() {
     }
 
     private fun displayHome(categories: List<Category>) {
+        // 2026-06-13 : revert du fallback carrousel (asm242) — l'user a
+        //   signalé une régression DessinAnime. Retour au comportement
+        //   d'origine v1.7.220.
         categories
             .find { it.name == Category.FEATURED }
             ?.also {

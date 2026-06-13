@@ -83,9 +83,14 @@ class ProviderViewHolder(
         // 2026-06-09 : si l'user a sélectionné DessinAnime, déclencher le
         //   bypass CF immédiatement (dialog s'affiche direct au lieu d'attendre
         //   le 1er fetch du home).
-        if (provider.provider.name == "DessinAnime") {
-            try { com.streamflixreborn.streamflix.providers.DessinAnimeProvider.prefetchCfBypassIfNeeded() } catch (_: Throwable) {}
-        }
+        // 2026-06-13 v3 (user "le Home ne charge pas tout seul mais quand on
+        //   va dans film ça charge bien") : le dialog WebView CF (silent=false)
+        //   masque le home au boot → confirmé que c'est bien ce prefetch qui
+        //   bloque. RE-DÉSACTIVÉ. Le bypass se déclenchera au 1er fetch détail
+        //   (clic sur une carte → getMovie/getTvShow → ensureCfBypassed).
+        // if (provider.provider.name == "DessinAnime") {
+        //     try { com.streamflixreborn.streamflix.providers.DessinAnimeProvider.prefetchCfBypassIfNeeded() } catch (_: Throwable) {}
+        // }
         com.streamflixreborn.streamflix.StreamFlixApp.instance
             .refreshProviderUrlAsync(provider.provider)
         context.toActivity()?.apply {
@@ -121,6 +126,21 @@ class ProviderViewHolder(
                 }
                 performSwitch()
             }
+            // 2026-06-13 (porté upstream Favorite Providers) : long-press
+            //   toggle le provider dans la liste des favoris + affiche un
+            //   toast + met à jour l'étoile + notifie le picker langue.
+            setOnLongClickListener {
+                val nowFavorite = UserPreferences.toggleFavoriteProvider(provider.name)
+                binding.ivFavoriteStar.visibility = if (nowFavorite) android.view.View.VISIBLE
+                    else android.view.View.GONE
+                android.widget.Toast.makeText(
+                    context,
+                    if (nowFavorite) "${provider.name} ajouté aux favoris"
+                        else "${provider.name} retiré des favoris",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                true
+            }
         }
 
         Glide.with(context)
@@ -139,6 +159,10 @@ class ProviderViewHolder(
         binding.tvProviderLanguage.text = Locale.forLanguageTag(provider.language)
             .let { it.getDisplayLanguage(it) }
             .replaceFirstChar { it.titlecase() }
+
+        // 2026-06-13 : affiche l'étoile si provider favori.
+        binding.ivFavoriteStar.visibility = if (UserPreferences.isFavoriteProvider(provider.name))
+            android.view.View.VISIBLE else android.view.View.GONE
     }
 
     private fun displayTvItem(binding: ItemProviderTvBinding) {
@@ -164,6 +188,20 @@ class ProviderViewHolder(
                 }
                 performSwitch()
             }
+            // 2026-06-13 (porté upstream Favorite Providers) : long-press D-pad
+            //   sur la TV pour ajouter/retirer le provider des favoris.
+            setOnLongClickListener {
+                val nowFavorite = UserPreferences.toggleFavoriteProvider(provider.name)
+                binding.ivFavoriteStar.visibility = if (nowFavorite) android.view.View.VISIBLE
+                    else android.view.View.GONE
+                android.widget.Toast.makeText(
+                    context,
+                    if (nowFavorite) "${provider.name} ajouté aux favoris"
+                        else "${provider.name} retiré des favoris",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                true
+            }
         }
 
         Glide.with(context)
@@ -180,5 +218,9 @@ class ProviderViewHolder(
         binding.tvProviderLanguage.text = Locale.forLanguageTag(provider.language)
             .let { it.getDisplayLanguage(it) }
             .replaceFirstChar { it.titlecase() }
+
+        // 2026-06-13 : affiche l'étoile si provider favori.
+        binding.ivFavoriteStar.visibility = if (UserPreferences.isFavoriteProvider(provider.name))
+            android.view.View.VISIBLE else android.view.View.GONE
     }
 }

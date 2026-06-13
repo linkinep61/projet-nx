@@ -224,7 +224,13 @@ class LocalPlayerActivity : AppCompatActivity() {
     private var unlockFlashRunnable: Runnable? = null
 
     private fun setupScreenLock() {
-        val btnLock = playerView.findViewById<android.widget.ImageButton>(
+        // 2026-06-13 (user "le player des vidéos téléchargées est cassé") :
+        //   le btn_exo_lock dans le layout exo_controls est un ImageView
+        //   (AppCompatImageView), pas un ImageButton. Le cast vers ImageButton
+        //   provoquait ClassCastException → crash de LocalPlayerActivity dès
+        //   son onCreate → l'user revient direct au menu Téléchargements sans
+        //   pouvoir lire la vidéo.
+        val btnLock = playerView.findViewById<android.widget.ImageView>(
             com.streamflixreborn.streamflix.R.id.btn_exo_lock,
         )
         val overlay = findViewById<android.widget.FrameLayout>(

@@ -25,7 +25,11 @@ class MixDropExtractor : Extractor() {
         "https://mixdrop.gl",
         "https://mixdrop.sx",
         // 2026-05-14 (dessinanime.cc utilise ce miroir spécifique)
-        "https://mxdrop.sx"
+        "https://mxdrop.sx",
+        // 2026-06-13 (porté upstream v1.7.220-v1.7.221) : miroirs avec typo
+        //   (i en plus) — protègent si MixDrop change pour ces variantes.
+        "https://miixdrop.net",
+        "https://miiixdrop.net"
     )
     override val rotatingDomain = listOf(
         Regex("^md[3bfyz][a-z0-9]*\\.[a-z0-9]+", RegexOption.IGNORE_CASE)

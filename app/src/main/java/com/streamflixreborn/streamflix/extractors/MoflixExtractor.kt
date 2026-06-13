@@ -44,6 +44,11 @@ class MoflixExtractor : Extractor() {
                 val src = video.src ?: ""
                 val resolveUrl = video.playback_resolve_url ?: ""
                 if (src.isBlank() && resolveUrl.isBlank()) return@mapNotNull null
+                // 2026-06-13 : skip serveurs verrouillés derrière paywall
+                //   (porté depuis upstream streamflix-reborn v1.7.220 — sans
+                //   ce skip on lance un stream qui affiche un paywall à l'user
+                //   = mauvaise UX, server "mort silencieusement").
+                if (video.premium_locked == true) return@mapNotNull null
 
                 val finalSrc = if (resolveUrl.isNotBlank()) "$mainUrl/api/v1/$resolveUrl" else src
                 
@@ -135,6 +140,9 @@ class MoflixExtractor : Extractor() {
             val src: String? = null,
             val type: String? = null,
             val playback_resolve_url: String? = null,
+            // 2026-06-13 : indicateur serveur premium (= paywall). Si true,
+            //   on skip le serveur dans `servers()` (cf upstream v1.7.220).
+            val premium_locked: Boolean? = null,
         )
     }
 

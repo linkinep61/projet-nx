@@ -32,6 +32,7 @@
 	<string name="main_menu_settings">الإعدادات</string>
 
 	<string name="search_input_hint">ابحث عن الأفلام أو المسلسلات</string>
+	<string name="search_input_hint_iptv">ابحث عن القنوات</string>
 	<string name="global_search">بحث شامل</string>
 	<string name="searching">جاري البحث...</string>
 	<string name="search_empty_query">يرجى إدخال مصطلح البحث</string>

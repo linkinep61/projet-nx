@@ -834,6 +834,21 @@ abstract class Extractor {
                     }
                 }
             }
+            // 2026-06-13 (user "Frembed mapping richardquestionbuilding→voe") :
+            //   2e passe via `rotatingDomain` regex pour capter automatiquement
+            //   les domaines rotatifs (Voe utilise des noms aléatoires comme
+            //   richardquestionbuilding.com, jessicayeahcatch.com…). Sans ce
+            //   check, le picker affichait "Richardquestionbuilding" au lieu
+            //   de "VOE" (la lecture marchait déjà via rotatingDomain dans le
+            //   matching d'extractor — c'est juste l'AFFICHAGE qui était
+            //   cassé). Maintenant ce check résout TOUS les futurs domaines
+            //   rotatifs sans avoir à les hardcoder dans une map (= mieux que
+            //   l'approche upstream qui ajoute juste 1 mapping spécifique).
+            for (extractor in extractors) {
+                if (extractor.rotatingDomain.any { it.containsMatchIn(compareUrl) }) {
+                    return extractor.name
+                }
+            }
             // Fallback: match base domain name without TLD
             for (extractor in extractors) {
                 val baseName = extractor.mainUrl.replace(Regex("^(https?://)?(www\\.)?(.*?)(\\.[a-z]+)"), "$3")
