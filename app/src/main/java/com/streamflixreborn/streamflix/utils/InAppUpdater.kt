@@ -39,7 +39,7 @@ object InAppUpdater {
 
     private val UPDATE_SOURCES = listOf(
         UpdateSource(owner = "Xx-nanico-xX", repo = "mobile-client-v2", useAuth = true),
-        UpdateSource(owner = "Logami61", repo = "mobile-client-v2-backup", useAuth = false),
+        UpdateSource(owner = "linkinep61", repo = "mobile-client-v2-backup", useAuth = false),
     )
 
     private data class Version(val name: String) : Comparable<Version> {
