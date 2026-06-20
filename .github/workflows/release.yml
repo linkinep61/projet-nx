@@ -71,7 +71,7 @@ jobs:
 
       - name: Rename Default APK
         run: |
-          cp "${{ steps.sign_apk.outputs.signedFile }}" "streamflix-${{ github.ref_name }}.apk"
+          cp "${{ steps.sign_apk.outputs.signedFile }}" "onyx-${{ github.ref_name }}.apk"
 
       # --- Mobile build ---
       - name: Set Mobile version
@@ -93,7 +93,7 @@ jobs:
 
       - name: Rename Mobile APK
         run: |
-          cp "${{ steps.sign_apk_mobile.outputs.signedFile }}" "streamflix-${{ github.ref_name }}-mobile.apk"
+          cp "${{ steps.sign_apk_mobile.outputs.signedFile }}" "onyx-${{ github.ref_name }}-mobile.apk"
 
       # --- TV build ---
       - name: Set TV version
@@ -120,13 +120,13 @@ jobs:
 
       - name: Rename TV APK
         run: |
-          cp "${{ steps.sign_apk_tv.outputs.signedFile }}" "streamflix-${{ github.ref_name }}-tv.apk"
+          cp "${{ steps.sign_apk_tv.outputs.signedFile }}" "onyx-${{ github.ref_name }}-tv.apk"
 
       # --- Upload all APKs to the existing release ---
       - name: Upload APKs to Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            streamflix-${{ github.ref_name }}.apk
-            streamflix-${{ github.ref_name }}-mobile.apk
-            streamflix-${{ github.ref_name }}-tv.apk
+            onyx-${{ github.ref_name }}.apk
+            onyx-${{ github.ref_name }}-mobile.apk
+            onyx-${{ github.ref_name }}-tv.apk

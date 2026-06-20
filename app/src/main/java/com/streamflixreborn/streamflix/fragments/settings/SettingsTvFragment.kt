@@ -1022,6 +1022,178 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             startActivity(android.content.Intent(requireContext(), com.streamflixreborn.streamflix.activities.sync.DeviceSyncActivity::class.java))
             true
         }
+
+        // 2026-06-19 v35 : injecte options Compte TF1+ / Compte M6+ pour TV Hub.
+        injectTvHubAccountPreferences()
+    }
+
+    /** Ajoute dynamiquement les boutons compte TF1+/M6+ à pc_provider_settings
+     *  si le provider courant est TV Hub. Clic sur "Compte X" → dialog avec
+     *  3 options : reconnecter, déconnecter (= clear token + cookies), annuler. */
+    private fun injectTvHubAccountPreferences() {
+        val provName = com.streamflixreborn.streamflix.utils.UserPreferences
+            .currentProvider?.name ?: return
+        if (provName != "TV Hub") return
+        val cat = findPreference<PreferenceCategory>("pc_provider_settings") ?: return
+        cat.isVisible = true
+        findPreference<PreferenceCategory>("pc_provider_empty_state")?.isVisible = false
+        val tf1Key = "tvhub_account_tf1"
+        if (findPreference<Preference>(tf1Key) == null) {
+            val pref = Preference(requireContext()).apply {
+                key = tf1Key
+                title = "Compte TF1+"
+                isIconSpaceReserved = false
+                summary = tf1AccountSummary()
+                setOnPreferenceClickListener {
+                    showAccountActionDialog(
+                        serviceLabel = "TF1+",
+                        isLoggedIn = com.streamflixreborn.streamflix.utils.TF1Auth.isLoggedIn(requireContext()),
+                        onConnect = {
+                            com.streamflixreborn.streamflix.activities.LoginWebViewActivity.start(
+                                requireContext(),
+                                com.streamflixreborn.streamflix.activities.LoginWebViewActivity.SERVICE_TF1,
+                            )
+                        },
+                        onDisconnect = {
+                            com.streamflixreborn.streamflix.utils.TF1Auth.clearToken(requireContext())
+                            clearWebViewAccountCookies(
+                                listOf(
+                                    "tf1.fr", ".tf1.fr", "compte.tf1.fr",
+                                    "www.tf1.fr", "accounts.tf1.fr",
+                                ),
+                            )
+                            summary = tf1AccountSummary()
+                            Toast.makeText(requireContext(),
+                                "TF1+ : déconnecté", Toast.LENGTH_SHORT).show()
+                        },
+                    )
+                    true
+                }
+            }
+            cat.addPreference(pref)
+        }
+        val m6Key = "tvhub_account_m6"
+        if (findPreference<Preference>(m6Key) == null) {
+            val pref = Preference(requireContext()).apply {
+                key = m6Key
+                title = "Compte M6+ (6play)"
+                isIconSpaceReserved = false
+                summary = m6AccountSummary()
+                setOnPreferenceClickListener {
+                    showAccountActionDialog(
+                        serviceLabel = "M6+",
+                        isLoggedIn = com.streamflixreborn.streamflix.utils.M6Auth.isLoggedIn(requireContext()),
+                        onConnect = {
+                            com.streamflixreborn.streamflix.activities.LoginWebViewActivity.start(
+                                requireContext(),
+                                com.streamflixreborn.streamflix.activities.LoginWebViewActivity.SERVICE_M6,
+                            )
+                        },
+                        onDisconnect = {
+                            com.streamflixreborn.streamflix.utils.M6Auth.clearToken(requireContext())
+                            clearWebViewAccountCookies(
+                                listOf(
+                                    "6play.fr", ".6play.fr", "www.6play.fr",
+                                    "m6.fr", ".m6.fr",
+                                    "login.m6.fr", "gigya.com", ".gigya.com",
+                                ),
+                            )
+                            summary = m6AccountSummary()
+                            Toast.makeText(requireContext(),
+                                "M6+ : déconnecté", Toast.LENGTH_SHORT).show()
+                        },
+                    )
+                    true
+                }
+            }
+            cat.addPreference(pref)
+        }
+    }
+
+    private fun tf1AccountSummary(): String =
+        if (com.streamflixreborn.streamflix.utils.TF1Auth.isLoggedIn(requireContext()))
+            "✓ Connecté — cliquer pour reconnecter ou déconnecter"
+        else "Non connecté — cliquer pour se connecter"
+
+    private fun m6AccountSummary(): String =
+        if (com.streamflixreborn.streamflix.utils.M6Auth.isLoggedIn(requireContext()))
+            "✓ Connecté — cliquer pour reconnecter ou déconnecter"
+        else "Non connecté — cliquer pour se connecter"
+
+    private fun showAccountActionDialog(
+        serviceLabel: String,
+        isLoggedIn: Boolean,
+        onConnect: () -> Unit,
+        onDisconnect: () -> Unit,
+    ) {
+        if (!isLoggedIn) {
+            onConnect(); return
+        }
+        AlertDialog.Builder(requireContext())
+            .setTitle("Compte $serviceLabel")
+            .setItems(arrayOf("Reconnexion (changer compte / refresh token)", "Déconnexion (efface mot de passe + cookies)")) { _, idx ->
+                when (idx) {
+                    0 -> onConnect()
+                    1 -> {
+                        AlertDialog.Builder(requireContext())
+                            .setTitle("Déconnecter $serviceLabel ?")
+                            .setMessage("Tes identifiants ($serviceLabel) seront supprimés (token + cookies + mot de passe / email). Tes favoris et autres données ne sont PAS effacés.")
+                            .setPositiveButton("Déconnecter") { _, _ -> onDisconnect() }
+                            .setNegativeButton("Annuler", null)
+                            .show()
+                    }
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** 2026-06-19 v40 (user "quand on se déconnecte on est censé se reconnecter
+     *  par le site et là c'est pas le cas") : clean robuste — getCookie veut
+     *  une URL https valide, et il faut vider WebStorage + cache WebView pour
+     *  forcer un VRAI login au lieu d'un auto-login depuis cookies cachés. */
+    private fun clearWebViewAccountCookies(domains: List<String>) {
+        val cm = android.webkit.CookieManager.getInstance()
+        val urls = domains.flatMap { d ->
+            val host = d.removePrefix(".")
+            listOf("https://$host/", "https://www.$host/")
+        }.distinct()
+        var totalCleared = 0
+        for (url in urls) {
+            val cookies = cm.getCookie(url) ?: continue
+            cookies.split(";").map { it.trim() }.forEach { c ->
+                val name = c.substringBefore("=").trim()
+                if (name.isNotBlank()) {
+                    val host = try { java.net.URL(url).host } catch (_: Throwable) { "" }
+                    if (host.isNotBlank()) {
+                        cm.setCookie(url, "$name=; Max-Age=0; Path=/")
+                        cm.setCookie(url, "$name=; Max-Age=0; Path=/; Domain=$host")
+                        cm.setCookie(url, "$name=; Max-Age=0; Path=/; Domain=.$host")
+                        cm.setCookie(url, "$name=; Max-Age=0; Path=/; Secure; SameSite=None")
+                        cm.setCookie(url, "$name=; Max-Age=0; Path=/; Domain=$host; Secure; SameSite=None")
+                        totalCleared++
+                    }
+                }
+            }
+        }
+        cm.flush()
+        Log.d("SettingsTv", "clearWebViewAccountCookies: expired $totalCleared cookies across ${urls.size} URLs")
+        try {
+            android.webkit.WebStorage.getInstance().deleteAllData()
+            Log.d("SettingsTv", "WebStorage.deleteAllData() done")
+        } catch (t: Throwable) {
+            Log.w("SettingsTv", "WebStorage clear failed: ${t.message}")
+        }
+        try {
+            val wv = android.webkit.WebView(requireContext())
+            wv.clearCache(true)
+            wv.clearHistory()
+            wv.clearFormData()
+            wv.destroy()
+            Log.d("SettingsTv", "WebView clearCache(true) + clearHistory done")
+        } catch (t: Throwable) {
+            Log.w("SettingsTv", "WebView clear failed: ${t.message}")
+        }
     }
 
     private suspend fun performBackupExport(uri: Uri) {

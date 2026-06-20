@@ -3,5 +3,5 @@
     <!-- 2026-06-02 : override app_name pour les builds debug pour
          différencier visuellement de la version release dans le launcher
          (utile quand les 2 sont installées côte-à-côte). -->
-    <string name="app_name">StreamFR DEBUG</string>
+    <string name="app_name">ONYX DEBUG</string>
 </resources>

@@ -108,28 +108,61 @@ class ProfilePickerActivity : FragmentActivity() {
     }
 
     private fun onProfileClicked(profile: Profile) {
-        if (profile.pinHash != null) {
-            promptPin(profile) { ok ->
-                if (ok) enterProfile(profile)
+        // 2026-06-17 (user "certains appareils bloqués sur écran profil") :
+        //   log + Toast pour identifier où ça coince. Le user signale que des
+        //   appareils ne peuvent pas dépasser cet écran après click profil.
+        Log.d(TAG, "onProfileClicked: ${profile.name} (pin=${profile.pinHash != null})")
+        try {
+            if (profile.pinHash != null) {
+                promptPin(profile) { ok ->
+                    if (ok) enterProfile(profile)
+                }
+            } else {
+                enterProfile(profile)
             }
-        } else {
-            enterProfile(profile)
+        } catch (e: Throwable) {
+            Log.e(TAG, "onProfileClicked CRASH: ${e.message}", e)
+            try {
+                Toast.makeText(
+                    this,
+                    "Erreur entrée profil : ${e.javaClass.simpleName} ${e.message?.take(60)}",
+                    Toast.LENGTH_LONG
+                ).show()
+            } catch (_: Throwable) {}
         }
     }
 
     private fun enterProfile(profile: Profile) {
-        ProfileManager.setCurrentProfile(profile)
-        Log.d(TAG, "Entering profile: ${profile.name} (${profile.id})")
+        // 2026-06-17 : try-catch défensif total + logs détaillés pour identifier
+        //   pourquoi certains appareils restent bloqués sur "Qui regarde ?".
+        try {
+            ProfileManager.setCurrentProfile(profile)
+            Log.d(TAG, "Entering profile: ${profile.name} (${profile.id})")
+        } catch (e: Throwable) {
+            Log.e(TAG, "setCurrentProfile failed: ${e.message}", e)
+            Toast.makeText(this, "Erreur sauvegarde profil : ${e.message?.take(60)}", Toast.LENGTH_LONG).show()
+            return
+        }
         // 2026-05-12 (user "on ne peut pas faire retour pour retourner ce
         // nouveau menu") : NE PAS finish() la picker — on veut que le bouton
         // retour depuis la home retourne sur "Qui regarde ?". FLAG_CLEAR_TOP
         // évite d'empiler plusieurs MainMobileActivity si l'user reclique le
         // même profil rapidement.
-        startActivity(
-            Intent(this, MainMobileActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                .putExtra("FORCE_PROVIDERS_SCREEN", true)
-        )
+        try {
+            startActivity(
+                Intent(this, MainMobileActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    .putExtra("FORCE_PROVIDERS_SCREEN", true)
+            )
+            Log.d(TAG, "MainMobileActivity launch dispatched OK")
+        } catch (e: Throwable) {
+            Log.e(TAG, "startActivity MainMobileActivity failed: ${e.message}", e)
+            Toast.makeText(
+                this,
+                "Erreur lancement : ${e.javaClass.simpleName} ${e.message?.take(60)}",
+                Toast.LENGTH_LONG
+            ).show()
+        }
     }
 
     private fun promptPin(profile: Profile, onResult: (Boolean) -> Unit) {

@@ -51,6 +51,14 @@
         android:title="Pays/langue"
         android:visible="false" />
 
+    <!-- 2026-06-17 (user "il faut faire un bouton de bascule") : tunnel Vavoo
+         via serveurs free VYPN. OFF par défaut. -->
+    <item
+        android:id="@+id/vavoo_tunnel_menu"
+        android:icon="@drawable/ic_vavoo_tunnel"
+        android:title="Tunnel VPN"
+        android:visible="false" />
+
     <!-- 2026-06-10 (user "bouton apparent dans la barre") : sélecteur de
          source World TV (style Wiseplay). -->
     <item
@@ -72,6 +80,15 @@
         android:id="@+id/catalog_filter_menu"
         android:icon="@drawable/ic_categories_filter"
         android:title="Filtre"
+        android:visible="false" />
+
+    <!-- 2026-06-19 (user "on n'a pas mis le bouton refresh du home en dessous
+         des paramètres sur TV dans le TV Hub") : icône refresh du home,
+         visible UNIQUEMENT pour LiveTvHubProvider via updateNavigationVisibility. -->
+    <item
+        android:id="@+id/livehub_refresh_menu"
+        android:icon="@drawable/ic_refresh"
+        android:title="Rafraîchir"
         android:visible="false" />
 
     <!-- 2026-05-26 : filtre genre TMDB = re-clic sur Films/Séries (pas d'item dédié).

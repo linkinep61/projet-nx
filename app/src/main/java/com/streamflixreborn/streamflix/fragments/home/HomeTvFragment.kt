@@ -300,6 +300,17 @@ class HomeTvFragment : Fragment() {
             }
         } catch (_: Throwable) {}
 
+        // 2026-06-16 (FIX) : attachPlayerView APPELE INCONDITIONNELLEMENT a chaque
+        //   onResume, AVANT le ?: return. Sans ca, au demarrage froid (=
+        //   currentChannelId == null), on returnait avant et le freezeOverlay
+        //   restait null → captureLastFrameToOverlay skipait silencieusement.
+        try {
+            val freezeOv = binding.root.findViewById<android.widget.ImageView>(
+                com.streamflixreborn.streamflix.R.id.mini_swap_freeze_overlay
+            )
+            MiniPlayerController.attachPlayerView(binding.miniPlayerView, freezeOv)
+        } catch (_: Throwable) {}
+
         val channelId = MiniPlayerController.currentChannelId ?: return
 
         // If the player was released (e.g. went to fullscreen), re-init and replay

@@ -8,4 +8,10 @@
     <dimen name="genre_spacing">16dp</dimen>
 
     <dimen name="season_episodes_spacing">30dp</dimen>
+
+    <!-- 2026-06-15 (user "en position couché le mini lecteur prend tout l'écran") :
+         Hauteur du mini player sur mobile. En portrait = 200dp (= valeur historique).
+         En paysage (values-land/dimens.xml) = 100dp pour ne pas envahir l'écran.
+         Les layouts TV gardent leur 200dp hardcodé (= jamais touché). -->
+    <dimen name="mini_player_height_mobile">200dp</dimen>
 </resources>

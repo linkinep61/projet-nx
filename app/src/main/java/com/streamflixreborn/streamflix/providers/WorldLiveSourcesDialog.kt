@@ -13,8 +13,11 @@ object WorldLiveSourcesDialog {
         val activeIdx = WorldLiveSourcesStore.getActiveIndex(context)
         val labels = all.mapIndexed { idx, src ->
             val active = if (idx == activeIdx) " ✓" else ""
-            val builtin = if (src.isBuiltin) "  [prédéfini]" else ""
-            "${src.name}${active}${builtin}"
+            // 2026-06-14 (user "le mot prédéfini derrière la liste ça sert à
+            //   rien") : retiré. Les built-in sont maintenant éditables/
+            //   supprimables comme les sources perso, plus de distinction
+            //   visuelle nécessaire.
+            "${src.name}${active}"
         }.toTypedArray()
 
         android.app.AlertDialog.Builder(context)
@@ -145,11 +148,13 @@ object WorldLiveSourcesDialog {
         context: Context, indexInAll: Int, source: WorldLiveSourcesStore.Source,
         onChanged: () -> Unit,
     ) {
-        val actions = if (source.isBuiltin) {
-            arrayOf("✓ Activer cette source")
-        } else {
-            arrayOf("✓ Activer cette source", "Modifier", "Supprimer")
-        }
+        // 2026-06-14 (user "les playlists par défaut il faut faire en sorte
+        //   qu'elles soient supprimées si l'utilisateur veut les supprimer
+        //   comme celles qu'on ajoute ou même modifier") : les 3 actions
+        //   sont maintenant dispos même pour les built-in. Le store gère
+        //   les built-in supprimés via PREF_REMOVED_BUILTINS et les modifs
+        //   via PREF_BUILTIN_OVERRIDES.
+        val actions = arrayOf("✓ Activer cette source", "Modifier", "Supprimer")
         android.app.AlertDialog.Builder(context)
             .setTitle(source.name)
             .setItems(actions) { _, action ->
@@ -183,10 +188,10 @@ object WorldLiveSourcesDialog {
                         onChanged()
                     }
                     1 -> {
-                        // 2026-06-13 : meme fix que remove, on passe la source
-                        //   directement → showEditDialog retrouve son personIdx
-                        //   via name+url (robuste au masquage built-in).
-                        showEditDialog(context, source, onChanged)
+                        // 2026-06-14 : showEditDialog prend maintenant indexInAll
+                        //   pour pouvoir aussi éditer les built-in via le mécanisme
+                        //   d'override (PREF_BUILTIN_OVERRIDES) du store.
+                        showEditDialog(context, indexInAll, source, onChanged)
                     }
                     2 -> {
                         // 2026-06-13 (user "j'arrive pas a supprimer la source
@@ -246,20 +251,13 @@ object WorldLiveSourcesDialog {
     }
 
     private fun showEditDialog(
-        context: Context, source: WorldLiveSourcesStore.Source,
+        context: Context, indexInAll: Int, source: WorldLiveSourcesStore.Source,
         onChanged: () -> Unit,
     ) {
-        // 2026-06-13 : retrouve le personIdx en interne via name+url
-        // (= robuste au masquage built-in qui decale les indices visibles).
-        val personIdx = WorldLiveSourcesStore.list(context).indexOfFirst {
-            it.name == source.name && it.url == source.url
-        }
-        if (personIdx < 0) {
-            android.widget.Toast.makeText(context,
-                "Source introuvable (peut-etre un built-in non editable)",
-                android.widget.Toast.LENGTH_SHORT).show()
-            return
-        }
+        // 2026-06-14 (user "les playlists par défaut... ou même modifier") :
+        //   utilise updateAtAllIndex (= accepte builtin via overrides) au lieu
+        //   de update(personIdx). Plus de risque d'erreur "Source introuvable"
+        //   sur un built-in.
         val container = android.widget.LinearLayout(context).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(48, 24, 48, 24)
@@ -281,10 +279,11 @@ object WorldLiveSourcesDialog {
                 val name = nameInput.text.toString().trim()
                 val url = urlInput.text.toString().trim()
                 if (name.isBlank() || url.isBlank()) return@setPositiveButton
-                WorldLiveSourcesStore.update(context, personIdx, name, url)
-                android.widget.Toast.makeText(context,
-                    "Modifiée : $name", android.widget.Toast.LENGTH_SHORT).show()
-                onChanged()
+                val ok = WorldLiveSourcesStore.updateAtAllIndex(context, indexInAll, name, url)
+                val msg = if (ok) "Modifiée : $name" else "Modification échouée"
+                android.widget.Toast.makeText(context, msg,
+                    android.widget.Toast.LENGTH_SHORT).show()
+                if (ok) onChanged()
             }
             .setNegativeButton("Annuler", null)
             .show()

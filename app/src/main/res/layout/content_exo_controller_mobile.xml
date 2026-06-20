@@ -40,7 +40,9 @@
         android:textColor="#FFFFFF"
         android:textSize="18sp"
         android:textStyle="bold"
-        app:layout_constraintEnd_toStartOf="@id/btn_exo_external_player"
+        android:maxLines="1"
+        android:ellipsize="end"
+        app:layout_constraintEnd_toStartOf="@id/exo_top_icons_bar"
         app:layout_constraintStart_toEndOf="@id/btn_exo_back"
         app:layout_constraintTop_toTopOf="parent"
         tools:text="Title" />
@@ -54,23 +56,13 @@
         android:layout_marginEnd="16dp"
         android:textSize="12sp"
         android:textStyle="bold"
-        app:layout_constraintEnd_toStartOf="@id/btn_exo_external_player"
+        android:maxLines="1"
+        android:ellipsize="end"
+        app:layout_constraintEnd_toStartOf="@id/exo_top_icons_bar"
         app:layout_constraintStart_toEndOf="@id/btn_exo_back"
         app:layout_constraintTop_toBottomOf="@id/tv_exo_title"
         tools:text="Description" />
 
-    <ImageView
-        android:id="@+id/btn_exo_external_player"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginEnd="16dp"
-        android:padding="8dp"
-        android:src="@drawable/exo_styled_controls_external_player"
-        app:tint="#FFFFFF"
-        app:layout_constraintBottom_toBottomOf="@id/tv_exo_subtitle"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toTopOf="@id/tv_exo_title"
-        tools:ignore="ContentDescription" />
 
     <LinearLayout
         android:id="@+id/exo_center_controls"
@@ -155,15 +147,21 @@
     </LinearLayout>
 
     <!-- Mobile port v51 : conteneur vertical pour exo_progress (VOD) + dual-bars (live IPTV). -->
+    <!-- 2026-06-19 (user "barre de progression trop haute, ça cache les sous-titres
+         en pause") : barre placée TOUT en bas, exo_bottom_bar (= boutons + temps)
+         remonte au-dessus.
+         2026-06-19 v27 (user "remonter la barre d'un cran et décaler") :
+         marginBottom 4→24dp pour décoller la barre du bord, +marginStart/End
+         alignés sur les autres bars (16dp). -->
     <LinearLayout
         android:id="@+id/exo_progress_container"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
-        android:layout_marginEnd="8dp"
-        android:layout_marginBottom="4dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="24dp"
         android:orientation="vertical"
-        app:layout_constraintBottom_toTopOf="@id/exo_bottom_bar"
+        app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent">
 
@@ -192,13 +190,18 @@
             tools:visibility="visible" />
     </LinearLayout>
 
+    <!-- 2026-06-19 v34 (user "barre avec TOUS les icônes tout en haut") :
+         exo_bottom_bar ne contient plus QUE le timer (position/separator/
+         duration). channel_list a été déplacée dans exo_top_icons_bar
+         pour grouper TOUS les icônes en haut. -->
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/exo_bottom_bar"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginStart="16dp"
         android:layout_marginEnd="16dp"
-        app:layout_constraintBottom_toBottomOf="parent"
+        android:layout_marginBottom="4dp"
+        app:layout_constraintBottom_toTopOf="@id/exo_progress_container"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent">
 
@@ -238,6 +241,22 @@
             app:layout_constraintTop_toTopOf="parent"
             tools:text="00:00:00" />
 
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+    <!-- 2026-06-19 v37 (user "ta barre avec le cadenas et tout le reste elle
+         devrait être en haut") : container TOP des icônes — alignée TOUT EN
+         HAUT à droite, sur la même ligne que le titre (au lieu d'être sous
+         le subtitle). Le titre se contrainte End_toStartOf=cette bar pour
+         ne pas overlap. -->
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/exo_top_icons_bar"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="16dp"
+        android:layout_marginTop="12dp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
         <ImageView
             android:id="@+id/btn_exo_lock"
             android:layout_width="wrap_content"
@@ -247,30 +266,10 @@
             android:src="@drawable/exo_styled_controls_lock"
             app:tint="#FFFFFF"
             app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@id/btn_exo_channel_list"
+            app:layout_constraintEnd_toStartOf="@id/btn_exo_cast"
             app:layout_constraintTop_toTopOf="parent"
             tools:ignore="ContentDescription,PrivateResource" />
 
-        <!-- 2026-06-12 (user "bouton liste chaines a cote du cadenas") :
-             Visible UNIQUEMENT pour les providers IPTV (Vavoo, World Live,
-             OLA, etc.). Tap → BottomSheet avec toutes les chaines du
-             provider, tap sur une chaine = switch rapide (= equivalent
-             touche LEFT D-pad sur TV). -->
-        <ImageView
-            android:id="@+id/btn_exo_channel_list"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginEnd="16dp"
-            android:padding="12dp"
-            android:src="@drawable/ic_channel_list"
-            android:contentDescription="Liste des chaines"
-            android:visibility="gone"
-            app:tint="#FFFFFF"
-            app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@id/btn_exo_cast"
-            app:layout_constraintTop_toTopOf="parent" />
-
-        <!-- 2026-05-31 : Bouton Cast — envoie le flux vidéo à la Chromecast -->
         <androidx.mediarouter.app.MediaRouteButton
             android:id="@+id/btn_exo_cast"
             android:layout_width="wrap_content"
@@ -282,9 +281,6 @@
             app:layout_constraintTop_toTopOf="parent"
             app:mediaRouteButtonTint="#FFFFFF" />
 
-        <!-- 2026-06-03 : Bouton "Diffuser écran" — ouvre Settings.ACTION_CAST_SETTINGS
-             Android système qui détecte les Miracast wireless displays (TV LG webOS,
-             Samsung, etc.) que le MediaRouteButton/Cast SDK ne voit pas. -->
         <ImageView
             android:id="@+id/btn_exo_wireless"
             android:layout_width="wrap_content"
@@ -312,10 +308,6 @@
             app:layout_constraintTop_toTopOf="parent"
             tools:ignore="ContentDescription,PrivateResource" />
 
-        <!-- Live recording button — sits between PiP and Zoom in the
-             bottom-right corner, away from the central playback controls so
-             users don't tap it by accident while seeking. Visible on any
-             video; tap to start/stop a live capture (turns red while active). -->
         <ImageView
             android:id="@+id/btn_live_record"
             android:layout_width="wrap_content"
@@ -333,22 +325,58 @@
             android:id="@+id/btn_exo_aspect_ratio"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginEnd="16dp"
             android:padding="12dp"
             android:src="@drawable/exo_styled_controls_aspect_ratio"
             app:tint="#FFFFFF"
             app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintEnd_toStartOf="@id/btn_exo_external_player"
             app:layout_constraintTop_toTopOf="parent"
             tools:ignore="ContentDescription,PrivateResource" />
 
+        <!-- 2026-06-19 v34 : external_player n'est plus en TOUT à droite,
+             channel_list le remplace (= dernière icône à droite). -->
+        <ImageView
+            android:id="@+id/btn_exo_external_player"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="16dp"
+            android:padding="12dp"
+            android:src="@drawable/exo_styled_controls_external_player"
+            app:tint="#FFFFFF"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toStartOf="@id/btn_exo_channel_list"
+            app:layout_constraintTop_toTopOf="parent"
+            tools:ignore="ContentDescription" />
+
+        <!-- 2026-06-19 v34 (user "barre avec TOUS les icônes tout en haut") :
+             channel_list rejoint la barre du haut, en TOUT à droite. -->
+        <ImageView
+            android:id="@+id/btn_exo_channel_list"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="12dp"
+            android:src="@drawable/ic_channel_list"
+            android:contentDescription="Liste des chaines"
+            android:visibility="gone"
+            app:tint="#FFFFFF"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
     </androidx.constraintlayout.widget.ConstraintLayout>
 
+    <!-- 2026-06-19 v34 (user "passer l'intro en bas, pas en haut") :
+         BUG TROUVÉ — la contrainte référençait exo_progress qui est DANS
+         exo_progress_container (LinearLayout), pas direct child du
+         ConstraintLayout root → contrainte non résolue → bouton tombait
+         en haut à droite. Fix : référencer exo_bottom_bar (direct child). -->
     <TextView
         android:id="@+id/btn_skip_intro"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginEnd="16dp"
-        android:layout_marginBottom="16dp"
+        android:layout_marginBottom="8dp"
         android:background="@drawable/bg_skip_intro_button"
         android:drawableStart="@drawable/exo_styled_controls_fastforward"
         android:drawablePadding="8dp"
@@ -361,7 +389,7 @@
         android:textColor="#FFFFFF"
         android:textSize="14sp"
         android:visibility="gone"
-        app:layout_constraintBottom_toTopOf="@id/exo_progress"
+        app:layout_constraintBottom_toTopOf="@id/exo_bottom_bar"
         app:layout_constraintEnd_toEndOf="parent"
         tools:visibility="visible" />
 

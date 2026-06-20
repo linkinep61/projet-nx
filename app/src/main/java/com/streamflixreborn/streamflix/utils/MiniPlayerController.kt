@@ -70,6 +70,11 @@ object MiniPlayerController {
     // d'abandonner. Maintenant: 10s × 1 cycle = 10s. Si le stream ne charge
     // pas en 6s (BUFFERING_WATCHDOG), c'est probable qu'il est down →
     // pas la peine de re-tenter 3x avec 30s d'attente entre chaque.
+    // 2026-06-15 REVERT (user "faut pas toucher à tout c'est générique") :
+    //   les retry cycles touchent TOUS les providers IPTV. Les bump à 3 cycles
+    //   sur 9s ne fixe pas prime-tv (= 403 reste côté serveur) ET ralentit
+    //   la récupération sur tous les autres providers. Retour au comportement
+    //   original 1 cycle × 10s = comportement éprouvé.
     private const val RETRY_DELAY_MS = 10_000L  // 10s avant retry (était 30s)
     private const val MAX_RETRY_CYCLES = 1       // 1 cycle max (était 3)
     // If a stream stays BUFFERING for this long without reaching READY, force-failover
@@ -79,6 +84,13 @@ object MiniPlayerController {
     private const val BUFFERING_WATCHDOG_MS = 6_000L
 
     private var player: ExoPlayer? = null
+    // 2026-06-16 (user "le grand player dans le mini a l exactitude") : mirror du
+    //   grand swap_freeze_overlay (PlayerTvFragment 478-527). Refs vers la PlayerView
+    //   active + ImageView overlay, setees par HomeTvFragment/HomeMobileFragment
+    //   au boot via attachPlayerView(). Permet captureLastFrameToOverlay() avant
+    //   le JUMELAGE swap = masque la coupure codec flush ~500ms.
+    @Volatile private var miniPlayerView: androidx.media3.ui.PlayerView? = null
+    @Volatile private var freezeOverlayView: android.widget.ImageView? = null
     // 2026-06-09 : appContext stocké pour pouvoir lancer/arrêter le
     //   RadioPlaybackService depuis n'importe quelle fonction.
     @Volatile private var appContext: Context? = null
@@ -203,7 +215,126 @@ object MiniPlayerController {
     private var backupJob: Job? = null
     private var bufferingStartMs: Long = 0L
     private const val BACKUP_PREFETCH_DELAY_MS = 10_000L
-    private const val BUFFERING_SWAP_THRESHOLD_MS = 2_000L
+    // 2026-06-15 (user "le mini lecteur a pas le même pattern que le grand
+    //   lecteur") : aligné sur le grand (PlayerTvFragment line 3436 "stuck
+    //   buffering 500ms → swapToNextWithAudioFade"). Avant : 2000ms = user
+    //   voit 2s de coupure avant swap. Après : 500ms = swap imperceptible.
+    // 2026-06-16 FINAL (apres audit 5 fixes) : 500L = MIRROR EXACT du grand.
+    //   Plus de boucle car PROACTIVE prepare et speed=1.1 et backup SAME-URL
+    //   etaient les vraies causes du drain. Maintenant le buffer reste stable
+    //   donc swap rare comme le grand.
+    private const val BUFFERING_SWAP_THRESHOLD_MS = 500L
+
+    // 2026-06-15 (user "le mini lecteur doit être autonome") : forced periodic
+    //   swap toutes les 45s pour rafraîchir le primary anti-dégradation CDN.
+    //   Aligné sur PlayerTvFragment.startPeriodicForcedSwap() (ligne 5216).
+    //   Sans ce mécanisme, un primary qui se dégrade lentement (rate-limit,
+    //   token vieillissant) finit par couper sans que le mini ne réagisse.
+    //   Avec : on swap vers le backup AVANT que le primary ne meure.
+    private var periodicSwapJob: Job? = null
+    @Volatile private var lastSwapTimestampMs: Long = 0L
+
+    /**
+     * 2026-06-17 (user "quand je swap de chaîne il a tendance à garder la même
+     *  chaîne en mémoire") : compteur de génération atomique incrémenté à CHAQUE
+     *  playChannel. Toutes les coroutines (loadJob, progressiveServerJob,
+     *  playServerAtIndex) capturent leur génération locale au lancement et
+     *  l'inspectent avant chaque écriture sur le player (setMediaSource, prepare,
+     *  play). Si la génération a changé entre temps → abort immédiat.
+     *
+     *  Pourquoi le check `currentChannelId != channelId` seul est insuffisant :
+     *   - User clique TF1 → playChannel("tf1") → loadJob1 lance getServers + setMediaSource("tf1")
+     *   - User clique TMC AVANT que loadJob1 termine → playChannel("tmc")
+     *      → cancel loadJob1 (async coopératif) + reset state + lance loadJob2("tmc")
+     *   - loadJob1 termine son getVideo() AVANT de checker `currentChannelId`,
+     *      puis setMediaSource("tf1_url") sur le player → joue TF1 au lieu de TMC
+     *   - Pire : user revient sur TF1 → playChannel("tf1") → currentChannelId=="tf1"
+     *      → l'ancien loadJob1 ne se sait pas annulé via le check de channelId
+     *      → race entre loadJob1 et loadJob3 → comportement non-déterministe
+     *      qui matche la description user ("parfois oui parfois non, tout dépend").
+     */
+    @Volatile private var playChannelGeneration: Int = 0
+    private const val PERIODIC_SWAP_INTERVAL_MS = 45_000L
+    // 2026-06-15 v6 : aligné PlayerTvFragment.kt SWAP_COOLDOWN_MS=5_000L (ligne 5193).
+    //   Avant : 20_000L (4× plus permissif que le grand → swaps trop rares → cuts).
+    private const val SWAP_RECENT_COOLDOWN_MS = 5_000L
+
+    // 2026-06-15 (user "regarde les logs il y a des défauts dans le mini") :
+    //   Porté de PlayerMobileFragment ligne 3640-3669. Quand le stream live
+    //   IPTV STALL en BUFFERING long (= prime-tv, Vavoo edge lent), seek live
+    //   edge + prepare() le fait repartir. Limite anti-flap : 3 reloads max
+    //   sur fenêtre 15s sinon STOP (= évite boucle infinie sur stream cassé).
+    private var liveBufferingRecoveryJob: Job? = null
+    // 2026-06-16 : watchdog stuck-BUFFERING continu (porté du grand)
+    private var stuckBufferingWatchdogJob: Job? = null
+    @Volatile private var liveRecoveryActive: Boolean = false
+    // 2026-06-16 (Transfer-recovery porté du grand TV ligne 6113) : marqueur
+    //   set à true quand le stream IPTV a atteint STATE_READY au moins une fois.
+    //   Sert à la branche ENDED/IDLE pour ne reload QUE si on a déjà joué.
+    @Volatile private var iptvCurrentStreamHasWorked: Boolean = false
+    private val recentReloadTimestamps = mutableListOf<Long>()
+    private const val LIVE_BUFFERING_RECOVERY_MS = 12_000L
+    private const val RELOAD_FLAP_THRESHOLD = 3
+    private const val RELOAD_FLAP_WINDOW_MS = 15_000L
+
+    // 2026-06-15 (user "il faut tout porter") : Server Scout HEAD 10s +
+    //   addBackupPreventively. Porté de PlayerTvFragment ligne 5252-5326.
+    //   Sonde le manifest URL toutes les 10s en HEAD. Si 509/429/5xx détecté,
+    //   ajoute un backup MediaItem en queue AVANT que ExoPlayer ne crashe.
+    //   Anticipe les coupures côté serveur.
+    private var scoutJob: Job? = null
+    @Volatile private var lastScoutBadResponseMs: Long = 0L
+
+    // 2026-06-15 (user "le mini coupe sur ParaTV TNT FR alors que le grand
+    //   tient, applique tous les empoints") : LAZY BACKUP just-in-time porté
+    //   de PlayerTvFragment ligne 4952-4984. Surveille buffer ahead toutes
+    //   les 5s. Quand ahead >= 15s ET pas de backup → ajoute backup MediaItem
+    //   pour garantir que JUMELAGE swap est toujours possible.
+    private var lazyBackupJob: Job? = null
+    private const val LAZY_BACKUP_AHEAD_THRESHOLD_S = 15
+    // 2026-06-15 (user "applique tous les empoints du grand au mini") :
+    //   ÉTAT supplémentaire pour le reload identique dans onPlayerError
+    //   et le watchdog flux corrompu (PORTÉ PlayerTvFragment ligne 4780-4802).
+    //   recentReloadTimestamps / RELOAD_FLAP_* déjà déclarés plus haut.
+    @Volatile private var preemptiveReloadInFlight: Boolean = false
+    @Volatile private var lastStuckPosKey: Int = -1
+    @Volatile private var stuckCounter: Int = 0
+    // 2026-06-16 (user "au 404 d'une chaine IPTV, l'app re-fetche la playlist
+    //   source mais faut pas que ca fasse trop de retrail") : auto-refresh
+    //   de la playlist source IPTV (livehub::worldlivetv) au 404, avec throttle
+    //   5 min pour ne pas spammer le CDN/GitHub raw. ParaTV rote ses paths
+    //   obfusques plusieurs fois par heure → notre data.m3u cache local
+    //   contient parfois des URLs deja mortes. Au lieu de "reload identique"
+    //   sur URL morte, on invalide le cache + relance la chaine (= re-fetch
+    //   la playlist + re-build channels + re-prepare avec la nouvelle URL).
+    @Volatile private var lastPlaylistRefreshMs: Long = 0L
+    private const val PLAYLIST_REFRESH_THROTTLE_MS = 5 * 60_000L  // 5 min
+    // 2026-06-16 (user "porte exactement ce que fait le grand") : watchdog
+    //   stuck-BUFFERING porté de PlayerTvFragment ligne 5165-5173. Quand
+    //   ExoPlayer reste en BUFFERING avec position figée >8s, les retries
+    //   internes ont probablement échoué silencieusement (ExoPlayer ne fire
+    //   pas toujours onPlayerError). Le watchdog force alors un re-fetch via
+    //   invalidateCache + replay channel (= équivalent viewModel.getVideo
+    //   pour le grand). Combiné avec auto-refresh 404, garantit que les URLs
+    //   roteees ParaTV sont detectees immediatement.
+    @Volatile private var lastObservedPositionMs: Long = -1L
+    @Volatile private var stuckBufferingTicks: Int = 0
+    private const val STUCK_BUFFER_THRESHOLD_TICKS = 8
+    // 2026-06-16 : flux corrompu (position bloquée avec buffer plein >8s) →
+    //   seekToDefault + prepare. Porté PlayerTvFragment ligne 4780-4802.
+    @Volatile private var stuckPosCounter: Int = 0
+    @Volatile private var lastStuckPosKey2s: Int = -1
+    // 2026-06-15 v11 (CAUSE TROUVÉE des coupures mini via logcat) :
+    //   les logs montrent que LAZY BACKUP swap fail avec
+    //   `UnrecognizedInputFormatException` car addMediaItem() utilise
+    //   l'auto-detect et tente du Progressive/MP4 au lieu de HLS.
+    //   Fix : stocker la DataSource.Factory IPTV courante et construire
+    //   tous les backups via IptvPlayerSetup.createIptvHlsMediaSource
+    //   (= même pipeline que le primary) puis addMediaSource (PAS
+    //   addMediaItem).
+    @Volatile private var currentIptvDataSourceFactory: androidx.media3.datasource.DataSource.Factory? = null
+    @Volatile private var currentIptvIsHls: Boolean = false
+    private const val LAZY_BACKUP_CHECK_INTERVAL_MS = 5_000L
 
     // Host-level failure tracking: if a host fails >= HOST_FAIL_THRESHOLD times,
     // skip all remaining servers on that host immediately instead of wasting 5s each.
@@ -221,7 +352,137 @@ object MiniPlayerController {
         }
     }
 
+    /**
+     * 2026-06-15 (user "M6 bug sur le mini lecteur") : BUG CRITIQUE diagnostiqué
+     * via logcat. Avant ce helper, MiniPlayerController.onPlayerError appelait
+     * OlaTvProvider.reportBrokenStreamUrl() inconditionnellement, ce qui
+     * blacklistait le HOST (ex 185.160.192.14) pour TOUTE la session. Quand
+     * un segment TS prime-tv (World Live TV) retournait 403 (= JWT expiré,
+     * segment éphémère), OlaTvProvider blacklistait 185.160.192.14 → TOUTES
+     * les chaînes prime-tv du host (M6, W9, ...) devenaient inaccessibles.
+     *
+     * Fix : ne déléguer au tracker OlaTvProvider que SI la chaîne est Ola.
+     * Pour les autres providers (World Live TV, Vavoo, Movix LiveTV, etc.),
+     * on garde uniquement le recordHostFail LOCAL (cooldown mini-player only).
+     */
+    private fun isCurrentChannelOla(): Boolean {
+        val id = currentChannelId ?: return false
+        return id.startsWith("ola::") || id.startsWith("ola_ep::") ||
+            id.startsWith("ola_stream::") || id.startsWith("ola_fasttrack::")
+    }
+
+
     fun getPlayer(): ExoPlayer? = player
+
+    /**
+     * 2026-06-16 : appele par HomeTvFragment / HomeMobileFragment au boot pour
+     *   donner au MiniPlayerController une reference vers la PlayerView active
+     *   + ImageView overlay. Permet le freeze frame avant JUMELAGE swap.
+     */
+    fun attachPlayerView(
+        playerView: androidx.media3.ui.PlayerView?,
+        freezeOverlay: android.widget.ImageView?,
+    ) {
+        miniPlayerView = playerView
+        freezeOverlayView = freezeOverlay
+        Log.d(TAG, "attachPlayerView: pv=${playerView != null} freeze=${freezeOverlay != null}")
+    }
+
+    /**
+     * 2026-06-16 : mirror grand PlayerTvFragment 478-506. PixelCopy la derniere
+     *   frame du SurfaceView vers un Bitmap et affiche dans freezeOverlayView.
+     *   Pendant le seek+codec flush (~500-1000ms ecran noir naturel), le user
+     *   voit la frame figee au lieu du noir. Hide au prochain STATE_READY.
+     */
+    @androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.N)
+    private suspend fun captureLastFrameToOverlay() {
+        try {
+            val pv = miniPlayerView
+            val overlay = freezeOverlayView
+            if (pv == null || overlay == null) {
+                Log.w(TAG, "captureLastFrameToOverlay: pv=${pv != null} overlay=${overlay != null} — SKIP")
+                return
+            }
+            val w = pv.width
+            val h = pv.height
+            if (w <= 0 || h <= 0) {
+                Log.w(TAG, "captureLastFrameToOverlay: dimensions invalides ${w}x${h}")
+                return
+            }
+            // 2026-06-16 : layout = TextureView (= sync rendering, plus reactif que
+            //   SurfaceView). textureView.getBitmap() retourne directement le bitmap
+            //   actuel (= la derniere frame decoder). Plus rapide que PixelCopy + plus
+            //   fiable (pas de race condition pre-flush).
+            val tv = findTextureView(pv)
+            val bmp: android.graphics.Bitmap? = if (tv != null) {
+                try { tv.getBitmap(w, h) } catch (e: Exception) {
+                    Log.w(TAG, "textureView.getBitmap failed: ${e.message}")
+                    null
+                }
+            } else {
+                val sv = findSurfaceView(pv) ?: run {
+                    Log.w(TAG, "captureLastFrameToOverlay: ni TextureView ni SurfaceView trouve")
+                    return
+                }
+                val b = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+                val ok = kotlinx.coroutines.suspendCancellableCoroutine<Boolean> { cont ->
+                    try {
+                        android.view.PixelCopy.request(sv, b, { result ->
+                            if (cont.isActive) cont.resume(result == android.view.PixelCopy.SUCCESS) {}
+                        }, android.os.Handler(android.os.Looper.getMainLooper()))
+                    } catch (e: Exception) {
+                        if (cont.isActive) cont.resume(false) {}
+                    }
+                }
+                if (ok) b else null
+            }
+            if (bmp != null) {
+                withContext(Dispatchers.Main) {
+                    overlay.setImageBitmap(bmp)
+                    overlay.visibility = android.view.View.VISIBLE
+                    overlay.alpha = 1f
+                    overlay.bringToFront()
+                }
+                Log.d(TAG, "captureLastFrameToOverlay: SUCCESS ${w}x${h} (mode=${if (tv != null) "TextureView" else "PixelCopy"})")
+            } else {
+                Log.w(TAG, "captureLastFrameToOverlay: bitmap null")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "captureLastFrameToOverlay: ${e.message}")
+        }
+    }
+
+    private fun findTextureView(root: android.view.View): android.view.TextureView? {
+        if (root is android.view.TextureView) return root
+        if (root is android.view.ViewGroup) {
+            for (i in 0 until root.childCount) {
+                val child = root.getChildAt(i)
+                val found = findTextureView(child)
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
+    private fun findSurfaceView(root: android.view.View): android.view.SurfaceView? {
+        if (root is android.view.SurfaceView) return root
+        if (root is android.view.ViewGroup) {
+            for (i in 0 until root.childCount) {
+                val child = root.getChildAt(i)
+                val found = findSurfaceView(child)
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
+    private fun hideFreezeOverlay() {
+        try {
+            val overlay = freezeOverlayView ?: return
+            overlay.visibility = android.view.View.GONE
+            overlay.setImageBitmap(null)
+        } catch (_: Exception) {}
+    }
 
     private val playerListener = object : Player.Listener {
         override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
@@ -263,9 +524,12 @@ object MiniPlayerController {
                 val playingUri = player?.currentMediaItem?.localConfiguration?.uri?.toString()
                 if (!playingUri.isNullOrBlank()) {
                     recordHostFail(playingUri)
-                    try {
-                        com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
-                    } catch (_: Throwable) {}
+                    // 2026-06-15 : ne déléguer à OlaTvProvider QUE si chaîne Ola.
+                    if (isCurrentChannelOla()) {
+                        try {
+                            com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
+                        } catch (_: Throwable) {}
+                    }
                     // Invalide le fast-track pré-caché : ce CID est dead côté CDN.
                     // 2026-06-03 : on N'EFFACE PAS l'URL du cache (le 456 = rate-limit
                     //   transitoire). On la marque "morte" 24h → getCachedStreamUrls()
@@ -304,9 +568,12 @@ object MiniPlayerController {
             val playingUri = player?.currentMediaItem?.localConfiguration?.uri?.toString()
             if (!playingUri.isNullOrBlank()) {
                 recordHostFail(playingUri)
-                try {
-                    com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
-                } catch (_: Throwable) { }
+                // 2026-06-15 : ne déléguer à OlaTvProvider QUE si chaîne Ola.
+                if (isCurrentChannelOla()) {
+                    try {
+                        com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
+                    } catch (_: Throwable) { }
+                }
                 // 2026-06-03 : si c'était un fast-track + HTTP 403/404/410 = mort
                 //   confirmé. markUrlDead 24h pour rétrograder à la prochaine visite.
                 if (currentServerIsFastTrack &&
@@ -315,6 +582,124 @@ object MiniPlayerController {
                     try {
                         com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex.markUrlDead(playingUri)
                     } catch (_: Throwable) {}
+                }
+            }
+            // 2026-06-15 (user "applique tous les empoints du grand au mini") :
+            //   PORTÉ PlayerTvFragment ligne 3742-3817. AVANT de sauter au
+            //   server suivant, on tente un reload identique du MediaItem
+            //   (clearMediaItems + setMediaItem + prepare = fresh connexion
+            //   HTTP). Beaucoup d'erreurs IPTV viennent d'une connexion HTTP
+            //   morte et NON d'une URL morte → reload résout en 1 RTT au lieu
+            //   de tryNextServer qui re-extract une URL fresh (5-10s). Anti-flap:
+            //   3 reloads max dans 15s → bascule serveur si échec persistant.
+            val curChIdForReload = currentChannelId
+            val isLiveIptvForReload = curChIdForReload != null && (
+                curChIdForReload.startsWith("ch::") || curChIdForReload.startsWith("sport::") ||
+                curChIdForReload.startsWith("ola::") || curChIdForReload.startsWith("ola_ep::") ||
+                curChIdForReload.startsWith("vegeta::") || curChIdForReload.startsWith("vegeta_ep::") ||
+                curChIdForReload.startsWith("livehub::") || curChIdForReload.startsWith("sportlive::") ||
+                curChIdForReload.startsWith("match::") || curChIdForReload.startsWith("vavoo::") ||
+                curChIdForReload.startsWith("myiptv-live::")
+            )
+            val uriObj = player?.currentMediaItem?.localConfiguration?.uri
+            // 2026-06-16 (user "au 404 d'une chaine IPTV l'app re-fetche la
+            //   playlist source mais faut pas que ca fasse trop de refresh") :
+            //   Specifique au HTTP 404 sur chaine World Live TV (mix m3u, paradis,
+            //   etc.) → la playlist M3U a probablement une URL roteee. Au lieu
+            //   du reload identique, on invalide le cache + replay la chaine
+            //   (= getChannel re-fetchera la playlist M3U et trouvera la nouvelle
+            //   URL). Throttle 5 min global pour ne pas spammer.
+            val isWorldLiveIptv = curChIdForReload?.startsWith("livehub::worldlivetv::") == true
+            if (httpCode == 404 && isWorldLiveIptv) {
+                val now404 = System.currentTimeMillis()
+                val sinceLast = now404 - lastPlaylistRefreshMs
+                if (sinceLast > PLAYLIST_REFRESH_THROTTLE_MS) {
+                    lastPlaylistRefreshMs = now404
+                    Log.w(TAG, "Live IPTV 404 (worldlivetv) — invalidate cache + replay channel ${curChIdForReload?.take(60)}")
+                    try {
+                        com.streamflixreborn.streamflix.providers.WorldLiveTvProvider.invalidateCache()
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "WorldLiveTvProvider.invalidateCache failed: ${t.message}")
+                    }
+                    // Relance la chaine via playChannel — re-fetchera la playlist
+                    // avec URL fraiche (= re-resolution depuis le M3U).
+                    val freshChId = curChIdForReload!!
+                    val freshName = currentChannelName ?: ""
+                    val freshPoster = currentChannelPoster
+                    scope.launch {
+                        delay(800) // delai pour invalidation
+                        playChannel(freshChId, freshName, freshPoster)
+                    }
+                    return
+                } else {
+                    Log.d(TAG, "Live IPTV 404 throttled (last refresh ${sinceLast/1000}s ago, need ${PLAYLIST_REFRESH_THROTTLE_MS/1000}s) — fallback to reload identique")
+                }
+            }
+            // 2026-06-16 (user "mini coupures vs grand stable") : PORTÉ du grand
+            //   PlayerTvFragment ligne 3748-3770. AVANT de faire le reload
+            //   destructif (clearMediaItems + setMediaItem + prepare = ~2-5s de
+            //   coupure), si on a un backup en queue (LazyBackup ou JUMELAGE),
+            //   on swap dessus = swap instantané sans coupure visible. C'est
+            //   ce que faisait le grand et que le mini ne faisait PAS.
+            // 2026-06-18 (user "Végéta TV se coupe et plus rien, change de
+            //   serveur auto au lieu de retry sur le même lien, ça **** tout
+            //   le Game") : VegetaTV n'a souvent qu'1-2 serveurs valides parmi
+            //   les 71. Le JUMELAGE swap envoie vers un backup pré-chargé
+            //   souvent mort → encore plus d'erreurs. Pour VegetaTV (et OTF/
+            //   OLA qui ont la même topologie), on SKIP le JUMELAGE swap et
+            //   on tente d'abord un sticky retry prepare() sur le même flux.
+            val isVegetaCh = curChIdForReload?.startsWith("vegeta::") == true ||
+                             curChIdForReload?.startsWith("vegeta_ep::") == true ||
+                             curChIdForReload?.startsWith("livehub::vegeta::") == true
+            val pForSwap = player
+            if (isLiveIptvForReload && !isVegetaCh && pForSwap != null && !preemptiveReloadInFlight) {
+                val hasBackupQueued = try {
+                    pForSwap.mediaItemCount > 1 && pForSwap.hasNextMediaItem()
+                } catch (_: Exception) { false }
+                val sinceLastSwap = System.currentTimeMillis() - lastSwapTimestampMs
+                if (hasBackupQueued && sinceLastSwap >= SWAP_RECENT_COOLDOWN_MS) {
+                    Log.w(TAG, "JUMELAGE: error avec backup → swapToNextWithAudioFade (no reset)")
+                    preemptiveReloadInFlight = true
+                    scope.launch {
+                        try {
+                            swapToNextWithAudioFade(pForSwap)
+                            lastSwapTimestampMs = System.currentTimeMillis()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "swap on error failed: ${e.message}")
+                        }
+                        delay(8_000L)
+                        preemptiveReloadInFlight = false
+                    }
+                    return
+                }
+            }
+            if (isLiveIptvForReload && uriObj != null && !preemptiveReloadInFlight) {
+                val nowFlap = System.currentTimeMillis()
+                recentReloadTimestamps.removeAll { (nowFlap - it) > RELOAD_FLAP_WINDOW_MS }
+                // 2026-06-18 (user "Végéta TV se coupe, switch auto **** tout
+                //   le game") : VegetaTV nécessite jusqu'à 10 retries sur le
+                //   même flux avant abandon. Le switch serveur sur VegetaTV
+                //   tombe presque toujours sur un serveur dead car la
+                //   topologie a beaucoup de serveurs morts.
+                val effectiveThreshold = if (isVegetaCh) 10 else RELOAD_FLAP_THRESHOLD
+                if (recentReloadTimestamps.size < effectiveThreshold) {
+                    recentReloadTimestamps.add(nowFlap)
+                    Log.w(TAG, "Live IPTV error — sticky retry (prepare seul, mirror grand) ${recentReloadTimestamps.size}/$effectiveThreshold")
+                    preemptiveReloadInFlight = true
+                    scope.launch {
+                        try {
+                            val pReload = player ?: return@launch
+                            pReload.prepare()
+                            pReload.playWhenReady = true
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Sticky retry failed: ${e.message}")
+                        }
+                        delay(5_000L)
+                        preemptiveReloadInFlight = false
+                    }
+                    return
+                } else {
+                    Log.w(TAG, "Reload flap detected (3 reloads/15s) → fallback tryNextServer")
                 }
             }
             tryNextServer()
@@ -328,6 +713,17 @@ object MiniPlayerController {
                     Log.d(TAG, "Playback ready on server [$currentServerIndex] $serverName")
                     cancelBufferingWatchdog()
                     retryCycle = 0 // reset cycle counter on success
+                    bufferingStartMs = 0L
+                    // 2026-06-16 (user "copie identique du grand") : hideFreezeOverlay
+                    //   RETIRE du STATE_READY. Le grand n'utilise PAS le freeze overlay
+                    //   dans son swap (swapToNextWithAudioFade TEST9 minimal ligne 555-563
+                    //   = juste seekToNextMediaItem + seekToDefaultPosition). On reste
+                    //   identique au grand.
+                    // 2026-06-16 (Transfer-recovery du grand ligne 6113-6115) :
+                    //   marqueur set à true au 1er READY pour autoriser le reload
+                    //   sur ENDED/IDLE plus tard. Sans ça, le flag reste false et
+                    //   la branche ENDED/IDLE ne se déclenche jamais.
+                    iptvCurrentStreamHasWorked = true
                     _state.value = State.Playing(chId, currentChannelName ?: "", currentChannelPoster)
                     // 2026-05-17 (user "il a changé que après") : si l'user a un
                     //   favori qui n'est PAS le server actuellement joué, on
@@ -379,44 +775,103 @@ object MiniPlayerController {
                             val latencyMs = if (bufferingStartMs > 0) {
                                 System.currentTimeMillis() - bufferingStartMs
                             } else null
-                            com.streamflixreborn.streamflix.providers.OlaTvProvider.reportWorkingStreamUrl(
-                                playingUri,
-                                if (isDirect) channelKey else null,
-                                cid = if (isDirect) extractedCid else null,
-                                latencyMs = if (isDirect) latencyMs else null,
-                            )
+                            // 2026-06-15 : ne pousser vers OlaTvProvider QUE si chaîne Ola.
+                            if (isCurrentChannelOla()) {
+                                com.streamflixreborn.streamflix.providers.OlaTvProvider.reportWorkingStreamUrl(
+                                    playingUri,
+                                    if (isDirect) channelKey else null,
+                                    cid = if (isDirect) extractedCid else null,
+                                    latencyMs = if (isDirect) latencyMs else null,
+                                )
+                            }
                         } catch (_: Throwable) { }
                     }
+                    // 2026-06-15 (audit grand-vs-mini) : porté de
+                    //   PlayerTvFragment.kt ligne 3607 — démarre le server
+                    //   scout HEAD 10s qui détecte 509/429/5xx au manifest et
+                    //   ajoute un backup préventif. Sans ça, addBackupPreventively
+                    //   n'était JAMAIS appelé côté mini.
+                    startServerScout()
+                    // 2026-06-16 (user "analyse le grand et reproduit le pattern") :
+                    //   demarre un Handler tick 1s qui LOG le buffer ahead toutes les
+                    //   5s comme le grand (PlayerTvFragment.startProgressHandler). Permet
+                    //   de comparer le drain du buffer mini vs grand.
+                    startMiniBufferLogger()
+                    // 2026-06-16 (user "tu enleves tout ce qui est mini, je veux du grand
+                    //   a l exactitude") : startStuckBufferingWatchdog DESACTIVE.
+                    //   Le grand TV PlayerTvFragment ligne 4720 met le watchdog dans
+                    //   un Runnable derriere if (player.isPlaying), avec un check
+                    //   !player.isPlaying interieur qui est de fait IMPOSSIBLE = le
+                    //   stuck du grand ne se declenche JAMAIS pour live IPTV. Le mini
+                    //   l appelait, ca declenchait STUCK BUFFERING 8s + replay channel
+                    //   en boucle. armLiveBufferingRecovery (seek+prepare 12s en
+                    //   STATE_BUFFERING) + Transfer-recovery (ENDED/IDLE) suffisent.
+                    // startStuckBufferingWatchdog()  // DISABLED — mismatch avec grand
                 }
                 Player.STATE_BUFFERING -> {
-                    // Start a watchdog: if buffering doesn't reach READY within
-                    // BUFFERING_WATCHDOG_MS, force-failover. ExoPlayer can otherwise hang
-                    // on a stream that returns headers but no segments.
-                    armBufferingWatchdog()
-                    // 2026-05-17 v18 (user "jumelage") : si on a un backup dans la
-                    //   queue, swap après BUFFERING_SWAP_THRESHOLD_MS de buffering.
-                    //   ExoPlayer pré-buffer le backup → swap quasi-instant.
-                    bufferingStartMs = System.currentTimeMillis()
+                    // 2026-06-16 (user "je ne veux pas qu'il y ait de difference, je veux
+                    //   exactement la meme chose que le grand") : porte CONDITION EXACTE
+                    //   du grand PlayerTvFragment ligne 3480 : armBufferingWatchdog
+                    //   UNIQUEMENT pour NON-live-IPTV. Le grand ne fait JAMAIS le
+                    //   "stuck >15s switching" pour live IPTV (= il s'appuie sur JUMELAGE
+                    //   swap + stuckBufferingTicks). Sans cette condition, le mini bouclait
+                    //   sur "tryNextServer + retry cycle" toutes les 15s.
+                    val curChIdForBuf = currentChannelId
+                    val isLiveIptvForBuf = curChIdForBuf != null && (
+                        curChIdForBuf.startsWith("ch::") || curChIdForBuf.startsWith("sport::") ||
+                        curChIdForBuf.startsWith("ola::") || curChIdForBuf.startsWith("ola_ep::") ||
+                        curChIdForBuf.startsWith("vegeta::") || curChIdForBuf.startsWith("vegeta_ep::") ||
+                        curChIdForBuf.startsWith("livehub::") || curChIdForBuf.startsWith("sportlive::") ||
+                        curChIdForBuf.startsWith("match::") || curChIdForBuf.startsWith("vavoo::") ||
+                        curChIdForBuf.startsWith("myiptv-live::")
+                    )
+                    if (!isLiveIptvForBuf) {
+                        // Start a watchdog: if buffering doesn't reach READY within
+                        // BUFFERING_WATCHDOG_MS, force-failover. ExoPlayer can otherwise hang
+                        // on a stream that returns headers but no segments.
+                        armBufferingWatchdog()
+                    }
+                    // 2026-06-16 (audit 3 agents) : armLiveBufferingRecovery DESACTIVE.
+                    //   Le grand TV n'execute le seek+prepare 12s EN BUFFERING
+                    //   QUE dans attachTransferRecoveryListener (= attache
+                    //   uniquement au handoff mini->grand, pas en lecture normale).
+                    //   Le mini, lui, l'activait systematiquement = BOUCLE TF1
+                    //   (BUFFERING -> seek+prepare 12s -> repart BUFFERING -> ...).
+                    //   Le JUMELAGE swap (avec backup) + handleEndedOrIdle (ENDED/IDLE)
+                    //   suffisent pour recovery, comme sur le grand.
+                    // if (isLiveIptvForBuf) {
+                    //     armLiveBufferingRecovery()
+                    // }
+                    // 2026-06-16 (audit #43) : MIRROR EXACT grand PlayerTvFragment 3386 —
+                    //   bufferingStartTimestampMs set UNIQUEMENT si == 0L (= au 1er
+                    //   tick BUFFERING). Avant le mini reset systematiquement chaque
+                    //   tick = timer constamment a 0 = le double-check 500ms passait
+                    //   immediatement = JUMELAGE swap declenchait trop vite.
+                    if (bufferingStartMs == 0L) {
+                        bufferingStartMs = System.currentTimeMillis()
+                    }
                     val pAtBuffer = player ?: return
                     val hasBackup = try { pAtBuffer.mediaItemCount > 1 } catch (_: Exception) { false }
-                    if (hasBackup) {
+                    val sinceLastSwapAtBuf = System.currentTimeMillis() - lastSwapTimestampMs
+                    if (hasBackup && sinceLastSwapAtBuf >= SWAP_RECENT_COOLDOWN_MS) {
                         scope.launch {
                             delay(BUFFERING_SWAP_THRESHOLD_MS)
                             val p2 = player ?: return@launch
                             if (p2.playbackState == Player.STATE_BUFFERING &&
                                 System.currentTimeMillis() - bufferingStartMs >= BUFFERING_SWAP_THRESHOLD_MS &&
-                                p2.hasNextMediaItem()) {
-                                Log.w(TAG, "JUMELAGE: primary stuck buffering ${BUFFERING_SWAP_THRESHOLD_MS}ms → swap vers backup")
+                                p2.hasNextMediaItem() &&
+                                System.currentTimeMillis() - lastSwapTimestampMs >= SWAP_RECENT_COOLDOWN_MS) {
+                                Log.w(TAG, "JUMELAGE: primary stuck buffering ${BUFFERING_SWAP_THRESHOLD_MS}ms swap to backup")
                                 try {
+                                    // 2026-06-16 (user "copie identique du grand") :
+                                    //   captureLastFrameToOverlay RETIRE. Le grand fait
+                                    //   swap minimal TEST9 (PlayerTvFragment 555-563) :
+                                    //   juste seekToNextMediaItem + seekToDefaultPosition.
+                                    //   Pas de capture frame, pas de freeze overlay.
                                     p2.seekToNextMediaItem()
-                                    // 2026-05-20 (user "retours sur écran avec son et image
-                                    //   qui se répètent") : après le swap, le backup a été
-                                    //   pré-bufferisé à une position PLUS ANCIENNE que le
-                                    //   primary → l'user revoit du contenu déjà joué.
-                                    //   seekToDefaultPosition force un saut au live edge
-                                    //   (targetOffset derrière) → élimine le replay.
                                     p2.seekToDefaultPosition()
-                                    Log.d(TAG, "JUMELAGE: seekToDefaultPosition après swap (anti-replay)")
+                                    lastSwapTimestampMs = System.currentTimeMillis()
+                                    Log.d(TAG, "JUMELAGE: seekToDefaultPosition after swap (anti-replay)")
                                 } catch (e: Exception) {
                                     Log.w(TAG, "seekToNextMediaItem failed: ${e.message}")
                                 }
@@ -426,8 +881,96 @@ object MiniPlayerController {
                 }
                 Player.STATE_ENDED, Player.STATE_IDLE -> {
                     cancelBufferingWatchdog()
+                    handleEndedOrIdle(playbackState)
                 }
             }
+        }
+    }
+
+    // 2026-06-16 (Transfer-recovery du grand TV ligne 6152-6208) :
+    //   sur live IPTV qui a déjà joué (iptvCurrentStreamHasWorked=true),
+    //   STATE_ENDED/IDLE = stream coupé → full MediaItem reload pour
+    //   forcer ExoPlayer à re-ouvrir HTTP au CDN. Anti-flap 3/15s.
+    private fun handleEndedOrIdle(playbackState: Int) {
+        val curChIdForEnd = currentChannelId ?: return
+        val isLiveIptvForEnd = curChIdForEnd.startsWith("ch::") || curChIdForEnd.startsWith("sport::") ||
+            curChIdForEnd.startsWith("ola::") || curChIdForEnd.startsWith("ola_ep::") ||
+            curChIdForEnd.startsWith("vegeta::") || curChIdForEnd.startsWith("vegeta_ep::") ||
+            curChIdForEnd.startsWith("livehub::") || curChIdForEnd.startsWith("sportlive::") ||
+            curChIdForEnd.startsWith("match::") || curChIdForEnd.startsWith("vavoo::") ||
+            curChIdForEnd.startsWith("myiptv-live::")
+        if (!isLiveIptvForEnd || !iptvCurrentStreamHasWorked || preemptiveReloadInFlight) return
+        val pForReload = player ?: return
+        val uri = pForReload.currentMediaItem?.localConfiguration?.uri ?: return
+        // 2026-06-16 (audit agent #3) : MIRROR EXACT grand PlayerTvFragment 3752-3770 —
+        //   AVANT le reload destructif, tenter le JUMELAGE swap si backup disponible.
+        //   Le grand fait toujours le swap d'abord (~500ms) avant le reload (2-5s).
+        val sinceLastSwapEnd = System.currentTimeMillis() - lastSwapTimestampMs
+        val hasBackupForEnd = try { pForReload.mediaItemCount > 1 && pForReload.hasNextMediaItem() } catch (_: Exception) { false }
+        if (hasBackupForEnd && sinceLastSwapEnd >= SWAP_RECENT_COOLDOWN_MS) {
+            Log.w(TAG, "Transfer-recovery: Live IPTV $playbackState avec backup → JUMELAGE swap (mirror grand)")
+            try {
+                // Mirror grand : capture la frame avant le swap
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                    scope.launch { captureLastFrameToOverlay() }
+                }
+                pForReload.seekToNextMediaItem()
+                pForReload.seekToDefaultPosition()
+                lastSwapTimestampMs = System.currentTimeMillis()
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "JUMELAGE swap on ENDED/IDLE failed: ${e.message}")
+            }
+        }
+        val nowFlap2 = System.currentTimeMillis()
+        recentReloadTimestamps.removeAll { (nowFlap2 - it) > RELOAD_FLAP_WINDOW_MS }
+        if (recentReloadTimestamps.size >= RELOAD_FLAP_THRESHOLD) {
+            Log.e(TAG, "Transfer-recovery: reload flap (${recentReloadTimestamps.size} en 15s) — STOP")
+            return
+        }
+        recentReloadTimestamps.add(nowFlap2)
+        Log.w(TAG, "Transfer-recovery: Live IPTV $playbackState — full MediaItem reload")
+        preemptiveReloadInFlight = true
+        scope.launch {
+            try {
+                val freshItem = MediaItem.Builder()
+                    .setUri(uri)
+                    .setLiveConfiguration(
+                        MediaItem.LiveConfiguration.Builder()
+                            .setTargetOffsetMs(45_000)
+                            .setMinOffsetMs(20_000)
+                            .setMaxOffsetMs(120_000)
+                            .setMinPlaybackSpeed(0.95f)
+                            .setMaxPlaybackSpeed(1.0f)
+                            .build()
+                    )
+                    .build()
+                pForReload.clearMediaItems()
+                pForReload.setMediaItem(freshItem)
+                pForReload.prepare()
+                pForReload.playWhenReady = true
+            } catch (e: Exception) {
+                Log.w(TAG, "Transfer-recovery MediaItem reload failed: ${e.message}")
+            }
+            delay(5_000L)
+            preemptiveReloadInFlight = false
+        }
+    }
+
+    // 2026-06-16 (user "mini lecteur subit toujours des coupures par rapport au
+    //   grand qui est stable et fluide — pas le meme Pattern") : porte de
+    //   PlayerTvFragment.kt ligne 555. Au lieu du reload identique destructif
+    //   (clearMediaItems + setMediaItem + prepare = ~2-5s de coupure), si on a
+    //   un MediaItem backup en queue (= LazyBackup ou JUMELAGE), on swap dessus
+    //   instantanement. seekToNextMediaItem + seekToDefaultPosition force le
+    //   live edge sur le backup pour ne pas rejouer du contenu deja vu.
+    private suspend fun swapToNextWithAudioFade(p: ExoPlayer) {
+        try {
+            p.seekToNextMediaItem()
+            p.seekToDefaultPosition()
+            Log.d(TAG, "swapToNextWithAudioFade: swap minimal (no fade)")
+        } catch (e: Exception) {
+            Log.w(TAG, "swapToNextWithAudioFade failed: ${e.message}")
         }
     }
 
@@ -455,9 +998,12 @@ object MiniPlayerController {
                 val playingUri = player?.currentMediaItem?.localConfiguration?.uri?.toString()
                 if (!playingUri.isNullOrBlank()) {
                     recordHostFail(playingUri)
-                    try {
-                        com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
-                    } catch (_: Throwable) { }
+                    // 2026-06-15 : ne déléguer à OlaTvProvider QUE si chaîne Ola.
+                    if (isCurrentChannelOla()) {
+                        try {
+                            com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
+                        } catch (_: Throwable) { }
+                    }
                 }
                 tryNextServer()
             }
@@ -469,54 +1015,541 @@ object MiniPlayerController {
         bufferingWatchdogJob = null
     }
 
-    // 2026-05-17 : LoadErrorHandlingPolicy partagé pour le mini-player. Retry
-    //   403/5xx HLS manifest 6x avec backoff exponentiel avant fire onPlayerError
-    //   → masque les rate-limits transitoires Xtream sans cut visible.
-    private val resilientLoadErrorPolicy = object : androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy() {
-        override fun getRetryDelayMsFor(loadErrorInfo: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo): Long {
-            val ex = loadErrorInfo.exception
-            if (ex is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) {
-                val code = ex.responseCode
-                // 2026-05-17 v64 (user "Mon IPTV trop de crash, retour home") :
-                //   HTTP 456 (Stalker MAC rate-limit) → FAIL FAST, pas de retry.
-                //   Sinon ExoPlayer retry 6× au défaut → CPU 250% → ANR 5s → crash.
-                //   401/402/403 même chose : credentials invalides, ne sert à rien
-                //   de retrier. 451 = unavailable for legal reasons.
-                if (code == 456 || code == 401 || code == 402 || code == 451) {
-                    Log.w(TAG, "Mini LoadError HARD FAIL HTTP $code (rate-limit/auth) — no retry")
-                    return C.TIME_UNSET // signal "don't retry"
+    /**
+     * 2026-06-15 (user "regarde les logs, détecte les défauts si on peut les
+     * corriger") : porté de PlayerMobileFragment ligne 3640-3669.
+     *
+     * Quand le stream live STALL en BUFFERING (= no data flowing, manifest
+     * coupé, segments lents, etc.), faire un seek live edge + prepare() le
+     * force à refetch un manifest frais et reprendre. Borné par anti-flap
+     * (3 reloads max sur 15s) pour éviter boucle infinie.
+     */
+    private fun armLiveBufferingRecovery() {
+        if (liveRecoveryActive) return
+        liveRecoveryActive = true
+        liveBufferingRecoveryJob = scope.launch {
+            try {
+                while (kotlinx.coroutines.currentCoroutineContext().isActive &&
+                    (try { player?.playbackState == Player.STATE_BUFFERING } catch (_: Exception) { false })) {
+                    delay(LIVE_BUFFERING_RECOVERY_MS)
+                    val stillBuffering = try {
+                        player?.playbackState == Player.STATE_BUFFERING
+                    } catch (_: Exception) { false }
+                    if (!stillBuffering) break
+                    val now = System.currentTimeMillis()
+                    recentReloadTimestamps.removeAll { (now - it) > RELOAD_FLAP_WINDOW_MS }
+                    if (recentReloadTimestamps.size >= RELOAD_FLAP_THRESHOLD) {
+                        // 2026-06-16 (user "je suis parti 5 min je suis revenu
+                        //   la video etait a l'arret en train de boulinais") :
+                        //   AVANT : on STOP juste → mini reste fige indefiniment.
+                        //   APRES : cooldown 60s puis reset compteur + un dernier
+                        //   essai full pipeline (= refresh playlist au 404, ou
+                        //   tryNextServer si on a d'autres serveurs). Ca permet
+                        //   au mini de se reveiller tout seul si l'user revient
+                        //   plus tard sans toucher a l'app.
+                        Log.e(TAG, "Live BUFFERING: reload flap — pause 60s puis retry full pipeline")
+                        delay(60_000L)
+                        if (!kotlinx.coroutines.currentCoroutineContext().isActive) break
+                        val finalCheck = try { player?.playbackState == Player.STATE_BUFFERING } catch (_: Exception) { false }
+                        if (!finalCheck) break
+                        // Reset le compteur anti-flap
+                        recentReloadTimestamps.clear()
+                        // Trigger un retry pipeline complet (re-fetch servers + playlist)
+                        val chId = currentChannelId
+                        if (chId != null) {
+                            Log.w(TAG, "Live BUFFERING flap recovery: scheduleRetryOrFail apres 60s pause")
+                            scheduleRetryOrFail(chId, "Buffering 60s+")
+                        }
+                        break
+                    }
+                    recentReloadTimestamps.add(now)
+                    Log.w(TAG, "Live BUFFERING >${LIVE_BUFFERING_RECOVERY_MS / 1000}s → seek live edge + prepare() (aligned with PlayerMobileFragment)")
+                    try {
+                        val p = player ?: break
+                        p.seekToDefaultPosition()
+                        p.prepare()
+                        p.playWhenReady = true
+                    } catch (_: Exception) {}
                 }
-                // 2026-06-03 : si fast-track pré-caché → 403/404/410/5xx = mort
-                //   confirmé → skip immédiat (pas de retry 31 sec). Pour les
-                //   serveurs natifs Xtream, on garde le retry exponentiel.
-                if (currentServerIsFastTrack &&
-                    (code == 403 || code == 404 || code == 410 ||
-                     code == 500 || code == 502 || code == 503)) {
-                    Log.w(TAG, "Mini LoadError FAST-TRACK HARD FAIL HTTP $code — no retry, skip fast")
-                    return C.TIME_UNSET
-                }
-                // 2026-06-12 (user "ça charge en boucle sur TF1 World Live") :
-                //   pour les IPTV live mono-serveur, le retry n a aucun sens
-                //   sur 4xx (token signé, géo-block, auth) puisqu il n y a
-                //   personne sur qui basculer. On fail fast.
-                if (availableServers.size <= 1 &&
-                    (code == 403 || code == 404 || code == 410)) {
-                    Log.w(TAG, "Mini LoadError MONO-SERVER HARD FAIL HTTP $code — no retry, abandon")
-                    return C.TIME_UNSET
-                }
-                if (code == 403 || code == 500 || code == 502 || code == 503 || code == 509 || code == 429) {
-                    val attempt = loadErrorInfo.errorCount
-                    if (attempt < 6) {
-                        val delay = 500L * (1L shl attempt.coerceAtMost(5))
-                        Log.d(TAG, "Mini LoadError retry $attempt/6 for HTTP $code, delay=${delay}ms")
-                        return delay.coerceAtMost(16_000L)
+            } finally {
+                liveRecoveryActive = false
+            }
+        }
+    }
+
+    private fun cancelLiveBufferingRecovery() {
+        liveBufferingRecoveryJob?.cancel()
+        liveBufferingRecoveryJob = null
+        liveRecoveryActive = false
+    }
+
+    // 2026-06-16 (user "mini lecteur c'est n'importe quoi il respecte pas le
+    //   grand") : porté PlayerTvFragment ligne 4743-4802. 2 watchdogs en 1 :
+    //   (1) stuck-BUFFERING : position figée + BUFFERING >8s → force reload
+    //       via invalidateCache + replay channel (= équivalent viewModel.getVideo
+    //       du grand qui re-extrait l'URL fraîche).
+    //   (2) flux corrompu : position bloquée avec buffer plein (>10s ahead)
+    //       8 ticks consécutifs → seekToDefault + prepare (= decoder coincé
+    //       sur frames corrompues).
+    //   Le watchdog tourne TOUTES les 1s tant que la chaîne est active.
+    private fun startStuckBufferingWatchdog() {
+        stuckBufferingWatchdogJob?.cancel()
+        // Reset state pour nouvelle chaîne
+        stuckBufferingTicks = 0
+        stuckPosCounter = 0
+        lastObservedPositionMs = -1L
+        lastStuckPosKey2s = -1
+        val channelAtStart = currentChannelId
+        stuckBufferingWatchdogJob = scope.launch {
+            try {
+                while (kotlinx.coroutines.currentCoroutineContext().isActive &&
+                       currentChannelId == channelAtStart) {
+                    delay(1000L)
+                    val p = player ?: continue
+                    val state = try { p.playbackState } catch (_: Exception) { -1 }
+                    val curPos = try { p.currentPosition } catch (_: Exception) { -1L }
+                    val isPlaying = try { p.isPlaying } catch (_: Exception) { false }
+                    val buf = try { p.bufferedPosition } catch (_: Exception) { -1L }
+
+                    // 2026-06-16 (user "copie exacte du grand lecteur") : MIRROR
+                    //   EXACT PlayerTvFragment ligne 4748-4767. Conditions :
+                    //   - !isPlaying (= si player joue, position figee normale pas stuck)
+                    //   - curPos == lastObserved
+                    //   - curPos >= 0
+                    //   Action = seekToDefault + prepare local (= equivalent au getVideo
+                    //   du grand pour un mini sans currentServer). PAS de playChannel
+                    //   complet, PAS d invalidate cache. Le replay channel boucle infini
+                    //   parce que ParaTV manifest HLS statique est mis a jour toutes les
+                    //   ~5 min cote GitHub raw cache, on attend pas le re-fetch dans 5 min.
+                    val isStuck = !isPlaying && curPos == lastObservedPositionMs && curPos >= 0
+                    if (isStuck) {
+                        stuckBufferingTicks++
+                        if (stuckBufferingTicks >= STUCK_BUFFER_THRESHOLD_TICKS && !preemptiveReloadInFlight) {
+                            stuckBufferingTicks = 0
+                            preemptiveReloadInFlight = true
+                            Log.w(TAG, "STUCK BUFFERING ${STUCK_BUFFER_THRESHOLD_TICKS}s (!isPlaying) seekToDefault + prepare")
+                            try {
+                                p.seekToDefaultPosition()
+                                p.prepare()
+                                p.playWhenReady = true
+                            } catch (_: Exception) {}
+                            launch {
+                                delay(8_000L)
+                                preemptiveReloadInFlight = false
+                            }
+                        }
+                    } else {
+                        stuckBufferingTicks = 0
+                    }
+                    lastObservedPositionMs = curPos
+
+                    // (2) flux corrompu : position avance pas mais buffer plein
+                    val ahead = (buf - curPos).coerceAtLeast(0)
+                    val aheadSec = (ahead / 1000).toInt()
+                    if (aheadSec > 10 && isPlaying) {
+                        val posKey = (curPos / 2000).toInt()
+                        if (posKey == lastStuckPosKey2s) {
+                            stuckPosCounter++
+                            if (stuckPosCounter >= 8) {
+                                Log.w(TAG, "Flux corrompu (pos bloquée ${curPos/1000}s avec ${aheadSec}s buffer) → auto-refresh")
+                                stuckPosCounter = 0
+                                try {
+                                    p.seekToDefaultPosition()
+                                    p.prepare()
+                                    p.playWhenReady = true
+                                } catch (_: Exception) {}
+                            }
+                        } else {
+                            stuckPosCounter = 0
+                            lastStuckPosKey2s = posKey
+                        }
+                    } else {
+                        stuckPosCounter = 0
                     }
                 }
+            } catch (_: kotlinx.coroutines.CancellationException) {
+                // normal
+            } catch (e: Exception) {
+                Log.w(TAG, "Stuck buffering watchdog crashed: ${e.message}")
             }
-            return super.getRetryDelayMsFor(loadErrorInfo)
         }
-        override fun getMinimumLoadableRetryCount(dataType: Int): Int = 6
     }
+
+    private fun cancelStuckBufferingWatchdog() {
+        stuckBufferingWatchdogJob?.cancel()
+        stuckBufferingWatchdogJob = null
+        stuckBufferingTicks = 0
+        stuckPosCounter = 0
+    }
+
+    /**
+     * 2026-06-15 (user "il faut tout porter") : porté de PlayerTvFragment
+     * ligne 5252-5299. Sonde le manifest URL toutes les 10s en HEAD pour
+     * détecter 509/429/5xx AVANT que ExoPlayer y arrive. Si dégradation
+     * détectée, ajoute préventivement un backup MediaItem en queue pour
+     * absorber le cut imminent.
+     */
+    /**
+     * 2026-06-16 : mirror du grand PlayerTvFragment.startProgressHandler ligne 4699-4719.
+     * Log "Live buffer: pos=Xs buf=Ys ahead=Zs" toutes les 5s pour comparer avec le grand.
+     */
+    private var bufferLoggerJob: Job? = null
+    private fun startMiniBufferLogger() {
+        bufferLoggerJob?.cancel()
+        bufferLoggerJob = scope.launch {
+            var counter = 0
+            var lastReseekMs = 0L
+            while (kotlinx.coroutines.currentCoroutineContext().isActive) {
+                kotlinx.coroutines.delay(1000L)
+                counter++
+                val p = player ?: continue
+                try {
+                    if (!p.isPlaying) continue
+                    val pos = p.currentPosition
+                    val buf = p.bufferedPosition
+                    val ahead = ((buf - pos) / 1000).toInt()
+                    if (counter % 5 == 0) {
+                        Log.d(TAG, "Live buffer mini: pos=${pos/1000}s buf=${buf/1000}s ahead=${ahead}s")
+                    }
+                    // 2026-06-16 (FIX #1 audit) : PROACTIVE prepare RETIRE.
+                    //   Mon ancien fix mais cause exactement le drain : prepare() invalide
+                    //   le buffer = ahead descend. ExoPlayer gere naturellement.
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    private fun cancelMiniBufferLogger() {
+        bufferLoggerJob?.cancel()
+        bufferLoggerJob = null
+    }
+
+    private fun startServerScout() {
+        scoutJob?.cancel()
+        scoutJob = scope.launch(Dispatchers.IO) {
+            val client = okhttp3.OkHttpClient.Builder()
+                .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
+            while (kotlinx.coroutines.currentCoroutineContext().isActive) {
+                try {
+                    delay(10_000L)
+                    val uri = withContext(Dispatchers.Main) {
+                        player?.currentMediaItem?.localConfiguration?.uri
+                    } ?: continue
+                    val request = okhttp3.Request.Builder()
+                        .url(uri.toString())
+                        .head()
+                        .header("User-Agent", com.streamflixreborn.streamflix.utils.NetworkClient.USER_AGENT)
+                        .build()
+                    val resp = try {
+                        client.newCall(request).execute()
+                    } catch (e: Exception) {
+                        Log.d("MiniScout", "Scout request failed: ${e.message}")
+                        null
+                    }
+                    if (resp != null) {
+                        val code = resp.code
+                        resp.close()
+                        if (code == 509 || code == 429 || code in 500..503) {
+                            lastScoutBadResponseMs = System.currentTimeMillis()
+                            Log.w("MiniScout", "⚠️ Serveur en difficulté: HTTP $code → trigger backup préventif")
+                            withContext(Dispatchers.Main) {
+                                addBackupPreventively()
+                            }
+                        } else if (code == 200) {
+                            if (System.currentTimeMillis() - lastScoutBadResponseMs < 30_000L) {
+                                Log.d("MiniScout", "✅ Serveur recovered: HTTP 200")
+                            }
+                        }
+                    }
+                } catch (_: kotlinx.coroutines.CancellationException) {
+                    break
+                } catch (e: Exception) {
+                    Log.d("MiniScout", "Scout loop error: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun cancelServerScout() {
+        scoutJob?.cancel()
+        scoutJob = null
+    }
+
+    /**
+     * 2026-06-15 (user "applique tous les empoints") : LAZY BACKUP just-in-time
+     * porté de PlayerTvFragment ligne 4952-4984. Surveille buffer ahead toutes
+     * les 5s. Quand ahead >= 15s ET pas de backup en queue, ajoute un backup
+     * MediaItem aligné sur les offsets du primary (anti-déjà-vu). Garantit
+     * que le JUMELAGE swap a toujours un backup à utiliser.
+     */
+    private fun startLazyBackupWatcher() {
+        lazyBackupJob?.cancel()
+        // 2026-06-15 v6 (aligné PlayerTvFragment.kt ligne 4947-4951) :
+        //   les chaînes Stalker `myiptv-live::` enforcent 1 connexion par MAC
+        //   côté serveur — ajouter un backup MediaItem ouvre une 2e connexion
+        //   → serveur rejette les DEUX → écran noir + retry loop. Le grand
+        //   exclut explicitement myiptv-live de la lazy backup. On fait pareil.
+        val chIdLazy = currentChannelId
+        val excludeFromLazyBackup = chIdLazy != null && chIdLazy.startsWith("myiptv-live::")
+        if (excludeFromLazyBackup) {
+            Log.d(TAG, "LAZY BACKUP désactivé pour chaîne Stalker $chIdLazy (1-conn par MAC)")
+            return
+        }
+        lazyBackupJob = scope.launch {
+            while (kotlinx.coroutines.currentCoroutineContext().isActive) {
+                delay(LAZY_BACKUP_CHECK_INTERVAL_MS)
+                try {
+                    val p = player ?: continue
+                    val ahead = try {
+                        ((p.bufferedPosition - p.currentPosition) / 1000).toInt()
+                    } catch (_: Exception) { -1 }
+                    val hasBackup = try {
+                        p.mediaItemCount > 1 && p.hasNextMediaItem()
+                    } catch (_: Exception) { false }
+                    // 2026-06-16 (audit 3 agents) : watchdog flux corrompu DESACTIVE
+                    //   ici (doublonnait avec armLiveBufferingRecovery, qui est aussi
+                    //   desactive). Le grand TV a ce watchdog dans progressRunnable
+                    //   (PlayerTvFragment 4780-4802) mais avec un Handler 1s, pas dans
+                    //   le lazyBackupWatcher. Pour le mini, le JUMELAGE swap (qui se
+                    //   declenche AVANT 12s) + handleEndedOrIdle suffisent.
+                    if (ahead >= LAZY_BACKUP_AHEAD_THRESHOLD_S && !hasBackup) {
+                        val curUri = p.currentMediaItem?.localConfiguration?.uri
+                        val curMime = p.currentMediaItem?.localConfiguration?.mimeType
+                        if (curUri != null) {
+                            try {
+                                val backupLazy = MediaItem.Builder()
+                                    .setUri(curUri)
+                                    .apply { curMime?.let { setMimeType(it) } }
+                                    .setLiveConfiguration(
+                                        MediaItem.LiveConfiguration.Builder()
+                                            .setTargetOffsetMs(55_000)
+                                            .setMaxOffsetMs(120_000)
+                                            .setMinOffsetMs(30_000)
+                                            .setMinPlaybackSpeed(0.95f)
+                                            .setMaxPlaybackSpeed(1.0f)
+                                            .build()
+                                    )
+                                    .build()
+                                addBackupItemSafely(p, backupLazy)
+                                Log.d(TAG, "LAZY BACKUP ajouté just-in-time — buffer ${ahead}s (aligned grand lecteur)")
+                            } catch (e: Exception) {
+                                Log.w(TAG, "LAZY BACKUP add failed: ${e.message}")
+                            }
+                        }
+                    }
+                } catch (_: kotlinx.coroutines.CancellationException) {
+                    break
+                } catch (e: Exception) {
+                    Log.w(TAG, "Lazy backup loop error: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun cancelLazyBackupWatcher() {
+        lazyBackupJob?.cancel()
+        lazyBackupJob = null
+    }
+
+    /**
+     * 2026-06-15 v11 (CAUSE des coupures mini identifiée via logcat) :
+     * helper qui ajoute un backup au player en utilisant la MÊME factory HLS
+     * que le primary (sinon ExoPlayer auto-detect échoue avec
+     * UnrecognizedInputFormatException sur HLS sans Content-Type fiable).
+     *
+     * @param p le player
+     * @param backupItem MediaItem à ajouter en backup
+     * @return true si ajout via addMediaSource HLS réussi, false si fallback
+     *   addMediaItem (= non-IPTV ou factory non dispo).
+     */
+    private fun addBackupItemSafely(p: ExoPlayer, backupItem: MediaItem): Boolean {
+        val chId = currentChannelId ?: return tryAddMediaItem(p, backupItem)
+        val dsFactory = currentIptvDataSourceFactory
+        if (!currentIptvIsHls || dsFactory == null) {
+            return tryAddMediaItem(p, backupItem)
+        }
+        return try {
+            // 2026-06-16 (user "IptvPlayerSetup c'est le code du grand reutilise par
+            //   le mini, du coup quand tu modifies le mini, ce code la est pas modifie") :
+            //   INLINE du createIptvHlsMediaSource (= contenait de IptvPlayerSetup.kt
+            //   ligne 136-160). Maintenant tout est dans MiniPlayerController.
+            val hlsExtractorFactory = androidx.media3.exoplayer.hls.DefaultHlsExtractorFactory(
+                androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
+                    androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
+                true,
+            )
+            val needsStuckTolerance30x = !chId.startsWith("livehub::francetv::")
+            val playlistTrackerFactory = androidx.media3.exoplayer.hls.playlist.HlsPlaylistTracker.Factory {
+                dsFactory2, loadPolicy, parserFactory, cmcdConfig ->
+                androidx.media3.exoplayer.hls.playlist.DefaultHlsPlaylistTracker(
+                    dsFactory2, loadPolicy, parserFactory, cmcdConfig, 30.0,
+                )
+            }
+            val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(dsFactory)
+                .setAllowChunklessPreparation(true)
+                .setExtractorFactory(hlsExtractorFactory)
+                .apply { if (needsStuckTolerance30x) setPlaylistTrackerFactory(playlistTrackerFactory) }
+                .createMediaSource(backupItem)
+            p.addMediaSource(hlsSource)
+            Log.d(TAG, "Backup ajouté via addMediaSource HLS (inline mini, mirror grand)")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "addMediaSource HLS backup failed: ${e.message}, fallback addMediaItem")
+            tryAddMediaItem(p, backupItem)
+        }
+    }
+
+    private fun tryAddMediaItem(p: ExoPlayer, item: MediaItem): Boolean {
+        return try {
+            p.addMediaItem(item)
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "addMediaItem failed: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * 2026-06-15 : Porté de PlayerTvFragment ligne 5301-5326. Ajoute le backup
+     * en queue préventivement quand le scout détecte 509/429/5xx sur le
+     * manifest. Pas ajouté si déjà 2+ MediaItems (= éviter doublons).
+     */
+    private fun addBackupPreventively() {
+        try {
+            val p = player ?: return
+            if (p.mediaItemCount > 1) return
+            val curUri = p.currentMediaItem?.localConfiguration?.uri ?: return
+            val curMime = p.currentMediaItem?.localConfiguration?.mimeType
+            val backupItem = MediaItem.Builder()
+                .setUri(curUri)
+                .apply { curMime?.let { setMimeType(it) } }
+                .setLiveConfiguration(
+                    MediaItem.LiveConfiguration.Builder()
+                        .setTargetOffsetMs(55_000)
+                        .setMaxOffsetMs(120_000)
+                        .setMinOffsetMs(30_000)
+                        .setMinPlaybackSpeed(0.95f)
+                        .setMaxPlaybackSpeed(1.0f)
+                        .build()
+                )
+                .build()
+            addBackupItemSafely(p, backupItem)
+            Log.d(TAG, "MiniScout: backup préventif ajouté (server en difficulté détecté)")
+        } catch (e: Exception) {
+            Log.w(TAG, "MiniScout addBackupPreventively failed: ${e.message}")
+        }
+    }
+
+    /**
+     * 2026-06-15 (user "le mini lecteur doit être autonome") : porté depuis
+     * PlayerTvFragment.startPeriodicForcedSwap() (ligne 5216).
+     *
+     * Toutes les 45s, si un backup MediaItem est dispo et qu'aucun swap n'a
+     * eu lieu dans les 20s précédentes, on force un seekToNextMediaItem
+     * suivi de seekToDefaultPosition (= live edge) puis on re-ajoute un
+     * nouveau backup pour le cycle suivant.
+     *
+     * But : rafraîchir le primary AVANT que la dégradation CDN (rate-limit,
+     * token vieillissant, sliding window manifest qui dérive) ne provoque
+     * une vraie coupure. La fenêtre 45s est suffisamment longue pour ne pas
+     * gêner l'user mais courte par rapport au timeout typique d'un primary
+     * dégradé (~60-90s avant cut).
+     */
+    private fun startPeriodicForcedSwap() {
+        periodicSwapJob?.cancel()
+        periodicSwapJob = scope.launch {
+            while (kotlinx.coroutines.currentCoroutineContext().isActive) {
+                delay(PERIODIC_SWAP_INTERVAL_MS)
+                try {
+                    val p = player ?: continue
+                    val hasBackup = try {
+                        p.mediaItemCount > 1 && p.hasNextMediaItem()
+                    } catch (_: Exception) { false }
+                    val sinceLastSwap = System.currentTimeMillis() - lastSwapTimestampMs
+                    if (hasBackup && sinceLastSwap >= SWAP_RECENT_COOLDOWN_MS) {
+                        val ahead = try {
+                            ((p.bufferedPosition - p.currentPosition) / 1000).toInt()
+                        } catch (_: Exception) { -1 }
+                        Log.w(TAG, "FORCED PERIODIC SWAP (timer ${PERIODIC_SWAP_INTERVAL_MS / 1000}s, ahead=${ahead}s) — seekToNextMediaItem")
+                        try {
+                            p.seekToNextMediaItem()
+                            p.seekToDefaultPosition()
+                            lastSwapTimestampMs = System.currentTimeMillis()
+                            // Re-ARM un backup pour le prochain cycle.
+                            // Sinon après le 1er forced swap, plus aucun backup
+                            // n'est dispo → 2e forced swap skip → mini reste sur
+                            // ce qui est devenu le nouveau primary (= ex-backup).
+                            val curUri = p.currentMediaItem?.localConfiguration?.uri
+                            val curMime = p.currentMediaItem?.localConfiguration?.mimeType
+                            if (curUri != null && p.mediaItemCount == 1) {
+                                try {
+                                    val newBackup = MediaItem.Builder()
+                                        .setUri(curUri)
+                                        .apply { curMime?.let { setMimeType(it) } }
+                                        .setLiveConfiguration(
+                                            MediaItem.LiveConfiguration.Builder()
+                                                .setTargetOffsetMs(55_000)
+                                                .setMaxOffsetMs(120_000)
+                                                .setMinOffsetMs(30_000)
+                                                .setMinPlaybackSpeed(0.95f)
+                                                .setMaxPlaybackSpeed(1.0f)
+                                                .build()
+                                        )
+                                        .build()
+                                    addBackupItemSafely(p, newBackup)
+                                    Log.d(TAG, "Backup re-armé après FORCED SWAP")
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Re-arm backup failed: ${e.message}")
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "FORCED PERIODIC SWAP seekToNextMediaItem failed: ${e.message}")
+                        }
+                    } else if (!hasBackup) {
+                        Log.d(TAG, "FORCED SWAP skipped: no backup ready")
+                    }
+                } catch (_: kotlinx.coroutines.CancellationException) {
+                    break
+                } catch (e: Exception) {
+                    Log.w(TAG, "Periodic swap loop error: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun cancelPeriodicForcedSwap() {
+        periodicSwapJob?.cancel()
+        periodicSwapJob = null
+    }
+
+    // 2026-06-16 (user "IptvPlayerSetup c'est le code du grand reutilise") :
+    //   INLINE de createResilientLoadErrorPolicy (= contenait de IptvPlayerSetup.kt
+    //   ligne 74-94). Retry exponentiel 500ms → 16s (max 6 retries) sur 403/5xx HLS.
+    private val resilientLoadErrorPolicy: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy =
+        object : androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy() {
+            override fun getRetryDelayMsFor(
+                loadErrorInfo: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo,
+            ): Long {
+                val ex = loadErrorInfo.exception
+                if (ex is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) {
+                    val code = ex.responseCode
+                    if (code == 403 || code == 500 || code == 502 || code == 503 || code == 509 || code == 429) {
+                        val attempt = loadErrorInfo.errorCount
+                        if (attempt < 6) {
+                            val delay = 500L * (1L shl attempt.coerceAtMost(5))
+                            Log.d(TAG, "LoadError retry $attempt/6 for HTTP $code, delay=${delay}ms")
+                            return delay.coerceAtMost(16_000L)
+                        }
+                        Log.w(TAG, "LoadError gave up after 6 attempts on HTTP $code")
+                    }
+                }
+                return super.getRetryDelayMsFor(loadErrorInfo)
+            }
+
+            override fun getMinimumLoadableRetryCount(dataType: Int): Int = 6
+        }
 
     fun initPlayer(context: Context) {
         // 2026-06-09 : stocker l'appContext pour le foreground service.
@@ -600,12 +1633,17 @@ object MiniPlayerController {
         //     les 403 rate-limit Xtream.
         //   - maxBufferMs 30s → 300s : pas de cap artificiel sur le buffer.
         //   - bufferForPlaybackMs reste à 1s pour démarrage rapide du mini.
+        // 2026-06-15 (user "le mini lecteur a pas le même pattern que le grand
+        //   lecteur") : bufferForPlaybackAfterRebufferMs 2000 → 500ms pour
+        //   aligner sur PlayerTvFragment IPTV (lines 5612-5618). Avant : après
+        //   une mini-coupure, le mini attendait 2s de buffer avant de reprendre
+        //   = user voit la coupure. Après : 0.5s = reprise quasi-instantanée.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 /* minBufferMs */ 60_000,
                 /* maxBufferMs */ 300_000,
                 /* bufferForPlaybackMs */ 1_000,
-                /* bufferForPlaybackAfterRebufferMs */ 2_000
+                /* bufferForPlaybackAfterRebufferMs */ 500
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
@@ -615,19 +1653,20 @@ object MiniPlayerController {
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
             .setLoadErrorHandlingPolicy(resilientLoadErrorPolicy)
 
-        // 2026-06-10 (user "le mini-player perd l'image au bout d'un moment,
-        //   le son reste") : hypothèse hardware decoder qui se met en sleep
-        //   en surface petite (MTK/Amlogic Chromecast). Fix : utilise
-        //   NextRenderersFactory + EXTENSION_RENDERER_MODE_PREFER pour les
-        //   chaînes IPTV mini-player → software FFmpeg en priorité = pas
-        //   d'optimisation power-saving qui kill la surface vidéo.
+        // 2026-06-15 v8 (user "se coupe moins mais lag") : EXTENSION_RENDERER_MODE_ON
+        //   = HW decoder prioritaire avec fallback software. EXACTEMENT le pattern
+        //   du grand (PlayerTvFragment ligne 5662). HW = pas de lag CPU Chromecast.
+        //   La cause des cuts v6 = la policy MONO-SERVER/HARD FAIL (supprimée
+        //   en v7), PAS le decoder. Maintenant strict miroir grand sur tous les
+        //   aspects.
         val miniRenderersFactory = try {
+            Log.d(TAG, "RenderersFactory: EXTENSION_RENDERER_MODE_ON (HW prefer, sw fallback = strict miroir grand)")
             io.github.anilbeesetti.nextlib.media3ext.ffdecoder
                 .NextRenderersFactory(context).apply {
                     setEnableDecoderFallback(true)
                     setExtensionRendererMode(
                         androidx.media3.exoplayer.DefaultRenderersFactory
-                            .EXTENSION_RENDERER_MODE_PREFER
+                            .EXTENSION_RENDERER_MODE_ON
                     )
                 }
         } catch (e: Throwable) {
@@ -647,11 +1686,30 @@ object MiniPlayerController {
                     .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
                     .setUsage(C.USAGE_MEDIA)
                     .build(),
-                /* handleAudioFocus */ true
+                // 2026-06-15 v6 (aligné PlayerTvFragment.kt ligne 6035-6039) :
+                //   handleAudioFocus = false pour le mini car il joue de l'IPTV
+                //   en permanence (= comportement TV). Avant : true → une notif
+                //   système ou un autre player coupe le live. Maintenant : false
+                //   → le live IPTV continue de jouer (= identique au grand TV).
+                /* handleAudioFocus */ false
             )
             .build().apply {
                 playWhenReady = true
                 addListener(playerListener)
+                // 2026-06-16 (PREUVE LOGS CODEC) : setMaxVideoSize REMIS DEFINITIVEMENT.
+                //   Test sans cap = yoyo ABR 576p<->720p en 30s = codec reset visible
+                //   = "boucle". Cap a 480p = un seul variant = pas de switch codec.
+                //   Le grand utilise AdaptiveQualityGovernor.applyCap (ligne 116) avec
+                //   setMaxVideoSize aussi quand qualite adaptative ON. Donc le mini
+                //   PEUT utiliser setMaxVideoSize sans diverger du grand.
+                try {
+                    trackSelectionParameters = trackSelectionParameters.buildUpon()
+                        .setMaxVideoSize(854, 480)
+                        .build()
+                    Log.d(TAG, "Mini cap 854x480 (anti-ABR-yoyo, mirror grand AdaptiveQualityGovernor)")
+                } catch (e: Exception) {
+                    Log.w(TAG, "setMaxVideoSize failed: ${e.message}")
+                }
                 // 2026-05-17 v56 : PreloadConfiguration désactivé pour live IPTV.
                 //   Causait déjà-vu de 30s post-swap (backup pré-bufferisé avec
                 //   contenu OLDER que target live edge).
@@ -998,6 +2056,14 @@ object MiniPlayerController {
             stopRadioForegroundService()
             radioOriginProviderName = null
         }
+        // 2026-06-17 (user "image figée mobile") : CRITIQUE — reset le flag
+        //   iptvCurrentStreamHasWorked AVANT player.stop(). Sinon le stop()
+        //   déclenche onPlaybackStateChanged(STATE_IDLE) → handleEndedOrIdle()
+        //   voit le flag à true ET un backup MediaItem → swap vers l'ancienne
+        //   chaîne backup → le player se figure sur l'ancien rendu. Quand
+        //   playServerAtIndex arrive ensuite à setMediaSource(nouvelle), il
+        //   est trop tard car le player a déjà été corrompu par le swap.
+        iptvCurrentStreamHasWorked = false
         // 2026-05-09 : STOP le player avant de switcher de canal, sinon si le
         // fetch du nouveau canal foire, la chaîne précédente continue de jouer
         // (bug : "je clique BFMTV et le player joue Canal+ que j'avais cliqué avant").
@@ -1015,6 +2081,13 @@ object MiniPlayerController {
                 com.streamflixreborn.streamflix.StreamFlixApp.clearLiveCache()
             } catch (_: Exception) { }
         }
+        // 2026-06-17 (user "quand je swap de chaîne ça garde la même en mémoire") :
+        //   incrémente la génération AVANT de toucher au state. Les anciennes
+        //   coroutines en cours (loadJob, progressiveServerJob, playServerAtIndex)
+        //   qui n'ont pas encore terminé verront leur génération locale différer
+        //   de cette nouvelle valeur et abandonneront leur setMediaSource.
+        val newGen = ++playChannelGeneration
+        Log.d(TAG, "playChannel: gen=$newGen $channelName ($channelId)")
         currentChannelId = channelId
         currentChannelName = channelName
         currentChannelPoster = channelPoster
@@ -1027,11 +2100,41 @@ object MiniPlayerController {
         retryJob?.cancel()
         progressiveServerJob?.cancel()
         cancelBufferingWatchdog()
+        cancelStuckBufferingWatchdog()
+        cancelLiveBufferingRecovery()
+        cancelPeriodicForcedSwap()
+        cancelLazyBackupWatcher()
+        // 2026-06-16 (audit agent #3) : cancelServerScout manquait dans playChannel,
+        //   le job HEAD-probe survivait a la transition et continuait a prober
+        //   l URI de l ancienne chaine.
+        cancelServerScout()
+        // 2026-06-16 : reset le flag iptvCurrentStreamHasWorked (= la branche
+        //   Transfer-recovery ENDED/IDLE ne se déclenche que si on a déjà joué).
+        iptvCurrentStreamHasWorked = false
+        // Reset bufferingStartMs (= sinon timestamp ancien dans la nouvelle chaîne
+        //   déclenche un swap immédiat dès le 1er STATE_BUFFERING).
+        bufferingStartMs = 0L
+        // 2026-06-16 (audit #72/#84) : reset state variables a new channel pour
+        //   miroir grand (= fragment lifecycle reset implicite).
+        lastSwapTimestampMs = 0L
+        lastObservedPositionMs = -1L
+        stuckBufferingTicks = 0
+        stuckPosCounter = 0
+        lastStuckPosKey2s = -1
+        // Reset recentReloadTimestamps (= sinon l'anti-flap de la chaîne
+        //   précédente bloque le mécanisme sur la nouvelle chaîne).
+        recentReloadTimestamps.clear()
         _state.value = State.Loading(channelId, channelName)
 
         loadJob?.cancel()
         loadJob = scope.launch {
             try {
+                // 2026-06-17 : capture la génération LOCALE pour cette coroutine. Si
+                //   un playChannel ultérieur incrémente playChannelGeneration, on
+                //   abandonne (= jamais de setMediaSource pour une chaîne stale).
+                val gen = newGen
+                if (gen != playChannelGeneration) return@launch
+
                 // 2026-05-31 : résoudre le provider IPTV depuis le préfixe de l'ID
                 // plutôt que UserPreferences.currentProvider. Quand le user est sur
                 // un provider Films/Séries (Cloudstream, Movix) et navigue dans le
@@ -1041,6 +2144,7 @@ object MiniPlayerController {
                         _state.value = State.Error(channelId, "Not an IPTV provider")
                         return@launch
                     }
+                if (gen != playChannelGeneration) return@launch
 
                 // Build VideoType for the channel
                 val videoType = Video.Type.Episode(
@@ -1063,6 +2167,11 @@ object MiniPlayerController {
                 // Get servers (initial batch: OTF, WiTV, Vavoo)
                 val rawServers = withContext(Dispatchers.IO) {
                     provider.getServers(channelId, videoType)
+                }
+                // 2026-06-17 : re-check génération après le getServers() suspend point.
+                if (gen != playChannelGeneration) {
+                    Log.d(TAG, "loadJob[gen=$gen]: aborting after getServers — newer playChannel (gen=${playChannelGeneration}) took over")
+                    return@launch
                 }
                 // 2026-05-09 : tri par fiabilité observée — les variantes
                 // qui ont récemment foiré (Vegeta server X down, OTF cert
@@ -1149,7 +2258,7 @@ object MiniPlayerController {
                     0
                 }
                 currentServerIndex = startIndex
-                playServerAtIndex(channelId, provider, startIndex)
+                playServerAtIndex(channelId, provider, startIndex, gen)
 
             } catch (e: CancellationException) {
                 throw e
@@ -1240,8 +2349,16 @@ object MiniPlayerController {
      * Try to play the server at [index]. If extraction fails or source is empty,
      * automatically moves to the next server.
      */
-    private suspend fun playServerAtIndex(channelId: String, provider: Provider, index: Int) {
-        if (currentChannelId != channelId) return // channel changed
+    /**
+     * 2026-06-17 (user "quand je swap de chaîne ça garde la même en mémoire") :
+     * paramètre `gen` ajouté pour le check de génération atomique. Le caller
+     * passe la valeur de `playChannelGeneration` qu'il a capturée à son lancement.
+     * Si entre temps un nouveau playChannel a incrémenté la génération → on
+     * abandonne le setMediaSource pour éviter d'écraser le player avec une
+     * ancienne URL.
+     */
+    private suspend fun playServerAtIndex(channelId: String, provider: Provider, index: Int, gen: Int = playChannelGeneration) {
+        if (currentChannelId != channelId || gen != playChannelGeneration) return // channel changed or generation expired
         if (index >= availableServers.size) {
             Log.w(TAG, "All ${availableServers.size} servers exhausted for $channelId — requesting renewal batch")
             serversExhausted = true
@@ -1310,7 +2427,13 @@ object MiniPlayerController {
                 provider.getVideo(server)
             }
 
-            if (currentChannelId != channelId) return
+            // 2026-06-17 : re-check génération après getVideo() suspend point. Sans ça,
+            //   un playChannel intermédiaire pouvait laisser ce code finir setMediaSource
+            //   avec l'URL de la chaîne précédente → mini lecteur jouait l'ancienne chaîne.
+            if (currentChannelId != channelId || gen != playChannelGeneration) {
+                Log.d(TAG, "playServerAtIndex[gen=$gen]: aborting after getVideo (current=${playChannelGeneration})")
+                return
+            }
 
             if (video.source.isEmpty()) {
                 Log.w(TAG, "Server [$index] ${server.name} returned empty source, trying next")
@@ -1329,6 +2452,17 @@ object MiniPlayerController {
 
             // Play
             val p = player ?: return
+            // 2026-06-15 v10 (user "même pipeline mais mini coupe, pas le grand") :
+            //   le grand crée un NOUVEAU player à chaque entrée Fragment → état neuf.
+            //   Le mini est un singleton qui réutilise le SAME ExoPlayer → entre 2
+            //   chaînes, des frames decoder + buffer obsolète peuvent persister →
+            //   micro-coupures. Fix : avant le setMediaSource, on STOP + CLEAR pour
+            //   simuler un player frais. Aucun crash visible (le player est OK pour
+            //   réutilisation après stop+prepare).
+            try {
+                p.stop()
+                p.clearMediaItems()
+            } catch (_: Throwable) {}
             // Apply per-video request headers (Referer/Origin/UA) BEFORE prepare
             // so sources like meritend.net (403 sans bon Referer + UA Android)
             // reçoivent les bonnes credentials. Sans ça, ExoPlayer envoie juste
@@ -1363,15 +2497,23 @@ object MiniPlayerController {
                 .setMimeType(video.type)
                 .apply {
                     if (isLiveChannel) {
+                        // 2026-06-15 v5 (user "le mini bugue toujours, applique
+                        //   le MÊME pattern") : aligné EXACT sur PlayerTvFragment
+                        //   ligne 3796-3801 — targetOffsetMs 55_000 → 45_000,
+                        //   minOffsetMs 30_000 → 20_000. Le mini jouait 10s plus
+                        //   loin du live edge → tombait en fin de fenêtre ParaTV
+                        //   ~80s → segments expirés → micro-coupures à chaque
+                        //   bord. À 45s on a 30s+ de marge fenêtre → fluide.
                         setLiveConfiguration(
                             MediaItem.LiveConfiguration.Builder()
-                                .setTargetOffsetMs(55_000)
+                                .setTargetOffsetMs(45_000)
                                 .setMaxOffsetMs(120_000)
-                                .setMinOffsetMs(30_000)
-                                // 2026-05-17 v46 : range 0.95-1.0 (imperceptible).
-                                //   Le swap PREEMPTIVE (ahead<25s) gère la recovery, pas besoin
-                                //   de slowdown agressif. ExoPlayer auto-adjust dans cette plage.
+                                .setMinOffsetMs(20_000)
                                 .setMinPlaybackSpeed(0.95f)
+                                // 2026-06-16 (FIX #2 audit) : 1.1 → 1.0 = mirror grand.
+                                //   1.1 etait la CAUSE du drain : ExoPlayer accelerait pour
+                                //   rattraper le live edge ET consommait 10% plus vite que
+                                //   le reseau ne livrait = drain linaire 20s→0s en 30s.
                                 .setMaxPlaybackSpeed(1.0f)
                                 .build()
                         )
@@ -1395,21 +2537,41 @@ object MiniPlayerController {
             )
             val isDash = urlBeforeQuery.endsWith(".mpd", ignoreCase = true) ||
                 video.type == "application/dash+xml"
-            val dsFactory = httpDataSourceFactory
+            // 2026-06-15 (user "le mini lecteur doit être complet comme si
+            //   c'était le grand lecteur point barre") : audit a montré que le
+            //   grand utilise DefaultHttpDataSource + LiveReconnectingHttpDataSource
+            //   wrapper (PlayerTvFragment.kt:5997-6013), alors que le mini
+            //   utilisait OkHttp/Cronet brut sans wrapper. LiveReconnecting
+            //   détecte les /live/.../N.ts (Xtream + ParaTV TNT) et rouvre
+            //   auto la connexion sur EOF que ces serveurs envoient via
+            //   Connection: close après chaque segment → primary cause des
+            //   cuts ParaTV TF1/M6 alors que le grand tient. Fix : pour
+            //   toutes les chaînes IPTV NON-Vavoo (= Vavoo a besoin de
+            //   Cronet pour son JA3 fingerprint anti-pub VYPN), on bascule
+            //   sur le même pattern que le grand. Vavoo garde OkHttp+Cronet.
+            val isVavoo = channelId.startsWith("vavoo::")
+            val isIptvNonVavoo = isLiveChannel && !isVavoo
+            val dsFactory: androidx.media3.datasource.DataSource.Factory? = if (isIptvNonVavoo) {
+                val ua = perVideoHeaders["User-Agent"]
+                    ?: com.streamflixreborn.streamflix.utils.NetworkClient.USER_AGENT
+                val base = androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                    .setUserAgent(ua)
+                    .setConnectTimeoutMs(20_000)
+                    .setReadTimeoutMs(30_000)
+                    .setAllowCrossProtocolRedirects(true)
+                    .setDefaultRequestProperties(perVideoHeaders.filterKeys { it != "User-Agent" })
+                Log.d(TAG, "Using DefaultHttpDataSource + LiveReconnecting (aligné grand lecteur) ua=$ua")
+                com.streamflixreborn.streamflix.utils.LiveReconnectingHttpDataSource.Factory(base)
+            } else {
+                httpDataSourceFactory
+            }
             if (isHls && dsFactory != null) {
-                // 2026-05-17 : wrap avec CacheDataSource pour DVR 100 Mo persistant.
-                //   Bénéfices : channel-switch rapide, manifest cache, anti-fetch-fail.
-                val ctx = currentChannelId?.let { _ -> player?.let { it as Any? } as Any? }
-                val cache = try {
-                    com.streamflixreborn.streamflix.StreamFlixApp
-                        .getLiveCache(com.streamflixreborn.streamflix.StreamFlixApp.instance)
-                } catch (_: Exception) { null }
-                val finalDataSource = if (cache != null && isLiveChannel) {
-                    androidx.media3.datasource.cache.CacheDataSource.Factory()
-                        .setCache(cache)
-                        .setUpstreamDataSourceFactory(dsFactory)
-                        .setFlags(androidx.media3.datasource.cache.CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
-                } else dsFactory
+                // 2026-06-16 (FIX #4 audit) : CacheDataSource RETIRE pour live IPTV.
+                //   Le grand n utilise pas CacheDataSource. La cache disque serialise
+                //   les lectures via single-writer lock = throttle download HLS = drain
+                //   buffer mini. Pour live, utiliser directement le dsFactory sans wrap.
+                val finalDataSource = dsFactory
+                val cache: Any? = null
                 // 2026-05-17 (user "à chaque coupure c'est là où ça renvoie le boost
                 //   et le chargement du nouveau flux") : DefaultHlsExtractorFactory
                 //   avec FLAG_ALLOW_NON_IDR_KEYFRAMES + FLAG_DETECT_ACCESS_UNITS.
@@ -1437,19 +2599,70 @@ object MiniPlayerController {
                         dsFactory2, loadPolicy, parserFactory, cmcdConfig, 30.0
                     )
                 }
+                // 2026-06-16 (user "IptvPlayerSetup c'est le code du grand reutilise") :
+                //   INLINE direct du HlsMediaSource.Factory (= IptvPlayerSetup.kt
+                //   createIptvHlsMediaSource est INUTILE car le code etait deja
+                //   inline juste au-dessus avec hlsExtractorFactory + playlistTrackerFactory).
+                //   Maintenant TOUT est dans MiniPlayerController.
+                currentIptvDataSourceFactory = finalDataSource
+                currentIptvIsHls = true
+                val needsStuckTolerance30x = !channelId.startsWith("livehub::francetv::")
                 val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(finalDataSource)
                     .setAllowChunklessPreparation(true)
                     .setExtractorFactory(hlsExtractorFactory)
-                    .setLoadErrorHandlingPolicy(resilientLoadErrorPolicy)
-                    .setPlaylistTrackerFactory(playlistTrackerFactory)
+                    .apply { if (needsStuckTolerance30x) setPlaylistTrackerFactory(playlistTrackerFactory) }
                     .createMediaSource(mediaItem)
+                // 2026-06-17 : LAST barrier avant l'écriture sur le player —
+                //   protège contre une race entre cancellation et setMediaSource.
+                if (currentChannelId != channelId || gen != playChannelGeneration) {
+                    Log.d(TAG, "Aborting setMediaSource — gen mismatch ($gen vs ${playChannelGeneration})")
+                    return
+                }
                 p.setMediaSource(hlsSource)
-                Log.d(TAG, "Using HlsMediaSource + chunklessPreparation + smoothChunkJoin + DVR cache + stuckTolerance30x (live=${isLiveChannel}, cache=${cache != null})")
+                Log.d(TAG, "HlsMediaSource inline mini (mirror grand, cid=$channelId, cache=${cache != null})")
             } else if (isDash && dsFactory != null) {
-                val dashSource = androidx.media3.exoplayer.dash.DashMediaSource.Factory(dsFactory)
-                    .createMediaSource(mediaItem)
+                val dashFactory = androidx.media3.exoplayer.dash.DashMediaSource.Factory(dsFactory)
+                // v38 : Widevine DRM pour TF1+ VOD aussi dans le mini-lecteur.
+                //   Sans ça, films TF1+ écran noir + son crypté (cf v34/v37 fullscreen).
+                // 2026-06-19 : étendu pour M6+ (même pattern).
+                val widevineUrl = com.streamflixreborn.streamflix.utils.TF1Resolver
+                    .getWidevineLicenseUrl(video.source)
+                    ?: com.streamflixreborn.streamflix.utils.M6Resolver
+                        .getWidevineLicenseUrl(video.source)
+                val drmHeaders = com.streamflixreborn.streamflix.utils.M6Resolver
+                    .getWidevineHeaders(video.source)
+                if (widevineUrl != null) {
+                    Log.d(TAG, "Mini DASH+Widevine DRM: license=${widevineUrl.take(80)}... headers=${drmHeaders?.keys}")
+                    // 2026-06-19 v17 : si M6+ → M6DrmCallback (JSON wrapper)
+                    val isM6 = drmHeaders?.containsKey("x-dt-auth-token") == true
+                    val drmCallback: androidx.media3.exoplayer.drm.MediaDrmCallback = if (isM6) {
+                        Log.d(TAG, "Mini using M6DrmCallback (DRMtoday JSON wrapper)")
+                        com.streamflixreborn.streamflix.utils.M6DrmCallback(widevineUrl, drmHeaders!!)
+                    } else {
+                        val cb = androidx.media3.exoplayer.drm.HttpMediaDrmCallback(
+                            widevineUrl,
+                            androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                                .setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+                        )
+                        drmHeaders?.forEach { (k, v) ->
+                            try { cb.setKeyRequestProperty(k, v) } catch (_: Throwable) {}
+                        }
+                        cb
+                    }
+                    val l3Provider = androidx.media3.exoplayer.drm.ExoMediaDrm.Provider { uuid ->
+                        val drm = androidx.media3.exoplayer.drm.FrameworkMediaDrm.newInstance(uuid)
+                        try { drm.setPropertyString("securityLevel", "L3") } catch (_: Exception) {}
+                        drm
+                    }
+                    val drmSessionManager = androidx.media3.exoplayer.drm.DefaultDrmSessionManager.Builder()
+                        .setUuidAndExoMediaDrmProvider(androidx.media3.common.C.WIDEVINE_UUID, l3Provider)
+                        .setMultiSession(false)
+                        .build(drmCallback)
+                    dashFactory.setDrmSessionManagerProvider { drmSessionManager }
+                }
+                val dashSource = dashFactory.createMediaSource(mediaItem)
                 p.setMediaSource(dashSource)
-                Log.d(TAG, "Using DashMediaSource")
+                Log.d(TAG, "Using DashMediaSource (DRM=${widevineUrl != null})")
             } else {
                 // v65 (user "ça rame sur Mon IPTV") :
                 //   Pour les streams progressifs TS (Stalker, Xtream sans HLS),
@@ -1480,6 +2693,31 @@ object MiniPlayerController {
             //   manuel — ça override la LiveConfiguration et cause des sauts
             //   de phase. Le VOD reste à 1.0x naturel.
             p.prepare()
+            // 2026-06-16 (audit #52) : MIRROR grand PlayerTvFragment 4492-4498 —
+            //   force seek live edge au start pour les chaines live IPTV. Sans
+            //   ca, ExoPlayer peut demarrer a un offset random (debut sliding
+            //   window HLS) qui peut etre derriere le live edge cible et causer
+            //   des BUFFERING immediat pour rattraper.
+            if (isLiveChannel) {
+                try { p.seekToDefaultPosition() } catch (_: Exception) {}
+            }
+            // 2026-06-17 FIX BUG mini mobile : "image figée audio change" entre 2
+            //   chaînes. Le `p.stop()` + `p.clearMediaItems()` ligne 2443-2444
+            //   détache la SurfaceView vidéo du player (l'audio se ré-attache
+            //   automatiquement via AudioTrack mais pas la vidéo). Symptôme :
+            //   son change OK mais image reste figée sur la dernière frame.
+            //   Fix : re-attacher PlayerView au player ici (= force ExoPlayer
+            //   à reconnecter le video renderer au SurfaceView de la mini PlayerView).
+            try {
+                miniPlayerView?.let { v ->
+                    if (v.player != p) v.player = p
+                    else {
+                        // même player object → force re-attach surface
+                        v.player = null
+                        v.player = p
+                    }
+                }
+            } catch (_: Throwable) {}
             p.play()
 
             Log.d(TAG, "Playing server [$index] ${server.name}: ${video.source.take(80)} (speed=${p.playbackParameters.speed}x)")
@@ -1502,8 +2740,26 @@ object MiniPlayerController {
             // → le backup cause un Source error → servers exhausted → retry loop infini.
             val isOtfChannel = channelId.startsWith("livehub::otf::")
             if (isLiveChannel && (isHls || isDash) && !isOtfChannel) {
+                // 2026-06-16 (user "mini lecteur a toujours des micro coupures
+                //   mais c'est mieux") : MIRROR EXACT du grand PlayerTvFragment
+                //   ligne 3608 — "v47 FORCED PERIODIC SWAP désactivé : causait
+                //   2x plus de decoder resets = 2x plus de cuts. PREEMPTIVE swap
+                //   natif suffit". Le mini, lui, l'appelait toujours toutes les
+                //   45s → forçait un seekToNextMediaItem inutile sur un stream
+                //   stable → coupure visible toutes les 45s. Désactivé pour
+                //   matcher le comportement du grand.
+                // Reset du timestamp pour cohérence avec le JUMELAGE swap.
+                lastSwapTimestampMs = System.currentTimeMillis()
+                // 2026-06-16 (FIX #3 audit) : pour worldlivetv, le backup SAME-URL ouvre
+                //   une 2e connexion ParaTV qui se PARTAGE la bande passante avec primary
+                //   = drain. Désactivé. Pour les autres providers (OLA, Vegeta, etc.),
+                //   le backup reste actif comme avant.
+                val isWorldLive = channelId.startsWith("livehub::worldlivetv::")
+                if (!isWorldLive) {
+                    startLazyBackupWatcher()
+                }
                 backupJob?.cancel()
-                backupJob = scope.launch {
+                if (!isWorldLive) backupJob = scope.launch {
                     try {
                         delay(5_000L)  // Délai pour laisser primary se stabiliser
                         if (currentChannelId != channelId) return@launch
@@ -1514,7 +2770,11 @@ object MiniPlayerController {
                                 MediaItem.LiveConfiguration.Builder()
                                     .setTargetOffsetMs(55_000)
                                     .setMaxOffsetMs(120_000)
-                                    .setMinOffsetMs(40_000)
+                                    // 2026-06-16 (audit) : minOffsetMs 40s -> 30s pour matcher
+                                    //   le grand backup (PlayerTvFragment 4977-4985). Le mini
+                                    //   etait 10s plus loin du live edge = potentiel deja-vu
+                                    //   visuel au swap, contredisant le commentaire "aligne".
+                                    .setMinOffsetMs(30_000)
                                     .setMinPlaybackSpeed(0.95f)
                                     .setMaxPlaybackSpeed(1.0f)
                                     .build()
@@ -1523,7 +2783,7 @@ object MiniPlayerController {
                         withContext(Dispatchers.Main) {
                             try {
                                 if (currentChannelId == channelId && p == player && p.mediaItemCount == 1) {
-                                    p.addMediaItem(backupMediaItem)
+                                    addBackupItemSafely(p, backupMediaItem)
                                     Log.d(TAG, "Backup SAME URL ajouté (offset 55s vs primary 45s)")
                                 }
                             } catch (e: Exception) {
@@ -1596,12 +2856,45 @@ object MiniPlayerController {
     }
 
     fun stop() {
+        // 2026-06-19 (user "sur mobile quand je ferme le mini lecteur ça
+        //   continue en arrière plan sur World Live") : stop() ne faisait
+        //   PAS `player.release()` ni `stopRadioForegroundService()` →
+        //   l'instance ExoPlayer restait vivante avec son audio renderer
+        //   (MediaCodec garde l'audio actif) ET le service radio foreground
+        //   gardait la notification = audio continue en background. Tous
+        //   les call sites de stop() sont des vraies fermetures (clic
+        //   close, change provider, settings), aucun ne fait de pause/reuse
+        //   après → on peut renforcer stop() en place sans risque.
+        stopRadioForegroundService()
+        radioOriginProviderName = null
         loadJob?.cancel()
         retryJob?.cancel()
         progressiveServerJob?.cancel()
         cancelBufferingWatchdog()
-        player?.stop()
-        player?.clearMediaItems()
+        cancelStuckBufferingWatchdog()  // 2026-06-16 (audit) : manquait dans stop()
+        cancelLiveBufferingRecovery()
+        cancelPeriodicForcedSwap()
+        cancelLazyBackupWatcher()
+        cancelServerScout()             // 2026-06-16 (audit) : manquait dans stop()
+        backupJob?.cancel()
+        hideFreezeOverlay()             // mirror grand
+        val p = player
+        player = null
+        if (p != null) {
+            try { p.removeListener(playerListener) } catch (_: Exception) {}
+            try { p.stop() } catch (_: Exception) {}
+            try { p.clearMediaItems() } catch (_: Exception) {}
+            try { p.release() } catch (e: Exception) {
+                Log.w(TAG, "stop: release error: ${e.message}")
+            }
+        }
+        // Au cas où un detachedPlayer (= transition fullscreen abandonnée)
+        //   serait encore présent, on le coupe aussi.
+        detachedPlayer?.let {
+            try { it.stop() } catch (_: Exception) {}
+            try { it.release() } catch (_: Exception) {}
+        }
+        detachedPlayer = null
         currentChannelId = null
         currentChannelName = null
         currentChannelPoster = null
@@ -1632,6 +2925,10 @@ object MiniPlayerController {
     fun transferPlayer(): ExoPlayer? {
         loadJob?.cancel()
         progressiveServerJob?.cancel()
+        cancelLiveBufferingRecovery()
+        cancelPeriodicForcedSwap()
+        cancelLazyBackupWatcher()
+        backupJob?.cancel()
         transitioningToFullscreen = true
         val p = player ?: return null.also { transitioningToFullscreen = false }
         // Detach listener so mini player state changes don't fire
@@ -1669,6 +2966,10 @@ object MiniPlayerController {
         loadJob?.cancel()
         retryJob?.cancel()
         progressiveServerJob?.cancel()
+        cancelLiveBufferingRecovery()
+        cancelPeriodicForcedSwap()
+        cancelLazyBackupWatcher()
+        backupJob?.cancel()
         transitioningToFullscreen = true
         val p = player
         player = null
@@ -1723,6 +3024,10 @@ object MiniPlayerController {
         loadJob?.cancel()
         retryJob?.cancel()
         progressiveServerJob?.cancel()
+        cancelLiveBufferingRecovery()
+        cancelPeriodicForcedSwap()
+        cancelLazyBackupWatcher()
+        backupJob?.cancel()
         detachedPlayer = player
         player = null
         // Keep currentChannelId / currentChannelName / currentChannelPoster
@@ -1757,6 +3062,10 @@ object MiniPlayerController {
         loadJob?.cancel()
         retryJob?.cancel()
         progressiveServerJob?.cancel()
+        cancelLiveBufferingRecovery()
+        cancelPeriodicForcedSwap()
+        cancelLazyBackupWatcher()
+        backupJob?.cancel()
         player?.stop()
         player?.release()
         player = null

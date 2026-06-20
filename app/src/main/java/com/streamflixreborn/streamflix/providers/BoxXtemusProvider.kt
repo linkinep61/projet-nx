@@ -2098,6 +2098,54 @@ object BoxXtemusProvider : Provider, IptvProvider {
         channelName: String,
         channelKey: String,
     ): com.streamflixreborn.streamflix.models.Video {
+        // 2026-06-17 (Phase 1 Replay - port Catchup TV & More) : URL spéciale
+        //   `francetv://<si_id>` posée par le M3U replay → résoudre en URL HLS
+        //   ou DASH via k7.ftven.fr + hdfauth.ftven.fr (= obligatoire depuis IP FR).
+        if (com.streamflixreborn.streamflix.utils.FrancetvResolver.isFrancetvUrl(streamUrl)) {
+            val r = com.streamflixreborn.streamflix.utils.FrancetvResolver.resolveTyped(streamUrl)
+            return com.streamflixreborn.streamflix.models.Video(
+                source = r?.url ?: "",
+                type = r?.mimeType ?: "application/x-mpegURL",
+                headers = emptyMap(),
+            )
+        }
+        // 2026-06-17 (Phase 2 Replay) : URL spéciale `arte://<programId>` →
+        //   résoudre via api.arte.tv/api/player/v2/config/fr/<pid>
+        if (com.streamflixreborn.streamflix.utils.ArteResolver.isArteUrl(streamUrl)) {
+            val r = com.streamflixreborn.streamflix.utils.ArteResolver.resolveTyped(streamUrl)
+            return com.streamflixreborn.streamflix.models.Video(
+                source = r?.url ?: "",
+                type = r?.mimeType ?: "application/x-mpegURL",
+                headers = emptyMap(),
+            )
+        }
+        // 2026-06-18 (Phase 2 Replay TF1+) : URL `tf1plus://<si_id>` → résoudre
+        //   via mediainfo.tf1.fr/mediainfocombo (= replays gratuits sans login).
+        //   DRM Widevine (= contenus premium TF1+ MAX) renvoie null = on skip.
+        if (com.streamflixreborn.streamflix.utils.TF1Resolver.isTF1Url(streamUrl)) {
+            val r = com.streamflixreborn.streamflix.utils.TF1Resolver.resolveTyped(streamUrl)
+            return com.streamflixreborn.streamflix.models.Video(
+                source = r?.url ?: "",
+                type = r?.mimeType ?: "application/x-mpegURL",
+                headers = emptyMap(),
+            )
+        }
+        // 2026-06-19 (Phase 2 Replay M6+) : URL `m6play://<service>/<program_id>` →
+        //   résoudre via pc.middleware.6play.fr → /programs/<id>/videos puis
+        //   /videos/<vid>?with=clips. DRM Widevine (= souvent activé) nécessite
+        //   M6Auth (login 6play) + upfront-token via drm.6cloud.fr. Pattern
+        //   identique à TF1+ : Resolved.widevineLicenseUrl est passé au player
+        //   qui configure DrmSessionManager (HttpMediaDrmCallback). Si non
+        //   logged → license null → écran noir attendu (= comme TF1+ Max).
+        if (com.streamflixreborn.streamflix.utils.M6Resolver.isM6Url(streamUrl)) {
+            val r = com.streamflixreborn.streamflix.utils.M6Resolver.resolveTyped(streamUrl)
+            return com.streamflixreborn.streamflix.models.Video(
+                source = r?.url ?: "",
+                type = r?.mimeType ?: "application/dash+xml",
+                headers = emptyMap(),
+            )
+        }
+
         val fakeId = "ext-${channelKey.hashCode()}"
         val fakeCh = BxtChannel(
             id = fakeId,

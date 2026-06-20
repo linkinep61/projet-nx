@@ -65,6 +65,41 @@ class CategoryViewHolder(
     }
 
     /**
+     * 2026-06-19 : Picker de groupe Adrar TV (= comme OTF). Affiche les
+     * groupes disponibles (France / Sports / etc.) avec un AlertDialog.
+     */
+    private fun showAdrarGroupPicker(anchor: View) {
+        val ctx = anchor.context
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            val groups = try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.streamflixreborn.streamflix.utils.AdrarTvService.getGroups()
+                }
+            } catch (_: Exception) { emptyList() }
+            if (groups.isEmpty()) return@launch
+
+            val current = com.streamflixreborn.streamflix.utils.AdrarTvService.selectedGroup.ifBlank { "France" }
+            val items = groups.toTypedArray()
+            val checkedIndex = groups.indexOf(current).coerceAtLeast(0)
+
+            android.app.AlertDialog.Builder(ctx)
+                .setTitle("Adrar TV — Choisir le catalogue")
+                .setSingleChoiceItems(items, checkedIndex) { dialog, which ->
+                    val chosen = groups[which]
+                    com.streamflixreborn.streamflix.utils.AdrarTvService.selectedGroup = chosen
+                    dialog.dismiss()
+                    val provider = UserPreferences.currentProvider
+                    if (provider != null) {
+                        com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(ctx, provider)
+                    }
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
+    }
+
+    /**
      * 2026-05-31 : Picker de groupe OTF TV (🌍 France / USA / Spain / etc.)
      * Affiche un AlertDialog avec les groupes disponibles, change le groupe
      * sélectionné et recharge le home.
@@ -142,7 +177,9 @@ class CategoryViewHolder(
         binding.tvCategoryTitle.text = category.name
 
         // 2026-05-31 : OTF TV — icône globe COLLÉE au texte, cliquable
-        if (category.name.contains("OTF TV")) {
+        // 2026-06-19 : étendu à Adrar TV (= même UX)
+        val hasGroupPicker = category.name.contains("OTF TV") || category.name.contains("Adrar TV")
+        if (hasGroupPicker) {
             try {
                 val icon = androidx.core.content.ContextCompat.getDrawable(
                     context, android.R.drawable.ic_menu_mapmode
@@ -159,7 +196,8 @@ class CategoryViewHolder(
             }
             binding.tvCategoryTitle.setCompoundDrawables(null, null, null, null)
             binding.tvCategoryTitle.setOnClickListener {
-                showOtfGroupPicker(it)
+                if (category.name.contains("Adrar TV")) showAdrarGroupPicker(it)
+                else showOtfGroupPicker(it)
             }
         } else {
             binding.tvCategoryTitle.setCompoundDrawables(null, null, null, null)
@@ -190,7 +228,9 @@ class CategoryViewHolder(
         binding.tvCategoryTitle.text = category.name
 
         // 2026-06-01 : OTF TV — globe + picker langue sur TV (focusable au D-pad)
-        if (category.name.contains("OTF TV")) {
+        // 2026-06-19 : étendu à Adrar TV
+        val hasGroupPickerTv = category.name.contains("OTF TV") || category.name.contains("Adrar TV")
+        if (hasGroupPickerTv) {
             try {
                 val icon = androidx.core.content.ContextCompat.getDrawable(
                     context, android.R.drawable.ic_menu_mapmode
@@ -205,7 +245,10 @@ class CategoryViewHolder(
             } catch (_: Exception) {}
             binding.tvCategoryTitle.isFocusable = true
             binding.tvCategoryTitle.isFocusableInTouchMode = false
-            binding.tvCategoryTitle.setOnClickListener { showOtfGroupPicker(it) }
+            binding.tvCategoryTitle.setOnClickListener {
+                if (category.name.contains("Adrar TV")) showAdrarGroupPicker(it)
+                else showOtfGroupPicker(it)
+            }
             // Style focus pour que le D-pad montre le titre sélectionné
             binding.tvCategoryTitle.setOnFocusChangeListener { v, hasFocus ->
                 v.alpha = if (hasFocus) 1.0f else 0.7f

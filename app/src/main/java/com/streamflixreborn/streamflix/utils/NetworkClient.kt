@@ -91,12 +91,58 @@ object NetworkClient {
         )
     }
 
+    /** 2026-06-19 v36 (user "ça bug comme ça depuis qu'on a mis le bouton refresh"
+     *  / log montre `Cine24hBypass: [OkHttp] <-- 200 OK https://ash-speed.hetzner.com/10GB.bin`
+     *  avec Content-Length 10737418240 = 10 GB) : une lib ou un provider tente
+     *  un speedtest sur Hetzner qui retourne un fichier de 10 GB. OkHttp/cache
+     *  alloue la mémoire pour ça → OOM/SIGABRT immédiat. Workaround : bloquer
+     *  les domaines de speedtest connus avant qu'OkHttp ne fasse la requête. */
+    private val BLOCKED_HOSTS_SUBSTR = listOf(
+        "ash-speed.hetzner.com",
+        "hetzner.com/10gb",
+        "speedtest.net",
+        "/10gb.bin",
+        "/100mb.bin",
+        "/1gb.bin",
+    )
+
     private fun buildClient(dns: Dns, customizer: ((OkHttpClient.Builder) -> Unit)? = null): OkHttpClient {
         val builder = OkHttpClient.Builder()
             .cache(httpCache)
             .connectionPool(sharedConnectionPool)
+            // 2026-06-19 v37 RETIRÉ : networkInterceptor qui court-circuitait
+            //   proceed() pour bloquer hetzner crashait OTF (IllegalStateException
+            //   "must call proceed() exactly once"). Network interceptors DOIVENT
+            //   toujours call proceed. Le blocking reste au niveau application
+            //   interceptor ci-dessous (= autorisé à court-circuiter).
             .addInterceptor { chain ->
                 val original = chain.request()
+                // 2026-06-19 v37 (user "OTF est cassé / hetzner s'invite") :
+                //   Le serveur OTF (app.otf-tv.com/authV3.php) retourne
+                //   maintenant un 30x redirect vers ash-speed.hetzner.com/10GB.bin
+                //   → OkHttp follow → download 10 GB body → OOM/SIGABRT.
+                //   Fix : si l'URL CIBLE elle-même est bloquée → 503 direct.
+                //   Sinon on let proceed mais on inspecte la response — si
+                //   30x avec Location: ash-speed/hetzner → 503 fast-fail au
+                //   lieu de suivre le redirect.
+                val urlStr = original.url.toString().lowercase()
+                if (BLOCKED_HOSTS_SUBSTR.any { urlStr.contains(it) }) {
+                    // 2026-06-19 v36 : log full stack trace pour identifier
+                    //   QUI fait l'appel speedtest (= lib externe ou notre code).
+                    val st = Thread.currentThread().stackTrace
+                        .filter { !it.className.startsWith("okhttp3") &&
+                                   !it.className.startsWith("kotlinx.coroutines") &&
+                                   !it.className.startsWith("java.lang.Thread") }
+                        .joinToString("\n  ") { "${it.className}.${it.methodName}(${it.fileName}:${it.lineNumber})" }
+                    Log.w(TAG, "BLOCKED speedtest URL: ${original.url}\nSTACK:\n  $st")
+                    return@addInterceptor okhttp3.Response.Builder()
+                        .request(original)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(503)
+                        .message("Blocked by Onyx (speedtest/huge-download)")
+                        .body(okhttp3.ResponseBody.create(null, ByteArray(0)))
+                        .build()
+                }
                 val requestBuilder = original.newBuilder()
                 // Only set default headers if not already provided by the caller (e.g. an extractor)
                 if (original.header("User-Agent") == null)
@@ -113,7 +159,28 @@ object NetworkClient {
                     requestBuilder.header("Sec-Fetch-Site", "none")
                 if (original.header("Upgrade-Insecure-Requests") == null)
                     requestBuilder.header("Upgrade-Insecure-Requests", "1")
-                chain.proceed(requestBuilder.build())
+                val response = chain.proceed(requestBuilder.build())
+                // 2026-06-19 v37 : inspecte la response APRÈS proceed pour les
+                //   redirections 30x vers hetzner. Le serveur OTF redirige
+                //   son authV3.php vers hetzner/10GB.bin → OkHttp followRedirects
+                //   suit en interne SANS repasser par notre Interceptor.
+                //   Solution : si on voit un 30x avec Location bloquée, on
+                //   retourne 503 (= empêche le follow).
+                if (response.isRedirect) {
+                    val loc = response.header("Location")?.lowercase() ?: ""
+                    if (BLOCKED_HOSTS_SUBSTR.any { loc.contains(it) }) {
+                        Log.w(TAG, "BLOCKED redirect ${response.code} from ${original.url} → ${response.header("Location")}")
+                        try { response.close() } catch (_: Throwable) {}
+                        return@addInterceptor okhttp3.Response.Builder()
+                            .request(original)
+                            .protocol(okhttp3.Protocol.HTTP_1_1)
+                            .code(503)
+                            .message("Blocked by Onyx (redirect to speedtest)")
+                            .body(okhttp3.ResponseBody.create(null, ByteArray(0)))
+                            .build()
+                    }
+                }
+                response
             }
             .cookieJar(cookieJar)
             .connectTimeout(30, TimeUnit.SECONDS)

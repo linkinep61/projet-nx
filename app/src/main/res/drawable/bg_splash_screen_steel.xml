@@ -9,9 +9,9 @@
     </item>
 
     <item
-        android:width="180dp"
-        android:height="180dp"
-        android:drawable="@mipmap/ic_banner_foreground"
+        android:width="256dp"
+        android:height="256dp"
+        android:drawable="@mipmap/ic_launcher_foreground"
         android:gravity="center" />
 
 </layer-list>

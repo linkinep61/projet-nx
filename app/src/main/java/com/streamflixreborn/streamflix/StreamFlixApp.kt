@@ -262,6 +262,79 @@ class StreamFlixApp : Application() {
             Log.e("StreamFlixApp", "UserPreferences/DNS setup failed: ${e.message}", e)
         }
 
+        // 2026-06-17 v3 (user reports Fred/Fantomial/Bob : "panneau vide après
+        //   redémarrage TV ou ferme app, désactiver puis réactiver tunnel répare")
+        //   = state stale tunnel + ExoPlayer ne se warm-up pas. Au cold start,
+        //   on FORCE un STOP avant le START — reproduit le workaround manuel
+        //   Fantomial automatiquement et de façon invisible pour l'user.
+        // 2026-06-17 v6 (Fred bug : "désactiver/réactiver tunnel ne marche pas,
+        //   seul pm clear marche") = cachedClient OkHttp garde un connection
+        //   pool avec sockets zombies vers le vieux tunnel. Fix v3 invalidait
+        //   AVANT start (cassait Fred). Fix v6 : invalidate APRÈS start success
+        //   = vieux client utilisé tant que start pas confirmé, puis remplacé
+        //   par fresh client avec nouveau proxy.
+        try {
+            // 2026-06-18 : `vavooUseTunnel` retourne true pour VYPN ET pour
+            //   "VPN 2" (= TUNNEL_MODE_PLANETVPN, désormais = "VYPN serveur
+            //   alternatif"). On passe skipBestN au démarrage pour cibler
+            //   le bon serveur du pool VYPN.
+            if (UserPreferences.vavooUseTunnel) {
+                val skip = UserPreferences.vavooTunnelSkipBestN()
+                CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                    try {
+                        try {
+                            com.streamflixreborn.streamflix.utils.VavooTunnel.stop()
+                        } catch (_: Throwable) {}
+                        kotlinx.coroutines.delay(500)
+                        val ok = com.streamflixreborn.streamflix.utils.VavooTunnel.start(skipBestN = skip)
+                        Log.d("StreamFlixApp", "Vavoo tunnel cold-start (skip=$skip): $ok")
+                        if (ok) {
+                            try {
+                                com.streamflixreborn.streamflix.providers.VavooProvider.invalidateClientCache()
+                                Log.d("StreamFlixApp", "Vavoo client cache invalidated (post-start)")
+                            } catch (_: Throwable) {}
+                        }
+                    } catch (e: Throwable) {
+                        Log.e("StreamFlixApp", "VavooTunnel.start: ${e.message}", e)
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            Log.e("StreamFlixApp", "Tunnel auto-start init failed: ${e.message}", e)
+        }
+
+        // 2026-06-18 (user "ça met du temps à charger Le replay") : pré-charge
+        //   le M3U replay en background dès le cold start. Cache disque +
+        //   RAM → ouverture du TV Hub instantanée à partir du 2e lancement.
+        try {
+            com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+                .installReplayDiskCache(cacheDir)
+            com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+                .installAppContext(applicationContext)
+            // 2026-06-18 : TF1Resolver lit le token TF1 via TF1Auth → Context.
+            com.streamflixreborn.streamflix.utils.TF1Resolver
+                .installContext(applicationContext)
+            // 2026-06-19 : M6Resolver lit le token M6 via M6Auth → Context.
+            com.streamflixreborn.streamflix.utils.M6Resolver
+                .installContext(applicationContext)
+            // 2026-06-19 v38 (user "creuse pourquoi OTF") : OtfTvService a
+            //   besoin du Context pour Settings.Secure.ANDROID_ID (= le vrai
+            //   DeviceID OTF, décompilé depuis l'APK officielle V3.2).
+            com.streamflixreborn.streamflix.utils.OtfTvService
+                .installContext(applicationContext)
+            CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                try {
+                    com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+                        .warmReplayCache()
+                    Log.d("StreamFlixApp", "Replay cache warmed at cold start")
+                } catch (e: Throwable) {
+                    Log.w("StreamFlixApp", "Replay warm failed: ${e.message}")
+                }
+            }
+        } catch (e: Throwable) {
+            Log.w("StreamFlixApp", "Replay cache init exception: ${e.message}")
+        }
+
         // 2026-05-31 : Google Cast — init CastContext pour la découverte Chromecast
         try {
             com.google.android.gms.cast.framework.CastContext.getSharedInstance(
@@ -304,17 +377,26 @@ class StreamFlixApp : Application() {
         try {
             val recentSession = ProfileStore.isRecentlyActive()
             val pickerEnabled = UserPreferences.profilePickerEnabled
-            if (!recentSession && pickerEnabled) {
+            if (recentSession) {
+                // 2026-06-19 (user "mon home est bloqué une fois sur 2 ; après
+                //   le crash ça remarche bien") : SUR CHROMECAST low-RAM,
+                //   l'OS freeze + recrée souvent le process. À chaque retour
+                //   on perdait `currentProvider` (clear systématique quand
+                //   pickerEnabled=false), donc getHome ne se lançait jamais,
+                //   le bouton Refresh n'apparaissait pas, spinner infini.
+                //   Fix : si la session est récente (< 30 min), PRÉSERVER
+                //   le provider quel que soit pickerEnabled.
+                Log.d("StreamFlixApp", "Process recreated mid-session: profile + provider preserved")
+            } else if (pickerEnabled) {
                 UserPreferences.currentProvider = null
                 ProfileStore.setCurrentProfileId(null)
                 Log.d("StreamFlixApp", "Cold start: profile + provider cleared (Netflix-style)")
-            } else if (!pickerEnabled) {
-                // ProfilePicker désactivé → on garde le profil principal,
-                // mais on clear le provider pour atterrir sur le Home Fournisseur.
-                UserPreferences.currentProvider = null
-                Log.d("StreamFlixApp", "ProfilePicker disabled: provider cleared, profile kept")
             } else {
-                Log.d("StreamFlixApp", "Process recreated mid-session: profile preserved")
+                // ProfilePicker désactivé + pas de session récente → on garde
+                //   le profil principal, mais on clear le provider pour
+                //   atterrir sur le Home Fournisseur.
+                UserPreferences.currentProvider = null
+                Log.d("StreamFlixApp", "Cold start (picker disabled): provider cleared, profile kept")
             }
         } catch (e: Throwable) {
             Log.e("StreamFlixApp", "currentProvider/profile reset failed: ${e.message}")

@@ -10,13 +10,20 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import com.streamflixreborn.streamflix.utils.UserPreferences
+import com.streamflixreborn.streamflix.utils.VavooTunnel
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.Proxy
+import java.security.KeyStore
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509TrustManager
 
 /**
  * VavooProvider — chaînes IPTV françaises via Vavoo (oha.to / vavoo.to / huhu.to / kool.to).
@@ -72,10 +79,82 @@ object VavooProvider : Provider, IptvProvider {
     )
 
     // ───────── HTTP client ─────────
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .build()
+    // 2026-06-17 (FIX FR métropole — Vavoo retourne status:guest sans VPN VYPN) :
+    //   StreamFlixApp.onCreate appelle IptvTlsHelper.install() qui réécrit
+    //   HttpsURLConnection.defaultSSLSocketFactory en nuclear-trust-all + accepte
+    //   tous hostnames. Conséquence : notre TLS handshake n'a plus le fingerprint
+    //   Conscrypt-standard d'un Chrome Android → Vavoo détecte l'anomalie côté
+    //   serveur → addonSig retourné avec status:guest → sunshine CDN sert la pub
+    //   VYPN au lieu du vrai contenu. Cloudstream lui n'a pas ce nuclear-helper,
+    //   garde Conscrypt pur, et Vavoo l'accepte comme client légitime.
+    //   Fix : on force ICI un SSLSocketFactory propre (TrustManager système par
+    //   défaut + Conscrypt qu'on a inséré en provider position 1 au boot). Le
+    //   nuclear reste pour les autres providers IPTV (Wise/etc. avec certs expirés).
+    // 2026-06-17 : cache client versionné. Quand UserPreferences.vavooUseTunnel
+    //   change, le getter rebuild un OkHttpClient avec ou sans proxy SOCKS5 local.
+    @Volatile private var cachedClient: OkHttpClient? = null
+    @Volatile private var cachedClientMode: String? = null
+
+    private val client: OkHttpClient
+        get() {
+            // 2026-06-18 : 3 modes mutuellement exclusifs.
+            //   OFF       = pas de proxy (= Vavoo direct, soumis au geoblock FR)
+            //   VYPN      = SOCKS5 vers VavooTunnel (= notre tunnel Shadowsocks intégré)
+            //   PLANETVPN = SOCKS5 vers app PlanetVPN externe ("VPN 2") sur 127.0.0.1:10808
+            val mode = try { UserPreferences.vavooTunnelMode } catch (_: Throwable) { UserPreferences.TUNNEL_MODE_OFF }
+            val existing = cachedClient
+            if (existing != null && cachedClientMode == mode) return existing
+            val newClient = buildClient(mode)
+            cachedClient = newClient
+            cachedClientMode = mode
+            return newClient
+        }
+
+    private fun buildClient(mode: String): OkHttpClient {
+        val pureSocketFactory = try {
+            val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+            tmf.init(null as KeyStore?)
+            val trustManager = tmf.trustManagers.first { it is X509TrustManager } as X509TrustManager
+            val sslContext = SSLContext.getInstance("TLS")
+            sslContext.init(null, arrayOf<javax.net.ssl.TrustManager>(trustManager), java.security.SecureRandom())
+            Pair(sslContext.socketFactory, trustManager)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Failed to build pure SSL socket factory, fallback to default: ${e.message}")
+            null
+        }
+        return OkHttpClient.Builder().apply {
+            if (pureSocketFactory != null) {
+                sslSocketFactory(pureSocketFactory.first, pureSocketFactory.second)
+            }
+            // 2026-06-18 : Les 2 modes "Tunnel VPN" et "VPN 2" utilisent le
+            //   MÊME proxy SOCKS5 local (= notre VavooTunnel intégré). La
+            //   différence est interne au tunnel : il cible un autre serveur
+            //   du pool VYPN selon `vavooTunnelSkipBestN()`. ONYX n'a pas
+            //   besoin de savoir lequel ici.
+            when (mode) {
+                UserPreferences.TUNNEL_MODE_VYPN,
+                UserPreferences.TUNNEL_MODE_PLANETVPN -> {
+                    if (VavooTunnel.isRunning()) try {
+                        proxy(Proxy(Proxy.Type.SOCKS, VavooTunnel.localProxyAddress()))
+                        Log.d(TAG, "VavooProvider OkHttp via VavooTunnel SOCKS5 (mode=$mode)")
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "Failed to set proxy: ${e.message}")
+                    }
+                }
+                else -> { /* OFF — no proxy */ }
+            }
+            connectTimeout(15, TimeUnit.SECONDS)
+            readTimeout(15, TimeUnit.SECONDS)
+        }.build()
+    }
+
+    /** Invalide le cache client OkHttp + signature cache. À appeler après toggle mode. */
+    fun invalidateClientCache() {
+        cachedClient = null
+        cachedClientMode = null
+        cachedSignature = null
+        signatureExpiry = 0L
+    }
 
     private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
 

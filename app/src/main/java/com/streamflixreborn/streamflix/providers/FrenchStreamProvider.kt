@@ -56,7 +56,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             return cachePortalURL.ifEmpty { field }
         }
 
-    override val defaultBaseUrl: String = "https://fs17.lol/"
+    override val defaultBaseUrl: String = "https://fs15.lol/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
@@ -86,7 +86,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
     private object Endpoints {
         const val FILM_AJAX_JSON = "engine/ajax/film_api.php"
         const val SERIE_AJAX_JSON = "engine/ajax/sx.php"
-        const val DEFAULT_REFERER = "https://fs17.lol/"
+        const val DEFAULT_REFERER = "https://fs15.lol/"
         const val DLE_SKIN_COOKIE = "dle_skin=VFV1"
     }
 
@@ -352,6 +352,15 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
     override suspend fun getHome(): List<Category> = coroutineScope {
         initializeService()
         val document = service.getHome()
+        // 2026-06-14 debug — voir si le HTML reçu correspond à fs15.lol
+        //   (= sect/short présents) ou à une page Cloudflare challenge.
+        val htmlPreview = document.outerHtml().take(1800).replace("\n", " ")
+        val sectCount = document.select("div.sect").size
+        val shortCount = document.select("div.short").size
+        val title = document.selectFirst("title")?.text() ?: "?"
+        Log.d("FrenchStream", "getHome HTML: title='$title' sect=$sectCount short=$shortCount " +
+                "totalLen=${document.outerHtml().length}")
+        Log.d("FrenchStream", "getHome HTML preview: $htmlPreview")
         val categories = mutableListOf<Category>()
         val allItems = mutableListOf<AppAdapter.Item>()
 
@@ -1629,7 +1638,34 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                 .dns(DnsResolver.doh)
                 .followRedirects(false)
                 .addInterceptor { chain ->
-                    var request = chain.request()
+                    // 2026-06-14 : fs15.lol a une protection anti-bot custom
+                    //   qui retourne page "Verification..." 842b avec un JS
+                    //   qui set le cookie fsschal=1 (max-age=86400s = 24h)
+                    //   puis reload. On bypass en envoyant directement le
+                    //   cookie fsschal=1 sur toutes les requêtes : le serveur
+                    //   nous sert direct le vrai HTML home/films/séries.
+                    //   On ajoute aussi un UA Chrome car le UA okhttp default
+                    //   peut être rejeté sur d'autres endpoints.
+                    val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                            "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                            "Chrome/120.0.0.0 Safari/537.36"
+                    val origReq = chain.request()
+                    // Merge avec le Cookie existant si présent (= les autres
+                    //   endpoints ont déjà dle_skin=VFV1) sans le casser.
+                    val existingCookie = origReq.header("Cookie") ?: ""
+                    val mergedCookie = if (existingCookie.isBlank()) {
+                        "fsschal=1"
+                    } else if ("fsschal=" in existingCookie) {
+                        existingCookie
+                    } else {
+                        "$existingCookie; fsschal=1"
+                    }
+                    var request = origReq.newBuilder()
+                        .header("User-Agent", ua)
+                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                        .header("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
+                        .header("Cookie", mergedCookie)
+                        .build()
                     var response = chain.proceed(request)
                     var redirects = 0
                     while (response.isRedirect && redirects < 5) {
@@ -1730,7 +1766,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         suspend fun getFilmAjaxJson(
             @Query("id") newsId: String,
             @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("Referer") referer: String = "https://fs17.lol/"
+            @Header("Referer") referer: String = "https://fs15.lol/"
         ): okhttp3.ResponseBody
 
         // 2026-05-04 : nouveau endpoint AJAX qui retourne les épisodes d'une
@@ -1744,7 +1780,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         suspend fun getSerieAjaxJson(
             @Query("p") newsId: String,
             @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("Referer") referer: String = "https://fs17.lol/"
+            @Header("Referer") referer: String = "https://fs15.lol/"
         ): okhttp3.ResponseBody
 
         // Legacy detail pages (slug-based, kept for backwards compatibility)
@@ -1789,13 +1825,13 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         suspend fun getAjaxJsonByUrl(
             @Url url: String,
             @Header("Cookie") cookie: String = "dle_skin=VFV1",
-            @Header("Referer") referer: String = "https://fs17.lol/"
+            @Header("Referer") referer: String = "https://fs15.lol/"
         ): okhttp3.ResponseBody
 
         @GET
         suspend fun getRawText(
             @Url url: String,
-            @Header("Referer") referer: String = "https://fs17.lol/"
+            @Header("Referer") referer: String = "https://fs15.lol/"
         ): okhttp3.ResponseBody
     }
 }

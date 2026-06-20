@@ -45,7 +45,14 @@ object VegetaTvProvider : Provider, IptvProvider {
     // le serveur coupe la connexion à 136 KB → ExoPlayer fail avec
     // "Loading finished before preparation is complete". UA Mozilla → stream OK.
     private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14) Chrome/130.0.0.0 Mobile Safari/537.36"
-    private const val VEGETA_SERVERS_URL = "http://212.47.64.168/serveurs.txt"
+    // 2026-06-15 : ancien backend "http://212.47.64.168/serveurs.txt" ne donne
+    //   plus de réel statut up/down. App officielle VegetaTV (capture PCAPdroid
+    //   sur io.kodular.vegetatvoficial) utilise désormais
+    //   "vegetatv.duckdns.org/data/server_status.json" qui retourne un JSON avec
+    //   les 63 serveurs + leur statut UP/DOWN + flag + latence checked toutes
+    //   les 120s. On garde l'URL legacy en fallback si le JSON tombe.
+    private const val VEGETA_SERVERS_URL = "http://vegetatv.duckdns.org/data/server_status.json"
+    private const val VEGETA_SERVERS_URL_LEGACY = "http://212.47.64.168/serveurs.txt"
 
     // ───────── HTTP ─────────
 
@@ -161,7 +168,10 @@ object VegetaTvProvider : Provider, IptvProvider {
     // Cap on search results to avoid TV RecyclerView ANR on logo loads.
     private const val SEARCH_RESULT_LIMIT = 30
     private const val PHASE3_MAX_FR_SERVERS = 8
-    private const val PHASE3_PARALLELISM = 2
+    // 2026-06-17 v5 (user "Quand je clique TF1 ça met super beaucoup de temps") :
+    //   passé de 2 → 10. Avec sem=2, scan 20 candidates prend 10x trop long. Le
+    //   timeout per-server 12s reste la safety.
+    private const val PHASE3_PARALLELISM = 10
 
     // 2026-05-05 : raisons d'avoir augmenté de 5 → 20 :
     // l'utilisateur a 71 serveurs Vegeta dispo et voulait voir tous les
@@ -509,14 +519,71 @@ object VegetaTvProvider : Provider, IptvProvider {
 
     // ───────── Server list parsing ─────────
 
-    /** Parse serveurs.txt. We keep the URL-position (1-indexed, ignoring blanks)
-     *  because positions 39..47 are confirmed 🇫🇷 by user. We return ALL servers
-     *  whose flag set OR position marks them FR-compatible, with FR-prio first. */
+    /** 2026-06-15 : parse vegetatv.duckdns.org/data/server_status.json.
+     *  Format : {ok, count, up_count, servers: {url: {url,name,flag,up,status,response_time_ms,...}}, list:[...]}.
+     *  On garde uniquement up=true avec flag contenant 🇫🇷 ou 🌐 ; tri par
+     *  response_time_ms croissant (= rapides en 1er). Fallback ancien
+     *  serveurs.txt si JSON tombe.
+     *  Format StalkerServer inchangé pour ne rien casser ailleurs. */
     private fun parseVegetaServerList(): List<StalkerServer> {
+        // Tentative JSON moderne d'abord
+        val fromJson = tryParseVegetaJson()
+        if (fromJson.isNotEmpty()) return fromJson
+        // Sinon fallback sur l'ancien parser texte
+        Log.w(TAG, "JSON server_status vide → fallback serveurs.txt legacy")
+        return parseVegetaServerListLegacy()
+    }
+
+    private fun tryParseVegetaJson(): List<StalkerServer> {
         val frFirst = mutableListOf<StalkerServer>()
         val globalOnly = mutableListOf<StalkerServer>()
         try {
             val req = Request.Builder().url(VEGETA_SERVERS_URL)
+                .header("User-Agent", USER_AGENT).build()
+            val body = probeClient.newCall(req).execute().body?.string() ?: return emptyList()
+            val root = org.json.JSONObject(body)
+            val list = root.optJSONArray("list") ?: return emptyList()
+            val raw = mutableListOf<Triple<Int /*pos*/, Int /*ping*/, StalkerServer>>()
+            for (i in 0 until list.length()) {
+                val o = list.optJSONObject(i) ?: continue
+                val up = o.optBoolean("up", false) || o.optString("status") == "up"
+                if (!up) continue
+                val flag = o.optString("flag", "")
+                val pos = o.optInt("pos", i + 1)
+                // 2026-06-15 user "sur la liste officielle les serveurs français
+                //   sont du 32 au 37" → on force isFr sur ces 6 positions au cas
+                //   où le flag disparaît (= notre fenêtre confirmée).
+                val flagFr = flag.contains("🇫🇷")
+                val isFr = flagFr || pos in 32..37
+                val hasGlobal = flag.contains("🌐")
+                if (!isFr && !hasGlobal) continue
+                val url = o.optString("url", "")
+                if (!url.startsWith("http")) continue
+                val baseUrl = url.substringBefore("/get.php").trimEnd('/')
+                if (!baseUrl.startsWith("http")) continue
+                val ping = o.optInt("response_time_ms", 9999)
+                val srv = StalkerServer(pos, baseUrl, isFr, xtreamUrl = url)
+                raw.add(Triple(pos, ping, srv))
+                Log.d(TAG, "JSON Server[pos=$pos isFr=$isFr global=$hasGlobal ping=${ping}ms] → $baseUrl")
+            }
+            // Tri : FR d'abord, puis ping asc
+            raw.sortedBy { it.second }.forEach { (_, _, s) ->
+                if (s.isFr) frFirst.add(s) else globalOnly.add(s)
+            }
+            Log.d(TAG, "tryParseVegetaJson: ${frFirst.size} FR + ${globalOnly.size} GLOBAL (sorted by ping)")
+        } catch (e: Exception) {
+            Log.e(TAG, "tryParseVegetaJson failed: ${e.message}")
+            return emptyList()
+        }
+        return frFirst + globalOnly
+    }
+
+    /** Ancien parser texte conservé en fallback. */
+    private fun parseVegetaServerListLegacy(): List<StalkerServer> {
+        val frFirst = mutableListOf<StalkerServer>()
+        val globalOnly = mutableListOf<StalkerServer>()
+        try {
+            val req = Request.Builder().url(VEGETA_SERVERS_URL_LEGACY)
                 .header("User-Agent", USER_AGENT).build()
             val body = probeClient.newCall(req).execute().body?.string() ?: return emptyList()
             val rawLines = body.split("\n").map { it.trim() }
@@ -533,11 +600,8 @@ object VegetaTvProvider : Provider, IptvProvider {
 
                 val flagFr = flags.contains("🇫🇷") || flags.contains(" FR") || flags.endsWith("FR")
                 val hasGlobal = flags.contains("🌐")
-                // 2026-05-08 : positions 39-47 confirmées FR par user. Si le flag
-                // 🇫🇷 est absent (peut arriver quand serveurs.txt change), on
-                // promeut quand même ces positions comme FR pour pas perdre
-                // les bons serveurs.
-                val isFrByPosition = pos in 39..47
+                // 2026-06-15 (user) : fenêtre confirmée 32..37 dans la liste officielle.
+                val isFrByPosition = pos in 32..37
                 val isFr = flagFr || isFrByPosition
 
                 if (!isFr && !hasGlobal) continue
@@ -547,13 +611,13 @@ object VegetaTvProvider : Provider, IptvProvider {
 
                 val server = StalkerServer(pos, baseUrl, isFr, xtreamUrl = url)
                 if (isFr) frFirst.add(server) else globalOnly.add(server)
-                Log.d(TAG, "Server[pos=$pos isFr=$isFr global=$hasGlobal] → $baseUrl")
+                Log.d(TAG, "Legacy Server[pos=$pos isFr=$isFr global=$hasGlobal] → $baseUrl")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "parseVegetaServerList failed: ${e.message}")
+            Log.e(TAG, "parseVegetaServerListLegacy failed: ${e.message}")
         }
         val all = frFirst + globalOnly
-        Log.d(TAG, "parseVegetaServerList: ${frFirst.size} FR + ${globalOnly.size} GLOBAL = ${all.size} servers")
+        Log.d(TAG, "parseVegetaServerListLegacy: ${frFirst.size} FR + ${globalOnly.size} GLOBAL = ${all.size} servers")
         return all
     }
 
@@ -1115,8 +1179,15 @@ object VegetaTvProvider : Provider, IptvProvider {
     private suspend fun scanAdditionalServers() {
         try {
             val alreadyDone = frServerIndices.toSet()
-            val frRemaining = vegetaServers.filter { it.isFr && it.idx !in alreadyDone }
-            val globals = vegetaServers.filter { !it.isFr && it.idx !in alreadyDone }
+            // 2026-06-17 v5 : utilise cache ALIVE pour trier (= testés en 1er)
+            //   au lieu de cache DEAD persistant.
+            val aliveCache = loadFrServersCache()?.toSet().orEmpty()
+            val frRemaining = vegetaServers.filter {
+                it.isFr && it.idx !in alreadyDone
+            }.sortedBy { if (it.idx in aliveCache) 0 else 1 }
+            val globals = vegetaServers.filter {
+                !it.isFr && it.idx !in alreadyDone
+            }.sortedBy { if (it.idx in aliveCache) 0 else 1 }
             val candidates = (frRemaining + globals).take(PHASE3_MAX_CANDIDATES)
             if (candidates.isEmpty()) {
                 phase3Done = true
@@ -1148,20 +1219,33 @@ object VegetaTvProvider : Provider, IptvProvider {
                         }
                         sem.acquire()
                         try {
-                            // Try Xtream m3u via proxies first, fallback to Stalker
-                            var added = ingestServerChannelsViaXtreamM3u(server.idx, server.xtreamUrl, server.isFr)
-                            if (added == 0) added = ingestServerChannelsViaStalker(server.idx, server.baseUrl)
+                            // 2026-06-17 v5 : timeout per-server 12s pour ne pas
+                            // laisser sem=10 bloqué 30s sur un m3u 10MB.
+                            val added = try {
+                                kotlinx.coroutines.withTimeoutOrNull(12_000L) {
+                                    var n = ingestServerChannelsViaXtreamM3u(server.idx, server.xtreamUrl, server.isFr)
+                                    if (n == 0) n = ingestServerChannelsViaStalker(server.idx, server.baseUrl)
+                                    n
+                                } ?: run {
+                                    Log.d(TAG, "Server[${server.idx}] phase3 TIMEOUT 12s")
+                                    0
+                                }
+                            } catch (e: Exception) {
+                                Log.d(TAG, "Server[${server.idx}] background scan: ${e.message}")
+                                0
+                            }
                             if (added > 0) {
                                 frServerIndices.add(server.idx)
                             }
-                        } catch (e: Exception) {
-                            Log.d(TAG, "Server[${server.idx}] background scan: ${e.message}")
+                            // 2026-06-17 v3 : pas de mark dead persistant.
                         } finally { sem.release() }
                     }
                 }.awaitAll()
             }
             phase3Done = true
             Log.d(TAG, "Phase 3 done: ${frServerIndices.size} servers contributing, ${channelRegistry.size} channels in registry")
+            // 2026-06-17 v5 : persiste les serveurs alive pour le prochain boot
+            try { saveFrServersCache(frServerIndices.toList()) } catch (_: Exception) {}
         } catch (e: Exception) {
             Log.w(TAG, "scanAdditionalServers failed: ${e.message}")
             phase3Done = true
@@ -1185,43 +1269,54 @@ object VegetaTvProvider : Provider, IptvProvider {
                 //   on scanne Vegeta[6] EN PREMIER → arrive en first dans
                 //   additionalServersFlow → MiniPlayer joue le favori direct
                 //   au lieu d'attendre/jouer un autre serveur d'abord.
-                val candidates = vegetaServers
-                    .filter { it.idx !in alreadyDone && !IptvDeadServersCache.isDead("vegeta", it.idx) }
+                // 2026-06-17 v3 : pas de filtre DEAD persistant (= ignoré only
+                //   pour la session ; cf probe-all au boot). On scan parmi tous
+                //   les serveurs pas encore explorés CETTE session.
+                val candidates = vegetaServers.filter { it.idx !in alreadyDone }
+                // 2026-06-17 v8 (user "le mini lecteur bascule automatiquement
+                //   sur Serveur ou une chaîne qui fonctionne Pour lancer canal
+                //   car là je clique sur Canal Plus Cinéma il me dit qu'il y
+                //   a rien") : take(5) → take(ALL). On scan TOUS les serveurs
+                //   restants en // (sem=10, timeout 12s per server). Si Canal+
+                //   Cinéma existe quelque part, on le trouvera.
                 val nextPair = if (priorityServerIdx != null) {
-                    // Mettre le favori en premier (s'il est éligible), puis les autres
                     val favorite = candidates.firstOrNull { it.idx == priorityServerIdx }
                     val rest = candidates.filter { it.idx != priorityServerIdx }
                         .sortedBy { if (it.isFr) 0 else 1 }
-                    (if (favorite != null) listOf(favorite) + rest else rest).take(5)
+                    if (favorite != null) listOf(favorite) + rest else rest
                 } else {
-                    candidates.sortedBy { if (it.isFr) 0 else 1 }.take(5)
+                    candidates.sortedBy { if (it.isFr) 0 else 1 }
                 }
                 if (nextPair.isEmpty()) {
-                    Log.d(TAG, "On-demand backfill ($reason): no servers left to scan (alreadyDone=${alreadyDone.size}, dead=${IptvDeadServersCache.deadCount("vegeta")})")
+                    Log.d(TAG, "On-demand backfill ($reason): no servers left this session (alreadyDone=${alreadyDone.size})")
                     return@launch
                 }
-                Log.d(TAG, "On-demand backfill ($reason): scanning ${nextPair.map { it.idx }}${if (priorityServerIdx != null) " (priority=Vegeta[$priorityServerIdx])" else ""}")
+                Log.d(TAG, "On-demand backfill ($reason): scanning ${nextPair.size} servers (sem=10, timeout 12s)${if (priorityServerIdx != null) " (priority=Vegeta[$priorityServerIdx])" else ""}")
+                val odSem = kotlinx.coroutines.sync.Semaphore(10)
                 coroutineScope {
                     nextPair.map { server ->
                         async {
+                            odSem.acquire()
                             try {
-                                var added = ingestServerChannelsViaXtreamM3u(server.idx, server.xtreamUrl, server.isFr)
-                                if (added == 0) added = ingestServerChannelsViaStalker(server.idx, server.baseUrl)
+                                val added = try {
+                                    kotlinx.coroutines.withTimeoutOrNull(12_000L) {
+                                        var n = ingestServerChannelsViaXtreamM3u(server.idx, server.xtreamUrl, server.isFr)
+                                        if (n == 0) n = ingestServerChannelsViaStalker(server.idx, server.baseUrl)
+                                        n
+                                    } ?: run {
+                                        Log.d(TAG, "Server[${server.idx}] on-demand TIMEOUT 12s")
+                                        0
+                                    }
+                                } catch (e: Exception) {
+                                    Log.d(TAG, "On-demand server[${server.idx}]: ${e.message}")
+                                    0
+                                }
                                 if (added > 0) {
                                     frServerIndices.add(server.idx)
-                                    // Au cas où un serveur ressuscite : décache
-                                    IptvDeadServersCache.unmarkDead("vegeta", server.idx)
                                 } else {
-                                    // 2026-05-08 : marquer mort si les 2 méthodes (Xtream m3u
-                                    // ET Stalker) ont échoué → skip pendant 24h. Évite de
-                                    // gaspiller 8-10s à chaque backfill sur des serveurs morts.
-                                    IptvDeadServersCache.markDead("vegeta", server.idx)
-                                    Log.d(TAG, "Server[${server.idx}] marked dead (24h cache)")
+                                    Log.d(TAG, "Server[${server.idx}] on-demand: 0 channels (ignored this session)")
                                 }
-                            } catch (e: Exception) {
-                                Log.d(TAG, "On-demand server[${server.idx}]: ${e.message}")
-                                IptvDeadServersCache.markDead("vegeta", server.idx)
-                            }
+                            } finally { odSem.release() }
                         }
                     }.awaitAll()
                 }
@@ -1271,52 +1366,77 @@ object VegetaTvProvider : Provider, IptvProvider {
                         return@withContext
                     }
 
-                    // Phase 2 (per user request, like OlaTV): preload only 2 servers in
+                    // Phase 2 (per user request, like OlaTV): preload servers in
                     // parallel. Phase 3 backfills the rest in background and on-demand
                     // when getServers() is called on a channel that has too few streams.
-                    val frServers = vegetaServers.filter { it.isFr }
+                    val frServersAll = vegetaServers.filter { it.isFr }
                     val nonFrServers = vegetaServers.filter { !it.isFr }
-                    // Take 2 FR servers for the initial preload race
-                    val raceServers = frServers.take(2)
-                    Log.d(TAG, "Initial race: 2 FR servers (out of ${frServers.size} FR + ${nonFrServers.size} GLOBAL)")
+                    // 2026-06-17 v4 (logs montrent "Probe: 1st FR server alive in
+                    //   215402ms" = 3min35s à cause de m3u 10MB qui bloquent les
+                    //   slots sémaphore) : on TRIE les serveurs avec ceux marqués
+                    //   ALIVE au précédent boot EN PREMIER. La sem=10 ingest donc
+                    //   d'abord les valeurs sûres → 1er stream dispo en quelques
+                    //   secondes au lieu de 3 minutes.
+                    val aliveCache = loadFrServersCache()?.toSet().orEmpty()
+                    val raceServers = if (aliveCache.isEmpty()) {
+                        frServersAll
+                    } else {
+                        // Cached-alive en 1er, puis le reste
+                        frServersAll.sortedBy { if (it.idx in aliveCache) 0 else 1 }
+                    }
+                    Log.d(TAG, "Probe-all: ${raceServers.size} FR servers (alive-cached: ${aliveCache.size}/${frServersAll.size}, sem=10)")
                     val unblockSignal = kotlinx.coroutines.CompletableDeferred<Unit>()
                     val fastResults = java.util.concurrent.atomic.AtomicInteger(0)
                     val totalAdded = java.util.concurrent.atomic.AtomicInteger(0)
 
+                    // 2026-06-17 v4 : sem=20 (au lieu de 10) + timeout per-server
+                    //   12s (au lieu d'attendre 30s+ qu'un m3u 10MB se télécharge).
+                    //   Effet : si un serveur prend >12s, on l'abandonne, sem libère
+                    //   immédiatement, on passe au suivant. Le 1er ALIVE est trouvé
+                    //   beaucoup plus vite (= 5-15s au lieu de 3min35s).
+                    val probeSem = kotlinx.coroutines.sync.Semaphore(20)
                     val raceJob = scope.launch(Dispatchers.IO + NonCancellable) {
                         coroutineScope {
                             raceServers.map { server ->
                                 async {
-                                    val added = try {
-                                        // Try Xtream m3u via proxies first (the protocol the
-                                        // native Vegeta web player actually uses), fallback
-                                        // to Stalker MAC if m3u path returns 0.
-                                        var n = ingestServerChannelsViaXtreamM3u(server.idx, server.xtreamUrl, server.isFr)
-                                        if (n == 0) n = ingestServerChannelsViaStalker(server.idx, server.baseUrl)
-                                        n
-                                    } catch (e: Exception) {
-                                        Log.w(TAG, "Server[${server.idx}] race failed: ${e.message}")
-                                        0
-                                    }
-                                    if (added > 0) {
-                                        frServerIndices.add(server.idx)
-                                        totalAdded.addAndGet(added)
-                                        if (fastResults.incrementAndGet() >= 1 && !unblockSignal.isCompleted) {
-                                            unblockSignal.complete(Unit)
-                                            Log.d(TAG, "Race: unblocked at 1 server in ${System.currentTimeMillis() - t0}ms")
+                                    probeSem.acquire()
+                                    try {
+                                        val added = try {
+                                            kotlinx.coroutines.withTimeoutOrNull(12_000L) {
+                                                var n = ingestServerChannelsViaXtreamM3u(server.idx, server.xtreamUrl, server.isFr)
+                                                if (n == 0) n = ingestServerChannelsViaStalker(server.idx, server.baseUrl)
+                                                n
+                                            } ?: run {
+                                                Log.d(TAG, "Server[${server.idx}] probe TIMEOUT 12s")
+                                                0
+                                            }
+                                        } catch (e: Exception) {
+                                            Log.w(TAG, "Server[${server.idx}] probe failed: ${e.message}")
+                                            0
                                         }
-                                    }
+                                        if (added > 0) {
+                                            frServerIndices.add(server.idx)
+                                            totalAdded.addAndGet(added)
+                                            if (fastResults.incrementAndGet() == 1 && !unblockSignal.isCompleted) {
+                                                unblockSignal.complete(Unit)
+                                                Log.d(TAG, "Probe: 1st FR server alive in ${System.currentTimeMillis() - t0}ms")
+                                            }
+                                        } else {
+                                            // 2026-06-17 v3 : pas de cache 24h. Ignoré pour CETTE session seulement.
+                                            Log.d(TAG, "Server[${server.idx}] probe: 0 channels (ignored this session)")
+                                        }
+                                    } finally { probeSem.release() }
                                 }
                             }.awaitAll()
                         }
                         if (!unblockSignal.isCompleted) unblockSignal.complete(Unit)
-                        Log.d(TAG, "Race finished: ${frServerIndices.size}/${raceServers.size} OK, ${channelRegistry.size} channels, ${totalAdded.get()} added in ${System.currentTimeMillis() - t0}ms")
-                        try {
-                            saveRegistryCache()
-                            scanAdditionalServers()
-                            saveRegistryCache()
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Phase 3 background: ${e.message}")
+                        Log.d(TAG, "Probe-all done: ${frServerIndices.size}/${raceServers.size} FR servers alive, ${channelRegistry.size} channels, ${totalAdded.get()} ingested in ${System.currentTimeMillis() - t0}ms")
+                        try { saveRegistryCache() } catch (e: Exception) {
+                            Log.w(TAG, "saveRegistryCache: ${e.message}")
+                        }
+                        // 2026-06-17 v4 : persiste les serveurs alive pour le prochain boot
+                        try { saveFrServersCache(frServerIndices.toList()) } catch (e: Exception) {
+                            Log.w(TAG, "saveFrServersCache: ${e.message}")
                         }
                     }
 
@@ -1653,22 +1773,73 @@ object VegetaTvProvider : Provider, IptvProvider {
                 }
             } catch (_: Exception) { null }
 
-            val info = synchronized(registryLock) { channelRegistry[key] }
+            var info = synchronized(registryLock) { channelRegistry[key] }
             if (info == null) {
                 Log.w(TAG, "getServers: channel '$key' not found (registry size=${channelRegistry.size}) — triggering backfill" + (favoriteServerIdx?.let { " (favori prioritaire: Vegeta[$it])" } ?: ""))
                 triggerOnDemandBackfill("missing $key", favoriteServerIdx)
                 spawnLateRegistryWatcher(key)
-                return emptyList()
+                // 2026-06-17 v8 (user "le mini lecteur me dit qu'il y a rien
+                //   sur Canal+ Cinéma") : wait 8s → 15s. Le backfill scan
+                //   maintenant TOUS les serveurs (sem=10, ~12s par serveur).
+                //   On laisse 15s pour qu'au moins quelques serveurs lents
+                //   finissent leur fetch.
+                val deadline = System.currentTimeMillis() + 15_000L
+                while (System.currentTimeMillis() < deadline) {
+                    delay(500)
+                    val refreshed = synchronized(registryLock) { channelRegistry[key] }
+                    if (refreshed != null && refreshed.streams.isNotEmpty()) {
+                        Log.d(TAG, "getServers: backfill produced ${refreshed.streams.size} streams for '$key' after ${System.currentTimeMillis() - (deadline - 15000L)}ms")
+                        info = refreshed
+                        break
+                    }
+                }
+                if (info == null) {
+                    Log.w(TAG, "getServers: backfill timeout (15s) for '$key' — channel introuvable dans tous les serveurs Vegeta")
+                    return emptyList()
+                }
             }
+
+            // 2026-06-17 v2 : streams ingestés tous disponibles. Ban manuel si besoin.
+            //   À ce point info est garanti non-null (return emptyList plus haut)
+            var infoMut: ChannelInfo = info!!
+            // 2026-06-17 v6 (user "tous les serveurs doivent charger pour qu'on
+            //   puisse changer facilement Donc si tu vois qu'il y a un problème
+            //   de chargement de serveur Il faut que tu le règles") : si seulement
+            //   1 stream au getServers, attendre jusqu'à 6s qu'au moins 3 streams
+            //   soient ingérés. Avant : TF1 n'avait qu'1 stream (Vegeta[37] HD)
+            //   → si ce serveur faisait 509, swap impossible. Maintenant on
+            //   garantit 3 streams minimum dans le picker initial.
+            // 2026-06-17 v7 : seuil descendu de 3 → 2 (les serveurs Vegeta n'ont
+            //   souvent que 2-3 variants par chaîne ; attendre 3 prend trop long
+            //   et finit en timeout). Wait étendu de 6s → 10s pour laisser temps
+            //   aux serveurs 10MB de finir leur fetch (5-8s typique).
+            if (infoMut.streams.size < 2) {
+                Log.d(TAG, "getServers '$key': only ${infoMut.streams.size} streams — waiting up to 10s for more")
+                triggerOnDemandBackfill("backfill $key — need more streams (had ${infoMut.streams.size})")
+                val deadline = System.currentTimeMillis() + 10_000L
+                while (System.currentTimeMillis() < deadline) {
+                    delay(300)
+                    val refreshed = synchronized(registryLock) { channelRegistry[key] }
+                    if (refreshed != null && refreshed.streams.size >= 2) {
+                        Log.d(TAG, "getServers '$key': got ${refreshed.streams.size} streams after wait")
+                        infoMut = refreshed
+                        break
+                    }
+                }
+                if (infoMut.streams.size < 2) {
+                    Log.d(TAG, "getServers '$key': still ${infoMut.streams.size} streams after 10s — returning what we have")
+                }
+            }
+            val aliveStreams = infoMut.streams
 
             // Promote the last-known-good stream for this channel (if any) to first
             // position so the user doesn't have to wait through a broken variant.
             val lastGood = lastGoodStreamUrl[key]
             val sortedStreams = if (lastGood != null) {
-                val pinned = info.streams.firstOrNull { it.url == lastGood }
-                if (pinned != null) listOf(pinned) + info.streams.filter { it.url != lastGood }
-                else info.streams
-            } else info.streams
+                val pinned = aliveStreams.firstOrNull { it.url == lastGood }
+                if (pinned != null) listOf(pinned) + aliveStreams.filter { it.url != lastGood }
+                else aliveStreams
+            } else aliveStreams
 
             // Build display labels with auto-disambiguation: when multiple streams
             // share the same base label (e.g. all "Server 39"), append #1, #2, etc.
@@ -1692,7 +1863,7 @@ object VegetaTvProvider : Provider, IptvProvider {
                 )
             }
 
-            Log.d(TAG, "getServers '$key': ${servers.size} servers (total in registry: ${info.streams.size})")
+            Log.d(TAG, "getServers '$key': ${servers.size} servers (total in registry: ${infoMut.streams.size})")
 
             // 2026-05-08 : SEUIL CIBLE = 5 items VISIBLES (non-bannis) dans le
             // picker. Les bannis (grisés) ne comptent PAS dans le total.
@@ -1715,9 +1886,15 @@ object VegetaTvProvider : Provider, IptvProvider {
             currentEmitJob?.cancel()
             _additionalServers.resetReplayCache()
             currentEmitJob = scope.launch {
-                delay(150)
+                // 2026-06-17 (user "les serveurs doivent apparaître dès qu'ils sont
+                //   prêts") : delay(150) supprimé. Avant : on attendait 150ms avant
+                //   d'émettre le 1er extra server. Maintenant : émission immédiate
+                //   dès que getServers a returné la 1ère batch.
                 var emitted = 0
-                for (stream in info.streams.drop(servers.size)) {
+                // 2026-06-17 v2 : retour à infoMut.streams (pas de filtre DEAD à
+                //   la lecture, juste au scan). Les streams ingestés restent
+                //   disponibles ; ban manuel si un ne marche pas.
+                for (stream in infoMut.streams.drop(servers.size)) {
                     if (!isActive) return@launch
                     if (emitted >= MAX_VARIANTS_PER_CHANNEL) return@launch
                     val server = Video.Server(

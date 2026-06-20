@@ -48,7 +48,9 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
     override val name = "1Jour1Film"
 
     const val USER_AGENT = NetworkClient.USER_AGENT
-    override val defaultPortalUrl: String = "https://1jour1film-officiel.site/"
+    // 2026-06-19 (user "l'adresse de redirection a changé") : 1jour1film-officiel.site
+    //   est mort, nouveau portail = https://1jour1film2026.site/
+    override val defaultPortalUrl: String = "https://1jour1film2026.site/"
 
     override val portalUrl: String = defaultPortalUrl
         get() {
@@ -1200,17 +1202,52 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 try {
                     val document = addressService.getHome()
 
-                    // Try inline scripts first (fast), fallback to full HTML serialization.
-                    // onChangeUrl is called once at startup so the fallback cost is acceptable.
-                    val newUrl = (document.select("script").asSequence()
-                        .map { it.data() }
-                        .firstOrNull { it.contains("window.location.href") }
-                        ?.substringAfter("window.location.href = \"")
-                        ?.substringBefore("\"")
-                        ?.trim()
-                        ?.takeIf { it.startsWith("http") }
-                        ?: document.html().substringAfter("window.location.href = \"").substringBefore("\"").trim()
-                    )
+                    // 2026-06-19 (user "ça ne m'a pas redirigé auto") : ancien
+                    //   pattern `window.location.href = "..."` ne marche plus.
+                    //   Le portail 1jour1film2026.site utilise désormais :
+                    //   (1) un lien HTML "Accéder à l'adresse actuelle" pointant
+                    //       vers la vraie URL, et
+                    //   (2) un meta http-equiv="refresh" ou setTimeout/replace.
+                    //   On essaye dans l'ordre : <a> link → <meta refresh> →
+                    //   script window.location.* → fallback HTML brut.
+                    val htmlText = document.html()
+                    val newUrl = run {
+                        // 1) Le 1er <a href=...> qui pointe vers un domaine 1jour1film*
+                        //    (= le bouton "Accéder à l'adresse actuelle")
+                        val anchorUrl = document.select("a[href]").asSequence()
+                            .map { it.attr("href").trim() }
+                            .firstOrNull {
+                                it.startsWith("http") &&
+                                (it.contains("1jour1film", ignoreCase = true) ||
+                                 it.contains("/film", ignoreCase = true)) &&
+                                !it.contains("2026.site") &&  // skip self-portal
+                                !it.contains("/go", ignoreCase = true)
+                            }
+                        if (anchorUrl != null) return@run anchorUrl
+                        // 2) <meta http-equiv="refresh" content="N;url=...">
+                        val metaRefresh = document.select("meta[http-equiv=refresh]")
+                            .firstOrNull()?.attr("content")
+                            ?.substringAfter("url=", "")
+                            ?.trim()
+                            ?.takeIf { it.startsWith("http") }
+                        if (metaRefresh != null) return@run metaRefresh
+                        // 3) Anciennes patterns JS : window.location.href / .replace / .assign
+                        val jsPatterns = listOf(
+                            "window.location.href = \"", "window.location.href='",
+                            "window.location = \"", "window.location='",
+                            "window.location.replace(\"", "window.location.replace('",
+                            "window.location.assign(\"", "window.location.assign('",
+                            "location.href = \"", "location.href='",
+                            "location.replace(\"", "location.replace('",
+                        )
+                        for (pattern in jsPatterns) {
+                            val closing = if (pattern.endsWith("\"")) "\"" else "'"
+                            val candidate = htmlText.substringAfter(pattern, "")
+                                .substringBefore(closing).trim()
+                            if (candidate.startsWith("http")) return@run candidate
+                        }
+                        ""
+                    }
                     if (!newUrl.isNullOrEmpty() && newUrl.startsWith("http")) {
                         val newIcon = document.selectFirst("link[rel=apple-touch-icon]")
                             ?.attr("href")

@@ -32,10 +32,22 @@
         <androidx.media3.ui.PlayerView
             android:id="@+id/mini_player_view"
             android:layout_width="match_parent"
-            android:layout_height="200dp"
+            android:layout_height="@dimen/mini_player_height_mobile"
             app:use_controller="false"
             app:show_buffering="when_playing"
-            app:resize_mode="fit" />
+            app:resize_mode="fit"
+            app:surface_type="surface_view" />
+
+        <!-- 2026-06-16 : mirror du grand swap_freeze_overlay pour masquer le
+             JUMELAGE swap. PixelCopy de la derniere frame du SurfaceView avant
+             seekToNextMediaItem. Cache au prochain STATE_READY. -->
+        <ImageView
+            android:id="@+id/mini_swap_freeze_overlay"
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/mini_player_height_mobile"
+            android:scaleType="fitCenter"
+            android:visibility="gone"
+            android:contentDescription="@null" />
 
         <!-- Channel name overlay -->
         <LinearLayout
@@ -162,6 +174,9 @@
     <!-- 2026-05-13 (user "à côté de l'onglet téléchargement il faudrait mettre
          un icône catégorie") : bouton picker catégorie pour Mon IPTV. Visibilité
          togglée dans HomeMobileFragment selon le provider actif. -->
+    <!-- 2026-06-19 v35 (user "le bug du refresh est sur plusieurs providers
+         My IPTV et World Live") : décalé en cascade pour ne pas chevaucher
+         iv_tvhub_refresh. Position 5e dans la chaîne. -->
     <ImageView
         android:id="@+id/iv_iptv_categories"
         android:layout_width="40dp"
@@ -174,7 +189,7 @@
         android:contentDescription="Catégories IPTV"
         android:visibility="gone"
         app:tint="@android:color/white"
-        app:layout_constraintEnd_toStartOf="@id/iv_iptv_language"
+        app:layout_constraintEnd_toStartOf="@id/iv_vavoo_tunnel"
         app:layout_constraintTop_toTopOf="parent" />
 
     <!-- 2026-05-13 (user "tu mets un troisième bouton à côté de téléchargement
@@ -195,8 +210,28 @@
         app:layout_constraintEnd_toStartOf="@id/iv_downloads"
         app:layout_constraintTop_toTopOf="parent" />
 
+    <!-- 2026-06-18 (user "Ton bouton refresh il devrait être Tout en haut à
+         côté de La planète") : icône Refresh dans la top-bar TV Hub. Clic =
+         clear cache replay + re-fetch GitHub. À gauche du globe. -->
+    <ImageView
+        android:id="@+id/iv_tvhub_refresh"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginEnd="4dp"
+        android:layout_marginTop="16dp"
+        android:padding="8dp"
+        android:src="@android:drawable/ic_popup_sync"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="Actualiser TV Hub"
+        android:visibility="gone"
+        app:tint="@android:color/white"
+        app:layout_constraintEnd_toStartOf="@id/iv_iptv_language"
+        app:layout_constraintTop_toTopOf="parent" />
+
     <!-- 2026-06-10 (user "bouton apparent dans la barre") : sélecteur de
          source World TV (style Wiseplay). À gauche du globe. -->
+    <!-- 2026-06-19 v35 : décalé en cascade (position 6e), à gauche de
+         iv_iptv_categories. -->
     <ImageView
         android:id="@+id/iv_world_live_sources"
         android:layout_width="40dp"
@@ -209,13 +244,15 @@
         android:contentDescription="Mes sources World TV"
         android:visibility="gone"
         app:tint="@android:color/white"
-        app:layout_constraintEnd_toStartOf="@id/iv_iptv_language"
+        app:layout_constraintEnd_toStartOf="@id/iv_iptv_categories"
         app:layout_constraintTop_toTopOf="parent" />
 
     <!-- 2026-05-20 (user "sur les providers compatibles on pourrait choisir par
          quoi trier — toutes régions, FR, etc.") : bouton filtre catalogue,
          visible uniquement sur les providers TMDB (Cloudstream). Même slot que
          iv_iptv_language (jamais affichés en même temps : IPTV vs Cloudstream). -->
+    <!-- 2026-06-19 v35 : décalé en cascade (position 7e), à gauche de
+         iv_world_live_sources. -->
     <ImageView
         android:id="@+id/iv_catalog_filter"
         android:layout_width="40dp"
@@ -228,7 +265,28 @@
         android:contentDescription="Filtre catalogue"
         android:visibility="gone"
         app:tint="@android:color/white"
-        app:layout_constraintEnd_toStartOf="@id/iv_downloads"
+        app:layout_constraintEnd_toStartOf="@id/iv_world_live_sources"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- 2026-06-17 (user "il faut faire un bouton de bascule, de base il est pas
+         activé et on l'active") : bouton tunnel Vavoo via serveurs free VYPN,
+         visible UNIQUEMENT sur Vavoo TV. OFF par défaut. -->
+    <!-- 2026-06-19 v35 (user "Bug grave sur vavoo refresh empilé sur VPN
+         décale le bouton VPN sur la gauche") : iv_vavoo_tunnel décalé À
+         GAUCHE de iv_tvhub_refresh pour ne plus se superposer. -->
+    <ImageView
+        android:id="@+id/iv_vavoo_tunnel"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginEnd="4dp"
+        android:layout_marginTop="16dp"
+        android:padding="8dp"
+        android:src="@drawable/ic_vavoo_tunnel"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="Mode tunnel Vavoo (France)"
+        android:visibility="gone"
+        app:tint="@android:color/white"
+        app:layout_constraintEnd_toStartOf="@id/iv_tvhub_refresh"
         app:layout_constraintTop_toTopOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
