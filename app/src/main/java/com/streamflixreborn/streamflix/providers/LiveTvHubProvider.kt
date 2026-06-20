@@ -2120,7 +2120,32 @@ object LiveTvHubProvider : Provider, IptvProvider {
             try {
                 val req = okhttp3.Request.Builder().url(REPLAY_M3U_URL)
                     .header("User-Agent", "Mozilla/5.0").build()
-                val body = replayClient.newCall(req).execute().use { it.body?.string().orEmpty() }
+                // 2026-06-19 (user "TV hub crash au démarrage sur certaines box") :
+                //   stream-bounded read au lieu de .string() qui alloue tout en
+                //   RAM d'un coup. Cap 8 MB (= m3u replay actuel ~500 KB, marge
+                //   x16). Catch Throwable pour rattraper OOM.
+                val body = try {
+                    replayClient.newCall(req).execute().use { resp ->
+                        val source = resp.body?.source()
+                        if (source == null) "" else {
+                            val buf = okio.Buffer()
+                            val MAX_BYTES = 8L * 1024 * 1024
+                            var total = 0L
+                            while (!source.exhausted() && total < MAX_BYTES) {
+                                val n = source.read(buf, 64 * 1024L)
+                                if (n == -1L) break
+                                total += n
+                            }
+                            if (total >= MAX_BYTES) {
+                                Log.w(TAG, "Replay M3U exceeded ${MAX_BYTES} bytes — abort")
+                                ""
+                            } else buf.readUtf8()
+                        }
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Replay body read failed: ${t.javaClass.simpleName}: ${t.message}")
+                    ""
+                }
                 if (body.isBlank() || "#EXTM3U" !in body) {
                     Log.w(TAG, "Replay M3U empty or invalid")
                     return@withContext emptyList<Category>()

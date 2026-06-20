@@ -322,14 +322,30 @@ class StreamFlixApp : Application() {
             //   DeviceID OTF, décompilé depuis l'APK officielle V3.2).
             com.streamflixreborn.streamflix.utils.OtfTvService
                 .installContext(applicationContext)
-            CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
-                try {
-                    com.streamflixreborn.streamflix.providers.LiveTvHubProvider
-                        .warmReplayCache()
-                    Log.d("StreamFlixApp", "Replay cache warmed at cold start")
-                } catch (e: Throwable) {
-                    Log.w("StreamFlixApp", "Replay warm failed: ${e.message}")
+            // 2026-06-19 (user "World Live crash au démarrage sur certaines box,
+            //   pareil pour le TV hub Faut qu'on fasse en sorte qu'ils soient
+            //   moins gourmands") : warm UNIQUEMENT si TV Hub est le provider
+            //   actif au boot. Sur petites box (RAM/CPU limités), fetch+parse
+            //   452 KB de m3u replay au boot alors que l'user est sur Cloudstream
+            //   = gaspillage RAM/CPU qui peut faire crash le process.
+            //   Si TV Hub actif → warm en background (chauffe le cache pour
+            //   ouverture instantanée). Sinon → on attend que l'user navigue.
+            val warmTvHub = try {
+                com.streamflixreborn.streamflix.utils.UserPreferences
+                    .currentProvider is com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+            } catch (_: Throwable) { false }
+            if (warmTvHub) {
+                CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                    try {
+                        com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+                            .warmReplayCache()
+                        Log.d("StreamFlixApp", "Replay cache warmed at cold start (TV Hub active)")
+                    } catch (e: Throwable) {
+                        Log.w("StreamFlixApp", "Replay warm failed: ${e.message}")
+                    }
                 }
+            } else {
+                Log.d("StreamFlixApp", "Replay cache warm SKIPPED (TV Hub not active provider)")
             }
         } catch (e: Throwable) {
             Log.w("StreamFlixApp", "Replay cache init exception: ${e.message}")
