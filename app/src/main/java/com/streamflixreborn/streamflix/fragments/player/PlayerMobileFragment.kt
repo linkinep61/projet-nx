@@ -1592,7 +1592,12 @@ class PlayerMobileFragment : Fragment() {
         //   toute la liste, tap sur une chaîne = switch rapide.
         binding.pvPlayer.controller.binding.btnExoChannelList.isVisible = isIptvChannelContext()
         binding.pvPlayer.controller.binding.btnExoChannelList.setOnClickListener {
-            showIptvChannelListBottomSheet()
+            // 2026-06-15 (user "soit le build est pas bon, soit tu touches pas
+            //   le bon truc") : remplace le BottomSheet (= bricolé avec maxWidth
+            //   qui ne marche pas) par le PANEL INTÉGRÉ au layout, comme sur TV.
+            //   layout_channel_list_mobile est dans fragment_player_mobile.xml,
+            //   ancré à gauche avec layout_constraintWidth_percent ajustable.
+            showIptvChannelListPanelMobile()
         }
 
         binding.pvPlayer.controller.binding.btnExoPictureInPicture.setOnClickListener {
@@ -2231,6 +2236,44 @@ class PlayerMobileFragment : Fragment() {
             1f,
         ))
 
+        // 2026-06-15 v4 (user "toujours pareil pour la liste des chaînes ça
+        //   prend tout l'écran") : utiliser setOnShowListener pour appliquer
+        //   la modif APRÈS que la vue soit complètement créée et attachée.
+        //   En paysage : window.attributes.width = 60% + gravity START.
+        //   C'est l'approche window-level qui contourne le comportement
+        //   par défaut de BottomSheetDialog (= match_parent en width).
+        val isLandscape = resources.configuration.orientation ==
+            android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        if (isLandscape) {
+            sheet.setOnShowListener {
+                try {
+                    val w = sheet.window
+                    if (w != null) {
+                        val newWidth = (resources.displayMetrics.widthPixels * 0.2f).toInt()
+                        w.setLayout(newWidth, android.view.ViewGroup.LayoutParams.MATCH_PARENT)
+                        val lp = w.attributes
+                        lp.gravity = android.view.Gravity.START or android.view.Gravity.BOTTOM
+                        w.attributes = lp
+                        Log.d("PlayerMobileFragment", "ChannelList sheet landscape: window width=${newWidth}px (60%) gravity=START|BOTTOM")
+                    }
+                    // En complément : forcer la largeur de la design_bottom_sheet
+                    val designBottomSheet = sheet.findViewById<android.view.View>(
+                        com.google.android.material.R.id.design_bottom_sheet
+                    )
+                    designBottomSheet?.let { view ->
+                        val newWidth = (resources.displayMetrics.widthPixels * 0.2f).toInt()
+                        val params = view.layoutParams
+                        params.width = newWidth
+                        view.layoutParams = params
+                        (view.layoutParams as? android.widget.FrameLayout.LayoutParams)?.gravity =
+                            android.view.Gravity.START or android.view.Gravity.BOTTOM
+                        view.requestLayout()
+                    }
+                } catch (e: Throwable) {
+                    Log.w("PlayerMobileFragment", "ChannelList landscape resize failed: ${e.message}")
+                }
+            }
+        }
         // sheet déclaré plus haut, on le configure et l'affiche ici.
         sheet.setContentView(container)
         sheet.behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
@@ -2285,6 +2328,115 @@ class PlayerMobileFragment : Fragment() {
             if (currentIdx >= 0) rv.scrollToPosition(currentIdx)
 
             // 2026-06-13 : filtre live sur EditText
+            searchInput.addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    val q = s?.toString()?.trim()?.lowercase().orEmpty()
+                    val filtered = if (q.isBlank()) items
+                        else items.filter { it.second.lowercase().contains(q) }
+                    adapter.replaceItems(filtered)
+                    titleView.text = if (q.isBlank()) "Chaînes (${filtered.size})"
+                        else "Chaînes (${filtered.size}/${items.size})"
+                    if (filtered.isNotEmpty()) rv.scrollToPosition(0)
+                }
+            })
+        }
+    }
+
+    /**
+     * 2026-06-15 (user "tu n'arrives pas à prendre le même pattern que TV") :
+     * Version PANEL INTÉGRÉ (= pattern TV qui marche) du channel list mobile.
+     * Utilise layout_channel_list_mobile du fragment_player_mobile.xml au lieu
+     * d'un BottomSheetDialog. Largeur = layout_constraintWidth_percent ajusté
+     * selon orientation (1.0 portrait, 0.2 paysage).
+     */
+    private fun showIptvChannelListPanelMobile() {
+        val provider = UserPreferences.currentProvider ?: return
+        if (_binding == null) return
+
+        val panel = binding.layoutChannelListMobile
+        val titleView = binding.tvChannelListTitleMobile
+        val searchInput = binding.etChannelSearchMobile
+        val rv = binding.rvChannelListMobile
+        val closeBtn = binding.btnChannelListCloseMobile
+
+        // Largeur selon orientation via ConstraintSet
+        val root = binding.root
+        val cs = androidx.constraintlayout.widget.ConstraintSet()
+        cs.clone(root)
+        val isLandscape = resources.configuration.orientation ==
+            android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        // 2026-06-15 v12 (user "l'overlay prend tout le téléphone, on avait
+        //   réglé") : ConstraintSet.constrainPercentWidth() ne fait RIEN si
+        //   `widthDefault` n'est pas explicitement set à MATCH_CONSTRAINT_PERCENT.
+        //   Sans ce setter, le percent est ignoré → width reste 0dp → conteneur
+        //   prend tout l'espace dispo. Le set ci-dessous active le mode percent.
+        cs.constrainDefaultWidth(
+            R.id.layout_channel_list_mobile,
+            androidx.constraintlayout.widget.ConstraintSet.MATCH_CONSTRAINT_PERCENT
+        )
+        // 2026-06-15 v17 (user "20 %") : landscape strict 20%, portrait 40%.
+        cs.constrainPercentWidth(
+            R.id.layout_channel_list_mobile,
+            if (isLandscape) 0.2f else 0.4f
+        )
+        cs.applyTo(root)
+
+        titleView.text = "Chaînes — chargement…"
+        rv.layoutManager = androidx.recyclerview.widget.LinearLayoutManager(requireContext())
+        panel.visibility = View.VISIBLE
+        panel.bringToFront()
+
+        closeBtn.setOnClickListener {
+            panel.visibility = View.GONE
+        }
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            val items = withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val channelIds: List<String> = when (provider) {
+                    is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getOrderedChannelIds()
+                    is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getOrderedChannelIds()
+                    is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider -> provider.getOrderedChannelIds()
+                    is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getOrderedChannelIds(args.id)
+                    is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getOrderedChannelIds()
+                    is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getOrderedLiveChannelIds()
+                    else -> emptyList()
+                }
+                channelIds.mapNotNull { id ->
+                    val name = when (provider) {
+                        is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelDisplayName(id)
+                        is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelDisplayName(id)
+                        is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider -> provider.getChannelDisplayName(id)
+                        is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelDisplayName(id)
+                        is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelDisplayName(id)
+                        is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getChannelDisplayName(id)
+                        else -> null
+                    } ?: return@mapNotNull null
+                    val logo = when (provider) {
+                        is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getChannelPoster(id)
+                        is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getChannelPoster(id)
+                        is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider -> provider.getChannelPoster(id)
+                        is com.streamflixreborn.streamflix.providers.LiveTvHubProvider -> provider.getChannelPoster(id)
+                        is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getChannelPoster(id)
+                        is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getChannelPoster(id)
+                        else -> null
+                    }
+                    Triple(id, name, logo)
+                }
+            }
+
+            if (!isAdded || _binding == null) return@launch
+            titleView.text = "Chaînes (${items.size})"
+            val mutableItems = items.toMutableList()
+            val adapter = IptvChannelListMobileAdapter(mutableItems, args.id) { selectedId ->
+                panel.visibility = View.GONE
+                switchToIptvChannel(selectedId, provider)
+            }
+            rv.adapter = adapter
+            val currentIdx = items.indexOfFirst { it.first == args.id }
+            if (currentIdx >= 0) rv.scrollToPosition(currentIdx)
+
             searchInput.addTextChangedListener(object : android.text.TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -2630,9 +2782,21 @@ class PlayerMobileFragment : Fragment() {
         // to the same dead URL (different cmd, same upstream).
         val playingUri = player.currentMediaItem?.localConfiguration?.uri?.toString()
         if (!playingUri.isNullOrBlank()) {
-            try {
-                com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
-            } catch (_: Throwable) { /* WiTv lacks this method, ignore */ }
+            // 2026-06-15 (user "OlaTvProvider Domain blacklisted 185.160 alors qu'on
+            //   est sur TF1 World Live TV") : même bug que celui fixé dans
+            //   MiniPlayerController. OlaTvProvider blacklist le HOST entier
+            //   inconditionnellement → quand on est sur un autre provider (World
+            //   Live TV, prime-tv 185.160), les fail sur 185.160 cassent toutes
+            //   les chaînes du host. Gate par préfixe d'ID.
+            val isOlaChannel = args.id.startsWith("ola::") ||
+                args.id.startsWith("ola_ep::") ||
+                args.id.startsWith("ola_stream::") ||
+                args.id.startsWith("ola_fasttrack::")
+            if (isOlaChannel) {
+                try {
+                    com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
+                } catch (_: Throwable) { /* WiTv lacks this method, ignore */ }
+            }
         }
         val variants = PlayerSettingsView.Settings.ChannelVariant.list
         val removed = variants.removeAll { it.id == server.id }
@@ -3361,10 +3525,63 @@ class PlayerMobileFragment : Fragment() {
             } else if (isDash) {
                 // DASH (.mpd) — utilisé par les flux live français (TF1, France TV, etc.)
                 // via le pipeline 3BoxTV (RSS feed → URL signée vers .mpd).
-                val dashSource = androidx.media3.exoplayer.dash.DashMediaSource.Factory(teeFactory)
-                    .createMediaSource(mediaItem)
+                val dashFactory = androidx.media3.exoplayer.dash.DashMediaSource.Factory(teeFactory)
+                // v34 : Widevine DRM pour TF1+ VOD. Le mediainfo retourne une license URL
+                //   dans delivery.drms[name=widevine].url qu'on récupère via TF1Resolver cache.
+                // 2026-06-19 : étendu pour M6+. M6Resolver expose aussi
+                //   getWidevineLicenseUrl + getWidevineHeaders (= x-dt-auth-token).
+                val widevineUrl = com.streamflixreborn.streamflix.utils.TF1Resolver
+                    .getWidevineLicenseUrl(video.source)
+                    ?: com.streamflixreborn.streamflix.utils.M6Resolver
+                        .getWidevineLicenseUrl(video.source)
+                val drmHeaders = com.streamflixreborn.streamflix.utils.M6Resolver
+                    .getWidevineHeaders(video.source)
+                if (widevineUrl != null) {
+                    Log.d("PlayerDebug", "DASH+Widevine DRM: license=${widevineUrl.take(80)}... headers=${drmHeaders?.keys}")
+                    // 2026-06-19 v17 : si M6+ (= drmHeaders contient x-dt-auth-token),
+                    //   utilise M6DrmCallback custom qui parse le JSON wrapper
+                    //   {"license": "base64..."} retourné par DRMtoday. Sinon
+                    //   HttpMediaDrmCallback standard pour TF1+ et autres.
+                    val isM6 = drmHeaders?.containsKey("x-dt-auth-token") == true
+                    val drmCallback: androidx.media3.exoplayer.drm.MediaDrmCallback = if (isM6) {
+                        Log.d("PlayerDebug", "Using M6DrmCallback (DRMtoday JSON wrapper)")
+                        com.streamflixreborn.streamflix.utils.M6DrmCallback(widevineUrl, drmHeaders!!)
+                    } else {
+                        val cb = androidx.media3.exoplayer.drm.HttpMediaDrmCallback(
+                            widevineUrl,
+                            androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                                .setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+                        )
+                        drmHeaders?.forEach { (k, v) ->
+                            try { cb.setKeyRequestProperty(k, v) } catch (_: Throwable) {}
+                        }
+                        cb
+                    }
+                    // v37 : custom provider qui force securityLevel=L3 (software path).
+                    //   Sinon Widevine tente L1 (= HW secure) qui demande HDCP →
+                    //   sur OPPO CPH2211 HDCP retourne `255` (= unsupported) →
+                    //   check en boucle infinie = écran qui clignote.
+                    val l3Provider = androidx.media3.exoplayer.drm.ExoMediaDrm.Provider { uuid ->
+                        val drm = androidx.media3.exoplayer.drm.FrameworkMediaDrm.newInstance(uuid)
+                        try {
+                            drm.setPropertyString("securityLevel", "L3")
+                        } catch (e: Exception) {
+                            Log.w("PlayerDebug", "Set L3 failed: ${e.message}")
+                        }
+                        drm
+                    }
+                    val drmSessionManager = androidx.media3.exoplayer.drm.DefaultDrmSessionManager.Builder()
+                        .setUuidAndExoMediaDrmProvider(
+                            androidx.media3.common.C.WIDEVINE_UUID,
+                            l3Provider
+                        )
+                        .setMultiSession(false)
+                        .build(drmCallback)
+                    dashFactory.setDrmSessionManagerProvider { drmSessionManager }
+                }
+                val dashSource = dashFactory.createMediaSource(mediaItem)
                 player.setMediaSource(dashSource)
-                Log.d("PlayerDebug", "DASH: DashMediaSource + TeeDataSource")
+                Log.d("PlayerDebug", "DASH: DashMediaSource + TeeDataSource (DRM=${widevineUrl != null})")
             } else {
                 // Non-HLS / Non-DASH (mp4 progressive). Wrap with TeeDataSource for REC.
                 val progressiveSource = androidx.media3.exoplayer.source.ProgressiveMediaSource
@@ -3479,6 +3696,27 @@ class PlayerMobileFragment : Fragment() {
                     val isHdr10 = codecLabel.contains("hvc1.2.", ignoreCase = true) ||
                         codecLabel.contains("hev1.2.", ignoreCase = true) ||
                         firstFormat.colorInfo?.colorTransfer == androidx.media3.common.C.COLOR_TRANSFER_ST2084
+                    // 2026-06-19 v13 (user "C'est un bug codec, le son passe mais
+                    //   pas l'image") : distinguer DRM-locked vs codec impossible.
+                    //   avc1.42C01E (h264 baseline) est supporté par tous les
+                    //   Android. Si isTrackSupported false MAIS le format a un
+                    //   drmInitData, c'est un cas DRM → message clair, audio
+                    //   continue de jouer (= au lieu de player.stop() qui tue
+                    //   tout). L'image reviendra dès que la license sera
+                    //   obtenue (= via M6Resolver background fix).
+                    val isDrmLocked = firstFormat.drmInitData != null
+                    if (isDrmLocked) {
+                        Log.w("PlayerNetwork", "Track vidéo DRM-protected sans license ($codecLabel) — audio only")
+                        try {
+                            android.widget.Toast.makeText(
+                                requireContext(),
+                                "Contenu DRM (M6+ premium) : connexion compte requise. Audio seulement.",
+                                android.widget.Toast.LENGTH_LONG,
+                            ).show()
+                        } catch (_: Exception) {}
+                        // PAS de player.stop() → l'audio AAC continue de jouer
+                        return
+                    }
                     val toastMsg = when {
                         isHdr10 -> "Vidéo HEVC HDR10 (10-bit) non supportée par ce device — essaie un autre serveur si dispo"
                         else -> "Codec vidéo non supporté ($codecLabel) par ce device — essaie un autre serveur si dispo"
@@ -4032,7 +4270,12 @@ class PlayerMobileFragment : Fragment() {
                         errMsg.contains("response code: 502") ||
                         errMsg.contains("response code: 503")
                     val MAX_RETRIES_BEFORE_SWITCH = 3
-                    val shouldSwitch = !iptvCurrentStreamHasWorked &&
+                    // 2026-06-17 (user "écran noir + pas de son sur OLA") : 456 = MAC
+                    //   blocked / rate-limit côté serveur — JAMAIS récupérable même
+                    //   après retry. Force le switch même si stream a déjà brièvement
+                    //   marché (sinon on retry sticky un server condamné).
+                    val isMacBlocked456 = errMsg.contains("response code: 456")
+                    val shouldSwitch = (!iptvCurrentStreamHasWorked || isMacBlocked456) &&
                         (isPermanentHttpError || iptvRetryCount >= MAX_RETRIES_BEFORE_SWITCH)
 
                     // 2026-05-10 : cooldown anti-cascade (cf PlayerTvFragment).
@@ -4527,10 +4770,15 @@ class PlayerMobileFragment : Fragment() {
                         val stdBar = ctrl.findViewById<View>(R.id.exo_progress)
                         val pri = ctrl.findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.live_primary_progress)
                         val sec = ctrl.findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.live_secondary_progress)
-                        // 2026-05-31 : masquer les barres de jumelage sur IPTV
-                        if (stdBar != null && stdBar.visibility != View.GONE) stdBar.visibility = View.GONE
-                        if (pri != null && pri.visibility != View.VISIBLE) pri.visibility = View.VISIBLE
-                        if (sec != null && sec.visibility != View.VISIBLE) sec.visibility = View.VISIBLE
+                        // 2026-06-19 (user "ma barre était purement visuelle. Tu remets
+                        //   la même barre que pour les VOD") : on remet la barre standard
+                        //   ExoPlayer (= exo_progress) sur live AUSSI, comme VOD. Les 2
+                        //   barres custom (live_primary/secondary) deviennent permanent GONE.
+                        //   Le swap réel se fait en interne via ExoPlayer.mediaItemCount,
+                        //   pas via le visuel. Cohérent VOD/Live + 1 seule barre.
+                        if (stdBar != null && stdBar.visibility != View.VISIBLE) stdBar.visibility = View.VISIBLE
+                        if (pri != null && pri.visibility != View.GONE) pri.visibility = View.GONE
+                        if (sec != null && sec.visibility != View.GONE) sec.visibility = View.GONE
                         if (pri != null && sec != null) {
                             liveCumulativePlaybackMs += 1000L
                             smoothedAheadMs = if (ahead > smoothedAheadMs) ahead

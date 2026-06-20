@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 2026-06-15 (user "en position couché le mini lecteur prend tout l'écran") :
+         Mode paysage = écran moins haut (≈ 360-380dp sur OPPO). 200dp = 54% de
+         l'écran, trop. 100dp = environ 27% = restent ~270dp pour la liste des
+         chaînes en dessous, suffisant pour scroller confortablement. -->
+    <dimen name="mini_player_height_mobile">100dp</dimen>
+</resources>

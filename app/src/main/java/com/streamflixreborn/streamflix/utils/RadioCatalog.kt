@@ -107,26 +107,135 @@ object RadioCatalog {
         return all
     }
 
-    private suspend fun loadDric4rTvRadios(): List<RadioStation> {
-        return try {
-            val sections = Dric4rTvProvider.getHome()
-            val radioCat = sections.firstOrNull { cat ->
-                cat.name.equals("R4di0", ignoreCase = true) ||
-                cat.name.contains("R4di0", ignoreCase = true)
-            }
-            (radioCat?.list as? List<*>)?.mapNotNull { item ->
-                val tv = item as? TvShow ?: return@mapNotNull null
-                RadioStation(
-                    id = tv.id,
-                    name = tv.title,
-                    poster = tv.poster,
-                    streamUrl = null,
-                )
-            } ?: emptyList()
-        } catch (t: Throwable) {
-            Log.w(TAG, "loadDric4rTvRadios failed: ${t.message}")
-            emptyList()
-        }
+    /**
+     * 2026-06-14 (user "lemieux pour l'instant c'est que les radios soit
+     * directement dans l'application au moins elle reste là ça va marcher
+     * tout le temps comme ça si on retire toute la source du TV hub on aura
+     * toujours les radios") : 17 radios curatées Dric4rTV hardcodées en
+     * dur dans l'app — INDÉPENDANTES de dric4rt.free.fr/radio.json.
+     *
+     * IDs identiques au format Dric4rTvProvider.slugify (compat favoris)
+     * pour ne PAS casser les RadioFavoritesStore déjà saved par les users.
+     *
+     * URLs CDN directes (icecast/infomaniak/NRJ/RTL/France Bleu) qui ne
+     * dépendent pas du serveur dric4rt.free.fr. Si une URL meurt un jour,
+     * il suffit de la patcher ici + rebuild app.
+     *
+     * streamUrl != null → RadioPickerDialog appelle playRadioDirect (= pas
+     * besoin d'un provider IPTV pour résoudre).
+     */
+    private val HARDCODED_DRIC4RTV_RADIOS = listOf(
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::canalb",
+            name = "CanalB",
+            poster = "https://canalb.fr/themes/custom/canalb/img/logo_header.png",
+            streamUrl = "https://stream.levillage.org/canalb?1742558567358.mp3",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::fip_groove",
+            name = "FIP Groove",
+            poster = "https://www.allzicradio.com/media/radios/fip-groove.png",
+            streamUrl = "http://icecast.radiofrance.fr/fipgroove-midfi.mp3",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::fip_reggae",
+            name = "FIP Reggae",
+            poster = "https://www.allzicradio.com/media/radios/fipwebradio_reggae.png",
+            streamUrl = "http://direct.fipradio.fr/live/fip-webradio6.mp3",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::fip_nantes",
+            name = "FIP Nantes",
+            poster = "https://upload.wikimedia.org/wikipedia/commons/thumb/1/16/FIP_logo_2021.svg/1200px-FIP_logo_2021.svg.png",
+            streamUrl = "http://icecast.radiofrance.fr/fipnantes-midfi.mp3",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::djam_radio",
+            name = "Djam Radio",
+            poster = "https://static.wixstatic.com/media/8f2aad_67ad3aceea004dd089cd8ffbae3b893e~mv2.png/v1/fill/w_200,h_200,al_c,q_85,usm_0.66_1.00_0.01,enc_avif,quality_auto/Logo%20Djam%20OK.png",
+            streamUrl = "https://stream10.xdevel.com/audio15s976748-2280/stream/icecast.audio",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::metropolys",
+            name = "Metropolys",
+            poster = "https://bocir-prod-bucket.s3.amazonaws.com/medias/fXRZGVmtA7/image/logo_metropolys_rds1713452063368-format1by1.jpg",
+            streamUrl = "http://stream.rcs.revma.com/rvwymh32w42vv",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::radio_nova",
+            name = "radio Nova",
+            poster = "https://upload.wikimedia.org/wikipedia/fr/6/6a/Radio_Nova.png",
+            streamUrl = "http://nova-dance.ice.infomaniak.ch/nova-dance-256.aac",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::rire_chansons",
+            name = "Rire & Chansons",
+            poster = "https://upload.wikimedia.org/wikipedia/fr/8/84/Logo-rire-et-chansons-2020.png",
+            streamUrl = "http://cdn.nrjaudio.fm/adwz1/fr/30443/mp3_128.mp3?origine=fluxradios&aw_0_1st.station=Rire-Chansons-OPEN-DU-RIRE",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::jet_fm",
+            name = "Jet FM",
+            poster = "https://lesautrespossibles.fr/wp-content/uploads/2020/06/logo-jet-fm.png",
+            streamUrl = "http://80.82.229.202/jetfm.mp3",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::prun",
+            name = "Prun'",
+            poster = "https://www.univ-nantes.fr/medias/photo/logo-prun-couleur_1664352643358-png",
+            streamUrl = "https://www.prun.net/stream/",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::rtl2",
+            name = "RTL2",
+            poster = "https://upload.wikimedia.org/wikipedia/fr/5/51/RTL2.png",
+            streamUrl = "http://icecast.rtl2.fr/rtl2-1-44-128?listen=webCwsBCggNCQgLDQUGBAcGBg",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::europe_2",
+            name = "Europe 2",
+            poster = "https://www.europe2.fr/wp-content/uploads/europeradio/2022/10/news-750x410.jpeg",
+            streamUrl = "http://europe2.lmn.fm/europe2.aac",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::virgin_radio",
+            name = "Virgin Radio",
+            poster = "https://upload.wikimedia.org/wikipedia/commons/d/d1/VirginRadio.png",
+            streamUrl = "https://virginradio.ice.infomaniak.ch/virgin-radio.mp3",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::abc_disco_funk",
+            name = "ABC Disco Funk",
+            poster = "https://static.mytuner.mobi/media/tvos_radios/w5duv9cuuvab.png",
+            streamUrl = "http://streaming.radionomy.com/ABC-DISCO-FUNK",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::hot_fm",
+            name = "Hot FM",
+            poster = "https://pwaimg.listenlive.co/HOTFMKELATE_992391_config_station_logo_image_1412055702.png",
+            streamUrl = "https://edge.iono.fm/xice/57_medium.aac",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::hitwest",
+            name = "HitWest",
+            poster = "https://upload.wikimedia.org/wikipedia/fr/a/ad/Logo_Hit_West.png",
+            streamUrl = "http://statslive.infomaniak.ch/playlist/hitwest/hitwest-high.mp3/playlist.pls",
+        ),
+        RadioStation(
+            id = "livehub::dric4rtv::r4di0::ici_loire_ocean",
+            name = "ICI Loire-Océan",
+            poster = "https://upload.wikimedia.org/wikipedia/fr/thumb/0/0b/Ici_Loire_Oc%C3%A9an.svg/485px-Ici_Loire_Oc%C3%A9an.svg.png",
+            streamUrl = "http://direct.francebleu.fr/live/fbloireocean-lofi.mp3",
+        ),
+    )
+
+    /**
+     * 2026-06-14 : retourne la liste hardcodée — plus aucune dépendance à
+     * Dric4rTvProvider ni au serveur dric4rt.free.fr. Les radios continuent
+     * de marcher même si on retire toute la source Dric4rTV du TV Hub.
+     */
+    private fun loadDric4rTvRadios(): List<RadioStation> {
+        return HARDCODED_DRIC4RTV_RADIOS
     }
 
     private suspend fun loadBrowserRadios(): List<RadioStation> {

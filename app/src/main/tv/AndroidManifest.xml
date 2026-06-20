@@ -18,7 +18,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
-    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
+    <!-- 2026-06-13 : UPDATE_PACKAGES_WITHOUT_USER_ACTION retire (Play Protect
+         flag dropper-malware pattern). 0 usage code, 0 impact UX. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <queries>
@@ -114,6 +115,14 @@
             android:exported="false"
             android:hardwareAccelerated="true"
             android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.AppCompat.NoActionBar" />
+
+        <!-- 2026-06-18 (user "la face de connexion pour M6 et TF1") -->
+        <activity
+            android:name=".activities.LoginWebViewActivity"
+            android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden"
+            android:exported="false"
+            android:label="Connexion Replay"
             android:theme="@style/Theme.AppCompat.NoActionBar" />
 
         <!-- 2026-06-04 : Activity OTF TV dédiée — ExoPlayer 2.19.1 strict pattern. -->

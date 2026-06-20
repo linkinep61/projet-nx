@@ -40,7 +40,21 @@
             android:layout_height="match_parent"
             app:use_controller="false"
             app:show_buffering="when_playing"
-            app:resize_mode="fit" />
+            app:resize_mode="fit"
+            app:surface_type="surface_view" />
+
+        <!-- 2026-06-16 (user "je veux le grand player dans le mini a l exactitude") :
+             mirror du grand swap_freeze_overlay. Pendant le JUMELAGE swap (~500ms),
+             on PixelCopy la derniere frame du SurfaceView vers ce bitmap. Le user
+             voit la derniere frame figee au lieu du noir flush codec. Cache au
+             prochain STATE_READY. -->
+        <ImageView
+            android:id="@+id/mini_swap_freeze_overlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:scaleType="fitCenter"
+            android:visibility="gone"
+            tools:ignore="ContentDescription" />
 
         <LinearLayout
             android:id="@+id/mini_player_overlay"
@@ -189,7 +203,28 @@
             android:nextFocusLeft="@id/home"
             android:nextFocusRight="@id/vgv_home"
             android:nextFocusUp="@id/iv_iptv_categories"
+            android:nextFocusDown="@id/iv_vavoo_tunnel"
             android:contentDescription="Filtre langue IPTV"
+            app:tint="@android:color/white" />
+
+        <!-- 2026-06-17 (user "il faut faire un bouton de bascule, de base il est
+             pas activé et on l'active") : bouton tunnel Vavoo via serveurs free
+             VYPN, visible UNIQUEMENT sur Vavoo TV. OFF par défaut. -->
+        <ImageView
+            android:id="@+id/iv_vavoo_tunnel"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_marginTop="8dp"
+            android:padding="10dp"
+            android:src="@drawable/ic_vavoo_tunnel"
+            android:background="?android:attr/selectableItemBackground"
+            android:focusable="true"
+            android:focusableInTouchMode="false"
+            android:nextFocusLeft="@id/home"
+            android:nextFocusRight="@id/vgv_home"
+            android:nextFocusUp="@id/iv_iptv_language"
+            android:contentDescription="Mode tunnel Vavoo (France)"
+            android:visibility="gone"
             app:tint="@android:color/white" />
     </LinearLayout>
 

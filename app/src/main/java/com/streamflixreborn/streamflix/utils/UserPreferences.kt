@@ -81,6 +81,85 @@ object UserPreferences {
     @Volatile
     var isGlobalSearchEnabled: Boolean = false
 
+    /**
+     * 2026-06-17 (user "il faut faire un bouton de bascule, de base il est pas
+     * activé et on l'active") : toggle pour activer le tunnel Shadowsocks via
+     * serveurs free VYPN, pour débloquer Vavoo en France métropolitaine sans
+     * VPN externe. OFF par défaut (= Vavoo direct, comportement actuel).
+     *
+     * 2026-06-17 v5 (Fred/Fantomial/Bob/Nani : "panneau vide après update/TV
+     * reboot, désactiver/réactiver répare") = VRAI BUG = flag pas persisté.
+     * Au cold start le flag retombait à false → tunnel pas démarré → Vavoo
+     * geoblock France → panneau vide. Maintenant persisté SharedPrefs.
+     */
+    private const val KEY_VAVOO_USE_TUNNEL = "vavoo_use_tunnel"
+    /**
+     * 2026-06-18 (user "On appuie sur un bouton Ça active le 2e VPN c'est pas
+     * compliqué") : `vavooUseTunnel` retourne true pour VYPN ET pour "VPN 2"
+     * (= TUNNEL_MODE_PLANETVPN, repensé en "VYPN serveur alternatif"). Permet
+     * à StreamFlixApp cold-start de démarrer le tunnel sur le bon serveur.
+     */
+    var vavooUseTunnel: Boolean
+        get() {
+            if (!::prefs.isInitialized) return false
+            // Si le nouveau pref enum est posé, on suit le mode
+            val mode = prefs.getString(KEY_VAVOO_TUNNEL_MODE, null)
+            if (mode != null) {
+                return mode == TUNNEL_MODE_VYPN || mode == TUNNEL_MODE_PLANETVPN
+            }
+            return prefs.getBoolean(KEY_VAVOO_USE_TUNNEL, false)
+        }
+        set(value) {
+            if (::prefs.isInitialized) {
+                prefs.edit().putBoolean(KEY_VAVOO_USE_TUNNEL, value).apply()
+            }
+        }
+
+    /** Index "skip best N" à passer à VavooTunnel.start() en fonction du mode.
+     *  0 = serveur primaire (= meilleur load), 1 = serveur secondaire (= VPN 2). */
+    fun vavooTunnelSkipBestN(): Int {
+        return when (vavooTunnelMode) {
+            TUNNEL_MODE_PLANETVPN -> 1
+            else -> 0
+        }
+    }
+
+    /**
+     * 2026-06-18 — Mode tunnel Vavoo unifié (mutex strict — un seul actif).
+     *   - "OFF" (= aucun tunnel, Vavoo direct)
+     *   - "VYPN" (= notre tunnel Shadowsocks intégré, ex-vavooUseTunnel=true)
+     *   - "PLANETVPN" (= "VPN 2", route via le SOCKS5 local de l'app PlanetVPN)
+     *
+     * Rétrocompat : si la nouvelle pref n'existe pas, on dérive du flag
+     * vavooUseTunnel pré-existant (true → VYPN, false → OFF).
+     *
+     * Le setter applique aussi la mutex : sélectionner VYPN ou PLANETVPN met
+     * vavooUseTunnel = (mode == VYPN) pour que tout code legacy reste cohérent.
+     */
+    const val TUNNEL_MODE_OFF = "OFF"
+    const val TUNNEL_MODE_VYPN = "VYPN"
+    const val TUNNEL_MODE_PLANETVPN = "PLANETVPN"
+    private const val KEY_VAVOO_TUNNEL_MODE = "vavoo_tunnel_mode"
+    var vavooTunnelMode: String
+        get() {
+            if (!::prefs.isInitialized) return TUNNEL_MODE_OFF
+            prefs.getString(KEY_VAVOO_TUNNEL_MODE, null)?.let { return it }
+            // Migration depuis l'ancien Boolean vavooUseTunnel
+            return if (prefs.getBoolean(KEY_VAVOO_USE_TUNNEL, false)) TUNNEL_MODE_VYPN
+                   else TUNNEL_MODE_OFF
+        }
+        set(value) {
+            if (!::prefs.isInitialized) return
+            val sanitized = when (value) {
+                TUNNEL_MODE_VYPN, TUNNEL_MODE_PLANETVPN -> value
+                else -> TUNNEL_MODE_OFF
+            }
+            prefs.edit()
+                .putString(KEY_VAVOO_TUNNEL_MODE, sanitized)
+                .putBoolean(KEY_VAVOO_USE_TUNNEL, sanitized == TUNNEL_MODE_VYPN)
+                .apply()
+        }
+
     /** 2026-05-13 (user "à l'ouverture d'un profil pas par maman c'est Mon IPTV
      *  qui s'ouvre au lieu du home fournisseur") : currentProvider est
      *  maintenant stocké PAR PROFIL. Chaque profil a sa propre clé

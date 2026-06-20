@@ -89,13 +89,16 @@ object OlaTvProvider : Provider, IptvProvider {
     private val registryMutex = Mutex()
     @Volatile private var registryLoaded = false
 
-    /** 2026-05-18 v85 : vide le cache catalogue (anti-OOM). */
+    /** 2026-05-18 v85 : vide le cache catalogue (anti-OOM).
+     *  2026-06-15 : vide aussi le ban-set des CIDs DOWN pour redonner une
+     *  chance aux serveurs qui sont peut-être revenus en ligne. */
     fun clearCache() {
         try {
             registryLoaded = false
             lastLoadTime = 0L
             olaTvServerMap = emptyMap()
             phase3Done = false
+            clearBannedCids()
             android.util.Log.d(TAG, "clearCache: OlaTV registry vidé")
         } catch (_: Throwable) {}
     }
@@ -130,6 +133,16 @@ object OlaTvProvider : Provider, IptvProvider {
 
     // Disk cache for the discovered FR cid list — 24h TTL
     private const val FR_CIDS_CACHE_FILE = "olatv_fr_cids.json"
+
+    // 2026-06-15 (user "ola tv démarre lentement, élimine les serveurs DOWN") :
+    //   ban-set persistant des CIDs morts (no FR genre OU 0 stream OU exception)
+    //   pour ne plus les re-scanner pendant 3 jours. Sur ~60 candidats Phase 3,
+    //   typiquement 30-40 sont morts → 30-40 probes économisés = boot ~2x plus
+    //   rapide quand on est en fresh scan (= cache 24h expiré OU clearCache).
+    private const val OLA_BANNED_CIDS_FILE = "olatv_banned_cids.json"
+    private const val OLA_BANNED_CIDS_TTL_MS = 3L * 24L * 60L * 60L * 1000L // 3 jours
+    private val olaBannedCids = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var bannedCidsLoaded = false
 
     // Cap on the "Autres chaînes" home row to keep the TV RecyclerView responsive
     // (ANR if hundreds of items try to bind + load logos at the same time).
@@ -1559,6 +1572,54 @@ object OlaTvProvider : Provider, IptvProvider {
         }
     }
 
+    // ─────────────── 2026-06-15 banned CIDs (= DOWN) ───────────────
+    private fun bannedCidsFile() = java.io.File(StreamFlixApp.instance.filesDir, OLA_BANNED_CIDS_FILE)
+
+    private fun loadBannedCids() {
+        if (bannedCidsLoaded) return
+        try {
+            val f = bannedCidsFile()
+            if (!f.exists()) { bannedCidsLoaded = true; return }
+            val obj = JSONObject(f.readText())
+            val ts = obj.optLong("ts", 0)
+            if (System.currentTimeMillis() - ts > OLA_BANNED_CIDS_TTL_MS) {
+                Log.d(TAG, "Banned CIDs cache expired (>3j) — clearing")
+                f.delete()
+                bannedCidsLoaded = true
+                return
+            }
+            val arr = obj.optJSONArray("cids") ?: run { bannedCidsLoaded = true; return }
+            for (i in 0 until arr.length()) {
+                arr.optString(i).takeIf { it.isNotBlank() }?.let { olaBannedCids.add(it) }
+            }
+            Log.d(TAG, "Loaded ${olaBannedCids.size} banned CIDs from cache")
+        } catch (_: Exception) {}
+        bannedCidsLoaded = true
+    }
+
+    private fun saveBannedCids() {
+        try {
+            val f = bannedCidsFile()
+            val obj = JSONObject().apply {
+                put("ts", System.currentTimeMillis())
+                put("cids", JSONArray(olaBannedCids.toList()))
+            }
+            f.writeText(obj.toString())
+            Log.d(TAG, "Banned CIDs cache saved: ${olaBannedCids.size} cids")
+        } catch (e: Exception) {
+            Log.w(TAG, "Banned CIDs cache save failed: ${e.message}")
+        }
+    }
+
+    /** Vide le cache des CIDs bannis. Appelé par clearCache (user reset). */
+    private fun clearBannedCids() {
+        try {
+            olaBannedCids.clear()
+            bannedCidsFile().delete()
+            Log.d(TAG, "Banned CIDs cache cleared (user reset)")
+        } catch (_: Throwable) {}
+    }
+
     // ─────────────── Channel registry disk cache ───────────────
 
     private fun registryCacheFile() = java.io.File(StreamFlixApp.instance.filesDir, REGISTRY_CACHE_FILE)
@@ -1675,15 +1736,21 @@ object OlaTvProvider : Provider, IptvProvider {
                 return@withLock
             }
 
-            // No cache → fresh scan
+            // No cache → fresh scan. 2026-06-15 : skip les CIDs persistés DOWN
+            //   pour économiser ~30-40 probes morts. Sur 60 candidats au pire
+            //   il en reste 20-30 vraiment à tester.
+            loadBannedCids()
+            val bannedBefore = olaBannedCids.size
             val candidates = olaTvServerMap.keys
-                .filter { it != primaryCid }
+                .filter { it != primaryCid && it !in olaBannedCids }
                 .shuffled()
                 .take(PHASE3_MAX_CANDIDATES)
-            Log.d(TAG, "Phase 3 fresh scan: probing ${candidates.size} candidate cids…")
+            Log.d(TAG, "Phase 3 fresh scan: probing ${candidates.size} candidate cids " +
+                    "(skipped $bannedBefore previously DOWN)…")
 
             val foundCids = java.util.concurrent.CopyOnWriteArrayList<String>()
             foundCids.add(primaryCid)
+            val newlyBanned = java.util.concurrent.CopyOnWriteArrayList<String>()
 
             coroutineScope {
                 val sem = kotlinx.coroutines.sync.Semaphore(PHASE3_PARALLELISM)
@@ -1692,22 +1759,39 @@ object OlaTvProvider : Provider, IptvProvider {
                         sem.acquire()
                         try {
                             if (foundCids.size >= PHASE3_MAX_FR_CIDS) return@async
-                            if (!cidHasFrenchGenre(cid)) return@async
-                            val creds = getMacCredentials(cid) ?: return@async
+                            // 1) Test rapide "a-t-il un genre FR ?" — si non, ban.
+                            if (!cidHasFrenchGenre(cid)) {
+                                newlyBanned.add(cid)
+                                return@async
+                            }
+                            val creds = getMacCredentials(cid) ?: run {
+                                newlyBanned.add(cid)
+                                return@async
+                            }
+                            // 2) Ingestion. Si 0 stream, ban aussi.
                             val n = ingestCidChannels(cid, creds, forceAllGenres = false)
                             if (n > 0) {
                                 foundCids.add(cid)
                                 frCids.add(cid)
                                 Log.d(TAG, "  Phase 3 cid=$cid IS FR → +$n streams (total FR cids: ${foundCids.size})")
+                            } else {
+                                newlyBanned.add(cid)
                             }
                         } catch (e: Exception) {
                             Log.w(TAG, "  Phase 3 cid=$cid failed: ${e.message}")
+                            newlyBanned.add(cid)
                         } finally { sem.release() }
                     }
                 }
                 jobs.awaitAll()
             }
 
+            // Persiste les nouveaux DOWN (= moins de probes au prochain boot)
+            if (newlyBanned.isNotEmpty()) {
+                olaBannedCids.addAll(newlyBanned)
+                saveBannedCids()
+                Log.d(TAG, "Phase 3: banned ${newlyBanned.size} new DOWN cids (total banned: ${olaBannedCids.size})")
+            }
             saveFrCidsCache(foundCids.toList())
             phase3Done = true
             Log.d(TAG, "Phase 3 fresh done in ${System.currentTimeMillis() - t0}ms — ${foundCids.size} FR cids active")

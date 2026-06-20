@@ -237,6 +237,28 @@ class TvShowViewHolder(
         // TV Hub (livehub::) IDs, plus les providerNames.
         // 2026-06-08 : ajout World Live (livehubplus::) — duplicate de TV Hub
         //   pour les playlists Wiseplay supplémentaires (World Live TV).
+        // 2026-06-18 v24 : EXCEPTION replay TF1+/M6 — ces ids contiennent
+        //   `replay::tf1/<show>` ou `replay::m6/<show>` (= un programme avec
+        //   plusieurs épisodes). Click DOIT ouvrir la page détail (= liste
+        //   épisodes), PAS lancer auto-play. On exclut donc de isIptvProvider().
+        val id = tvShow.id
+        // 2026-06-19 : étendu aux 6 services M6+ (= m6replay/w9replay/6terreplay/gulli/tevareplay/parispremierereplay)
+        // 2026-06-19 v19 : SI le tvShow est marqué isMovie=true (= film, spectacle,
+        //   documentaire, etc.), on lance en mini lecteur direct → on garde
+        //   isIptvProvider=true. Seules les VRAIES séries (= isMovie=false)
+        //   doivent ouvrir la fiche détail avec saisons/épisodes.
+        val isReplayProgram = id.startsWith("livehub::replay::tf1/")
+            || id.startsWith("livehub::replay::m6/")
+            || id.startsWith("livehub::replay::m6replay/")
+            || id.startsWith("livehub::replay::w9replay/")
+            || id.startsWith("livehub::replay::6terreplay/")
+            || id.startsWith("livehub::replay::gulli/")
+            || id.startsWith("livehub::replay::tevareplay/")
+            || id.startsWith("livehub::replay::parispremierereplay/")
+        if (isReplayProgram && !tvShow.isMovie) {
+            android.util.Log.d("TvShowViewHolder", "v25 isIptvProvider FALSE for replay program: $id")
+            return false
+        }
         return tvShow.providerName == "OLA TV"
             || tvShow.providerName == "Vegeta TV"
             || tvShow.providerName == "Vavoo TV"
@@ -245,19 +267,19 @@ class TvShowViewHolder(
             || tvShow.providerName == "TV Hub"
             || tvShow.providerName == "World Live"
             || tvShow.providerName == "Mon IPTV"
-            || tvShow.id.startsWith("ch::")
-            || tvShow.id.startsWith("sport::")
-            || tvShow.id.startsWith("ola::")
-            || tvShow.id.startsWith("ola_ep::")
-            || tvShow.id.startsWith("vegeta::")
-            || tvShow.id.startsWith("vegeta_ep::")
-            || tvShow.id.startsWith("vavoo::")
-            || tvShow.id.startsWith("sportlive::")
-            || tvShow.id.startsWith("match::")
-            || tvShow.id.startsWith("movixlivetv::")
-            || tvShow.id.startsWith("livehub::")
-            || tvShow.id.startsWith("livehubplus::")
-            || tvShow.id.startsWith("myiptv-live::")
+            || id.startsWith("ch::")
+            || id.startsWith("sport::")
+            || id.startsWith("ola::")
+            || id.startsWith("ola_ep::")
+            || id.startsWith("vegeta::")
+            || id.startsWith("vegeta_ep::")
+            || id.startsWith("vavoo::")
+            || id.startsWith("sportlive::")
+            || id.startsWith("match::")
+            || id.startsWith("movixlivetv::")
+            || id.startsWith("livehub::")
+            || id.startsWith("livehubplus::")
+            || id.startsWith("myiptv-live::")
     }
 
     private fun checkProviderAndRun(action: () -> Unit) {
@@ -483,6 +505,56 @@ class TvShowViewHolder(
             if (tvShow.id.startsWith("resume_series_")) {
                 openResumeSeries(binding.root.findNavController()); return@setOnClickListener
             }
+            // 2026-06-18 (user "Le système de connexion à côté du nom de la
+            //   Playlist") : card synthétique "Se connecter à TF1/M6" → lance
+            //   LoginWebViewActivity au lieu du player.
+            if (tvShow.id.startsWith("livehub::replay::__login_")) {
+                val svc = tvShow.id.removePrefix("livehub::replay::__login_").removeSuffix("__")
+                if (svc.lowercase() == "tf1") {
+                    // 2026-06-18 : TF1+ utilise form natif (= pipeline Gigya
+                    //   nécessite email+password explicites, WebView ne sait
+                    //   pas extraire le JWT depuis localStorage).
+                    com.streamflixreborn.streamflix.activities.TF1LoginDialog.show(context)
+                } else {
+                    com.streamflixreborn.streamflix.activities.LoginWebViewActivity.start(
+                        context,
+                        com.streamflixreborn.streamflix.activities.LoginWebViewActivity.SERVICE_M6
+                    )
+                }
+                return@setOnClickListener
+            }
+            // 2026-06-18 (user "on peut pas mettre un bouton pour ça Pour
+            //   forcer le Refresh") : card "🔄 Actualiser" → vide les caches
+            //   replay et re-fetch immédiatement le M3U depuis GitHub.
+            if (tvShow.id == "livehub::replay::__refresh__") {
+                val ctxRef = context
+                android.widget.Toast.makeText(ctxRef,
+                    "Rafraîchissement du TV Hub…",
+                    android.widget.Toast.LENGTH_SHORT).show()
+                kotlinx.coroutines.CoroutineScope(
+                    kotlinx.coroutines.Dispatchers.IO +
+                    kotlinx.coroutines.SupervisorJob()
+                ).launch {
+                    val n = try {
+                        com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+                            .forceRefreshReplay()
+                    } catch (_: Throwable) { 0 }
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        android.widget.Toast.makeText(ctxRef,
+                            "TV Hub : $n catégories chargées",
+                            android.widget.Toast.LENGTH_SHORT).show()
+                        try {
+                            com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(ctxRef,
+                                com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider ?: return@withContext)
+                        } catch (_: Throwable) {}
+                        try {
+                            com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
+                                .notifyProviderChanged()
+                        } catch (_: Throwable) {}
+                    }
+                }
+                return@setOnClickListener
+            }
             checkProviderAndRun {
                 if (context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
                     com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin(tvShow.id)
@@ -528,13 +600,66 @@ class TvShowViewHolder(
             }
             isVisible = watchHistory != null
         }
-        binding.tvTvShowLastEpisode.text = if (isIptvProvider()) "" else tvShow.seasons.lastOrNull()?.episodes?.lastOrNull()?.let { "E${it.number}" } ?: tvShow.released?.format("yyyy") ?: context.getString(if (tvShow.isMovie) R.string.movie_item_type else R.string.tv_show_item_type)
+        // 2026-06-19 (user "bug de confusion Entre les séries et les films Sur toute notre liste") :
+        //   pour les programmes Replay (= téléfilms, émissions one-off,
+        //   documentaires single-program), ni épisodes ni année → fallback
+        //   sur "Série" alors que c'est PAS une série. Fix : ne PAS afficher
+        //   le label "Série"/"Film" par défaut. On affiche juste l'année si
+        //   dispo, sinon rien.
+        binding.tvTvShowLastEpisode.text = when {
+            isIptvProvider() -> ""
+            tvShow.id.startsWith("livehub::replay::") -> ""
+            else -> tvShow.seasons.lastOrNull()?.episodes?.lastOrNull()
+                ?.let { "E${it.number}" }
+                ?: tvShow.released?.format("yyyy")
+                ?: context.getString(if (tvShow.isMovie) R.string.movie_item_type else R.string.tv_show_item_type)
+        }
         binding.tvTvShowTitle.text = tvShow.title
     }
 
     private fun displayTvItem(binding: ItemTvShowTvBinding) {
         binding.root.apply {
             setOnClickListener {
+                // 2026-06-18 (user "système de connexion") : card login synthétique
+                if (tvShow.id.startsWith("livehub::replay::__login_")) {
+                    val svc = tvShow.id.removePrefix("livehub::replay::__login_").removeSuffix("__")
+                    val service = when (svc.lowercase()) {
+                        "tf1" -> com.streamflixreborn.streamflix.activities.LoginWebViewActivity.SERVICE_TF1
+                        else -> com.streamflixreborn.streamflix.activities.LoginWebViewActivity.SERVICE_M6
+                    }
+                    com.streamflixreborn.streamflix.activities.LoginWebViewActivity.start(context, service)
+                    return@setOnClickListener
+                }
+                // 2026-06-18 : card refresh TV Hub
+                if (tvShow.id == "livehub::replay::__refresh__") {
+                    val ctxRef = context
+                    android.widget.Toast.makeText(ctxRef,
+                        "Rafraîchissement du TV Hub…",
+                        android.widget.Toast.LENGTH_SHORT).show()
+                    kotlinx.coroutines.CoroutineScope(
+                        kotlinx.coroutines.Dispatchers.IO +
+                        kotlinx.coroutines.SupervisorJob()
+                    ).launch {
+                        val n = try {
+                            com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+                                .forceRefreshReplay()
+                        } catch (_: Throwable) { 0 }
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            android.widget.Toast.makeText(ctxRef,
+                                "TV Hub : $n catégories chargées",
+                                android.widget.Toast.LENGTH_SHORT).show()
+                            try {
+                                com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(ctxRef,
+                                    com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider ?: return@withContext)
+                            } catch (_: Throwable) {}
+                            try {
+                                com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
+                                    .notifyProviderChanged()
+                            } catch (_: Throwable) {}
+                        }
+                    }
+                    return@setOnClickListener
+                }
                 // 2026-05-24 : guards pour items synthétiques du cœur (favoris saison/épisode, reprises)
                 if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
                     openSeasonFavorite(findNavController()); return@setOnClickListener
@@ -588,7 +713,20 @@ class TvShowViewHolder(
             }
             isVisible = watchHistory != null
         }
-        binding.tvTvShowLastEpisode.text = if (isIptvProvider()) "" else tvShow.seasons.lastOrNull()?.episodes?.lastOrNull()?.let { "E${it.number}" } ?: tvShow.released?.format("yyyy") ?: context.getString(if (tvShow.isMovie) R.string.movie_item_type else R.string.tv_show_item_type)
+        // 2026-06-19 (user "bug de confusion Entre les séries et les films Sur toute notre liste") :
+        //   pour les programmes Replay (= téléfilms, émissions one-off,
+        //   documentaires single-program), ni épisodes ni année → fallback
+        //   sur "Série" alors que c'est PAS une série. Fix : ne PAS afficher
+        //   le label "Série"/"Film" par défaut. On affiche juste l'année si
+        //   dispo, sinon rien.
+        binding.tvTvShowLastEpisode.text = when {
+            isIptvProvider() -> ""
+            tvShow.id.startsWith("livehub::replay::") -> ""
+            else -> tvShow.seasons.lastOrNull()?.episodes?.lastOrNull()
+                ?.let { "E${it.number}" }
+                ?: tvShow.released?.format("yyyy")
+                ?: context.getString(if (tvShow.isMovie) R.string.movie_item_type else R.string.tv_show_item_type)
+        }
         binding.tvTvShowTitle.text = tvShow.title
     }
 
@@ -753,7 +891,20 @@ class TvShowViewHolder(
             }
             isVisible = watchHistory != null
         }
-        binding.tvTvShowLastEpisode.text = if (isIptvProvider()) "" else tvShow.seasons.lastOrNull()?.episodes?.lastOrNull()?.let { "E${it.number}" } ?: tvShow.released?.format("yyyy") ?: context.getString(if (tvShow.isMovie) R.string.movie_item_type else R.string.tv_show_item_type)
+        // 2026-06-19 (user "bug de confusion Entre les séries et les films Sur toute notre liste") :
+        //   pour les programmes Replay (= téléfilms, émissions one-off,
+        //   documentaires single-program), ni épisodes ni année → fallback
+        //   sur "Série" alors que c'est PAS une série. Fix : ne PAS afficher
+        //   le label "Série"/"Film" par défaut. On affiche juste l'année si
+        //   dispo, sinon rien.
+        binding.tvTvShowLastEpisode.text = when {
+            isIptvProvider() -> ""
+            tvShow.id.startsWith("livehub::replay::") -> ""
+            else -> tvShow.seasons.lastOrNull()?.episodes?.lastOrNull()
+                ?.let { "E${it.number}" }
+                ?: tvShow.released?.format("yyyy")
+                ?: context.getString(if (tvShow.isMovie) R.string.movie_item_type else R.string.tv_show_item_type)
+        }
         binding.tvTvShowTitle.text = tvShow.title
     }
 
@@ -812,7 +963,20 @@ class TvShowViewHolder(
             }
             isVisible = watchHistory != null
         }
-        binding.tvTvShowLastEpisode.text = if (isIptvProvider()) "" else tvShow.seasons.lastOrNull()?.episodes?.lastOrNull()?.let { "E${it.number}" } ?: tvShow.released?.format("yyyy") ?: context.getString(if (tvShow.isMovie) R.string.movie_item_type else R.string.tv_show_item_type)
+        // 2026-06-19 (user "bug de confusion Entre les séries et les films Sur toute notre liste") :
+        //   pour les programmes Replay (= téléfilms, émissions one-off,
+        //   documentaires single-program), ni épisodes ni année → fallback
+        //   sur "Série" alors que c'est PAS une série. Fix : ne PAS afficher
+        //   le label "Série"/"Film" par défaut. On affiche juste l'année si
+        //   dispo, sinon rien.
+        binding.tvTvShowLastEpisode.text = when {
+            isIptvProvider() -> ""
+            tvShow.id.startsWith("livehub::replay::") -> ""
+            else -> tvShow.seasons.lastOrNull()?.episodes?.lastOrNull()
+                ?.let { "E${it.number}" }
+                ?: tvShow.released?.format("yyyy")
+                ?: context.getString(if (tvShow.isMovie) R.string.movie_item_type else R.string.tv_show_item_type)
+        }
         binding.tvTvShowTitle.text = tvShow.title
     }
 

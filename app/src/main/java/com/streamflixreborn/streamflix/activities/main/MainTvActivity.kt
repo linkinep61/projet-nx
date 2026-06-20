@@ -34,6 +34,7 @@ import com.streamflixreborn.streamflix.utils.ThemeManager
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import com.streamflixreborn.streamflix.utils.getCurrentFragment
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainTvActivity : FragmentActivity() {
 
@@ -144,6 +145,28 @@ class MainTvActivity : FragmentActivity() {
         if (event.action == android.view.KeyEvent.ACTION_DOWN) {
             val pf = getCurrentFragment() as? PlayerTvFragment
             if (pf != null && pf.handleOverlayKey(event.keyCode, event.repeatCount)) return true
+        }
+        // 2026-06-19 (user "le bouton gauche en Chromecast ouvre le controller
+        //   au lieu du panel chaînes") : intercept LEFT en lecture IPTV AVANT
+        //   que le controller le consomme. La callback est settée seulement
+        //   par PlayerTvFragment.setupChannelListPanel() (= isIptvChannel true)
+        //   et reset à null dans onDestroyView. Si non-null → on est en lecture
+        //   IPTV → LEFT ouvre le panel chaînes. Sinon LEFT normal (sidebar/etc).
+        // 2026-06-19 v2 (user "quand le controller est visible avec ses 5
+        //   boutons restart/refresh/pause/next/settings, LEFT doit naviguer
+        //   dans les boutons normalement ; c'est uniquement quand TOUT est
+        //   masqué que LEFT doit ouvrir le panel chaînes") : la callback
+        //   retourne true SI le panel a été toggle (= controller masqué),
+        //   false SINON (= controller visible → on laisse LEFT au controller).
+        if (event.action == android.view.KeyEvent.ACTION_DOWN &&
+            event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT &&
+            event.repeatCount == 0) {
+            val cb = com.streamflixreborn.streamflix.utils.ChannelListState.onLeftToggleRequested
+            if (cb != null) {
+                val consumed = cb.invoke()
+                android.util.Log.d("MainTvActivity", "LEFT down — callback consumed=$consumed")
+                if (consumed) return true
+            }
         }
         // === LEFT/UP override pour Mon IPTV (ou tout provider) sur les tiles ===
         if (event.action == android.view.KeyEvent.ACTION_DOWN && (
@@ -496,6 +519,37 @@ class MainTvActivity : FragmentActivity() {
                     showCatalogFilterPicker()
                     return@setOnItemSelectedListener false
                 }
+                R.id.livehub_refresh_menu -> {
+                    // 2026-06-19 (user "bouton refresh du home, ça efface les
+                    //   données du home pour ce genre de cas Wiflix") :
+                    //   refresh complet du home via HomeCacheStore clear +
+                    //   pour les providers à domaine dynamique (Wiflix etc.),
+                    //   clear aussi PROVIDER_URL pour forcer re-discovery via
+                    //   le portail au prochain initializeService().
+                    try {
+                        com.streamflixreborn.streamflix.utils.UserPreferences
+                            .currentProvider?.let { p ->
+                            com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(this, p)
+                            if (p is com.streamflixreborn.streamflix.providers.ProviderConfigUrl) {
+                                try {
+                                    com.streamflixreborn.streamflix.utils.UserPreferences
+                                        .setProviderCache(p, com.streamflixreborn.streamflix.utils.UserPreferences.PROVIDER_URL, "")
+                                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                                        try { p.onChangeUrl(forceRefresh = true) } catch (_: Throwable) {}
+                                    }
+                                } catch (_: Throwable) {}
+                            }
+                        }
+                        com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
+                            .notifyProviderChanged()
+                        android.widget.Toast.makeText(this, "Home rafraîchi", android.widget.Toast.LENGTH_SHORT).show()
+                    } catch (_: Throwable) {}
+                    return@setOnItemSelectedListener false
+                }
+                R.id.vavoo_tunnel_menu -> {
+                    showVavooTunnelPicker()
+                    return@setOnItemSelectedListener false
+                }
             }
             val handled = androidx.navigation.ui.NavigationUI.onNavDestinationSelected(menuItem, navController)
             val provider = UserPreferences.currentProvider
@@ -740,13 +794,24 @@ class MainTvActivity : FragmentActivity() {
             // Walk tous les descendants — on transparent les backgrounds des
             //   ViewGroup conteneurs (= panels, header, etc.) mais on laisse
             //   TextView/ImageView/Button intacts (= texte/icons opaques).
+            // 2026-06-16 (user "y a plein de providers qui ont pas Le petit
+            //   rectangle de navigation sur le menu de gauche — Wiflix, AnimeSama,
+            //   FRAnime, FrenchStream ; OK sur Movix, Cloudstream, FrenchManga") :
+            //   le walk écrasait AUSSI les backgrounds des items focusables du
+            //   menu (= StateListDrawable / RippleDrawable qui dessine le carré
+            //   de focus D-pad). Skip les Views focusables ET celles dont le
+            //   background est déjà un selector d'état (StateListDrawable, RippleDrawable,
+            //   InsetDrawable wrapping un selector) → préserve le rectangle de focus.
             fun walk(v: android.view.View) {
                 if (v === binding.navMain) {
                     // déjà traité au-dessus
                 } else if (v is android.view.ViewGroup &&
                     v !is android.widget.TextView &&
                     v !is android.widget.ImageView &&
-                    v !is android.widget.Button) {
+                    v !is android.widget.Button &&
+                    !v.isFocusable &&
+                    v.background !is android.graphics.drawable.StateListDrawable &&
+                    v.background !is android.graphics.drawable.RippleDrawable) {
                     try { v.background = android.graphics.drawable.ColorDrawable(color) } catch (_: Throwable) {}
                 }
                 if (v is android.view.ViewGroup) {
@@ -811,6 +876,143 @@ class MainTvActivity : FragmentActivity() {
             }
             .setNegativeButton("Annuler", null)
             .show()
+    }
+
+    /** 2026-06-17 (user "il faut faire un bouton de bascule") : picker mode Vavoo
+     *  Direct ↔ Tunnel VYPN free.
+     *  2026-06-18 (user "On peut essayer voir si ça fonctionne" + "Tu l'appelles
+     *    VPN 2" + "faudra faire attention que les 2 boutons puissent pas se
+     *    connecter en même temps") : 3 modes mutuellement exclusifs.
+     *    - "Direct" = pas de tunnel (= comportement standard, geoblock FR)
+     *    - "Tunnel VPN" = notre tunnel VYPN intégré (= Shadowsocks DE)
+     *    - "VPN 2" = SOCKS5 vers app PlanetVPN externe (= Frankfurt 162.19.234.202)
+     *  Mutex garanti par construction (single-choice + pref enum unifiée). */
+    fun showVavooTunnelPicker() {
+        val current = try { UserPreferences.vavooTunnelMode } catch (_: Throwable) { UserPreferences.TUNNEL_MODE_OFF }
+        val items = arrayOf(
+            "Direct (= comportement standard)",
+            "Tunnel VPN",
+            "VPN 2 (serveur alternatif)"
+        )
+        val checked = when (current) {
+            UserPreferences.TUNNEL_MODE_VYPN -> 1
+            UserPreferences.TUNNEL_MODE_PLANETVPN -> 2
+            else -> 0
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Tunnel VPN")
+            .setSingleChoiceItems(items, checked) { dialog, which ->
+                val newMode = when (which) {
+                    1 -> UserPreferences.TUNNEL_MODE_VYPN
+                    2 -> UserPreferences.TUNNEL_MODE_PLANETVPN
+                    else -> UserPreferences.TUNNEL_MODE_OFF
+                }
+                if (newMode == current) { dialog.dismiss(); return@setSingleChoiceItems }
+                dialog.dismiss()
+                lifecycleScope.launch { switchVavooTunnelMode(prevMode = current, newMode = newMode) }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** Bascule de mode tunnel Vavoo (mutex strict — un seul actif à la fois).
+     *  Stoppe l'ancien, démarre le nouveau, persiste, invalide les caches. */
+    private suspend fun switchVavooTunnelMode(prevMode: String, newMode: String) {
+        try {
+            if (prevMode == UserPreferences.TUNNEL_MODE_VYPN
+                || prevMode == UserPreferences.TUNNEL_MODE_PLANETVPN) {
+                try { com.streamflixreborn.streamflix.utils.VavooTunnel.stop() } catch (_: Throwable) {}
+            }
+            UserPreferences.vavooTunnelMode = newMode
+
+            // - "Tunnel VPN" : sélection AUTO du meilleur serveur ami
+            // - "VPN 2"     : 2e dialog → user choisit MANUELLEMENT son serveur
+            val displayMsg: String = when (newMode) {
+                UserPreferences.TUNNEL_MODE_VYPN -> {
+                    val ok = try {
+                        com.streamflixreborn.streamflix.utils.VavooTunnel.start(skipBestN = 0)
+                    } catch (_: Throwable) { false }
+                    if (!ok) {
+                        UserPreferences.vavooTunnelMode = UserPreferences.TUNNEL_MODE_OFF
+                        "Tunnel VPN : démarrage échoué"
+                    } else "Tunnel VPN actif"
+                }
+                UserPreferences.TUNNEL_MODE_PLANETVPN -> {
+                    showVpn2ServerPicker()
+                    "Sélectionne ton serveur dans la liste"
+                }
+                else -> "Tunnel VPN désactivé"
+            }
+
+            com.streamflixreborn.streamflix.providers.VavooProvider.invalidateClientCache()
+            UserPreferences.currentProvider?.let { p ->
+                try { com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(applicationContext, p) } catch (_: Throwable) {}
+            }
+            try { com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged() } catch (_: Throwable) {}
+
+            Toast.makeText(applicationContext, displayMsg, Toast.LENGTH_LONG).show()
+        } catch (e: Throwable) {
+            Toast.makeText(
+                applicationContext,
+                "Bascule échouée : ${e.javaClass.simpleName} ${e.message?.take(80)}",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    /** 2026-06-18 (user "les gens ils choisissent leur serveur") : sur clic
+     *  VPN 2, affiche un 2e dialog listant les serveurs free du pool VYPN.
+     *  L'user pick → tunnel start sur l'IP précise. */
+    fun showVpn2ServerPicker() {
+        lifecycleScope.launch {
+            val loading = androidx.appcompat.app.AlertDialog.Builder(this@MainTvActivity)
+                .setTitle("VPN 2")
+                .setMessage("Chargement de la liste des serveurs…")
+                .setCancelable(false)
+                .show()
+            val pool = try {
+                com.streamflixreborn.streamflix.utils.VavooTunnel.listFreeServers()
+            } catch (_: Throwable) { emptyList() }
+            loading.dismiss()
+            if (pool.isEmpty()) {
+                Toast.makeText(applicationContext,
+                    "VPN 2 : pas de serveur disponible (= VYPN ping a échoué)",
+                    Toast.LENGTH_LONG).show()
+                UserPreferences.vavooTunnelMode = UserPreferences.TUNNEL_MODE_OFF
+                return@launch
+            }
+            val labels = pool.map { it.displayLabel() }.toTypedArray()
+            androidx.appcompat.app.AlertDialog.Builder(this@MainTvActivity)
+                .setTitle("VPN 2 — Choisis ton serveur")
+                .setItems(labels) { dlg, idx ->
+                    dlg.dismiss()
+                    val chosen = pool[idx]
+                    lifecycleScope.launch {
+                        val ok = try {
+                            com.streamflixreborn.streamflix.utils.VavooTunnel.startWithServer(chosen)
+                        } catch (_: Throwable) { false }
+                        if (ok) {
+                            com.streamflixreborn.streamflix.providers.VavooProvider.invalidateClientCache()
+                            UserPreferences.currentProvider?.let { p ->
+                                try { com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(applicationContext, p) } catch (_: Throwable) {}
+                            }
+                            try { com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged() } catch (_: Throwable) {}
+                            Toast.makeText(applicationContext,
+                                "VPN 2 actif : ${chosen.country} / ${chosen.city}",
+                                Toast.LENGTH_LONG).show()
+                        } else {
+                            UserPreferences.vavooTunnelMode = UserPreferences.TUNNEL_MODE_OFF
+                            Toast.makeText(applicationContext,
+                                "VPN 2 : échec démarrage sur ${chosen.country}/${chosen.city}",
+                                Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+                .setNegativeButton("Annuler") { _, _ ->
+                    UserPreferences.vavooTunnelMode = UserPreferences.TUNNEL_MODE_OFF
+                }
+                .show()
+        }
     }
 
     /** 2026-05-21 : picker filtre catalogue (item sidebar sous Paramètres,
@@ -1044,6 +1246,7 @@ class MainTvActivity : FragmentActivity() {
             binding.navMain.menu.findItem(R.id.iptv_categories_menu)?.isVisible = false
             binding.navMain.menu.findItem(R.id.iptv_language_menu)?.isVisible = false
             binding.navMain.menu.findItem(R.id.catalog_filter_menu)?.isVisible = false
+            binding.navMain.menu.findItem(R.id.livehub_refresh_menu)?.isVisible = false
             return
         }
         // Provider sélectionné : restaure la visibilité des onglets pertinents.
@@ -1123,12 +1326,19 @@ class MainTvActivity : FragmentActivity() {
         //   "Pays/langue") car ça filtre par catégorie, pas par langue.
         binding.navMain.menu.findItem(R.id.iptv_categories_menu)?.isVisible = isMyIptv || isTvHub || isWorldLive
         binding.navMain.menu.findItem(R.id.iptv_language_menu)?.isVisible = isMyIptv || isVavoo
+        // 2026-06-17 (user "il faut faire un bouton de bascule") : tunnel Vavoo
+        //   visible UNIQUEMENT sur Vavoo TV.
+        binding.navMain.menu.findItem(R.id.vavoo_tunnel_menu)?.isVisible = isVavoo
         // 2026-06-10 : bouton "Sources" visible quand on est sur World TV.
         binding.navMain.menu.findItem(R.id.world_live_sources_menu)?.isVisible = isWorldLive
         // 2026-05-21 : filtre catalogue (sous Paramètres) uniquement pour les
         //   providers TMDB compatibles (Cloudstream).
         binding.navMain.menu.findItem(R.id.catalog_filter_menu)?.isVisible =
             com.streamflixreborn.streamflix.utils.CatalogFilter.isSupported(provider.name)
+        // 2026-06-19 : bouton refresh visible pour TOUS les providers (TV Hub
+        //   + VOD). Permet à l'user de forcer un refresh quand le home est
+        //   stale (= ancien cache).
+        binding.navMain.menu.findItem(R.id.livehub_refresh_menu)?.isVisible = true
         // 2026-05-26 : filtre genre TMDB = re-clic sur Films/Séries
         // (pas d'item sidebar, géré par setOnItemReselectedListener)
     }
@@ -1257,9 +1467,14 @@ class MainTvActivity : FragmentActivity() {
             "Chargement des catégories…", android.widget.Toast.LENGTH_SHORT)
         loadingToast.show()
         lifecycleScope.launch {
+            // 2026-06-19 v35 (user "ce ne sont pas les bonnes catégories,
+            //   ça devrait être tout ce qu'il y a dans le TV Hub en catégorie") :
+            //   le picker utilisait BoxXtemusProvider (= source brute) au lieu
+            //   de LiveTvHubProvider (= ce qui s'affiche réellement à l'écran).
+            //   Fix : prendre les sections VISIBLES dans le home TV Hub.
             val realSections = try {
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    com.streamflixreborn.streamflix.providers.BoxXtemusProvider.getHome()
+                    com.streamflixreborn.streamflix.providers.LiveTvHubProvider.getHome()
                 }
             } catch (_: Throwable) { emptyList() }
             loadingToast.cancel()

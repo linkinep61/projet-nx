@@ -29,7 +29,13 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
-    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
+    <!-- 2026-06-13 : UPDATE_PACKAGES_WITHOUT_USER_ACTION retire — Google
+         Play Protect tagait l'app comme dangereuse a cause de cette permission
+         combinee a REQUEST_INSTALL_PACKAGES (= pattern dropper malware).
+         Aucun impact UX : on n'utilisait PAS PackageInstaller API (= notre
+         InAppUpdater.installApk passe par Intent.ACTION_VIEW qui demande
+         TOUJOURS confirmation user, peu importe les permissions). Verifie
+         par grep complet : 0 usage code, 0 lib externe. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <!-- Pre-Android 10 only: needed to write to /sdcard/Movies/ via legacy File API.
@@ -42,6 +48,9 @@
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
+        <!-- Package visibility for PlanetVPN (= "VPN 2") — sans ça getPackageInfo
+             échoue silencieusement et le picker croit que l'app n'est pas installée. -->
+        <package android:name="com.freevpnplanet" />
         <!-- Package visibility for SmartTube (Stable & Beta) and YouTube -->
         <package android:name="org.smarttube.stable" />
         <package android:name="org.smarttube.beta" />
@@ -86,6 +95,16 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true">
+
+        <!-- 2026-06-18 (user "la face de connexion pour M6 et TF1") :
+             activité WebView fullscreen pour login TF1+ ou M6 6play.
+             Intercepte les cookies de session après login. -->
+        <activity
+            android:name=".activities.LoginWebViewActivity"
+            android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden"
+            android:exported="false"
+            android:label="Connexion Replay"
+            android:theme="@style/Theme.AppCompat.NoActionBar" />
 
         <activity
             android:name=".activities.main.MainMobileActivity"

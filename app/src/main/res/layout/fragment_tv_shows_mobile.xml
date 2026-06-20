@@ -20,7 +20,7 @@
         <androidx.media3.ui.PlayerView
             android:id="@+id/mini_player_view"
             android:layout_width="match_parent"
-            android:layout_height="200dp"
+            android:layout_height="@dimen/mini_player_height_mobile"
             app:use_controller="false"
             app:show_buffering="when_playing"
             app:resize_mode="fit" />

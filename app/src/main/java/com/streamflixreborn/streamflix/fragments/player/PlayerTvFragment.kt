@@ -1641,6 +1641,14 @@ class PlayerTvFragment : Fragment() {
                 st.onDismiss = null
             } catch (_: Exception) { }
 
+            // 2026-06-19 : clear la callback `onLeftToggleRequested` pour ne pas
+            //   pollute l'état global après destruction du fragment (= sinon
+            //   LEFT sur HomeTv déclencherait la callback orpheline).
+            try {
+                com.streamflixreborn.streamflix.utils.ChannelListState
+                    .onLeftToggleRequested = null
+            } catch (_: Throwable) {}
+
             // 2026-06-02 : clear le picker quand on quitte le player. Sinon
             //   les serveurs du film précédent restent dans Settings.Server.list
             //   (singleton companion object) et pollue le suivant.
@@ -2063,14 +2071,35 @@ class PlayerTvFragment : Fragment() {
             // 2026-05-08 : ajout livehub:: pour TV Hub.
             // 2026-05-10 : ajout vavoo:: pour réactivation Vavoo standalone.
             // 2026-05-17 v61 : ajout myiptv-live:: pour Mon IPTV.
-            val isIptvChannel = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+            // 2026-06-19 v37 (user "Les replay d'Arte / tous les autres replay
+            //   sont des séries/épisodes, on doit avoir prev/next épisode") :
+            //   TOUT `livehub::replay::*` est du contenu REPLAY (= nav
+            //   classique prev/next épisode), PAS une chaîne IPTV. Couvre
+            //   Arte, France TV, TF1+, M6+ et tout ce qui passe par M3U
+            //   replay (arte://, francetv://, tf1plus://, m6play://, etc.).
+            //   Les VRAIES chaînes IPTV restent : freeshot::, bonus::, otf::,
+            //   canalplus::, etc.
+            // 2026-06-19 (user "le bouton gauche en Chromecast ouvre le controller
+            //   au lieu du panel chaînes en live TMC/M6/...") : distinguer LIVE
+            //   direct (= `livehub::replay::<channel>` = 3 segments, TMC Direct
+            //   par ex.) vs REPLAY EPISODE (= `livehub::replay::<channel>::<id>`
+            //   = 4+ segments, épisode d'une série replay). Les LIVES doivent
+            //   avoir le panel chaînes pour zapper, les REPLAY EPISODES doivent
+            //   garder prev/next épisode.
+            val isReplayEpisode = args.id.startsWith("livehub::replay::") &&
+                args.id.removePrefix("livehub::replay::").contains("::")
+            val isIptvChannel = !isReplayEpisode && (
+                args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
                 args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
                 args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
                 args.id.startsWith("livehub::") || args.id.startsWith("vavoo::") ||
                 args.id.startsWith("myiptv-live::")
+            )
+            android.util.Log.d("PlayerTvFragment", "setupNav: args.id=${args.id} isReplay=$isReplayEpisode isIptv=$isIptvChannel")
             if (isIptvChannel) {
                 setupChannelNavigationButtons(btnPrevious, btnNext)
                 setupChannelListPanel()
+                android.util.Log.d("PlayerTvFragment", "setupChannelListPanel called for ${args.id}")
                 // Ré-ouvrir la liste si on vient d'un changement de chaîne
                 if (reopenChannelListAfterNavigation) {
                     reopenChannelListAfterNavigation = false
@@ -2399,6 +2428,35 @@ class PlayerTvFragment : Fragment() {
             binding.pvPlayer.onChannelListRequested = {
                 if (channelListVisible) hideChannelListPanel() else showChannelListPanel()
             }
+            // 2026-06-19 : callback global appelée par MainTvActivity sur LEFT
+            //   en lecture IPTV. Permet d'ouvrir le panel même si le controller
+            //   Media3 a le focus (= le controller intercept normalement LEFT
+            //   pour naviguer entre ses boutons pause/restart/settings).
+            // 2026-06-19 v2 (user "quand le controller est visible avec ses 5
+            //   boutons, LEFT doit naviguer dans les boutons normalement ;
+            //   c'est uniquement quand TOUT est masqué que LEFT doit ouvrir
+            //   le panel chaînes") : on retourne true seulement si on a
+            //   réellement togglé le panel (= controller masqué OU panel déjà
+            //   ouvert). Sinon on retourne false → LEFT suit son chemin
+            //   normal et navigue dans le controller.
+            com.streamflixreborn.streamflix.utils.ChannelListState.onLeftToggleRequested = lambda@{
+                // Si le panel est déjà ouvert → LEFT le ferme (= consommé).
+                if (channelListVisible) {
+                    hideChannelListPanel()
+                    return@lambda true
+                }
+                // Sinon, vérifier si le controller est visible. Si oui → on
+                //   laisse LEFT au controller (navigation entre boutons).
+                val controllerVisible = try {
+                    _binding?.pvPlayer?.isControllerFullyVisible == true
+                } catch (_: Throwable) { false }
+                if (controllerVisible) {
+                    return@lambda false
+                }
+                // Controller masqué → on ouvre le panel chaînes (= consommé).
+                showChannelListPanel()
+                true
+            }
             // 2026-06-13 : callbacks zone-aware (= 0=Retour, 1=Search, 2=Liste).
             //   MainTvActivity les invoque, et nous on route selon focusZone.
             com.streamflixreborn.streamflix.utils.ChannelListState.onOkPressed = {
@@ -2599,8 +2657,14 @@ class PlayerTvFragment : Fragment() {
         }
 
         private fun showChannelListPanel() {
+            android.util.Log.d("PlayerTvFragment", "showChannelListPanel() called — channelListVisible=$channelListVisible")
             if (channelListVisible) return
-            val provider = UserPreferences.currentProvider ?: return
+            val provider = UserPreferences.currentProvider
+            if (provider == null) {
+                android.util.Log.w("PlayerTvFragment", "showChannelListPanel: provider is NULL → abort")
+                return
+            }
+            android.util.Log.d("PlayerTvFragment", "showChannelListPanel: provider=${provider::class.simpleName}")
             val panel = binding.layoutChannelList
             val rv = binding.rvChannelList
 
@@ -2614,15 +2678,49 @@ class PlayerTvFragment : Fragment() {
             binding.pvPlayer.hideController()
             binding.pvPlayer.controllerAutoShow = false
             com.streamflixreborn.streamflix.utils.ChannelListState.isOpen = true
+            // 2026-06-19 v2 (user "réparer l'affichage des chaînes télé quand
+            //   on fait gauche avec la télécommande sur la chromecast") :
+            //   fix z-order + focus + désactivation totale du pvPlayer focus chain.
+            //   Sur Chromecast (TV layout), le D-pad LEFT doit donner le focus
+            //   à la liste, pas à la timebar.
+            panel.bringToFront()
+            panel.elevation = 32f
+            panel.translationZ = 32f
+            panel.isFocusable = true
+            panel.isFocusableInTouchMode = true
+            // Bloque TOUT le pvPlayer (controller + content view) pour que rien
+            //   ne capture le focus.
+            binding.pvPlayer.clearFocus()
+            binding.pvPlayer.isFocusable = false
+            binding.pvPlayer.descendantFocusability =
+                android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            try {
+                val ctrl = binding.pvPlayer.findViewById<View>(androidx.media3.ui.R.id.exo_controller)
+                ctrl?.isFocusable = false
+                (ctrl as? android.view.ViewGroup)?.descendantFocusability =
+                    android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            } catch (_: Throwable) {}
+            // Force le focus sur le RecyclerView des chaînes pour que le D-pad
+            //   UP/DOWN zappe directement (Chromecast télécommande).
+            rv.requestFocus()
             // 2026-06-13 : zone par défaut = liste (= comportement initial pour
             //   l'user qui veut zapper rapidement avec D-pad UP/DOWN).
             channelListFocusZone = 2
             com.streamflixreborn.streamflix.utils.ChannelListState.focusZone = 2
 
             // Charger les chaînes en background
+            // 2026-06-19 (user "Chaînes (0) → il devrait trouver toutes les
+            //   chaînes du provider Avec un chargement progressif pour éviter
+            //   le crash") : si le cache RAM homeChannelsCache est vide (= OS
+            //   a recyclé le process), on force getHome() sur le provider pour
+            //   le repeupler AVANT de lister. Si quand même vide après, on
+            //   affiche un message d'erreur explicite au lieu de "Chaînes (0)".
+            //   Chargement progressif : on PAGE par paquets de 100 dans le
+            //   RecyclerView (mapNotNull crée tout d'un coup mais l'adapter
+            //   récupère ce qu'il a besoin).
             viewLifecycleOwner.lifecycleScope.launch {
                 val items = withContext(kotlinx.coroutines.Dispatchers.Default) {
-                    val channelIds: List<String> = when (provider) {
+                    suspend fun fetchIds(): List<String> = when (provider) {
                         is com.streamflixreborn.streamflix.providers.OlaTvProvider -> provider.getOrderedChannelIds()
                         is com.streamflixreborn.streamflix.providers.VegetaTvProvider -> provider.getOrderedChannelIds()
                         is com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider -> provider.getOrderedChannelIds()
@@ -2630,6 +2728,18 @@ class PlayerTvFragment : Fragment() {
                         is com.streamflixreborn.streamflix.providers.VavooProvider -> provider.getOrderedChannelIds()
                         is com.streamflixreborn.streamflix.providers.MyIptvProvider -> provider.getOrderedLiveChannelIds()
                         else -> emptyList()
+                    }
+                    var channelIds: List<String> = fetchIds()
+                    // Si vide → force populate le cache home en appelant getHome()
+                    if (channelIds.isEmpty() && provider is com.streamflixreborn.streamflix.providers.IptvProvider) {
+                        try {
+                            android.util.Log.d("PlayerTvFragment", "channelIds vide → force getHome() pour repeupler cache")
+                            provider.getHome()
+                            channelIds = fetchIds()
+                            android.util.Log.d("PlayerTvFragment", "après getHome(): channelIds=${channelIds.size}")
+                        } catch (t: Throwable) {
+                            android.util.Log.w("PlayerTvFragment", "force getHome() failed: ${t.message}")
+                        }
                     }
                     channelIds.mapNotNull { id ->
                         val name = when (provider) {
@@ -2731,6 +2841,20 @@ class PlayerTvFragment : Fragment() {
             binding.pvPlayer.isChannelListOpen = false
             com.streamflixreborn.streamflix.utils.ChannelListState.isOpen = false
             binding.pvPlayer.controllerAutoShow = true
+            // 2026-06-19 (user "je ne peux plus naviguer sur le lecteur ; quand
+            //   je fais OK je peux plus me déplacer nulle part") : showChannelListPanel
+            //   désactive le focus du pvPlayer + son controller pour donner le
+            //   focus au panel. Au close, on DOIT restaurer ces flags sinon
+            //   plus rien dans le player n'est focusable.
+            binding.pvPlayer.isFocusable = true
+            binding.pvPlayer.descendantFocusability =
+                android.view.ViewGroup.FOCUS_AFTER_DESCENDANTS
+            try {
+                val ctrl = binding.pvPlayer.findViewById<View>(androidx.media3.ui.R.id.exo_controller)
+                ctrl?.isFocusable = true
+                (ctrl as? android.view.ViewGroup)?.descendantFocusability =
+                    android.view.ViewGroup.FOCUS_AFTER_DESCENDANTS
+            } catch (_: Throwable) {}
             binding.pvPlayer.requestFocus()
         }
 
@@ -2881,9 +3005,18 @@ class PlayerTvFragment : Fragment() {
             triedChannelVariantIds.add(server.id)
             val playingUri = player.currentMediaItem?.localConfiguration?.uri?.toString()
             if (!playingUri.isNullOrBlank()) {
-                try {
-                    com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
-                } catch (_: Throwable) { }
+                // 2026-06-15 (user "OlaTvProvider blackliste 185.160 alors qu'on
+                //   est sur TF1 World Live TV") : aligné sur MiniPlayerController
+                //   + PlayerMobileFragment. Gate par préfixe d'ID.
+                val isOlaChannel = args.id.startsWith("ola::") ||
+                    args.id.startsWith("ola_ep::") ||
+                    args.id.startsWith("ola_stream::") ||
+                    args.id.startsWith("ola_fasttrack::")
+                if (isOlaChannel) {
+                    try {
+                        com.streamflixreborn.streamflix.providers.OlaTvProvider.reportBrokenStreamUrl(playingUri)
+                    } catch (_: Throwable) { }
+                }
             }
             val variants = PlayerSettingsView.Settings.ChannelVariant.list
             val removed = variants.removeAll { it.id == server.id }
@@ -3316,10 +3449,58 @@ class PlayerTvFragment : Fragment() {
                     player.setMediaSource(hlsSource)
                     Log.d("PlayerDebug", "TV: HlsMediaSource (chunkless, stuckTolerance=${if (needsStuckTolerance30x) "30x" else "default"})")
                 } else if (isDash) {
-                    val dashSource = androidx.media3.exoplayer.dash.DashMediaSource.Factory(dataSourceFactory)
-                        .createMediaSource(mediaItem)
+                    // 2026-06-19 v36 (user "grand lecteur TV n'a pas les codecs
+                    //   pour TF1 etc. tu n'as pas appliqué ce que tu as fait
+                    //   sur mobile sur la version TV pour le lecteur") : port
+                    //   du pipeline DASH+Widevine DRM pour TF1+/M6+ depuis
+                    //   PlayerMobileFragment vers PlayerTvFragment.
+                    val dashFactory = androidx.media3.exoplayer.dash.DashMediaSource.Factory(dataSourceFactory)
+                    val widevineUrl = com.streamflixreborn.streamflix.utils.TF1Resolver
+                        .getWidevineLicenseUrl(video.source)
+                        ?: com.streamflixreborn.streamflix.utils.M6Resolver
+                            .getWidevineLicenseUrl(video.source)
+                    val drmHeaders = com.streamflixreborn.streamflix.utils.M6Resolver
+                        .getWidevineHeaders(video.source)
+                    if (widevineUrl != null) {
+                        Log.d("PlayerDebug", "TV DASH+Widevine: license=${widevineUrl.take(80)}... headers=${drmHeaders?.keys}")
+                        val isM6 = drmHeaders?.containsKey("x-dt-auth-token") == true
+                        val drmCallback: androidx.media3.exoplayer.drm.MediaDrmCallback = if (isM6) {
+                            Log.d("PlayerDebug", "TV: Using M6DrmCallback (DRMtoday JSON wrapper)")
+                            com.streamflixreborn.streamflix.utils.M6DrmCallback(widevineUrl, drmHeaders!!)
+                        } else {
+                            val cb = androidx.media3.exoplayer.drm.HttpMediaDrmCallback(
+                                widevineUrl,
+                                androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                                    .setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+                            )
+                            drmHeaders?.forEach { (k, v) ->
+                                try { cb.setKeyRequestProperty(k, v) } catch (_: Throwable) {}
+                            }
+                            cb
+                        }
+                        // L3 software path : évite HDCP check qui peut planter
+                        //   sur certaines Chromecast/Android TV. Même fix que mobile.
+                        val l3Provider = androidx.media3.exoplayer.drm.ExoMediaDrm.Provider { uuid ->
+                            val drm = androidx.media3.exoplayer.drm.FrameworkMediaDrm.newInstance(uuid)
+                            try {
+                                drm.setPropertyString("securityLevel", "L3")
+                            } catch (e: Exception) {
+                                Log.w("PlayerDebug", "TV: Set L3 failed: ${e.message}")
+                            }
+                            drm
+                        }
+                        val drmSessionManager = androidx.media3.exoplayer.drm.DefaultDrmSessionManager.Builder()
+                            .setUuidAndExoMediaDrmProvider(
+                                androidx.media3.common.C.WIDEVINE_UUID,
+                                l3Provider
+                            )
+                            .setMultiSession(false)
+                            .build(drmCallback)
+                        dashFactory.setDrmSessionManagerProvider { drmSessionManager }
+                    }
+                    val dashSource = dashFactory.createMediaSource(mediaItem)
                     player.setMediaSource(dashSource)
-                    Log.d("PlayerDebug", "TV: DashMediaSource (explicit, .mpd)")
+                    Log.d("PlayerDebug", "TV: DashMediaSource (DRM=${widevineUrl != null})")
                 } else {
                     player.setMediaItem(mediaItem)
                     Log.d("PlayerDebug", "TV: setMediaItem (auto-detect + ExoPlayer defaults)")
@@ -3425,8 +3606,15 @@ class PlayerTvFragment : Fragment() {
 
                         // 2026-05-17 v25 : cooldown anti-double-swap. Si swap récent (<5s),
                         //   skip ce swap pour laisser le précédent compléter.
+                        // 2026-06-18 (user "Végéta TV se coupe et plus rien")
+                        //   VegetaTV : SKIP le JUMELAGE swap stuck-buffering 500ms.
+                        //   On laisse le buffering récupérer naturellement.
+                        val curIdBuf = args.id
+                        val isVegetaBuf = curIdBuf.startsWith("vegeta::") ||
+                                          curIdBuf.startsWith("vegeta_ep::") ||
+                                          curIdBuf.startsWith("livehub::vegeta::")
                         val sinceLastSwap = System.currentTimeMillis() - lastSwapTimestampMs
-                        if (hasBackup && sinceLastSwap >= SWAP_COOLDOWN_MS) {
+                        if (!isVegetaBuf && hasBackup && sinceLastSwap >= SWAP_COOLDOWN_MS) {
                             viewLifecycleOwner.lifecycleScope.launch {
                                 kotlinx.coroutines.delay(500L)
                                 if (::player.isInitialized && player.playbackState == Player.STATE_BUFFERING &&
@@ -3740,9 +3928,17 @@ class PlayerTvFragment : Fragment() {
                         //   backup jumelage en queue, swap au lieu de tout reset. Le
                         //   reload destructif (clearMediaItems + setMediaItem) écrase
                         //   le backup et empêche la récupération sans cut.
+                        // 2026-06-18 (user "Végéta TV se coupe et plus rien, change
+                        //   de serveur auto au lieu de retry sur le même lien")
+                        //   VegetaTV : SKIP le JUMELAGE swap, sticky retry sur le
+                        //   même flux. Les backups VegetaTV sont souvent morts.
+                        val curIdJumelage = args.id
+                        val isVegetaCh = curIdJumelage.startsWith("vegeta::") ||
+                                         curIdJumelage.startsWith("vegeta_ep::") ||
+                                         curIdJumelage.startsWith("livehub::vegeta::")
                         val hasBackupQueued = try { player.mediaItemCount > 1 && player.hasNextMediaItem() } catch (_: Exception) { false }
                         val sinceLastSwap = System.currentTimeMillis() - lastSwapTimestampMs
-                        if (hasBackupQueued && sinceLastSwap >= SWAP_COOLDOWN_MS) {
+                        if (!isVegetaCh && hasBackupQueued && sinceLastSwap >= SWAP_COOLDOWN_MS) {
                             Log.w("PlayerTvFragment", "JUMELAGE: STATE_$playbackState avec backup → swapToNextWithAudioFade (no reset)")
                             preemptiveReloadInFlight = true
                             viewLifecycleOwner.lifecycleScope.launch {
@@ -4227,7 +4423,11 @@ class PlayerTvFragment : Fragment() {
                             errMsg.contains("response code: 502") ||
                             errMsg.contains("response code: 503")
                         val MAX_RETRIES_BEFORE_SWITCH = 3
-                        val shouldSwitch = !iptvCurrentStreamHasWorked &&
+                        // 2026-06-17 (user "écran noir + pas de son sur OLA") : 456 = MAC
+                        //   blocked / rate-limit serveur — JAMAIS récupérable. Force le
+                        //   switch même si stream a déjà brièvement marché.
+                        val isMacBlocked456 = errMsg.contains("response code: 456")
+                        val shouldSwitch = (!iptvCurrentStreamHasWorked || isMacBlocked456) &&
                             (isPermanentHttpError || iptvRetryCount >= MAX_RETRIES_BEFORE_SWITCH)
 
                         // 2026-05-10 : cooldown anti-cascade. Si un auto-switch s'est fait
@@ -4807,10 +5007,12 @@ class PlayerTvFragment : Fragment() {
                             val stdBar = ctrl.findViewById<View>(R.id.exo_progress)
                             val pri = ctrl.findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.live_primary_progress)
                             val sec = ctrl.findViewById<androidx.media3.ui.DefaultTimeBar>(R.id.live_secondary_progress)
-                            // Live IPTV → hide standard, show 2 custom bars
-                            if (stdBar != null && stdBar.visibility != View.GONE) stdBar.visibility = View.GONE
-                            if (pri != null && pri.visibility != View.VISIBLE) pri.visibility = View.VISIBLE
-                            if (sec != null && sec.visibility != View.VISIBLE) sec.visibility = View.VISIBLE
+                            // 2026-06-19 (user "ma barre était purement visuelle. Tu remets
+                            //   la même barre que pour les VOD") : remet exo_progress
+                            //   standard. Les 2 bars custom = permanent GONE.
+                            if (stdBar != null && stdBar.visibility != View.VISIBLE) stdBar.visibility = View.VISIBLE
+                            if (pri != null && pri.visibility != View.GONE) pri.visibility = View.GONE
+                            if (sec != null && sec.visibility != View.GONE) sec.visibility = View.GONE
                             // 2026-05-31 : forcer non-focusable (DefaultTimeBar force focusable=true en interne)
                             pri?.isFocusable = false
                             sec?.isFocusable = false
@@ -5561,6 +5763,7 @@ class PlayerTvFragment : Fragment() {
 
         private fun showSkipIntroButton(show: Boolean) {
             val btnSkipIntro = binding.pvPlayer.controller.binding.btnSkipIntro
+            val controllerBinding = binding.pvPlayer.controller.binding
             if (show && btnSkipIntro.isGone) {
                 val fadeIn = android.view.animation.AnimationUtils.loadAnimation(
                     requireContext(),
@@ -5568,6 +5771,15 @@ class PlayerTvFragment : Fragment() {
                 )
                 btnSkipIntro.startAnimation(fadeIn)
                 btnSkipIntro.isVisible = true
+                // 2026-06-19 v35 (user "quand on fait droite ça veut pas aller
+                //   à passer l'intro, ça avance dans l'épisode") : quand
+                //   skip-intro visible, RIGHT depuis les contrôles centraux
+                //   amène DIRECTEMENT au bouton skip-intro au lieu de
+                //   btn_custom_next (= skip episode).
+                val skipId = btnSkipIntro.id
+                controllerBinding.exoPlayPause.nextFocusRightId = skipId
+                controllerBinding.btnCustomNext.nextFocusRightId = skipId
+                controllerBinding.exoSettings.nextFocusRightId = skipId
                 if (binding.layoutNextEpisodeOverlay.isVisible) {
                     updateNextEpisodeOverlayFocusBindings(true)
                 }
@@ -5578,6 +5790,10 @@ class PlayerTvFragment : Fragment() {
                 )
                 btnSkipIntro.startAnimation(fadeOut)
                 btnSkipIntro.isGone = true
+                // Restaure nav D-pad normale quand skip-intro disparaît.
+                controllerBinding.exoPlayPause.nextFocusRightId = controllerBinding.btnCustomNext.id
+                controllerBinding.btnCustomNext.nextFocusRightId = controllerBinding.exoSettings.id
+                controllerBinding.exoSettings.nextFocusRightId = controllerBinding.exoSettings.id
                 if (binding.layoutNextEpisodeOverlay.isVisible) {
                     updateNextEpisodeOverlayFocusBindings(true)
                 }

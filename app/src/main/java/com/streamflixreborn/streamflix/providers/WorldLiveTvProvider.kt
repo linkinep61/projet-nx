@@ -62,7 +62,11 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                 com.streamflixreborn.streamflix.StreamFlixApp.instance
             )
         } catch (_: Throwable) { DEFAULT_PLAYLIST_URL }
-    private const val CACHE_TTL_MS = 30 * 60 * 1000L  // 30 min
+    // 2026-06-15 v2 (user "pour pas avoir de coupures faudrait qu'on réduise
+    //   alors") : cache 10 → 5 min combiné avec workflow CI 30 min →
+    //   delay max entre fix CI et app = 35 min (= quasi temps réel pour
+    //   un service M3U). Coût bande passante négligeable (~180KB / 5 min).
+    private const val CACHE_TTL_MS = 5 * 60 * 1000L  // 5 min
 
     private val _additionalServersFlow = MutableSharedFlow<Video.Server>()
     override val additionalServersFlow: SharedFlow<Video.Server> = _additionalServersFlow.asSharedFlow()
@@ -71,6 +75,17 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
+            .build()
+    }
+
+    // 2026-06-14 : client séparé avec timeouts plus longs pour les panels
+    //   Xtream Codes (player_api.php peut retourner 5-50 MB selon le serveur).
+    //   N'IMPACTE PAS le client M3U générique au-dessus.
+    private val xtreamClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(90, TimeUnit.SECONDS)
+            .writeTimeout(90, TimeUnit.SECONDS)
             .build()
     }
 
@@ -93,6 +108,13 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         val tvgLanguage: String?,  // capturé depuis tvg-language="xx" du M3U
         val isFolder: Boolean = false,  // 2026-06-10 (Wiseplay-style folders)
         val folderPath: String? = null,  // si isFolder, chemin pour lookup folderContents
+        // 2026-06-15 (user "ajouter un 2e serveur en backup pour booster comme
+        //   font les autres liens") : URLs additionnelles servant de fallback
+        //   auto. Le parser M3U les remplit quand il rencontre plusieurs EXTINF
+        //   avec le même (tvg-id, group-title). Chaque triple = (URL, UA, Referer).
+        //   getServers expose primary + chacune en Video.Server, le mini lecteur
+        //   fait tryNextServer() automatiquement si le primary fail.
+        val extraServers: List<Triple<String, String?, String?>> = emptyList(),
     )
 
     /** 2026-06-10 (user "comme Wiseplay : dossiers explorables, pas tout
@@ -118,10 +140,27 @@ object WorldLiveTvProvider : Provider, IptvProvider {
      *  après un changement de source. */
     fun getCategoryNamesFast(): List<String> {
         val currentUrl = PLAYLIST_URL
-        if (groupsCache.isNotEmpty() && lastLoadedUrl == currentUrl) {
-            return groupsCache.map { it.name }
+        // 2026-06-14 (user "les catégories ne fonctionnent pas — le picker
+        //   n'affiche que 'Toutes les chaînes' + nom de la playlist au lieu
+        //   des 32 catégories du M3U") : on retourne les group-title=
+        //   distincts du M3U (= les VRAIES sections que l'user voit dans le
+        //   home) au lieu des group top-level de la playlist JSON. Pour
+        //   l'user actuel qui a UNE playlist M3U "primtv" sur Codeberg :
+        //   groupsCache.map = ["primtv"] = inutile.
+        //   channelRegistry.map { it.groupName }.distinct() = 32 catégories
+        //   (Animation, Auto, Comedy, Culture, Horse, Locales TV, Muzik,
+        //   Nature & Decouverte, etc.) — c'est ce que l'user attend.
+        //   Préserve l'ordre d'apparition dans le M3U via .distinct() sur
+        //   une liste ordonnée.
+        if (channelRegistry.isNotEmpty() && lastLoadedUrl == currentUrl) {
+            return channelRegistry.map { it.groupName }.distinct()
         }
         if (restoreFolderContentsFromDisk() && lastLoadedUrl == currentUrl) {
+            if (channelRegistry.isNotEmpty()) {
+                return channelRegistry.map { it.groupName }.distinct()
+            }
+            // Fallback : si registry pas restauré mais groupsCache oui,
+            // on tombe sur les noms top-level (= comportement historique).
             return groupsCache.map { it.name }
         }
         return emptyList()
@@ -168,26 +207,45 @@ object WorldLiveTvProvider : Provider, IptvProvider {
             val groups = fetchTopLevel()
             if (groups.isEmpty()) return@withContext
             groupsCache = groups
-            // Fetch toutes les .m3u en parallèle avec un timeout court par cat.
+            // 2026-06-17 (user "playlist crash sur appareils peu performants") :
+            //   Semaphore(3) pour limiter le parallélisme. AVANT : tous les
+            //   groupes fetchaient EN MÊME TEMPS, chaque M3U body.string()
+            //   pouvait peser 2-5 MB → 40-100 MB peak RAM si 20 groupes →
+            //   OOM crash sur appareils 1-2 GB. APRÈS : max 3 groupes en
+            //   parallèle → peak ~15 MB acceptable partout.
+            val fetchSem = kotlinx.coroutines.sync.Semaphore(3)
             val all = coroutineScope {
                 groups.map { g ->
                     async {
+                        fetchSem.acquire()
                         try {
                             fetchM3uChannels(g)
                         } catch (t: Throwable) {
                             Log.w(TAG, "fetch ${g.name} failed: ${t.message}")
                             emptyList()
+                        } finally {
+                            fetchSem.release()
                         }
                     }
                 }.awaitAll()
             }.flatten()
-            channelRegistry = all
+            // 2026-06-17 (user "optimiser pour appareils faibles") : cap total
+            //   global. Au-delà de 10 000 chaînes, c'est trop pour la RAM des
+            //   appareils 1-2 GB (= chaque WlChannel = ~200 bytes → 10k = 2 MB
+            //   en registre permanent + duplication dans folderContents, JSON
+            //   sérialisation au persist, etc.). Tronque pour rester safe.
+            val MAX_TOTAL_CHANNELS = 10_000
+            val capped = if (all.size > MAX_TOTAL_CHANNELS) {
+                Log.w(TAG, "Total channels ${all.size} > $MAX_TOTAL_CHANNELS → tronque (cap RAM appareils faibles)")
+                all.subList(0, MAX_TOTAL_CHANNELS)
+            } else all
+            channelRegistry = capped
             lastLoad = System.currentTimeMillis()
             // 2026-06-10 (user "ouverture instantanée") : persiste sur disque
             //   le registry + folderContents pour qu'au prochain lancement,
             //   le home s'affiche en <100ms sans re-fetch HTTP.
             persistFolderContents()
-            Log.d(TAG, "Loaded ${all.size} channels across ${groups.size} groups (cached to disk)")
+            Log.d(TAG, "Loaded ${capped.size}/${all.size} channels across ${groups.size} groups (cached to disk)")
         } catch (t: Throwable) {
             Log.w(TAG, "loadAllChannels failed: ${t.message}")
         }
@@ -441,6 +499,22 @@ object WorldLiveTvProvider : Provider, IptvProvider {
      *   https://stream.url/playlist.m3u8
      */
     private fun fetchM3uChannels(g: WlGroup, depth: Int = 0): List<WlChannel> {
+        // 2026-06-14 : si URL = Xtream Codes panel
+        //   (host:port/get.php?username=X&password=Y), on bascule sur le
+        //   parser dédié (= player_api.php), qui donne les catégories
+        //   officielles du panel + URLs streams pré-formatées. Si le
+        //   parser Xtream renvoie 0 chaînes (= URL n'est pas vraiment
+        //   Xtream malgré le pattern), on retombe sur le parser M3U
+        //   classique ci-dessous. ADDITIF — ne casse pas les .m3u/.m3u8
+        //   génériques existants.
+        if (isXtreamUrl(g.url)) {
+            val xtream = fetchXtreamChannels(g)
+            if (xtream.isNotEmpty()) {
+                Log.d(TAG, "${g.name}: Xtream parser found ${xtream.size} channels")
+                return xtream
+            }
+            Log.w(TAG, "${g.name}: Xtream parser returned 0 → fallback to M3U")
+        }
         // 2026-06-10 (user "3box TV") : les sources 3box utilisent rebrand.ly
         //   avec q=base64 → Google Sheets TSV. On décode l'URL avant fetch
         //   (rebrand.ly retourne souvent 403 pour les UA non-navigateur).
@@ -457,9 +531,26 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) " +
                         "Gecko/20100101 Firefox/115.0")
             .build()
+        // 2026-06-17 (user "optimiser pour appareils faibles") : cap taille
+        //   body M3U à 30 MB. Au-delà, on skip → empêche un seul M3U géant
+        //   d'allouer 50-100 MB en RAM et causer un OOM sur appareils 1-2 GB.
+        //   Le Semaphore(3) limite déjà le parallélisme mais ne protège pas
+        //   contre 1 énorme M3U.
+        val MAX_BODY_BYTES = 30L * 1024 * 1024  // 30 MB
         val body = client.newCall(req).execute().use {
             if (!it.isSuccessful) return emptyList()
+            val contentLength = it.body?.contentLength() ?: -1L
+            if (contentLength > MAX_BODY_BYTES) {
+                Log.w(TAG, "${g.name}: M3U body too large (${contentLength / 1024 / 1024} MB > 30 MB) — skipping")
+                return emptyList()
+            }
             it.body?.string() ?: return emptyList()
+        }
+        // Garde-fou supplémentaire : si Content-Length n'était pas annoncé mais
+        //   le body matérialisé dépasse la limite, on abort.
+        if (body.length > MAX_BODY_BYTES) {
+            Log.w(TAG, "${g.name}: M3U body materialized > 30 MB (${body.length / 1024 / 1024} MB) — skipping")
+            return emptyList()
         }
         // 2026-06-10 : 3 formats supportés :
         //   - M3U standard (#EXTM3U / #EXTINF)
@@ -493,6 +584,14 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         var pendingExtinf: String? = null
         var pendingUa: String? = null
         var pendingReferer: String? = null
+        // 2026-06-15 (user "ajouter 2e serveur backup pour booster") : map
+        //   (tvgId, groupTitle) -> index dans out pour grouper les EXTINF en
+        //   doublon (= même chaîne servie par plusieurs URLs). Le 2e/3e EXTINF
+        //   ajoute son URL aux extraServers de la 1ère WlChannel au lieu de
+        //   créer une chaîne distincte. Mini lecteur fait fallback auto.
+        //   Garde : seulement si tvg-id présent et non-vide. Sinon comportement
+        //   actuel (= chId-suffix pour les doublons par nom).
+        val dedupByTvgId = HashMap<Pair<String, String>, Int>()
 
         for (rawLine in body.lineSequence()) {
             val line = rawLine.trim()
@@ -520,31 +619,59 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                         val groupTitle = Regex("""group-title="([^"]+)"""").find(extinf)
                             ?.groupValues?.get(1) ?: g.name
                         val tvgLanguage = Regex("""tvg-language="([^"]+)"""").find(extinf)?.groupValues?.get(1)
+                        val tvgId = Regex("""tvg-id="([^"]*)"""").find(extinf)?.groupValues?.get(1)
                         val chSlug = slugify(name)
-                        var chId = "wltv::$groupSlug::$chSlug"
-                        if (!seen.add(chId)) {
-                            // Doublon — ajoute un suffixe index
-                            chId = "$chId-${out.size}"
-                            seen.add(chId)
-                        }
-                        out.add(
-                            WlChannel(
-                                id = chId,
-                                name = name,
-                                logo = logo,
-                                groupName = groupTitle,
-                                streamUrl = line,
-                                userAgent = pendingUa,
-                                referer = pendingReferer,
-                                tvgLanguage = tvgLanguage,
+
+                        // 2026-06-15 : si tvg-id présent ET (tvg-id, group-title)
+                        //   déjà parsé dans ce flux → ajouter en backup au lieu
+                        //   de créer une nouvelle chaîne.
+                        val dedupKey = if (!tvgId.isNullOrBlank()) Pair(tvgId, groupTitle) else null
+                        val existingIdx = dedupKey?.let { dedupByTvgId[it] }
+                        if (existingIdx != null) {
+                            val cur = out[existingIdx]
+                            out[existingIdx] = cur.copy(
+                                extraServers = cur.extraServers + Triple(line, pendingUa, pendingReferer)
                             )
-                        )
+                            Log.d(TAG, "M3U dedup: '$name' (tvg-id=$tvgId, group=$groupTitle) — added as backup #${cur.extraServers.size + 1}")
+                        } else {
+                            var chId = "wltv::$groupSlug::$chSlug"
+                            if (!seen.add(chId)) {
+                                // Doublon par NAME (= pas de tvg-id) — ajoute un suffixe index
+                                chId = "$chId-${out.size}"
+                                seen.add(chId)
+                            }
+                            out.add(
+                                WlChannel(
+                                    id = chId,
+                                    name = name,
+                                    logo = logo,
+                                    groupName = groupTitle,
+                                    streamUrl = line,
+                                    userAgent = pendingUa,
+                                    referer = pendingReferer,
+                                    tvgLanguage = tvgLanguage,
+                                )
+                            )
+                            if (dedupKey != null) {
+                                dedupByTvgId[dedupKey] = out.size - 1
+                            }
+                        }
                     }
                     pendingExtinf = null
                     pendingUa = null
                     pendingReferer = null
                 }
             }
+        }
+        // 2026-06-17 (user "optimiser pour appareils faibles") : cap channels
+        //   par groupe. Au-delà de 5000, c'est une playlist "monstre" (= type
+        //   DrewLive 16k) qui va saturer la RAM des appareils faibles. On
+        //   tronque pour rester safe. Les chaînes prioritaires sont en tête
+        //   (= ordre du M3U source) donc le head 5000 garde le contenu utile.
+        val MAX_CHANNELS_PER_GROUP = 5000
+        if (out.size > MAX_CHANNELS_PER_GROUP) {
+            Log.w(TAG, "${g.name}: ${out.size} channels → tronque à $MAX_CHANNELS_PER_GROUP (cap RAM appareils faibles)")
+            return out.subList(0, MAX_CHANNELS_PER_GROUP).toList()
         }
         return out
     }
@@ -1121,24 +1248,78 @@ object WorldLiveTvProvider : Provider, IptvProvider {
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         ensureRegistry()
         val ch = channelById(id) ?: return emptyList()
-        return listOf(
+        val servers = mutableListOf(
             Video.Server(
                 id = "wltv-ch::${ch.id}",
                 name = "${ch.name} [World Live TV]",
                 src = ch.streamUrl,
             )
         )
+        // 2026-06-15 (user "ajouter 2e serveur backup pour booster") : si la
+        //   chaîne a des extraServers (= doublons EXTINF parsés par même
+        //   tvg-id+group-title), les expose comme servers additionnels. Le
+        //   mini lecteur enchaînera tryNextServer() automatiquement si le
+        //   primary fail.
+        ch.extraServers.forEachIndexed { idx, (url, _, _) ->
+            servers.add(
+                Video.Server(
+                    id = "wltv-ch::${ch.id}::backup${idx + 1}",
+                    name = "${ch.name} [World Live TV backup ${idx + 1}]",
+                    src = url,
+                )
+            )
+        }
+        return servers
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
         ensureRegistry()
-        val channelId = server.id.removePrefix("wltv-ch::")
+        // 2026-06-15 : server.id format "wltv-ch::<chId>" OU "wltv-ch::<chId>::backup<N>"
+        //   pour les backup servers (= multi-URL avec dedup tvg-id). Parse les
+        //   deux formats pour récupérer le bon channel + le bon backup index.
+        val stripped = server.id.removePrefix("wltv-ch::")
+        val backupMatch = Regex("""^(.+)::backup(\d+)$""").find(stripped)
+        val channelId = backupMatch?.groupValues?.get(1) ?: stripped
+        val backupIdx = backupMatch?.groupValues?.get(2)?.toIntOrNull()
         val ch = channelById(channelId)
-        val rawSrc = ch?.streamUrl ?: server.src
-        val customUa = ch?.userAgent
+        // Si server = backup, prends l'URL/UA/Referer du backup correspondant.
+        //   Sinon = primary, prends streamUrl/userAgent/referer de la WlChannel.
+        val backupTriple = backupIdx?.let { idx -> ch?.extraServers?.getOrNull(idx - 1) }
+        val rawSrc = backupTriple?.first ?: ch?.streamUrl ?: server.src
+        val customUa = backupTriple?.second
+            ?: ch?.userAgent
             ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Firefox/115.0"
-        val customReferer = ch?.referer ?: "https://box.xtemus.com/"
+        val customReferer = backupTriple?.third
+            ?: ch?.referer
+            ?: "https://box.xtemus.com/"
         val channelName = ch?.name ?: ""
+
+        // 2026-06-14 (user "TF1 Premium FR ne marche pas malgré UA M3U") :
+        //   le UA du M3U (ex: ExoPlayer/2.19.1 pour prime-tv) n'est PAS
+        //   appliqué côté Cronet (UA hardcoded "MediaHubMX/2"). On ré-active
+        //   le hook IptvProxyServer SEULEMENT pour les .ts directs (= URLs
+        //   prime-tv live.aab1.top) afin de respecter strictement les headers
+        //   du M3U sans casser les .m3u8 (= ParaTV/iptv-org qui marchent
+        //   avec le pipeline classique).
+        //
+        //   Le proxy local fetch le .ts avec les bons headers et stream
+        //   à ExoPlayer qui reçoit du MPEG-TS valide → décodage OK.
+        //
+        //   Pour les .m3u8 : pas de proxy (le proxy téléchargerait la
+        //   playlist mais les segments TS référencés dedans seraient fetchés
+        //   en direct par ExoPlayer sans headers). Pipeline classique.
+        val srcLower = rawSrc.lowercase().substringBefore('?')
+        val isTsDirect = srcLower.endsWith(".ts")
+        val hasM3uHeaders = !ch?.userAgent.isNullOrBlank() || !ch?.referer.isNullOrBlank()
+        if (isTsDirect && hasM3uHeaders) {
+            val proxied = com.streamflixreborn.streamflix.utils.IptvProxyServer.wrap(
+                url = rawSrc,
+                ua = ch?.userAgent,
+                referer = ch?.referer,
+            )
+            Log.d(TAG, "Proxied $channelName (.ts) via IptvProxyServer (UA=${ch?.userAgent?.take(40)}, Ref=${ch?.referer?.take(40)})")
+            return Video(source = proxied, type = "video/mp2t", headers = emptyMap())
+        }
 
         // 2026-06-10 (user "tu compliques les choses, importe tous les
         //   réglages du TV Hub directement sur World TV") : DÉLÉGUE le
@@ -1173,6 +1354,136 @@ object WorldLiveTvProvider : Provider, IptvProvider {
      *  2026-06-10 fix v2 (user "IPTV Daily ne montre qu'1 sub sur 17") :
      *  early-return si l'URL n'a pas de chars problématiques dans le path
      *  (= 99% des cas). Évite tout effet de bord de la reconstruction. */
+
+    // ──────── 2026-06-14 Xtream Codes support (ADDITIF) ────────
+    // Pattern URL Xtream : http(s)://host:port/get.php?username=X&password=Y&type=m3u
+    // Format API panel (player_api.php) :
+    //   - action=get_live_categories → JSON [{category_id, category_name}]
+    //   - action=get_live_streams → JSON [{stream_id, name, stream_icon, category_id, ...}]
+    // URL stream finale : http://host:port/live/<USER>/<PASS>/<STREAM_ID>.ts
+    private fun isXtreamUrl(url: String): Boolean {
+        return url.contains("/get.php") &&
+                url.contains("username=") &&
+                url.contains("password=")
+    }
+
+    private data class XtreamCreds(val baseUrl: String, val user: String, val pass: String)
+
+    private fun parseXtreamCreds(url: String): XtreamCreds? {
+        return try {
+            val u = java.net.URI(url)
+            val host = u.host ?: return null
+            val port = u.port
+            val scheme = u.scheme ?: "http"
+            val portSuffix = if (port > 0 && port != u.toURL().defaultPort) ":$port" else ""
+            val base = "$scheme://$host$portSuffix"
+            // Parse query string username=X&password=Y
+            val q = u.rawQuery ?: return null
+            val params = q.split("&").mapNotNull {
+                val kv = it.split("=", limit = 2)
+                if (kv.size == 2) kv[0] to java.net.URLDecoder.decode(kv[1], "UTF-8") else null
+            }.toMap()
+            val user = params["username"] ?: return null
+            val pass = params["password"] ?: return null
+            XtreamCreds(base, user, pass)
+        } catch (_: Throwable) { null }
+    }
+
+    private fun fetchXtreamString(url: String): String? {
+        return try {
+            val req = Request.Builder().url(url)
+                // UA "Xtream-friendly" : okhttp est l'UA par défaut des apps
+                //   IPTV (TiviMate, IPTV Smarters, Sparkle…). Les serveurs
+                //   Xtream le reconnaissent. Firefox est souvent rejeté.
+                .header("User-Agent", "okhttp/4.9.3")
+                .build()
+            xtreamClient.newCall(req).execute().use {
+                if (!it.isSuccessful) {
+                    Log.w(TAG, "Xtream HTTP ${it.code} on ${url.take(80)}")
+                    null
+                } else it.body?.string()
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Xtream fetch failed: ${t.message}")
+            null
+        }
+    }
+
+    private fun fetchXtreamChannels(g: WlGroup): List<WlChannel> {
+        val creds = parseXtreamCreds(g.url) ?: run {
+            Log.w(TAG, "${g.name}: not a valid Xtream URL")
+            return emptyList()
+        }
+        val authQs = "username=${java.net.URLEncoder.encode(creds.user, "UTF-8")}" +
+                "&password=${java.net.URLEncoder.encode(creds.pass, "UTF-8")}"
+        // 1. Get live categories → map<category_id, category_name>
+        val catsUrl = "${creds.baseUrl}/player_api.php?$authQs&action=get_live_categories"
+        val catsJson = fetchXtreamString(catsUrl) ?: return emptyList()
+        val catMap = HashMap<String, String>()
+        try {
+            val arr = org.json.JSONArray(catsJson)
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                catMap[o.optString("category_id", "")] = o.optString("category_name", "")
+            }
+            Log.d(TAG, "${g.name}: Xtream ${catMap.size} categories")
+        } catch (t: Throwable) {
+            Log.w(TAG, "${g.name}: Xtream categories JSON parse failed: ${t.message}")
+            return emptyList()
+        }
+        // 2. Get live streams (toutes catégories en 1 appel)
+        val streamsUrl = "${creds.baseUrl}/player_api.php?$authQs&action=get_live_streams"
+        val streamsJson = fetchXtreamString(streamsUrl) ?: return emptyList()
+        val out = mutableListOf<WlChannel>()
+        val seen = HashSet<String>()
+        try {
+            val arr = org.json.JSONArray(streamsJson)
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val streamId = when {
+                    o.has("stream_id") -> o.get("stream_id").toString()
+                    else -> continue
+                }
+                val name = o.optString("name", "").trim()
+                if (name.isEmpty()) continue
+                val logo = o.optString("stream_icon", "").ifBlank { null }
+                val catId = o.optString("category_id", "0")
+                val catName = catMap[catId] ?: g.name
+                // Xtream streams au format :
+                //   http://host:port/live/USER/PASS/STREAMID.ts (ou .m3u8)
+                val streamUrl = "${creds.baseUrl}/live/" +
+                        "${java.net.URLEncoder.encode(creds.user, "UTF-8")}/" +
+                        "${java.net.URLEncoder.encode(creds.pass, "UTF-8")}/" +
+                        "$streamId.ts"
+                val chSlug = slugify(name)
+                var chId = "wltv::xtream::$chSlug::$streamId"
+                if (!seen.add(chId)) {
+                    chId = "$chId-${out.size}"
+                    seen.add(chId)
+                }
+                out.add(
+                    WlChannel(
+                        id = chId,
+                        name = name,
+                        logo = logo,
+                        groupName = catName,
+                        streamUrl = streamUrl,
+                        // UA okhttp par défaut pour les segments .ts (sinon
+                        //   certains serveurs Xtream refusent).
+                        userAgent = "okhttp/4.9.3",
+                        referer = null,
+                        tvgLanguage = null,
+                    )
+                )
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "${g.name}: Xtream streams JSON parse failed: ${t.message}")
+            return emptyList()
+        }
+        Log.d(TAG, "${g.name}: Xtream ${out.size} channels (${catMap.size} cats)")
+        return out
+    }
+
     private fun sanitizeUrlPath(url: String): String {
         // Détection rapide : si pas d'espace, pas de & ni de chars >127 dans
         //   le path/query, on ne touche pas.

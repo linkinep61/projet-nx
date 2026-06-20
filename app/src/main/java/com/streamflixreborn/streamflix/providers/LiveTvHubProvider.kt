@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -48,6 +49,22 @@ object LiveTvHubProvider : Provider, IptvProvider {
     override val language = "fr"
 
     private const val TAG = "LiveTvHubProvider"
+
+    /**
+     * 2026-06-14 (user "donc maintenant tu peux retirer la source du TV hub
+     * c'est plus gênant") : flag pour réactiver l'injection des sections
+     * Dric4rTV dans le TvHub. Désactivé par défaut car :
+     *  - Les 17 radios sont hardcodées dans RadioCatalog.HARDCODED_DRIC4RTV_RADIOS
+     *    (URLs CDN directes radiofrance/infomaniak/RTL/etc.).
+     *  - Les chaînes TV intéressantes (178) sont sur le data.m3u Codeberg,
+     *    accessibles via le provider World Live (MyIptvProvider URL externe).
+     *  - 23 "Live & DJ set" droppées (= .mp4 statiques freebox Dric, pas live).
+     *
+     * Le code Dric4rTvProvider.kt reste en place pour compat des anciens
+     * favoris cœur (IDs `livehub::dric4rtv::*`) : getServers/getVideo
+     * continuent à fonctionner si un favori est cliqué depuis le cœur.
+     */
+    private const val DRIC4RTV_IN_HUB = false
 
     private val _additionalServersFlow = MutableSharedFlow<Video.Server>()
     override val additionalServersFlow: SharedFlow<Video.Server> = _additionalServersFlow.asSharedFlow()
@@ -304,7 +321,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             else -> null
         }
         val logoUrl = logoKey?.let { manualLogoMap[it] }
-            ?: "https://ui-avatars.com/api/?name=${java.net.URLEncoder.encode(c.displayName.take(3), "UTF-8")}&background=0EA5E9&color=fff&size=512&bold=true&format=png"
+            ?: "https://ui-avatars.com/api/?name=${java.net.URLEncoder.encode(c.displayName.take(3), "UTF-8")}&background=0EA5E9&color=fff&size=128&bold=true&format=png"
         return TvShow(
             id = "livehub::freeshot::${c.id}::${c.slug}",
             title = c.displayName,
@@ -318,7 +335,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
 
     private fun bonusToTvShow(c: BonusChannel): TvShow {
         val logoUrl = c.logoKey?.let { manualLogoMap[it] }
-            ?: "https://ui-avatars.com/api/?name=${java.net.URLEncoder.encode(c.displayName, "UTF-8")}&background=DC2626&color=fff&size=512&bold=true&format=png"
+            ?: "https://ui-avatars.com/api/?name=${java.net.URLEncoder.encode(c.displayName, "UTF-8")}&background=DC2626&color=fff&size=128&bold=true&format=png"
         return TvShow(
             id = "livehub::bonus::${c.id}",
             title = c.displayName,
@@ -331,7 +348,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
     }
 
     private fun dailymotionChannelToTvShow(): TvShow {
-        val logo = "https://ui-avatars.com/api/?name=SF&background=0EA5E9&color=fff&size=512&bold=true&format=png"
+        val logo = "https://ui-avatars.com/api/?name=SF&background=0EA5E9&color=fff&size=128&bold=true&format=png"
         return TvShow(
             id = "livehub::dailymotion::$DAILYMOTION_SPORT_EN_FRANCE_ID",
             title = "Sport en France",
@@ -402,7 +419,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             .joinToString("") { it.first().uppercaseChar().toString() }
             .ifBlank { "T" }
         val encoded = java.net.URLEncoder.encode(initials, "UTF-8")
-        return "https://ui-avatars.com/api/?name=$encoded&background=7C3AED&color=fff&size=512&bold=true&format=png"
+        return "https://ui-avatars.com/api/?name=$encoded&background=7C3AED&color=fff&size=128&bold=true&format=png"
     }
 
     private fun channelToTvShow(c: HubChannel): TvShow = TvShow(
@@ -438,8 +455,53 @@ object LiveTvHubProvider : Provider, IptvProvider {
         return channels.filter { it.witvKey in allFavKeys || it.olaVegetaKey in allFavKeys }
     }
 
+    // 2026-06-19 (user "optimise pour pas faire ramer les petits appareils") :
+    //   cache getHome 60s. Sur un OPPO bas de gamme, le getHome construit
+    //   ~15-25 sections (OTF, Adrar, Replays, Favoris, Sport bonus, etc.)
+    //   avec fetch réseau (4s OTF + 3s replays + 2s adar) + ~50ms de logique
+    //   par section. Le re-déclencher à chaque scroll/refresh saturait le CPU.
+    //   Avec ce cache, 95% des navigations utilisent un snapshot mémoire.
+    //   Le cache est invalidé par ProviderChangeNotifier (sélection groupe OTF/Adrar
+    //   change), par favori ajouté/retiré (= signature change), ou par TTL 60s.
+    @Volatile private var cachedHome: List<Category>? = null
+    @Volatile private var cachedHomeSignature: String = ""
+    @Volatile private var cachedHomeAt: Long = 0L
+    private val HOME_CACHE_TTL_MS = 60_000L
+
+    private fun computeHomeSignature(favs: List<HubChannel>): String {
+        val favSig = favs.joinToString(",") { it.witvKey }
+        val otfGroup = try { com.streamflixreborn.streamflix.utils.OtfTvService.selectedGroup } catch (_: Throwable) { "" }
+        val adarGroup = try { com.streamflixreborn.streamflix.utils.AdrarTvService.selectedGroup } catch (_: Throwable) { "" }
+        val bannedHash = try {
+            com.streamflixreborn.streamflix.fragments.player.settings
+                .IptvBannedChannels.getAllBannedKeys().sorted().joinToString(",").hashCode().toString()
+        } catch (_: Throwable) { "0" }
+        val catFilter = try {
+            val ctx = appContextRef
+            if (ctx != null) com.streamflixreborn.streamflix.providers
+                .BoxXtemusCategorySettings.getCurrentCode(ctx)
+            else ""
+        } catch (_: Throwable) { "" }
+        return "$favSig|$otfGroup|$adarGroup|$bannedHash|$catFilter"
+    }
+
+    fun clearHomeCache() {
+        cachedHome = null
+        cachedHomeAt = 0L
+    }
+
     override suspend fun getHome(): List<Category> {
+        val tHomeStart = System.currentTimeMillis()
         val favs = favoriteChannels()
+        // Cache hit ? 95% des refresh tombent ici.
+        val sig = computeHomeSignature(favs)
+        val now = System.currentTimeMillis()
+        val cached = cachedHome
+        if (cached != null && sig == cachedHomeSignature && now - cachedHomeAt < HOME_CACHE_TTL_MS) {
+            Log.d(TAG, "getHome: cache HIT (${cached.size} sections, ${(now - cachedHomeAt) / 1000}s old)")
+            return cached
+        }
+        Log.d(TAG, "getHome: COLD START — building from scratch")
         val sections = mutableListOf<Category>()
         // Filtre les chaînes bannies du home (elles vont dans la section
         // "Chaînes bannies" en bas).
@@ -539,11 +601,24 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2026-06-04 : timeout 8s → 4s (couplé au cache négatif 60s dans
         //   OtfTvService) pour ne pas faire patienter quand OTF est down.
         val otfService = com.streamflixreborn.streamflix.utils.OtfTvService
+        // 2026-06-19 v36 (user "chargement infini après refresh TV Hub") :
+        //   OtfTvService a déclenché un OutOfMemoryError dans le buffer
+        //   OkHttp cache → catch (Exception) ne le rattrape pas (= Error,
+        //   pas Exception) → le worker crash sans cancel le withTimeoutOrNull
+        //   → getHome bloqué infiniment. Fix : catch Throwable.
+        val tOtf = System.currentTimeMillis()
         val otfChannelsFromApi = try {
             kotlinx.coroutines.withTimeoutOrNull(4_000L) {
                 otfService.fetchChannels()
             } ?: emptyList()
-        } catch (_: Exception) { emptyList() }
+        } catch (t: Throwable) {
+            Log.w(TAG, "OTF fetch failed (caught Throwable: ${t.javaClass.simpleName}: ${t.message})")
+            // 2026-06-19 v36 : marque OTF comme failed pour éviter retry
+            //   immédiat à chaque refresh home (= cooldown 60s).
+            try { otfService.markFailure() } catch (_: Throwable) {}
+            emptyList()
+        }
+        Log.d(TAG, "getHome: OTF fetched in ${System.currentTimeMillis() - tOtf}ms (${otfChannelsFromApi.size} channels)")
 
         val selectedGroup = otfService.selectedGroup.ifBlank { "France" }
         val otfFiltered = otfChannelsFromApi.filter { it.group == selectedGroup }
@@ -603,6 +678,34 @@ object LiveTvHubProvider : Provider, IptvProvider {
             }
         } catch (_: Throwable) {}
 
+        // 2026-06-19 : Adrar TV — agrégateur IPTV. Comme OTF : un seul groupe
+        //   affiché à la fois (via selectedGroup) + picker via clic sur le
+        //   titre "Adrar TV - <group>". Géré par CategoryViewHolder.
+        // 2026-06-19 v37 : wrap timeout 4s + catch Throwable comme OTF/Replay.
+        try {
+            val adarService = com.streamflixreborn.streamflix.utils.AdrarTvService
+            val adarChannels = kotlinx.coroutines.withTimeoutOrNull(4_000L) {
+                adarService.fetchChannels()
+            } ?: emptyList()
+            val adarSelectedGroup = adarService.selectedGroup.ifBlank { "France" }
+            val adarFiltered = adarChannels.filter { it.group == adarSelectedGroup }
+            val adarShows = adarFiltered.mapNotNull { ch ->
+                val id = "livehub::adar::${adarService.keyOf(ch)}"
+                if (com.streamflixreborn.streamflix.fragments.player.settings
+                        .IptvBannedChannels.isBanned(id)) return@mapNotNull null
+                TvShow(id = id, title = ch.name).apply {
+                    providerName = "TV Hub"
+                    poster = ch.logo
+                    banner = ch.logo
+                }
+            }
+            if (adarShows.isNotEmpty()) {
+                sections.add(Category(name = "Adrar TV - $adarSelectedGroup", list = adarShows))
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Adrar TV fetch failed (Throwable: ${t.javaClass.simpleName}): ${t.message}")
+        }
+
         // 2026-06-14 (user "3tvbox a fermé, on nettoie sauf l'alias") :
         //   bloc BoxXtemus retiré (= ne pollue plus le hub avec ses 12 catégories
         //   "France TV - TF1+/Canal+/...", qui faisaient doublon avec World Live).
@@ -610,38 +713,49 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   l'user ajoute manuellement une URL playlist via le picker — c'est
         //   juste son injection automatique dans CE hub qui disparait.
 
-        // 2026-06-08 (user "appareil non compatible avec l'API complexe de
-        //   3TVBOX V2 → essayer Dric4rTV plus simple") : sections Dric4rTV
-        //   (Ligue1+, US Sports & NBA, Horse, Nature, Live & DJ, Muzik,
-        //   R4di0, Locales TV). Format JSON simple, URLs directes — pas
-        //   de pipeline html.bet. Les IDs sont déjà préfixés `livehub::dric4rtv::`
-        //   dans Dric4rTvProvider, donc on les passe tels quels.
-        try {
-            val dricSections = com.streamflixreborn.streamflix.providers
-                .Dric4rTvProvider.getHome()
-            for (cat in dricSections) {
-                val rebadged = (cat.list as? List<*>)?.mapNotNull { item ->
-                    val tv = item as? TvShow ?: return@mapNotNull null
-                    // 2026-06-08 : skip si bannie
-                    if (com.streamflixreborn.streamflix.fragments.player.settings
-                            .IptvBannedChannels.isBanned(tv.id)) return@mapNotNull null
-                    // L'id contient déjà "livehub::dric4rtv::..." — pas besoin de re-préfixer.
-                    TvShow(id = tv.id, title = tv.title).apply {
-                        providerName = "TV Hub"
-                        poster = tv.poster
-                        banner = tv.banner
+        // 2026-06-14 (user "donc maintenant tu peux retirer la source du TV
+        //   hub c'est plus gênant") : Dric4rTV DÉSACTIVÉ du TvHub.
+        //   - Les 17 radios sont maintenant HARDCODÉES dans RadioCatalog.kt
+        //     (HARDCODED_DRIC4RTV_RADIOS) avec leurs URLs CDN directes
+        //     (icecast.radiofrance.fr, infomaniak, etc.) → continuent à jouer
+        //     même si dric4rt.free.fr meurt.
+        //   - Les chaînes TV intéressantes (178 chaînes Nature/Muzik/Sports/
+        //     Locales/Horse + "90 Is Good IT") sont migrées vers le data.m3u
+        //     externe (raw.githubusercontent.com/xdata-mix/nx-data/main/data.m3u
+        //     — migré depuis Codeberg en 2026-06-15 car ubuntu-latest plus fiable)
+        //     accessible via le provider World Live (MyIptvProvider URL externe).
+        //   - 23 "Live & DJ set" droppées (= .mp4 statiques sur la Freebox
+        //     personnelle de Dric4rd, pas du vrai live).
+        //
+        //   Le code Dric4rTvProvider.kt RESTE en place pour le moment afin de
+        //   préserver les anciens favoris cœur (IDs `livehub::dric4rtv::*`)
+        //   qui pourraient toujours être joués via getServers/getVideo. Seul
+        //   l'injection auto dans le TvHub disparait.
+        //
+        //   Pour réactiver temporairement (ex: debug), passer DRIC4RTV_IN_HUB
+        //   à true en haut du fichier.
+        if (DRIC4RTV_IN_HUB) {
+            try {
+                val dricSections = com.streamflixreborn.streamflix.providers
+                    .Dric4rTvProvider.getHome()
+                for (cat in dricSections) {
+                    val rebadged = (cat.list as? List<*>)?.mapNotNull { item ->
+                        val tv = item as? TvShow ?: return@mapNotNull null
+                        if (com.streamflixreborn.streamflix.fragments.player.settings
+                                .IptvBannedChannels.isBanned(tv.id)) return@mapNotNull null
+                        TvShow(id = tv.id, title = tv.title).apply {
+                            providerName = "TV Hub"
+                            poster = tv.poster
+                            banner = tv.banner
+                        }
+                    } ?: emptyList()
+                    if (rebadged.isNotEmpty()) {
+                        sections.add(Category(name = "France TV - ${cat.name}", list = rebadged))
                     }
-                } ?: emptyList()
-                if (rebadged.isNotEmpty()) {
-                    // 2026-06-08 (user "renomme Dric4rTV en France TV pour
-                    //   unifier") : ces sections viennent du provider Dric4rTV
-                    //   mais on les affiche comme "France TV - X" pour fondre
-                    //   visuellement avec les autres sections France TV.
-                    sections.add(Category(name = "France TV - ${cat.name}", list = rebadged))
                 }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Dric4rTV getHome failed: ${t.message}")
             }
-        } catch (t: Throwable) {
-            Log.w(TAG, "Dric4rTV getHome failed: ${t.message}")
         }
 
         // 2026-06-08 (user "favoris ça marche sur OTF mais pas France TV /
@@ -703,6 +817,25 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   d'ajouter là, le mettre dans un autre TV Hub +") : World Live TV
         //   déplacé dans LiveTvHubPlusProvider pour ne pas surcharger ce Hub.
 
+        // 2026-06-17 (Phase 1 Replay - port Catchup TV & More Kotlin) :
+        //   fetch data-replay.m3u depuis nx-data → catégories "Replay France X".
+        //   URLs francetv://<si_id> résolues par FrancetvResolver (k7.ftven.fr).
+        // 2026-06-19 v37 (user "tvhub bloqué") : wrap dans withTimeoutOrNull 4s
+        //   + catch Throwable pour rattraper Errors (OOM cache OkHttp etc.) qui
+        //   ne sont pas caught par catch(Exception). Garantit que getHome ne
+        //   peut PAS être bloqué par un fetch réseau qui traîne.
+        try {
+            val replayCats = kotlinx.coroutines.withTimeoutOrNull(4_000L) {
+                fetchReplayCategories()
+            } ?: emptyList()
+            if (replayCats.isNotEmpty()) {
+                sections.addAll(replayCats)
+                Log.d(TAG, "Replay sections added: ${replayCats.size} catégories")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Replay section failed (Throwable: ${t.javaClass.simpleName}): ${t.message}")
+        }
+
         // 2026-05-08 : section "✕ Chaînes bannies" EN BAS du home.
         try {
             val banned = channels.filter {
@@ -738,6 +871,33 @@ object LiveTvHubProvider : Provider, IptvProvider {
         } catch (t: Throwable) {
             Log.w(TAG, "homeChannelsCache populate failed: ${t.message}")
         }
+        // 2026-06-19 v35 (user "ce ne sont pas les bonnes catégories... ça
+        //   devrait être tout ce qu'il y a dans le TV Hub en catégorie") :
+        //   filtre les sections par la catégorie sélectionnée dans
+        //   BoxXtemusCategorySettings. Si ALL_CODE → tout, sinon ne garde
+        //   QUE la section dont le name == currentCode.
+        val ctxForFilter = appContextRef
+        if (ctxForFilter != null) {
+            val currentCode = com.streamflixreborn.streamflix.providers
+                .BoxXtemusCategorySettings.getCurrentCode(ctxForFilter)
+            if (currentCode != com.streamflixreborn.streamflix.providers
+                    .BoxXtemusCategorySettings.ALL_CODE) {
+                val filtered = sections.filter {
+                    it.name.equals(currentCode, ignoreCase = true)
+                }
+                // Cache le résultat filtré aussi
+                cachedHome = filtered
+                cachedHomeSignature = sig
+                cachedHomeAt = System.currentTimeMillis()
+                Log.d(TAG, "getHome: built+cached ${filtered.size} sections (filter=$currentCode)")
+                return filtered
+            }
+        }
+        // Stocke le résultat dans le cache mémoire pour les 60s suivantes.
+        cachedHome = sections.toList()
+        cachedHomeSignature = sig
+        cachedHomeAt = System.currentTimeMillis()
+        Log.d(TAG, "getHome: built+cached ${sections.size} sections in ${System.currentTimeMillis() - tHomeStart}ms (TTL 60s)")
         return sections
     }
 
@@ -782,7 +942,22 @@ object LiveTvHubProvider : Provider, IptvProvider {
         throw UnsupportedOperationException("LiveTvHub n'a pas de films")
 
     override suspend fun getTvShow(id: String): TvShow {
-        // 2026-05-15 : gestion bonus channels (bolaloca + dailymotion + freeshot)
+        // 2026-06-18 v24 : REPLAY TF1+ programme → fetch les épisodes via TF1+ HTML
+        //   Pipeline :
+        //   1. fetch https://www.tf1.fr/<show-path>  (ex: tf1/good-american-family)
+        //   2. trouve tous les liens .../videos/<slug>-<id>.html (= chaque épisode)
+        //   3. extrait pour chaque : titre, S0xE0x, poster
+        //   4. retourne TvShow avec 1 saison "Tous les épisodes"
+        if (id.startsWith("livehub::replay::tf1/")) {
+            val showPath = id.removePrefix("livehub::replay::")
+            return buildTf1ReplayShow(id, showPath)
+        }
+        // 2026-06-19 : REPLAY M6+ programme → fetch les videos via pc.middleware
+        //   /programs/{id}/videos, parse les titres "S\d+ E\d+ - title" pour
+        //   grouper en saisons.
+        if (M6_SERVICES.any { id.startsWith("livehub::replay::$it/") }) {
+            return buildM6ReplayShow(id)
+        }
         val bonusShow = when {
             id.startsWith("livehub::bonus::") -> {
                 val num = id.removePrefix("livehub::bonus::").toIntOrNull()
@@ -863,6 +1038,26 @@ object LiveTvHubProvider : Provider, IptvProvider {
             )
         }
 
+        // 2026-06-19 v40 (user "Le mini player mouline") : pour les IDs
+        //   `livehub::replay::*` qui représentent UN LIVE DIRECT (TMC, M6Live, etc.
+        //   PAS un episode replay) → fallback synthétique. Sans ça getTvShow
+        //   throw IllegalArgumentException → EpisodeManager.addEpisodesFromDb
+        //   catch pas → mini-player stuck en spinning.
+        if (id.startsWith("livehub::replay::")) {
+            // Titre best-effort : cache home OU dernier segment de l'ID
+            val title = homeChannelsCache.firstOrNull { it.first == id }?.second
+                ?: id.removePrefix("livehub::replay::").substringAfterLast("/")
+                    .replace("-", " ").replaceFirstChar { it.uppercase() }
+            return TvShow(id = id, title = title).apply {
+                providerName = "TV Hub"
+            }.copy(
+                seasons = listOf(
+                    Season(id = id, number = 1, title = "En Direct",
+                        episodes = listOf(Episode(id = id, number = 1,
+                            title = "Regarder en Direct", poster = null)))
+                )
+            )
+        }
         val c = channelById[id] ?: throw IllegalArgumentException("Channel inconnue: $id")
         val tvShow = channelToTvShow(c)
         return tvShow.copy(
@@ -874,7 +1069,272 @@ object LiveTvHubProvider : Provider, IptvProvider {
         )
     }
 
-    override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> = emptyList()
+    override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
+        // v28 : TF1+ replay → retourne les épisodes depuis le cache buildTf1ReplayShow
+        if (seasonId.startsWith("livehub::replay::tf1season::")) {
+            return tf1SeasonEpisodesCache[seasonId] ?: run {
+                // Cache miss : extrait showPath du seasonId pour re-build
+                // Format : livehub::replay::tf1season::<showPath>::<seasonNum>
+                val payload = seasonId.removePrefix("livehub::replay::tf1season::")
+                val showPath = payload.substringBeforeLast("::")
+                val seasonNum = payload.substringAfterLast("::").toIntOrNull() ?: 1
+                try {
+                    buildTf1ReplayShow("livehub::replay::$showPath", showPath)
+                    tf1SeasonEpisodesCache[seasonId] ?: emptyList()
+                } catch (e: Exception) {
+                    Log.w(TAG, "getEpisodesBySeason rebuild fail: ${e.message}")
+                    emptyList()
+                }
+            }
+        }
+        // 2026-06-19 : M6+ replay → cache m6SeasonEpisodesCache
+        if (seasonId.startsWith("livehub::replay::m6season::")) {
+            return m6SeasonEpisodesCache[seasonId] ?: run {
+                // Cache miss : Format livehub::replay::m6season::<service>::<program_id>::<seasonNum>
+                val payload = seasonId.removePrefix("livehub::replay::m6season::")
+                val parts = payload.split("::")
+                if (parts.size >= 2) {
+                    val service = parts[0]
+                    val programId = parts[1]
+                    try {
+                        buildM6ReplayShow("livehub::replay::$service/$programId")
+                        m6SeasonEpisodesCache[seasonId] ?: emptyList()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "M6 getEpisodesBySeason rebuild fail: ${e.message}")
+                        emptyList()
+                    }
+                } else emptyList()
+            }
+        }
+        return emptyList()
+    }
+
+    // v28 : cache pour retrouver les épisodes par seasonId (= rebuild évité)
+    private val tf1SeasonEpisodesCache = java.util.concurrent.ConcurrentHashMap<String, List<Episode>>()
+    // 2026-06-19 : cache équivalent pour M6+
+    private val m6SeasonEpisodesCache = java.util.concurrent.ConcurrentHashMap<String, List<Episode>>()
+
+    // ====== 2026-06-19 : M6+ replay show parser ======
+    private val M6_SERVICES = listOf(
+        "m6replay", "w9replay", "6terreplay", "gulli", "tevareplay", "parispremierereplay"
+    )
+
+    /** Fetch /programs/<id>/videos via pc.middleware.6play.fr puis parse les
+     *  titles "S\d+ E\d+ - title" pour grouper en saisons. */
+    private suspend fun buildM6ReplayShow(showId: String): TvShow {
+        // Format showId : livehub::replay::<service>/<program_id>
+        val rest = showId.removePrefix("livehub::replay::")
+        val service = rest.substringBefore("/")
+        val programId = rest.substringAfter("/")
+        val videosUrl = "https://pc.middleware.6play.fr/6play/v2/platforms/m6group_web/services/$service/programs/$programId/videos?csa=6&with=clips,freemiumpacks&type=vi,vc,playlist&limit=100&offset=0"
+        val videosJson = try {
+            withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val req = okhttp3.Request.Builder()
+                    .url(videosUrl)
+                    .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    .build()
+                okhttp3.OkHttpClient.Builder()
+                    .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                    .build()
+                    .newCall(req).execute().use { r -> r.body?.string().orEmpty() }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "M6 replay show fetch failed for $programId: ${e.message}")
+            ""
+        }
+        val showTitle = try {
+            val arr = org.json.JSONArray(videosJson)
+            if (arr.length() > 0) {
+                val firstClip = arr.optJSONObject(0)?.optJSONObject("program")?.optString("title", "")
+                if (!firstClip.isNullOrBlank()) firstClip else "Replay"
+            } else "Replay"
+        } catch (_: Throwable) { "Replay" }
+        // Parse pour extraire S<num> E<num> - title
+        val seasonsMap = LinkedHashMap<Int, MutableList<Episode>>()
+        val flatEpisodes = mutableListOf<Episode>()
+        var firstImage: String? = null
+        try {
+            val arr = org.json.JSONArray(videosJson)
+            for (i in 0 until arr.length()) {
+                val v = arr.optJSONObject(i) ?: continue
+                val vid = v.optString("id", "")
+                if (vid.isBlank()) continue
+                val title = v.optString("title", "").trim()
+                if (title.isBlank()) continue
+                // Image preview
+                val images = v.optJSONArray("images")
+                val imgKey = images?.optJSONObject(0)?.optString("external_key", "") ?: ""
+                val imgUrl = if (imgKey.isNotBlank()) "https://images.6play.fr/v1/images/$imgKey/raw" else null
+                if (firstImage == null && imgUrl != null) firstImage = imgUrl
+                // Parse "S<num> E<num> - title"
+                val match = Regex("""^S(\d+)\s*E(\d+)\s*[-–]\s*(.+)$""").find(title)
+                if (match != null) {
+                    val sNum = match.groupValues[1].toIntOrNull() ?: 1
+                    val eNum = match.groupValues[2].toIntOrNull() ?: 1
+                    val epTitle = match.groupValues[3].trim()
+                    val ep = Episode(
+                        id = "livehub::replay::m6ep::$service::$vid",
+                        number = eNum,
+                        title = "S${"%02d".format(sNum)}E${"%02d".format(eNum)} — $epTitle",
+                        poster = imgUrl,
+                    )
+                    seasonsMap.getOrPut(sNum) { mutableListOf() }.add(ep)
+                } else {
+                    flatEpisodes.add(Episode(
+                        id = "livehub::replay::m6ep::$service::$vid",
+                        number = flatEpisodes.size + 1,
+                        title = title,
+                        poster = imgUrl,
+                    ))
+                }
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "M6 replay parse fail: ${e.message}")
+        }
+        val seasons = if (seasonsMap.isNotEmpty()) {
+            seasonsMap.entries.sortedBy { it.key }.map { (sNum, eps) ->
+                Season(
+                    id = "livehub::replay::m6season::$service::$programId::$sNum",
+                    number = sNum,
+                    title = "Saison $sNum",
+                    episodes = eps.sortedByDescending { it.number },  // épisodes récents en haut
+                )
+            }
+        } else if (flatEpisodes.isNotEmpty()) {
+            listOf(Season(
+                id = "livehub::replay::m6season::$service::$programId::1",
+                number = 1,
+                title = "Tous les épisodes",
+                episodes = flatEpisodes,
+            ))
+        } else {
+            listOf(Season(id = showId, number = 1, title = "Replay",
+                episodes = listOf(Episode(id = showId, number = 1,
+                    title = "Voir", poster = firstImage))))
+        }
+        for (s in seasons) {
+            m6SeasonEpisodesCache[s.id] = s.episodes
+        }
+        Log.d(TAG, "buildM6ReplayShow $service/$programId: ${seasons.size} seasons, ${seasons.sumOf { it.episodes.size }} total eps")
+        return TvShow(id = showId, title = showTitle, seasons = seasons).apply {
+            providerName = "TV Hub"
+            this.poster = firstImage
+            this.banner = firstImage
+        }
+    }
+
+    // ===== v24 : TF1+ replay show parser =====
+    /** Parse la page programme TF1+ pour extraire la liste des épisodes.
+     *  URL exemple : https://www.tf1.fr/tf1/good-american-family
+     *  Cherche les liens `<a href="/tf1/<show>/videos/<title-with-episodeNum>-<id>.html">`
+     *  + le titre dans `<h3>` ou `aria-label` parent. */
+    private suspend fun buildTf1ReplayShow(showId: String, showPath: String): TvShow {
+        val pageUrl = "https://www.tf1.fr/$showPath"
+        val html = try {
+            withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val req = okhttp3.Request.Builder()
+                    .url(pageUrl)
+                    .header("User-Agent",
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+                    .header("Referer", "https://www.tf1.fr/")
+                    .build()
+                okhttp3.OkHttpClient.Builder()
+                    .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                    .build()
+                    .newCall(req).execute().use { r -> r.body?.string().orEmpty() }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "TF1 replay show fetch failed for $showPath: ${e.message}")
+            ""
+        }
+        // Titre programme (depuis <title> ou <h1>)
+        val showTitle = Regex("""<title>([^<]+)\|\s*TF1\+</title>""")
+            .find(html)?.groupValues?.get(1)?.trim()
+            ?: showPath.substringAfterLast("/")
+                .split("-").joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+        // Poster (depuis 1ère image ou meta og:image)
+        val poster = Regex("""<meta\s+property="og:image"\s+content="([^"]+)"""")
+            .find(html)?.groupValues?.get(1)
+            ?: Regex("""https://photos\.tf1\.fr/[^"\s]+@3x\.(?:avif|webp|jpg)""")
+                .find(html)?.value
+        // Cherche tous les liens vidéo + titre + saison/épisode + image
+        // Pattern : /<chan>/<show>/videos/<slug-s01-e01-...-numId>.html
+        val episodes = mutableListOf<Episode>()
+        val seenIds = mutableSetOf<String>()
+        val videoLinkRx = Regex("""/[a-z0-9-]+/[a-z0-9-]+/videos?/([a-z0-9-]+-s(\d{1,2})-e(\d{1,3})-[a-z0-9-]+-(\d{6,14}))\.html""")
+        // Cherche aussi les liens sans S0xE0x (= bonus, replay sans num saison)
+        val anyVideoLinkRx = Regex("""/[a-z0-9-]+/[a-z0-9-]+/videos?/([a-z0-9-]+-(\d{6,14}))\.html""")
+        // Map num → (season, episode)
+        val seasonsMap = LinkedHashMap<Int, MutableList<Episode>>()
+        for (m in videoLinkRx.findAll(html)) {
+            val (slug, sNum, eNum, _) = m.destructured
+            if (slug in seenIds) continue
+            seenIds.add(slug)
+            val season = sNum.toIntOrNull() ?: 1
+            val episode = eNum.toIntOrNull() ?: 1
+            // Titre de l'épisode = essaye d'extraire un titre lisible du slug
+            val titlePart = slug.substringAfter("-s$sNum-e$eNum-")
+                .replace("-", " ")
+                .replaceFirstChar { it.uppercase() }
+            val ep = Episode(
+                id = "livehub::replay::tf1ep::$slug",
+                number = episode,
+                title = "S${"%02d".format(season)}E${"%02d".format(episode)} — $titlePart",
+                poster = poster
+            )
+            seasonsMap.getOrPut(season) { mutableListOf() }.add(ep)
+        }
+        // Si aucune saison détectée, fallback : liste plate de vidéos
+        if (seasonsMap.isEmpty()) {
+            for (m in anyVideoLinkRx.findAll(html)) {
+                val (slug, _) = m.destructured
+                if (slug in seenIds) continue
+                seenIds.add(slug)
+                val titlePart = slug.split("-").dropLast(1)
+                    .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+                episodes.add(Episode(
+                    id = "livehub::replay::tf1ep::$slug",
+                    number = episodes.size + 1,
+                    title = titlePart,
+                    poster = poster
+                ))
+            }
+        }
+        val seasons = if (seasonsMap.isNotEmpty()) {
+            seasonsMap.entries.sortedBy { it.key }.map { (sNum, eps) ->
+                Season(
+                    id = "livehub::replay::tf1season::$showPath::$sNum",
+                    number = sNum,
+                    title = "Saison $sNum",
+                    episodes = eps.sortedBy { it.number }
+                )
+            }
+        } else if (episodes.isNotEmpty()) {
+            listOf(Season(
+                id = "livehub::replay::tf1season::$showPath::1",
+                number = 1,
+                title = "Tous les épisodes",
+                episodes = episodes
+            ))
+        } else {
+            // Pas d'épisode trouvé : 1 "Voir" qui lance le 1er flux dispo
+            listOf(Season(id = showId, number = 1, title = "Replay",
+                episodes = listOf(Episode(id = showId, number = 1,
+                    title = "Voir", poster = poster))))
+        }
+        // v28 : remplit le cache pour getEpisodesBySeason
+        for (s in seasons) {
+            tf1SeasonEpisodesCache[s.id] = s.episodes
+        }
+        Log.d(TAG, "buildTf1ReplayShow $showPath: html=${html.length}, seasons=${seasonsMap.size}, flatEps=${episodes.size}, finalSeasons=${seasons.size}, total eps=${seasons.sumOf { it.episodes.size }}")
+        return TvShow(id = showId, title = showTitle, seasons = seasons).apply {
+            providerName = "TV Hub"
+            this.poster = poster
+            this.banner = poster
+        }
+    }
 
     override suspend fun getGenre(id: String, page: Int): Genre =
         throw UnsupportedOperationException("LiveTvHub n'a pas de genres")
@@ -897,6 +1357,87 @@ object LiveTvHubProvider : Provider, IptvProvider {
      *  "canalplus", mais le Hub cherchait sous "canal" (witvKey) → fallback
      *  déclenché à tort, l'user voyait toute la liste agrégée. */
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        // v24 : épisode replay TF1+ (= id "livehub::replay::tf1ep::<slug>")
+        //   → résout via TF1Resolver avec le slug video complet, qui fait :
+        //   slug → fetch page video → extrait UUID → mediainfo → délivery URL.
+        if (id.startsWith("livehub::replay::tf1ep::")) {
+            val slug = id.removePrefix("livehub::replay::tf1ep::")
+            // On reconstruit l'URL tf1plus:// avec le path complet de la vidéo
+            //   TF1Resolver gère le format "tf1plus://<chan>/<show>/videos/<slug>.html"
+            //   en passant directement par resolveProgramPath qui détecte le `/videos/`.
+            // On ne connaît pas le chan ni le show ici → utilise un format simplifié
+            //   tf1plus://VIDEO_SLUG/<slug> qui sera traité.
+            return listOf(
+                Video.Server(
+                    id = id,
+                    name = "TF1+ replay",
+                    src = "tf1plus://VIDEO/$slug",
+                )
+            )
+        }
+        // 2026-06-19 : Adrar TV — id `livehub::adar::<key>` → résout via
+        //   AdrarTvService.getUrlForChannel(key). Le src est l'URL directe.
+        if (id.startsWith("livehub::adar::")) {
+            val key = id.removePrefix("livehub::adar::")
+            val adarUrl = com.streamflixreborn.streamflix.utils.AdrarTvService
+                .getUrlForChannel(key)
+            if (adarUrl != null) {
+                val (url, _) = adarUrl
+                return listOf(
+                    Video.Server(
+                        id = id,
+                        name = "Adrar TV",
+                        src = url,
+                    )
+                )
+            }
+            return emptyList()
+        }
+        // 2026-06-19 v38 : chaîne LIVE M6+ (= id "livehub::replay::m6live::<service>")
+        //   → résout via M6Resolver en mode LIVE (= renvoie m6live:// pour
+        //   que M6Resolver fetche le live stream m3u8 depuis 6play API).
+        if (id.startsWith("livehub::replay::m6live::")) {
+            val service = id.removePrefix("livehub::replay::m6live::")
+            return listOf(
+                Video.Server(
+                    id = id,
+                    name = "M6+ Live",
+                    src = "m6live://$service",
+                )
+            )
+        }
+        // 2026-06-19 : épisode replay M6+ (= id "livehub::replay::m6ep::<service>::<clip_id>")
+        //   → résout via M6Resolver direct sur la vidéo.
+        if (id.startsWith("livehub::replay::m6ep::")) {
+            val payload = id.removePrefix("livehub::replay::m6ep::")
+            val service = payload.substringBefore("::")
+            val videoId = payload.substringAfter("::")
+            // M6Resolver gère m6play://<service>/<program_or_video_id> et le détecte
+            //   via le préfixe "clip_" pour aller direct à la vidéo (= skip /programs/{id}/videos)
+            return listOf(
+                Video.Server(
+                    id = id,
+                    name = "M6+ replay",
+                    src = "m6play://$service/$videoId",
+                )
+            )
+        }
+        // 2026-06-17 (Phase 1 Replay) : chaîne replay = id "livehub::replay::<si_id>"
+        //   → retourne le src complet stocké dans replayProgramSrcs (= peut être
+        //   francetv://, arte://, tf1plus://, m6play://).
+        if (id.startsWith("livehub::replay::")) {
+            val siId = id.removePrefix("livehub::replay::")
+            val title = replayProgramTitles[siId] ?: "Replay"
+            // Fallback francetv:// pour rétrocompat si le src n'a pas été stocké
+            val src = replayProgramSrcs[siId] ?: "francetv://$siId"
+            return listOf(
+                Video.Server(
+                    id = "livehub::replay::$siId",
+                    name = title,
+                    src = src,
+                )
+            )
+        }
         // 2026-06-08 : France TV (BoxXtemus) — délègue au provider natif. Le
         //   Video.Server retourné aura un id préfixé "bxt-ch::" qui sera
         //   routé dans getVideo() vers BoxXtemusProvider.getVideo().
@@ -1071,6 +1612,17 @@ object LiveTvHubProvider : Provider, IptvProvider {
     /** getVideo : délègue au provider d'origine selon le prefix de l'id.
      *  Couvre tous les providers IPTV via IptvCrossDelegate. */
     override suspend fun getVideo(server: Video.Server): Video {
+        // 2026-06-17 (Phase 1 Replay) : URL francetv://<si_id> → FrancetvResolver
+        if (server.id.startsWith("livehub::replay::")) {
+            return com.streamflixreborn.streamflix.providers
+                .BoxXtemusProvider.resolveExternalChannel(
+                    streamUrl = server.src,
+                    customUa = "Mozilla/5.0",
+                    customReferer = "https://www.france.tv/",
+                    channelName = server.name,
+                    channelKey = server.id,
+                )
+        }
         // 2026-06-08 : France TV (BoxXtemus) — server.id préfixé "bxt-ch::"
         //   par BoxXtemusProvider.getServers. Pipeline résolution :
         //   RSS feed, ftven auth, anti-bot HTML — tout est encapsulé dans
@@ -1091,6 +1643,20 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 .WorldLiveTvProvider.getVideo(server)
         }
 
+        // 2026-06-19 : Adrar TV — URL directe HLS ou TS. Type détecté de l'URL.
+        //   Headers (UA spécifique) viennent de AdrarTvService selon la chaîne.
+        if (server.id.startsWith("livehub::adar::")) {
+            val key = server.id.removePrefix("livehub::adar::")
+            val resolved = com.streamflixreborn.streamflix.utils.AdrarTvService
+                .getUrlForChannel(key)
+            val (src, headers) = resolved ?: (server.src to emptyMap())
+            val isHls = src.contains(".m3u8", ignoreCase = true)
+            return Video(
+                source = src,
+                type = if (isHls) "application/vnd.apple.mpegurl" else "video/mp2t",
+                headers = headers,
+            )
+        }
         // 2026-05-15 : bonus channels — délègue à Extractor.extract qui route
         // vers Hoca8Extractor (bolaloca/cartelive/embedme) ou DailymotionExtractor.
         // 2026-05-31 : OTF TV — URLs directes m3u8, pas d'extraction
@@ -1262,5 +1828,349 @@ object LiveTvHubProvider : Provider, IptvProvider {
     /** 2026-05-18 v85 : LiveTvHub agrège WiTV/Ola/Vegeta, le clear est délégué à eux. */
     fun clearCache() {
         // no-op : pas de cache propre (forward via WiTV/Ola/Vegeta).
+    }
+
+    // ────────────── 2026-06-17 Phase 1 Replay (Port Catchup TV & More) ──────────────
+    private const val REPLAY_M3U_URL =
+        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data-replay.m3u"
+    @Volatile private var replayCacheTs: Long = 0L
+    @Volatile private var replayCacheSections: List<Category> = emptyList()
+    /** Map si_id → titre programme, pour réutiliser dans getServers. */
+    private val replayProgramTitles: MutableMap<String, String> = java.util.concurrent.ConcurrentHashMap()
+    /** 2026-06-18 (Phase 2 — TF1+/M6) : map siId → src complet (= "francetv://..."
+     *  ou "arte://..." ou "tf1plus://..." ou "m6play://..."). Permet à
+     *  getServers de retourner le bon protocole pour la résolution. */
+    private val replayProgramSrcs: MutableMap<String, String> = java.util.concurrent.ConcurrentHashMap()
+    // 2026-06-18 (user "Là j'ai refresh Le nouveau Les catégories
+    //   n'apparaissent toujours pas dans replay") : 6h trop long → user
+    //   ne voit pas les MAJ après push. Maintenant : RAM cache 30 min +
+    //   re-fetch FORCÉ au cold start (warmReplayCache → forceRefresh=true).
+    //   Le cache disque sert d'affichage instantané avant que le re-fetch
+    //   en background ne ramène les vraies données fraîches.
+    private const val REPLAY_TTL_MS = 30L * 60 * 1000  // 30 min
+    /** Tag posé pendant un pre-fetch en background pour éviter qu'un appel
+     *  bloquant en parallèle fasse 2 fetch simultanés. */
+    @Volatile private var replayFetchInProgress: Boolean = false
+    /** Fichier de cache disque (= persisté entre redémarrages app). */
+    @Volatile private var replayDiskCacheFile: java.io.File? = null
+    /** Application context capturé au cold start. Sert à savoir si TF1+/M6
+     *  sont connectés pour décider d'afficher les cards "Se connecter". */
+    @Volatile private var appContextRef: android.content.Context? = null
+
+    /** Délégué à appeler une fois (= au cold start) pour donner accès au
+     *  cacheDir Android. Stocké pour les fetchs ultérieurs. */
+    fun installReplayDiskCache(cacheDir: java.io.File) {
+        if (replayDiskCacheFile == null) {
+            replayDiskCacheFile = java.io.File(cacheDir, "replay-m3u.cache")
+        }
+    }
+
+    /** Capture l'application context pour le parser (= check login state). */
+    fun installAppContext(ctx: android.content.Context) {
+        if (appContextRef == null) appContextRef = ctx.applicationContext
+    }
+
+    private val replayClient by lazy {
+        okhttp3.OkHttpClient.Builder()
+            .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+    }
+
+    /** 2026-06-18 (user "TF1 en premier et dans l'ordre") : ordre canonique
+     *  TNT FR. Catégories non listées sont rejetées en queue avec priority
+     *  élevée (= au final). */
+    private val REPLAY_CATEGORY_ORDER: Map<String, Int> = linkedMapOf(
+        "Live TF1+" to 5,
+        "Live M6+" to 6,
+        "Replay TF1" to 10,
+        "Replay TMC" to 11,
+        "Replay TFX" to 12,
+        "Replay TF1 Séries Films" to 13,
+        "Replay LCI" to 14,
+        "Replay France 2" to 20,
+        "Replay France 3" to 21,
+        "Replay France 4" to 22,
+        "Replay France 5" to 23,
+        "Replay Franceinfo" to 24,
+        "Replay M6" to 30,
+        "Replay W9" to 31,
+        "Replay 6ter" to 32,
+        "Replay Gulli" to 33,
+        "Replay Paris Première" to 34,
+        "Replay Téva" to 35,
+        "Arte Cinéma" to 40,
+        "Arte Séries et fictions" to 41,
+        "Arte Documentaires" to 42,
+        "Arte Sciences" to 43,
+        "Arte Culture et pop" to 44,
+        "Arte Histoire" to 45,
+        "Arte Arts" to 46,
+        "Arte Société" to 47,
+    )
+
+    private fun parseReplayM3u(body: String): List<Category> {
+        if (body.isBlank() || "#EXTM3U" !in body) return emptyList()
+        val groups = LinkedHashMap<String, MutableList<TvShow>>()
+        val lines = body.lines()
+        var pendingExtinf: String? = null
+        for (line in lines) {
+            val t = line.trim()
+            if (t.startsWith("#EXTINF:")) {
+                pendingExtinf = t
+            } else if (pendingExtinf != null &&
+                       (t.startsWith("francetv://") || t.startsWith("arte://")
+                        || t.startsWith("tf1plus://") || t.startsWith("tf1live://")
+                        || t.startsWith("m6play://") || t.startsWith("m6live://"))) {
+                val src = t
+                val siId = src.substringAfter("://").trim()
+                val title = pendingExtinf!!.substringAfterLast(",").trim()
+                val groupTitle = Regex("""group-title="([^"]+)"""")
+                    .find(pendingExtinf!!)?.groupValues?.get(1) ?: "Replay"
+                val logo = Regex("""tvg-logo="([^"]+)"""")
+                    .find(pendingExtinf!!)?.groupValues?.get(1) ?: ""
+                // 2026-06-19 : tvg-type="movie" sur les films/spectacles/etc.
+                //   pour afficher le badge "Film" au lieu de "Série" (= ViewHolder
+                //   utilise tvShow.isMovie pour distinguer).
+                val tvgType = Regex("""tvg-type="([^"]+)"""")
+                    .find(pendingExtinf!!)?.groupValues?.get(1) ?: ""
+                val tv = TvShow(
+                    id = "livehub::replay::$siId",
+                    title = title,
+                ).apply {
+                    providerName = "TV Hub"
+                    poster = logo
+                    banner = logo
+                    if (tvgType == "movie") isMovie = true
+                }
+                groups.getOrPut(groupTitle) { mutableListOf() }.add(tv)
+                replayProgramTitles[siId] = title
+                replayProgramSrcs[siId] = src
+                pendingExtinf = null
+            } else if (t.isEmpty() || !t.startsWith("#")) {
+                pendingExtinf = null
+            }
+        }
+        // 2026-06-18 (user "Ton bouton refresh il devrait être Tout en haut
+        //   à côté de La planète… il a rien à faire là") : RETIRE la card
+        //   refresh. Le bouton est maintenant dans la top-bar à côté du globe.
+        // 2026-06-18 (user "faut peut être que les catégories soient fixées
+        //   pour se connecter" + "J'ai connecté mon TF1 en replay Il a disparu
+        //   carrément") : INSÈRE TOUJOURS les catégories TF1+/M6, qu'on soit
+        //   connecté ou non. Comme ça :
+        //   - Pas connecté → card "🔓 Connexion" + (programmes M3U si dispo)
+        //   - Connecté + 0 programme → catégorie reste visible (sinon l'user
+        //     ne voit plus que TF1 a disparu après s'être connecté)
+        //   - Connecté + programmes → catégorie avec les programmes
+        val appCtxForFix = appContextRef
+        if (appCtxForFix != null) {
+            val tf1Cats = listOf("Replay TF1", "Replay TMC", "Replay TFX",
+                                  "Replay TF1 Séries Films", "Replay LCI")
+            val m6Cats  = listOf("Replay M6", "Replay W9", "Replay 6ter",
+                                  "Replay Gulli", "Replay Paris Première", "Replay Téva")
+            for (cat in tf1Cats) groups.getOrPut(cat) { mutableListOf() }
+            for (cat in m6Cats) groups.getOrPut(cat) { mutableListOf() }
+        }
+        // 2026-06-19 v38 (user "il nous manque toujours la catégorie M6 Live
+        //   tu mets toutes les chaînes à part celle qu'il faut payer") :
+        //   injecte la catégorie "Live M6+" avec les 4 chaînes M6+ GRATUITES :
+        //   M6, W9, 6ter, Gulli. (Paris Première et Téva sont premium-only
+        //   chez M6 → exclues.) ID format livehub::replay::m6live::<service>.
+        run {
+            val liveM6Cat = groups.getOrPut("Live M6+") { mutableListOf() }
+            // Si déjà alimenté par data-replay.m3u → on ne re-ajoute pas pour
+            //   éviter les doublons. Sinon hardcode les 4 chaînes.
+            if (liveM6Cat.isEmpty()) {
+                // 2026-06-19 fix : les URLs `6play.fr/m6_dist/logo_*.png` sont
+                //   des 404. On utilise tv-logos GitHub (CC0 public).
+                val live6 = listOf(
+                    Triple("M6",     "m6",    "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/france/m6-fr.png"),
+                    Triple("W9",     "w9",    "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/france/w9-fr.png"),
+                    Triple("6ter",   "6ter",  "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/france/6ter-fr.png"),
+                    Triple("Gulli",  "gulli", "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/france/gulli-fr.png"),
+                )
+                for ((label, service, logo) in live6) {
+                    val tv = TvShow(
+                        id = "livehub::replay::m6live::$service",
+                        title = label,
+                    ).apply {
+                        providerName = "TV Hub"
+                        poster = logo
+                        banner = logo
+                    }
+                    liveM6Cat.add(tv)
+                    replayProgramTitles[service] = label
+                    replayProgramSrcs[service] = "m6live://$service"
+                }
+            }
+        }
+        // Tri canonique : TF1, TMC, ..., France 2, ..., M6, ..., Arte, ...
+        val sortedEntries = groups.entries.sortedWith(
+            compareBy(
+                { REPLAY_CATEGORY_ORDER[it.key] ?: 999 },
+                { it.key }
+            )
+        )
+        // 2026-06-18 (user "Le système de connexion à côté du nom de la
+        //   Playlist") : pour chaque catégorie M6/TF1+, insère une "card
+        //   Se connecter" en TÊTE de liste. Clic = lance LoginWebViewActivity
+        //   (intercepté dans TvShowViewHolder). Card masquée si déjà connecté.
+        val appCtx = appContextRef
+        return sortedEntries.map { (cat, items) ->
+            val list = items.toMutableList()
+            if (appCtx != null) {
+                // 2026-06-19 (user "les logos de connexion devraient être devant
+                //   les live M6 et TF1") : inclus aussi "Live TF1+" / "Live M6+"
+                //   pour que la card "🔓 Connexion" apparaisse EN TÊTE de la
+                //   section live, devant les chaînes M6/TF1 qui ne marcheront
+                //   pas tant que l'user n'est pas connecté.
+                val isTf1Plus = cat in setOf("Live TF1+", "Replay TF1", "Replay TMC", "Replay TFX",
+                                              "Replay TF1 Séries Films", "Replay LCI")
+                val isM6 = cat in setOf("Live M6+", "Replay M6", "Replay W9", "Replay 6ter",
+                                        "Replay Gulli", "Replay Paris Première", "Replay Téva")
+                val tf1Logged = com.streamflixreborn.streamflix.utils.TF1Auth.isLoggedIn(appCtx)
+                val m6Logged = com.streamflixreborn.streamflix.utils.M6Auth.isLoggedIn(appCtx)
+                if (isTf1Plus) {
+                    if (!tf1Logged) {
+                        list.add(0, makeLoginCard("tf1", "🔓 Connexion TF1+"))
+                    } else if (list.isEmpty()) {
+                        // 2026-06-18 (user "J'ai connecté mon TF1 Il a disparu
+                        //   carrément") : connecté mais aucun programme M3U →
+                        //   card "✓ Connecté" pour montrer que la catégorie
+                        //   existe + en attente du M3U.
+                        list.add(0, makeStatusCard("tf1", "✓ TF1+ connecté\n(programmes en attente)"))
+                    }
+                } else if (isM6) {
+                    if (!m6Logged) {
+                        list.add(0, makeLoginCard("m6", "🔓 Connexion 6play"))
+                    } else if (list.isEmpty()) {
+                        list.add(0, makeStatusCard("m6", "✓ 6play connecté\n(programmes en attente)"))
+                    }
+                }
+            }
+            Category(name = cat, list = list)
+        }
+    }
+
+    /** Crée une card "✓ Connecté" comme TvShow synthétique. Clic = ouvre la
+     *  WebView de login (= permet à l'user de basculer compte ou logout). */
+    private fun makeStatusCard(service: String, label: String): TvShow {
+        return TvShow(
+            id = "livehub::replay::__login_${service}__",  // même id → relance login (= switch compte)
+            title = label,
+        ).apply {
+            providerName = "TV Hub"
+            poster = ""
+            banner = ""
+        }
+    }
+
+    /** Crée une card "Se connecter" comme TvShow synthétique. Son id
+     *  spécial sera intercepté par TvShowViewHolder pour lancer
+     *  LoginWebViewActivity au lieu du player. */
+    private fun makeLoginCard(service: String, label: String): TvShow {
+        // 2026-06-18 (user "image cassée imgur") : laisse poster vide →
+        //   placeholder card propre avec juste le texte (titre/label).
+        return TvShow(
+            id = "livehub::replay::__login_${service}__",
+            title = label,
+        ).apply {
+            providerName = "TV Hub"
+            poster = ""
+            banner = ""
+        }
+    }
+
+    /** Fetch + parse data-replay.m3u → Category par chaîne, TRIÉ par
+     *  ordre canonique TNT FR. Cache RAM + disque. Non-bloquant si vide.
+     *  `forceRefresh=true` (= cold start) ignore le cache et re-fetch. */
+    private suspend fun fetchReplayCategories(forceRefresh: Boolean = false): List<Category> {
+        val now = System.currentTimeMillis()
+        // 1. Cache RAM frais (sauf si force)
+        if (!forceRefresh && replayCacheSections.isNotEmpty() && now - replayCacheTs < REPLAY_TTL_MS) {
+            return replayCacheSections
+        }
+        // 2. Cache disque (sauf si force)
+        val diskFile = replayDiskCacheFile
+        if (!forceRefresh && diskFile != null && diskFile.exists()) {
+            val diskAge = now - diskFile.lastModified()
+            if (diskAge < REPLAY_TTL_MS) {
+                try {
+                    val body = diskFile.readText()
+                    val parsed = parseReplayM3u(body)
+                    if (parsed.isNotEmpty()) {
+                        replayCacheSections = parsed
+                        replayCacheTs = now
+                        Log.d(TAG, "Replay loaded from DISK cache: ${parsed.size} cats (age=${diskAge / 1000}s)")
+                        return parsed
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "Replay disk cache read failed: ${e.message}")
+                }
+            }
+        }
+        // 3. Fetch réseau, mais ne bloque QU'UNE FOIS — les appels concurrents
+        //    retournent le cache RAM ou empty.
+        if (replayFetchInProgress) {
+            Log.d(TAG, "Replay fetch already in progress, return cached (${replayCacheSections.size} cats)")
+            return replayCacheSections
+        }
+        replayFetchInProgress = true
+        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val req = okhttp3.Request.Builder().url(REPLAY_M3U_URL)
+                    .header("User-Agent", "Mozilla/5.0").build()
+                val body = replayClient.newCall(req).execute().use { it.body?.string().orEmpty() }
+                if (body.isBlank() || "#EXTM3U" !in body) {
+                    Log.w(TAG, "Replay M3U empty or invalid")
+                    return@withContext emptyList<Category>()
+                }
+                val parsed = parseReplayM3u(body)
+                replayCacheSections = parsed
+                replayCacheTs = now
+                // Persiste sur disque
+                try {
+                    diskFile?.writeText(body)
+                    Log.d(TAG, "Replay saved to DISK cache (${body.length} bytes)")
+                } catch (e: Throwable) {
+                    Log.w(TAG, "Replay disk cache write failed: ${e.message}")
+                }
+                Log.d(TAG, "Replay parsed: ${parsed.size} catégories, ${replayProgramTitles.size} programmes")
+                parsed
+            } catch (e: Throwable) {
+                Log.w(TAG, "Replay fetch failed: ${e.message}")
+                emptyList()
+            } finally {
+                replayFetchInProgress = false
+            }
+        }
+    }
+
+    /** 2026-06-18 (user "ça met du temps à charger Le replay" + "Là j'ai
+     *  refresh Le nouveau Les catégories n'apparaissent toujours pas") :
+     *  appelé une fois au cold start (StreamFlixApp.onCreate). Pré-charge
+     *  le M3U replay en background. forceRefresh=true → ignore le cache
+     *  disque et va chercher la VRAIE dernière version du M3U depuis
+     *  GitHub. Le cache disque reste utilisé comme affichage instantané
+     *  au démarrage avant que le re-fetch ne complète. */
+    suspend fun warmReplayCache() {
+        try {
+            fetchReplayCategories(forceRefresh = true)
+        } catch (e: Throwable) {
+            Log.w(TAG, "warmReplayCache failed: ${e.message}")
+        }
+    }
+
+    /** 2026-06-18 (user "on peut pas mettre un bouton pour ça Dans le TVhub
+     *  Pour forcer le Refresh") : vide TOUS les caches replay (RAM + disque)
+     *  et relance immédiatement un fetch frais. Retourne le nombre de
+     *  catégories obtenues (= 0 si KO réseau). À appeler depuis l'UI. */
+    suspend fun forceRefreshReplay(): Int {
+        replayCacheSections = emptyList()
+        replayCacheTs = 0L
+        try { replayDiskCacheFile?.delete() } catch (_: Throwable) {}
+        Log.d(TAG, "forceRefreshReplay: cache cleared, re-fetching from network")
+        val cats = fetchReplayCategories(forceRefresh = true)
+        return cats.size
     }
 }

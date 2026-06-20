@@ -27,6 +27,16 @@ object HomeCacheStore {
             return payload.toCategories()
         }
 
+        // 2026-06-17 (user "sur Vavoo ça sert à rien de garder le cache à la
+        //   fermeture") : Vavoo = RAM only. Boot frais. Fix bug "panneau vide
+        //   après update APK" rapporté par Fred, Fantomial, Nani (= cache
+        //   disque devient stale entre 2 versions, désinstall propre répare).
+        if (provider.name.equals("Vavoo TV", ignoreCase = true)) {
+            val legacy = cacheFile(context, cacheKey)
+            if (legacy.exists()) legacy.delete()
+            return null
+        }
+
         val file = cacheFile(context, cacheKey)
         if (!file.exists()) return null
 
@@ -63,6 +73,9 @@ object HomeCacheStore {
             val cacheKey = cacheKey(provider)
             memoryCache[cacheKey] = payload
             writeTimestamps[cacheKey] = System.currentTimeMillis()
+            // 2026-06-17 (user "sur Vavoo ça sert à rien de garder le cache à
+            //   la fermeture") : Vavoo = RAM only. Skip disque.
+            if (provider.name.equals("Vavoo TV", ignoreCase = true)) return@runCatching
             cacheFile(context, cacheKey).apply {
                 parentFile?.mkdirs()
                 writeText(gson.toJson(payload))

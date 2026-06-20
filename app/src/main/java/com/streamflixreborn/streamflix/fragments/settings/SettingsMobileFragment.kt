@@ -1011,6 +1011,239 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             startActivity(android.content.Intent(requireContext(), com.streamflixreborn.streamflix.activities.sync.DeviceSyncActivity::class.java))
             true
         }
+
+        // 2026-06-19 v35 (user "on n'a pas la possibilité de se déconnecter ou
+        //   se reconnecter de TF1 manuellement ou M6 dans les paramètres
+        //   fournisseur ... voire même suppression du mot de passe et du mail
+        //   sans effacer toutes les données") : sur TV Hub provider, injecte
+        //   2 options "Compte TF1+" et "Compte M6+" avec actions
+        //   Connexion / Reconnexion / Déconnexion.
+        injectTvHubAccountPreferences()
+    }
+
+    /** Ajoute dynamiquement les boutons compte TF1+/M6+ à pc_provider_settings
+     *  si le provider courant est TV Hub. Clic sur "Compte X" → dialog avec
+     *  3 options : reconnecter, déconnecter (= clear token + cookies), annuler. */
+    private fun injectTvHubAccountPreferences() {
+        val provName = com.streamflixreborn.streamflix.utils.UserPreferences
+            .currentProvider?.name ?: return
+        if (provName != "TV Hub") return
+        val cat = findPreference<PreferenceCategory>("pc_provider_settings") ?: return
+        cat.isVisible = true
+        // Cache "Aucune option de fournisseur disponible" — on a 2 options.
+        findPreference<PreferenceCategory>("pc_provider_empty_state")?.isVisible = false
+        // TF1+
+        val tf1Key = "tvhub_account_tf1"
+        if (findPreference<Preference>(tf1Key) == null) {
+            val pref = Preference(requireContext()).apply {
+                key = tf1Key
+                title = "Compte TF1+"
+                isIconSpaceReserved = false
+                summary = tf1AccountSummary()
+                setOnPreferenceClickListener {
+                    showAccountActionDialog(
+                        serviceLabel = "TF1+",
+                        isLoggedIn = com.streamflixreborn.streamflix.utils.TF1Auth.isLoggedIn(requireContext()),
+                        onConnect = {
+                            com.streamflixreborn.streamflix.activities.LoginWebViewActivity.start(
+                                requireContext(),
+                                com.streamflixreborn.streamflix.activities.LoginWebViewActivity.SERVICE_TF1,
+                            )
+                        },
+                        onDisconnect = {
+                            com.streamflixreborn.streamflix.utils.TF1Auth.clearToken(requireContext())
+                            clearWebViewAccountCookies(
+                                listOf(
+                                    "tf1.fr", ".tf1.fr", "compte.tf1.fr",
+                                    "www.tf1.fr", "accounts.tf1.fr",
+                                ),
+                            )
+                            summary = tf1AccountSummary()
+                            Toast.makeText(requireContext(),
+                                "TF1+ : déconnecté", Toast.LENGTH_SHORT).show()
+                        },
+                    )
+                    true
+                }
+            }
+            cat.addPreference(pref)
+        }
+        // M6+
+        val m6Key = "tvhub_account_m6"
+        if (findPreference<Preference>(m6Key) == null) {
+            val pref = Preference(requireContext()).apply {
+                key = m6Key
+                title = "Compte M6+ (6play)"
+                isIconSpaceReserved = false
+                summary = m6AccountSummary()
+                setOnPreferenceClickListener {
+                    showAccountActionDialog(
+                        serviceLabel = "M6+",
+                        isLoggedIn = com.streamflixreborn.streamflix.utils.M6Auth.isLoggedIn(requireContext()),
+                        onConnect = {
+                            com.streamflixreborn.streamflix.activities.LoginWebViewActivity.start(
+                                requireContext(),
+                                com.streamflixreborn.streamflix.activities.LoginWebViewActivity.SERVICE_M6,
+                            )
+                        },
+                        onDisconnect = {
+                            com.streamflixreborn.streamflix.utils.M6Auth.clearToken(requireContext())
+                            // 2026-06-19 v41 (user "la reconnexion fonctionne mal") :
+                            //   Gigya garde des cookies sur des SOUS-domaines obscurs
+                            //   (eu1.gigya.com, socialize.eu1.gigya.com, etc.). Pour
+                            //   tuer DÉFINITIVEMENT la session, on passe par
+                            //   removeAllCookies → nucléaire mais 100% effectif.
+                            //   Tous les autres providers (TF1+, etc.) gardent leurs
+                            //   tokens dans SharedPrefs, ils se reconnecteront auto.
+                            clearAllWebViewCookiesAndStorage()
+                            summary = m6AccountSummary()
+                            Toast.makeText(requireContext(),
+                                "M6+ : déconnecté (cookies WebView vidés)", Toast.LENGTH_SHORT).show()
+                        },
+                    )
+                    true
+                }
+            }
+            cat.addPreference(pref)
+        }
+    }
+
+    private fun tf1AccountSummary(): String =
+        if (com.streamflixreborn.streamflix.utils.TF1Auth.isLoggedIn(requireContext()))
+            "✓ Connecté — cliquer pour reconnecter ou déconnecter"
+        else "Non connecté — cliquer pour se connecter"
+
+    private fun m6AccountSummary(): String =
+        if (com.streamflixreborn.streamflix.utils.M6Auth.isLoggedIn(requireContext()))
+            "✓ Connecté — cliquer pour reconnecter ou déconnecter"
+        else "Non connecté — cliquer pour se connecter"
+
+    private fun showAccountActionDialog(
+        serviceLabel: String,
+        isLoggedIn: Boolean,
+        onConnect: () -> Unit,
+        onDisconnect: () -> Unit,
+    ) {
+        if (!isLoggedIn) {
+            onConnect(); return
+        }
+        AlertDialog.Builder(requireContext())
+            .setTitle("Compte $serviceLabel")
+            .setItems(arrayOf("Reconnexion (changer compte / refresh token)", "Déconnexion (efface mot de passe + cookies)")) { _, idx ->
+                when (idx) {
+                    0 -> onConnect()
+                    1 -> {
+                        AlertDialog.Builder(requireContext())
+                            .setTitle("Déconnecter $serviceLabel ?")
+                            .setMessage("Tes identifiants ($serviceLabel) seront supprimés (token + cookies + mot de passe / email). Tes favoris et autres données ne sont PAS effacés.")
+                            .setPositiveButton("Déconnecter") { _, _ -> onDisconnect() }
+                            .setNegativeButton("Annuler", null)
+                            .show()
+                    }
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** Efface les cookies WebView pour les domaines du service. Préserve les
+     *  cookies des autres providers (cible précise). */
+    /** 2026-06-19 v40 (user "ta reconnexion ne fonctionne pas / ça va trop
+     *  vite") : clean robuste — pour chaque domaine, on construit l'URL
+     *  https://<host>/ valide (= CookieManager.getCookie veut une URL pas
+     *  juste un nom de domaine). On vide aussi les cookies *.gigya.com et
+     *  les WebStorage (localStorage des SPA M6/6play) car le login Gigya
+     *  garde une session locale en plus des cookies. */
+    /** 2026-06-19 v41 (user "la reconnexion fonctionne mal / on n'a pas le
+     *  temps de se reconnecter") : version NUCLÉAIRE pour M6+. Gigya pose des
+     *  cookies sur des sous-domaines insoupçonnés. removeAllCookies + clear
+     *  WebStorage + cache = garantit zéro session restante. */
+    private fun clearAllWebViewCookiesAndStorage() {
+        val cm = android.webkit.CookieManager.getInstance()
+        try {
+            // Synchronous flush of any pending
+            cm.flush()
+            val countLatch = java.util.concurrent.CountDownLatch(1)
+            cm.removeAllCookies { ok ->
+                Log.d("SettingsMobile", "removeAllCookies success=$ok")
+                countLatch.countDown()
+            }
+            countLatch.await(2, java.util.concurrent.TimeUnit.SECONDS)
+            cm.removeSessionCookies(null)
+            cm.flush()
+            Log.d("SettingsMobile", "All WebView cookies cleared")
+        } catch (t: Throwable) {
+            Log.w("SettingsMobile", "removeAllCookies failed: ${t.message}")
+        }
+        try {
+            android.webkit.WebStorage.getInstance().deleteAllData()
+            Log.d("SettingsMobile", "WebStorage.deleteAllData() done")
+        } catch (t: Throwable) {
+            Log.w("SettingsMobile", "WebStorage clear failed: ${t.message}")
+        }
+        try {
+            val wv = android.webkit.WebView(requireContext())
+            wv.clearCache(true)
+            wv.clearHistory()
+            wv.clearFormData()
+            android.webkit.WebViewDatabase.getInstance(requireContext()).clearHttpAuthUsernamePassword()
+            android.webkit.WebViewDatabase.getInstance(requireContext()).clearFormData()
+            wv.destroy()
+            Log.d("SettingsMobile", "WebView clearCache + clearHistory + DB cleared")
+        } catch (t: Throwable) {
+            Log.w("SettingsMobile", "WebView clear failed: ${t.message}")
+        }
+    }
+
+    private fun clearWebViewAccountCookies(domains: List<String>) {
+        val cm = android.webkit.CookieManager.getInstance()
+        // 1. Construit la liste des URLs HTTPS valides + les variantes domain
+        val urls = domains.flatMap { d ->
+            val host = d.removePrefix(".")
+            listOf("https://$host/", "https://www.$host/")
+        }.distinct()
+        var totalCleared = 0
+        for (url in urls) {
+            val cookies = cm.getCookie(url) ?: continue
+            cookies.split(";").map { it.trim() }.forEach { c ->
+                val name = c.substringBefore("=").trim()
+                if (name.isNotBlank()) {
+                    // Plusieurs variantes Domain= pour matcher les cookies posés
+                    //   avec Domain=.6play.fr ET Domain=6play.fr ET sans Domain.
+                    val host = try { java.net.URL(url).host } catch (_: Throwable) { "" }
+                    if (host.isNotBlank()) {
+                        cm.setCookie(url, "$name=; Max-Age=0; Path=/")
+                        cm.setCookie(url, "$name=; Max-Age=0; Path=/; Domain=$host")
+                        cm.setCookie(url, "$name=; Max-Age=0; Path=/; Domain=.$host")
+                        cm.setCookie(url, "$name=; Max-Age=0; Path=/; Secure; SameSite=None")
+                        cm.setCookie(url, "$name=; Max-Age=0; Path=/; Domain=$host; Secure; SameSite=None")
+                        totalCleared++
+                    }
+                }
+            }
+        }
+        cm.flush()
+        Log.d("SettingsMobile", "clearWebViewAccountCookies: expired $totalCleared cookies across ${urls.size} URLs")
+        // 2. Vide les WebStorage (localStorage / sessionStorage / IndexedDB)
+        //   des WebViews — Gigya garde sa session là-dedans aussi.
+        try {
+            android.webkit.WebStorage.getInstance().deleteAllData()
+            Log.d("SettingsMobile", "WebStorage.deleteAllData() done")
+        } catch (t: Throwable) {
+            Log.w("SettingsMobile", "WebStorage clear failed: ${t.message}")
+        }
+        // 3. Vide aussi le cache HTTP des WebViews (= invalide certificate pins,
+        //   force re-fetch propre).
+        try {
+            val wv = android.webkit.WebView(requireContext())
+            wv.clearCache(true)
+            wv.clearHistory()
+            wv.clearFormData()
+            wv.destroy()
+            Log.d("SettingsMobile", "WebView clearCache(true) + clearHistory done")
+        } catch (t: Throwable) {
+            Log.w("SettingsMobile", "WebView clear failed: ${t.message}")
+        }
     }
 
     private fun updateOverviewLabels() {
