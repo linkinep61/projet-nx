@@ -536,7 +536,10 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         //   d'allouer 50-100 MB en RAM et causer un OOM sur appareils 1-2 GB.
         //   Le Semaphore(3) limite déjà le parallélisme mais ne protège pas
         //   contre 1 énorme M3U.
-        val MAX_BODY_BYTES = 30L * 1024 * 1024  // 30 MB
+        // 2026-06-19 (user "World Live crash au démarrage sur certaines box") :
+        //   30 MB était trop permissif pour les box bas de gamme (384 MB heap).
+        //   Cap descendu à 8 MB (= un M3U World normal fait <2 MB).
+        val MAX_BODY_BYTES = 8L * 1024 * 1024  // 8 MB
         val body = client.newCall(req).execute().use {
             if (!it.isSuccessful) return emptyList()
             val contentLength = it.body?.contentLength() ?: -1L
