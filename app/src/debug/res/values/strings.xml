@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 2026-06-02 : override app_name pour les builds debug pour
-         différencier visuellement de la version release dans le launcher
-         (utile quand les 2 sont installées côte-à-côte). -->
-    <string name="app_name">ONYX DEBUG</string>
+    <!-- 2026-06-20 (user "change juste le nom") : label clair pour distinguer
+         visuellement la version debug de la release. -->
+    <string name="app_name">Onyx Debug</string>
 </resources>

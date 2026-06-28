@@ -113,6 +113,14 @@ object MiniPlayerController {
     var currentChannelPoster: String? = null
         private set
 
+    /** 2026-06-20 (user "valable pour tous les providers qui ont un mini lecteur") :
+     *  callback global appelé chaque fois que le mini démarre/arrête une chaîne.
+     *  MainTvActivity s'y abonne pour montrer/cacher l'item sidebar "🎦 Plein écran". */
+    @JvmField var onChannelStateChanged: (() -> Unit)? = null
+    private fun fireChannelStateChanged() {
+        try { onChannelStateChanged?.invoke() } catch (_: Throwable) {}
+    }
+
     // 2026-06-09 (user "le mini player est ouvert dans les providers pour la
     //   radio") : provider d'origine quand on a démarré une radio. Permet aux
     //   fragments de masquer le mini-player VISUEL quand on est sur un autre
@@ -254,6 +262,12 @@ object MiniPlayerController {
      *      qui matche la description user ("parfois oui parfois non, tout dépend").
      */
     @Volatile private var playChannelGeneration: Int = 0
+    // 2026-06-22 (user "changement rapide de chaîne → erreur bloquante") :
+    //   génération du MEDIA actuellement chargé dans le player. Posé juste
+    //   avant setMediaSource/setMediaItem. onPlayerError vérifie que sa
+    //   génération matche playChannelGeneration — sinon l'erreur est stale
+    //   (vient de l'ancienne chaîne interrompue) et on l'ignore.
+    @Volatile private var activeMediaGeneration: Int = 0
     private const val PERIODIC_SWAP_INTERVAL_MS = 45_000L
     // 2026-06-15 v6 : aligné PlayerTvFragment.kt SWAP_COOLDOWN_MS=5_000L (ligne 5193).
     //   Avant : 20_000L (4× plus permissif que le grand → swaps trop rares → cuts).
@@ -383,9 +397,51 @@ object MiniPlayerController {
         playerView: androidx.media3.ui.PlayerView?,
         freezeOverlay: android.widget.ImageView?,
     ) {
+        // 2026-06-23 (user "le mini lecteur doit comprendre quel onglet on
+        //   est actif — sinon image noire dans l'autre onglet") : quand on
+        //   switche d'un fragment à un autre (= 2 PlayerView au home et tv_shows
+        //   par exemple), seule la NOUVELLE PlayerView doit être attachée au
+        //   Player. On détache d'abord l'ancienne pour libérer son Surface,
+        //   puis on attache la nouvelle. Comme ça l'image va toujours sur le
+        //   PlayerView du fragment courant.
+        val oldView = miniPlayerView
+        if (oldView != null && oldView !== playerView) {
+            try {
+                if (oldView.player != null) {
+                    oldView.player = null
+                    Log.d(TAG, "attachPlayerView: detached player from previous PlayerView")
+                }
+            } catch (_: Throwable) {}
+        }
         miniPlayerView = playerView
         freezeOverlayView = freezeOverlay
+        // Attache le player à la nouvelle PlayerView (si player vivant)
+        val p = player
+        if (playerView != null && p != null) {
+            try {
+                playerView.player = p
+                Log.d(TAG, "attachPlayerView: attached player to NEW PlayerView")
+            } catch (t: Throwable) {
+                Log.w(TAG, "attachPlayerView: failed to attach: ${t.message}")
+            }
+        }
         Log.d(TAG, "attachPlayerView: pv=${playerView != null} freeze=${freezeOverlay != null}")
+    }
+
+    /**
+     * 2026-06-22 : ré-attache la PlayerView du home (= celle enregistrée via
+     *   attachPlayerView) après la fermeture d'un dialog qui avait temporairement
+     *   attaché sa propre PlayerView au player. Appelé dans le onDismiss des
+     *   LiveHubFolderDialog / WorldLiveFolderDialog.
+     */
+    fun reattachHomePlayerView() {
+        val p = player ?: return
+        miniPlayerView?.let { v ->
+            if (v.player != p) {
+                v.player = p
+                Log.d(TAG, "reattachHomePlayerView: re-bound player to home PlayerView")
+            }
+        }
     }
 
     /**
@@ -503,6 +559,16 @@ object MiniPlayerController {
             }
         }
         override fun onPlayerError(error: PlaybackException) {
+            // 2026-06-22 (user "changement rapide → erreur bloquante") :
+            //   si le media qui a causé l'erreur appartient à une ancienne
+            //   génération (= chaîne déjà abandonnée par un playChannel plus
+            //   récent), on IGNORE l'erreur complètement. Sans ça, l'erreur
+            //   stale de la chaîne A corrompait l'itération serveurs de la
+            //   chaîne B → scheduleRetryOrFail → State.Error terminal.
+            if (activeMediaGeneration != playChannelGeneration) {
+                Log.d(TAG, "onPlayerError: STALE error ignored (media gen=$activeMediaGeneration, current gen=$playChannelGeneration) — ${error.message}")
+                return
+            }
             val serverName = availableServers.getOrNull(currentServerIndex)?.name ?: "?"
             Log.e(TAG, "Player error on server [$currentServerIndex] $serverName: ${error.message}")
             cancelBufferingWatchdog()
@@ -852,8 +918,11 @@ object MiniPlayerController {
                     }
                     val pAtBuffer = player ?: return
                     val hasBackup = try { pAtBuffer.mediaItemCount > 1 } catch (_: Exception) { false }
+                    // 2026-06-22 : replays = VOD seekable → le rebuffering
+                    //   après un seek est normal, pas un stream mort.
+                    val isReplayMini = currentChannelId?.contains("replay") == true
                     val sinceLastSwapAtBuf = System.currentTimeMillis() - lastSwapTimestampMs
-                    if (hasBackup && sinceLastSwapAtBuf >= SWAP_RECENT_COOLDOWN_MS) {
+                    if (!isReplayMini && hasBackup && sinceLastSwapAtBuf >= SWAP_RECENT_COOLDOWN_MS) {
                         scope.launch {
                             delay(BUFFERING_SWAP_THRESHOLD_MS)
                             val p2 = player ?: return@launch
@@ -1987,6 +2056,7 @@ object MiniPlayerController {
 
     fun playChannel(channelId: String, channelName: String, channelPoster: String?) {
         Log.d(TAG, "playChannel: $channelName ($channelId)")
+        fireChannelStateChanged()
         // 2026-06-10 (user "j'ai activé sous-titres j'en vois pas") : applique
         //   le toggle iptvShowSubtitlesFr À CHAQUE switch de chaîne. initPlayer
         //   skip si player existe déjà → les params de track selection
@@ -2073,6 +2143,24 @@ object MiniPlayerController {
                 p.clearMediaItems()
             }
         } catch (_: Throwable) {}
+        // 2026-06-22 (user "changement rapide → erreur bloquante") :
+        //   invalider la génération media pour que onPlayerError ignore
+        //   toute erreur stale de l'ancien flux interrompu par le stop().
+        activeMediaGeneration = 0
+        // 2026-06-22 : si le player a été détruit (par un stop() complet
+        //   ou une erreur précédente), le re-créer pour que playServerAtIndex
+        //   ne tombe pas sur `player ?: return` silencieux.
+        if (player == null) {
+            val ctx = appContext
+            if (ctx != null) {
+                Log.d(TAG, "playChannel: player was null — reinitializing")
+                initPlayer(ctx)
+            } else {
+                Log.e(TAG, "playChannel: player null AND no appContext — cannot play")
+                _state.value = State.Error(channelId, "Player not initialized")
+                return
+            }
+        }
         // 2026-05-17 (user "le cache 100 Mo est vidé à chaque changement de
         //   chaîne, il y a intérêt") : clear le DVR cache pour dédier les
         //   100 Mo à la nouvelle chaîne uniquement.
@@ -2091,6 +2179,11 @@ object MiniPlayerController {
         currentChannelId = channelId
         currentChannelName = channelName
         currentChannelPoster = channelPoster
+        // 2026-06-20 (user "le bouton plein écran apparaît pour OTF mais pas
+        //   pour les autres") : déclenche le callback APRÈS que currentChannelId
+        //   soit set — sinon updateNavigationVisibility() lit l'ancienne valeur
+        //   (null) et cache l'item.
+        fireChannelStateChanged()
         availableServers.clear()
         triedServerUrls.clear()
         hostFailCounts.clear()
@@ -2565,6 +2658,10 @@ object MiniPlayerController {
             } else {
                 httpDataSourceFactory
             }
+            // 2026-06-22 : marquer la génération du media qui va être chargé.
+            //   onPlayerError ne traitera que les erreurs de CETTE génération.
+            activeMediaGeneration = gen
+
             if (isHls && dsFactory != null) {
                 // 2026-06-16 (FIX #4 audit) : CacheDataSource RETIRE pour live IPTV.
                 //   Le grand n utilise pas CacheDataSource. La cache disque serialise
@@ -2625,19 +2722,37 @@ object MiniPlayerController {
                 // v38 : Widevine DRM pour TF1+ VOD aussi dans le mini-lecteur.
                 //   Sans ça, films TF1+ écran noir + son crypté (cf v34/v37 fullscreen).
                 // 2026-06-19 : étendu pour M6+ (même pattern).
-                val widevineUrl = com.streamflixreborn.streamflix.utils.TF1Resolver
+                // 2026-06-27 : Pluto DASH ne doit PAS passer par le DRM TF1/M6/BFM
+                //   (faux match → message « connecte-toi à M6 »). Pluto = clair (joue
+                //   direct) ou DRM Pluto natif (≠ M6, à faire plus tard).
+                val isPlutoDash = video.source.contains("pluto.tv")
+                val widevineUrl = if (isPlutoDash)
+                    com.streamflixreborn.streamflix.utils.PlutoTvResolver.getWidevineLicenseUrl(video.source)
+                else
+                    (com.streamflixreborn.streamflix.utils.TF1Resolver
                     .getWidevineLicenseUrl(video.source)
                     ?: com.streamflixreborn.streamflix.utils.M6Resolver
                         .getWidevineLicenseUrl(video.source)
-                val drmHeaders = com.streamflixreborn.streamflix.utils.M6Resolver
+                    ?: com.streamflixreborn.streamflix.utils.BfmResolver
+                        .getWidevineLicenseUrl(video.source))
+                // Pluto = HttpMediaDrmCallback standard (jwt dans l'URL) → drmHeaders null.
+                val drmHeaders = if (isPlutoDash) null else
+                    (com.streamflixreborn.streamflix.utils.M6Resolver
                     .getWidevineHeaders(video.source)
+                    ?: com.streamflixreborn.streamflix.utils.BfmResolver
+                        .getWidevineHeaders(video.source))
                 if (widevineUrl != null) {
                     Log.d(TAG, "Mini DASH+Widevine DRM: license=${widevineUrl.take(80)}... headers=${drmHeaders?.keys}")
                     // 2026-06-19 v17 : si M6+ → M6DrmCallback (JSON wrapper)
+                    // 2026-06-20 : BFM Play → BfmDrmCallback (raw Widevine bytes)
                     val isM6 = drmHeaders?.containsKey("x-dt-auth-token") == true
+                    val isBfm = drmHeaders?.containsKey("customdata") == true
                     val drmCallback: androidx.media3.exoplayer.drm.MediaDrmCallback = if (isM6) {
                         Log.d(TAG, "Mini using M6DrmCallback (DRMtoday JSON wrapper)")
                         com.streamflixreborn.streamflix.utils.M6DrmCallback(widevineUrl, drmHeaders!!)
+                    } else if (isBfm) {
+                        Log.d(TAG, "Mini using BfmDrmCallback (raw Widevine)")
+                        com.streamflixreborn.streamflix.utils.BfmDrmCallback(widevineUrl, drmHeaders!!)
                     } else {
                         val cb = androidx.media3.exoplayer.drm.HttpMediaDrmCallback(
                             widevineUrl,
@@ -2688,6 +2803,21 @@ object MiniPlayerController {
                     p.setMediaItem(mediaItem)
                 }
             }
+            // 2026-06-27 (user "Plex films/séries en anglais") : audio FR préféré
+            //   pour le VOD Plex/Pluto dans le mini-lecteur. Le catalogue France
+            //   (géo XFF=FR) a souvent une piste VF dans le manifeste (ex "The 2nd"
+            //   = 8 EN + 1 FR) qu'ExoPlayer ne sélectionnait pas faute de langue
+            //   audio préférée. Scopé Plex/Pluto VOD (pas le live, pas les animes).
+            try {
+                val cidVod = currentChannelId ?: ""
+                if (cidVod.contains("plexvod_") || cidVod.contains("plexep::") ||
+                    cidVod.contains("plutomovie_") || cidVod.contains("plutoep::")) {
+                    p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                        .setPreferredAudioLanguages("fr", "fre", "fra")
+                        .build()
+                    Log.d(TAG, "Plex/Pluto VOD → audio FR préféré (mini)")
+                }
+            } catch (_: Throwable) {}
             // 2026-05-17 v7 : on laisse ExoPlayer gérer le speed via la
             //   LiveConfiguration range 0.95-1.0x. PAS de setPlaybackParameters
             //   manuel — ça override la LiveConfiguration et cause des sauts
@@ -2856,6 +2986,8 @@ object MiniPlayerController {
     }
 
     fun stop() {
+        activeMediaGeneration = 0 // 2026-06-22 : invalider pour ignorer erreurs stale
+        fireChannelStateChanged()
         // 2026-06-19 (user "sur mobile quand je ferme le mini lecteur ça
         //   continue en arrière plan sur World Live") : stop() ne faisait
         //   PAS `player.release()` ni `stopRadioForegroundService()` →
@@ -2960,6 +3092,7 @@ object MiniPlayerController {
     }
 
     fun stopAsync() {
+        activeMediaGeneration = 0 // 2026-06-22 : invalider pour ignorer erreurs stale
         // 2026-06-09 : arrêter le keep-alive radio si actif.
         stopRadioForegroundService()
         radioOriginProviderName = null

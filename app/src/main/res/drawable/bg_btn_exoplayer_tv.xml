@@ -1,20 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-06-22 v4 (user "exactement comme l'image") :
+     boutons latéraux = aucun cercle au repos. Focus = halo blanc 50% alpha. -->
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
-
-    <!-- Focus bien visible sur toutes les TV : fond rouge accent + contour blanc -->
     <item android:state_focused="true">
-        <shape android:shape="rectangle">
-            <corners android:radius="360dp" />
-            <solid android:color="#CCE50914" />
-            <stroke android:width="3dp" android:color="#FFFFFFFF" />
+        <shape android:shape="oval">
+            <solid android:color="#80FFFFFF" />
         </shape>
     </item>
     <item android:state_selected="true">
-        <shape android:shape="rectangle">
-            <corners android:radius="360dp" />
-            <solid android:color="#CCE50914" />
-            <stroke android:width="3dp" android:color="#FFFFFFFF" />
+        <shape android:shape="oval">
+            <solid android:color="#80FFFFFF" />
         </shape>
     </item>
-
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="@android:color/transparent" />
+        </shape>
+    </item>
 </selector>

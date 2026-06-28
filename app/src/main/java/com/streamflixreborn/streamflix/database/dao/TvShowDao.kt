@@ -57,6 +57,12 @@ interface TvShowDao {
     @Query("DELETE FROM tv_shows")
     fun deleteAll()
 
+    // 2026-06-27 (user "corbeille Continuer à regarder doit vider") : retire les
+    //   séries de la rangée "prochains épisodes à voir" (isWatching) sans toucher
+    //   aux favoris (isFavorite reste).
+    @Query("UPDATE tv_shows SET isWatching = 0 WHERE isWatching = 1")
+    fun clearWatching()
+
     @Transaction
     fun save(tvShow: TvShow) {
         val provider = UserPreferences.currentProvider?.name ?: "Unknown"

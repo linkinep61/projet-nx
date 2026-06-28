@@ -21,14 +21,20 @@ import kotlinx.coroutines.launch
 import kotlin.math.abs
 
 class PlayerGestureHelper(
-    private val context: Context, 
+    private val context: Context,
     private val playerView: PlayerView,
     private val brightnessLayout: View,
     private val brightnessBar: ProgressBar,
     private val brightnessText: TextView,
     private val volumeLayout: View,
     private val volumeBar: ProgressBar,
-    private val volumeText: TextView
+    private val volumeText: TextView,
+    /** 2026-06-21 (user "sur mobile quand on double-clic à gauche ou à droite,
+     *  ça active retour 10s / avant 10s. Est-ce que c'est faisable chez nous") :
+     *  callback appelé sur double-tap. side = "left" → reculer 10s,
+     *  side = "right" → avancer 10s. Le caller (PlayerMobileFragment) execute
+     *  player.seekTo + affiche l'overlay visuel. */
+    private val onDoubleTapSeek: ((side: String) -> Unit)? = null,
 ) {
 
     private val gestureDetector: GestureDetector
@@ -110,10 +116,32 @@ class PlayerGestureHelper(
             }
             
             override fun onDoubleTap(e: MotionEvent): Boolean {
-                val videoView = playerView.videoSurfaceView ?: return false
-                videoView.scaleX = 1.0f
-                videoView.scaleY = 1.0f
-                return true
+                // 2026-06-21 (user "sur mobile quand on double-clic à gauche
+                //   ou à droite, ça active retour 10s / avant 10s") :
+                //   Double-tap seek ±10s selon le côté de l'écran tapé.
+                //   Tap zone centrale (~25%) = reset zoom (= comportement
+                //   précédent préservé pour les users qui zoomaient).
+                val width = playerView.width
+                if (width <= 0) return false
+                val xRatio = e.x / width
+                val callback = onDoubleTapSeek
+                return when {
+                    xRatio < 0.40f && callback != null -> {
+                        callback("left")
+                        true
+                    }
+                    xRatio > 0.60f && callback != null -> {
+                        callback("right")
+                        true
+                    }
+                    else -> {
+                        // Zone centrale → reset zoom (ancien comportement)
+                        val videoView = playerView.videoSurfaceView ?: return false
+                        videoView.scaleX = 1.0f
+                        videoView.scaleY = 1.0f
+                        true
+                    }
+                }
             }
         })
 

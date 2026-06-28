@@ -342,6 +342,13 @@
                 app:iconSpaceReserved="false" />
 
             <SwitchPreference
+                android:key="PIP_ON_EXIT"
+                android:title="Picture-in-Picture en quittant"
+                android:summary="Quand vous quittez l'app pendant la lecture, le player passe en fenêtre flottante. Désactivé par défaut."
+                android:defaultValue="false"
+                app:iconSpaceReserved="false" />
+
+            <SwitchPreference
                 android:key="KEEP_SCREEN_ON_APP"
                 android:title="@string/settings_keep_screen_on_app"
                 android:summary="@string/settings_keep_screen_on_app_summary"
@@ -436,12 +443,16 @@
                 android:defaultValue="true"
                 app:iconSpaceReserved="false" />
 
-            <!-- 2026-06-09 : toggle global "carrousel comme fond d'écran". -->
-            <SwitchPreference
-                android:key="CAROUSEL_AS_BACKGROUND"
-                android:title="Carrousel comme fond d'écran"
-                android:summary="Affiche la bannière du film/série en focus en fond. Désactive pour un fond statique."
-                android:defaultValue="true"
+            <!-- 2026-06-21 (user "réunir toutes ces préférences en une seule
+                 option pour éviter d'avoir trop de trucs partout") :
+                 4 modes regroupés dans UNE seule liste déroulante. -->
+            <ListPreference
+                android:key="HOME_BG_MODE"
+                android:title="Affichage du home"
+                android:summary="%s"
+                android:entries="@array/home_bg_mode_entries"
+                android:entryValues="@array/home_bg_mode_values"
+                android:defaultValue="carousel"
                 app:iconSpaceReserved="false" />
 
             <!-- 2026-06-09 : fond d'écran personnalisé. -->

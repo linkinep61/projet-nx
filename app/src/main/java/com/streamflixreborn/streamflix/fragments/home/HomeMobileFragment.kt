@@ -27,6 +27,8 @@ import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.ui.SpacingItemDecoration
 import com.streamflixreborn.streamflix.utils.MiniPlayerController
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import androidx.transition.TransitionManager
+import androidx.transition.AutoTransition
 import com.streamflixreborn.streamflix.utils.dp
 import com.streamflixreborn.streamflix.utils.CacheUtils
 import com.streamflixreborn.streamflix.utils.LoggingUtils
@@ -194,12 +196,17 @@ class HomeMobileFragment : Fragment() {
         //   adapter pour que displayMobileSwiper soit re-bind avec nouvelle
         //   valeur de carouselAsBackground.
         try { binding.rvHome.adapter?.notifyDataSetChanged() } catch (_: Throwable) {}
+        // 2026-06-21 (user "3 modes background") : refresh fond au retour
+        //   sur le home après changement de pref dans Settings.
+        try { updateMobileBackground(null) } catch (_: Throwable) {}
         // 2026-06-15 (user "quand tu mets en plein écran et que tu reviens en
         //   arrière ça remet le truc super large") : configChanges="orientation"
         //   est actif → quand on revient du fullscreen player, l'activity n'a
         //   pas été recréée et le layout mini player n'est pas réappliqué.
         //   Re-appliquer manuellement la bonne géométrie selon l'orientation.
-        try { updateMiniPlayerLayout(resources.configuration.orientation) } catch (_: Throwable) {}
+        if (binding.miniPlayerContainer.visibility == View.VISIBLE) {
+            try { updateMiniPlayerLayout(resources.configuration.orientation) } catch (_: Throwable) {}
+        }
         val channelId = MiniPlayerController.currentChannelId ?: return
 
         // If the player was released (e.g. went to fullscreen), re-init and replay
@@ -242,7 +249,7 @@ class HomeMobileFragment : Fragment() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        if (_binding != null) {
+        if (_binding != null && binding.miniPlayerContainer.visibility == View.VISIBLE) {
             updateMiniPlayerLayout(newConfig.orientation)
         }
     }
@@ -351,7 +358,6 @@ class HomeMobileFragment : Fragment() {
 
         if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
             // Landscape: mini player on the right 1/3
-            // Container: top-right, width = 0 with 0.33 horizontal weight
             cs.connect(container.id, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)
             cs.connect(container.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
             cs.connect(container.id, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)
@@ -368,24 +374,25 @@ class HomeMobileFragment : Fragment() {
             // Smaller player view height in landscape (fill the container)
             binding.miniPlayerView.layoutParams.height = ViewGroup.LayoutParams.MATCH_PARENT
         } else {
-            // Portrait: full width at top
-            cs.connect(container.id, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)
+            // Portrait: container SOUS les icônes (forcé explicitement)
+            cs.clear(container.id, ConstraintSet.TOP)
+            cs.connect(container.id, ConstraintSet.TOP, R.id.iv_provider_logo, ConstraintSet.BOTTOM)
             cs.connect(container.id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
             cs.connect(container.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
             cs.clear(container.id, ConstraintSet.BOTTOM)
             cs.constrainPercentWidth(container.id, 1f)
             cs.constrainHeight(container.id, ConstraintSet.WRAP_CONTENT)
 
-            // RecyclerView: below the mini player
-            cs.connect(recycler.id, ConstraintSet.TOP, container.id, ConstraintSet.BOTTOM)
+            // MUR : rv_home TOUJOURS sous la barrier — rien ne passe au-dessus
+            cs.connect(recycler.id, ConstraintSet.TOP, R.id.barrier_home_top, ConstraintSet.BOTTOM)
             cs.connect(recycler.id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
             cs.connect(recycler.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
             cs.connect(recycler.id, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)
 
             // Reset player height to 200dp
-            binding.miniPlayerView.layoutParams.height = (200 * resources.displayMetrics.density).toInt()
+            val dp = resources.displayMetrics.density
+            binding.miniPlayerView.layoutParams.height = (200 * dp).toInt()
         }
-
         cs.applyTo(root)
     }
 
@@ -402,19 +409,44 @@ class HomeMobileFragment : Fragment() {
         miniPlayerObserverJob = viewLifecycleOwner.lifecycleScope.launch {
             MiniPlayerController.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
                 if (_binding == null) return@collect
+                // 2026-06-22 : animation fluide — la liste se comprime
+                // quand le mini player apparaît (glissement smooth)
+                val wasVisible = binding.miniPlayerContainer.visibility == View.VISIBLE
                 when (state) {
                     is MiniPlayerController.State.Idle -> {
+                        if (wasVisible) {
+                            TransitionManager.beginDelayedTransition(
+                                binding.root as ViewGroup,
+                                AutoTransition().apply { duration = 300 }
+                            )
+                        }
                         binding.miniPlayerContainer.visibility = View.GONE
+                        // rv_home stays below barrier_home_top — barrier auto-adjusts
+                        // when container goes GONE (falls back to icons height)
                     }
                     is MiniPlayerController.State.Loading -> {
                         ensureMiniPlayerAttached()
+                        if (!wasVisible) {
+                            TransitionManager.beginDelayedTransition(
+                                binding.root as ViewGroup,
+                                AutoTransition().apply { duration = 300 }
+                            )
+                        }
                         com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
+                        updateMiniPlayerLayout(resources.configuration.orientation)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.VISIBLE
                     }
                     is MiniPlayerController.State.Playing -> {
                         ensureMiniPlayerAttached()
+                        if (!wasVisible) {
+                            TransitionManager.beginDelayedTransition(
+                                binding.root as ViewGroup,
+                                AutoTransition().apply { duration = 300 }
+                            )
+                        }
                         com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
+                        updateMiniPlayerLayout(resources.configuration.orientation)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.GONE
                         updatePauseButton()
@@ -483,6 +515,47 @@ class HomeMobileFragment : Fragment() {
         binding.miniPlayerPause.setImageResource(icon)
     }
 
+    /**
+     * 2026-06-21 (user "3 modes : original, carrousel comme fond, mode noir,
+     *   et en plus on peut mettre un fond d'écran à part comme d'habitude") :
+     * Met à jour iv_home_background selon les prefs :
+     *  - blackBackground ON → fond noir uni (override tout, y compris custom)
+     *  - sinon carouselAsBackground ON → bannière courante du swiper
+     *  - sinon → ne touche à RIEN (= AppearanceManager.applyTo a déjà mis le
+     *    custom wallpaper user, ou le default bg_wallpaper_mobile).
+     */
+    private fun updateMobileBackground(bannerUrl: String?) {
+        if (_binding == null) return
+        val ctx = context ?: return
+        try {
+            val prefs = com.streamflixreborn.streamflix.utils.UserPreferences
+            // Mode noir → override tout (custom wallpaper + carrousel + default)
+            if (prefs.blackBackground) {
+                com.bumptech.glide.Glide.with(ctx).clear(binding.ivHomeBackground)
+                binding.ivHomeBackground.setImageDrawable(null)
+                binding.ivHomeBackground.setBackgroundColor(android.graphics.Color.BLACK)
+                return
+            }
+            // Reset bg color (= au cas où on revient de mode noir)
+            binding.ivHomeBackground.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            // Mode carrousel → bannière courante
+            if (prefs.carouselAsBackground && !bannerUrl.isNullOrBlank()
+                && prefs.currentProvider !is com.streamflixreborn.streamflix.providers.IptvProvider
+            ) {
+                com.bumptech.glide.Glide.with(ctx)
+                    .load(com.streamflixreborn.streamflix.utils.optimizeArtworkUrl(bannerUrl, 1280))
+                    .centerCrop()
+                    .transition(com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions.withCrossFade(400))
+                    .into(binding.ivHomeBackground)
+                return
+            }
+            // Mode original : NE PAS TOUCHER au fond. AppearanceManager.applyTo
+            //   a déjà appliqué le custom wallpaper user (ou default si rien).
+            //   Si on revient de carrousel/noir → on RE-applique pour restaurer.
+            com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(binding.root)
+        } catch (_: Throwable) {}
+    }
+
     private fun navigateToFullPlayer() {
         val channelId = MiniPlayerController.currentChannelId ?: return
         val channelName = MiniPlayerController.currentChannelName ?: channelId
@@ -523,8 +596,16 @@ class HomeMobileFragment : Fragment() {
     }
 
     private fun initializeHome() {
-        // Fond wallpaper fixe sur mobile — même fond que l'écran providers
-        appAdapter.onSwiperPageChanged = { _ -> /* no-op sur mobile */ }
+        // 2026-06-21 (user "3 modes : original (défaut), carrousel comme
+        //   fond d'écran (opt-in), mode noir (opt-in)") :
+        //   - Si blackBackground=true → fond noir uni
+        //   - Sinon si carouselAsBackground=true → bannière courante
+        //   - Sinon → wallpaper statique (= mode original)
+        appAdapter.onSwiperPageChanged = { bannerUrl ->
+            updateMobileBackground(bannerUrl)
+        }
+        // Initial state au boot (= avant que le swiper émette) :
+        updateMobileBackground(null)
 
         binding.rvHome.apply {
             setHasFixedSize(true)
@@ -1125,6 +1206,11 @@ class HomeMobileFragment : Fragment() {
      *  Sauve le mode PAR provider, invalide le HomeCacheStore (sinon le TTL 5 min
      *  re-sert l'ancien home) puis recharge getHome(). Même patron que le picker
      *  langue IPTV. */
+    /**
+     * 2026-06-24 : appelé par MainMobileActivity pendant le drag du bouton
+     * au bout de la barre de navigation. Ajuste le paddingTop de rv_home
+     * en temps réel (le contenu descend/monte).
+     */
     private fun showCatalogFilterPicker() {
         val provider = UserPreferences.currentProvider ?: return
         val modes = com.streamflixreborn.streamflix.utils.CatalogFilter.Mode.entries
@@ -1172,6 +1258,28 @@ class HomeMobileFragment : Fragment() {
             .find { it.name == Category.CONTINUE_WATCHING }
             ?.also {
                 it.name = getString(R.string.home_continue_watching)
+                // 2026-06-27 (user "corbeille devant Continuer à regarder, focusable
+                //   télécommande, tous providers") : réutilise la corbeille du header
+                //   (setupClearButton) → vide tout le continue-watching.
+                it.onClearSection = {
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        try {
+                            withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                // Vide réellement le continue-watching en base (la rangée
+                                //   home vient de la DB, pas du set "dismissed" du cœur).
+                                val db = com.streamflixreborn.streamflix.database.AppDatabase.getInstance(requireContext())
+                                db.movieDao().clearContinueWatching()
+                                db.episodeDao().clearContinueWatching()
+                                db.tvShowDao().clearWatching()
+                                com.streamflixreborn.streamflix.utils.GlobalFavorites.dismissAllContinueWatching()
+                            }
+                            com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.let { p ->
+                                com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(requireContext(), p)
+                            }
+                        } catch (_: Throwable) {}
+                        viewModel.getHome()
+                    }
+                }
                 it.list.forEach { show ->
                     when (show) {
                         is Episode -> show.itemType = AppAdapter.Type.EPISODE_CONTINUE_WATCHING_MOBILE_ITEM
@@ -1212,12 +1320,12 @@ class HomeMobileFragment : Fragment() {
         if (shouldScrollToTop) {
             shouldScrollToTop = false
             homeLayoutState = null
-            binding.rvHome.post { binding.rvHome.scrollToPosition(0) }
+            _binding?.rvHome?.let { rv -> rv.post { if (_binding != null) rv.scrollToPosition(0) } }
         } else if (homeLayoutState != null) {
             // v91 : restaure la position verticale du Home apres retour depuis un detail
             val st = homeLayoutState
             homeLayoutState = null
-            binding.rvHome.post { binding.rvHome.layoutManager?.onRestoreInstanceState(st) }
+            _binding?.rvHome?.let { rv -> rv.post { if (_binding != null) rv.layoutManager?.onRestoreInstanceState(st) } }
         }
     }
 }

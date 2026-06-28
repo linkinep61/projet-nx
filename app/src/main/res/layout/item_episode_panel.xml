@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-06-20 (user "comme sur l'image, panel épisodes droite avec cards riches") :
+     carte épisode dans le panneau side-right. Affiche poster + titre + date +
+     durée + rating + extrait synopsis. Surlignée en rouge si épisode courant. -->
+<androidx.cardview.widget.CardView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/cv_episode_card"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginStart="12dp"
+    android:layout_marginEnd="12dp"
+    android:layout_marginTop="6dp"
+    android:layout_marginBottom="6dp"
+    android:focusable="true"
+    android:focusableInTouchMode="true"
+    android:clickable="true"
+    app:cardBackgroundColor="#22FFFFFF"
+    app:cardCornerRadius="8dp"
+    app:cardElevation="0dp"
+    app:contentPadding="0dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="8dp">
+
+        <!-- Poster vignette 16:9 -->
+        <androidx.cardview.widget.CardView
+            android:layout_width="130dp"
+            android:layout_height="74dp"
+            app:cardCornerRadius="6dp"
+            app:cardElevation="0dp">
+
+            <ImageView
+                android:id="@+id/iv_episode_poster"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:contentDescription="Vignette épisode"
+                android:scaleType="centerCrop"
+                tools:src="@android:drawable/ic_menu_gallery"
+                xmlns:tools="http://schemas.android.com/tools" />
+        </androidx.cardview.widget.CardView>
+
+        <!-- Textes -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="10dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/tv_episode_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                tools:text="Le Fantôme vengeur"
+                xmlns:tools="http://schemas.android.com/tools" />
+
+            <TextView
+                android:id="@+id/tv_episode_meta"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:layout_marginTop="2dp"
+                android:textColor="#B3FFFFFF"
+                android:textSize="11sp"
+                tools:text="2012-08-12 · 24 min · ★ 8.0"
+                xmlns:tools="http://schemas.android.com/tools" />
+
+            <TextView
+                android:id="@+id/tv_episode_overview"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="2"
+                android:layout_marginTop="4dp"
+                android:textColor="#CCFFFFFF"
+                android:textSize="11sp"
+                android:lineSpacingExtra="1dp"
+                tools:text="Alors qu'ils enquêtent sur un meurtre qui aurait dû être impossible…"
+                xmlns:tools="http://schemas.android.com/tools" />
+        </LinearLayout>
+    </LinearLayout>
+</androidx.cardview.widget.CardView>

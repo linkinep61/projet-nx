@@ -222,9 +222,14 @@ object M6Resolver {
         val needsResolve = gigyaToken.isNullOrBlank() ||
             (m6JwtCached.isNullOrBlank() || m6JwtCached!!.startsWith("GIGYA::"))
         if (needsResolve) {
-            Log.d(TAG, "No M6 token or no valid M6 JWT, attempt restore via WebView headless...")
+            // 2026-06-22 fix : forceWebView=true car le JWT est manquant ou
+            //   invalide. Sans forceWebView, resolveSync retourne l'accountId
+            //   en cache en 15ms sans lancer la WebView → le JWT n'est jamais
+            //   rafraîchi. Le SPA M6+ chargé par la WebView appelle /getJwt
+            //   que le hook JS intercepte et sauve dans M6Auth.
+            Log.d(TAG, "No M6 token or no valid M6 JWT, attempt restore via WebView headless (forceWebView)...")
             com.streamflixreborn.streamflix.utils.M6UidResolver
-                .resolveSync(ctx, 30_000L)
+                .resolveSync(ctx, 30_000L, forceWebView = true)
             gigyaToken = com.streamflixreborn.streamflix.utils.M6Auth.getToken(ctx)
             m6JwtCached = com.streamflixreborn.streamflix.utils.M6Auth.getM6Jwt(ctx)
         }
@@ -278,9 +283,9 @@ object M6Resolver {
         if (m6Jwt?.startsWith("eyJ") != true) {
             // Pas de vrai JWT M6 → tente une nouvelle résolution
             if (m6Jwt.isNullOrBlank() || m6Jwt!!.startsWith("GIGYA::")) {
-                Log.d(TAG, "No valid M6 JWT cached, trying via WebView headless...")
+                Log.d(TAG, "No valid M6 JWT cached, trying via WebView headless (forceWebView)...")
                 com.streamflixreborn.streamflix.utils.M6UidResolver
-                    .resolveSync(ctx, 30_000L)
+                    .resolveSync(ctx, 30_000L, forceWebView = true)
                 m6Jwt = com.streamflixreborn.streamflix.utils.M6Auth.getM6Jwt(ctx)
             }
             // Si on a un id_token Gigya fallback, tente OkHttp/Cronet POST
@@ -297,6 +302,24 @@ object M6Resolver {
             Log.w(TAG, "Could not obtain valid M6 JWT, DRM will fail for $service/$videoId")
             return Resolved(bestUrl, mime, null, null)
         }
+        // 2026-06-22 : vérifier si le JWT est expiré AVANT d'appeler upfront-token.
+        //   HTTP 498 "Invalid JWT (invalid time)" = JWT expiré côté serveur.
+        //   On détecte via le claim "exp" du JWT (standard RFC 7519).
+        if (isJwtExpired(m6Jwt)) {
+            Log.d(TAG, "M6 JWT expired (exp claim), forcing refresh via WebView...")
+            com.streamflixreborn.streamflix.utils.M6Auth.saveM6Jwt(ctx, "")
+            // 2026-06-22 fix : forceWebView=true pour bypasser le early-return
+            //   sur accountId en cache. Sans ça, resolveSync retournait en 15ms
+            //   sans lancer la WebView → JWT jamais rafraîchi.
+            com.streamflixreborn.streamflix.utils.M6UidResolver
+                .resolveSync(ctx, 30_000L, forceWebView = true)
+            m6Jwt = com.streamflixreborn.streamflix.utils.M6Auth.getM6Jwt(ctx)
+            if (m6Jwt?.startsWith("eyJ") != true) {
+                Log.w(TAG, "JWT refresh failed (expired), DRM will fail for $service/$videoId")
+                return Resolved(bestUrl, mime, null, null)
+            }
+            Log.d(TAG, "JWT refreshed OK (len=${m6Jwt!!.length})")
+        }
         Log.d(TAG, "Using M6 JWT (len=${m6Jwt!!.length}, prefix=${m6Jwt!!.take(10)})")
         // 3. Get upfront-token Widevine. videoId garde le préfixe "clip_" dans
         //   le path — test sandbox : sans clip_ → HTTP 404, avec → HTTP 498
@@ -304,11 +327,29 @@ object M6Resolver {
         val upfrontUrl = URL_UPFRONT_REPLAY
             .replace("{UID}", resolvedAccountId)
             .replace("{VID}", videoId)
-        val upfrontToken = try {
+        var upfrontToken = try {
             fetchUpfrontToken(upfrontUrl, m6Jwt)
         } catch (e: Exception) {
             Log.e(TAG, "upfront-token fetch failed: ${e.message}", e)
             null
+        }
+        // 2026-06-22 : retry une fois si upfront-token échoue (JWT peut être
+        //   techniquement non-expiré côté claim mais rejeté côté serveur pour
+        //   clock skew ou révocation). On force un refresh WebView et retente.
+        if (upfrontToken == null && m6Jwt?.startsWith("eyJ") == true) {
+            Log.d(TAG, "upfront-token failed, retrying with fresh JWT...")
+            com.streamflixreborn.streamflix.utils.M6Auth.saveM6Jwt(ctx, "")
+            com.streamflixreborn.streamflix.utils.M6UidResolver
+                .resolveSync(ctx, 30_000L, forceWebView = true)
+            m6Jwt = com.streamflixreborn.streamflix.utils.M6Auth.getM6Jwt(ctx)
+            if (m6Jwt?.startsWith("eyJ") == true) {
+                upfrontToken = try {
+                    fetchUpfrontToken(upfrontUrl, m6Jwt)
+                } catch (e: Exception) {
+                    Log.e(TAG, "upfront-token retry failed: ${e.message}", e)
+                    null
+                }
+            }
         }
         if (upfrontToken == null) {
             Log.w(TAG, "No upfront-token, DRM lookup failed for $service/$videoId")
@@ -368,6 +409,24 @@ object M6Resolver {
             Log.e(TAG, "Gigya fetchGigyaUid failed: ${e.message}", e)
             null
         }
+    }
+
+    /** 2026-06-22 : vérifie si un JWT M6 est expiré en lisant le claim "exp".
+     *  Renvoie true si expiré ou dans les 60s de l'expiration (= marge sécurité).
+     *  Renvoie false si pas de claim exp (= on tente quand même) ou si erreur parse. */
+    private fun isJwtExpired(jwt: String?): Boolean {
+        if (jwt == null || !jwt.startsWith("eyJ")) return true
+        return try {
+            val parts = jwt.split(".")
+            if (parts.size < 2) return true
+            val payloadB64 = parts[1].replace('-', '+').replace('_', '/')
+            val padded = payloadB64 + "=".repeat((4 - payloadB64.length % 4) % 4)
+            val payloadBytes = android.util.Base64.decode(padded, android.util.Base64.NO_WRAP)
+            val payloadJson = JSONObject(String(payloadBytes, Charsets.UTF_8))
+            val exp = payloadJson.optLong("exp", 0L)
+            if (exp == 0L) false  // pas de claim exp → on assume valide
+            else (System.currentTimeMillis() / 1000) > (exp - 60)  // expiré ou <60s restantes
+        } catch (_: Exception) { false }
     }
 
     /** 2026-06-19 : décode le payload du JWT upfront-token (= partie centrale

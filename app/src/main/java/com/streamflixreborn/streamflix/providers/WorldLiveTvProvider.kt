@@ -234,7 +234,7 @@ object WorldLiveTvProvider : Provider, IptvProvider {
             //   appareils 1-2 GB (= chaque WlChannel = ~200 bytes → 10k = 2 MB
             //   en registre permanent + duplication dans folderContents, JSON
             //   sérialisation au persist, etc.). Tronque pour rester safe.
-            val MAX_TOTAL_CHANNELS = 10_000
+            val MAX_TOTAL_CHANNELS = 100_000
             val capped = if (all.size > MAX_TOTAL_CHANNELS) {
                 Log.w(TAG, "Total channels ${all.size} > $MAX_TOTAL_CHANNELS → tronque (cap RAM appareils faibles)")
                 all.subList(0, MAX_TOTAL_CHANNELS)
@@ -436,6 +436,22 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                     )
                 )
             }
+            // 2026-06-25 : RSS atob (format rsseverything.com) — le body est du
+            //   XML RSS contenant des <script> avec atob() pour encoder les URLs.
+            //   Comme pour le M3U direct, on wrap dans 1 WlGroup qui pointera
+            //   vers la même URL ; fetchM3uChannels détectera les <script>+atob.
+            if (trimmed.contains("<script>") && trimmed.contains("atob(")) {
+                Log.w(TAG, "Source is RSS atob format, wrapping as 1 group")
+                return listOf(
+                    WlGroup(
+                        name = WorldLiveSourcesStore.getActiveName(
+                            com.streamflixreborn.streamflix.StreamFlixApp.instance
+                        ),
+                        image = null,
+                        url = PLAYLIST_URL,
+                    )
+                )
+            }
             // Tableau JSON top-level direct `[{name, url}, ...]` (= certains
             //   exports Wiseplay).
             if (trimmed.startsWith("[")) {
@@ -555,18 +571,43 @@ object WorldLiveTvProvider : Provider, IptvProvider {
             Log.w(TAG, "${g.name}: M3U body materialized > 30 MB (${body.length / 1024 / 1024} MB) — skipping")
             return emptyList()
         }
+        // 2026-06-25 : RSS rsseverything (atob-encoded latvdefrance URLs)
+        //   Détecte les feeds RSS communautaires qui embarquent du JS
+        //   atob() dans des <script> pour encoder les URLs de stream.
+        //   Wiseplay fait pareil en interne — on parse le même format.
+        if (body.contains("<script>") && body.contains("atob(")) {
+            val rssChannels = parseRssAtobChannels(body, g)
+            if (rssChannels.isNotEmpty()) {
+                Log.w(TAG, "${g.name}: RSS atob parser found ${rssChannels.size} channels")
+                return rssChannels
+            }
+        }
         // 2026-06-10 : 3 formats supportés :
         //   - M3U standard (#EXTM3U / #EXTINF)
         //   - Google Sheets JSON-per-line (format 3box TV)
         //   - JSON structuré {groups:[{stations:[]}]}  (format Dric4rTV)
         if (!body.startsWith("#EXTM3U") && !body.contains("#EXTINF")) {
+            // 2026-06-25 (user "Cinéma : que des playlists, app les lit
+            //   comme lecteurs") : le body 3box TSV commence souvent par
+            //   #N/A (= Google Sheets header vide) avant le vrai JSON.
+            //   trim() ne strip pas #N/A → on cherche le PREMIER `{` valide
+            //   et on parse à partir de là.
             val trimmed = body.trim()
+            val jsonStart = trimmed.indexOf('{')
+            // 2026-06-25 v3 (user "Cinéma Pluto TV pas redimensionné") :
+            //   les TSV Google Sheets ont des `\t` à chaque fin de ligne
+            //   ET des `\r` qui cassent partiellement le JSON parse Android
+            //   (= optJSONArray retourne null pour groups). On strip ces
+            //   chars avant le parse.
+            val cleaned = (if (jsonStart > 0) trimmed.substring(jsonStart) else trimmed)
+                .replace("\t", "")
+                .replace("\r", "")
             // 2026-06-10 (user "il doit nous manquer plein de choses sur
             //   d'autres sources") : tente parseNestedJson strict d'abord.
             //   Si le résultat est trop pauvre (1-2 items pour un body
             //   plus de 2000 chars), on bascule sur parser tolérant.
-            if (trimmed.startsWith("{") && (trimmed.contains("\"stations\"") || trimmed.contains("\"groups\""))) {
-                val strictResult = parseNestedJsonChannels(trimmed, g, depth)
+            if (cleaned.startsWith("{") && (cleaned.contains("\"stations\"") || cleaned.contains("\"groups\""))) {
+                val strictResult = parseNestedJsonChannels(cleaned, g, depth)
                 // Si le strict parse a très peu trouvé mais le body est gros,
                 //   tente le tolérant qui scanne ligne-par-ligne.
                 if (strictResult.size <= 2 && body.length > 2000) {
@@ -672,10 +713,189 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         //   tronque pour rester safe. Les chaînes prioritaires sont en tête
         //   (= ordre du M3U source) donc le head 5000 garde le contenu utile.
         val MAX_CHANNELS_PER_GROUP = 5000
-        if (out.size > MAX_CHANNELS_PER_GROUP) {
+        val capped = if (out.size > MAX_CHANNELS_PER_GROUP) {
             Log.w(TAG, "${g.name}: ${out.size} channels → tronque à $MAX_CHANNELS_PER_GROUP (cap RAM appareils faibles)")
-            return out.subList(0, MAX_CHANNELS_PER_GROUP).toList()
+            out.subList(0, MAX_CHANNELS_PER_GROUP).toList()
+        } else out.toList()
+
+        // 2026-06-25 (user "il faut gérer les sous-dossiers comme Wiseplay :
+        //   Pluto TV → catégories Divertissement/Series Policieres/Kids/...") :
+        //   si on est DANS un sub-folder (depth > 0) et que le M3U a plusieurs
+        //   group-title distincts, on REGROUPE les chaînes par group-title et
+        //   on crée 1 sub-folder par catégorie. L'user voit Pluto TV → grid
+        //   des 8 catégories au lieu de la liste à plat de 50 chaînes.
+        if (depth > 0) {
+            val byGroupTitle = capped.groupBy { it.groupName }
+            if (byGroupTitle.size >= 2 && capped.size >= byGroupTitle.size * 2) {
+                val folders = mutableListOf<WlChannel>()
+                for ((gt, channels) in byGroupTitle) {
+                    if (channels.isEmpty()) continue
+                    val gtSlug = slugify(gt).ifBlank { "cat${folders.size}" }
+                    val folderPath = "$groupSlug/$gtSlug/syn${folders.size}"
+                    folderContents[folderPath] = channels
+                    val folderId = "wltv::$groupSlug::folder::$gtSlug-syn${folders.size}"
+                    folders.add(WlChannel(
+                        id = folderId,
+                        name = gt,
+                        logo = channels.firstOrNull { !it.logo.isNullOrBlank() }?.logo,
+                        groupName = g.name,
+                        streamUrl = "",
+                        userAgent = null,
+                        referer = null,
+                        tvgLanguage = null,
+                        isFolder = true,
+                        folderPath = folderPath,
+                    ))
+                }
+                Log.d(TAG, "${g.name}: re-grouped ${capped.size} channels into ${folders.size} sub-folders by group-title")
+                return folders
+            }
         }
+        return capped
+    }
+
+    // ── RSS atob parser ────────────────────────────────────────────────
+    //   Parse les feeds RSS communautaires (rsseverything.com) qui
+    //   embarquent des <script> avec du JS atob()-encoded pour les
+    //   URLs de stream latvdefrance/assistancefrancaise.
+    //   Format JS : `==="tf1"...) { fetch((atob("...")+..."2"+...)) }`
+
+    /** Noms d'affichage pour les clés chaîne du RSS. */
+    private val RSS_CHANNEL_NAMES = mapOf(
+        "tf1" to "TF1", "france2" to "France 2", "france3" to "France 3",
+        "france4" to "France 4", "france5" to "France 5", "m6" to "M6",
+        "arte" to "Arte", "w9" to "W9", "tmc" to "TMC", "tfx" to "TFX",
+        "tf1seriesfilms" to "TF1 Séries Films", "lci" to "LCI",
+        "franceinfo" to "franceinfo", "france24" to "France 24",
+        "bfmtv" to "BFM TV", "cnews" to "CNEWS", "cstar" to "CStar",
+        "gulli" to "Gulli", "6ter" to "6ter", "cherie25" to "Chérie 25",
+        "lachaineparlementaire" to "LCP", "canalplus" to "Canal+",
+        "canalpluscinema" to "Canal+ Cinéma", "canalplussport" to "Canal+ Sport",
+        "canalplusfoot" to "Canal+ Foot", "canalplusdecale" to "Canal+ Décalé",
+        "beinsports1" to "beIN Sports 1", "beinsports2" to "beIN Sports 2",
+        "beinsports3" to "beIN Sports 3", "rmcsport1" to "RMC Sport 1",
+        "rmcsport2" to "RMC Sport 2", "rmcstory" to "RMC Story",
+        "rmcdecouverte" to "RMC Découverte", "dazn" to "DAZN",
+        "lequipe21" to "L'Équipe", "tv5monde" to "TV5 Monde",
+        "tvbreizh" to "TV Breizh", "novo19" to "Paris Première",
+        "rtl9" to "RTL9", "teva" to "Téva", "equidia" to "Equidia",
+        "automotolachaine" to "Automoto", "golfchannel" to "Golf Channel",
+        "animaux" to "Animaux", "scienceandvie" to "Science et Vie TV",
+        "ushuaiatv" to "Ushuaïa TV", "toutehistoire" to "Toute l'Histoire",
+        "chassepeche" to "Chasse et Pêche", "crimedistrict" to "Crime District",
+        "trek" to "Trek", "mangas" to "Mangas", "action" to "Action",
+        "ab1" to "AB1", "t18" to "T18",
+    )
+
+    /** Groupes pour le classement dans World Live. */
+    private val RSS_CHANNEL_GROUPS = mapOf(
+        "tf1" to "TNT", "france2" to "TNT", "france3" to "TNT",
+        "france4" to "TNT", "france5" to "TNT", "m6" to "TNT",
+        "arte" to "TNT", "w9" to "TNT", "tmc" to "TNT", "tfx" to "TNT",
+        "tf1seriesfilms" to "TNT", "lci" to "TNT", "franceinfo" to "TNT",
+        "bfmtv" to "TNT", "cnews" to "TNT", "cstar" to "TNT",
+        "gulli" to "TNT", "6ter" to "TNT", "cherie25" to "TNT",
+        "lachaineparlementaire" to "TNT", "france24" to "Info",
+        "tv5monde" to "Info",
+        "canalplus" to "Canal+", "canalpluscinema" to "Canal+",
+        "canalplussport" to "Canal+", "canalplusfoot" to "Canal+",
+        "canalplusdecale" to "Canal+",
+        "beinsports1" to "Sport", "beinsports2" to "Sport",
+        "beinsports3" to "Sport", "rmcsport1" to "Sport",
+        "rmcsport2" to "Sport", "dazn" to "Sport",
+        "lequipe21" to "Sport", "equidia" to "Sport",
+        "automotolachaine" to "Sport", "golfchannel" to "Sport",
+        "rmcstory" to "Découverte", "rmcdecouverte" to "Découverte",
+        "animaux" to "Découverte", "scienceandvie" to "Découverte",
+        "ushuaiatv" to "Découverte", "toutehistoire" to "Découverte",
+        "chassepeche" to "Découverte", "crimedistrict" to "Découverte",
+        "trek" to "Découverte",
+        "novo19" to "Divertissement", "rtl9" to "Divertissement",
+        "teva" to "Divertissement", "tvbreizh" to "Divertissement",
+        "mangas" to "Divertissement", "action" to "Divertissement",
+        "ab1" to "Divertissement", "t18" to "Divertissement",
+    )
+
+    /** Décode une URL stream depuis un bloc JS contenant fetch((atob()+...)) */
+    private fun decodeAtobStreamUrl(scriptBlock: String): String? {
+        val fetchStart = scriptBlock.indexOf("fetch((")
+        if (fetchStart < 0) return null
+        val searchFrom = fetchStart + "fetch((".length
+        val ends = listOfNotNull(
+            scriptBlock.indexOf(".replaceAll", searchFrom).takeIf { it > 0 },
+            scriptBlock.indexOf(").then", searchFrom).takeIf { it > 0 },
+            scriptBlock.indexOf("))", searchFrom + 1).takeIf { it > 0 },
+        )
+        if (ends.isEmpty()) return null
+        val concatRegion = scriptBlock.substring(searchFrom, ends.min())
+        // 2026-06-27 : le format rsseverything construit le token via des
+        //   ("longHexString").replace("target","replacement") chaînés.
+        //   L'ancien pattern "([^"]*)" capturait TOUS les strings y compris
+        //   les arguments de .replace() → token garbled → 403/404.
+        //   Nouveau parser : 3 alternatives mutuellement exclusives :
+        //     1) atob("base64")               → décode base64
+        //     2) ("str").replace("A","B")…   → applique les remplacements
+        //     3) "literal"                    → string brut
+        val tokenPattern = Regex(
+            """atob\("([A-Za-z0-9+/=]+)"\)|\("([^"]*)"\)((?:\.replace\("[^"]*","[^"]*"\))*)|"([^"]*)""""
+        )
+        val replacePattern = Regex("""\.replace\("([^"]*)","([^"]*)"\)""")
+        val parts = mutableListOf<String>()
+        for (m in tokenPattern.findAll(concatRegion)) {
+            val b64        = m.groupValues[1]
+            val baseStr    = m.groupValues[2]
+            val replChains = m.groupValues[3]
+            val lit        = m.groupValues[4]
+            when {
+                b64.isNotEmpty() -> {
+                    val padded = b64 + "=".repeat((4 - b64.length % 4) % 4)
+                    val decoded = try {
+                        String(android.util.Base64.decode(padded, android.util.Base64.DEFAULT))
+                    } catch (_: Throwable) { return null }
+                    parts.add(decoded)
+                }
+                m.value.startsWith("(\"") -> {
+                    // ("string").replace("A","B")… — applique toutes les substitutions
+                    var result = baseStr
+                    for (rep in replacePattern.findAll(replChains)) {
+                        result = result.replace(rep.groupValues[1], rep.groupValues[2])
+                    }
+                    parts.add(result)
+                }
+                else -> parts.add(lit)
+            }
+        }
+        if (parts.isEmpty()) return null
+        val url = parts.joinToString("").replace("\\/", "/")
+        return if (url.startsWith("http") && (".m3u8" in url || ".mpd" in url)) url else null
+    }
+
+    /** Parse un body RSS contenant des <script>atob()</script> → WlChannels */
+    private fun parseRssAtobChannels(body: String, g: WlGroup): List<WlChannel> {
+        val out = mutableListOf<WlChannel>()
+        val scriptPattern = Regex("""<script>(.*?)</script>""", RegexOption.DOT_MATCHES_ALL)
+        val keyPattern = Regex("""===\s*"([^"]+)"""")
+        val groupSlug = slugify(g.name)
+        for (scriptMatch in scriptPattern.findAll(body)) {
+            val js = scriptMatch.groupValues[1]
+            val keyMatch = keyPattern.find(js) ?: continue
+            val chKey = keyMatch.groupValues[1]
+            val streamUrl = decodeAtobStreamUrl(js) ?: continue
+            val displayName = RSS_CHANNEL_NAMES[chKey] ?: chKey
+            val groupTitle = RSS_CHANNEL_GROUPS[chKey] ?: g.name
+            val chId = "$groupSlug-rss-$chKey"
+            out.add(WlChannel(
+                id = chId,
+                name = displayName,
+                streamUrl = streamUrl,
+                logo = null,
+                groupName = groupTitle,
+                userAgent = null,
+                referer = null,
+                tvgLanguage = "fr",
+            ))
+        }
+        Log.w(TAG, "${g.name}: RSS atob parsed ${out.size} channels from ${scriptPattern.findAll(body).count()} scripts")
         return out
     }
 
@@ -693,11 +913,18 @@ object WorldLiveTvProvider : Provider, IptvProvider {
             //   format Dric4rTV `{stations:[...]}` direct top-level (sans
             //   wrapper groups). On parse stations comme si c'était dans
             //   un seul sub-group nommé g.name.
+            // 2026-06-25 (user "Pluto TV Samsung disparu, reste que les
+            //   chaînes Rakuten") : si le root a TOP-LEVEL stations ET
+            //   groups (= cas Cinéma 3box), parser les DEUX. Avant on
+            //   return-early sur stations → folders perdus.
             val topStations = root.optJSONArray("stations")
-            if (topStations != null) {
+            val groupsArr = root.optJSONArray("groups")
+            if (topStations != null && groupsArr == null) {
                 return parseStationsArray(topStations, g, groupSlug, seen)
             }
-            val groupsArr = root.optJSONArray("groups") ?: return emptyList()
+            // Top-level stations seront parsées APRÈS le loop des groups
+            //   (= on les ajoute en plus, pas à la place).
+            if (groupsArr == null) return emptyList()
             for (gi in 0 until groupsArr.length()) {
                 val sub = groupsArr.optJSONObject(gi) ?: continue
                 val subName = sub.optString("name").trim().ifBlank { g.name }
@@ -709,7 +936,7 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                 //   `groups[]` inline (pas via url) → c'est un folder qui
                 //   contient des sub-folders ou stations. On crée un folder
                 //   et on récurse sur ces nested groups en mémoire.
-                if (stations == null && subUrl.isBlank() && nestedGroups != null && depth < 3) {
+                if (stations == null && subUrl.isBlank() && nestedGroups != null && depth < 8) {
                     val folderPath = "${slugify(g.name)}/${slugify(subName)}/$gi"
                     // Reconstruit un body JSON intermédiaire pour récurser
                     //   directement sur les nested groups.
@@ -746,7 +973,7 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                 //   c'est un sous-bouquet récursif (format Cinéma 3box) — on
                 //   fetch et on parse cette URL comme une sous-playlist.
                 //   Limite de récursion : depth=2 (évite les loops).
-                if (stations == null && subUrl.isNotBlank() && depth < 3) {
+                if (stations == null && subUrl.isNotBlank() && depth < 8) {
                     // 2026-06-10 (user "comme Wiseplay multi-niveau") : crée
                     //   un FOLDER (= dossier explorable) pour chaque sub-bouquet
                     //   récursif. On fetch le contenu et on stocke dans
@@ -809,6 +1036,13 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                     )
                 }
             }
+            // 2026-06-25 : top-level stations parsing APRÈS les groups (=
+            //   cas Cinéma 3box qui a `groups` + `stations` au même niveau).
+            //   Les stations s'ajoutent à la liste des folders.
+            if (topStations != null) {
+                val topStationChannels = parseStationsArray(topStations, g, groupSlug, seen)
+                out.addAll(topStationChannels)
+            }
         } catch (t: Throwable) {
             Log.w(TAG, "parseNestedJson ${g.name} failed: ${t.message}")
         }
@@ -853,7 +1087,7 @@ object WorldLiveTvProvider : Provider, IptvProvider {
             val ua = obj.optString("userAgent").trim().takeIf { it.isNotBlank() }
             val referer = obj.optString("referer").trim().takeIf { it.isNotBlank() }
             val isPlaylistUrl = isPlaylistLikeUrl(url)
-            if (isPlaylistUrl && depth < 3) {
+            if (isPlaylistUrl && depth < 8) {
                 // Folder explorable
                 // 2026-06-10 (user "téléchargement super long, ça boucle") :
                 //   clé STABLE basée sur URL hash pour que le cache
@@ -1324,6 +1558,111 @@ object WorldLiveTvProvider : Provider, IptvProvider {
             return Video(source = proxied, type = "video/mp2t", headers = emptyMap())
         }
 
+        // 2026-06-24 (user "Pluto TV sub-folders lus comme stream") : pour
+        //   les URLs textup.fr (= Pluto TV/LG Channels sub-list), un GET
+        //   rapide retourne du M3U (#EXTM3U). Ces URLs ne sont PAS des
+        //   streams — ce sont des sous-dossiers de chaînes. Si la playlist
+        //   3box-tv les a marquées comme stream par erreur, on échoue
+        //   proprement avec un message clair pour ne pas tenter de jouer
+        //   du texte.
+        //   TODO Phase 2 : transformer ces URLs en WlGroup au moment du
+        //   parsing initial (= fetchM3uChannels) pour les exposer comme
+        //   sous-dossiers explorables. Pour l'instant, guard explicite.
+        if (rawSrc.contains("textup.fr", ignoreCase = true)) {
+            try {
+                val probe = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val req = Request.Builder().url(rawSrc)
+                        .header("User-Agent", customUa)
+                        .also { if (customReferer.isNotBlank()) it.header("Referer", customReferer) }
+                        .get()
+                        .build()
+                    client.newCall(req).execute().use { r ->
+                        if (!r.isSuccessful) null else r.body?.string()?.take(512)
+                    }
+                }
+                if (probe != null && (probe.trimStart().startsWith("#EXTM3U") || probe.contains("#EXTINF"))) {
+                    Log.w(TAG, "textup.fr $channelName is a M3U sub-list (not a stream) — refusing to play")
+                    throw IllegalStateException(
+                        "Cette URL est un sous-dossier M3U (Pluto TV / LG Channels), pas un flux. " +
+                            "À ajouter comme playlist séparée."
+                    )
+                }
+            } catch (e: IllegalStateException) {
+                throw e
+            } catch (t: Throwable) {
+                Log.w(TAG, "textup.fr probe failed for $channelName: ${t.message} — continuing to normal pipeline")
+            }
+        }
+
+        // ──────── 2026-06-24 FAST html.bet BYPASS (Samsung TV+ / Pluto TV) ────────
+        // html.bet est un wrapper JS qui redirige vers le vrai stream. Au lieu
+        // de passer par un WebView lent (17s+), on résout directement :
+        //   - Samsung TV+ : html.bet/?https://jmp2.uk/stvp-<ID>
+        //       → jmp2.uk fait un 302 vers amagi.tv m3u8 (instantané)
+        //   - Pluto TV   : html.bet/?<hexChannelId>#
+        //       → boot API Pluto → JWT → stream URL (~1s)
+        if (rawSrc.contains("html.bet", ignoreCase = true)) {
+            try {
+                val resolved = resolveHtmlBetUrl(rawSrc, channelName)
+                if (resolved != null) {
+                    return resolved
+                }
+                // Si resolved == null → pas de pattern reconnu, tombe dans le
+                // pipeline GenericStreamResolver ci-dessous (WebView fallback)
+            } catch (t: Throwable) {
+                Log.w(TAG, "html.bet bypass failed for $channelName: ${t.message} — fallback to JS resolver")
+            }
+        }
+
+        // 2026-06-25 (user "Wisplay marche, chez nous ça affiche
+        //   'Mise à jour conseillée'") : pour les URLs c9v3.s.gy (= short
+        //   URL TVRadioZap 3box-tv qui redirige vers rsseverything.com),
+        //   on SHORTCUT le pipeline complexe BoxXtemus et on appelle
+        //   GenericStreamResolver direct avec le UA SPÉCIAL de la chaîne
+        //   (= contient tokens + date du jour qui identifient le client).
+        //   Sans UA spécial, c9v3 redirige vers 127.0.0.1 (= piège anti-bot).
+        //
+        // 2026-06-24 (reverse Wiseplay 8.5.3 : HostParser.WEB = vihosts.vp.a) :
+        //   on bascule sur `resolveWithJsFallback` = pipeline HTTP classique
+        //   d'abord, puis fallback WebView headless qui intercepte le 1er
+        //   .m3u8/.mpd sortant. Couvre les 3 patterns JS-only :
+        //   - c9v3.s.gy/me/...       (Rakuten : JS construit URL via XHR)
+        //   - c9v3.s.gy/aDqr3F/...   (Sony : wrapper hdfauth.ftven.fr/esi/TA)
+        //   - scailhol.free.fr       (PHP mini-proxy wrapping ftven/cloudfront)
+        //   - hdfauth.ftven.fr       (wrapper France TV avec ?url=<real m3u8>)
+        //   Sans WebView, 67 % des chaînes 3box-tv échouent. Avec WebView,
+        //   on récupère le pipeline complet que Wiseplay utilise.
+        val needsJsResolver = rawSrc.contains("c9v3.s.gy", ignoreCase = true) ||
+            rawSrc.contains("scailhol.free.fr", ignoreCase = true) ||
+            rawSrc.contains("hdfauth.ftven.fr", ignoreCase = true)
+        if (needsJsResolver) {
+            val headers = mutableMapOf<String, String>()
+            headers["User-Agent"] = customUa
+            if (customReferer.isNotBlank()) headers["Referer"] = customReferer
+            try {
+                val resolved = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.streamflixreborn.streamflix.utils.GenericStreamResolver.resolveWithJsFallback(
+                        startUrl = rawSrc,
+                        baseHeaders = headers,
+                        webviewTimeoutMs = 12_000L,
+                    )
+                }
+                val mime = when {
+                    resolved.url.contains(".mpd", ignoreCase = true) -> "application/dash+xml"
+                    resolved.url.contains(".m3u8", ignoreCase = true) -> "application/x-mpegURL"
+                    else -> "application/x-mpegURL"
+                }
+                Log.d(TAG, "JS-resolver shortcut: $channelName → ${resolved.url.take(120)}")
+                return com.streamflixreborn.streamflix.models.Video(
+                    source = resolved.url,
+                    type = mime,
+                    headers = resolved.headers,
+                )
+            } catch (t: Throwable) {
+                Log.w(TAG, "JS-resolver shortcut failed for $channelName: ${t.message} — fallback to BoxXtemus")
+            }
+        }
+
         // 2026-06-10 (user "tu compliques les choses, importe tous les
         //   réglages du TV Hub directement sur World TV") : DÉLÉGUE le
         //   pipeline COMPLET à BoxXtemus.resolveExternalChannel — il
@@ -1514,5 +1853,208 @@ object WorldLiveTvProvider : Provider, IptvProvider {
     //   - is3boxAntibotUrl : géré par BoxXtemus.getVideo (c3v9.short.gy/me)
     //   - isSeriesEpisodeName : heuristique abandonnée avec le folder system
     //     (toutes les récursions deviennent des folders explorables).
+
+    // ──────── 2026-06-24 html.bet bypass — résolution directe ────────
+    // Bypasse le wrapper JS html.bet en résolvant directement les URLs internes.
+    // Samsung TV+ : jmp2.uk/stvp-<ID> → 302 redirect → amagi.tv m3u8
+    // Pluto TV    : <hexId> → boot API → JWT → stream URL
+    private suspend fun resolveHtmlBetUrl(rawUrl: String, channelName: String): Video? {
+        // Extraire l'URL/ID interne : tout ce qui suit "html.bet/?"
+        val idx = rawUrl.indexOf("html.bet/?")
+        if (idx < 0) return null
+        val inner = rawUrl.substring(idx + 10).trimEnd('#', ' ')
+        if (inner.isBlank()) return null
+
+        // ── Samsung TV+ : inner = "https://jmp2.uk/stvp-<ID>" ──
+        if (inner.contains("jmp2.uk/stvp-", ignoreCase = true)) {
+            return resolveSamsungTvPlus(inner, channelName)
+        }
+
+        // ── Pluto TV : inner = hex channel ID (24 chars) ──
+        if (inner.matches(Regex("[0-9a-fA-F]{20,}"))) {
+            return resolvePlutoTv(inner, channelName)
+        }
+
+        // ── Autre inner URL (ex: https://...) : suivre les redirects HTTP ──
+        if (inner.startsWith("http", ignoreCase = true)) {
+            return resolveGenericRedirect(inner, channelName)
+        }
+
+        Log.w(TAG, "html.bet inner URL non reconnu pour $channelName: ${inner.take(80)}")
+        return null
+    }
+
+    /** Samsung TV+ : jmp2.uk fait un 302 direct vers amagi.tv m3u8 */
+    private suspend fun resolveSamsungTvPlus(jmpUrl: String, channelName: String): Video {
+        val m3u8Url = withContext(Dispatchers.IO) {
+            val noRedirectClient = client.newBuilder()
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .connectTimeout(8, TimeUnit.SECONDS)
+                .readTimeout(8, TimeUnit.SECONDS)
+                .build()
+            val req = Request.Builder()
+                .url(jmpUrl)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+                .get()
+                .build()
+            val resp = noRedirectClient.newCall(req).execute()
+            resp.use { r ->
+                val location = r.header("Location")
+                if (location != null && (location.contains(".m3u8") || location.contains("amagi.tv") || location.contains("playout"))) {
+                    location
+                } else if (r.isRedirect && location != null) {
+                    // Suit une chaîne de redirects (max 5)
+                    var current = location
+                    for (hop in 1..5) {
+                        val req2 = Request.Builder().url(current!!).header("User-Agent", "Mozilla/5.0").get().build()
+                        val r2 = noRedirectClient.newCall(req2).execute()
+                        r2.use { rr ->
+                            val loc2 = rr.header("Location")
+                            if (loc2 != null) {
+                                current = loc2
+                                if (loc2.contains(".m3u8") || loc2.contains("amagi") || loc2.contains("playout")) {
+                                    return@withContext loc2
+                                }
+                            } else {
+                                // Pas de redirect → c'est l'URL finale
+                                return@withContext current
+                            }
+                        }
+                    }
+                    current
+                } else {
+                    // Pas de redirect → l'URL elle-même est probablement le stream
+                    jmpUrl
+                }
+            }
+        }
+        Log.d(TAG, "Samsung TV+ bypass: $channelName → ${m3u8Url?.take(120)}")
+        val finalUrl = m3u8Url ?: throw IllegalStateException("Samsung TV+ redirect a échoué pour $channelName")
+        val mime = when {
+            finalUrl.contains(".mpd", ignoreCase = true) -> "application/dash+xml"
+            else -> "application/x-mpegURL"
+        }
+        return Video(source = finalUrl, type = mime, headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+        ))
+    }
+
+    /** Pluto TV : boot API → JWT → stream URL stitcher.
+     *  Le JWT contient un sessionID qu'il FAUT passer dans &sid= sinon 401.
+     *  Le master.m3u8 retourne des variantes SANS jwt= → ExoPlayer perd le JWT.
+     *  On fetch le master, extrait la meilleure variante, et ajoute &jwt= dessus. */
+    private suspend fun resolvePlutoTv(channelId: String, channelName: String): Video {
+        Log.w(TAG, "Pluto TV resolve: $channelName (id=$channelId)")
+        val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        val streamUrl = withContext(Dispatchers.IO) {
+            val deviceId = java.util.UUID.randomUUID().toString()
+            val bootUrl = "https://boot.pluto.tv/v4/start?appName=web&appVersion=9.9.0" +
+                "&deviceVersion=120.0.0.0&deviceModel=web&deviceMake=Chrome&deviceType=web" +
+                "&clientID=$deviceId&clientModelNumber=na&serverSideAds=false"
+            Log.w(TAG, "Pluto boot API call for $channelName...")
+            val bootReq = Request.Builder().url(bootUrl).header("User-Agent", ua).get().build()
+            val bootBody = client.newCall(bootReq).execute().use { r ->
+                Log.w(TAG, "Pluto boot response: ${r.code} for $channelName")
+                if (!r.isSuccessful) throw IllegalStateException("Pluto boot API ${r.code}")
+                r.body?.string() ?: throw IllegalStateException("Pluto boot body vide")
+            }
+            val bootJson = JSONObject(bootBody)
+            val jwt = bootJson.getString("sessionToken")
+            val stitcher = bootJson.getJSONObject("servers").getString("stitcher")
+            val sid = try {
+                val parts = jwt.split(".")
+                if (parts.size >= 2) {
+                    var payload = parts[1]
+                    val pad = (4 - payload.length % 4) % 4
+                    payload += "=".repeat(pad)
+                    val decoded = String(
+                        android.util.Base64.decode(
+                            payload.replace('-', '+').replace('_', '/'),
+                            android.util.Base64.DEFAULT
+                        )
+                    )
+                    JSONObject(decoded).optString("sessionID", deviceId)
+                } else deviceId
+            } catch (_: Exception) { deviceId }
+            Log.w(TAG, "Pluto boot OK: stitcher=$stitcher sid=$sid")
+
+            // Fetch master.m3u8 pour extraire la variante
+            val masterUrl = "$stitcher/v2/stitch/hls/channel/$channelId/master.m3u8" +
+                "?advertisingId=&appName=web&appVersion=9.9.0&deviceDNT=0" +
+                "&deviceId=$deviceId&deviceLat=0&deviceLon=0" +
+                "&deviceMake=Chrome&deviceModel=web&deviceType=web" +
+                "&deviceVersion=120.0.0.0&sid=$sid&jwt=$jwt"
+            val masterReq = Request.Builder().url(masterUrl).header("User-Agent", ua).get().build()
+            val masterBody = client.newCall(masterReq).execute().use { r ->
+                Log.w(TAG, "Pluto master.m3u8 response: ${r.code}")
+                if (!r.isSuccessful) throw IllegalStateException("Pluto master HTTP ${r.code}")
+                r.body?.string() ?: ""
+            }
+            Log.w(TAG, "Pluto master body (${masterBody.length} chars): ${masterBody.take(300)}")
+
+            val lines = masterBody.lines()
+            var bestUrl: String? = null
+            var bestBandwidth = 0L
+            for (i in lines.indices) {
+                val line = lines[i].trim()
+                if (line.startsWith("#EXT-X-STREAM-INF:")) {
+                    val bw = Regex("BANDWIDTH=(\\d+)").find(line)
+                        ?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 0L
+                    val nextLine = lines.getOrNull(i + 1)?.trim() ?: continue
+                    if (nextLine.isNotEmpty() && !nextLine.startsWith("#")) {
+                        if (bw > bestBandwidth) { bestBandwidth = bw; bestUrl = nextLine }
+                    }
+                }
+            }
+            if (bestUrl == null) {
+                Log.w(TAG, "Pluto: pas de variante, fallback master")
+                masterUrl
+            } else {
+                val variantFullUrl = if (bestUrl.startsWith("http")) bestUrl
+                    else masterUrl.substringBefore("?").substringBeforeLast("/") + "/" + bestUrl
+                val finalUrl = if (variantFullUrl.contains("jwt=")) variantFullUrl
+                    else variantFullUrl + (if (variantFullUrl.contains("?")) "&" else "?") + "jwt=$jwt"
+                Log.w(TAG, "Pluto variante (bw=$bestBandwidth): ${finalUrl.take(150)}")
+                finalUrl
+            }
+        }
+        Log.w(TAG, "Pluto TV bypass: $channelName → ${streamUrl.take(120)}")
+        return Video(
+            source = streamUrl,
+            type = "application/x-mpegURL",
+            headers = mapOf("User-Agent" to ua),
+        )
+    }
+
+    /** URL directe (non-Samsung, non-Pluto) : suit les redirects HTTP */
+    private suspend fun resolveGenericRedirect(url: String, channelName: String): Video {
+        val finalUrl = withContext(Dispatchers.IO) {
+            val followClient = client.newBuilder()
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(10, TimeUnit.SECONDS)
+                .build()
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+                .get()
+                .build()
+            followClient.newCall(req).execute().use { r ->
+                // L'URL après tous les redirects
+                r.request.url.toString()
+            }
+        }
+        Log.d(TAG, "Generic redirect bypass: $channelName → ${finalUrl.take(120)}")
+        val mime = when {
+            finalUrl.contains(".mpd", ignoreCase = true) -> "application/dash+xml"
+            finalUrl.contains(".m3u8", ignoreCase = true) -> "application/x-mpegURL"
+            else -> "application/x-mpegURL"
+        }
+        return Video(source = finalUrl, type = mime, headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+        ))
+    }
 }
 

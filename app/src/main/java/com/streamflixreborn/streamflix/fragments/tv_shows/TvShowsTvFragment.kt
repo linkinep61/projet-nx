@@ -26,6 +26,8 @@ import com.streamflixreborn.streamflix.providers.Provider
 import com.streamflixreborn.streamflix.providers.IptvProvider
 import com.streamflixreborn.streamflix.utils.MiniPlayerController
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import androidx.transition.TransitionManager
+import androidx.transition.AutoTransition
 import com.streamflixreborn.streamflix.utils.CacheUtils
 import com.streamflixreborn.streamflix.utils.viewModelsFactory
 import kotlinx.coroutines.launch
@@ -151,6 +153,7 @@ class TvShowsTvFragment : Fragment() {
         }
 
         com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
+        syncOverlayVisibility()
         binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
         MiniPlayerController.currentChannelPoster?.let { poster ->
             Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
@@ -160,11 +163,9 @@ class TvShowsTvFragment : Fragment() {
         if (MiniPlayerController.onIptvChannelClick == null) {
             MiniPlayerController.onIptvChannelClick = { tvShow ->
                 if (tvShow.id == MiniPlayerController.currentChannelId) {
-                    // 2026-06-08 (user "ils se ferment et le grand lecteur
-                    //   s'ouvre point barre") : KILL le mini, pas de handoff.
-                    Log.d("TvShowsTv", "Same channel → KILL mini (onResume): ${tvShow.title}")
-                    MiniPlayerController.stopAsync()
-                    if (_binding != null) { binding.miniPlayerContainer.visibility = View.GONE }
+                    Log.d("TvShowsTv", "Same channel → TRANSFER mini → fullscreen (onResume): ${tvShow.title}")
+                    MiniPlayerController.transitioningToFullscreen = true
+                    if (_binding != null) { binding.miniPlayerView.player = null; binding.miniPlayerContainer.visibility = View.GONE; syncOverlayVisibility() }
                     false
                 } else {
                     Log.d("TvShowsTv", "Mini player intercept (onResume): ${tvShow.title}")
@@ -260,6 +261,7 @@ class TvShowsTvFragment : Fragment() {
         val isIptv = UserPreferences.currentProvider is IptvProvider
         if (!isIptv || !UserPreferences.miniPlayerEnabled) {
             binding.miniPlayerContainer.visibility = View.GONE
+            syncOverlayVisibility()
             MiniPlayerController.onIptvChannelClick = null
             return
         }
@@ -269,6 +271,7 @@ class TvShowsTvFragment : Fragment() {
 
         if (MiniPlayerController.currentChannelId != null) {
             com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
+            syncOverlayVisibility()
             binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
             MiniPlayerController.currentChannelPoster?.let { poster ->
                 Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
@@ -278,19 +281,41 @@ class TvShowsTvFragment : Fragment() {
 
         viewLifecycleOwner.lifecycleScope.launch {
             MiniPlayerController.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
+                val wasVisible = binding.miniPlayerContainer.visibility == View.VISIBLE
                 when (state) {
                     is MiniPlayerController.State.Idle -> {
+                        if (wasVisible) {
+                            TransitionManager.beginDelayedTransition(
+                                binding.root as ViewGroup,
+                                AutoTransition().apply { duration = 300 }
+                            )
+                        }
                         binding.miniPlayerContainer.visibility = View.GONE
+                        syncOverlayVisibility()
                         updateGridForMiniPlayer(false)
                     }
                     is MiniPlayerController.State.Loading -> {
+                        if (!wasVisible) {
+                            TransitionManager.beginDelayedTransition(
+                                binding.root as ViewGroup,
+                                AutoTransition().apply { duration = 300 }
+                            )
+                        }
                         com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
+                        syncOverlayVisibility()
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.VISIBLE
                         updateGridForMiniPlayer(true)
                     }
                     is MiniPlayerController.State.Playing -> {
+                        if (!wasVisible) {
+                            TransitionManager.beginDelayedTransition(
+                                binding.root as ViewGroup,
+                                AutoTransition().apply { duration = 300 }
+                            )
+                        }
                         com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
+                        syncOverlayVisibility()
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.GONE
                         updatePauseButton()
@@ -302,8 +327,6 @@ class TvShowsTvFragment : Fragment() {
                     is MiniPlayerController.State.Error -> {
                         binding.miniPlayerLoading.visibility = View.GONE
                         Log.e("TvShowsTv", "Mini player error: ${state.message}")
-                        // 2026-05-14 (user "tu vois pas que la vidéo mouline depuis tout
-                        // à l'heure") : feedback visible.
                         Toast.makeText(requireContext(),
                             "Stream indisponible — essaie une autre chaîne",
                             Toast.LENGTH_LONG).show()
@@ -322,10 +345,9 @@ class TvShowsTvFragment : Fragment() {
 
         MiniPlayerController.onIptvChannelClick = { tvShow ->
             if (tvShow.id == MiniPlayerController.currentChannelId) {
-                // 2026-06-08 : KILL le mini, pas de handoff.
-                Log.d("TvShowsTv", "Same channel → KILL mini: ${tvShow.title}")
-                MiniPlayerController.stopAsync()
-                if (_binding != null) { binding.miniPlayerContainer.visibility = View.GONE }
+                Log.d("TvShowsTv", "Same channel → TRANSFER mini → fullscreen: ${tvShow.title}")
+                MiniPlayerController.transitioningToFullscreen = true
+                if (_binding != null) { binding.miniPlayerView.player = null; binding.miniPlayerContainer.visibility = View.GONE; syncOverlayVisibility() }
                 false
             } else {
                 Log.d("TvShowsTv", "Mini player intercept: ${tvShow.title} (${tvShow.id})")
@@ -394,6 +416,12 @@ class TvShowsTvFragment : Fragment() {
         }
     }
 
+    /** Synchro visibilité overlay (barre boutons) avec le container vidéo. */
+    private fun syncOverlayVisibility() {
+        if (_binding == null) return
+        binding.miniPlayerOverlay.visibility = binding.miniPlayerContainer.visibility
+    }
+
     private fun updatePauseButton() {
         if (_binding == null) return
         val icon = if (MiniPlayerController.isPaused()) {
@@ -436,23 +464,76 @@ class TvShowsTvFragment : Fragment() {
 
     private var miniPlayerLayoutApplied = false
 
+    /** 2026-06-23 (user "sur la télé quand on affiche le mini lecteur il faut
+     *  descendre le panel pour rester bien visible — regarde sur la
+     *  chromecast — ça a pas marché sur vavoo") :
+     *  Auparavant on rétrécissait la grille à 52% width pour la garder à
+     *  GAUCHE du mini-player. L'user préfère que la grille descende SOUS
+     *  le mini (= même comportement que le home TV). Push vertical via
+     *  paddingTop dynamique calculé sur la hauteur du mini-player
+     *  (50% width × 9/16 + 8dp marge), avec restauration du paddingTop
+     *  de base (@dimen/tv_shows_spacing = 16dp) quand le mini est masqué. */
     private fun updateGridForMiniPlayer(miniPlayerVisible: Boolean) {
         if (_binding == null) return
         if (miniPlayerVisible == miniPlayerLayoutApplied) return
         miniPlayerLayoutApplied = miniPlayerVisible
         val grid = binding.vgvTvShows
-        val params = grid.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
-        if (miniPlayerVisible) {
-            // Constrain grid width to end at the mini player (45% + 16dp margin)
-            // so items keep their original 6-column size and don't go behind it.
-            params.matchConstraintPercentWidth = 0.52f
-            params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
-            params.horizontalBias = 0f
-        } else {
-            params.matchConstraintPercentWidth = 1f
-            params.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+        val density = resources.displayMetrics.density
+        val basePaddingTop = (16 * density).toInt()  // @dimen/tv_shows_spacing = 16dp
+        if (!miniPlayerVisible) {
+            grid.setPadding(grid.paddingLeft, basePaddingTop, grid.paddingRight, grid.paddingBottom)
+            try {
+                val lp = grid.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
+                // 2026-06-23 v3 fix : restaurer la width pleine (au cas où une
+                // ancienne v2 aurait laissé matchConstraintPercentWidth=0.52f).
+                lp.matchConstraintPercentWidth = 1f
+                lp.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                lp.horizontalBias = 0.5f
+                if (lp.topMargin != 0) {
+                    lp.topMargin = 0
+                }
+                grid.layoutParams = lp
+            } catch (_: Throwable) {}
+            grid.requestLayout()
+            android.util.Log.d("TvShowsTv", "updateGridForMiniPlayer(false): RESET topMargin=0 width=1f paddingTop=$basePaddingTop")
+            return
         }
-        grid.layoutParams = params
+        // 2026-06-23 v3 (user "C'est toujours pas bon sur TV — descendre tout
+        //   ce qui est derrière, comme un glissement") : on n'utilise plus le
+        //   paddingTop (= ignoré visuellement par le VerticalGridView Leanback
+        //   en runtime). On utilise le topMargin du LayoutParams pour pousser
+        //   tout le grid vers le bas comme un véritable glissement.
+        //   IMPORTANT : on FORCE aussi width=1f (= pleine largeur) au cas où
+        //   une ancienne version aurait laissé matchConstraintPercentWidth=0.52f
+        //   (= seul TF1 visible au lieu des 770 chaînes Vavoo).
+        val fallbackH = (resources.displayMetrics.widthPixels * 0.50 * 9.0 / 16.0).toInt()
+        val initialPadding = fallbackH + (8 * density).toInt()
+        grid.setPadding(grid.paddingLeft, basePaddingTop, grid.paddingRight, grid.paddingBottom)
+        try {
+            val lp = grid.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
+            lp.matchConstraintPercentWidth = 1f
+            lp.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+            lp.horizontalBias = 0.5f
+            lp.topMargin = initialPadding
+            grid.layoutParams = lp
+        } catch (_: Throwable) {}
+        grid.requestLayout()
+        android.util.Log.d("TvShowsTv", "updateGridForMiniPlayer(true): topMargin=$initialPadding px width=1f (fallbackH=$fallbackH, density=$density, widthPx=${resources.displayMetrics.widthPixels})")
+        // Raffinement via .post quand la vraie hauteur est mesurée.
+        binding.miniPlayerContainer.post {
+            if (_binding == null) return@post
+            val miniH = binding.miniPlayerContainer.height
+            if (miniH > 0 && miniH != fallbackH) {
+                val refinedPadding = miniH + (8 * density).toInt()
+                binding.vgvTvShows.setPadding(
+                    binding.vgvTvShows.paddingLeft,
+                    refinedPadding,
+                    binding.vgvTvShows.paddingRight,
+                    binding.vgvTvShows.paddingBottom,
+                )
+                android.util.Log.d("TvShowsTv", "updateGridForMiniPlayer refined: paddingTop=$refinedPadding px (miniH=$miniH)")
+            }
+        }
     }
 
     private fun displayTvShows(tvShows: List<TvShow>, hasMore: Boolean) {

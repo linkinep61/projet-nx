@@ -19,12 +19,74 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
+    <!-- 2026-06-24 v2 (user "boutons pas focusables avec télécommande") :
+         Button (pas TextView) + nextFocus explicite, descendantFocusability
+         BEFORE_DESCENDANTS sur LinearLayout pour participer au focus chain. -->
+    <LinearLayout
+        android:id="@+id/ll_tv_show_lang_tabs"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="70dp"
+        android:layout_marginTop="12dp"
+        android:descendantFocusability="afterDescendants"
+        android:focusable="false"
+        android:orientation="horizontal"
+        android:visibility="gone"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/tv_tv_show_seasons_label">
+
+        <Button
+            android:id="@+id/btn_tv_show_lang_vostfr"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="12dp"
+            android:background="@drawable/bg_lang_tab_focus"
+            android:focusable="true"
+            android:focusableInTouchMode="false"
+            android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:nextFocusDown="@id/hgv_tv_show_seasons"
+            android:nextFocusRight="@id/btn_tv_show_lang_vf"
+            android:paddingStart="24dp"
+            android:paddingTop="10dp"
+            android:paddingEnd="24dp"
+            android:paddingBottom="10dp"
+            android:text="VOSTFR"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btn_tv_show_lang_vf"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_lang_tab_focus"
+            android:focusable="true"
+            android:focusableInTouchMode="false"
+            android:gravity="center"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:nextFocusDown="@id/hgv_tv_show_seasons"
+            android:nextFocusLeft="@id/btn_tv_show_lang_vostfr"
+            android:paddingStart="24dp"
+            android:paddingTop="10dp"
+            android:paddingEnd="24dp"
+            android:paddingBottom="10dp"
+            android:text="VF"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+    </LinearLayout>
+
     <androidx.leanback.widget.HorizontalGridView
         android:id="@+id/hgv_tv_show_seasons"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:clipChildren="false"
         android:clipToPadding="false"
+        android:nextFocusUp="@id/btn_tv_show_lang_vostfr"
         android:paddingStart="70dp"
         android:paddingTop="26dp"
         android:paddingEnd="70dp"
@@ -33,7 +95,7 @@
         app:focusOutFront="true"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/tv_tv_show_seasons_label"
+        app:layout_constraintTop_toBottomOf="@id/ll_tv_show_lang_tabs"
         tools:listitem="@layout/item_season_tv" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

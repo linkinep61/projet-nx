@@ -87,8 +87,19 @@ class GlideCustomModule : AppGlideModule() {
             .addInterceptor(logging)
             .addInterceptor { chain ->
                 val request = chain.request()
+                // 2026-06-28 : Les domaines CF-protégés (Wiflix, DessinAnime, FrenchAnime,
+                //   Papadustream) ont un cookie cf_clearance lié au STEALTH_UA (Chrome 131).
+                //   Si Glide envoie l'ancien UA Chrome/116, CF rejette → jaquettes grises.
+                val host = request.url.host.lowercase()
+                val isCfHost = host.contains("wiflix") || host.contains("flemmix") ||
+                    host.contains("dessinanime") || host.contains("frenchanime") ||
+                    host.contains("papadustream")
+                val ua = if (isCfHost)
+                    com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA
+                else
+                    com.streamflixreborn.streamflix.utils.NetworkClient.USER_AGENT
                 val newRequest = request.newBuilder()
-                    .header("User-Agent", com.streamflixreborn.streamflix.utils.NetworkClient.USER_AGENT)
+                    .header("User-Agent", ua)
                     .header("Referer", "${request.url.scheme}://${request.url.host}/")
                     .build()
                 chain.proceed(newRequest)

@@ -128,8 +128,28 @@ class MainTvActivity : FragmentActivity() {
                         com.streamflixreborn.streamflix.utils.ChannelListState.onDownPressed?.invoke()
                         return true
                     }
-                    android.view.KeyEvent.KEYCODE_BACK,
                     android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        // 2026-06-21 (user "ni gauche ni droite sur les saisons") :
+                        //   Si onLeftPressed gère (= focus sur onglet saison
+                        //   qui peut aller plus à gauche), on consomme. Sinon
+                        //   c'est close.
+                        val handled = com.streamflixreborn.streamflix.utils.ChannelListState
+                            .onLeftPressed?.invoke() ?: false
+                        if (!handled) {
+                            com.streamflixreborn.streamflix.utils.ChannelListState.onCloseRequested?.invoke()
+                        }
+                        return true
+                    }
+                    android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        // 2026-06-21 (user "ni gauche ni droite sur les saisons") :
+                        //   onRightPressed pour nav horizontale entre onglets
+                        //   de saison. Si null/false → consomme sans agir
+                        //   (= reste sur la card actuelle).
+                        com.streamflixreborn.streamflix.utils.ChannelListState
+                            .onRightPressed?.invoke()
+                        return true
+                    }
+                    android.view.KeyEvent.KEYCODE_BACK -> {
                         com.streamflixreborn.streamflix.utils.ChannelListState.onCloseRequested?.invoke()
                         return true
                     }
@@ -251,9 +271,10 @@ class MainTvActivity : FragmentActivity() {
                 val channelListPanel2 = window.decorView.findViewById<View>(R.id.layout_channel_list)
                 val channelListOpen = channelListPanel2 != null && channelListPanel2.visibility == View.VISIBLE
                 if (!channelListOpen && !settingsPanelVisible && playerView != null && !playerView.isControllerFullyVisible) {
-                    val settingsBtn = playerView.findViewById<View>(androidx.media3.ui.R.id.exo_settings)
+                    // 2026-06-20 : focus par défaut sur Play/Pause (centre), pas sur settings.
+                    val playPauseBtn = playerView.findViewById<View>(androidx.media3.ui.R.id.exo_play_pause)
                     playerView.showController()
-                    settingsBtn?.requestFocus()
+                    playPauseBtn?.requestFocus()
                     return true  // consume → pas de pause
                 }
                 // Controls visibles ou panel Settings ouvert : on laisse passer.
@@ -452,6 +473,13 @@ class MainTvActivity : FragmentActivity() {
         binding.navMain.setupWithNavController(navController)
         updateNavigationVisibility()
 
+        // 2026-06-20 (user "valable pour tous les providers qui ont un mini lecteur") :
+        //   refresh la visibilité de l'item "🎦 Plein écran" sidebar chaque fois
+        //   que le mini player démarre / s'arrête.
+        com.streamflixreborn.streamflix.utils.MiniPlayerController.onChannelStateChanged = {
+            runOnUiThread { updateNavigationVisibility() }
+        }
+
         // 2026-05-14 (user "les icônes de la barre de gauche ne correspondent pas
         // au provider en général pour les animés tu m'as mis des icônes pour un
         // provider IPTV") : observe les changements de provider pour refresh la
@@ -519,6 +547,9 @@ class MainTvActivity : FragmentActivity() {
                     showCatalogFilterPicker()
                     return@setOnItemSelectedListener false
                 }
+                // 2026-06-22 : minip_fullscreen_menu retiré de la sidebar.
+                // Les boutons mini player (⛶ ⏸ ✕) sont maintenant en overlay
+                // dans le layout fragment, accessibles via D-pad.
                 R.id.livehub_refresh_menu -> {
                     // 2026-06-19 (user "bouton refresh du home, ça efface les
                     //   données du home pour ce genre de cas Wiflix") :
@@ -1339,6 +1370,8 @@ class MainTvActivity : FragmentActivity() {
         //   + VOD). Permet à l'user de forcer un refresh quand le home est
         //   stale (= ancien cache).
         binding.navMain.menu.findItem(R.id.livehub_refresh_menu)?.isVisible = true
+        // 2026-06-22 : minip_fullscreen_menu retiré de la sidebar (boutons
+        // mini player déplacés dans l'overlay du fragment, en haut à gauche).
         // 2026-05-26 : filtre genre TMDB = re-clic sur Films/Séries
         // (pas d'item sidebar, géré par setOnItemReselectedListener)
     }

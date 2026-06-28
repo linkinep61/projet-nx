@@ -7,9 +7,14 @@
     android:focusable="true"
     android:focusableInTouchMode="true">
 
+    <!-- 2026-06-23 (user "la jaquette épisode est immense, mauvaise qualité,
+         on voit le upscale") : 600dp → 400dp. La source TMDB des stills
+         d'épisodes est en w500 (=500px), donc à 600dp Android upscale de
+         500→600 = blur visible. À 400dp on est en dessous de la source
+         → image rendue NETTE. Ratio 2:1 conservé. -->
     <ImageView
         android:id="@+id/iv_episode_poster"
-        android:layout_width="600dp"
+        android:layout_width="400dp"
         android:layout_height="0dp"
         android:background="@drawable/bg_item_episode_image_tv"
         android:duplicateParentState="true"

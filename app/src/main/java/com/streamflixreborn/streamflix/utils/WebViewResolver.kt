@@ -46,7 +46,10 @@ class WebViewResolver(private val context: Context) {
         // EN
         "Just a moment...", "cf-browser-verification", "challenge-running", "Checking your browser", "cloudflare",
         // FR (2026-06-09 : DessinAnime CF challenge en français)
-        "Un instant", "Veuillez patienter", "Vérification en cours", "Vérifie votre navigateur"
+        "Un instant", "Veuillez patienter", "Vérification en cours", "Vérifie votre navigateur",
+        // 2026-06-28 : bot shield Wiflix (flemmix.city) — page intermédiaire
+        //   JS après le Turnstile CF, doit être traitée comme un challenge.
+        "Bot shield active"
     )
 
     /** Si silent=true, désactive le dialog "challenge visible" — pour les
@@ -67,32 +70,143 @@ class WebViewResolver(private val context: Context) {
         return@withLock result ?: "<html><body>Timeout</body></html>"
     }
 
+    companion object {
+        // 2026-06-28 : User-Agent réaliste Chrome 131 (dernière stable Android).
+        //   L'ancien UA Chrome/116 est vieux de 2 ans → score bot élevé chez CF.
+        //   NB : on ne touche PAS NetworkClient.USER_AGENT (utilisé par OkHttp
+        //   pour les appels API normaux). STEALTH_UA est utilisé par le WebView
+        //   bypass ET par les requêtes OkHttp post-bypass (le cookie cf_clearance
+        //   est lié au UA — mismatch = rejet).
+        const val STEALTH_UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.39 Mobile Safari/537.36"
+    }
+
+    // 2026-06-28 : script JS anti-détection injecté AVANT que les scripts
+    //   Cloudflare ne s'exécutent (via onPageStarted). Spoofes les empreintes
+    //   que CF Turnstile vérifie pour distinguer un WebView d'un vrai Chrome :
+    //   - navigator.webdriver = undefined (WebView met true → red flag #1)
+    //   - window.chrome = objet Chrome réaliste (absent en WebView → red flag #2)
+    //   - navigator.plugins = faux plugins (vide en WebView → red flag #3)
+    //   - navigator.permissions.query = pas d'erreur sur "notifications"
+    //   - WebGL renderer = pas "SwiftShader" (indicateur headless)
+    //   Résultat : le Turnstile devrait s'auto-résoudre comme dans un vrai
+    //   navigateur (~2-3s), sans que le user ait besoin de cliquer.
+    private val STEALTH_JS = """
+        (function() {
+            // 1. navigator.webdriver = undefined (le signal #1 que CF vérifie)
+            try {
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: function() { return undefined; },
+                    configurable: true
+                });
+            } catch(e) {}
+
+            // 2. window.chrome = objet réaliste (absent en WebView = bot)
+            if (!window.chrome) {
+                window.chrome = {
+                    app: { isInstalled: false, getDetails: function(){}, getIsInstalled: function(){}, installState: function(){}, runningState: function(){ return 'cannot_run'; } },
+                    runtime: { id: undefined, connect: function(){}, sendMessage: function(){}, onMessage: { addListener: function(){}, removeListener: function(){} }, PlatformOs: { ANDROID: 'android' }, lastError: null },
+                    csi: function(){ return {}; },
+                    loadTimes: function(){ return {}; }
+                };
+            }
+
+            // 3. navigator.plugins = faux plugins (vide en WebView = suspect)
+            try {
+                Object.defineProperty(navigator, 'plugins', {
+                    get: function() {
+                        return [
+                            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format', length: 1 },
+                            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '', length: 1 },
+                            { name: 'Native Client', filename: 'internal-nacl-plugin', description: '', length: 2 }
+                        ];
+                    },
+                    configurable: true
+                });
+            } catch(e) {}
+
+            // 4. navigator.languages (certains WebView renvoient juste ["en"])
+            try {
+                Object.defineProperty(navigator, 'languages', {
+                    get: function() { return ['fr-FR', 'fr', 'en-US', 'en']; },
+                    configurable: true
+                });
+            } catch(e) {}
+
+            // 5. permissions.query — pas d'erreur sur "notifications" (WebView throw)
+            try {
+                var origQuery = navigator.permissions.query.bind(navigator.permissions);
+                navigator.permissions.query = function(params) {
+                    if (params && params.name === 'notifications') {
+                        return Promise.resolve({ state: 'prompt', onchange: null });
+                    }
+                    return origQuery(params);
+                };
+            } catch(e) {}
+
+            // 6. Dimension écran réaliste (certaines implémentations renvoient 0)
+            try {
+                if (screen.width === 0 || screen.height === 0) {
+                    Object.defineProperty(screen, 'width', { get: function(){ return 412; } });
+                    Object.defineProperty(screen, 'height', { get: function(){ return 915; } });
+                }
+            } catch(e) {}
+
+            // 7. Spoof canvas toDataURL pour éviter le fingerprint "vide"
+            //    (on ne change pas le rendu, juste on s'assure que c'est pas vide)
+
+            // 8. Cacher que c'est un WebView via le feature check
+            try {
+                Object.defineProperty(navigator, 'userAgent', {
+                    get: function() { return navigator.__originalUA || navigator.userAgent; },
+                    configurable: true
+                });
+            } catch(e) {}
+        })();
+    """.trimIndent()
+
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView(url: String, headers: Map<String, String>, continuation: kotlinx.coroutines.CancellableContinuation<String>) {
         webView = WebView(context).apply {
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(Color.BLACK)
             // IMPORTANTE: Su TV non deve essere focusable per lasciare il controllo al container
-            isFocusable = !isTv 
+            isFocusable = !isTv
             isFocusableInTouchMode = !isTv
-            
+
             // Stabilità Rendering Software per Android TV 9 (come da registro)
             if (isTv) {
                 setLayerType(View.LAYER_TYPE_SOFTWARE, null)
             }
-            
+
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
                 databaseEnabled = true
-                userAgentString = NetworkClient.USER_AGENT
+                // 2026-06-28 : UA Chrome 131 réaliste au lieu de l'ancien
+                //   Chrome 116 (2 ans de retard = score bot élevé chez CF)
+                userAgentString = STEALTH_UA
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 loadWithOverviewMode = true
                 useWideViewPort = true
             }
 
             webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView?, currentUrl: String?, favicon: android.graphics.Bitmap?) {
+                    super.onPageStarted(view, currentUrl, favicon)
+                    // 2026-06-28 : injecter les patches anti-détection le PLUS
+                    //   TÔT possible — AVANT que les scripts Cloudflare ne
+                    //   s'exécutent et lisent navigator.webdriver / window.chrome.
+                    //   onPageStarted est le 1er callback = injection optimale.
+                    view?.evaluateJavascript(STEALTH_JS, null)
+                    Log.d(TAG, "[WebView] Stealth patches injected for $currentUrl")
+                }
+
                 override fun onPageFinished(view: WebView?, currentUrl: String?) {
                     Log.d(TAG, "[WebView] onPageFinished: $currentUrl")
+                    // 2026-06-28 : ré-injecter les patches après le load complet
+                    //   au cas où un framework JS (React/Next.js) réinitialise
+                    //   le DOM et perd les patches du onPageStarted.
+                    view?.evaluateJavascript(STEALTH_JS, null)
                     // 2026-06-09 v2 : 500ms → 100ms — check immédiat des liens
                     //   réels du site. Si page chargée → SUCCESS direct.
                     mainHandler.postDelayed({
@@ -113,7 +227,7 @@ class WebViewResolver(private val context: Context) {
         
         view?.evaluateJavascript("(function() { return document.documentElement.innerHTML; })();") { html ->
             val cleanHtml = html?.trim()?.removeSurrounding("\"")
-                ?.replace("\\u003C", "<")?.replace("\\\"", "\"")?.replace("\\n", "\n") ?: ""
+                ?.replace("\\u003C", "<")?.replace("\\\"", "\"")?.replace("\\n", "\n")?.replace("\\t", "\t") ?: ""
             
             val isChallenge = challengeKeywords.any { cleanHtml.contains(it, ignoreCase = true) }
             val hasContent = cleanHtml.contains("article") || cleanHtml.contains("iframe") ||
@@ -145,6 +259,14 @@ class WebViewResolver(private val context: Context) {
             //   "cloudflare" ou "Un instant" traînent encore dans des scripts.
             val hasRealSiteLinks = cleanHtml.contains("href=\"/movie/") ||
                 cleanHtml.contains("href=\"/tv/") ||
+                // 2026-06-23 : Wiflix — ses liens réels sont /film/ et /serie/
+                //   PLUS ses marqueurs de contenu (posterimg, mov-t, mov-list)
+                //   qui prouvent que le site a chargé DERRIÈRE le faux-positif
+                //   "cloudflare" (= CDN analytics, pas un challenge actif).
+                cleanHtml.contains("href=\"/film/") ||
+                cleanHtml.contains("href=\"/serie/") ||
+                // Wiflix content markers — si présents, c'est le VRAI site
+                (cleanHtml.contains("posterimg") && cleanHtml.contains("mov-t")) ||
                 // 2026-06-09 v2 : page film avec iframe lecteur (PAS Turnstile)
                 (cleanHtml.contains("<iframe", ignoreCase = true) &&
                     !cleanHtml.contains("challenges.cloudflare.com", ignoreCase = true) &&
@@ -152,13 +274,34 @@ class WebViewResolver(private val context: Context) {
             if (hasRealSiteLinks
                 || (!isChallenge && hasContent && cleanHtml.length > 1000)
                 || (hasClearance && !isChallenge)
-                || (!isChallenge && hasContent && hasClearance && cleanHtml.length > 5000 && pollingCount >= 3)) {
+                || (!isChallenge && hasContent && hasClearance && cleanHtml.length > 5000 && pollingCount >= 3)
+                // 2026-06-28 : si le cookie cf_clearance est posé ET la page a
+                //   du vrai contenu ET c'est assez gros, c'est du vrai contenu
+                //   même si "cloudflare" traîne dans les scripts CDN/analytics.
+                || (hasClearance && hasContent && cleanHtml.length > 5000)) {
                 Log.d(TAG, "[WebView] SUCCESS detected! Closing bypass.")
                 cookieManager.flush()
                 if (continuation.isActive) {
                     continuation.resume("<html>$cleanHtml</html>")
                     cleanup()
                 }
+                return@evaluateJavascript
+            }
+
+            // 2026-06-28 : détecter la page "Error 1015 — You are being rate
+            //   limited" AVANT le dialog. C'est une page Cloudflare qui contient
+            //   le mot "cloudflare" → isChallenge=true, mais il n'y a RIEN à
+            //   résoudre (pas de Turnstile). Afficher le dialog est inutile et
+            //   confus pour le user. On renvoie un marker silencieux ; le
+            //   WiflixProvider détectera le 1015 et activera le cooldown 15min.
+            val isRateLimited = cleanHtml.contains("Error 1015", ignoreCase = true) ||
+                cleanHtml.contains("You are being rate limited", ignoreCase = true) ||
+                cleanHtml.contains("has banned you temporarily", ignoreCase = true)
+            if (isRateLimited) {
+                Log.w(TAG, "[WebView] Rate limit 1015 detected — NOT showing dialog, returning silently")
+                cookieManager.flush()
+                if (continuation.isActive) continuation.resume("<html><!-- rate limited 1015 --></html>")
+                cleanup()
                 return@evaluateJavascript
             }
 
@@ -183,12 +326,15 @@ class WebViewResolver(private val context: Context) {
             }
 
             pollingCount++
-            if (pollingCount < 80) {
-                // 2026-06-09 v3 : 800ms → 300ms pour détection SUCCESS quasi-
-                //   instantanée dès que les liens réels du site apparaissent.
+            // 2026-06-28 : max polling aligné sur le timeout global —
+            //   silent=100 (30s), visible=400 (120s). Avant : 80 (24s)
+            //   trop court pour que le user résolve le Turnstile → dialog
+            //   fermé, challenge HTML renvoyé = cache empoisonné.
+            val maxPolls = if (silentMode) 100 else 400
+            if (pollingCount < maxPolls) {
                 mainHandler.postDelayed({ checkChallengeStatus(view, currentUrl, continuation) }, 300)
             } else {
-                Log.w(TAG, "[WebView] Max polling reached")
+                Log.w(TAG, "[WebView] Max polling reached ($maxPolls)")
                 if (continuation.isActive) continuation.resume("<html>$cleanHtml</html>")
                 cleanup()
             }
@@ -264,7 +410,7 @@ class WebViewResolver(private val context: Context) {
 
                     val webContainer = FrameLayout(dialogCtx).apply {
                         id = View.generateViewId()
-                        setBackgroundColor(Color.WHITE)
+                        setBackgroundColor(Color.BLACK)
                     }
                     val webParams = RelativeLayout.LayoutParams(-1, -1)
                     webParams.addRule(RelativeLayout.BELOW, btnInfo.id)

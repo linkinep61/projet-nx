@@ -105,6 +105,12 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
     fun setLanguageFilter(language: String) {
         if (languageFilter != language) {
             languageFilter = language
+            // 2026-06-20 : rafraîchit le contexte AnimeSama AVANT getTvShows
+            // sinon getGenre() utilise un vieux type/langue quand un genre est actif.
+            if (UserPreferences.currentProvider?.name == "AnimeSama") {
+                com.streamflixreborn.streamflix.providers.AnimeSamaProvider
+                    .setActiveTabContext(language, fromMovies = false)
+            }
             getTvShows()
         }
     }
@@ -133,6 +139,12 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
             _state.emit(State.Loading)
             try {
                 val provider = UserPreferences.currentProvider ?: return@launch
+                // 2026-06-20 : (re)pose le contexte AnimeSama AVANT chaque fetch.
+                // L'enrichment HomeViewModel peut avoir écrasé les flags entre 2 fetchs.
+                if (provider.name == "AnimeSama") {
+                    com.streamflixreborn.streamflix.providers.AnimeSamaProvider
+                        .setActiveTabContext(languageFilter, fromMovies = false)
+                }
                 Log.d("TvShowsViewModel", "getTvShows: provider=${provider.name}, isFilterable=${provider is FilterableProvider}, languageFilter=$languageFilter, genreId=$genreId")
                 var tvShows = if (genreId != null && GenreFilter.isSupported(provider.name)) {
                     Log.d("TvShowsViewModel", "getTvShows: using GENRE filter id=$genreId")

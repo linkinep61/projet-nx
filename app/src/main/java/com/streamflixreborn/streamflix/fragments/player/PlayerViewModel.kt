@@ -132,6 +132,18 @@ class PlayerViewModel(
         getSubtitles(episode)
     }
 
+    /** 2026-06-21 (user "clic sur épisode dans le panel ne change pas
+     *  d'épisode") : version qui DÉCLENCHE la navigation via le SharedFlow
+     *  `playPreviousOrNextEpisode`. Le collector du fragment fait ensuite
+     *  `releasePlayer + navigate(self, new args)`. C'est le même chemin que
+     *  Next/Previous qui marche depuis le début. */
+    fun switchToEpisode(episode: Video.Type.Episode) {
+        playEpisode(episode)
+        viewModelScope.launch {
+            _playPreviousOrNextEpisode.emit(episode)
+        }
+    }
+
     /**
      * Appelle [com.streamflixreborn.streamflix.providers.Provider.getServers]
      * avec auto-retry si la liste retournée est vide.

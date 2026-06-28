@@ -22,6 +22,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -414,7 +415,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     // Avantages : audio FR garanti (testé), pas de CF challenge, pas de
     // login, search JSON propre. Le bouton "Continuer" sur la page episode
     // est auto-cliqué par MoiflixExtractor.
-    private const val MOIFLIX_BASE = "https://moiflix.dad/" // 2026-06-01 : .click redirige à son tour vers .dad (domaine actif)
+    private const val MOIFLIX_BASE = "https://moiflix.fans/" // 2026-06-21 : .dad redirige vers .fans (chaîne : .click → .dad → .fans)
 
     /** Cherche un titre sur moiflix via l'AJAX search public.
      *  Retourne le path /movie/{slug} ou /show/{slug} du meilleur match, ou null. */
@@ -1864,6 +1865,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                 allResults.forEach { servers.addAll(it) }
             }
         }
+        // 2026-06-21 v2 (user "FrenchStream n'est plus là maintenant") :
+        //   REVERT du strip fstream-* total — sans backup direct fiable, on
+        //   privait l'user de TOUTES les sources FS. On garde les fstream-*
+        //   (= certains shows ont des mappings corrects). Pour les shows mal
+        //   mappés (= "FROM"), l'user a toujours les WIflix/CPasMal/TMDb +
+        //   FS direct backup en parallèle. Pas idéal mais mieux que vide.
         return servers
     }
 
@@ -2547,8 +2554,17 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
                 //   fetchPlayersFromAjax) dans le wrap "FS · ...". Les backups
                 //   restent dispo pour le user via Cloudstream/Movix direct
                 //   (zero duplication + zero pollution).
-                val nativeFsOnly = servers.filter { it.id.startsWith("fs_ajax_") }
-                Log.d("MovixProvider", "FS direct: ${servers.size} servers total, ${nativeFsOnly.size} natifs FS retenus (filtre fs_ajax_*)")
+                // 2026-06-21 (user "normalement si tu prends les backups FS
+                //   actuels on est censé avoir [Vidzy/Uqload/Voe/Netu]") :
+                //   ÉLARGIR le filtre — FrenchStreamProvider produit aussi des
+                //   IDs `fs_ep<N>_*` via le pipeline DIRECT PARSE (ligne 1170
+                //   FrenchStreamProvider) + `fs_player_*` en fallback movie.
+                //   Sans ces IDs, FROM S2E1 ramenait 0 backup → l'user n'avait
+                //   que les "FS · Voe (VF - HD)" pollués de Movix native
+                //   fstream-*. On garde tout `fs_*` (= tous formats natifs FS),
+                //   on exclut seulement les backups upstream (cs_*, movix_*, etc).
+                val nativeFsOnly = servers.filter { it.id.startsWith("fs_") }
+                Log.d("MovixProvider", "FS direct: ${servers.size} servers total, ${nativeFsOnly.size} natifs FS retenus (filtre fs_*)")
                 if (nativeFsOnly.isEmpty()) {
                     Log.w("MovixProvider", "FS direct: 0 natif FS pour $matchId (backups exclus exprès)")
                     continue
@@ -2684,15 +2700,194 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
         //   - fetchMovixBackups : OFF (= autres sources internes Movix)
         //   - fetchWiflixDirectBackup : ON (= scraping direct Wiflix)
         //   - fetchFrenchStreamDirectBackup : OFF (= scraping direct FS)
+        // 2026-06-21 (user "FrenchStream n'est plus là maintenant") :
+        //   RÉACTIVE fetchFrenchStreamDirectBackup. Le natif Movix fstream-*
+        //   produit fréquemment "FS · X (VF - HD)" pollués (= URLs d'autres
+        //   shows). Le scraping live de FrenchStream est l'unique source
+        //   fiable pour avoir les VRAIS Vidzy/Uqload/Voe/Netu. Sans lui,
+        //   l'user n'a aucune source FS correcte pour les shows mal mappés.
         if (!skipBackupsForBackupCall) {
             launch {
                 try {
                     val wf = fetchWiflixDirectBackup(id, videoType)
-                    if (wf.isNotEmpty()) emitDeduped(wf)
+                    if (wf.isNotEmpty()) {
+                        emitDeduped(wf)
+                        com.streamflixreborn.streamflix.utils.BackupAlertTracker
+                            .recordSuccess("Wiflix", wf.size)
+                    } else {
+                        com.streamflixreborn.streamflix.utils.BackupAlertTracker
+                            .recordSuspiciousEmpty("Wiflix", "0 sources pour $id")
+                    }
                 } catch (e: Exception) {
                     Log.w("MovixProvider", "Progressive Wiflix direct failed: ${e.message}")
+                    com.streamflixreborn.streamflix.utils.BackupAlertTracker
+                        .recordFailure("Wiflix", e)
                 }
             }
+            launch {
+                try {
+                    val fs = fetchFrenchStreamDirectBackup(id, videoType)
+                    if (fs.isNotEmpty()) {
+                        emitDeduped(fs)
+                        com.streamflixreborn.streamflix.utils.BackupAlertTracker
+                            .recordSuccess("FrenchStream", fs.size)
+                    } else {
+                        com.streamflixreborn.streamflix.utils.BackupAlertTracker
+                            .recordSuspiciousEmpty("FrenchStream", "0 sources pour $id")
+                    }
+                } catch (e: Exception) {
+                    Log.w("MovixProvider", "Progressive FS direct failed: ${e.message}")
+                    com.streamflixreborn.streamflix.utils.BackupAlertTracker
+                        .recordFailure("FrenchStream", e)
+                }
+            }
+            // 2026-06-21 (user "le backup Coflix n'apparaît pas alors qu'il est
+            //   bien là-bas, il y a au moins 3 serveurs de bons par épisode") :
+            //   Coflix backup réactivé dans progressive. fetchMovixBackups (qui
+            //   contient Coflix + Cloudstream + Moviebox) était OFF, mais user
+            //   veut au moins Coflix actif. Coflix utilise CoflixSourceProvider
+            //   qui auto-discover le mirror actif via coflix.blog → toujours
+            //   à jour quand Coflix migre de domaine (= actuellement coflix.band).
+            launch {
+                try {
+                    val coflix = fetchCoflixBackup(id, videoType)
+                    if (coflix.isNotEmpty()) emitDeduped(coflix)
+                } catch (e: Exception) {
+                    Log.w("MovixProvider", "Progressive Coflix backup failed: ${e.message}")
+                }
+            }
+            // 2026-06-21 v3 (user "non c'est ça que tu dois faire, tu dois
+            //   pas les désactiver surtout pas, tu dois juste faire en sorte
+            //   que les serveurs qui sont déjà arrivés s'affichent et ça pour
+            //   tous les providers, et le reste arrive ensuite peu importe,
+            //   faut juste que ça soit pas bloqué. Et si les serveurs déjà
+            //   arrivés sont cassés ou fonctionnent pas faut que ça attende
+            //   les autres jusqu'à tant que ça fonctionne, faut pas que la
+            //   page se ferme") :
+            //   Tous les backups ON. Cloudstream + Moviebox sont les plus
+            //   lourds (Cloudstream → MovieBox+ /resource sur 4 hosts +
+            //   Nakios ; Moviebox → /search sur 8 hosts). Wrap chacun dans
+            //   withTimeoutOrNull(25_000) → si un backup hang, il rend la
+            //   main proprement à 25s sans bloquer les autres NI fermer
+            //   le channelFlow. Le picker reste donc ouvert (attend toutes
+            //   les sources même si les premières échouent à lire).
+            launch {
+                try {
+                    val cs = kotlinx.coroutines.withTimeoutOrNull(25_000) {
+                        fetchCloudstreamBackup(id, videoType)
+                    }
+                    if (cs != null && cs.isNotEmpty()) {
+                        emitDeduped(cs)
+                        com.streamflixreborn.streamflix.utils.BackupAlertTracker
+                            .recordSuccess("Cloudstream", cs.size)
+                    } else if (cs != null) {
+                        com.streamflixreborn.streamflix.utils.BackupAlertTracker
+                            .recordSuspiciousEmpty("Cloudstream", "0 sources pour $id")
+                    } else {
+                        Log.w("MovixProvider", "Progressive Cloudstream backup timed out (25s) for $id")
+                    }
+                } catch (e: Exception) {
+                    Log.w("MovixProvider", "Progressive Cloudstream backup failed: ${e.message}")
+                    com.streamflixreborn.streamflix.utils.BackupAlertTracker
+                        .recordFailure("Cloudstream", e)
+                }
+            }
+            launch {
+                try {
+                    val mb = kotlinx.coroutines.withTimeoutOrNull(25_000) {
+                        fetchMovieboxBackup(id, videoType)
+                    }
+                    if (mb != null && mb.isNotEmpty()) {
+                        emitDeduped(mb)
+                        com.streamflixreborn.streamflix.utils.BackupAlertTracker
+                            .recordSuccess("Moviebox", mb.size)
+                    } else if (mb != null) {
+                        com.streamflixreborn.streamflix.utils.BackupAlertTracker
+                            .recordSuspiciousEmpty("Moviebox", "0 sources pour $id")
+                    } else {
+                        Log.w("MovixProvider", "Progressive Moviebox backup timed out (25s) for $id")
+                    }
+                } catch (e: Exception) {
+                    Log.w("MovixProvider", "Progressive Moviebox backup failed: ${e.message}")
+                    com.streamflixreborn.streamflix.utils.BackupAlertTracker
+                        .recordFailure("Moviebox", e)
+                }
+            }
+        }
+    }.flowOn(kotlinx.coroutines.Dispatchers.IO)
+    // 2026-06-21 v3 (user "rien charge en progressive, il faut optimiser ça
+    //   pour pas qu'il y ait de blocage" — logs OPPO montraient ANR_LOG 1.8s) :
+    //   Force tout le upstream (channelFlow + tous les launch{} HTTP) sur
+    //   Dispatchers.IO. Avant : les fetch tapaient le Main thread du caller
+    //   (ViewModel collect) → ANR. Maintenant : 100% IO, le Main reste libre
+    //   pour l'UI.
+
+    /** 2026-06-21 : Cloudstream backup standalone — extrait de fetchMovixBackups. */
+    private suspend fun fetchCloudstreamBackup(id: String, videoType: Video.Type): List<Video.Server> {
+        return try {
+            val csId = when (videoType) {
+                is Video.Type.Movie -> id
+                is Video.Type.Episode -> id.substringBefore("-").let { tid ->
+                    "$tid:${videoType.season.number}:${videoType.number}"
+                }
+            }
+            CloudstreamProvider.getServers(csId, videoType)
+        } catch (e: Exception) {
+            Log.d("MovixProvider", "Cloudstream backup progressive failed for $id: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** 2026-06-21 : Moviebox backup standalone — extrait de fetchMovixBackups. */
+    private suspend fun fetchMovieboxBackup(id: String, videoType: Video.Type): List<Video.Server> {
+        return try {
+            val tmdbIdInt = when (videoType) {
+                is Video.Type.Movie -> id.toIntOrNull()
+                is Video.Type.Episode -> id.substringBefore("-").toIntOrNull()
+            }
+            if (tmdbIdInt != null) MovieboxProvider.getMovieboxSourcesByTmdbId(tmdbIdInt, videoType)
+            else emptyList()
+        } catch (e: Exception) {
+            Log.d("MovixProvider", "Moviebox backup progressive failed for $id: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** 2026-06-21 : Coflix backup standalone — extrait de fetchMovixBackups
+     *  pour pouvoir être appelé en parallèle dans getServersProgressive
+     *  (= sans dépendre de Cloudstream/Moviebox qui sont OFF en progressive). */
+    private suspend fun fetchCoflixBackup(id: String, videoType: Video.Type): List<Video.Server> {
+        return try {
+            val tmdbIdInt = when (videoType) {
+                is Video.Type.Movie -> id.toIntOrNull()
+                is Video.Type.Episode -> id.substringBefore("-").toIntOrNull()
+            } ?: return emptyList()
+            val (title, year) = when (videoType) {
+                is Video.Type.Movie -> {
+                    val det = TMDb3.Movies.details(movieId = tmdbIdInt, language = "fr-FR")
+                    (det.title.takeIf { it.isNotBlank() } ?: det.originalTitle) to
+                        det.releaseDate?.take(4)?.toIntOrNull()
+                }
+                is Video.Type.Episode -> {
+                    val det = TMDb3.TvSeries.details(seriesId = tmdbIdInt, language = "fr-FR")
+                    (det.name.takeIf { it.isNotBlank() } ?: det.originalName) to
+                        det.firstAirDate?.take(4)?.toIntOrNull()
+                }
+            }
+            val result = when (videoType) {
+                is Video.Type.Movie -> CoflixSourceProvider.getMovieSources(title, year)
+                is Video.Type.Episode -> CoflixSourceProvider.getEpisodeSources(
+                    showTitle = title,
+                    year = year,
+                    seasonNumber = videoType.season.number,
+                    episodeNumber = videoType.number,
+                )
+            }
+            Log.d("MovixProvider", "Coflix backup progressive: ${result.size} sources for '$title' (${videoType.javaClass.simpleName})")
+            result
+        } catch (e: Exception) {
+            Log.d("MovixProvider", "Coflix backup progressive failed for $id: ${e.message}")
+            emptyList()
         }
     }
 

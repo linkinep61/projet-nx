@@ -161,6 +161,11 @@ object EpisodeManager {
         mergeEpisodes(convertToVideoTypeEpisodes(nextSeasonEpisodes, database, seasonToLoad.number))
         return hasNextEpisode()
     }
+    /** 2026-06-20 (user "quand on regarde une série et qu'on fait gauche
+     *  ça affiche tous les épisodes") : accès read-only à la liste pour le
+     *  panel latéral de PlayerTvFragment + bottom-sheet PlayerMobileFragment. */
+    fun getAllEpisodes(): List<Episode> = episodes.toList()
+
     fun clearEpisodes(){
         episodes.clear()
         currentIndex = 0

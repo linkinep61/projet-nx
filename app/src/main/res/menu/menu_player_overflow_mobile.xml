@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-06-20 : menu popup déclenché par le bouton 3-dots du lecteur mobile.
+     Regroupe TOUTES les icônes qui étaient directement dans la barre du haut. -->
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item
+        android:id="@+id/menu_player_lock"
+        android:icon="@drawable/exo_styled_controls_lock"
+        android:title="Verrouiller l'écran" />
+
+    <item
+        android:id="@+id/menu_player_cast"
+        android:icon="@drawable/ic_cast_24dp"
+        android:title="Diffuser (Chromecast)" />
+
+    <item
+        android:id="@+id/menu_player_wireless"
+        android:icon="@drawable/ic_screen_share"
+        android:title="Affichage sans fil (TV)" />
+
+    <item
+        android:id="@+id/menu_player_pip"
+        android:icon="@drawable/exo_styled_controls_picture_in_picture"
+        android:title="Picture-in-Picture" />
+
+    <item
+        android:id="@+id/menu_player_record"
+        android:icon="@android:drawable/ic_menu_save"
+        android:title="Enregistrer" />
+
+    <item
+        android:id="@+id/menu_player_aspect_ratio"
+        android:icon="@drawable/exo_styled_controls_aspect_ratio"
+        android:title="Ratio d'affichage" />
+
+    <item
+        android:id="@+id/menu_player_external"
+        android:icon="@drawable/exo_styled_controls_external_player"
+        android:title="Lecteur externe" />
+
+    <item
+        android:id="@+id/menu_player_settings"
+        android:icon="@drawable/exo_styled_controls_settings"
+        android:title="Paramètres" />
+
+</menu>

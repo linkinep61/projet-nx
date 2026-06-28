@@ -3,6 +3,9 @@
     xmlns:tools="http://schemas.android.com/tools"
     tools:showIn="@layout/activity_main_tv">
 
+    <!-- 2026-06-22 : "Plein écran" retiré de la sidebar — les boutons mini
+         player (⏸ ⛶ ✕) sont maintenant en bas à gauche, accessibles D-pad. -->
+
     <item
         android:id="@id/search"
         android:icon="@drawable/ic_menu_search"

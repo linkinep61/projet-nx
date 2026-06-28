@@ -122,6 +122,12 @@ import java.util.Locale
 
 class PlayerMobileFragment : Fragment() {
     companion object {
+        /** 2026-06-21 (user "panel reste ouvert quand on change d'épisode") :
+         *  Set à true par le click handler du panel AVANT switchToEpisode().
+         *  Lu par onViewCreated du nouveau fragment instance → réouvre le
+         *  panel automatiquement (~200ms après création). */
+        @Volatile var pendingReopenPanelMobile: Boolean = false
+
         private const val NEXT_EPISODE_PREFETCH_THRESHOLD_MS = 60_000L
         private const val NEXT_EPISODE_OVERLAY_MIN_THRESHOLD_MS = 30_000L
 
@@ -505,6 +511,15 @@ class PlayerMobileFragment : Fragment() {
             isSetupDone = true
         }
         isIgnoringPip = false
+        // 2026-06-21 (user "j'ai activé le PiP dans les paramètres mais ça
+        //   fonctionne pas") : si l'user a flippé la pref pendant qu'il était
+        //   ailleurs (Settings), Android n'a pas été mis à jour sur
+        //   setAutoEnterEnabled. On rafraîchit les params à chaque onResume.
+        if (::player.isInitialized
+            && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+        ) {
+            try { updatePipParams() } catch (_: Throwable) {}
+        }
         if (::player.isInitialized) {
             binding.pvPlayer.useController = true
             // Resume playback after returning from bypass or any pause
@@ -537,6 +552,19 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+
+        // 2026-06-21 (user "panel reste ouvert quand on change d'épisode") :
+        //   Si le flag statique est set, on réouvre le panel après ~600ms
+        //   pour laisser le temps au player de se setup. Le flag est
+        //   consommé immédiatement pour éviter une boucle.
+        if (pendingReopenPanelMobile) {
+            pendingReopenPanelMobile = false
+            view.postDelayed({
+                if (_binding != null && !episodePanelMobileVisible) {
+                    try { showEpisodePanelMobile() } catch (_: Throwable) {}
+                }
+            }, 600)
+        }
 
         // 2026-06-12 — Verrou enfant : intercepter le back hardware tant que
         // l'écran est locked → l'enfant ne peut pas quitter le fullscreen.
@@ -690,14 +718,27 @@ class PlayerMobileFragment : Fragment() {
             }
         }
         gestureHelper = PlayerGestureHelper(
-            requireContext(), 
-            binding.pvPlayer, 
-            binding.llBrightness, 
-            binding.pbBrightness, 
+            requireContext(),
+            binding.pvPlayer,
+            binding.llBrightness,
+            binding.pbBrightness,
             binding.tvBrightnessPercentage,
-            binding.llVolume, 
-            binding.pbVolume, 
-            binding.tvVolumePercentage
+            binding.llVolume,
+            binding.pbVolume,
+            binding.tvVolumePercentage,
+            onDoubleTapSeek = { side ->
+                // 2026-06-21 (user "double-clic à gauche = -10s, à droite =
+                //   +10s, comme sur l'image") : seek ±10s + overlay visuel
+                //   bref (~600ms).
+                if (::player.isInitialized) {
+                    try {
+                        val delta = if (side == "left") -10_000L else 10_000L
+                        val newPos = (player.currentPosition + delta).coerceIn(0L, player.duration.coerceAtLeast(0L))
+                        player.seekTo(newPos)
+                        showDoubleTapSeekOverlay(side)
+                    } catch (_: Throwable) {}
+                }
+            }
         )
 
         // Stato Video
@@ -1387,6 +1428,12 @@ class PlayerMobileFragment : Fragment() {
     }
 
     fun onUserLeaveHint() {
+        // 2026-06-21 (user "quand on quitte l'application, souvent elle se met
+        //   en tout petit comme ça [PiP]. Il faudrait mettre une option dans
+        //   Apparence pour désactiver. Beaucoup de personnes veulent quitter
+        //   tout simplement") :
+        //   Gate sur UserPreferences.pipOnExit (default false = off).
+        if (!UserPreferences.pipOnExit) return
         if (!isIgnoringPip && ::player.isInitialized && player.isPlaying) {
             enterPIPMode()
         }
@@ -1451,6 +1498,13 @@ class PlayerMobileFragment : Fragment() {
     }
 
     fun onBackPressed(): Boolean = when {
+        // 2026-06-20 (user "comme sur l'image, panel épisodes droite") :
+        //   BACK quand le panel épisodes est ouvert → ferme le panel (au
+        //   lieu de quitter le player).
+        episodePanelMobileVisible -> {
+            hideEpisodePanelMobile()
+            true
+        }
         webViewOverlay != null -> {
             hideWebViewOverlay()
             true
@@ -1533,7 +1587,12 @@ class PlayerMobileFragment : Fragment() {
         binding.pvPlayer.subtitleView?.apply {
             setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * UserPreferences.captionTextSize)
             setStyle(UserPreferences.captionStyle)
-            setPadding(0, 0, 0, UserPreferences.captionMargin.dp(context))
+            // 2026-06-21 (user "regarde les sous-titres ils sont encore dans
+            //   la barre") : padding bas user + 32dp pour dégager la zone
+            //   du progress bar + time labels (qui sont collés à 0dp en bas).
+            //   Avant : sub overlappait avec "00:07 · 22:52".
+            val extraBottom = (32 * context.resources.displayMetrics.density).toInt()
+            setPadding(0, 0, 0, UserPreferences.captionMargin.dp(context) + extraBottom)
         }
         setupEpisodeNavigationButtons()
 
@@ -1551,8 +1610,13 @@ class PlayerMobileFragment : Fragment() {
             ).show()
         }
 
-        binding.pvPlayer.controller.binding.exoReplay.setOnClickListener {
-            player.seekTo(0)
+        // 2026-06-20 : exo_replay retiré du centre → plus de click listener.
+        // Le bouton "replay from start" n'est plus dans le layout mobile.
+
+        // 2026-06-20 : bouton Serveur en haut → ouvre direct la liste des serveurs.
+        binding.pvPlayer.controller.binding.btnExoServer.setOnClickListener {
+            binding.pvPlayer.controllerShowTimeoutMs = binding.pvPlayer.controllerShowTimeoutMs
+            binding.settings.showServers()
         }
 
         // 2026-06-12 (user "crée une page transparente qui verrouille
@@ -1590,14 +1654,26 @@ class PlayerMobileFragment : Fragment() {
         //   films et series") : équivalent du LEFT D-pad sur TV. Visible
         //   seulement si on est sur une chaîne IPTV. Tap → BottomSheet avec
         //   toute la liste, tap sur une chaîne = switch rapide.
-        binding.pvPlayer.controller.binding.btnExoChannelList.isVisible = isIptvChannelContext()
+        // 2026-06-20 (user "et j'ai dit de faire ça aussi sur mobile en met
+        //   le même icône que pour IPTV pour afficher ce menu là") : le bouton
+        //   liste est visible en IPTV ET en VOD série.
+        // 2026-06-21 (user "sur Vavoo j'ai fait gauche j'ai plus que TF1.
+        //   T'aurais pas dû appliquer ça pour les Provider IPTV — c'est censé
+        //   afficher toutes les chaînes") :
+        //   Bug — IPTV stocke la chaîne courante comme Video.Type.Episode →
+        //   isVodEpisode était true → on routait vers le panel épisodes (=
+        //   1 chaîne courante seule) au lieu de la liste IPTV (= toutes les
+        //   chaînes). Fix : si IPTV, route TOUJOURS vers le panel IPTV
+        //   peu importe le type.
+        val isIptvCtx = isIptvChannelContext()
+        val isVodEpisode = !isIptvCtx && args.videoType is com.streamflixreborn.streamflix.models.Video.Type.Episode
+        binding.pvPlayer.controller.binding.btnExoChannelList.isVisible = isIptvCtx || isVodEpisode
         binding.pvPlayer.controller.binding.btnExoChannelList.setOnClickListener {
-            // 2026-06-15 (user "soit le build est pas bon, soit tu touches pas
-            //   le bon truc") : remplace le BottomSheet (= bricolé avec maxWidth
-            //   qui ne marche pas) par le PANEL INTÉGRÉ au layout, comme sur TV.
-            //   layout_channel_list_mobile est dans fragment_player_mobile.xml,
-            //   ancré à gauche avec layout_constraintWidth_percent ajustable.
-            showIptvChannelListPanelMobile()
+            if (isVodEpisode) {
+                showEpisodeListBottomSheet()
+            } else {
+                showIptvChannelListPanelMobile()
+            }
         }
 
         binding.pvPlayer.controller.binding.btnExoPictureInPicture.setOnClickListener {
@@ -1623,9 +1699,10 @@ class PlayerMobileFragment : Fragment() {
             updatePlayerScale()
         }
 
-        binding.pvPlayer.controller.binding.exoSettings.setOnClickListener {
+        // 2026-06-20 : 3-dots → popup menu avec toutes les options
+        binding.pvPlayer.controller.binding.exoSettings.setOnClickListener { anchor ->
             binding.pvPlayer.controllerShowTimeoutMs = binding.pvPlayer.controllerShowTimeoutMs
-            binding.settings.show()
+            showPlayerOverflowMenu(anchor)
         }
 
         // 2026-05-16 (user "ça charge à l'infini sans savoir si serveur OK") :
@@ -2096,6 +2173,100 @@ class PlayerMobileFragment : Fragment() {
 
     private var unlockFlashJob: kotlinx.coroutines.Job? = null
 
+    // ──────────────────────────────────────────────────────────────────
+    // 2026-06-20 : popup menu 3-dots — regroupe lock, cast, wireless,
+    // PiP, record, ratio, external, paramètres.
+    // ──────────────────────────────────────────────────────────────────
+    private fun showPlayerOverflowMenu(anchor: android.view.View) {
+        val popup = android.widget.PopupMenu(requireContext(), anchor)
+        popup.menuInflater.inflate(R.menu.menu_player_overflow_mobile, popup.menu)
+
+        // Forcer l'affichage des icônes dans le PopupMenu (API privée)
+        try {
+            val method = popup.javaClass.getDeclaredMethod("setForceShowIcon", Boolean::class.javaPrimitiveType)
+            method.invoke(popup, true)
+        } catch (_: Throwable) {
+            // Fallback : on essaie via MenuPopupHelper
+            try {
+                val field = popup.javaClass.getDeclaredField("mPopup")
+                field.isAccessible = true
+                val menuPopupHelper = field.get(popup)
+                menuPopupHelper.javaClass.getDeclaredMethod("setForceShowIcon", Boolean::class.javaPrimitiveType)
+                    .invoke(menuPopupHelper, true)
+            } catch (_: Throwable) { /* icônes invisibles = fallback OK, titres restent */ }
+        }
+
+        // Adapter le titre "Enregistrer" si un enregistrement est en cours
+        if (com.streamflixreborn.streamflix.download.LiveRecorder.isRecording) {
+            popup.menu.findItem(R.id.menu_player_record)?.title = "Arrêter l'enregistrement"
+        }
+
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                R.id.menu_player_lock -> {
+                    engageScreenLock()
+                    true
+                }
+                R.id.menu_player_cast -> {
+                    // Déclenche le picker Chromecast via le MediaRouteButton caché
+                    binding.pvPlayer.findViewById<androidx.mediarouter.app.MediaRouteButton>(
+                        R.id.btn_exo_cast
+                    )?.performClick()
+                    true
+                }
+                R.id.menu_player_wireless -> {
+                    try {
+                        val intent = android.content.Intent("android.settings.CAST_SETTINGS")
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(intent)
+                    } catch (_: Throwable) {
+                        try {
+                            startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
+                        } catch (_: Throwable) {
+                            Toast.makeText(requireContext(), "Impossible d'ouvrir les paramètres Cast", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    true
+                }
+                R.id.menu_player_pip -> {
+                    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O) {
+                        Toast.makeText(requireContext(), getString(R.string.player_picture_in_picture_not_supported), Toast.LENGTH_SHORT).show()
+                    } else {
+                        enterPIPMode()
+                    }
+                    true
+                }
+                R.id.menu_player_record -> {
+                    val server = currentServer
+                    if (server != null) {
+                        handleLiveRecord(server)
+                        updateLiveRecordButton()
+                    }
+                    true
+                }
+                R.id.menu_player_aspect_ratio -> {
+                    val newResize = UserPreferences.playerResize.next()
+                    zoomToast?.cancel()
+                    zoomToast = Toast.makeText(requireContext(), newResize.stringRes, Toast.LENGTH_SHORT)
+                    zoomToast?.show()
+                    UserPreferences.playerResize = newResize
+                    updatePlayerScale()
+                    true
+                }
+                R.id.menu_player_external -> {
+                    Toast.makeText(requireContext(), getString(R.string.player_external_player_error_video), Toast.LENGTH_SHORT).show()
+                    true
+                }
+                R.id.menu_player_settings -> {
+                    binding.settings.show()
+                    true
+                }
+                else -> false
+            }
+        }
+        popup.show()
+    }
+
     /** Active l'overlay verrou : intercepte tous les taps, bloque les
      *  gestures + le back hardware, cache le controller ExoPlayer. */
     private fun engageScreenLock() {
@@ -2342,6 +2513,558 @@ class PlayerMobileFragment : Fragment() {
                 }
             })
         }
+    }
+
+    /**
+     * 2026-06-20 (user "j'ai dit de faire ça aussi sur mobile en met le même
+     * icône que pour IPTV pour afficher ce menu là") : bottom-sheet avec la
+     * liste des épisodes de la série en cours. Réutilise EpisodeManager
+     * (= déjà rempli par le détail de la série), peu importe le provider VOD.
+     */
+    /**
+     * 2026-06-20 (user "comme sur l'image, panel épisodes droite avec saisons +
+     *   cartes riches") : remplace l'ancien AlertDialog par un VRAI panel
+     *   side-right intégré, calqué sur PlayerTvFragment.showEpisodePanel.
+     *   Slide depuis la droite, onglets saisons en haut, cards riches en bas
+     *   (poster + titre + meta + extrait synopsis), épisode courant rouge.
+     *   Background = thème user.
+     */
+    private var episodePanelMobileVisible: Boolean = false
+    /** 2026-06-21 (drill-down) : stack pour navigation dans les sous-dossiers. */
+    private data class EpisodePanelLevelMobile(
+        val episodes: List<com.streamflixreborn.streamflix.models.Video.Type.Episode>,
+        val currentId: String?,
+        val title: String,
+    )
+    private val episodePanelMobileStack: MutableList<EpisodePanelLevelMobile> = mutableListOf()
+    private var episodePanelMobileAdapter: com.streamflixreborn.streamflix.adapters.EpisodePanelAdapter? = null
+    private var episodePanelMobileCurrentSeason: Int = -1
+
+    private fun showEpisodeListBottomSheet() {
+        showEpisodePanelMobile()
+    }
+
+    private fun showEpisodePanelMobile() {
+        if (episodePanelMobileVisible) return
+        val ctx = context ?: return
+        if (_binding == null) return
+        val allEpisodes = com.streamflixreborn.streamflix.utils.EpisodeManager.getAllEpisodes()
+        if (allEpisodes.isEmpty()) {
+            android.widget.Toast.makeText(ctx, "Aucun épisode disponible",
+                android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val panel = binding.layoutEpisodePanelMobile
+
+        // Background = couleur du thème user
+        try {
+            val theme = com.streamflixreborn.streamflix.utils.UserPreferences.selectedTheme
+            val palette = com.streamflixreborn.streamflix.utils.ThemeManager.palette(theme)
+            val bg = palette.mobileNavBackground
+            val r = android.graphics.Color.red(bg)
+            val g = android.graphics.Color.green(bg)
+            val b = android.graphics.Color.blue(bg)
+            panel.setBackgroundColor(android.graphics.Color.argb(0xEE, r, g, b))
+        } catch (_: Throwable) {
+            panel.setBackgroundColor(0xEE000000.toInt())
+        }
+
+        panel.visibility = View.VISIBLE
+        panel.bringToFront()
+        panel.animate().translationX(0f).setDuration(200).start()
+        episodePanelMobileVisible = true
+
+        val currentEpId = args.id
+        val groupedInMemory = allEpisodes.groupBy { it.season.number }
+            .toSortedMap().toMutableMap()
+        val currentSeasonNum = allEpisodes.firstOrNull { it.id == currentEpId }
+            ?.season?.number ?: groupedInMemory.keys.firstOrNull() ?: 1
+        episodePanelMobileCurrentSeason = currentSeasonNum
+
+        // 2026-06-21 (user "pour les saisons elle n'apparaissent pas toutes") :
+        //   query provider pour récupérer TOUTES les saisons de la série.
+        val seasonTabsContainer = binding.llEpisodeSeasonTabsMobile
+        val rv = binding.rvEpisodePanelListMobile
+        val dp = resources.displayMetrics.density
+        val episodesBySeasonCache = mutableMapOf<Int, List<com.streamflixreborn.streamflix.models.Video.Type.Episode>>()
+        episodesBySeasonCache.putAll(groupedInMemory)
+        val seasonIdCache = mutableMapOf<Int, String>()
+
+        // Adapter initialisé avec la saison courante (= déjà chargée)
+        val initialEps = groupedInMemory[currentSeasonNum].orEmpty()
+        binding.tvEpisodePanelTitleMobile.text = "Épisodes (${initialEps.size})"
+        rv.layoutManager = androidx.recyclerview.widget.LinearLayoutManager(ctx)
+        val adapter = com.streamflixreborn.streamflix.adapters.EpisodePanelAdapter(
+            initialEps, currentEpId
+        ) { ep ->
+            // 2026-06-21 v2 (user "il prend pas en charge les double dossiers
+            //   — VOSTFR/FR. Si je clique sur le dossier il m'affiche pas
+            //   les saisons dedans") : si ep est un wrapper langue (id
+            //   commence par "@subfolder:" ou overview == "@subfolder"), on
+            //   ferme le panel + navigue vers Season fragment qui sait
+            //   afficher les sous-saisons. Pour les vrais épisodes, on
+            //   charge in-place comme avant.
+            // 2026-06-21 v3 (user "pareil sur mobile quand on clique dessus
+            //   ça fait un chargement mais ça ne change pas d'épisode") :
+            //   navigate(R.id.season) ne marchait pas. Refactor : DRILL-DOWN
+            //   dans le panel. Fetch les sous-épisodes et remplace la liste.
+            //   BACK pop vers le parent.
+            val isSubfolder = ep.id.startsWith("@subfolder:") || ep.overview == "@subfolder"
+            if (isSubfolder) {
+                val realSeasonId = ep.id.removePrefix("@subfolder:")
+                android.util.Log.d("PlayerMobileFragment", "subfolder drill-down → seasonId=$realSeasonId")
+                binding.tvEpisodePanelTitleMobile.text = "Épisodes — chargement…"
+                viewLifecycleOwner.lifecycleScope.launch {
+                    val sub = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        try {
+                            fetchEpisodesForSeasonMobile(realSeasonId, ep.number)
+                        } catch (t: Throwable) {
+                            android.util.Log.e("PlayerMobileFragment", "drill-down fetch failed: ${t.message}", t)
+                            emptyList()
+                        }
+                    }
+                    if (!episodePanelMobileVisible || _binding == null) return@launch
+                    if (sub.isEmpty()) {
+                        android.widget.Toast.makeText(ctx,
+                            "Aucun épisode dans ce dossier",
+                            android.widget.Toast.LENGTH_SHORT).show()
+                        binding.tvEpisodePanelTitleMobile.text = "Épisodes (${initialEps.size})"
+                        return@launch
+                    }
+                    // Snapshot parent pour BACK
+                    val parentEps = episodesBySeasonCache[episodePanelMobileCurrentSeason] ?: initialEps
+                    episodePanelMobileStack.add(EpisodePanelLevelMobile(
+                        episodes = parentEps,
+                        currentId = currentEpId,
+                        title = "Épisodes (${parentEps.size})",
+                    ))
+                    binding.tvEpisodePanelTitleMobile.text = "${ep.title ?: "Dossier"} (${sub.size})"
+                    episodePanelMobileAdapter?.updateEpisodes(sub, currentEpId)
+                    binding.rvEpisodePanelListMobile.scrollToPosition(0)
+                }
+                return@EpisodePanelAdapter
+            }
+            // 2026-06-21 v3 (user "clic sur épisode, ça fait un chargement
+            //   mais ne change pas d'épisode") :
+            //   viewModel.playEpisode(ep) seul ne switch PAS le MediaItem du
+            //   player (le state collector ne re-trigger pas comme attendu).
+            //   On utilise switchToEpisode(ep) qui emit _playPreviousOrNext
+            //   Episode → déclenche la recréation du fragment avec les
+            //   nouveaux args (= même chemin que Next/Previous qui marche).
+            //   Un flag statique réouvre le panel automatiquement après la
+            //   recréation pour préserver l'UX panel-toujours-ouvert.
+            try {
+                com.streamflixreborn.streamflix.utils.EpisodeManager.setCurrentEpisode(ep)
+                pendingReopenPanelMobile = true
+                viewModel.switchToEpisode(ep)
+            } catch (t: Throwable) {
+                android.util.Log.e("PlayerMobileFragment",
+                    "switchToEpisode failed: ${t.message}", t)
+            }
+        }
+        episodePanelMobileAdapter = adapter
+        rv.adapter = adapter
+        val currentIdx = initialEps.indexOfFirst { it.id == currentEpId }
+        if (currentIdx >= 0) rv.scrollToPosition(currentIdx)
+
+        // 2026-06-21 v2 (user "il confond Saison 1 et Saison 2 avec FR et
+        //   VOSTFR") : map seasonNumber → vrai titre (= "VOSTFR" / "VF" /
+        //   "Saison 1" / etc.) pour afficher le bon libellé d'onglet. On
+        //   tape dans EpisodeManager qui a la liste des Season avec titles.
+        val seasonTitlesByNumMobile: Map<Int, String?> = try {
+            com.streamflixreborn.streamflix.utils.EpisodeManager.getAllEpisodes()
+                .distinctBy { it.season.number }
+                .associate { it.season.number to it.season.title }
+        } catch (_: Throwable) { emptyMap() }
+        // Helper : construit les boutons saisons à partir d'une liste de Nº
+        fun buildSeasonTabsMobile(allSeasonNums: List<Int>) {
+            seasonTabsContainer.removeAllViews()
+            allSeasonNums.forEach { seasonNum ->
+                val realTitle = seasonTitlesByNumMobile[seasonNum]?.takeIf { it.isNotBlank() }
+                val btn = android.widget.Button(ctx).apply {
+                    // Si le provider a fourni un titre (= "VOSTFR", "VF",
+                    //   "Spécial...", etc.), on l'utilise. Sinon "Saison N".
+                    text = realTitle ?: "Saison $seasonNum"
+                    textSize = 12f
+                    setPadding((14 * dp).toInt(), (8 * dp).toInt(),
+                        (14 * dp).toInt(), (8 * dp).toInt())
+                    minWidth = 0
+                    minHeight = 0
+                    val isSelected = seasonNum == episodePanelMobileCurrentSeason
+                    setBackgroundColor(if (isSelected)
+                        android.graphics.Color.parseColor("#CC8B0000")
+                        else android.graphics.Color.parseColor("#22FFFFFF"))
+                    setTextColor(android.graphics.Color.WHITE)
+                    val lp = android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT)
+                    lp.marginEnd = (8 * dp).toInt()
+                    layoutParams = lp
+                    setOnClickListener {
+                        episodePanelMobileCurrentSeason = seasonNum
+                        for (i in 0 until seasonTabsContainer.childCount) {
+                            val tab = seasonTabsContainer.getChildAt(i)
+                            val tabSeason = allSeasonNums[i]
+                            tab.setBackgroundColor(if (tabSeason == seasonNum)
+                                android.graphics.Color.parseColor("#CC8B0000")
+                                else android.graphics.Color.parseColor("#22FFFFFF"))
+                        }
+                        // Cache HIT ou lazy fetch. 2026-06-21 v4 (user "elle
+                        //   devrait déjà tout afficher") : auto-flatten si la
+                        //   liste est all-subfolder.
+                        val cached = episodesBySeasonCache[seasonNum]
+                        if (cached != null) {
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                val displayList = if (cached.all { it.id.startsWith("@subfolder:") || it.overview == "@subfolder" } && cached.isNotEmpty()) {
+                                    binding.tvEpisodePanelTitleMobile.text = "Épisodes — chargement…"
+                                    flattenSubfoldersMobile(cached, seasonNum)
+                                } else cached
+                                if (!episodePanelMobileVisible || _binding == null) return@launch
+                                episodesBySeasonCache[seasonNum] = displayList
+                                binding.tvEpisodePanelTitleMobile.text = "Épisodes (${displayList.size})"
+                                episodePanelMobileAdapter?.updateEpisodes(displayList, currentEpId)
+                            }
+                        } else {
+                            binding.tvEpisodePanelTitleMobile.text = "Épisodes — chargement…"
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                val fetched = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    try {
+                                        val seasonId = seasonIdCache[seasonNum] ?: ""
+                                        if (seasonId.isBlank()) emptyList()
+                                        else fetchEpisodesForSeasonMobile(seasonId, seasonNum)
+                                    } catch (_: Throwable) { emptyList() }
+                                }
+                                if (!episodePanelMobileVisible || _binding == null) return@launch
+                                val displayList = if (fetched.all { it.id.startsWith("@subfolder:") || it.overview == "@subfolder" } && fetched.isNotEmpty()) {
+                                    flattenSubfoldersMobile(fetched, seasonNum)
+                                } else fetched
+                                if (!episodePanelMobileVisible || _binding == null) return@launch
+                                episodesBySeasonCache[seasonNum] = displayList
+                                binding.tvEpisodePanelTitleMobile.text = "Épisodes (${displayList.size})"
+                                episodePanelMobileAdapter?.updateEpisodes(displayList, currentEpId)
+                            }
+                        }
+                    }
+                }
+                seasonTabsContainer.addView(btn)
+            }
+        }
+
+        // Tabs initiales avec ce qu'on a en mémoire
+        buildSeasonTabsMobile(groupedInMemory.keys.toList())
+
+        // 2026-06-24 (user "il manque pas VF et VOSTFR en haut") : onglets
+        //   LANGUE au-dessus des saisons (= AnimeSama uniquement). Refetch
+        //   tvShow avec slug@vf/slug@vostfr au clic → rebuild season tabs.
+        run buildLangTabs@{
+            val langScroll = binding.hsvEpisodeLangTabsMobile
+            val langContainer = binding.llEpisodeLangTabsMobile
+            val provider = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+            val isAnimeSama = com.streamflixreborn.streamflix.utils.MultiLangDetector.supportsTvShowIdRefetch(provider)
+            if (!isAnimeSama) {
+                langScroll.visibility = View.GONE
+                return@buildLangTabs
+            }
+            val rawTvShowId = (args.videoType as? com.streamflixreborn.streamflix.models.Video.Type.Episode)
+                ?.tvShow?.id ?: return@buildLangTabs
+            // 2026-06-24 v11 mobile : currentLang MUTABLE + détection depuis
+            //   args.id en priorité (= langue réelle de l'épisode joué).
+            var currentLang = com.streamflixreborn.streamflix.utils.MultiLangDetector.langOf(args.id)
+                ?: com.streamflixreborn.streamflix.utils.MultiLangDetector.langOfTvShowId(rawTvShowId)
+                ?: "vostfr"
+            langScroll.visibility = View.VISIBLE
+            langContainer.removeAllViews()
+            val langsOrderedMobile = listOf("vostfr" to "VOSTFR", "vf" to "VF")
+            val repaintLangTabsMobile: () -> Unit = {
+                for (i in 0 until langContainer.childCount) {
+                    val tab = langContainer.getChildAt(i)
+                    val tabLang = langsOrderedMobile.getOrNull(i)?.first ?: continue
+                    val sel = tabLang == currentLang
+                    tab.setBackgroundColor(if (sel)
+                        android.graphics.Color.parseColor("#CC1565C0")
+                        else android.graphics.Color.parseColor("#22FFFFFF"))
+                }
+            }
+            langsOrderedMobile.forEach { (langCode, label) ->
+                val isSelected = langCode == currentLang
+                val btn = android.widget.Button(ctx).apply {
+                    text = label
+                    textSize = 12f
+                    setPadding((14 * dp).toInt(), (8 * dp).toInt(),
+                        (14 * dp).toInt(), (8 * dp).toInt())
+                    minWidth = 0; minHeight = 0
+                    setBackgroundColor(if (isSelected)
+                        android.graphics.Color.parseColor("#CC1565C0")
+                        else android.graphics.Color.parseColor("#22FFFFFF"))
+                    setTextColor(android.graphics.Color.WHITE)
+                    val lp = android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT)
+                    lp.marginEnd = (8 * dp).toInt()
+                    layoutParams = lp
+                    setOnClickListener {
+                        if (langCode == currentLang) return@setOnClickListener
+                        val slug = rawTvShowId.substringBefore("@")
+                        val newTvShowId = "$slug@$langCode"
+                        binding.tvEpisodePanelTitleMobile.text = "Épisodes — chargement ${label}…"
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            val newSeasons = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                try { provider?.getTvShow(newTvShowId)?.seasons.orEmpty() } catch (_: Throwable) { emptyList() }
+                            }
+                            if (!episodePanelMobileVisible || _binding == null) return@launch
+                            if (newSeasons.isEmpty()) {
+                                android.widget.Toast.makeText(ctx,
+                                    "Aucune saison en $label",
+                                    android.widget.Toast.LENGTH_SHORT).show()
+                                return@launch
+                            }
+                            episodesBySeasonCache.clear()
+                            seasonIdCache.clear()
+                            newSeasons.forEach { s -> seasonIdCache[s.number] = s.id }
+                            val newNums = newSeasons.map { it.number }.distinct().sorted()
+                            episodePanelMobileCurrentSeason = newNums.firstOrNull() ?: 1
+                            buildSeasonTabsMobile(newNums)
+                            val firstSeasonId = seasonIdCache[episodePanelMobileCurrentSeason] ?: ""
+                            val firstEps = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                if (firstSeasonId.isBlank()) emptyList()
+                                else try { fetchEpisodesForSeasonMobile(firstSeasonId, episodePanelMobileCurrentSeason) } catch (_: Throwable) { emptyList() }
+                            }
+                            if (!episodePanelMobileVisible || _binding == null) return@launch
+                            val displayList = if (firstEps.isNotEmpty() && firstEps.all { it.id.startsWith("@subfolder:") || it.overview == "@subfolder" })
+                                flattenSubfoldersMobile(firstEps, episodePanelMobileCurrentSeason)
+                            else firstEps
+                            if (!episodePanelMobileVisible || _binding == null) return@launch
+                            episodesBySeasonCache[episodePanelMobileCurrentSeason] = displayList
+                            binding.tvEpisodePanelTitleMobile.text = "Épisodes — $label (${displayList.size})"
+                            episodePanelMobileAdapter?.updateEpisodes(displayList, currentEpId)
+                            rv.scrollToPosition(0)
+                            // ⭐ FIX bug refresh : UPDATE currentLang AVANT repaint
+                            currentLang = langCode
+                            repaintLangTabsMobile()
+                        }
+                    }
+                }
+                langContainer.addView(btn)
+            }
+        }
+
+        // 2026-06-21 (user "pourquoi ton code se fie pas directement à
+        //   l'endroit où on passe par la synopsis pour récupérer les saisons") :
+        //   lire les saisons depuis la BASE DE DONNÉES Room (= synopsis).
+        //   Fallback provider.getTvShow si DB vide.
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val tvShowId = (args.videoType as? com.streamflixreborn.streamflix.models.Video.Type.Episode)
+                    ?.tvShow?.id ?: return@launch
+                val database = com.streamflixreborn.streamflix.database.AppDatabase
+                    .getInstance(ctx.applicationContext)
+                val provider = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+                // 2026-06-24 v10 : @lang force fetch vraies saisons.
+                val tvShowIdForPanel = if (com.streamflixreborn.streamflix.utils.MultiLangDetector.supportsTvShowIdRefetch(provider) && !tvShowId.contains("@")) {
+                    val lang = when {
+                        args.id.contains("/vostfr") -> "vostfr"
+                        args.id.contains("/vf") -> "vf"
+                        else -> "vostfr"
+                    }
+                    "$tvShowId@$lang"
+                } else tvShowId
+                // 2026-06-24 v12 mobile : skip DB cache pour AnimeSama (= il
+                //   contient les wrappers VOSTFR/VF qui pollueraient le merge).
+                val skipDbForAnimeSama = com.streamflixreborn.streamflix.utils.MultiLangDetector.supportsTvShowIdRefetch(provider)
+                val dbSeasons = if (skipDbForAnimeSama) emptyList()
+                    else withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        try { database.seasonDao().getByTvShowId(tvShowId) } catch (_: Throwable) { emptyList() }
+                    }
+                val providerSeasons = if (provider != null) {
+                    withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        try { provider.getTvShow(tvShowIdForPanel).seasons } catch (_: Throwable) { emptyList() }
+                    }
+                } else emptyList()
+                if (!episodePanelMobileVisible || _binding == null) return@launch
+                val byNum = mutableMapOf<Int, com.streamflixreborn.streamflix.models.Season>()
+                // Merge DB + provider seasons. Wiflix retourne parfois
+                // 2 seasons same number avec ids "blocvostfr"/"blocfr"
+                // → priorité à la lang du current épisode.
+                dbSeasons.forEach { byNum[it.number] = it }
+                val userLangIsVf = args.id.contains("blocfr") || args.id.contains("/vf")
+                val userLangIsVostfr = args.id.contains("blocvostfr") || args.id.contains("/vostfr")
+                providerSeasons.forEach { s ->
+                    val existing = byNum[s.number]
+                    if (existing == null) {
+                        byNum[s.number] = s
+                        return@forEach
+                    }
+                    val newIsVf = s.id.contains("blocfr") || s.id.contains("/vf")
+                    val newIsVostfr = s.id.contains("blocvostfr") || s.id.contains("/vostfr")
+                    val existingIsVf = existing.id.contains("blocfr") || existing.id.contains("/vf")
+                    val existingIsVostfr = existing.id.contains("blocvostfr") || existing.id.contains("/vostfr")
+                    val takeNew = when {
+                        userLangIsVf && newIsVf && !existingIsVf -> true
+                        userLangIsVostfr && newIsVostfr && !existingIsVostfr -> true
+                        else -> false
+                    }
+                    if (takeNew) byNum[s.number] = s
+                }
+                val sortedSeasons = byNum.values.sortedBy { it.number }
+                sortedSeasons.forEach { seasonIdCache[it.number] = it.id }
+                val allSeasonNums = sortedSeasons.map { it.number }.distinct()
+                // 2026-06-24 v13 mobile : pour AnimeSama, force rebuild tabs
+                //   + patch labels "Saison N" + refetch épisodes saison
+                //   courante avec le seasonId réel (= clean, pas @subfolder).
+                if (com.streamflixreborn.streamflix.utils.MultiLangDetector.supportsTvShowIdRefetch(provider)) {
+                    if (allSeasonNums.isNotEmpty()) buildSeasonTabsMobile(allSeasonNums)
+                    for (i in 0 until seasonTabsContainer.childCount) {
+                        val btn = seasonTabsContainer.getChildAt(i) as? android.widget.Button ?: continue
+                        val seasonNum = allSeasonNums.getOrNull(i) ?: continue
+                        btn.text = "Saison $seasonNum"
+                    }
+                    val curSeasonNum = episodePanelMobileCurrentSeason
+                    val curSeasonId = seasonIdCache[curSeasonNum] ?: ""
+                    if (curSeasonId.isNotBlank()) {
+                        launch {
+                            val freshEps = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                try { fetchEpisodesForSeasonMobile(curSeasonId, curSeasonNum) }
+                                catch (_: Throwable) { emptyList() }
+                            }
+                            if (!episodePanelMobileVisible || _binding == null) return@launch
+                            val displayList = if (freshEps.isNotEmpty() && freshEps.all { it.id.startsWith("@subfolder:") || it.overview == "@subfolder" })
+                                flattenSubfoldersMobile(freshEps, curSeasonNum)
+                            else freshEps
+                            if (!episodePanelMobileVisible || _binding == null) return@launch
+                            val cleanList = displayList.filter {
+                                !it.id.startsWith("@subfolder:") && it.overview != "@subfolder"
+                            }
+                            if (cleanList.isEmpty()) return@launch
+                            episodesBySeasonCache[curSeasonNum] = cleanList
+                            binding.tvEpisodePanelTitleMobile.text = "Épisodes (${cleanList.size})"
+                            episodePanelMobileAdapter?.updateEpisodes(cleanList, currentEpId)
+                        }
+                    }
+                } else if (allSeasonNums.isNotEmpty() && allSeasonNums != groupedInMemory.keys.toList()) {
+                    buildSeasonTabsMobile(allSeasonNums)
+                }
+            } catch (_: Throwable) {}
+        }
+
+        binding.btnEpisodePanelCloseMobile.setOnClickListener { hideEpisodePanelMobile() }
+    }
+
+    /** 2026-06-21 v4 (user "elle devrait déjà tout afficher") :
+     *  Aplatit les sous-dossiers en concaténant leurs contenus. 1 niveau
+     *  de profondeur. Si nested → garde le folder pour drill-down manuel. */
+    private suspend fun flattenSubfoldersMobile(
+        subfolders: List<com.streamflixreborn.streamflix.models.Video.Type.Episode>,
+        parentSeasonNumber: Int,
+    ): List<com.streamflixreborn.streamflix.models.Video.Type.Episode> = withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val out = mutableListOf<com.streamflixreborn.streamflix.models.Video.Type.Episode>()
+        for (folder in subfolders) {
+            val realSeasonId = folder.id.removePrefix("@subfolder:")
+            val sub = try {
+                fetchEpisodesForSeasonMobile(realSeasonId, parentSeasonNumber)
+            } catch (_: Throwable) { emptyList() }
+            val isStillNested = sub.isNotEmpty() && sub.all {
+                it.id.startsWith("@subfolder:") || it.overview == "@subfolder"
+            }
+            if (isStillNested || sub.isEmpty()) {
+                out.add(folder)
+            } else {
+                val prefix = folder.title?.takeIf { it.isNotBlank() }
+                out.addAll(sub.map { ep ->
+                    if (prefix != null && ep.title != null && !ep.title.startsWith(prefix)) {
+                        ep.copy(title = "[$prefix] ${ep.title}")
+                    } else ep
+                })
+            }
+        }
+        out
+    }
+
+    /** 2026-06-21 : fetch async les épisodes d'une saison via provider. */
+    private suspend fun fetchEpisodesForSeasonMobile(
+        seasonId: String,
+        seasonNumber: Int,
+    ): List<com.streamflixreborn.streamflix.models.Video.Type.Episode> {
+        val provider = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+            ?: return emptyList()
+        val tvShowId = (args.videoType as? com.streamflixreborn.streamflix.models.Video.Type.Episode)
+            ?.tvShow?.id ?: return emptyList()
+        val episodes = try {
+            provider.getEpisodesBySeason(seasonId)
+        } catch (_: Throwable) { return emptyList() }
+        // 2026-06-24 v14 mobile (user "S02E01 · VF alors que c'est VOSTFR") :
+        //   append @lang détecté depuis seasonId pour que getTvShow renvoie
+        //   les vraies saisons (= pas les wrappers VOSTFR/VF).
+        val tvShowIdForMeta = if (com.streamflixreborn.streamflix.utils.MultiLangDetector.supportsTvShowIdRefetch(provider) && !tvShowId.contains("@")) {
+            val lang = when {
+                seasonId.contains("/vf") -> "vf"
+                seasonId.contains("/vostfr") -> "vostfr"
+                else -> "vostfr"
+            }
+            "$tvShowId@$lang"
+        } else tvShowId
+        val tvShowMeta = try { provider.getTvShow(tvShowIdForMeta) } catch (_: Throwable) { null }
+        val seasonMeta = tvShowMeta?.seasons?.firstOrNull { it.number == seasonNumber }
+        val cleanSeasonTitle = seasonMeta?.title?.takeIf {
+            it.isNotBlank() && it != "VOSTFR" && it != "VF"
+        }
+        return episodes.map { ep ->
+            com.streamflixreborn.streamflix.models.Video.Type.Episode(
+                id = ep.id,
+                number = ep.number,
+                title = ep.title,
+                poster = ep.poster,
+                overview = ep.overview,
+                tvShow = com.streamflixreborn.streamflix.models.Video.Type.Episode.TvShow(
+                    id = tvShowId,
+                    title = tvShowMeta?.title ?: "",
+                    poster = tvShowMeta?.poster,
+                    banner = tvShowMeta?.banner,
+                    releaseDate = null,
+                    imdbId = tvShowMeta?.imdbId,
+                ),
+                season = com.streamflixreborn.streamflix.models.Video.Type.Episode.Season(
+                    number = seasonNumber,
+                    title = cleanSeasonTitle,
+                ),
+            )
+        }
+    }
+
+    private fun hideEpisodePanelMobile() {
+        if (!episodePanelMobileVisible || _binding == null) return
+        // 2026-06-21 (drill-down) : si on est en sous-niveau, BACK restaure
+        //   le niveau parent au lieu de fermer le panel.
+        if (episodePanelMobileStack.isNotEmpty()) {
+            val parent = episodePanelMobileStack.removeAt(episodePanelMobileStack.size - 1)
+            binding.tvEpisodePanelTitleMobile.text = parent.title
+            episodePanelMobileAdapter?.updateEpisodes(parent.episodes, parent.currentId)
+            binding.rvEpisodePanelListMobile.scrollToPosition(0)
+            return
+        }
+        val panel = binding.layoutEpisodePanelMobile
+        val widthPx = panel.width.toFloat().takeIf { it > 0 }
+            ?: (360 * resources.displayMetrics.density)
+        panel.animate().translationX(widthPx)
+            .setDuration(200)
+            .withEndAction { if (_binding != null) panel.visibility = View.GONE }
+            .start()
+        episodePanelMobileVisible = false
+    }
+
+    /** 2026-06-21 : fermeture complète du panel (croix UI / leave-fullscreen).
+     *  Vide le drill-down stack avant de hider. */
+    private fun forceCloseEpisodePanelMobile() {
+        episodePanelMobileStack.clear()
+        if (!episodePanelMobileVisible || _binding == null) return
+        val panel = binding.layoutEpisodePanelMobile
+        val widthPx = panel.width.toFloat().takeIf { it > 0 }
+            ?: (360 * resources.displayMetrics.density)
+        panel.animate().translationX(widthPx)
+            .setDuration(200)
+            .withEndAction { if (_binding != null) panel.visibility = View.GONE }
+            .start()
+        episodePanelMobileVisible = false
     }
 
     /**
@@ -3452,12 +4175,29 @@ class PlayerMobileFragment : Fragment() {
                 //   - setPreferredTextLanguages("fr"/"fre"/"fra") : préférence FR.
                 //   - setSelectUndeterminedTextLanguage(true) : sélectionne
                 //     même si label vide (cas embedded subs anime).
+                // 2026-06-27 (user "Plex films/séries tout en anglais, faut que
+                //   ce soit en français") : le VOD Plex/Pluto (catalogue France)
+                //   a souvent une piste audio FR (VF) MAIS ExoPlayer jouait la
+                //   piste par défaut (= VO anglaise) car aucune langue audio
+                //   préférée n'était définie. On force la préférence audio FR
+                //   UNIQUEMENT pour Plex/Pluto VOD (pas les animes VF/VOSTFR qui
+                //   gèrent la langue au niveau source). Si pas de piste FR,
+                //   ExoPlayer retombe sur la piste par défaut (no-op).
+                val isPlexPlutoVod = args.id.let {
+                    it.contains("plexvod_") || it.contains("plexep::") ||
+                    it.contains("plutomovie_") || it.contains("plutoep::")
+                }
                 p.trackSelectionParameters = p.trackSelectionParameters
                     .buildUpon()
                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                     .clearOverridesOfType(C.TRACK_TYPE_TEXT)
                     .setPreferredTextLanguages("fr", "fre", "fra")
                     .setSelectUndeterminedTextLanguage(true)
+                    .apply {
+                        if (isPlexPlutoVod) {
+                            setPreferredAudioLanguages("fr", "fre", "fra")
+                        }
+                    }
                     .build()
             }
         } catch (_: Exception) {}
@@ -3530,22 +4270,38 @@ class PlayerMobileFragment : Fragment() {
                 //   dans delivery.drms[name=widevine].url qu'on récupère via TF1Resolver cache.
                 // 2026-06-19 : étendu pour M6+. M6Resolver expose aussi
                 //   getWidevineLicenseUrl + getWidevineHeaders (= x-dt-auth-token).
-                val widevineUrl = com.streamflixreborn.streamflix.utils.TF1Resolver
+                // 2026-06-27 : Pluto DASH exclu du DRM TF1/M6/BFM (faux match → « connecte-toi à M6 »).
+                val isPlutoDashFs = video.source.contains("pluto.tv")
+                val widevineUrl = if (isPlutoDashFs)
+                    com.streamflixreborn.streamflix.utils.PlutoTvResolver.getWidevineLicenseUrl(video.source)
+                else
+                    (com.streamflixreborn.streamflix.utils.TF1Resolver
                     .getWidevineLicenseUrl(video.source)
                     ?: com.streamflixreborn.streamflix.utils.M6Resolver
                         .getWidevineLicenseUrl(video.source)
-                val drmHeaders = com.streamflixreborn.streamflix.utils.M6Resolver
+                    ?: com.streamflixreborn.streamflix.utils.BfmResolver
+                        .getWidevineLicenseUrl(video.source))
+                val drmHeaders = if (isPlutoDashFs) null else
+                    (com.streamflixreborn.streamflix.utils.M6Resolver
                     .getWidevineHeaders(video.source)
+                    ?: com.streamflixreborn.streamflix.utils.BfmResolver
+                        .getWidevineHeaders(video.source))
                 if (widevineUrl != null) {
                     Log.d("PlayerDebug", "DASH+Widevine DRM: license=${widevineUrl.take(80)}... headers=${drmHeaders?.keys}")
                     // 2026-06-19 v17 : si M6+ (= drmHeaders contient x-dt-auth-token),
                     //   utilise M6DrmCallback custom qui parse le JSON wrapper
                     //   {"license": "base64..."} retourné par DRMtoday. Sinon
                     //   HttpMediaDrmCallback standard pour TF1+ et autres.
+                    // 2026-06-20 : BFM Play (= drmHeaders contient customdata) →
+                    //   BfmDrmCallback custom qui retourne les bytes Widevine bruts.
                     val isM6 = drmHeaders?.containsKey("x-dt-auth-token") == true
+                    val isBfm = drmHeaders?.containsKey("customdata") == true
                     val drmCallback: androidx.media3.exoplayer.drm.MediaDrmCallback = if (isM6) {
                         Log.d("PlayerDebug", "Using M6DrmCallback (DRMtoday JSON wrapper)")
                         com.streamflixreborn.streamflix.utils.M6DrmCallback(widevineUrl, drmHeaders!!)
+                    } else if (isBfm) {
+                        Log.d("PlayerDebug", "Using BfmDrmCallback (raw Widevine)")
+                        com.streamflixreborn.streamflix.utils.BfmDrmCallback(widevineUrl, drmHeaders!!)
                     } else {
                         val cb = androidx.media3.exoplayer.drm.HttpMediaDrmCallback(
                             widevineUrl,
@@ -3710,7 +4466,7 @@ class PlayerMobileFragment : Fragment() {
                         try {
                             android.widget.Toast.makeText(
                                 requireContext(),
-                                "Contenu DRM (M6+ premium) : connexion compte requise. Audio seulement.",
+                                "Contenu protégé (DRM) — lecture audio seulement.",
                                 android.widget.Toast.LENGTH_LONG,
                             ).show()
                         } catch (_: Exception) {}
@@ -4553,6 +5309,13 @@ class PlayerMobileFragment : Fragment() {
         val isPlaying = ::player.isInitialized && player.isPlaying
         val actions = mutableListOf<RemoteAction>()
 
+        // 2026-06-22 (user "en lecteur réduit PiP, les icônes pause, avance,
+        //   recule ne répondent pas") : sur Android 13+, registerReceiver avec
+        //   RECEIVER_NOT_EXPORTED bloque la livraison d'Intents IMPLICITES
+        //   (= sans setPackage). On rend les intents EXPLICITES en ajoutant
+        //   le package name → Android livre le broadcast au receiver privé.
+        val pkg = requireContext().packageName
+
         // Rewind 10s
         actions.add(
             RemoteAction(
@@ -4561,8 +5324,8 @@ class PlayerMobileFragment : Fragment() {
                 getString(R.string.player_rewind),
                 PendingIntent.getBroadcast(
                     requireContext(), 3,
-                    Intent(PIP_ACTION_REWIND),
-                    PendingIntent.FLAG_IMMUTABLE
+                    Intent(PIP_ACTION_REWIND).setPackage(pkg),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
             )
         )
@@ -4576,8 +5339,8 @@ class PlayerMobileFragment : Fragment() {
                     getString(R.string.player_pause),
                     PendingIntent.getBroadcast(
                         requireContext(), 1,
-                        Intent(PIP_ACTION_PAUSE),
-                        PendingIntent.FLAG_IMMUTABLE
+                        Intent(PIP_ACTION_PAUSE).setPackage(pkg),
+                        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                     )
                 )
             )
@@ -4589,8 +5352,8 @@ class PlayerMobileFragment : Fragment() {
                     getString(R.string.player_play),
                     PendingIntent.getBroadcast(
                         requireContext(), 2,
-                        Intent(PIP_ACTION_PLAY),
-                        PendingIntent.FLAG_IMMUTABLE
+                        Intent(PIP_ACTION_PLAY).setPackage(pkg),
+                        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                     )
                 )
             )
@@ -4604,8 +5367,8 @@ class PlayerMobileFragment : Fragment() {
                 getString(R.string.player_forward),
                 PendingIntent.getBroadcast(
                     requireContext(), 4,
-                    Intent(PIP_ACTION_FORWARD),
-                    PendingIntent.FLAG_IMMUTABLE
+                    Intent(PIP_ACTION_FORWARD).setPackage(pkg),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
             )
         )
@@ -4614,8 +5377,14 @@ class PlayerMobileFragment : Fragment() {
             .setAspectRatio(Rational(16, 9))
             .setActions(actions)
 
+        // 2026-06-21 (user "j'ai activé le paramètre PiP mais ça ne fonctionne
+        //   pas") : sur Android 12+ (S), `setAutoEnterEnabled` contrôle si
+        //   Android entre AUTOMATIQUEMENT en PiP quand l'user quitte l'activité.
+        //   Sans cette gate, Android pouvait shortcircuit notre onUserLeaveHint
+        //   et auto-enter PiP même quand UserPreferences.pipOnExit = false.
+        //   On la lie maintenant à la pref user.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            builder.setAutoEnterEnabled(true)
+            builder.setAutoEnterEnabled(UserPreferences.pipOnExit)
         }
 
         return builder.build()
@@ -4626,6 +5395,93 @@ class PlayerMobileFragment : Fragment() {
         try {
             requireActivity().setPictureInPictureParams(buildPipParams())
         } catch (_: Exception) {}
+    }
+
+    // 2026-06-21 (user "double-clic à gauche = -10s, à droite = +10s") :
+    //   Overlay flottant qui apparaît brièvement après un double-tap seek.
+    //   Affiche un TextView semi-transparent rond avec "⏪ -10s" ou "+10s ⏩".
+    //   Auto-hide après ~600ms.
+    private var doubleTapSeekOverlay: TextView? = null
+    private var doubleTapSeekHideJob: kotlinx.coroutines.Job? = null
+    private fun showDoubleTapSeekOverlay(side: String) {
+        if (_binding == null) return
+        val ctx = context ?: return
+        val dp = ctx.resources.displayMetrics.density
+        if (doubleTapSeekOverlay == null) {
+            val tv = TextView(ctx).apply {
+                gravity = android.view.Gravity.CENTER
+                textSize = 18f
+                setTextColor(android.graphics.Color.WHITE)
+                setPadding((20 * dp).toInt(), (16 * dp).toInt(), (20 * dp).toInt(), (16 * dp).toInt())
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                    cornerRadius = 48 * dp
+                    setColor(0xCC000000.toInt())
+                }
+                elevation = 12 * dp
+                isClickable = false
+                isFocusable = false
+            }
+            // Attache l'overlay au parent du PlayerView (= FrameLayout/ConstraintLayout).
+            val parent = binding.pvPlayer.parent as? android.view.ViewGroup
+            if (parent is androidx.constraintlayout.widget.ConstraintLayout) {
+                val lp = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
+                    androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.WRAP_CONTENT,
+                    androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.WRAP_CONTENT,
+                )
+                lp.topToTop = binding.pvPlayer.id
+                lp.bottomToBottom = binding.pvPlayer.id
+                tv.layoutParams = lp
+                tv.id = View.generateViewId()
+                parent.addView(tv)
+                // Positionnement horizontal défini après dans show (gauche/droite).
+                doubleTapSeekOverlay = tv
+            } else if (parent is android.widget.FrameLayout) {
+                val lp = android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                )
+                lp.gravity = android.view.Gravity.CENTER_VERTICAL
+                tv.layoutParams = lp
+                parent.addView(tv)
+                doubleTapSeekOverlay = tv
+            } else return // parent non supporté → abandon silencieux
+        }
+        val tv = doubleTapSeekOverlay ?: return
+        tv.text = if (side == "left") "⏪  -10s" else "+10s  ⏩"
+        // Repositionne selon le côté
+        val parent = tv.parent as? android.view.ViewGroup ?: return
+        when (val lp = tv.layoutParams) {
+            is androidx.constraintlayout.widget.ConstraintLayout.LayoutParams -> {
+                if (side == "left") {
+                    lp.startToStart = binding.pvPlayer.id
+                    lp.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
+                    lp.marginStart = (32 * dp).toInt()
+                } else {
+                    lp.endToEnd = binding.pvPlayer.id
+                    lp.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
+                    lp.marginEnd = (32 * dp).toInt()
+                }
+                tv.layoutParams = lp
+            }
+            is android.widget.FrameLayout.LayoutParams -> {
+                lp.gravity = android.view.Gravity.CENTER_VERTICAL or
+                    (if (side == "left") android.view.Gravity.START else android.view.Gravity.END)
+                lp.marginStart = (32 * dp).toInt()
+                lp.marginEnd = (32 * dp).toInt()
+                tv.layoutParams = lp
+            }
+        }
+        tv.alpha = 0f
+        tv.visibility = View.VISIBLE
+        tv.animate().alpha(1f).setDuration(120).start()
+        doubleTapSeekHideJob?.cancel()
+        doubleTapSeekHideJob = viewLifecycleOwner.lifecycleScope.launch {
+            kotlinx.coroutines.delay(500)
+            tv.animate().alpha(0f).setDuration(180).withEndAction {
+                if (_binding != null) tv.visibility = View.GONE
+            }.start()
+        }
     }
 
     private fun enterPIPMode() {

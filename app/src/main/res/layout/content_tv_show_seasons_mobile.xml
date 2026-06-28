@@ -18,6 +18,51 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
+    <!-- 2026-06-24 : boutons VOSTFR/VF inline (= AnimeSama uniquement). -->
+    <LinearLayout
+        android:id="@+id/ll_tv_show_lang_tabs"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="10dp"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal"
+        android:visibility="gone"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/tv_tv_show_seasons_label">
+
+        <TextView
+            android:id="@+id/btn_tv_show_lang_vostfr"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="10dp"
+            android:background="#33FFFFFF"
+            android:gravity="center"
+            android:paddingStart="14dp"
+            android:paddingTop="6dp"
+            android:paddingEnd="14dp"
+            android:paddingBottom="6dp"
+            android:text="VOSTFR"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/btn_tv_show_lang_vf"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="#33FFFFFF"
+            android:gravity="center"
+            android:paddingStart="14dp"
+            android:paddingTop="6dp"
+            android:paddingEnd="14dp"
+            android:paddingBottom="6dp"
+            android:text="VF"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
+    </LinearLayout>
+
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rv_tv_show_seasons"
         android:layout_width="0dp"
@@ -31,7 +76,7 @@
         app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/tv_tv_show_seasons_label"
+        app:layout_constraintTop_toBottomOf="@id/ll_tv_show_lang_tabs"
         tools:listitem="@layout/item_season_mobile" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

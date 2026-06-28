@@ -192,13 +192,19 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                         is TvShow -> item.title
                         else -> null
                     } ?: return@forEach
-                    // 2026-05-05 : normalise (apostrophe typo, annotations VF/saison) avant TMDB
                     val normalized = com.streamflixreborn.streamflix.utils.TitleNormalizer.cleanForTmdbSearch(title)
-                    val results = TMDb3.Search.multi(normalized.ifBlank { title })
+                    val searchQuery = normalized.ifBlank { title }
+                    if (searchQuery.length < 2) return@forEach
+                    val results = TMDb3.Search.multi(searchQuery, language = "fr-FR")
+                    // Matching strict : langue anime + titre similaire
                     val match = results.results.firstOrNull { result ->
                         when (result) {
-                            is TMDb3.Movie -> result.originalLanguage in animeLanguages && result.backdropPath != null
-                            is TMDb3.Tv -> result.originalLanguage in animeLanguages && result.backdropPath != null
+                            is TMDb3.Movie -> result.originalLanguage in animeLanguages && result.backdropPath != null && run {
+                                val t = result.title?.trim() ?: ""; t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
+                            }
+                            is TMDb3.Tv -> result.originalLanguage in animeLanguages && result.backdropPath != null && run {
+                                val t = result.name?.trim() ?: ""; t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
+                            }
                             else -> false
                         }
                     }
@@ -214,6 +220,19 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                         }
                     }
                 } catch (_: Exception) {}
+            }
+            // Ne garder dans le carrousel que les items avec backdrop TMDb HD (min 5 sinon liste originale)
+            val featuredCat = categories.find { it.name == Category.FEATURED }
+            if (featuredCat != null) {
+                val filtered = featuredCat.list.filter { item ->
+                    val b = when (item) { is Movie -> item.banner; is TvShow -> item.banner; else -> null }
+                    b != null && b.contains("/t/p/")
+                }
+                // Min 5 items TMDb sinon on garde la liste originale
+                if (filtered.size >= 5) {
+                    categories[categories.indexOf(featuredCat)] = Category(name = Category.FEATURED, list = filtered)
+                }
+                // else: on garde le featuredCat original tel quel
             }
         }
 
@@ -477,12 +496,13 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         val result = mutableListOf<Episode>()
         var number = 1
-        val maps = listOf(episodesData.vf, episodesData.vostfr, episodesData.vo )
+        val maps = listOf(episodesData.vf, episodesData.vostfr, episodesData.vo)
         while (maps.any { it?.containsKey(number.toString()) == true }) {
             val info = episodesData.info?.get(number.toString())
+            val epId = "$seasonId/$number"
             result.add(
                 Episode(
-                    id = "$seasonId/$number",
+                    id = epId,
                     number = number,
                     poster = info?.poster ?: "",
                     title = info?.title?.replace("\\'", "'") ?: "Episode $number",

@@ -123,13 +123,23 @@ object TF1Resolver {
     private val widevineLicenseCache = java.util.concurrent.ConcurrentHashMap<String, String>()
     fun getWidevineLicenseUrl(streamUrl: String): String? = widevineLicenseCache[streamUrl]
 
-    /** Mapping slug user-friendly → channel ID TF1 pour le live. */
+    /** Mapping slug user-friendly → channel ID TF1 pour le live.
+     *  Les chaînes FAST n'ont pas besoin d'entrée ici : leur URL M3U utilise
+     *  directement tf1live://L_FAST_... qui passe par le shortcut ci-dessous. */
     private val LIVE_CHANNEL_IDS = mapOf(
+        // ── Traditionnelles ──
         "tf1"              to "L_TF1",
         "tmc"              to "L_TMC",
         "tfx"              to "L_TFX",
         "tf1-series-films" to "L_TF1_SERIES_FILMS",
         "lci"              to "L_LCI",
+        // ── Chaînes externes TF1+ ──
+        "arte"             to "L_ARTE",
+        "l-equipe"         to "L_L-EQUIPE",
+        "lcp-public-senat" to "L_LCP-PUBLIC-SENAT",
+        "le-figaro"        to "L_LE-FIGARO",
+        "novo19"           to "L_NOVO19",
+        "redbulltv"        to "L_REDBULLTV",
     )
 
     data class Resolved(
@@ -145,8 +155,14 @@ object TF1Resolver {
         //  - "tf1plus://<chan>/<program-slug>" → page programme + extract ID
         //  - "tf1plus://<numeric_id>" → mediainfo direct
         if (tf1Url.startsWith("tf1live://", ignoreCase = true)) {
-            val slug = tf1Url.removePrefix("tf1live://").trim().lowercase()
-            val chanId = LIVE_CHANNEL_IDS[slug]
+            val slug = tf1Url.removePrefix("tf1live://").trim()
+            // Si le slug est déjà un channel ID direct (L_FAST_..., L_ARTE, etc.)
+            // on le passe tel quel à resolveVideoId — pas besoin de lookup dans la map
+            val chanId = if (slug.startsWith("L_", ignoreCase = true)) {
+                slug  // ID direct
+            } else {
+                LIVE_CHANNEL_IDS[slug.lowercase()]
+            }
             if (chanId == null) {
                 Log.w(TAG, "Unknown live slug: $slug")
                 return null

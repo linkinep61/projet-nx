@@ -146,6 +146,9 @@ object EpisodeFavorites {
     /** Toutes les épisodes favorites du profil courant, plus récentes d'abord. */
     fun all(): List<Entry> = readAll().sortedByDescending { it.favoritedAt }
 
+    /** 2026-06-22 : vide tous les épisodes favoris du profil courant. */
+    fun clearAll() = writeAll(emptyList())
+
     /** data class pour le résultat du parse. */
     data class ParsedId(val provider: String, val showId: String, val seasonNumber: Int, val episodeNumber: Int)
 

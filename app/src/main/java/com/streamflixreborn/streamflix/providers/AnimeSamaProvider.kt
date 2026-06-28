@@ -40,7 +40,7 @@ import retrofit2.http.Path
 import retrofit2.http.Url
 import java.util.concurrent.TimeUnit
 
-object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, FilterableProvider {
+object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, FilterableProvider, ProgressiveServersProvider {
 
     override val name = "AnimeSama"
     override val defaultBaseUrl: String = "https://anime-sama.to/"
@@ -253,6 +253,39 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 }
             }
         } else null
+        // ── Catégories Catalogue (page 1) — lancées EN PARALLÈLE du scrape homepage ──
+        val catalogAnimeDeferred = async(Dispatchers.IO) {
+            try {
+                val catalogAnimeDoc = fetchDocument("${baseUrl}catalogue/?type[]=Anime&page=1")
+                catalogAnimeDoc.select(".catalog-card").mapNotNull { card ->
+                    val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
+                    val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
+                        .split("/").firstOrNull() ?: return@mapNotNull null
+                    val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                    val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
+                    TvShow(id = slug, title = title, poster = img)
+                }.distinctBy { it.id }
+            } catch (e: Exception) {
+                Log.w(TAG, "Catalogue Anime fetch failed: ${e.message}")
+                emptyList()
+            }
+        }
+        val catalogFilmDeferred = async(Dispatchers.IO) {
+            try {
+                val catalogFilmDoc = fetchDocument("${baseUrl}catalogue/?type[]=Film&page=1")
+                catalogFilmDoc.select(".catalog-card").mapNotNull { card ->
+                    val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
+                    val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
+                        .split("/").firstOrNull() ?: return@mapNotNull null
+                    val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                    val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
+                    Movie(id = slug, title = title, poster = img)
+                }.distinctBy { it.id }
+            } catch (e: Exception) {
+                Log.w(TAG, "Catalogue Films fetch failed: ${e.message}")
+                emptyList()
+            }
+        }
         val document = fetchDocument(baseUrl)
         val categories = mutableListOf<Category>()
 
@@ -382,25 +415,70 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         // parallèle du scrape donc en pratique il est souvent déjà prêt ici.
         // Timeout interne = 5s, await = encore 5s → total max 10s mais le scrape
         // prend lui-même 5-15s donc le TMDB a largement le temps.
-        val trendingAnime = if (featuredDeferred != null) {
+        val trendingAnimeRaw = if (featuredDeferred != null) {
             try {
                 kotlinx.coroutines.withTimeoutOrNull(5_000L) { featuredDeferred.await() } ?: emptyList()
             } catch (_: Exception) { emptyList() }
         } else emptyList()
+        // 2026-06-21 (user "quand je clique sur cette synopsis là dans le
+        //   carrousel elle ne trouve pas de contenu au final, elle va le piocher
+        //   où le contenu si elle l'a pas, pourquoi elle l'affiche") :
+        //   On filtre les items TMDB pour ne garder QUE ceux qui ont un
+        //   match sur AnimeSama (sinon clic → page vide). En profite pour
+        //   remplacer l'id "tmdb_anime_X" par le VRAI slug AnimeSama →
+        //   getTvShow() est ensuite direct (plus de redirect TMDB→search).
+        //   Parallèle (sem=8) + timeout 1.5s par recherche + 4s global →
+        //   home reste rapide.
+        val trendingAnime: List<TvShow> = if (trendingAnimeRaw.isNotEmpty()) {
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(4_000L) {
+                    val sem = kotlinx.coroutines.sync.Semaphore(8)
+                    trendingAnimeRaw.map { tmdbShow ->
+                        async(Dispatchers.IO) {
+                            sem.withPermit {
+                                kotlinx.coroutines.withTimeoutOrNull(1_500L) {
+                                    try {
+                                        val html = searchPost(tmdbShow.title ?: return@withTimeoutOrNull null)
+                                        val doc = Jsoup.parse(html)
+                                        val firstResult = doc.select("a.asn-search-result").firstOrNull()
+                                            ?: return@withTimeoutOrNull null
+                                        val href = firstResult.attr("href")
+                                        val realSlug = href.substringAfter("/catalogue/")
+                                            .removeSuffix("/").split("/").firstOrNull()
+                                            ?: return@withTimeoutOrNull null
+                                        if (realSlug.isBlank()) return@withTimeoutOrNull null
+                                        // Match confirmé → on remplace id par slug réel
+                                        tmdbShow.copy(id = realSlug)
+                                    } catch (_: Exception) { null }
+                                }
+                            }
+                        }
+                    }.awaitAll().filterNotNull()
+                } ?: emptyList()
+            } catch (_: Exception) { emptyList() }
+        } else emptyList()
         // 2026-05-22 (user "le carrousel AnimeSama n'apparaît pas du tout") : si le
-        //   featured TMDB revient vide (timeout / TMDB désactivé / échec), on bâtit
-        //   un carrousel de SECOURS depuis les items scrappés (poster utilisé en
-        //   bannière) — même approche que DessinAnime — pour que le carrousel soit
-        //   TOUJOURS présent. On crée des COPIES neuves (id identique mais objet
-        //   distinct) pour ne pas partager de référence avec les rangées (sinon
-        //   conflits d'itemType du FEATURED côté HomeViewModel).
-        val featuredList: List<TvShow> = trendingAnime.ifEmpty {
-            categories.flatMap { it.list }
-                .filterIsInstance<TvShow>()
-                .filter { !it.id.startsWith("tmdb_anime_") }
-                .distinctBy { it.id }
-                .take(10)
-                .map { s -> TvShow(id = s.id, title = s.title, poster = s.poster, banner = s.poster ?: s.banner) }
+        //   featured TMDB revient vide (timeout / TMDB désactivé / échec / aucun
+        //   item TMDB n'a de match AnimeSama), on bâtit un carrousel de SECOURS
+        //   depuis les items scrappés — même approche que DessinAnime — pour
+        //   que le carrousel soit TOUJOURS présent. On crée des COPIES neuves
+        //   (id identique mais objet distinct) pour ne pas partager de référence
+        //   avec les rangées (sinon conflits d'itemType du FEATURED côté
+        //   HomeViewModel).
+        val fallbackPool = categories.flatMap { it.list }
+            .filterIsInstance<TvShow>()
+            .filter { !it.id.startsWith("tmdb_anime_") }
+            .distinctBy { it.id }
+            .take(10)
+            .map { s -> TvShow(id = s.id, title = s.title, poster = s.poster, banner = s.poster ?: s.banner) }
+        // Si le trending TMDB a moins de 5 items validés, compléter avec le fallback scrapé
+        val featuredList: List<TvShow> = if (trendingAnime.size >= 5) {
+            trendingAnime
+        } else if (trendingAnime.isNotEmpty()) {
+            val existingIds = trendingAnime.map { it.id }.toSet()
+            trendingAnime + fallbackPool.filter { it.id !in existingIds }.take(10 - trendingAnime.size)
+        } else {
+            fallbackPool
         }
         if (featuredList.isNotEmpty()) {
             categories.add(0, Category(name = Category.FEATURED, list = featuredList))
@@ -476,7 +554,17 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             }
         }
 
-        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films
+        // ── Await catalogue deferred (lancés en parallèle au début) ──
+        val catalogAnimeItems = try { catalogAnimeDeferred.await() } catch (_: Exception) { emptyList() }
+        val catalogFilmItems = try { catalogFilmDeferred.await() } catch (_: Exception) { emptyList() }
+        if (catalogAnimeItems.isNotEmpty()) {
+            categories.add(Category(name = "Catalogue Anime", list = catalogAnimeItems))
+        }
+        if (catalogFilmItems.isNotEmpty()) {
+            categories.add(Category(name = "Catalogue Films", list = catalogFilmItems))
+        }
+
+        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films 7.Catalogue
         categories.sortedWith(compareBy { cat ->
             val n = cat.name.lowercase()
             val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
@@ -491,6 +579,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 isSeries -> 4
                 isFilm -> 5
                 isRecent -> 1
+                n.startsWith("catalogue") -> 7
                 else -> 6
             }
         })
@@ -498,19 +587,91 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
 
     // ========== SEARCH ==========
 
+    // Cache des genres récupérés dynamiquement depuis le catalogue
+    private var cachedGenres: List<Genre>? = null
+
+    // 2026-06-20 (user "les genres doivent être directement réglés en FR
+    //   quand on est sur cette catégorie là Puis quand on va sur VOSTFR
+    //   [...] Donc pour l'instant ça marche pas") : on track la dernière
+    //   langue + type utilisés dans getFilteredMovies/getFilteredTvShows
+    //   pour que `getGenre()` applique le BON filtre langue + type. Sinon
+    //   l'user clique un genre depuis l'onglet FR et voit tout mixé.
+    @Volatile private var lastLanguageFilter: String? = null  // "vf" / "vostfr" / null
+    @Volatile private var lastTypeFilter: String? = null      // "Anime" / "Film" / null
+
+    /** 2026-06-20 (user "VOSTFR + arts martiaux + Série OK / + Film → séries au
+     *  lieu de films") : quand un genre est actif, le ViewModel rappelle
+     *  `getGenre()` SANS repasser par getFilteredXxx → mes flags langue/type
+     *  ne sont pas mis à jour quand l'user switch sub-tab. Solution : les
+     *  ViewModels (Movies/TvShows) appellent ce helper AVANT chaque
+     *  setLanguageFilter pour rafraîchir le contexte côté provider. */
+    fun setActiveTabContext(languageFilter: String, fromMovies: Boolean) {
+        lastLanguageFilter = if (fromMovies) "vf" else "vostfr"
+        lastTypeFilter = if (languageFilter == "film") "Film" else "Anime"
+        Log.d(TAG, "[setActiveTabContext] languageFilter=$languageFilter fromMovies=$fromMovies → lang=$lastLanguageFilter type=$lastTypeFilter")
+    }
+
+    /**
+     * Récupère la liste complète des genres depuis la page catalogue.
+     * Les genres sont dans des checkboxes : <input class="filter-checkbox" name="genre[]" value="Isekai">
+     * Fallback sur une liste hardcodée si le fetch échoue.
+     */
+    private suspend fun fetchGenreList(): List<Genre> {
+        cachedGenres?.let { return it }
+        return try {
+            val document = fetchDocument("${baseUrl}catalogue/")
+            val genres = document.select("#genreList input.filter-checkbox").mapNotNull { input ->
+                val value = input.attr("value").trim()
+                if (value.isEmpty()) return@mapNotNull null
+                Genre(id = value, name = value)
+            }
+            if (genres.isNotEmpty()) {
+                cachedGenres = genres
+                genres
+            } else {
+                fallbackGenres()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to fetch dynamic genre list: ${e.message}")
+            fallbackGenres()
+        }
+    }
+
+    // 2026-06-20 (user "l'autre session avait voulu réparer les genres sur
+    //   AnimeSama mais pas bien réussi") : liste fallback étendue aux 109
+    //   genres réels du site (fetché depuis
+    //   https://anime-sama.to/catalogue/ - #genreList input[name=genre[]]).
+    //   Utilisée si fetchGenreList() dynamique échoue (= offline, CF block,
+    //   site down, sélecteur DOM cassé). Permet à l'user de filtrer par
+    //   N'IMPORTE quel genre du site sans dépendre du fetch HTML.
+    private fun fallbackGenres(): List<Genre> = listOf(
+        "Action", "Adolescence", "Aliens / Extra-terrestres", "Amitié", "Amour",
+        "Apocalypse", "Art", "Arts martiaux", "Assassinat", "Autre monde",
+        "Aventure", "Combats", "Comédie", "Crime", "Cyberpunk",
+        "Danse", "Démons", "Détective", "Donghua", "Dragon",
+        "Drame", "Ecchi", "Ecole", "Elfe", "Enquête",
+        "Famille", "Fantastique", "Fantasy", "Fantômes", "Futur",
+        "Gastronomie", "Ghibli", "Guerre", "Harcèlement", "Harem",
+        "Harem inversé", "Histoire", "Historique", "Homosexualité", "Horreur",
+        "Isekai", "Jeunesse", "Jeux", "Jeux vidéo", "Josei",
+        "Journalisme", "Kaï", "LGBT+", "Mafia", "Magical girl",
+        "Magie", "Maladie", "Mariage", "Mature", "Mechas",
+        "Médiéval", "Militaire", "Monde virtuel", "Monstres", "Musique",
+        "Mystère", "Nekketsu", "Ninjas", "Nostalgie", "Paranormal",
+        "Philosophie", "Pirates", "Police", "Politique", "Post-apocalyptique",
+        "Pouvoirs psychiques", "Préhistoire", "Prison", "Psychologique", "Quotidien",
+        "Réincarnation / Transmigration", "Religion", "Romance", "Samouraïs", "School Life",
+        "Science-Fantasy", "Science-fiction", "Scientifique", "Seinen", "Shôjo",
+        "Shôjo-Ai", "Shônen", "Shônen-Ai", "Slice of Life", "Société",
+        "Sport", "Super pouvoirs", "Super-héros", "Surnaturel", "Survie",
+        "Survival game", "Technologies", "Thriller", "Tournois", "Travail",
+        "Vampires", "Vengeance", "Voyage", "Voyage temporel", "Webcomic",
+        "Yakuza", "Yaoi", "Yokai", "Yuri",
+    ).map { name -> Genre(id = name, name = name) }
+
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
         if (query.isEmpty()) {
-            // Return genres so they appear in the search screen (like other providers)
-            return listOf(
-                "Action", "Aventure", "Comédie", "Drame", "Fantastique",
-                "Horreur", "Mystère", "Romance", "Science-fiction", "Thriller",
-                "Isekai", "Shônen", "Seinen", "Shôjo", "Ecole",
-                "Magie", "Crime", "Psychologique", "Sport", "Musique",
-                "K-Drama"
-            ).map { name ->
-                if (name == "K-Drama") Genre(id = "k-drama", name = name)
-                else Genre(id = name, name = name)
-            }
+            return fetchGenreList()
         }
 
         val html = searchPost(query)
@@ -609,12 +770,14 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
 
     override suspend fun getMovies(page: Int): List<Movie> {
         // FR tab: returns BOTH series (isSeries=true) and films (isSeries=false)
-        // No per-item probing — classify by catalogue type (2 requests total instead of N+1)
+        // 2026-06-20 (FIX) : NE PAS toucher aux flags lastLanguageFilter/lastTypeFilter
+        //   ici — getMovies est aussi appelé par HomeViewModel pour l'enrichment
+        //   background et écraserait le contexte posé par les ViewModels.
         val movies = mutableListOf<Movie>()
 
         // 1. Anime series with VF → Movie with isSeries=true
         try {
-            val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=vf&page=$page"
+            val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=VF&page=$page"
             fetchDocument(animeUrl).select(".catalog-card").mapNotNull { card ->
                 val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
                 val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
@@ -649,78 +812,99 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
     }
 
     override suspend fun getFilteredTvShows(language: String, page: Int): List<TvShow> {
-        // "language" is reused as type filter: "serie" or "film"
+        // "language" est en fait un type-filter pour AnimeSama : "serie" ou "film"
+        // (sub-tabs labellés "Série" et "Film" dans TvShowsTvFragment).
+        // 2026-06-20 (FIX) : NE PAS toucher aux flags ici. HomeViewModel
+        //   enrichment appelle getTvShows() → écraserait le contexte
+        //   Movies posé par MoviesViewModel. Le tracking est fait via
+        //   `setActiveTabContext()` appelé depuis les ViewModels.
         return when (language) {
-            "film" -> {
-                // Films only — from catalogue type=Film
-                try {
-                    val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
-                    fetchDocument(filmUrl).select(".catalog-card").mapNotNull { card ->
-                        val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
-                        val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
-                            .split("/").firstOrNull() ?: return@mapNotNull null
-                        val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
-                        val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
-                        TvShow(id = "$slug@vostfr-film0", title = title, poster = img).also { it.isMovie = true }
-                    }
-                } catch (_: Exception) { emptyList() }
-            }
-            else -> {
-                // Series only — fetch Anime VOSTFR, exclude anything in the Film catalogue
-                try {
-                    val filmSlugs = getFilmSlugs()
-                    val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=vostfr&page=$page"
-                    fetchDocument(animeUrl).select(".catalog-card").mapNotNull { card ->
-                        val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
-                        val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
-                            .split("/").firstOrNull() ?: return@mapNotNull null
-                        if (slug in filmSlugs) return@mapNotNull null // exclude films
-                        val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
-                        val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
-                        TvShow(id = "$slug@vostfr", title = title, poster = img)
-                    }
-                } catch (_: Exception) { emptyList() }
-            }
+            "film" -> try {
+                val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
+                fetchDocument(filmUrl).select(".catalog-card").mapNotNull { card ->
+                    val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
+                    val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
+                        .split("/").firstOrNull() ?: return@mapNotNull null
+                    val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                    val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
+                    TvShow(id = "$slug@vostfr-film0", title = title, poster = img).also { it.isMovie = true }
+                }
+            } catch (_: Exception) { emptyList() }
+            else -> try {
+                val filmSlugs = getFilmSlugs()
+                val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=vostfr&page=$page"
+                fetchDocument(animeUrl).select(".catalog-card").mapNotNull { card ->
+                    val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
+                    val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
+                        .split("/").firstOrNull() ?: return@mapNotNull null
+                    if (slug in filmSlugs) return@mapNotNull null
+                    val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                    val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
+                    TvShow(id = "$slug@vostfr", title = title, poster = img)
+                }
+            } catch (_: Exception) { emptyList() }
         }
     }
 
     override suspend fun getFilteredMovies(language: String, page: Int): List<Movie> {
-        // Fast path: single catalogue request per tab (no per-item probing)
+        // "language" = type-filter "serie" / "film". Onglet Films Onyx → contexte langue=vf.
+        // 2026-06-20 (FIX) : NE PAS toucher aux flags ici. Tracking via setActiveTabContext.
         return when (language) {
-            "film" -> {
-                // Films only — from catalogue type=Film
-                try {
-                    val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
-                    fetchDocument(filmUrl).select(".catalog-card").mapNotNull { card ->
-                        val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
-                        val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
-                            .split("/").firstOrNull() ?: return@mapNotNull null
-                        val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
-                        val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
-                        Movie(id = "$slug@film0", title = title, poster = img)
-                    }
-                } catch (_: Exception) { emptyList() }
-            }
-            else -> {
-                // Series (Anime VF) — exclude anything in the Film catalogue
-                try {
-                    val filmSlugs = getFilmSlugs()
-                    val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=vf&page=$page"
-                    fetchDocument(animeUrl).select(".catalog-card").mapNotNull { card ->
-                        val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
-                        val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
-                            .split("/").firstOrNull() ?: return@mapNotNull null
-                        if (slug in filmSlugs) return@mapNotNull null // exclude films
-                        val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
-                        val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
-                        Movie(id = "$slug@vf", title = title, poster = img).also { it.isSeries = true }
-                    }
-                } catch (_: Exception) { emptyList() }
-            }
+            "film" -> try {
+                val filmUrl = "${baseUrl}catalogue/?type[]=Film&page=$page"
+                fetchDocument(filmUrl).select(".catalog-card").mapNotNull { card ->
+                    val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
+                    val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
+                        .split("/").firstOrNull() ?: return@mapNotNull null
+                    val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                    val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
+                    Movie(id = "$slug@film0", title = title, poster = img)
+                }
+            } catch (_: Exception) { emptyList() }
+            else -> try {
+                val filmSlugs = getFilmSlugs()
+                val animeUrl = "${baseUrl}catalogue/?type[]=Anime&langue[]=VF&page=$page"
+                fetchDocument(animeUrl).select(".catalog-card").mapNotNull { card ->
+                    val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
+                    val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
+                        .split("/").firstOrNull() ?: return@mapNotNull null
+                    if (slug in filmSlugs) return@mapNotNull null
+                    val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                    val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
+                    Movie(id = "$slug@vf", title = title, poster = img).also { it.isSeries = true }
+                }
+            } catch (_: Exception) { emptyList() }
         }
     }
 
     // ========== MOVIE DETAIL ==========
+
+    /**
+     * 2026-06-23 — Sanitize les champs synopsis/genres parsés via regex naïf.
+     *
+     * Bug visible sur One Piece : le regex `SYNOPSIS[\s\S]*?<p>...</p>` tombait
+     * sur le panel infos complet ("Watchlist Favoris Vu État En cours Année 1999
+     * Épisodes 1181 Chapitres ? Créateur Eiichiro Oda Studio Toei... Voir plus
+     * Correspondance Episode 1155 -> Chapitre 1125 Synopsis Il fut un temps...").
+     *
+     * Si on détecte ≥ 2 marqueurs UI du panel (Watchlist, Voir plus, Correspondance
+     * Episode, Chapitres ?, Créateur ) → on considère le champ pollué :
+     *  - pour le synopsis on tente d'extraire ce qui suit le mot "Synopsis "
+     *  - pour les genres on vide complètement
+     */
+    private fun sanitizeAnimeSamaField(text: String, extractAfterSynopsis: Boolean): String {
+        val uiMarkers = listOf("Watchlist", "Voir plus", "Correspondance Episode",
+                               "Chapitres ?", "Créateur ")
+        val matched = uiMarkers.count { text.contains(it, ignoreCase = true) }
+        if (matched < 2) return text
+        if (extractAfterSynopsis) {
+            val idx = text.lastIndexOf("Synopsis ", ignoreCase = true)
+            if (idx >= 0 && idx + 9 < text.length) {
+                return text.substring(idx + 9).trim()
+            }
+        }
+        return ""
+    }
 
     override suspend fun getMovie(id: String): Movie {
         val slug = id.substringBefore("@")
@@ -729,9 +913,11 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
 
         val title = document.title().substringBefore(" |").trim()
         val synopsisMatch = Regex("SYNOPSIS[\\s\\S]*?<p[^>]*>([\\s\\S]*?)</p>", RegexOption.IGNORE_CASE).find(html)
-        val synopsis = synopsisMatch?.groupValues?.get(1)?.let { Jsoup.parse(it).text() } ?: ""
+        val synopsisRaw = synopsisMatch?.groupValues?.get(1)?.let { Jsoup.parse(it).text() } ?: ""
+        val synopsis = sanitizeAnimeSamaField(synopsisRaw, extractAfterSynopsis = true)
         val genresMatch = Regex("GENRES[\\s\\S]*?<p[^>]*>([\\s\\S]*?)</p>", RegexOption.IGNORE_CASE).find(html)
-        val genresText = genresMatch?.groupValues?.get(1)?.let { Jsoup.parse(it).text() } ?: ""
+        val genresRaw = genresMatch?.groupValues?.get(1)?.let { Jsoup.parse(it).text() } ?: ""
+        val genresText = sanitizeAnimeSamaField(genresRaw, extractAfterSynopsis = false)
 
         // ── Search for related content from the same franchise ──
         val relatedFilms = mutableListOf<Show>()
@@ -822,9 +1008,11 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
 
         val title = document.title().substringBefore(" |").trim()
         val synopsisMatch = Regex("SYNOPSIS[\\s\\S]*?<p[^>]*>([\\s\\S]*?)</p>", RegexOption.IGNORE_CASE).find(html)
-        val synopsis = synopsisMatch?.groupValues?.get(1)?.let { Jsoup.parse(it).text() } ?: ""
+        val synopsisRaw = synopsisMatch?.groupValues?.get(1)?.let { Jsoup.parse(it).text() } ?: ""
+        val synopsis = sanitizeAnimeSamaField(synopsisRaw, extractAfterSynopsis = true)
         val genresMatch = Regex("GENRES[\\s\\S]*?<p[^>]*>([\\s\\S]*?)</p>", RegexOption.IGNORE_CASE).find(html)
-        val genresText = genresMatch?.groupValues?.get(1)?.let { Jsoup.parse(it).text() } ?: ""
+        val genresRaw = genresMatch?.groupValues?.get(1)?.let { Jsoup.parse(it).text() } ?: ""
+        val genresText = sanitizeAnimeSamaField(genresRaw, extractAfterSynopsis = false)
 
         val seasons = mutableListOf<Season>()
         val animePoster = "${IMG_BASE}${slug}.jpg"
@@ -1006,34 +1194,40 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             }
         }
 
-        if (forcedLang != null || langSeasonFolders.size == 1) {
-            // Language already chosen (from VF/VOSTFR tab) or only one exists: show seasons directly
-            val entry = langSeasonFolders.entries.firstOrNull()
-            val lang = entry?.key ?: "vostfr"
-            val folders = entry?.value ?: mutableListOf()
-            for ((idx, folder) in folders.withIndex()) {
-                val seasonId = if (folder.path.isEmpty()) "$slug/$lang" else "$slug/${folder.path}/$lang"
+        // 2026-06-24 v9 DÉFINITIF (user "pourquoi t'as retiré mes 2 dossiers
+        //   VOSTFR et FR du menu synepsie") : ON EMET les 2 wrappers VOSTFR/VF
+        //   comme jaquettes de saison dans le synopsis quand les 2 langues
+        //   sont dispo. Title = "VOSTFR" / "VF" (= s'affiche tel quel sur la
+        //   jaquette). Click → Season fragment → drill dans les vraies
+        //   sous-saisons via re-probe (cf langFolderRegex getEpisodesBySeason).
+        //   Si 1 seule langue dispo OU forcedLang → vraies saisons directes.
+        val hasBothLangs = forcedLang == null
+            && langSeasonFolders.containsKey("vostfr")
+            && langSeasonFolders.containsKey("vf")
+        if (hasBothLangs) {
+            listOf("vostfr" to "VOSTFR", "vf" to "VF").forEachIndexed { idx, (lang, label) ->
+                val folders = langSeasonFolders[lang] ?: return@forEachIndexed
+                if (folders.isEmpty()) return@forEachIndexed
+                val paths = folders.joinToString(",") { f -> if (f.path.isEmpty()) "0" else f.path }
+                val labels = folders.joinToString("|") { f -> f.label }
                 seasons.add(Season(
-                    id = seasonId,
+                    id = "$slug/@$lang/$paths/$labels",
                     number = idx + 1,
-                    title = folder.label,
+                    title = label, // "VOSTFR" / "VF"
                     poster = animePoster,
                 ))
             }
         } else {
-            // No forced language and multiple languages: show language folders (VOSTFR / VF)
-            var idx = 0
-            for (lang in languages) {
-                val folders = langSeasonFolders[lang] ?: continue
-                val label = langLabels[lang] ?: lang.uppercase()
-                idx++
-                val folderPaths = folders.joinToString(",") { it.path.ifEmpty { "0" } }
-                val folderLabels = folders.joinToString("|") { it.label }
-                val folderId = "$slug/@$lang/$folderPaths/$folderLabels"
+            val bestLang = forcedLang
+                ?: if (langSeasonFolders.containsKey("vostfr")) "vostfr"
+                   else langSeasonFolders.keys.firstOrNull() ?: "vostfr"
+            val folders = langSeasonFolders[bestLang] ?: langSeasonFolders.values.firstOrNull() ?: mutableListOf()
+            for ((idx, folder) in folders.withIndex()) {
+                val seasonId = if (folder.path.isEmpty()) "$slug/$bestLang" else "$slug/${folder.path}/$bestLang"
                 seasons.add(Season(
-                    id = folderId,
-                    number = idx,
-                    title = label,
+                    id = seasonId,
+                    number = idx + 1,
+                    title = folder.label,
                     poster = animePoster,
                 ))
             }
@@ -1084,17 +1278,73 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         val episodePoster = "${IMG_BASE}${animeSlug}.jpg"
 
         if (langMatch != null) {
-            // Language folder mode: return sub-seasons as fake episodes
+            // Language folder mode: return sub-seasons as fake episodes.
+            // 2026-06-24 v5 (user "obligé de cliquer sur VF et revenir sur
+            //   VOSTFR pour afficher toutes les saisons") : on IGNORE les
+            //   paths/labels figés dans l'ID (= peuvent être incomplets si le
+            //   scan initial getTvShow a été coupé) et on RE-PROBE la liste
+            //   complète des sous-saisons à chaque ouverture. Toujours fresh.
             val slug = langMatch.groupValues[1]
             val lang = langMatch.groupValues[2]
-            val folderPaths = langMatch.groupValues[3].split(",")
-            val folderLabels = langMatch.groupValues[4].split("|")
-            Log.d(TAG, "[Episodes] Language folder: lang=$lang, folders=$folderPaths, labels=$folderLabels")
+            Log.d(TAG, "[Episodes] Language folder REPROBE: lang=$lang, slug=$slug")
+
+            // Re-scrape la liste des dossiers depuis la page index du slug
+            //   (= source authoritative). Si la page liste 4 saisons, on aura
+            //   les 4 garanties.
+            val scrapedFolders = try {
+                val indexUrl = "${baseUrl}catalogue/$slug/"
+                val html = probeText(indexUrl)
+                val regex = Regex("""(?:nom|name)\s*:\s*['"]([^'"]+)['"]\s*[,;]?\s*(?:url|chemin|path)\s*:\s*['"]([^'"]+)['"]""")
+                regex.findAll(html).mapNotNull { match ->
+                    val label = match.groupValues[1].trim()
+                    val path = match.groupValues[2].trim()
+                    if (label == "nom" && path == "url") null else (path to label)
+                }.toList()
+            } catch (_: Exception) { emptyList() }
+
+            // Si pas de scrape (= probe), fallback sur l'ID figé d'origine
+            //   (= comportement ancien). Sinon on re-probe les sous-saisons
+            //   trouvées pour vérifier qu'elles ont bien des épisodes dans
+            //   la langue demandée.
+            val foldersToList: List<Pair<String, String>> = if (scrapedFolders.isNotEmpty()) {
+                // Vérifie quelles saisons ont vraiment des épisodes dans CETTE langue
+                val verified = mutableListOf<Pair<String, String>>()
+                val seenEps1 = mutableSetOf<String>()
+                for ((path, label) in scrapedFolders) {
+                    try {
+                        val probeUrl = "${baseUrl}catalogue/$slug/$path/$lang/episodes.js"
+                        val text = probeText(probeUrl)
+                        if (text.contains("var eps1") && text.contains("http")) {
+                            val eps1Content = Regex("""var\s+eps1\s*=\s*\[([\s\S]*?)\]""").find(text)?.groupValues?.get(1) ?: ""
+                            val urlCount = Regex("""['"]https?://[^'"]+['"]""").findAll(eps1Content).count()
+                            if (urlCount >= 1) {
+                                // dedupe
+                                val eps1Urls = Regex("""['"]https?://[^'"]+['"]""").findAll(eps1Content)
+                                    .map { it.value }.sorted().joinToString("|")
+                                if (eps1Urls !in seenEps1) {
+                                    seenEps1.add(eps1Urls)
+                                    verified.add(path to label)
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+                verified
+            } else {
+                // Fallback : utilise les paths/labels d'origine figés dans l'ID
+                val folderPaths = langMatch.groupValues[3].split(",")
+                val folderLabels = langMatch.groupValues[4].split("|")
+                folderPaths.mapIndexed { idx, p ->
+                    val realPath = if (p == "0") "" else p
+                    val l = folderLabels.getOrElse(idx) { p }
+                    realPath to l
+                }
+            }
 
             val episodes = mutableListOf<Episode>()
-            for ((idx, path) in folderPaths.withIndex()) {
-                val subSeasonId = if (path == "0") "$slug/$lang" else "$slug/$path/$lang"
-                val label = folderLabels.getOrElse(idx) { path }
+            for ((idx, pair) in foldersToList.withIndex()) {
+                val (path, label) = pair
+                val subSeasonId = if (path.isEmpty()) "$slug/$lang" else "$slug/$path/$lang"
                 episodes.add(Episode(
                     id = "@subfolder:$subSeasonId",
                     number = idx + 1,
@@ -1103,7 +1353,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                     overview = "@subfolder",
                 ))
             }
-            Log.d(TAG, "[Episodes] Language folder: ${episodes.size} sub-seasons")
+            Log.d(TAG, "[Episodes] Language folder: ${episodes.size} sub-seasons (re-probed)")
             return episodes
         }
 
@@ -1214,11 +1464,14 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 else -> return emptyList()
             }
             val episodeIndex = episodeNum - 1
+            Log.d(TAG, "[TV Servers] id=$id → jsPath=$jsPath epNum=$episodeNum epIdx=$episodeIndex")
 
+            val fetchUrl = "${baseUrl}catalogue/$jsPath/episodes.js"
+            Log.d(TAG, "[TV Servers] Fetching: $fetchUrl")
             val episodesJs = try {
-                fetchText("${baseUrl}catalogue/$jsPath/episodes.js")
+                fetchText(fetchUrl)
             } catch (e: Exception) {
-                Log.e(TAG, "[Servers] Error fetching episodes.js: ${e.message}")
+                Log.e(TAG, "[TV Servers] Error fetching episodes.js: ${e.message}")
                 return emptyList()
             }
             if (episodesJs.isBlank()) return emptyList()
@@ -1231,6 +1484,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 if (episodeIndex < urls.size) {
                     val url = urls[episodeIndex]
                     val serverName = getServerName(varName, url)
+                    Log.d(TAG, "[TV Servers] $varName → $serverName → ${url.take(80)}")
                     servers.add(Video.Server(
                         id = varName,
                         name = serverName,
@@ -1343,6 +1597,96 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
     }
 
     /**
+     * 2026-06-23 (user "AnimeSama n'a pas de captcha, faire un backup progressif") :
+     *   ProgressiveServersProvider. Émet le natif en 1er, puis backups
+     *   (Cloudstream + Moviebox + Papa) en parallèle ajoutés au lot.
+     *   L'user voit les sources natives instantanément + les backups arrivent
+     *   ~5-10s après sans bloquer la lecture.
+     */
+    override fun getServersProgressive(id: String, videoType: Video.Type): kotlinx.coroutines.flow.Flow<List<Video.Server>> =
+        kotlinx.coroutines.flow.channelFlow {
+            // 1) Natif AnimeSama (= ce que getServers fait au début, sans les backups)
+            val native: List<Video.Server> = try {
+                val prevSkip = skipBackupsForBackupCall
+                skipBackupsForBackupCall = true  // disable backups dans getServers pour ne récup que le natif
+                try { getServers(id, videoType) } finally { skipBackupsForBackupCall = prevSkip }
+            } catch (e: Exception) {
+                Log.w(TAG, "[Progressive] native fetch failed: ${e.message}")
+                emptyList()
+            }
+            if (native.isNotEmpty()) {
+                Log.d(TAG, "[Progressive] native émis: ${native.size}")
+                send(native)
+            }
+
+            // 2) Backups parallèles (= seulement si pas déjà appelé en mode backup
+            //    par un autre provider, pour éviter récursion)
+            if (skipBackupsForBackupCall) return@channelFlow
+            val slug = id.substringBefore("@").substringBefore("/")
+            val title = slug.replace("-", " ").trim()
+            if (title.isBlank()) return@channelFlow
+
+            val backups = coroutineScope {
+                val csDef = async(Dispatchers.IO) {
+                    try {
+                        val csVideoType: Video.Type = when (videoType) {
+                            is Video.Type.Movie -> Video.Type.Movie(
+                                id = "0", title = title,
+                                releaseDate = videoType.releaseDate, poster = videoType.poster,
+                                imdbId = videoType.imdbId,
+                            )
+                            is Video.Type.Episode -> Video.Type.Episode(
+                                id = "0", number = videoType.number, title = videoType.title,
+                                poster = videoType.poster, overview = videoType.overview,
+                                tvShow = videoType.tvShow.copy(id = "0", title = title),
+                                season = videoType.season,
+                            )
+                        }
+                        CloudstreamProvider.getServers("0", csVideoType)
+                            .also { Log.d(TAG, "[Progressive] +CS: ${it.size}") }
+                    } catch (_: Exception) { emptyList() }
+                }
+                val mbDef = async(Dispatchers.IO) {
+                    try {
+                        val type = if (videoType is Video.Type.Movie) 1 else 2
+                        MovieboxProvider.getMovieboxSourcesByTitle(
+                            title, null, type,
+                            seasonNumber = if (videoType is Video.Type.Episode) videoType.season.number else null,
+                            episodeNumber = if (videoType is Video.Type.Episode) videoType.number else null,
+                        ).also { Log.d(TAG, "[Progressive] +MB: ${it.size}") }
+                    } catch (_: Exception) { emptyList() }
+                }
+                val papaDef = async(Dispatchers.IO) {
+                    if (videoType !is Video.Type.Episode) emptyList()
+                    else try {
+                        PapadustreamProvider.getPapaSourcesByTitle(
+                            title = title,
+                            seasonNum = videoType.season.number,
+                            episodeNum = videoType.number,
+                        ).also { Log.d(TAG, "[Progressive] +Papa: ${it.size}") }
+                    } catch (_: Exception) { emptyList() }
+                }
+                csDef.await() + mbDef.await() + papaDef.await()
+            }
+            if (backups.isNotEmpty()) {
+                // Émettre native + backups, re-trier VF d'abord
+                val combined = native + backups
+                val isVoLike: (Video.Server) -> Boolean = { srv ->
+                    val n = srv.name
+                    n.contains("VOSTFR", ignoreCase = true) ||
+                    n.contains("(VO)", ignoreCase = true) ||
+                    Regex("""\bVO\b""").containsMatchIn(n)
+                }
+                val sorted = combined.withIndex().sortedByDescending { (idx, srv) ->
+                    val voOffset = if (isVoLike(srv)) -500000 else 0
+                    (1000 - idx) + voOffset
+                }.map { it.value }
+                Log.d(TAG, "[Progressive] +backups émis: total=${sorted.size}")
+                send(sorted)
+            }
+        }
+
+    /**
      * Backup pour autres providers (ex DessinAnime) : retourne UNIQUEMENT les
      *   serveurs natifs AnimeSama d'un titre (pas de backups internes, donc pas
      *   de récursion ni de double-fetch). Best-effort, match par titre normalisé.
@@ -1449,18 +1793,52 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
     // ========== GENRE ==========
 
     override suspend fun getGenre(id: String, page: Int): Genre {
-        val url = "${baseUrl}catalogue/?genre[]=$id&type[]=Anime&type[]=Film&page=$page"
+        // Ne PAS ajouter type[]=Anime&type[]=Film — le serveur casse la requête et ne renvoie quasi rien.
+        // On filtre les scans côté client à la place.
+        // 2026-06-20 (user "les genres doivent être directement réglés en FR
+        //   quand on est sur cette catégorie là Puis quand on va sur VOSTFR
+        //   c'est l'inverse") : applique le contexte langue+type capturé par
+        //   le dernier appel à getMovies/getTvShows/getFilteredXxx. Comme ça
+        //   l'onglet (FR vs VOSTFR vs Films) pré-coche les bons filtres.
+        val lang = lastLanguageFilter
+        val type = lastTypeFilter
+        // 2026-06-20 (user a partagé l'URL site avec `langue[]=VF` MAJ) :
+        //   le serveur AnimeSama est case-sensitive sur "VF" (majuscule),
+        //   "vf" minuscule retourne 0 résultats. VOSTFR est insensible.
+        val langParam = if (lang.equals("vf", ignoreCase = true)) "VF" else lang
+        val sb = StringBuilder("${baseUrl}catalogue/?genre[]=$id&page=$page")
+        if (!langParam.isNullOrEmpty()) sb.append("&langue[]=$langParam")
+        if (!type.isNullOrEmpty()) sb.append("&type[]=$type")
+        val url = sb.toString()
+        Log.d(TAG, "[getGenre] id=$id page=$page lang=$lang type=$type → $url")
         val document = fetchDocument(url)
         return Genre(
             id = id,
             name = id.replaceFirstChar { it.uppercase() },
-            shows = document.select(".catalog-card").mapNotNull { card ->
-                val link = card.selectFirst("a[href*=/catalogue/]") ?: return@mapNotNull null
+            shows = document.select(".catalog-card").flatMap { card ->
+                // Skip scans — l'user veut uniquement Anime/Film/Autres
+                val typeText = card.select(".type-row .info-value").joinToString { it.text().trim() }
+                if (typeText.contains("Scans", ignoreCase = true)) return@flatMap emptyList<Show>()
+
+                val link = card.selectFirst("a[href*=/catalogue/]") ?: return@flatMap emptyList<Show>()
                 val slug = link.attr("href").substringAfter("/catalogue/").removeSuffix("/")
-                    .split("/").firstOrNull() ?: return@mapNotNull null
-                val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@mapNotNull null
+                    .split("/").firstOrNull() ?: return@flatMap emptyList<Show>()
+                val title = card.selectFirst(".card-title")?.text()?.trim() ?: return@flatMap emptyList<Show>()
                 val img = optimizeImageUrl(card.selectFirst("img")?.attr("src"), slug)
-                TvShow(id = slug, title = title, poster = img)
+                // 2026-06-20 (user "sur FR il y a rien") : MoviesViewModel
+                //   filterIsInstance<Movie>() et TvShowsViewModel
+                //   filterIsInstance<TvShow>(). Donc on émet UN Movie ET UN
+                //   TvShow pour chaque item — chaque viewmodel garde celui
+                //   qui matche son type. L'id est suffixé "@vf" ou "@vostfr"
+                //   selon la langue active pour que getMovie/getTvShow sache
+                //   quelle saison/langue ouvrir au clic.
+                val suffix = if (lang.equals("vf", ignoreCase = true)) "vf" else "vostfr"
+                val movieId = if (type == "Film") "$slug@$suffix-film0" else "$slug@$suffix"
+                val movie = Movie(id = movieId, title = title, poster = img)
+                if (type == "Anime") movie.isSeries = true
+                val tvShow = TvShow(id = "$slug@$suffix", title = title, poster = img)
+                if (type == "Film") tvShow.isMovie = true
+                listOf(movie, tvShow)
             },
         )
     }

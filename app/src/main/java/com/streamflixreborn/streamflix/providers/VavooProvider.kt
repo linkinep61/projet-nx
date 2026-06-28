@@ -752,7 +752,47 @@ object VavooProvider : Provider, IptvProvider {
             }
             return combined
         }
+        // 2026-06-27 (user "essaie de regrouper les chaînes canadiennes") :
+        //   Vavoo n'a PAS de groupe "Canada". On scanne tous les groupes et on
+        //   garde les chaînes dont le NOM est distinctement canadien (heuristique).
+        if (countryFilter == VavooCountrySettings.CANADA_HEURISTIC) {
+            val combined = mutableListOf<VavooChannel>()
+            val seen = HashSet<String>()
+            for (country in VavooCountrySettings.allCountryFilterValues) {
+                try {
+                    val chans = loadCatalogForCountry(baseUrl, signature, country)
+                    for (c in chans) {
+                        if (isCanadianChannel(c.name) && seen.add(c.id)) combined.add(c)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "  ! Canada scan $country failed: ${e.message}")
+                }
+            }
+            Log.d(TAG, "Canada heuristic: ${combined.size} chaînes regroupées")
+            return combined
+        }
         return loadCatalogForCountry(baseUrl, signature, countryFilter)
+    }
+
+    /** 2026-06-27 : heuristique "chaîne canadienne" par nom. Tokens distinctifs
+     *  (faible risque de faux positif) FR-Québec + EN-Canada. Vavoo ne taggant
+     *  pas le Canada, c'est le seul moyen de les regrouper. */
+    private fun isCanadianChannel(name: String): Boolean {
+        if (name.isBlank()) return false
+        val n = " ${name.lowercase().trim()} "
+        // marqueurs explicites
+        if (n.contains("canada") || n.contains("québec") || n.contains("quebec")
+            || n.contains("🇨🇦")) return true
+        // chaînes canadiennes distinctives (FR Québec + EN Canada)
+        val tokens = listOf(
+            "tva", "noovo", " rds", "rds ", "rdi", "radio-canada", "radio canada",
+            "télé-québec", "tele-quebec", "canal d", "canal vie", "z télé", "ztélé",
+            "addiktv", "unis tv", "météomédia", "meteomedia", "lcn", "vrak", "yoopa",
+            "cinépop", "super écran", "prise 2", "elle fictions", "savoir média",
+            "cbc", "ctv", "citytv", "city tv", "sportsnet", " tsn", "tsn ", "cp24",
+            "ici télé", "ici tele", "ici rdi", "ici musique", "telelatino",
+        )
+        return tokens.any { n.contains(it) }
     }
 
     /** Charge le catalogue Vavoo pour UN pays donné. */
@@ -761,7 +801,7 @@ object VavooProvider : Provider, IptvProvider {
         val headers = catalogHeaders(signature)
         val channels = mutableListOf<VavooChannel>()
         var cursorInt = 0
-        val isFrance = countryFilter.equals("France", ignoreCase = true)
+        var pageCount = 0
 
         while (true) {
             // 2026-05-10 : body strict, validé par test depuis Console DevTools de Lokke.
@@ -781,9 +821,21 @@ object VavooProvider : Provider, IptvProvider {
                 put("clientVersion", "3.1.0")
             }
 
-            val text = postJson(catalogUrl, body, headers)
-            val json = JSONObject(text)
+            // 2026-06-23 (user "quand on change de langue, ça doit prendre
+            //   toutes les chaînes de la langue") : try/catch sur la requête
+            //   pour ne pas perdre les pages déjà chargées si une page rate.
+            val text = try {
+                postJson(catalogUrl, body, headers)
+            } catch (e: Exception) {
+                Log.w(TAG, "loadCatalog page $pageCount ($countryFilter) échouée: ${e.message}, total partiel=${channels.size}")
+                break
+            }
+            val json = try { JSONObject(text) } catch (_: Exception) {
+                Log.w(TAG, "loadCatalog parse JSON failed page $pageCount, break")
+                break
+            }
             val items = json.optJSONArray("items") ?: JSONArray()
+            pageCount++
 
             for (i in 0 until items.length()) {
                 val item = items.getJSONObject(i)
@@ -794,14 +846,11 @@ object VavooProvider : Provider, IptvProvider {
                 val group = item.optString("group", "")
                 val country = extractCountry(group)
 
-                // 2026-05-13 : pour France, garde le filtre client historique
-                // (refuse "France XYZ" autres que "France Sport"). Pour les
-                // autres pays, accepte tout ce que l'API renvoie (l'API a
-                // déjà filtré côté serveur via filter.group).
-                if (isFrance) {
-                    if (!country.equals("France", ignoreCase = true) &&
-                        !country.equals("France Sport", ignoreCase = true)) continue
-                }
+                // 2026-06-23 (user "ça doit prendre TOUTES les chaînes de la
+                //   langue") : SUPPRIMÉ filtre client `isFrance` qui rejetait
+                //   les items "France XYZ" autres que "France"/"France Sport".
+                //   L'API a déjà filtré côté serveur via filter.group, on
+                //   accepte tout ce qu'elle renvoie.
 
                 val ids = item.optJSONObject("ids")
                 val id = ids?.optString("id", "") ?: item.optString("id", url)
@@ -843,6 +892,7 @@ object VavooProvider : Provider, IptvProvider {
             if (cursorInt < 0) break
         }
 
+        Log.d(TAG, "loadCatalog [$countryFilter] : ${channels.size} chaînes en $pageCount pages")
         return channels
     }
 
@@ -1100,28 +1150,17 @@ object VavooProvider : Provider, IptvProvider {
         if (all.isEmpty()) {
             listOf(Category(name = "Aucune chaîne disponible", list = emptyList()))
         } else {
-            // 2026-05-10 : home = curated channels Vegeta-style. On match les
-            // chaînes Vavoo par normalizeKey() (TF1 / TF1 HD / TF1 Backup → "tf1")
-            // contre la curated list. Pour chaque curated entry trouvée, on garde
-            // la PREMIÈRE chaîne Vavoo qui matche (c'est l'extracteur Vavoo qui
-            // sélectionne le best stream à la résolution).
-            // Tout ce qui n'est pas curated → tab 2 paginé OU recherche.
             val byKey = all.groupBy { it.canonicalKey } // pré-calculé, pas de regex
 
             val sections = mutableListOf<Category>()
 
             // ─── ★ Favoris EN TÊTE ───
-            // 2026-05-10 (user) : "les chaînes favoris ne s'ajoutent pas à l'onglet
-            // cœur favori". → on ajoute la section "Favoris" qu'IptvFavoritesTvFragment
-            // / IptvFavoritesMobileFragment cherchent dans getHome() pour peupler
-            // l'onglet ❤. Aussi affichée en tête du home Vavoo lui-même.
             try {
                 val favKeys = com.streamflixreborn.streamflix.utils.IptvFavoritesStore
                     .getAllCanonicalFavorites()
                 if (favKeys.isNotEmpty()) {
                     val favItems = favKeys.mapNotNull { key ->
                         val matching = byKey[key]?.firstOrNull() ?: return@mapNotNull null
-                        // Si curated match → displayName + logo curated. Sinon nom Vavoo nettoyé.
                         val curated = curatedChannels.firstOrNull { it.key == key }
                         val displayTitle = curated?.displayName ?: cleanDisplayName(matching.name)
                         TvShow(
@@ -1138,20 +1177,122 @@ object VavooProvider : Provider, IptvProvider {
                 }
             } catch (_: Throwable) { }
 
-            for (catName in CATEGORY_ORDER) {
-                val items = curatedChannels
-                    .filter { it.category == catName }
-                    .mapNotNull { curated ->
-                        val matching = byKey[curated.key]?.firstOrNull() ?: return@mapNotNull null
+            val isFrance = currentCountryFilter.equals("France", ignoreCase = true)
+
+            if (isFrance) {
+                // ─── MODE FRANCE : curated channels Vegeta-style ───
+                for (catName in CATEGORY_ORDER) {
+                    val items = curatedChannels
+                        .filter { it.category == catName }
+                        .mapNotNull { curated ->
+                            val matching = byKey[curated.key]?.firstOrNull() ?: return@mapNotNull null
+                            TvShow(
+                                id = "vavoo::${matching.id}",
+                                title = curated.displayName,
+                                poster = logoUrlFor(curated.displayName),
+                                banner = logoUrlFor(curated.displayName),
+                                providerName = name,
+                            )
+                        }
+                    if (items.isNotEmpty()) sections.add(Category(name = catName, list = items))
+                }
+            } else {
+                // 2026-06-23 (user "quand on change de langue, ça fait pas
+                //   pareil — pas de catégories comme pour France") : pour les
+                //   pays autres que France, on AUTO-CATÉGORISE par genre basé
+                //   sur le nom de chaîne, comme pour France mais sans la
+                //   curation manuelle. Heuristiques par mots-clés.
+                val unique = all.distinctBy { it.canonicalKey }
+
+                fun categorize(name: String): String {
+                    val n = name.lowercase()
+                    return when {
+                        // Sport
+                        n.contains("sport") || n.contains("espn") || n.contains("foot") ||
+                        n.contains("dazn") || n.contains("eurosport") || n.contains("bein") ||
+                        n.contains("rmc sport") || n.contains("tennis") || n.contains("golf") ||
+                        n.contains("motogp") || n.contains("formula") || n.contains("nba") ||
+                        n.contains("rugby") || n.contains("baseball") || n.contains("hockey") -> "Sport"
+                        // Cinéma / Films
+                        n.contains("cinema") || n.contains("cinéma") || n.contains("cine") ||
+                        n.contains("movie") || n.contains("film") || n.contains("hbo") ||
+                        n.contains("ocs") || n.contains("cstar") || n.contains("mgm") ||
+                        n.contains("tcm") || n.contains("showtime") || n.contains("starz") -> "Cinéma"
+                        // Info / News
+                        n.contains("news") || n.contains("info") || n.contains(" 24") ||
+                        n.contains("cnn") || n.contains("bbc") || n.contains("sky news") ||
+                        n.contains("aljazeera") || n.contains("al jazeera") || n.contains("euronews") ||
+                        n.contains("rt ") || n.contains("dw ") || n.contains("nhk") ||
+                        n.contains("franceinfo") || n.contains("bfm") || n.contains("rmc story") -> "Info"
+                        // Musique
+                        n.contains("music") || n.contains("musique") || n.contains("mtv") ||
+                        n.contains("vh1") || n.contains("hits") || n.contains("trace") ||
+                        n.contains("nrj") || n.contains("mcm") || n.contains("m6 music") ||
+                        n.contains("rfm") || n.contains("fun radio") -> "Musique"
+                        // Enfants / Kids
+                        n.contains("kids") || n.contains("cartoon") || n.contains("disney") ||
+                        n.contains("nick") || n.contains("boomerang") || n.contains("gulli") ||
+                        n.contains("baby") || n.contains("piwi") || n.contains("tiji") ||
+                        n.contains("canal j") || n.contains("teletoon") -> "Enfants"
+                        // Documentaire
+                        n.contains("doc") || n.contains("history") || n.contains("histoire") ||
+                        n.contains("discovery") || n.contains("national geographic") ||
+                        n.contains("nat geo") || n.contains("animal planet") ||
+                        n.contains("ushuaia") || n.contains("planete") || n.contains("planète") ||
+                        n.contains("science") || n.contains("crime") || n.contains("investigation") -> "Documentaire"
+                        // Séries / Divertissement
+                        n.contains("series") || n.contains("séries") || n.contains("fx ") ||
+                        n.contains("amc") || n.contains("comedy") || n.contains("comédie") ||
+                        n.contains("warner") || n.contains("syfy") || n.contains("13eme") ||
+                        n.contains("13ème") || n.contains("paramount") -> "Séries"
+                        // Adulte
+                        n.contains("xxl") || n.contains("dorcel") || n.contains("hot ") ||
+                        n.contains("adult") || n.contains("18+") -> "Adulte"
+                        // Sinon généraliste
+                        else -> "Généralistes"
+                    }
+                }
+
+                // Ordre prioritaire des catégories pour les autres pays
+                val categoryOrder = listOf(
+                    "Généralistes", "Cinéma", "Séries", "Info", "Sport",
+                    "Documentaire", "Musique", "Enfants", "Adulte"
+                )
+                val byCat = unique.groupBy { categorize(it.name) }
+                for (catName in categoryOrder) {
+                    val chans = byCat[catName] ?: continue
+                    val items = chans.sortedBy { it.name.lowercase() }.map { ch ->
+                        val displayTitle = cleanDisplayName(ch.name)
+                        val logo = ch.logo.ifBlank { logoUrlFor(displayTitle) }
                         TvShow(
-                            id = "vavoo::${matching.id}",
-                            title = curated.displayName,
-                            poster = logoUrlFor(curated.displayName),
-                            banner = logoUrlFor(curated.displayName),
+                            id = "vavoo::${ch.id}",
+                            title = displayTitle,
+                            poster = logo,
+                            banner = logo,
                             providerName = name,
                         )
                     }
-                if (items.isNotEmpty()) sections.add(Category(name = catName, list = items))
+                    if (items.isNotEmpty()) {
+                        sections.add(Category(name = catName, list = items))
+                    }
+                }
+                // Catégories non listées (= "Autres" si l'heuristique en a créé)
+                for ((catName, chans) in byCat) {
+                    if (catName in categoryOrder) continue
+                    val items = chans.sortedBy { it.name.lowercase() }.map { ch ->
+                        val displayTitle = cleanDisplayName(ch.name)
+                        val logo = ch.logo.ifBlank { logoUrlFor(displayTitle) }
+                        TvShow(
+                            id = "vavoo::${ch.id}",
+                            title = displayTitle,
+                            poster = logo,
+                            banner = logo,
+                            providerName = name,
+                        )
+                    }
+                    if (items.isNotEmpty()) sections.add(Category(name = catName, list = items))
+                }
+                Log.d(TAG, "getHome [$currentCountryFilter] (auto-cat) : ${sections.size} sections, ${unique.size} chaînes uniques")
             }
             sections
         }

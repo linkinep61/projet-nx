@@ -900,10 +900,10 @@ class MovieViewHolder(
             version = movie.version,
         )
         binding.tvMovieOverview.apply {
-            text = overviewText
-            visibility = if (overviewText.isNullOrBlank()) View.GONE else View.VISIBLE
+            text = if (overviewText.isNullOrBlank()) "Aucun synopsis disponible." else overviewText
+            visibility = View.VISIBLE
         }
-        binding.tvMovieOverviewLabel.visibility = if (overviewText.isNullOrBlank()) View.GONE else View.VISIBLE
+        binding.tvMovieOverviewLabel.visibility = View.VISIBLE
 
         // Note communautaire
         binding.root.findViewById<View>(R.id.include_community_rating)?.let { ratingRoot ->
@@ -1059,10 +1059,10 @@ class MovieViewHolder(
             version = movie.version,
         )
         binding.tvMovieOverview.apply {
-            text = overviewText
-            visibility = if (overviewText.isNullOrBlank()) View.GONE else View.VISIBLE
+            text = if (overviewText.isNullOrBlank()) "Aucun synopsis disponible." else overviewText
+            visibility = View.VISIBLE
         }
-        binding.tvMovieOverviewLabel.visibility = if (overviewText.isNullOrBlank()) View.GONE else View.VISIBLE
+        binding.tvMovieOverviewLabel.visibility = View.VISIBLE
 
         // Note communautaire
         binding.root.findViewById<View>(R.id.include_community_rating)?.let { ratingRoot ->

@@ -118,13 +118,28 @@ class GlobalFavoritesMobileFragment : Fragment() {
 
             // Épisodes favoris — poster SÉRIE + titre "Série — S1E3"
             val episodeFavs = EpisodeFavorites.all().map { e ->
+                val epLabel = if (e.seasonNumber > 0) "S${e.seasonNumber}E${e.episodeNumber}" else "E${e.episodeNumber}"
                 TvShow(
                     id = e.syntheticId(),
-                    title = "${e.showTitle} — S${e.seasonNumber}E${e.episodeNumber}",
+                    title = "${e.showTitle} — $epLabel",
                     overview = e.episodeTitle,
                     poster = e.showPoster ?: e.episodePoster,
                     banner = e.showBanner,
                 ).apply { itemType = AppAdapter.Type.TV_SHOW_MOBILE_ITEM }
+            }
+
+            // 2026-06-20 : favoris replay (séries/films du TV Hub replay)
+            val replayFavs = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.all().map { e ->
+                TvShow(
+                    id = e.syntheticId(),
+                    title = e.title,
+                    poster = e.poster,
+                    banner = e.banner,
+                ).apply {
+                    itemType = AppAdapter.Type.TV_SHOW_MOBILE_ITEM
+                    isMovie = e.isMovie
+                    providerName = "TV Hub"
+                }
             }
 
             // Reprises de lecture
@@ -136,7 +151,8 @@ class GlobalFavoritesMobileFragment : Fragment() {
                 GlobalFavorites.loadContinueWatchingSeries(requireContext(), 20)
             } catch (_: Exception) { emptyList() }
             val cwSeriesCards = cwSeries.map { cw ->
-                val title = "${cw.tvShow.title} — S${cw.seasonNumber}E${cw.episodeNumber}"
+                val epLabel = if (cw.seasonNumber > 0) "S${cw.seasonNumber}E${cw.episodeNumber}" else "E${cw.episodeNumber}"
+                val title = "${cw.tvShow.title} — $epLabel"
                 TvShow(
                     id = "resume_series_${cw.tvShow.id}",
                     title = title,
@@ -151,27 +167,38 @@ class GlobalFavoritesMobileFragment : Fragment() {
             if (movies.isNotEmpty()) {
                 categories += Category(name = "Films", list = movies).apply {
                     itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
+                    onClearSection = { clearSection("Films") }
                 }
             }
             if (tvShows.isNotEmpty()) {
                 categories += Category(name = "Séries", list = tvShows).apply {
                     itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
+                    onClearSection = { clearSection("Séries") }
                 }
             }
             if (seasonFavs.isNotEmpty()) {
                 categories += Category(name = "Saisons", list = seasonFavs).apply {
                     itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
+                    onClearSection = { clearSection("Saisons") }
                 }
             }
             if (episodeFavs.isNotEmpty()) {
                 categories += Category(name = "Épisodes", list = episodeFavs).apply {
                     itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
+                    onClearSection = { clearSection("Épisodes") }
+                }
+            }
+            if (replayFavs.isNotEmpty()) {
+                categories += Category(name = "Replays", list = replayFavs).apply {
+                    itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
+                    onClearSection = { clearSection("Replays") }
                 }
             }
             val resumeItems: List<AppAdapter.Item> = cwMovies + cwSeriesCards
             if (resumeItems.isNotEmpty()) {
                 categories += Category(name = "Reprendre", list = resumeItems).apply {
                     itemType = AppAdapter.Type.CATEGORY_MOBILE_ITEM
+                    onClearSection = { clearSection("Reprendre") }
                 }
             }
 
@@ -190,6 +217,13 @@ class GlobalFavoritesMobileFragment : Fragment() {
 
     /** Appui long sur un favori : le retirer + recharger la grille. */
     fun removeFavorite(itemId: String, isMovie: Boolean) {
+        // 2026-06-20 : favori replay (id synthétique) → store dédié.
+        if (itemId.startsWith(com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.SYNTHETIC_ID_PREFIX)) {
+            com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.removeBySyntheticId(itemId)
+            Toast.makeText(requireContext(), "Replay retiré des favoris", Toast.LENGTH_SHORT).show()
+            loadFavorites()
+            return
+        }
         // 2026-05-21 : saison favorite (id synthétique) → store dédié.
         if (itemId.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
             com.streamflixreborn.streamflix.utils.SeasonFavorites.removeBySyntheticId(itemId)
@@ -225,6 +259,30 @@ class GlobalFavoritesMobileFragment : Fragment() {
             if (ok) {
                 Toast.makeText(requireContext(), "Retiré des favoris", Toast.LENGTH_SHORT).show()
                 loadFavorites()
+            }
+        }
+    }
+
+    /**
+     * 2026-06-22 : vide toute une section du cœur. Chaque type de section
+     * a sa propre logique de suppression (Room DB, SharedPrefs, dismiss set).
+     */
+    private fun clearSection(sectionName: String) {
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                when (sectionName) {
+                    "Films" -> GlobalFavorites.clearAllFavoriteMovies(requireContext())
+                    "Séries" -> GlobalFavorites.clearAllFavoriteTvShows(requireContext())
+                    "Saisons" -> com.streamflixreborn.streamflix.utils.SeasonFavorites.clearAll()
+                    "Épisodes" -> EpisodeFavorites.clearAll()
+                    "Replays" -> com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.clearAll()
+                    "Reprendre" -> GlobalFavorites.dismissAllContinueWatching()
+                }
+                if (_binding == null) return@launch
+                Toast.makeText(requireContext(), "« $sectionName » vidé", Toast.LENGTH_SHORT).show()
+                loadFavorites()
+            } catch (e: Exception) {
+                android.util.Log.e(TAG, "clearSection $sectionName failed", e)
             }
         }
     }

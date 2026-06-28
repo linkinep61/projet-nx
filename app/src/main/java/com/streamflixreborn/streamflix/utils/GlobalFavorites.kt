@@ -34,8 +34,13 @@ object GlobalFavorites {
             val movies = mutableListOf<Movie>()
             val tvShows = mutableListOf<TvShow>()
             val providers = Provider.providers.keys.filter { it !is IptvProvider }
+            Log.i(TAG, "════ AUDIT FAVORIS — ${providers.size} providers non-IPTV ════")
             for (p in providers) {
-                if (!AppDatabase.providerDbExists(p.name, context)) continue
+                val dbExists = AppDatabase.providerDbExists(p.name, context)
+                if (!dbExists) {
+                    Log.i(TAG, "  [${p.name}] DB n'existe pas (= jamais utilisé)")
+                    continue
+                }
                 try {
                     val db = AppDatabase.getInstanceForProvider(p.name, context)
                     try {
@@ -45,14 +50,15 @@ object GlobalFavorites {
                         favTv.forEach { originByItemId[it.id] = p.name }
                         movies += favMovies
                         tvShows += favTv
+                        Log.i(TAG, "  [${p.name}] favoris : ${favMovies.size} films + ${favTv.size} séries")
                     } finally {
                         try { db.close() } catch (_: Exception) {}
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "fav read ${p.name}: ${e.message}")
+                    Log.w(TAG, "  [${p.name}] ERREUR lecture favoris: ${e.message}")
                 }
             }
-            Log.d(TAG, "loaded ${movies.size} films + ${tvShows.size} séries favoris")
+            Log.i(TAG, "════ TOTAL favoris : ${movies.size} films + ${tvShows.size} séries ════")
             Pair(
                 movies.sortedByDescending { it.favoritedAtMillis ?: 0L },
                 tvShows.sortedByDescending { it.favoritedAtMillis ?: 0L },
@@ -76,12 +82,17 @@ object GlobalFavorites {
         withContext(Dispatchers.IO) {
             val all = mutableListOf<Movie>()
             val providers = Provider.providers.keys.filter { it !is IptvProvider }
+            Log.i(TAG, "════ AUDIT REPRISE FILMS — ${providers.size} providers non-IPTV ════")
             for (p in providers) {
-                if (!AppDatabase.providerDbExists(p.name, context)) continue
+                if (!AppDatabase.providerDbExists(p.name, context)) {
+                    Log.i(TAG, "  [${p.name}] DB n'existe pas")
+                    continue
+                }
                 try {
                     val db = AppDatabase.getInstanceForProvider(p.name, context)
                     try {
                         val movies = db.movieDao().getWatchingMovies().first()
+                        var kept = 0
                         movies.forEach { m ->
                             val wh = m.watchHistory
                             // Garder seulement les films avec une position > 5s et pas "finis"
@@ -93,16 +104,19 @@ object GlobalFavorites {
                                 if (pct < 0.90) {
                                     originByItemId["resume_movie_${m.id}"] = p.name
                                     all += m
+                                    kept++
                                 }
                             }
                         }
+                        Log.i(TAG, "  [${p.name}] reprise films : ${movies.size} total, $kept retenus (>5s, <90%)")
                     } finally {
                         try { db.close() } catch (_: Exception) {}
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "continueWatching movies ${p.name}: ${e.message}")
+                    Log.w(TAG, "  [${p.name}] ERREUR reprise films: ${e.message}")
                 }
             }
+            Log.i(TAG, "════ TOTAL reprise films : ${all.size} ════")
             all.filter { !isContinueWatchingDismissed("resume_movie_${it.id}") }
                 .sortedByDescending { it.watchHistory?.lastEngagementTimeUtcMillis ?: 0 }
                 .take(limit)
@@ -117,15 +131,22 @@ object GlobalFavorites {
             val seriesMap = LinkedHashMap<String, RawEntry>()
             val openDbs = mutableListOf<AppDatabase>()
             val providers = Provider.providers.keys.filter { it !is IptvProvider }
+            Log.i(TAG, "════ AUDIT REPRISE SÉRIES — ${providers.size} providers non-IPTV ════")
             for (p in providers) {
-                if (!AppDatabase.providerDbExists(p.name, context)) continue
+                if (!AppDatabase.providerDbExists(p.name, context)) {
+                    Log.i(TAG, "  [${p.name}] DB n'existe pas")
+                    continue
+                }
                 try {
                     val db = AppDatabase.getInstanceForProvider(p.name, context)
                     openDbs += db
                     try {
                         val episodes = db.episodeDao().getWatchingEpisodes().first()
+                        var kept = 0
+                        var noTvShow = 0
                         for (ep in episodes) {
-                            val tvId = ep.tvShow?.id ?: continue
+                            val tvId = ep.tvShow?.id
+                            if (tvId == null) { noTvShow++; continue }
                             val wh = ep.watchHistory ?: continue
                             if (wh.lastPlaybackPositionMillis <= 5_000) continue
                             val existing = seriesMap[tvId]
@@ -134,14 +155,17 @@ object GlobalFavorites {
                             if (existing == null || thisTs > existingTs) {
                                 seriesMap[tvId] = RawEntry(p.name, ep, db)
                             }
+                            kept++
                         }
+                        Log.i(TAG, "  [${p.name}] reprise séries : ${episodes.size} épisodes, $kept retenus (>5s), $noTvShow sans tvShow lié")
                     } catch (e: Exception) {
-                        Log.w(TAG, "continueWatching series ${p.name}: ${e.message}")
+                        Log.w(TAG, "  [${p.name}] ERREUR reprise séries: ${e.message}")
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "continueWatching series open DB ${p.name}: ${e.message}")
+                    Log.w(TAG, "  [${p.name}] ERREUR ouverture DB séries: ${e.message}")
                 }
             }
+            Log.i(TAG, "════ TOTAL reprise séries (groupées) : ${seriesMap.size} ════")
 
             val result = seriesMap.values
                 .filter { entry ->
@@ -217,6 +241,59 @@ object GlobalFavorites {
                 false
             }
         }
+
+    // ══════════════════════════════════════════════════════════════════
+    //  Suppression en masse (poubelle par section, 2026-06-22)
+    // ══════════════════════════════════════════════════════════════════
+
+    /** Retire TOUS les films des favoris, cross-provider. */
+    suspend fun clearAllFavoriteMovies(context: Context) = withContext(Dispatchers.IO) {
+        val providers = Provider.providers.keys.filter { it !is IptvProvider }
+        for (p in providers) {
+            if (!AppDatabase.providerDbExists(p.name, context)) continue
+            try {
+                val db = AppDatabase.getInstanceForProvider(p.name, context)
+                try {
+                    val favs = db.movieDao().getFavorites().first()
+                    favs.forEach { db.movieDao().setFavoriteWithLog(it.id, false) }
+                } finally {
+                    try { db.close() } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
+        }
+        Log.d(TAG, "clearAllFavoriteMovies done")
+    }
+
+    /** Retire TOUTES les séries des favoris, cross-provider. */
+    suspend fun clearAllFavoriteTvShows(context: Context) = withContext(Dispatchers.IO) {
+        val providers = Provider.providers.keys.filter { it !is IptvProvider }
+        for (p in providers) {
+            if (!AppDatabase.providerDbExists(p.name, context)) continue
+            try {
+                val db = AppDatabase.getInstanceForProvider(p.name, context)
+                try {
+                    val favs = db.tvShowDao().getFavorites().first()
+                    favs.forEach { db.tvShowDao().setFavoriteWithLog(it.id, false) }
+                } finally {
+                    try { db.close() } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
+        }
+        Log.d(TAG, "clearAllFavoriteTvShows done")
+    }
+
+    /** Masque TOUTES les reprises de lecture d'un coup. */
+    fun dismissAllContinueWatching() {
+        // On ajoute tous les IDs connus au set dismissed
+        val prefs = dismissedPrefs()
+        val set = prefs.getStringSet(dismissedKey(), emptySet())!!.toMutableSet()
+        // Films
+        originByItemId.keys.filter { it.startsWith("resume_movie_") }.forEach { set.add(it) }
+        // Séries
+        resumeSeriesData.keys.forEach { set.add(it) }
+        prefs.edit().putStringSet(dismissedKey(), set).apply()
+        Log.d(TAG, "dismissAllContinueWatching: ${set.size} IDs dismissed")
+    }
 
     // ══════════════════════════════════════════════════════════════════
     //  Masquage des reprises de lecture

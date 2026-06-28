@@ -77,6 +77,15 @@ object ArtworkRepair {
         database: AppDatabase,
         tvShow: TvShow,
     ): TvShow? {
+        // 2026-06-19 (user "OTF et Adrar ne marchent pas au clic dossier") :
+        //   skip ArtworkRepair pour les cards dossier synthétiques du TV Hub
+        //   (id `livehub::folder::*`). Sinon le worker essaie de chercher
+        //   "📁 adrar" / "📁 sport" sur TMDB → erreur "Channel inconnue" +
+        //   alloc CPU/RAM gratuit + logs spam.
+        if (tvShow.id.startsWith("livehub::folder::")) return null
+        // Skip aussi les autres cards IPTV synthétiques (login, refresh, replay)
+        if (tvShow.id.startsWith("livehub::replay::__")) return null
+        if (tvShow.id == "livehub::replay::__refresh__") return null
         return runCatching {
             prepareProvider(context, provider)
             val refreshedTvShow = provider.getTvShow(tvShow.id).also { fetchedTvShow ->

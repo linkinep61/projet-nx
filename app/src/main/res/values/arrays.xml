@@ -1,5 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- 2026-06-21 (user "réunir toutes ces préférences en une seule option") :
+         4 modes d'affichage du home. -->
+    <string-array name="home_bg_mode_entries">
+        <item>Aucun (fond statique / wallpaper custom)</item>
+        <item>Carrousel uniquement</item>
+        <item>Carrousel comme fond d\'écran</item>
+        <item>Mode noir (fond noir uni)</item>
+    </string-array>
+    <string-array name="home_bg_mode_values">
+        <item>none</item>
+        <item>carousel</item>
+        <item>carousel_bg</item>
+        <item>black</item>
+    </string-array>
+
     <!-- 2026-05-13 (user "ça serait bien comme ça on peut avoir vraiment tout le
          contenu") : choix utilisateur du filtre langue pour Mon IPTV.
          Auto = comportement smart (50% threshold), All = pas de filtre,

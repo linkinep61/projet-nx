@@ -19,15 +19,18 @@
         tools:ignore="ContentDescription" />
 
     <!-- Mini Player container (IPTV only, hidden by default) -->
+    <!-- 2026-06-23 (user "le mini lecteur descende, il est derrière les icônes") :
+         contraint sous iv_provider_logo pour ne PAS recouvrir la barre d'icônes. -->
     <FrameLayout
         android:id="@+id/mini_player_container"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:visibility="gone"
         android:background="#FF000000"
+        android:elevation="8dp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent">
+        app:layout_constraintTop_toBottomOf="@id/iv_provider_logo">
 
         <androidx.media3.ui.PlayerView
             android:id="@+id/mini_player_view"
@@ -36,7 +39,7 @@
             app:use_controller="false"
             app:show_buffering="when_playing"
             app:resize_mode="fit"
-            app:surface_type="surface_view" />
+            app:surface_type="texture_view" />
 
         <!-- 2026-06-16 : mirror du grand swap_freeze_overlay pour masquer le
              JUMELAGE swap. PixelCopy de la derniere frame du SurfaceView avant
@@ -120,6 +123,19 @@
         </LinearLayout>
     </FrameLayout>
 
+    <!-- 2026-06-21 (user "les jaquettes des séries/films/épisodes sont juste
+         sous les icônes du haut, avec gros doigts on clique sur une chaîne
+         sans le vouloir") : Barrier qui aligne le bas de mini_player_container,
+         iv_provider_logo et iv_downloads (= les widgets du haut) pour que
+         rv_home commence STRICTEMENT en dessous, peu importe lequel est le
+         plus bas. + petite marge de 8dp pour aérer. -->
+    <androidx.constraintlayout.widget.Barrier
+        android:id="@+id/barrier_home_top"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        app:barrierDirection="bottom"
+        app:constraint_referenced_ids="mini_player_container,iv_provider_logo,iv_downloads" />
+
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rv_home"
         android:layout_width="0dp"
@@ -129,7 +145,7 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/mini_player_container"
+        app:layout_constraintTop_toBottomOf="@id/barrier_home_top"
         tools:itemCount="1"
         tools:listitem="@layout/content_category_swiper_mobile" />
 

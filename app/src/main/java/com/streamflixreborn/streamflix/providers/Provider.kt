@@ -118,7 +118,17 @@ interface Provider {
             AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME),
             FrenchAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
-            DessinAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
+            // 2026-06-28 : ancien DessinAnimeProvider Kotlin MASQUÉ — remplacé par
+            //   le WebJsProvider ci-dessous (même site, logique hébergée sur GitHub,
+            //   éditable sans rebuild).
+            // DessinAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
+            WebJsProvider(
+                name = "DessinAnime",
+                baseUrl = "https://dessinanime.cc",
+                jsUrl = "https://raw.githubusercontent.com/linkinep61/projet-nx/main/provider_web/dessinanime.js",
+                logo = "android.resource://${com.streamflixreborn.streamflix.BuildConfig.APPLICATION_ID}/drawable/logo_dessinanime",
+                language = "fr",
+            ) to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
             FranimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             VoirAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
             // 2026-05-21 : AnimeSite SUPPRIMÉ du provider list (user). SendvidExtractor reste dispo pour les autres.

@@ -427,14 +427,19 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
                                     is TvShow -> item.title
                                     else -> null
                                 } ?: continue
-                                // 2026-05-05 : normalise titres scrappés HTML (apostrophes typographiques etc.)
                                 val cleanTitle = com.streamflixreborn.streamflix.utils.TitleNormalizer
                                     .cleanForTmdbSearch(title).ifBlank { title }
-                                val results = TMDb3.Search.multi(cleanTitle)
+                                if (cleanTitle.length < 2) continue
+                                val results = TMDb3.Search.multi(cleanTitle, language = "fr-FR")
+                                // Matching strict : langue asiatique + titre similaire
                                 val match = results.results.firstOrNull { result ->
                                     when (result) {
-                                        is TMDb3.Movie -> result.originalLanguage in asianLanguages && result.backdropPath != null
-                                        is TMDb3.Tv -> result.originalLanguage in asianLanguages && result.backdropPath != null
+                                        is TMDb3.Movie -> result.originalLanguage in asianLanguages && result.backdropPath != null && run {
+                                            val t = result.title?.trim() ?: ""; t.equals(cleanTitle, true) || t.contains(cleanTitle, true) || cleanTitle.contains(t, true)
+                                        }
+                                        is TMDb3.Tv -> result.originalLanguage in asianLanguages && result.backdropPath != null && run {
+                                            val t = result.name?.trim() ?: ""; t.equals(cleanTitle, true) || t.contains(cleanTitle, true) || cleanTitle.contains(t, true)
+                                        }
                                         else -> false
                                     }
                                 }
@@ -452,8 +457,21 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
                             } catch (_: Exception) {}
                         }
                     }
-                    categories.add(Category(name = Category.FEATURED, list = featuredItems))
-                    categories.add(Category(name = "En cours", list = allItems))
+                    // Ne garder dans le carrousel que les items avec backdrop TMDb HD (min 5 sinon liste complète)
+                    val carouselItems = featuredItems.filter { item ->
+                        val b = when (item) { is Movie -> item.banner; is TvShow -> item.banner; else -> null }
+                        b != null && b.contains("/t/p/")
+                    }
+                    val finalCarousel = if (carouselItems.size >= 5) carouselItems else featuredItems
+                    if (finalCarousel.isNotEmpty()) {
+                        categories.add(Category(name = Category.FEATURED, list = finalCarousel))
+                    }
+                    // 2026-06-23 : retirer du "En cours" les items déjà dans le carousel
+                    val featuredIds = finalCarousel.mapNotNull { when (it) { is TvShow -> it.id; is Movie -> it.id; else -> null } }.toSet()
+                    categories.add(Category(name = "En cours", list = allItems.filter { item ->
+                        val id = when (item) { is TvShow -> item.id; is Movie -> item.id; else -> "" }
+                        id !in featuredIds
+                    }))
                 }
 
                 // 2. Nouveaux ajouts

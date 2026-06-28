@@ -65,10 +65,16 @@ class WorldLiveFileImportActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 2026-06-25 : ne lancer le picker QUE sur un fresh start (pas après
+        //   process death / recreation → sinon le picker ouvre en boucle).
+        if (savedInstanceState != null) return
         try {
-            launcher.launch(arrayOf("application/json", "text/*", "*/*"))
+            // 2026-06-25 : MIME type simplifié à "*/*" seul — certains file
+            //   pickers OEM (ColorOS OPPO, MagicOS Honor) crashent sur le
+            //   combo ["application/json","text/*","*/*"].
+            launcher.launch(arrayOf("*/*"))
         } catch (e: Throwable) {
-            Toast.makeText(this, "SAF unavailable : ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Sélecteur de fichiers indisponible", Toast.LENGTH_LONG).show()
             finish()
         }
     }

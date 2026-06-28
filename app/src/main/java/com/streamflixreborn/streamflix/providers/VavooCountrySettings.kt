@@ -28,29 +28,42 @@ object VavooCountrySettings {
      *  côté VavooProvider (itère tous les pays connus + combine). */
     const val ALL_COUNTRIES = "__ALL__"
 
+    // 2026-06-26 : liste ALIGNÉE sur les vrais `group` de Vavoo officiel
+    //   (récupérés via features.filter du catalogue mediahubmx-catalog.json).
+    //   Vrais groups : Albania, Arabia, Balkans, Bulgaria, Croatia, France,
+    //   France Sport, Germany, Italy, Netherlands, Poland, Portugal, Romania,
+    //   Russia, Spain, Turkey, United Kingdom.
+    //   RETIRÉS (n'existent PAS sur Vavoo → renvoyaient 0 chaîne) : Belgique,
+    //   Suisse, Autriche, USA, Grèce. "Arabic" corrigé en "Arabia".
+    //   2026-06-27 (user) : Russia RÉACTIVÉE (vrai groupe Vavoo). + Canada =
+    //   filterValue spécial CANADA_HEURISTIC (pas un vrai groupe Vavoo : on
+    //   regroupe par heuristique de noms côté VavooProvider).
+    const val CANADA_HEURISTIC = "__CANADA__"
     val list = listOf(
         Country("fr", "🇫🇷", "France", "France"),
         Country("all", "🌍", "Monde entier", ALL_COUNTRIES),
-        Country("it", "🇮🇹", "Italie", "Italy"),
+        Country("frsport", "⚽", "France Sport", "France Sport"),
+        Country("ca", "🇨🇦", "Canada", CANADA_HEURISTIC),
         Country("de", "🇩🇪", "Allemagne", "Germany"),
+        Country("it", "🇮🇹", "Italie", "Italy"),
         Country("uk", "🇬🇧", "Royaume-Uni", "United Kingdom"),
         Country("es", "🇪🇸", "Espagne", "Spain"),
         Country("pt", "🇵🇹", "Portugal", "Portugal"),
-        Country("be", "🇧🇪", "Belgique", "Belgium"),
         Country("nl", "🇳🇱", "Pays-Bas", "Netherlands"),
-        Country("ch", "🇨🇭", "Suisse", "Switzerland"),
-        Country("at", "🇦🇹", "Autriche", "Austria"),
-        Country("us", "🇺🇸", "USA", "United States"),
-        Country("ca", "🇨🇦", "Canada", "Canada"),
-        Country("tr", "🇹🇷", "Turquie", "Turkey"),
-        Country("gr", "🇬🇷", "Grèce", "Greece"),
         Country("pl", "🇵🇱", "Pologne", "Poland"),
-        Country("ar", "🇸🇦", "Pays arabes", "Arabic"),
+        Country("ro", "🇷🇴", "Roumanie", "Romania"),
+        Country("bg", "🇧🇬", "Bulgarie", "Bulgaria"),
+        Country("hr", "🇭🇷", "Croatie", "Croatia"),
+        Country("al", "🇦🇱", "Albanie", "Albania"),
+        Country("balkans", "🌍", "Balkans", "Balkans"),
+        Country("tr", "🇹🇷", "Turquie", "Turkey"),
+        Country("ru", "🇷🇺", "Russie", "Russia"),
+        Country("ar", "🇸🇦", "Pays arabes", "Arabia"),
     )
 
     /** Liste des pays à itérer pour "Monde entier" (tous sauf ALL_COUNTRIES). */
     val allCountryFilterValues: List<String> = list
-        .filter { it.filterValue != ALL_COUNTRIES }
+        .filter { it.filterValue != ALL_COUNTRIES && it.filterValue != CANADA_HEURISTIC }
         .map { it.filterValue }
 
     fun getCurrent(context: Context): Country {

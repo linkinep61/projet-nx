@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-06-24 (user "on voit pas le quadrant quand on se déplace dessus") :
+     drawable spécifique aux boutons VOSTFR/VF du menu synepsie. Rectangle
+     arrondi, focus rouge vif + stroke visible. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#FFE53935" />
+            <stroke android:width="3dp" android:color="#FFFFFFFF" />
+            <corners android:radius="6dp" />
+        </shape>
+    </item>
+
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#CCE53935" />
+            <corners android:radius="6dp" />
+        </shape>
+    </item>
+
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#33FFFFFF" />
+            <corners android:radius="6dp" />
+        </shape>
+    </item>
+
+</selector>

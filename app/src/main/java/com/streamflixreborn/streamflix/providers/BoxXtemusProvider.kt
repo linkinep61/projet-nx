@@ -732,6 +732,50 @@ object BoxXtemusProvider : Provider, IptvProvider {
                 // été altéré par downstream code).
                 src = ch.streamUrl
 
+                // 2026-06-27 (user "la playlist 3 TV box ne lit plus chez nous
+                //   mais Wiseplay oui") : la 3boxTv v2 a migré ses liens de
+                //   `c3v9.short.gy/me/...` vers `c9v3.s.gy/<token>/<cible-url-encodée>`
+                //   (capture PCAPdroid + cache Wiseplay 2026-06-27). Ces liens
+                //   redirigent CÔTÉ SERVEUR vers le vrai flux (Canal+ Akamai,
+                //   hdfauth.ftven.fr {"url":...}, molotov, rakuten...) MAIS
+                //   uniquement si on envoie le UA EXACT de la station (qui
+                //   contient la recette `~ref<b64>~...~@token`) + IP FR. Sans
+                //   le bon UA, le résolveur renvoie {"url":""}.
+                //   → on passe par resolveWithJsFallback (HTTP + WebView Wiseplay-
+                //   style) AVANT les anciens shortcuts c3v9/latvdefrance morts.
+                if (src.contains("c9v3.s.gy", ignoreCase = true)) {
+                    Log.d(TAG, "c9v3.s.gy station '${ch.channelName}' → resolveWithJsFallback: ${src.take(120)}")
+                    val r = try {
+                        com.streamflixreborn.streamflix.utils.GenericStreamResolver.resolveWithJsFallback(
+                            src,
+                            buildMap {
+                                if (ch.userAgent.isNotBlank()) put("User-Agent", ch.userAgent)
+                                if (ch.referer.isNotBlank()) put("Referer", ch.referer)
+                            },
+                        )
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "c9v3.s.gy resolve crashed: ${t.message}"); null
+                    }
+                    if (r != null && (r.url.contains(".m3u8") || r.url.contains(".mpd"))) {
+                        Log.d(TAG, "c9v3.s.gy SUCCESS '${ch.channelName}': ${r.url.take(140)}")
+                        sfrUrlCache[server.id] = CachedSfrUrl(
+                            r.url, System.currentTimeMillis() + 30 * 60 * 1000L,
+                        )
+                        return Video(
+                            source = r.url,
+                            type = if (r.url.contains(".mpd")) "application/dash+xml"
+                                   else "application/vnd.apple.mpegurl",
+                            headers = buildMap {
+                                put("User-Agent", r.headers["User-Agent"] ?: customUa)
+                                val ref = r.headers["Referer"] ?: customReferer
+                                if (ref.isNotBlank()) put("Referer", ref)
+                            },
+                            subtitles = emptyList(),
+                        )
+                    }
+                    Log.w(TAG, "c9v3.s.gy no media for '${ch.channelName}' (got=${r?.url?.take(80)}) — fallthrough anciens pipelines")
+                }
+
                 // 2026-06-12 (user "il y a un truc qui a cassé même la
                 //   chaine LCI ne fonctionne plus") : FAST-TRACK
                 //   latvdefranceShortcut DÉSACTIVÉ car maintenant que le RSS
@@ -1706,7 +1750,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
     /** 2026-06-11 (PCAPdroid sur Wiseplay révèle leur pipeline) : shortcut
      *  pour les chaînes FR (TF1, France 2/3/4/5, M6, etc.) via le RSS
      *  rsseverything.com/fr/feed/c779e9bb-... qui contient des `<script>`
-     *  JS du style `if (UA contains "~tpolTF1~") fetch("latvdefrance.com/po/hls/.../index.m3u8?token=...")`.
+     *  JS du style `if (UA contains "~tnpolTF1~") fetch("latvdefrance.com/ca/hls/.../index.m3u8?token=...")`.
      *  On parse en Kotlin et on extrait l'URL pour la chaîne demandée. */
     // 2026-06-12 — Cache du RSS rsseverything c779e9bb 5 min : le RSS coûte
     //   ~2s à fetch (avec UA signé), inutile de le retéléchargen à chaque clic.
@@ -2139,6 +2183,19 @@ object BoxXtemusProvider : Provider, IptvProvider {
         //   logged → license null → écran noir attendu (= comme TF1+ Max).
         if (com.streamflixreborn.streamflix.utils.M6Resolver.isM6Url(streamUrl)) {
             val r = com.streamflixreborn.streamflix.utils.M6Resolver.resolveTyped(streamUrl)
+            return com.streamflixreborn.streamflix.models.Video(
+                source = r?.url ?: "",
+                type = r?.mimeType ?: "application/dash+xml",
+                headers = emptyMap(),
+            )
+        }
+        // 2026-06-20 (Replay RMC BFM Play) : URL `bfmplay://<productId>` →
+        //   résoudre via ws-backendtv.rmcbfmplay.com → /replay/play → DRM
+        //   Widevine licence. Nécessite BfmAuth (login rmcbfmplay.com).
+        if (com.streamflixreborn.streamflix.utils.BfmResolver.isBfmUrl(streamUrl)) {
+            val r = kotlinx.coroutines.runBlocking {
+                com.streamflixreborn.streamflix.utils.BfmResolver.resolveTyped(streamUrl)
+            }
             return com.streamflixreborn.streamflix.models.Video(
                 source = r?.url ?: "",
                 type = r?.mimeType ?: "application/dash+xml",

@@ -358,9 +358,17 @@ object M6UidResolver {
 
     /** Variante synchrone (= block jusqu'à 15s) pour M6Resolver qui en a
      *  besoin avant de fetcher l'upfront-token. */
-    fun resolveSync(ctx: Context, timeoutMs: Long = 15_000L): String? {
-        // Si déjà cached, retourne direct
-        M6Auth.getAccountId(ctx)?.takeIf { it.isNotBlank() }?.let { return it }
+    fun resolveSync(ctx: Context, timeoutMs: Long = 15_000L, forceWebView: Boolean = false): String? {
+        if (!forceWebView) {
+            // Si déjà cached, retourne direct
+            M6Auth.getAccountId(ctx)?.takeIf { it.isNotBlank() }?.let { return it }
+        } else {
+            // 2026-06-22 : forceWebView = on DOIT relancer la WebView (ex:
+            //   JWT M6 expiré, on veut que le SPA refetch /getJwt et que le
+            //   hook JS intercepte le nouveau JWT). Reset le verrou anti-doublon.
+            Log.d(TAG, "forceWebView=true, resetting refreshInFlight + launching WebView")
+            refreshInFlight.set(false)
+        }
         val latch = java.util.concurrent.CountDownLatch(1)
         var result: String? = null
         resolveAsync(ctx) { uid ->

@@ -65,6 +65,11 @@ interface EpisodeDao {
     @Query("SELECT COUNT(id) > 0 FROM episodes WHERE tvShow = :tvShowId AND lastEngagementTimeUtcMillis IS NOT NULL")
     fun hasAnyWatchHistoryForTvShow(tvShowId: String): Boolean
 
+    // 2026-06-27 (user "corbeille Continuer à regarder doit vider") : reset des
+    //   épisodes en cours (progression) sans toucher aux favoris.
+    @Query("UPDATE episodes SET lastEngagementTimeUtcMillis = NULL, lastPlaybackPositionMillis = NULL, durationMillis = NULL WHERE lastEngagementTimeUtcMillis IS NOT NULL")
+    fun clearContinueWatching()
+
     @Query("SELECT * FROM episodes WHERE tvShow = :tvShowId ORDER BY season, number")
     fun getByTvShowId(tvShowId: String): List<Episode>
 

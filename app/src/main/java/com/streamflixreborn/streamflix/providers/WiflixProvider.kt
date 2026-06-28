@@ -20,6 +20,8 @@ import com.streamflixreborn.streamflix.utils.WebViewResolver
 import com.streamflixreborn.streamflix.StreamFlixApp
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -30,9 +32,12 @@ import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.TMDb3.original
+import com.streamflixreborn.streamflix.utils.TMDb3.w500
 import com.streamflixreborn.streamflix.utils.TitleNormalizer
 import com.streamflixreborn.streamflix.utils.TmdbUtils
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
@@ -111,6 +116,30 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     private const val CACHE_TTL_MS = 5 * 60 * 1000L // 5 minutes
     private val documentCache = mutableMapOf<String, Pair<Document, Long>>()
 
+    // 2026-06-23 (user "Wiflix ne relance pas son captcha quand cookie périme,
+    //   c'est juste un bug de cash") : quand le silent bypass timeout (= 30s
+    //   sans résolution Turnstile), on escalade vers le captcha VISIBLE qui
+    //   ouvre une WebView avec le Turnstile résolvable manuellement par l'user.
+    //   Cooldown 60s pour éviter d'ouvrir 8 captchas si 8 catégories home
+    //   échouent en parallèle.
+    @Volatile
+    private var lastVisibleBypassAt = 0L
+    private const val VISIBLE_BYPASS_COOLDOWN_MS = 60_000L
+
+    // 2026-06-23 (user "Error 1015 You are being rate limited") : Cloudflare
+    //   ban temporaire si trop de requêtes simultanées. Avant : home faisait
+    //   ~11 requêtes parallèles (1 home + 2 listings + 5 genres + 8 categories)
+    //   = burst → CF rate-limit kick in. Maintenant : Semaphore(3) limite à
+    //   3 requêtes simultanées max = pas de burst → CF content. Petit délai
+    //   au prix d'une latence légèrement plus longue mais zéro ban.
+    private val networkSemaphore = Semaphore(3)
+
+    // Cooldown si on détecte un Error 1015 dans la réponse → on attend 15 min
+    //   avant de retenter, sinon on aggrave le ban CF.
+    @Volatile
+    private var rateLimit1015Until = 0L
+    private const val RATE_LIMIT_COOLDOWN_MS = 15 * 60 * 1000L  // 15 minutes
+
     private fun getCachedDocument(url: String): Document? {
         val entry = documentCache[url] ?: return null
         if (System.currentTimeMillis() - entry.second > CACHE_TTL_MS) {
@@ -179,52 +208,151 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
      * First checks the in-memory cache. Then tries OkHttp (with cookies
      * from previous WebView bypasses). If Cloudflare is still detected,
      * falls back to WebViewResolver which opens a real WebView.
+     *
+     * 2026-06-22 fix (user "il oublie de relancer le scrap après") :
+     *   - Après bypass WebView, retry OkHttp avec le cookie frais
+     *   - Ne PAS cacher les documents vides/challenge (sinon cache pourri 5 min)
      */
-    private suspend fun getDocument(url: String, silentBypass: Boolean = true): Document {
+    private suspend fun getDocument(url: String, silentBypass: Boolean = true): Document = networkSemaphore.withPermit {
         // Check cache first
         getCachedDocument(url)?.let {
             Log.d(TAG, "[Provider] Cache HIT for $url")
-            return it
+            return@withPermit it
         }
 
-        try {
+        // 2026-06-23 : si on a détecté un Error 1015 récemment, on n'envoie
+        //   plus aucune requête pendant le cooldown 15min pour pas aggraver le ban.
+        val now = System.currentTimeMillis()
+        if (now < rateLimit1015Until) {
+            val left = (rateLimit1015Until - now) / 1000
+            Log.w(TAG, "[Provider] Rate limit cooldown active (${left}s left) — skipping $url")
+            return@withPermit Jsoup.parse("<html><!-- rate limited 1015 --></html>").apply { setBaseUri(baseUrl) }
+        }
+
+        // Tentative 1 : OkHttp direct (cookie CF déjà en place ?)
+        val okHttpDoc = tryOkHttp(url)
+        if (okHttpDoc != null) return@withPermit okHttpDoc
+
+        // Tentative 2 : WebView bypass (Turnstile)
+        Log.d(TAG, "[Provider] Launching WebView Bypass for $url (silent=$silentBypass)")
+        var html = getResolver().get(url, silent = silentBypass)
+
+        // 2026-06-23 (user "captcha apparaît sans demander de captcha, 1 clic
+        //   fait disparaître") : avant on détectait "Timeout" qui matchait
+        //   du contenu page légitime (= ex titre série "Timeout") → escalade
+        //   inutile vers visible. Maintenant on cherche les markers HTML
+        //   COMMENT exacts générés par WebViewResolver (lignes 170, 212) :
+        //     "<html><!-- silent fail --></html>"
+        //     "<html><!-- no live activity --></html>"
+        //   ces strings n'apparaissent JAMAIS dans une page Wiflix normale.
+        // 2026-06-28 : détection enrichie — si le HTML retourné contient
+        //   encore des marqueurs de challenge (Turnstile, Bot shield, etc.)
+        //   c'est un échec du bypass, PAS un succès. Avant : seuls les
+        //   markers <!-- silent fail --> étaient détectés → le HTML du
+        //   challenge se faisait cacher 5 min et empoisonnait tout.
+        fun isBypassFailed(h: String): Boolean {
+            if (h.contains("<!-- silent fail -->") ||
+                h.contains("<!-- no live activity -->") ||
+                h.contains("<!-- rate limited 1015 -->") ||
+                h.contains("User cancelled")) return true
+            // Le HTML retourné est un challenge CF ou Bot shield non résolu
+            val looksLikeChallenge = challengeKeywords.any { h.contains(it, ignoreCase = true) }
+            val hasRealContent = h.contains("mov-t") || h.contains("posterimg") ||
+                h.contains("mov-list") || h.contains("href=\"/film/") ||
+                h.contains("href=\"/serie/")
+            // Challenge détecté SANS contenu réel = bypass raté
+            return looksLikeChallenge && !hasRealContent
+        }
+        var bypassFailed = isBypassFailed(html)
+        if (bypassFailed && silentBypass) {
+            val nowEscalate = System.currentTimeMillis()
+            if (nowEscalate - lastVisibleBypassAt > VISIBLE_BYPASS_COOLDOWN_MS) {
+                lastVisibleBypassAt = nowEscalate
+                Log.d(TAG, "[Provider] Silent fail → ESCALATING to visible captcha for $url")
+                html = getResolver().get(url, silent = false)
+                bypassFailed = isBypassFailed(html)
+                if (!bypassFailed) {
+                    Log.d(TAG, "[Provider] Visible captcha SUCCESS for $url")
+                }
+            } else {
+                Log.d(TAG, "[Provider] Visible bypass cooldown active (${(VISIBLE_BYPASS_COOLDOWN_MS - (nowEscalate - lastVisibleBypassAt)) / 1000}s left) — skipping for $url")
+            }
+        }
+
+        // 2026-06-23 : détection Error 1015 (rate-limit Cloudflare) → ouvre
+        //   cooldown 15min global pour ne plus envoyer aucune requête le temps
+        //   que CF déban l'IP.
+        if (html.contains("Error 1015") || html.contains("You are being rate limited")) {
+            rateLimit1015Until = System.currentTimeMillis() + RATE_LIMIT_COOLDOWN_MS
+            Log.w(TAG, "[Provider] CLOUDFLARE 1015 detected for $url — cooldown 15min activated")
+        }
+
+        if (bypassFailed) {
+            Log.d(TAG, "[Provider] WebView bypass failed for $url — NOT caching")
+            cloudflareActive = true
+            return@withPermit Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+        }
+
+        // Bypass WebView a réussi → le cookie cf_clearance est dans le CookieManager.
+        // RELANCER via OkHttp pour un HTML propre du serveur.
+        Log.d(TAG, "[Provider] WebView bypass succeeded — retrying OkHttp with fresh cookie")
+        cloudflareActive = false
+        val freshDoc = tryOkHttp(url)
+        if (freshDoc != null) {
+            Log.d(TAG, "[Provider] OkHttp retry after bypass SUCCESS for $url")
+            return@withPermit freshDoc
+        }
+
+        // Fallback : utiliser le HTML du WebView
+        Log.d(TAG, "[Provider] OkHttp retry after bypass FAILED — using WebView HTML")
+        val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+        // 2026-06-28 : ne PAS cacher le fallback si c'est du challenge résiduel
+        //   (= empoisonnement cache 5 min → tout bloque, obligé de kill l'app)
+        if (!isCloudflareChallenge(doc) && !html.contains("Bot shield active", ignoreCase = true)) {
+            cacheDocument(url, doc)
+            populateUrlCache(doc)
+        } else {
+            Log.w(TAG, "[Provider] Fallback HTML is still a challenge — NOT caching for $url")
+        }
+        return@withPermit doc
+    }
+
+    /** Tente un fetch OkHttp. Retourne le Document si succès + pas de challenge, null sinon. */
+    private fun tryOkHttp(url: String): Document? {
+        return try {
+            // 2026-06-28 : MÊME UA que le WebView stealth (Chrome 131).
+            //   Le cookie cf_clearance est lié au UA : s'il a été posé par
+            //   le WebView avec Chrome/131 et qu'OkHttp envoie Chrome/116,
+            //   Cloudflare rejette → HTML retourné = challenge → fallback
+            //   WebView HTML avec \t dans les titres + images bloquées.
             val request = Request.Builder()
                 .url(url)
                 .header("Referer", baseUrl)
-                .header("User-Agent", NetworkClient.USER_AGENT)
+                .header("User-Agent", WebViewResolver.STEALTH_UA)
                 .build()
-
             val response = bypassClient.newCall(request).execute()
-
             if (response.isSuccessful) {
                 val html = response.body?.string() ?: ""
                 if (challengeKeywords.none { html.contains(it, ignoreCase = true) }) {
                     val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
                     cacheDocument(url, doc)
-                    // 2026-06-13 : populate URL cache pour le backup direct
-                    //   (From sur la home, etc.). Helper safe + try-catch.
                     populateUrlCache(doc)
                     cloudflareActive = false
-                    return doc
+                    doc
+                } else {
+                    Log.d(TAG, "[Provider] Cloudflare challenge in HTML for $url")
+                    cloudflareActive = true
+                    null
                 }
-                Log.d(TAG, "[Provider] Cloudflare challenge detected in HTML for $url")
-                cloudflareActive = true
             } else {
                 Log.d(TAG, "[Provider] HTTP ${response.code} for $url")
+                cloudflareActive = true
+                null
             }
         } catch (e: Exception) {
             Log.d(TAG, "[Provider] OkHttp failed for $url: ${e.message}")
+            null
         }
-
-        // OkHttp failed or Cloudflare detected -> use WebView bypass
-        Log.d(TAG, "[Provider] Launching WebView Bypass for $url (silent=$silentBypass)")
-        val html = getResolver().get(url, silent = silentBypass)
-        val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
-        cacheDocument(url, doc)
-        populateUrlCache(doc)
-        // WebView bypass a injecté les cookies CF → Retrofit devrait marcher maintenant
-        cloudflareActive = false
-        return doc
     }
 
     /** 2026-06-13 : extrait tous les <a class="mov-t" href="..."> du Document
@@ -255,7 +383,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     // This prevents querying non-existent pages that could return random/incorrect results.
     private var hasMore = true
 
-    override suspend fun getHome(): List<Category> {
+    override suspend fun getHome(): List<Category> = coroutineScope {
         try {
             initializeService()
         } catch (e: Exception) {
@@ -268,7 +396,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             }
         }
 
-        val document = try {
+        var document = try {
             val doc = service.getHome()
             if (isCloudflareChallenge(doc)) {
                 Log.d(TAG, "[getHome] Cloudflare challenge in Retrofit response, using bypass")
@@ -281,22 +409,112 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 getDocument(baseUrl, silentBypass = false)
             } catch (e2: Exception) {
                 Log.e(TAG, "[getHome] bypass also failed: ${e2.message}")
-                return emptyList()
+                return@coroutineScope emptyList()
             }
         }
 
+        // 2026-06-22 fix (user "il oublie de relancer le scrap après") :
+        // Si le document est vide (challenge/timeout), retry via OkHttp.
+        // Le bypass WebView a pu résoudre le Turnstile → cookie cf_clearance
+        // est maintenant dans le CookieManager → OkHttp devrait passer.
+        if (document.select("div.block-main").isEmpty() && document.select("div.mov").isEmpty()) {
+            Log.d(TAG, "[getHome] document vide après bypass — retry OkHttp (cookie frais)")
+            documentCache.remove(baseUrl)
+            kotlinx.coroutines.delay(500)
+            document = try {
+                getDocument(baseUrl, silentBypass = false)
+            } catch (_: Exception) { document }
+        }
+
+        // 2026-06-23 : lancer les fetches des pages listing en parallèle pendant
+        // qu'on parse la home page (= 0 latence supplémentaire)
+        val latestFilmsD = async {
+            runCatching {
+                val doc = try {
+                    val d = service.getMovies(1)
+                    if (isCloudflareChallenge(d)) getDocument("${baseUrl}film-en-streaming/page/1") else d
+                } catch (_: Exception) { getDocument("${baseUrl}film-en-streaming/page/1") }
+                doc.select("div.mov").mapNotNull {
+                    val id = it.selectFirst("a.mov-t")?.attr("href")?.substringAfterLast("/")
+                        ?.takeIf { id -> id.isNotBlank() } ?: return@mapNotNull null
+                    Movie(
+                        id = id,
+                        title = it.selectFirst("a.mov-t")?.ownText()?.trim() ?: return@mapNotNull null,
+                        poster = it.selectFirst("img")?.attr("src")?.let { src -> baseUrl + src },
+                    )
+                }
+            }.getOrDefault(emptyList())
+        }
+        val latestSeriesD = async {
+            runCatching {
+                val doc = try {
+                    val d = service.getTvShows(1)
+                    if (isCloudflareChallenge(d)) getDocument("${baseUrl}serie-en-streaming/page/1") else d
+                } catch (_: Exception) { getDocument("${baseUrl}serie-en-streaming/page/1") }
+                doc.select("div.mov").mapNotNull {
+                    val id = it.selectFirst("a.mov-t")?.attr("href")?.substringAfterLast("/")
+                        ?.takeIf { id -> id.isNotBlank() } ?: return@mapNotNull null
+                    val rawTitle = it.selectFirst("a.mov-t")?.ownText()?.trim() ?: return@mapNotNull null
+                    val season = it.selectFirst("span.block-sai")?.text()?.trim()?.takeIf { s -> s.isNotBlank() }
+                    TvShow(
+                        id = id,
+                        title = if (season != null) "$rawTitle - $season" else rawTitle,
+                        poster = it.selectFirst("img")?.attr("src")?.let { src -> baseUrl + src },
+                    )
+                }
+            }.getOrDefault(emptyList())
+        }
+
+        // Genres populaires — 1 page chacun, en parallèle
+        fun asyncGenreMovies(genre: String) = async {
+            runCatching {
+                val doc = try {
+                    val d = service.getGenre(genre, 1)
+                    if (isCloudflareChallenge(d)) getDocument("${baseUrl}film-en-streaming/$genre/page/1") else d
+                } catch (_: Exception) { getDocument("${baseUrl}film-en-streaming/$genre/page/1") }
+                doc.select("div.mov").take(20).mapNotNull {
+                    val id = it.selectFirst("a.mov-t")?.attr("href")?.substringAfterLast("/")
+                        ?.takeIf { id -> id.isNotBlank() } ?: return@mapNotNull null
+                    Movie(
+                        id = id,
+                        title = it.selectFirst("a.mov-t")?.ownText()?.trim() ?: return@mapNotNull null,
+                        poster = it.selectFirst("img")?.attr("src")?.let { src -> baseUrl + src },
+                    )
+                }
+            }.getOrDefault(emptyList())
+        }
+        val actionD   = asyncGenreMovies("action")
+        val comedieD  = asyncGenreMovies("comedie")
+        val thrillerD = asyncGenreMovies("thriller")
+        val sfD       = asyncGenreMovies("science-fiction")
+        val horreurD  = asyncGenreMovies("horreur")
+
         val categories = mutableListOf<Category>()
 
-        val topSeries = document.select("div.block-main").getOrNull(0)?.select("div.mov")?.mapNotNull {
+        // 2026-06-23 (user "top film à nous il est pas pareil" + "respecter les
+        //   sites") : avant on faisait getOrNull(0) / getOrNull(1) = fragile
+        //   car le site Wiflix a 3 `div.block-main` (TOP Séries / TOP Films /
+        //   Films Anciens) ET l'ordre peut changer. Maintenant on matche par
+        //   TITRE EXACT du `div.block-title` (= "TOP Séries", "TOP Films").
+        //   1 seul fetch home = on respecte le site sans le bombarder.
+        fun findBlockByTitlePrefix(prefix: String): org.jsoup.nodes.Element? {
+            return document.select("div.block-main").firstOrNull { block ->
+                val titleText = block.selectFirst("div.block-title")?.text()?.trim() ?: ""
+                titleText.startsWith(prefix, ignoreCase = true)
+            }
+        }
+        val topSeriesBlock = findBlockByTitlePrefix("TOP Séries")
+        val topFilmsBlock = findBlockByTitlePrefix("TOP Films")
+
+        val topSeries = topSeriesBlock?.select("div.mov")?.mapNotNull {
             val id = it.selectFirst("a.mov-t")
                 ?.attr("href")?.substringAfterLast("/")
                 ?.takeIf { id -> id.isNotBlank() } ?: return@mapNotNull null
+            val rawTitle = it.selectFirst("a.mov-t")?.ownText()?.trim() ?: return@mapNotNull null
+            val season = it.selectFirst("span.block-sai")?.text()?.trim()?.takeIf { s -> s.isNotBlank() }
             TvShow(
                 id = id,
-                title = listOfNotNull(
-                    it.selectFirst("a.mov-t")?.text(),
-                    it.selectFirst("span.block-sai")?.text(),
-                ).joinToString(" - "),
+                title = if (season != null) "$rawTitle - $season" else rawTitle,
                 poster = it.selectFirst("img")
                     ?.attr("src")?.let { src -> baseUrl + src },
                 banner = it.selectFirst("img")
@@ -304,17 +522,35 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             )
         } ?: emptyList()
 
-        val topFilms = document.select("div.block-main").getOrNull(1)?.select("div.mov")?.mapNotNull {
+        val topFilms = topFilmsBlock?.select("div.mov")?.mapNotNull {
             val id = it.selectFirst("a.mov-t")
                 ?.attr("href")?.substringAfterLast("/")
                 ?.takeIf { id -> id.isNotBlank() } ?: return@mapNotNull null
             Movie(
                 id = id,
-                title = it.selectFirst("a.mov-t")?.text() ?: return@mapNotNull null,
+                title = it.selectFirst("a.mov-t")?.ownText()?.trim() ?: return@mapNotNull null,
                 poster = it.selectFirst("img")
                     ?.attr("src")?.let { src -> baseUrl + src },
             )
         } ?: emptyList()
+
+        Log.d(TAG, "[getHome] TOP Séries (block home): ${topSeries.size} items, TOP Films (block home): ${topFilms.size} items")
+
+        // 2026-06-23 (user "pour avoir le top série tu prends la première page
+        //   des wifi séries /serie-en-streaming/, pour top film
+        //   /film-en-streaming/") : on enrichit les 2 sections TOP en y ajoutant
+        //   les ~25 items de la 1ère page du listing complet. Dédup par ID
+        //   pour pas dupliquer ce qui était déjà dans le block home.
+        //   Ces fetches utilisent latestSeriesD/latestFilmsD déjà launched en
+        //   parallèle au début → on attend leur résultat ici (= 0 latence
+        //   supplémentaire car déjà en cours).
+        val moreSeries = latestSeriesD.await()
+        val moreFilms = latestFilmsD.await()
+        val topSeriesIds = topSeries.map { it.id }.toSet()
+        val topFilmsIds = topFilms.map { it.id }.toSet()
+        val topSeriesAll = topSeries + moreSeries.filter { it.id !in topSeriesIds }
+        val topFilmsAll = topFilms + moreFilms.filter { it.id !in topFilmsIds }
+        Log.d(TAG, "[getHome] TOP Séries enrichi: ${topSeriesAll.size} items (+${moreSeries.size - (moreSeries.count { it.id in topSeriesIds })}), TOP Films enrichi: ${topFilmsAll.size} items")
 
         // FEATURED carousel: deep copies from topSeries + topFilms with TMDB HD backdrops
         val featuredItems = mutableListOf<AppAdapter.Item>()
@@ -336,6 +572,8 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         }
         if (featuredItems.isNotEmpty() && UserPreferences.enableTmdb) {
             // 2026-05-10 : CAP à 15 items pour éviter ~500 appels TMDB en burst au home.
+            // 2026-06-23 : matching strict — type (TvShow→Tv, Movie→Movie) + titre similaire.
+            // Avant : prenait le 1er résultat avec backdrop → "From" matchait n'importe quoi.
             for (item in featuredItems.take(15)) {
                 try {
                     val title = when (item) {
@@ -343,11 +581,24 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                         is Movie -> item.title
                         else -> continue
                     }
-                    val results = TMDb3.Search.multi(title)
+                    val cleanTitle = title.trim()
+                    if (cleanTitle.length < 2) continue // titres trop courts = matching impossible
+                    val results = TMDb3.Search.multi(cleanTitle, language = "fr-FR")
+                    // Matcher par type + vérifier que le titre TMDb ressemble au nôtre
                     val match = results.results.firstOrNull { result ->
-                        when (result) {
-                            is TMDb3.Movie -> result.backdropPath != null
-                            is TMDb3.Tv -> result.backdropPath != null
+                        when {
+                            item is TvShow && result is TMDb3.Tv && result.backdropPath != null -> {
+                                val tmdbName = result.name?.trim() ?: ""
+                                tmdbName.equals(cleanTitle, ignoreCase = true)
+                                    || tmdbName.contains(cleanTitle, ignoreCase = true)
+                                    || cleanTitle.contains(tmdbName, ignoreCase = true)
+                            }
+                            item is Movie && result is TMDb3.Movie && result.backdropPath != null -> {
+                                val tmdbTitle = result.title?.trim() ?: ""
+                                tmdbTitle.equals(cleanTitle, ignoreCase = true)
+                                    || tmdbTitle.contains(cleanTitle, ignoreCase = true)
+                                    || cleanTitle.contains(tmdbTitle, ignoreCase = true)
+                            }
                             else -> false
                         }
                     }
@@ -365,12 +616,28 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 } catch (_: Exception) {}
             }
         }
-        if (featuredItems.isNotEmpty()) {
-            categories.add(Category(name = Category.FEATURED, list = featuredItems))
+        // Ne garder dans le carrousel que les items avec backdrop TMDb HD (min 5 sinon liste complète)
+        val carouselItems = featuredItems.filter { item ->
+            val b = when (item) { is Movie -> item.banner; is TvShow -> item.banner; else -> null }
+            b != null && b.contains("/t/p/")
+        }
+        val finalCarousel = if (carouselItems.size >= 5) carouselItems else featuredItems
+        if (finalCarousel.isNotEmpty()) {
+            categories.add(Category(name = Category.FEATURED, list = finalCarousel))
         }
 
-        categories.add(Category(name = "TOP Séries", list = topSeries))
-        categories.add(Category(name = "TOP Films", list = topFilms))
+        // Retirer du TOP les items déjà dans le carousel pour éviter les doublons
+        val featuredIds = finalCarousel.map { when (it) { is TvShow -> it.id; is Movie -> it.id; else -> "" } }.toSet()
+        // 2026-06-23 (user "incrémenter notre TOP Série + une autre TOP Film") :
+        //   on utilise topSeriesAll / topFilmsAll (= block home + page listing
+        //   complet, dédupliqué) → ~25-30 items par section au lieu de 6-10.
+        categories.add(Category(name = "TOP Séries", list = topSeriesAll.filter { it.id !in featuredIds }))
+        categories.add(Category(name = "TOP Films", list = topFilmsAll.filter { (it as? Movie)?.id !in featuredIds }))
+
+        // 2026-06-23 (user "supprimes les 2 premières catégories Derniers films
+        //   ajoutés / Dernières séries ajoutées = doublons des TOP enrichis") :
+        //   on les vire car le contenu est maintenant dans TOP Séries / TOP Films.
+
         categories.add(
             Category(
                 name = "Films Anciens",
@@ -380,13 +647,25 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                         ?.takeIf { id -> id.isNotBlank() } ?: return@mapNotNull null
                     Movie(
                         id = id,
-                        title = it.selectFirst("a.mov-t")?.text() ?: return@mapNotNull null,
+                        title = it.selectFirst("a.mov-t")?.ownText()?.trim() ?: return@mapNotNull null,
                         poster = it.selectFirst("img")
                             ?.attr("src")?.let { src -> baseUrl + src },
                     )
                 } ?: emptyList(),
             )
         )
+
+        // Genres populaires (avec posters)
+        fun addGenreCategory(label: String, items: List<Movie>) {
+            if (items.isNotEmpty()) {
+                categories.add(Category(name = label, list = items))
+            }
+        }
+        addGenreCategory("Action",         actionD.await())
+        addGenreCategory("Comédie",        comedieD.await())
+        addGenreCategory("Thriller",       thrillerD.await())
+        addGenreCategory("Science-Fiction", sfD.await())
+        addGenreCategory("Horreur",        horreurD.await())
 
         // Parser les sections "Derniers Episodes Séries-TV ajoutés" et "Séries-TV Saison complète"
         // Ces sections sont dans des blocs avec des en-têtes rouges et des listes de liens
@@ -419,7 +698,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             }
         }
 
-        return categories
+        categories
     }
 
     suspend fun ignoreSource(source: String): Boolean {
@@ -529,12 +808,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                     poster = showPoster,
                 )
             } else if (href.contains("serie-en-streaming/") || href.contains("vf/") || href.contains("saison-complete/")) {
+                val rawTitle = it.selectFirst("a.mov-t")?.ownText()?.trim() ?: ""
+                val season = it.selectFirst("span.block-sai")?.text()?.trim()?.takeIf { s -> s.isNotBlank() }
                 TvShow(
                     id = showId,
-                    title = listOfNotNull(
-                        it.selectFirst("a.mov-t")?.text(),
-                        it.selectFirst("span.block-sai")?.text(),
-                    ).joinToString(" - "),
+                    title = if (season != null) "$rawTitle - $season" else rawTitle,
                     poster = showPoster,
                 )
             } else {
@@ -643,14 +921,13 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         } catch (e: Exception) { getDocument("${baseUrl}serie-en-streaming/page/$page") }
 
         val tvShows = document.select("div.mov").map {
+            val rawTitle = it.selectFirst("a.mov-t")?.ownText()?.trim() ?: ""
+            val season = it.selectFirst("span.block-sai")?.text()?.trim()?.takeIf { s -> s.isNotBlank() }
             TvShow(
                 id = it.selectFirst("a.mov-t")
                     ?.attr("href")?.substringAfterLast("/")
                     ?: "",
-                title = listOfNotNull(
-                    it.selectFirst("a.mov-t")?.text(),
-                    it.selectFirst("span.block-sai")?.text(),
-                ).joinToString(" - "),
+                title = if (season != null) "$rawTitle - $season" else rawTitle,
                 poster = it.selectFirst("img")
                     ?.attr("src")?.let { src -> baseUrl + src },
             )
@@ -919,9 +1196,34 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             if (isCloudflareChallenge(doc)) getDocument("${baseUrl}serie-en-streaming/$tvShowId") else doc
         } catch (e: Exception) { getDocument("${baseUrl}serie-en-streaming/$tvShowId") }
 
-        // Use the show poster as episode thumbnail
-        val showPoster = document.selectFirst("img#posterimg")
-            ?.attr("src")?.let { baseUrl + it }
+        // 2026-06-23 (user "pas de jaquette sur les épisodes Wiflix") :
+        //   cascade de selectors pour récupérer le poster de la série, utilisé
+        //   comme miniature de chaque épisode. Avant : QUE `img#posterimg` →
+        //   null si la structure HTML a changé → épisodes sans image.
+        //   Maintenant : essaye 4 sélecteurs + 2 patterns d'URL (relative et
+        //   absolue), puis fallback TMDB via le titre du show.
+        fun resolveSrc(src: String?): String? {
+            if (src.isNullOrBlank()) return null
+            if (src.startsWith("http")) return src
+            if (src.startsWith("//")) return "https:$src"
+            return baseUrl.trimEnd('/') + "/" + src.trimStart('/')
+        }
+        var showPoster: String? = resolveSrc(document.selectFirst("img#posterimg")?.attr("src"))
+            ?: resolveSrc(document.selectFirst("div.movie-poster img, div.mov-info img, div.entry-poster img")?.attr("src"))
+            ?: resolveSrc(document.selectFirst("meta[property=og:image]")?.attr("content"))
+            ?: resolveSrc(document.selectFirst("div.mov img")?.attr("src"))
+
+        // Fallback TMDB : si toujours null, search par titre + récupère poster TMDB
+        if (showPoster == null) {
+            try {
+                val title = document.selectFirst("h1, div.mov-t, span.mov-t")?.text()?.trim()
+                if (!title.isNullOrBlank()) {
+                    val results = TMDb3.Search.multi(title.take(60))
+                    val tvMatch = results.results.firstOrNull { it is TMDb3.Tv } as? TMDb3.Tv
+                    showPoster = tvMatch?.posterPath?.w500
+                }
+            } catch (_: Exception) {}
+        }
 
         val episodes = document.select("div.$className ul.eplist li").map {
             Episode(
@@ -999,12 +1301,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                         poster = showPoster,
                     )
                 } else if (href.contains("serie-en-streaming/") || href.contains("vf/") || href.contains("saison-complete/")) {
+                    val rawTitle = it.selectFirst("a.mov-t")?.ownText()?.trim() ?: ""
+                    val season = it.selectFirst("span.block-sai")?.text()?.trim()?.takeIf { s -> s.isNotBlank() }
                     TvShow(
                         id = showId,
-                        title = listOfNotNull(
-                            it.selectFirst("a.mov-t")?.text(),
-                            it.selectFirst("span.block-sai")?.text(),
-                        ).joinToString(" - "),
+                        title = if (season != null) "$rawTitle - $season" else rawTitle,
                         poster = showPoster,
                     )
                 } else {
