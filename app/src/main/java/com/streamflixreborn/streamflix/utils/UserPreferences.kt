@@ -344,6 +344,20 @@ object UserPreferences {
             Key.KEEP_SCREEN_ON_WHEN_PAUSED.setBoolean(value)
         }
 
+    /** 2026-06-21 (user "quand on quitte l'application, souvent elle se met en
+     *  tout petit comme ça [PiP]. Il faudrait mettre une option de base dans
+     *  paramètres > Apparence pour désactiver ce comportement. Beaucoup de
+     *  personnes ne veulent pas que ça soit comme ça quand ils quittent —
+     *  ils veulent quitter tout simplement") :
+     *  Si false (default), le PiP ne se déclenche PAS quand l'user quitte
+     *  l'app (home button / app switch). Si true, le player passe en PiP
+     *  flottant (= comportement historique). */
+    var pipOnExit: Boolean
+        get() = Key.PIP_ON_EXIT.getBoolean() ?: false
+        set(value) {
+            Key.PIP_ON_EXIT.setBoolean(value)
+        }
+
     /** 2026-06-14 (user "à chaque fin d'épisode il y a un overlay pour passer
      *  à l'épisode suivant, ajoute une option pour le désactiver pour ceux qui
      *  veulent aller jusqu'à la fin") : si false, on ne montre PAS l'overlay
@@ -410,11 +424,30 @@ object UserPreferences {
      *  toggle global "carrousel comme fond d'écran". Si false, updateBackground
      *  et pinBackground ne touchent plus à ivHomeBackground → le fond du
      *  layout reste visible. Default true pour ne rien casser. */
-    var carouselAsBackground: Boolean
-        get() = Key.CAROUSEL_AS_BACKGROUND.getBoolean() ?: true
+    /** 2026-06-21 (user "réunir toutes ces préférences en une seule option
+     *  pour éviter d'avoir trop de trucs partout") :
+     *  4 modes d'affichage du home dans UNE seule pref :
+     *  - "none"        : pas de carrousel, fond statique (= mode minimal)
+     *  - "carousel"    : carrousel visible, fond statique (= juste le slider)
+     *  - "carousel_bg" : carrousel + bannière en fond (= mode immersif TV)
+     *  - "black"       : pas de carrousel, fond noir uni (= mode sombre)
+     *  2026-06-21 v2 (user "mets carrousel uniquement par défaut pour les
+     *  gens, après ils changeront s'ils veulent") : default unifié = carousel
+     *  pour TV + mobile (= bon compromis : on voit le slider mais pas
+     *  d'effet bannière plein écran). */
+    var homeBackgroundMode: String
+        get() = Key.HOME_BG_MODE.getString() ?: "carousel"
         set(value) {
-            Key.CAROUSEL_AS_BACKGROUND.setBoolean(value)
+            Key.HOME_BG_MODE.setString(value)
         }
+
+    /** Helpers dérivés du mode courant — gardent l'API existante du code. */
+    val carouselAsBackground: Boolean
+        get() = homeBackgroundMode == "carousel_bg"
+    val blackBackground: Boolean
+        get() = homeBackgroundMode == "black"
+    val showCarousel: Boolean
+        get() = homeBackgroundMode == "carousel" || homeBackgroundMode == "carousel_bg"
 
     /** 2026-06-09 (user "rendre transparente la bande noire que tu vois sur la
      *  gauche pour voir le fond d'écran") : opacité 0-100 de la sidebar TV.
@@ -827,6 +860,19 @@ object UserPreferences {
             Key.MINI_PLAYER_ENABLED.setBoolean(value)
         }
 
+    /**
+     * 2026-06-24 (user "un réglage manuel pour descendre la barre et la fixer") :
+     * décalage en dp ajouté en haut du RecyclerView home mobile. 0 = automatique
+     * (barrier), >0 = marge supplémentaire pour les mobiles non compatibles
+     * (Honor 200, MagicOS densité 520 dpi, etc.).
+     * Plage : 0–120 dp. Persisté SharedPrefs.
+     */
+    var homeTopOffset: Int
+        get() = Key.HOME_TOP_OFFSET.getInt() ?: 0
+        set(value) {
+            Key.HOME_TOP_OFFSET.setInt(value)
+        }
+
     private enum class Key {
         APP_LAYOUT,
         CURRENT_LANGUAGE,
@@ -851,11 +897,15 @@ object UserPreferences {
         AUTOPLAY,
         PROVIDER_CACHE,
         KEEP_SCREEN_ON_WHEN_PAUSED,
+        PIP_ON_EXIT,
         SHOW_NEXT_EPISODE_OVERLAY,
         ANIME_AUTO_SKIP_BROKEN,
         FAVORITE_PROVIDERS,
         PROVIDER_SHOW_FAVORITES_ONLY,
         CAROUSEL_AS_BACKGROUND,
+        BLACK_BACKGROUND,
+        SHOW_CAROUSEL,
+        HOME_BG_MODE,
         SIDEBAR_OPACITY,
         KEEP_SCREEN_ON_APP,
         PLAYER_GESTURES,
@@ -884,7 +934,8 @@ object UserPreferences {
         HLS_PROXY_URL,
         MINI_PLAYER_ENABLED,
         FAILED_CHANNELS,
-        PROFILE_PICKER_ENABLED;
+        PROFILE_PICKER_ENABLED,
+        HOME_TOP_OFFSET;
 
         fun getBoolean(): Boolean? = when {
             prefs.contains(name) -> prefs.getBoolean(name, false)

@@ -19,7 +19,97 @@
         app:layout_constraintVertical_bias="0.0"
         tools:ignore="ContentDescription" />
 
-    <!-- Mini Player container for TV (IPTV only, hidden by default) — top right -->
+    <!-- Boutons mini player — barre HORIZONTALE en HAUT À GAUCHE de l'écran,
+         détachée du mini lecteur. Ordre : ⛶ Agrandir → ⏸ Pause → ✕ Fermer.
+         À côté du bouton quitter provider (sidebar). D-pad focusable. -->
+    <LinearLayout
+        android:id="@+id/mini_player_overlay"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:visibility="gone"
+        android:elevation="8dp"
+        android:background="#CC000000"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingTop="4dp"
+        android:paddingBottom="4dp"
+        android:paddingStart="6dp"
+        android:paddingEnd="6dp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        android:layout_marginStart="70dp"
+        android:layout_marginTop="8dp">
+
+        <ImageView
+            android:id="@+id/mini_player_channel_logo"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:layout_marginEnd="8dp"
+            android:scaleType="fitCenter"
+            tools:ignore="ContentDescription" />
+
+        <ProgressBar
+            android:id="@+id/mini_player_loading"
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:layout_marginEnd="8dp"
+            android:visibility="gone"
+            android:indeterminateTintMode="src_in"
+            android:indeterminateTint="#FFFFFF" />
+
+        <ImageView
+            android:id="@+id/mini_player_fullscreen"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_marginEnd="4dp"
+            android:padding="8dp"
+            android:src="@drawable/ic_mini_player_fullscreen"
+            android:scaleType="fitCenter"
+            android:background="?android:attr/selectableItemBackground"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusRight="@id/mini_player_pause"
+            android:nextFocusDown="@id/vgv_home"
+            android:nextFocusLeft="@id/home"
+            android:contentDescription="Agrandir" />
+
+        <ImageView
+            android:id="@+id/mini_player_pause"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_marginEnd="4dp"
+            android:padding="8dp"
+            android:src="@drawable/ic_mini_player_pause"
+            android:scaleType="fitCenter"
+            android:background="?android:attr/selectableItemBackground"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusLeft="@id/mini_player_fullscreen"
+            android:nextFocusRight="@id/mini_player_close"
+            android:nextFocusDown="@id/vgv_home"
+            android:contentDescription="Pause" />
+
+        <ImageView
+            android:id="@+id/mini_player_close"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:padding="8dp"
+            android:src="@android:drawable/ic_menu_close_clear_cancel"
+            android:scaleType="fitCenter"
+            android:background="?android:attr/selectableItemBackground"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusLeft="@id/mini_player_pause"
+            android:nextFocusDown="@id/vgv_home"
+            android:contentDescription="Fermer"
+            app:tint="#FFFFFF" />
+    </LinearLayout>
+
+    <!-- Mini player = vidéo pure, flush top-right. Pas d'overlay dedans.
+         2026-06-24 v3 (user "trop agrandi, réduis") : 0.65 → 0.55 width.
+         Ratio 16:9 conservé → height ~31% écran TV (juste un peu plus
+         que l'original 0.50 = 28%). Compromis : visible mais ne pousse
+         pas la grille trop bas. -->
     <FrameLayout
         android:id="@+id/mini_player_container"
         android:layout_width="0dp"
@@ -27,12 +117,10 @@
         android:visibility="gone"
         android:background="#FF000000"
         android:elevation="8dp"
-        app:layout_constraintWidth_percent="0.45"
+        app:layout_constraintWidth_percent="0.55"
         app:layout_constraintDimensionRatio="16:9"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
-        android:layout_marginEnd="16dp"
-        android:layout_marginTop="16dp">
+        app:layout_constraintTop_toTopOf="parent">
 
         <androidx.media3.ui.PlayerView
             android:id="@+id/mini_player_view"
@@ -43,11 +131,6 @@
             app:resize_mode="fit"
             app:surface_type="surface_view" />
 
-        <!-- 2026-06-16 (user "je veux le grand player dans le mini a l exactitude") :
-             mirror du grand swap_freeze_overlay. Pendant le JUMELAGE swap (~500ms),
-             on PixelCopy la derniere frame du SurfaceView vers ce bitmap. Le user
-             voit la derniere frame figee au lieu du noir flush codec. Cache au
-             prochain STATE_READY. -->
         <ImageView
             android:id="@+id/mini_swap_freeze_overlay"
             android:layout_width="match_parent"
@@ -55,82 +138,16 @@
             android:scaleType="fitCenter"
             android:visibility="gone"
             tools:ignore="ContentDescription" />
-
-        <LinearLayout
-            android:id="@+id/mini_player_overlay"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_gravity="bottom"
-            android:background="#80000000"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:padding="6dp">
-
-            <ImageView
-                android:id="@+id/mini_player_channel_logo"
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:layout_marginEnd="6dp"
-                android:scaleType="fitCenter"
-                tools:ignore="ContentDescription" />
-
-            <TextView
-                android:id="@+id/mini_player_channel_name"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:textColor="#FFFFFF"
-                android:textSize="12sp"
-                android:maxLines="1"
-                android:ellipsize="end" />
-
-            <ProgressBar
-                android:id="@+id/mini_player_loading"
-                android:layout_width="20dp"
-                android:layout_height="20dp"
-                android:layout_marginStart="6dp"
-                android:visibility="gone"
-                android:indeterminateTintMode="src_in"
-                android:indeterminateTint="#FFFFFF" />
-
-            <ImageView
-                android:id="@+id/mini_player_pause"
-                android:layout_width="28dp"
-                android:layout_height="28dp"
-                android:layout_marginStart="6dp"
-                android:padding="4dp"
-                android:src="@drawable/ic_mini_player_pause"
-                android:scaleType="fitCenter"
-                android:focusable="true"
-                android:focusableInTouchMode="true"
-                android:contentDescription="Pause" />
-
-            <ImageView
-                android:id="@+id/mini_player_fullscreen"
-                android:layout_width="28dp"
-                android:layout_height="28dp"
-                android:layout_marginStart="4dp"
-                android:padding="4dp"
-                android:src="@drawable/ic_mini_player_fullscreen"
-                android:scaleType="fitCenter"
-                android:focusable="true"
-                android:focusableInTouchMode="true"
-                android:contentDescription="Fullscreen" />
-
-            <ImageView
-                android:id="@+id/mini_player_close"
-                android:layout_width="28dp"
-                android:layout_height="28dp"
-                android:layout_marginStart="4dp"
-                android:padding="4dp"
-                android:src="@android:drawable/ic_menu_close_clear_cancel"
-                android:scaleType="fitCenter"
-                android:focusable="true"
-                android:focusableInTouchMode="true"
-                android:contentDescription="Close"
-                app:tint="#FFFFFF" />
-        </LinearLayout>
     </FrameLayout>
+
+    <!-- Nom de chaîne caché — garde le binding fonctionnel -->
+    <TextView
+        android:id="@+id/mini_player_channel_name"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:visibility="gone"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
 
     <androidx.leanback.widget.VerticalGridView
         android:id="@+id/vgv_home"

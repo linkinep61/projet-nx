@@ -93,21 +93,20 @@ private object ArtworkRepairCoordinator {
 
 /**
  * Poster in list/grid: 300×450 cap + RGB_565 (2 bytes/px instead of 4).
- * 2026-05-21 (user "tu peux réduire la qualité des jaquettes sur TV si ça aide,
- *   la netteté a de la marge") : baissé de 400×600 → 300×450. Les cartes font
- *   ~250 px de large sur une TV 1080p → 300 px reste sur-échantillonné (net),
- *   et on économise ~25-40% de RAM par poster. Le téléchargement (TMDB w342)
- *   ne change pas — le but ici est la mémoire, pas la vitesse.
+ * 2026-06-23 : réduit qualité compression pour fluidité VOD (user "réduire
+ *   la qualité des images pour avoir une meilleure fluidité"). weserv q=60
+ *   (était q=82), Glide cap 300×450 (était 342×513). Tailles TMDB inchangées
+ *   (w342 poster, w780 banner) pour garder la netteté sur TV 4K.
  */
 private val POSTER_LIST_OPTIONS = RequestOptions()
-    .override(342, 513)
+    .override(300, 450)
     .format(DecodeFormat.PREFER_RGB_565)
     .placeholder(R.drawable.glide_fallback_cover)
     .error(R.drawable.glide_fallback_cover)
 
-/** Banner/backdrop: 1280×720 cap + RGB_565 */
+/** Banner/backdrop: 960×540 cap + RGB_565 (was 1280×720, réduit pour fluidité VOD) */
 private val BANNER_OPTIONS = RequestOptions()
-    .override(1280, 720)
+    .override(960, 540)
     .format(DecodeFormat.PREFER_RGB_565)
     .placeholder(R.drawable.glide_fallback_cover)
     .error(R.drawable.glide_fallback_cover)
@@ -168,12 +167,14 @@ fun optimizeArtworkUrl(url: String?, targetWidthPx: Int): String? {
     // il tente de récupérer l'image côté serveur → jaquettes grises. On les charge
     // en DIRECT via Glide (OkHttp CF-aware), comme avant le fix weserv global.
     if (url.contains("voirdrama.") || url.contains("dramacool")
-        || url.contains("voir-anime") || url.contains("voiranime")) return url
+        || url.contains("voir-anime") || url.contains("voiranime")
+        || url.contains("french-anime") || url.contains("dessinanime")
+        || url.contains("flemmix.") || url.contains("wiflix.")) return url
     val noScheme = url.substringAfter("://")
     val originParam = if (isHttps) "ssl:$noScheme" else noScheme
     return "https://images.weserv.nl/?url=" +
         java.net.URLEncoder.encode(originParam, "UTF-8") +
-        "&w=$targetWidthPx&output=webp&q=82"
+        "&w=$targetWidthPx&output=webp&q=60"
 }
 
 /** Délais de retry croissants (ms) pour les jaquettes qui échouent au 1er chargement. */
@@ -314,7 +315,7 @@ fun ImageView.loadMovieBanner(
 ) {
     // Fallback poster si pas de banner (certains providers n'ont pas de backdrop)
     val bannerUrl = movie.banner.takeUnless { it.isNullOrBlank() } ?: movie.poster
-    loadRecoverableArtwork(bannerUrl, configure, memoryOptions = BANNER_OPTIONS, targetWidthPx = 1280, onRepair = { staleUrl, onUpdated ->
+    loadRecoverableArtwork(bannerUrl, configure, memoryOptions = BANNER_OPTIONS, targetWidthPx = 780, onRepair = { staleUrl, onUpdated ->
         ArtworkRepairCoordinator.repairMovieArtwork(this, movie, staleUrl) { refreshedMovie ->
             val refreshedUrl = refreshedMovie.banner.takeUnless { it.isNullOrBlank() }
                 ?: refreshedMovie.poster
@@ -347,7 +348,7 @@ fun ImageView.loadTvShowBanner(
     val bannerUrl = tvShow.banner.takeUnless { it.isNullOrBlank() }
         ?: tvShow.seasons.lastOrNull()?.poster?.takeUnless { it.isNullOrBlank() }
         ?: tvShow.poster
-    loadRecoverableArtwork(bannerUrl, configure, memoryOptions = BANNER_OPTIONS, targetWidthPx = 1280, onRepair = { staleUrl, onUpdated ->
+    loadRecoverableArtwork(bannerUrl, configure, memoryOptions = BANNER_OPTIONS, targetWidthPx = 780, onRepair = { staleUrl, onUpdated ->
         ArtworkRepairCoordinator.repairTvShowArtwork(this, tvShow, staleUrl) { refreshedTvShow ->
             val refreshedUrl = refreshedTvShow.banner.takeUnless { it.isNullOrBlank() }
                 ?: refreshedTvShow.seasons.lastOrNull()?.poster?.takeUnless { it.isNullOrBlank() }

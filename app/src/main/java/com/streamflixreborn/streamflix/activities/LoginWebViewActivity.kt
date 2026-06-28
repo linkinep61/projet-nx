@@ -16,6 +16,7 @@ import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.streamflixreborn.streamflix.utils.BfmAuth
 import com.streamflixreborn.streamflix.utils.M6Auth
 import com.streamflixreborn.streamflix.utils.TF1Auth
 
@@ -38,6 +39,7 @@ class LoginWebViewActivity : AppCompatActivity() {
         const val EXTRA_SERVICE = "service"
         const val SERVICE_M6 = "M6"
         const val SERVICE_TF1 = "TF1"
+        const val SERVICE_BFM = "BFM"
 
         fun start(ctx: Context, service: String) {
             val i = Intent(ctx, LoginWebViewActivity::class.java).apply {
@@ -95,6 +97,20 @@ class LoginWebViewActivity : AppCompatActivity() {
             settings.setSupportMultipleWindows(true)
             settings.javaScriptCanOpenWindowsAutomatically = true
             settings.userAgentString = USER_AGENT
+            // 2026-06-21 (user "sur BFM, le mail et le mdp ne se sauvegardent
+            //   pas, je dois le rentrer à chaque fois — TF1 et M6 le font") :
+            //   activate form data persistence + database storage. Combiné
+            //   avec l'injection JS d'attributs `autocomplete` sur les inputs
+            //   BFM (cf onPageStarted plus bas), permet à Google Password
+            //   Manager / Smart Lock de proposer la sauvegarde + restitution
+            //   automatique des credentials sur BFM, comme sur TF1/M6.
+            @Suppress("DEPRECATION")
+            settings.saveFormData = true
+            settings.databaseEnabled = true
+            // Enable autofill hints for password manager integration
+            try {
+                importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_AUTO
+            } catch (_: Throwable) {}
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             webViewClient = LoginWebViewClient()
@@ -102,6 +118,12 @@ class LoginWebViewActivity : AppCompatActivity() {
             // 2026-06-18 v3 : interface JS pour capture JWT TF1
             if (service == SERVICE_TF1) {
                 addJavascriptInterface(TF1JwtBridge(), "OnyxBridge")
+            }
+            // 2026-06-21 : interface JS pour sauver les credentials BFM
+            //   (email+password) au moment du submit du formulaire SSO.
+            //   Permet le re-login automatique quand le token expire.
+            if (service == SERVICE_BFM) {
+                addJavascriptInterface(BfmCredsBridge(), "OnyxBfmBridge")
             }
         }
         progress = ProgressBar(this).apply {
@@ -149,10 +171,64 @@ class LoginWebViewActivity : AppCompatActivity() {
                     android.view.Gravity.BOTTOM or android.view.Gravity.CENTER_HORIZONTAL
                 ).apply { setMargins(0, 0, 0, 80) }
                 setPadding(48, 24, 48, 24)
-                setOnClickListener { triggerTf1JwtCapture() }
+                setOnClickListener {
+                    autoAcceptCookies(popupWebView ?: webView)
+                    triggerTf1JwtCapture()
+                }
             }
             root.addView(finishBtn)
         }
+
+        // 2026-06-19 (user "les gens ils vont pas comprendre ton truc, c'était
+        //   bien ton bouton bleu comme sur TF1") : UN SEUL bouton bleu en bas
+        //   centre comme TF1 finishBtn. Au click :
+        //     1. Auto-accept cookies (= 14 selectors connus + fallback texte)
+        //     2. Pour TF1 → triggerTf1JwtCapture (= récupère JWT)
+        //     3. Pour M6/Facebook/Apple → finish() avec RESULT_OK
+        //   Texte adapté au service.
+        val unifiedFinishBtn = android.widget.Button(this).apply {
+            text = when (service) {
+                SERVICE_TF1 -> "✓ Terminer connexion TF1+"
+                SERVICE_M6 -> "✓ Terminer connexion 6play"
+                SERVICE_BFM -> "✓ Terminer connexion BFM Play"
+                else -> "✓ Terminer connexion"
+            }
+            setBackgroundColor(0xCC1E88E5.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.BOTTOM or android.view.Gravity.CENTER_HORIZONTAL
+            ).apply { setMargins(0, 0, 0, 80) }
+            setPadding(48, 24, 48, 24)
+            isFocusable = true
+            setOnClickListener {
+                // Accept cookies en premier (= si overlay consent encore présent)
+                autoAcceptCookies(popupWebView ?: webView)
+                // Puis selon service : capture JWT TF1 ou force-save M6
+                if (service == SERVICE_TF1) {
+                    triggerTf1JwtCapture()
+                } else if (service == SERVICE_M6) {
+                    // 2026-06-19 (user "le bouton connexion M6 est resté
+                    //   alors que TF1 a bien disparu") : captureM6 normal
+                    //   exige gigya-mid. Si l'user dit "j'ai fini", on save
+                    //   le token QUAND MÊME (= mode dégradé sans gigya-mid).
+                    //   Comme ça M6Auth.isLoggedIn = true → card Connexion
+                    //   6play disparait au refresh home.
+                    forceSaveM6Token()
+                } else if (service == SERVICE_BFM) {
+                    forceSaveBfmToken()
+                } else {
+                    setResult(RESULT_OK)
+                    finish()
+                }
+            }
+        }
+        // Évite le doublon avec finishBtn TF1 ajouté plus haut (= conditionnel)
+        if (service != SERVICE_TF1) {
+            root.addView(unifiedFinishBtn)
+        }
+
         setContentView(root)
 
         // 2026-06-19 v35 (user "souris virtuelle pour aller cliquer sur les
@@ -164,10 +240,16 @@ class LoginWebViewActivity : AppCompatActivity() {
 
         val loginUrl = when (service) {
             SERVICE_TF1 -> "https://www.tf1.fr/compte/connexion"
+            SERVICE_BFM -> "https://sso.rmcbfmplay.com/cas/oidc/authorize?" +
+                "client_id=uMgFIVzSfbUsjxGCHSALcyZJbdjSfMqasY" +
+                "&response_type=token" +
+                "&redirect_uri=https://www.rmcbfmplay.com" +
+                "&scope=openid"
             else -> "https://www.6play.fr/connexion"
         }
         title = when (service) {
             SERVICE_TF1 -> "Connexion TF1+"
+            SERVICE_BFM -> "Connexion RMC BFM Play"
             else -> "Connexion M6 6play"
         }
         Log.d(TAG, "Loading login URL: $loginUrl")
@@ -234,10 +316,19 @@ class LoginWebViewActivity : AppCompatActivity() {
         //   SCROLL la WebView au lieu d'être bloqué.
         val targetWebView: WebView = popupWebView ?: webView
         val scrollStep = (step * 3f).toInt().coerceAtLeast(80)
+        // 2026-06-19 (user "je peux pas défiler pour accepter le menu cookies") :
+        //   le scroll commence dès que le curseur entre dans la dernière BANDE
+        //   (200 px) du bas/haut/gauche/droite OU si la touche est répétée
+        //   (long press, repeatCount >= 3). Avant, il fallait pousser le
+        //   curseur tout au bord pour scroller, ce qui était laborieux.
+        val edgeThreshold = 200f
+        val isLongPress = event.repeatCount >= 3
         when (event.keyCode) {
             android.view.KeyEvent.KEYCODE_DPAD_UP -> {
-                if (cursorY <= 0.5f) {
+                if (isLongPress || cursorY <= edgeThreshold) {
                     targetWebView.scrollBy(0, -scrollStep)
+                    cursorY = (cursorY - step).coerceAtLeast(0f)
+                    updateCursorPosition()
                 } else {
                     cursorY = (cursorY - step).coerceAtLeast(0f)
                     updateCursorPosition()
@@ -245,8 +336,10 @@ class LoginWebViewActivity : AppCompatActivity() {
                 return true
             }
             android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
-                if (cursorY >= maxY - 0.5f) {
+                if (isLongPress || cursorY >= maxY - edgeThreshold) {
                     targetWebView.scrollBy(0, scrollStep)
+                    cursorY = (cursorY + step).coerceAtMost(maxY)
+                    updateCursorPosition()
                 } else {
                     cursorY = (cursorY + step).coerceAtMost(maxY)
                     updateCursorPosition()
@@ -271,6 +364,22 @@ class LoginWebViewActivity : AppCompatActivity() {
                 }
                 return true
             }
+            // 2026-06-19 (user "page noire" + scroll difficile) : touches
+            //   Channel+/- du remote Chromecast → scroll vertical d'une PAGE
+            //   entière (= 80% de la hauteur). Pratique pour parcourir le
+            //   consentement cookies Google rapidement.
+            android.view.KeyEvent.KEYCODE_CHANNEL_UP,
+            android.view.KeyEvent.KEYCODE_PAGE_UP -> {
+                val pageStep = (rootLayout.height * 0.8f).toInt().coerceAtLeast(400)
+                targetWebView.scrollBy(0, -pageStep)
+                return true
+            }
+            android.view.KeyEvent.KEYCODE_CHANNEL_DOWN,
+            android.view.KeyEvent.KEYCODE_PAGE_DOWN -> {
+                val pageStep = (rootLayout.height * 0.8f).toInt().coerceAtLeast(400)
+                targetWebView.scrollBy(0, pageStep)
+                return true
+            }
             android.view.KeyEvent.KEYCODE_DPAD_CENTER,
             android.view.KeyEvent.KEYCODE_ENTER,
             android.view.KeyEvent.KEYCODE_NUMPAD_ENTER -> {
@@ -282,10 +391,105 @@ class LoginWebViewActivity : AppCompatActivity() {
         return super.dispatchKeyEvent(event)
     }
 
+    /** 2026-06-19 (user "prends tous les cookies") : cherche dans le DOM les
+     *  boutons de consentement cookies courants et les clique. Couvre les
+     *  patterns CMP les plus communs : OneTrust, Didomi, Quantcast, TrustArc,
+     *  Tealium, Cookiebot + custom (M6, TF1, Google).
+     *  Appelé manuellement via le bouton 🍪 ou automatiquement à
+     *  onPageFinished. */
+    private fun autoAcceptCookies(webView: WebView) {
+        val js = """
+            (function() {
+              try {
+                var clicked = [];
+                // Selectors connus pour boutons "Accepter tout"
+                var selectors = [
+                  '#didomi-notice-agree-button',
+                  '#onetrust-accept-btn-handler',
+                  '#cookiebot-accept-all',
+                  'button[id*="accept-all" i]',
+                  'button[id*="accept_all" i]',
+                  'button[id*="acceptAll" i]',
+                  'button[class*="accept-all" i]',
+                  'button[class*="accept_all" i]',
+                  'button[class*="acceptAll" i]',
+                  'button[aria-label*="Tout accepter" i]',
+                  'button[aria-label*="accept all" i]',
+                  'button[data-testid*="accept-all" i]',
+                  '[data-tracking-name*="accept"]',
+                  '.cmp-button-accept-all',
+                  '.didomi-button.didomi-button-highlight',
+                ];
+                for (var i = 0; i < selectors.length; i++) {
+                  var els = document.querySelectorAll(selectors[i]);
+                  for (var j = 0; j < els.length; j++) {
+                    var el = els[j];
+                    if (el.offsetParent !== null) { // visible
+                      el.click();
+                      clicked.push(selectors[i]);
+                    }
+                  }
+                }
+                // Fallback : cherche TOUS les boutons avec texte "accepter" / "accept all" / "j'accepte" / "ok cookies"
+                var allBtns = document.querySelectorAll('button, a, [role="button"]');
+                for (var k = 0; k < allBtns.length; k++) {
+                  var b = allBtns[k];
+                  if (b.offsetParent === null) continue;
+                  var txt = (b.textContent || '').toLowerCase().trim();
+                  if (txt === 'tout accepter' || txt === 'accept all' || txt === 'accepter tout' ||
+                      txt === 'j\'accepte' || txt === 'i agree' ||
+                      txt === 'accept cookies' || txt === 'accepter les cookies') {
+                    b.click();
+                    clicked.push('text:' + txt);
+                  }
+                }
+                return 'COOKIES:' + clicked.length + ':' + clicked.join('|');
+              } catch(e) { return 'ERR:' + e.message; }
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js) { result ->
+            Log.d(TAG, "Auto-accept cookies → $result")
+        }
+    }
+
     private fun simulateTapAtCursor() {
         // Position du tap = centre visible du curseur, dans les coords de la WebView.
         val tapX = cursorX + cursorSize / 2f
         val tapY = cursorY + cursorSize / 2f
+        // 2026-06-19 (user "le clic souris sur terminer la connexion ne
+        //   fonctionne pas" + screenshot avec bouton bleu sous dialog cookies) :
+        //   AVANT le dispatch JS sur WebView, vérifier si le curseur est sur
+        //   un Button Android natif (= mon bouton bleu "Terminer connexion"
+        //   ou autres en overlay). Si oui → performClick direct dessus.
+        //   Sinon → dispatch JS DOM sur la WebView dessous.
+        val cursorCenterX = cursorX + cursorSize / 2f
+        val cursorCenterY = cursorY + cursorSize / 2f
+        for (i in 0 until rootLayout.childCount) {
+            val child = rootLayout.getChildAt(i)
+            if (child is android.widget.Button && child.isClickable && child.visibility == View.VISIBLE) {
+                val loc = IntArray(2)
+                child.getLocationOnScreen(loc)
+                val rootLoc = IntArray(2)
+                rootLayout.getLocationOnScreen(rootLoc)
+                val left = loc[0] - rootLoc[0]
+                val top = loc[1] - rootLoc[1]
+                val right = left + child.width
+                val bottom = top + child.height
+                if (cursorCenterX >= left && cursorCenterX <= right &&
+                    cursorCenterY >= top && cursorCenterY <= bottom) {
+                    Log.d(TAG, "Virtual click on Android Button '${child.text}' (overlay)")
+                    child.performClick()
+                    // Flash visuel
+                    cursorView?.let { c ->
+                        c.alpha = 1f
+                        c.animate().alpha(0.4f).setDuration(80L).withEndAction {
+                            c.animate().alpha(1f).setDuration(120L).start()
+                        }.start()
+                    }
+                    return
+                }
+            }
+        }
         // Si une popup OAuth est ouverte, on tape DESSUS, sinon sur la WebView principale.
         val targetView: WebView = popupWebView ?: webView
 
@@ -310,49 +514,174 @@ class LoginWebViewActivity : AppCompatActivity() {
               try {
                 var el = document.elementFromPoint($cssX, $cssY);
                 if (!el) return 'NO_ELEMENT';
-                // Remonte au premier ancêtre cliquable
+                // 2026-06-19 (user "le clic pour aller sur les icônes Google
+                //   Facebook Apple ne fonctionne pas") : les icônes OAuth sont
+                //   des SVG → on REMONTE TOUJOURS jusqu'à un HTMLElement
+                //   parent cliquable (button/a/[role=button]/etc.). Sur SVG,
+                //   target.click n'existe pas et dispatchEvent ne propage pas
+                //   au button parent.
                 var clickable = el;
-                while (clickable && clickable !== document.body) {
+                while (clickable && clickable !== document.body && clickable !== document.documentElement) {
                   var tag = clickable.tagName ? clickable.tagName.toUpperCase() : '';
-                  if (tag === 'A' || tag === 'BUTTON' || tag === 'INPUT' ||
-                      clickable.onclick || clickable.getAttribute('role') === 'button' ||
-                      window.getComputedStyle(clickable).cursor === 'pointer') {
+                  var isHtml = clickable instanceof HTMLElement;
+                  if (isHtml && (
+                      tag === 'A' || tag === 'BUTTON' || tag === 'INPUT' || tag === 'SELECT' ||
+                      tag === 'LABEL' ||
+                      clickable.onclick !== null ||
+                      clickable.getAttribute('role') === 'button' ||
+                      clickable.getAttribute('role') === 'link' ||
+                      clickable.getAttribute('jsaction') !== null ||
+                      clickable.getAttribute('data-action') !== null ||
+                      clickable.hasAttribute('tabindex') ||
+                      window.getComputedStyle(clickable).cursor === 'pointer')) {
                     break;
                   }
                   clickable = clickable.parentElement;
                 }
-                var target = clickable || el;
+                // Si remontée à body/html sans trouver → fallback sur élément original
+                if (!clickable || clickable === document.body || clickable === document.documentElement) {
+                  clickable = el;
+                }
+                var target = clickable;
+                // Sécurité : si on a quand même un SVG, on remonte au parent HTMLElement
+                while (target && !(target instanceof HTMLElement) && target.parentElement) {
+                  target = target.parentElement;
+                }
                 // Focus si input pour permettre saisie clavier
                 if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
                   target.focus();
                   return 'FOCUS:' + target.tagName + ':' + (target.type || '');
                 }
-                target.click();
+                // 2026-06-19 (user "le clic pour aller sur les icônes comme
+                //   Google Facebook ou Apple ne fonctionne pas") : Google/FB/
+                //   Apple OAuth listenent les vrais MouseEvent/PointerEvent
+                //   pas un simple .click(). On dispatch la séquence COMPLÈTE
+                //   d'un vrai tap : pointerdown→mousedown→pointerup→mouseup→
+                //   click avec coordonnées clientX/clientY corrects.
+                var rect = target.getBoundingClientRect();
+                var cx = rect.left + rect.width / 2;
+                var cy = rect.top + rect.height / 2;
+                var evtOpts = {
+                  bubbles: true, cancelable: true, view: window,
+                  clientX: cx, clientY: cy, button: 0, buttons: 1
+                };
+                try { target.dispatchEvent(new PointerEvent('pointerdown', Object.assign({pointerType:'mouse',pointerId:1}, evtOpts))); } catch(e) {}
+                target.dispatchEvent(new MouseEvent('mousedown', evtOpts));
+                try { target.dispatchEvent(new PointerEvent('pointerup', Object.assign({pointerType:'mouse',pointerId:1}, evtOpts))); } catch(e) {}
+                target.dispatchEvent(new MouseEvent('mouseup', evtOpts));
+                target.dispatchEvent(new MouseEvent('click', evtOpts));
                 return 'CLICK:' + target.tagName + ':' + (target.textContent ? target.textContent.substring(0, 30) : '');
               } catch(e) { return 'ERR:' + e.message; }
             })();
         """.trimIndent()
         targetView.evaluateJavascript(js) { result ->
             Log.d(TAG, "Virtual click at ($cssX, $cssY) on ${if (popupWebView != null) "popup" else "main"} → $result")
-            // 2026-06-19 (user "arrivée ici pour cliquer dans l'adresse ça
-            //   marche pas") : si on a focusé un input, on ouvre le clavier
-            //   virtuel TV pour permettre la saisie. result format =
-            //   "FOCUS:INPUT:email" → on parse pour décider.
-            val isInput = result?.contains("FOCUS:INPUT") == true ||
-                          result?.contains("FOCUS:TEXTAREA") == true
+            // 2026-06-19 (user "le clic souris ne déclenche pas le clavier de
+            //   la page") : sur WebView TV, showSoftInput() échoue avec
+            //   "startInput must be called after bindInput" + "invalid token"
+            //   parce que la WebView n'a pas créé son InputConnection (= mon
+            //   DOM focus() n'est pas un touch natif).
+            //   FIX : on intercepte les inputs → AlertDialog avec EditText
+            //   Android natif. Au OK, on inject le texte dans le DOM via JS
+            //   et on dispatch les events input/change.
+            val cleanResult = result?.trim('"')
+            val isInput = cleanResult?.startsWith("FOCUS:INPUT") == true ||
+                          cleanResult?.startsWith("FOCUS:TEXTAREA") == true
             if (isInput) {
+                // result format = "FOCUS:INPUT:email" — extract input type
+                val inputType = cleanResult?.substringAfterLast(":") ?: ""
                 runOnUiThread {
-                    targetView.requestFocus()
-                    val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
-                        as? android.view.inputmethod.InputMethodManager
-                    imm?.showSoftInput(
-                        targetView,
-                        android.view.inputmethod.InputMethodManager.SHOW_FORCED
-                    )
-                    Log.d(TAG, "IME requested for input")
+                    showInputEditDialog(targetView, cssX, cssY, inputType)
                 }
             }
         }
+    }
+
+    /** 2026-06-19 : AlertDialog Android natif pour saisir du texte dans un
+     *  input HTML focusé. Au OK, injecte le texte dans le DOM via JS + dispatch
+     *  les events input/change pour que le framework JS de la page (React, Vue,
+     *  Gigya, etc.) capte la valeur. */
+    private fun showInputEditDialog(
+        webView: WebView,
+        cssX: Float,
+        cssY: Float,
+        htmlInputType: String,
+    ) {
+        val editText = android.widget.EditText(this).apply {
+            // Configurer le type clavier selon le type d'input HTML
+            inputType = when (htmlInputType) {
+                "password" ->
+                    android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                "email" ->
+                    android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+                "tel" ->
+                    android.text.InputType.TYPE_CLASS_PHONE
+                "number" ->
+                    android.text.InputType.TYPE_CLASS_NUMBER
+                else ->
+                    android.text.InputType.TYPE_CLASS_TEXT
+            }
+            setSingleLine(true)
+            // Récupère la valeur actuelle de l'input HTML pour éditer
+            val getValJs = """
+                (function() {
+                  try {
+                    var el = document.elementFromPoint($cssX, $cssY);
+                    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
+                      return el.value || '';
+                    }
+                    return '';
+                  } catch(e) { return ''; }
+                })();
+            """.trimIndent()
+            webView.evaluateJavascript(getValJs) { v ->
+                val current = v?.trim('"')?.replace("\\\"", "\"") ?: ""
+                if (current.isNotEmpty()) {
+                    setText(current)
+                    setSelection(current.length)
+                }
+            }
+        }
+        val title = when (htmlInputType) {
+            "password" -> "🔒 Mot de passe"
+            "email" -> "✉️ Adresse e-mail"
+            "tel" -> "📞 Téléphone"
+            else -> "✏️ Saisie"
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(editText)
+            .setPositiveButton("OK") { _, _ ->
+                val text = editText.text.toString()
+                // Échappe les apostrophes pour le JS
+                val escaped = text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
+                val setValJs = """
+                    (function() {
+                      try {
+                        var el = document.elementFromPoint($cssX, $cssY);
+                        if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')) return 'NO_INPUT';
+                        // Use native setter to bypass React's controlled input lock
+                        var setter = Object.getOwnPropertyDescriptor(
+                          window.HTMLInputElement.prototype, 'value'
+                        ).set;
+                        setter.call(el, '$escaped');
+                        // Dispatch events that React / Vue / Gigya listen to
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                        return 'OK:' + el.value;
+                      } catch(e) { return 'ERR:' + e.message; }
+                    })();
+                """.trimIndent()
+                webView.evaluateJavascript(setValJs) { result ->
+                    Log.d(TAG, "Input value injected: $result")
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+            .also {
+                // Auto-focus l'EditText pour montrer le clavier système
+                editText.requestFocus()
+            }
         // Petit flash visuel du curseur pour confirmer le clic.
         cursorView?.let { c ->
             c.alpha = 1f
@@ -462,6 +791,22 @@ class LoginWebViewActivity : AppCompatActivity() {
             super.onPageFinished(view, url)
             progress.visibility = View.GONE
             checkCookiesForToken(url)
+            // 2026-06-21 (user "sur BFM le mail et mdp ne se sauvegardent
+            //   pas, TF1 et M6 le font") : la page SSO BFM (sso.rmcbfmplay.com)
+            //   ne met pas les attributs autocomplete corrects sur ses inputs
+            //   → Android Autofill / Google Password Manager ne reconnaît pas
+            //   le formulaire → pas de propose-saving. On les force via JS.
+            if (service == SERVICE_BFM && url != null
+                && (url.contains("rmcbfmplay.com") || url.contains("sso.rmc"))
+            ) {
+                view?.evaluateJavascript(JS_FORCE_AUTOCOMPLETE_BFM, null)
+                // 2026-06-22 (user "je dois remettre mon mot de passe et mon
+                //   mail à chaque fois, c'est le pire des misères") :
+                //   injecte les credentials sauvegardés dans le formulaire SSO
+                //   BFM pour que l'user n'ait PAS à retaper. Il clique juste
+                //   "Se connecter" et c'est fini.
+                injectBfmSavedCredentials(view)
+            }
             // 2026-06-19 v35 (user "les logos pour se connecter avec Facebook
             //   Google et Apple apparaissent 2 secondes et s'en vont") :
             //   l'injection CSS hide cachait les logos OAuth. On la DÉSACTIVE
@@ -549,9 +894,20 @@ class LoginWebViewActivity : AppCompatActivity() {
         //   ne capte le cookie QUE si on est revenu sur le site M6/TF1 (= pas
         //   pendant la popup OAuth Google/Facebook/Apple qui redirige plein
         //   de fois et fait apparaître des cookies stale).
+        // 2026-06-21 : BFM utilise OIDC CAS — le token arrive dans le QUERY
+        //   STRING (?access_token=eyJ...) ou parfois le fragment (#access_token=).
+        //   Le SSO CAS BFM retourne un JWT RS512 (pas un token BFM_ préfixé).
+        //   On le capture AVANT le check cookies classique.
+        if (service == SERVICE_BFM &&
+            (currentUrl.contains("?access_token=") || currentUrl.contains("&access_token=") ||
+             currentUrl.contains("#access_token="))) {
+            captureBfmOidcToken(currentUrl)
+            return
+        }
         val isOnTargetSite = when (service) {
             SERVICE_M6 -> currentUrl.contains("6play.fr") || currentUrl.contains("m6.fr")
             SERVICE_TF1 -> currentUrl.contains("tf1.fr")
+            SERVICE_BFM -> currentUrl.contains("rmcbfmplay.com") || currentUrl.contains("sso.rmcbfmplay.com")
             else -> false
         }
         if (!isOnTargetSite) {
@@ -582,6 +938,267 @@ class LoginWebViewActivity : AppCompatActivity() {
      *
      * On cherche un cookie nom = `glt_<apikey>` (préfixe `glt_`).
      */
+    /** 2026-06-19 (user "le bouton connexion M6 est resté alors que TF1 a
+     *  bien disparu") : force-save le token M6 même si gigya-mid manque.
+     *  Appelé depuis le bouton "Terminer connexion 6play" — l'user signale
+     *  qu'il a fini son login, on enregistre ce qu'on a :
+     *    - glt_<apiKey> (= token) → M6Auth.saveToken
+     *    - apiKey (extrait du nom du cookie) → M6Auth.saveApiKey
+     *    - gigya-mid_<apiKey> (si présent) → M6Auth.saveAccountId
+     *  Au moins M6Auth.isLoggedIn devient true → card Connexion 6play
+     *  disparait du home. Si gigya-mid absent → DRM Live M6 peut ne pas
+     *  marcher mais Replay ok.
+     */
+    private fun forceSaveM6Token() {
+        val mergedCookies = mutableMapOf<String, String>()
+        try {
+            val cm = CookieManager.getInstance()
+            for (domain in listOf(
+                "https://www.6play.fr/", "https://6play.fr/",
+                "https://www.m6.fr/", "https://m6.fr/",
+                "https://login.6play.fr/", "https://accounts.6play.fr/",
+                "https://login-gigya.m6.fr/", "https://compte.m6.fr/",
+            )) {
+                val c = cm.getCookie(domain) ?: continue
+                c.split(";").forEach { kv ->
+                    val parts = kv.trim().split("=", limit = 2)
+                    if (parts.size == 2 && parts[0].isNotBlank()) {
+                        mergedCookies.putIfAbsent(parts[0], parts[1])
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "forceSaveM6Token: failed to read cookies: ${t.message}")
+        }
+        val gltEntry = mergedCookies.entries.firstOrNull { it.key.startsWith("glt_") }
+        val loginToken = gltEntry?.value
+        if (loginToken.isNullOrBlank()) {
+            Toast.makeText(this, "⚠ Aucun token M6 trouvé — t'es bien connecté ?", Toast.LENGTH_LONG).show()
+            Log.w(TAG, "forceSaveM6Token: NO glt_ cookie found")
+            setResult(RESULT_CANCELED)
+            finish()
+            return
+        }
+        val exp = mergedCookies.entries.firstOrNull { it.key.startsWith("gltexp_") }?.value?.toLongOrNull()
+        val apiKey = gltEntry.key.removePrefix("glt_")
+        val gigyaMid = mergedCookies.entries.firstOrNull { it.key.startsWith("gigya-mid_") }?.value
+        captured = true
+        M6Auth.saveToken(this, loginToken, refresh = null, exp = exp)
+        if (apiKey.isNotBlank()) M6Auth.saveApiKey(this, apiKey)
+        if (!gigyaMid.isNullOrBlank()) {
+            M6Auth.saveAccountId(this, gigyaMid)
+            Log.d(TAG, "forceSaveM6Token: full save (token + apiKey + gigya-mid)")
+            Toast.makeText(this, "✓ M6 6play connecté", Toast.LENGTH_SHORT).show()
+        } else {
+            Log.w(TAG, "forceSaveM6Token: DEGRADED save (token + apiKey, NO gigya-mid)")
+            Toast.makeText(this,
+                "✓ Connexion M6 partielle (Live DRM peut échouer)",
+                Toast.LENGTH_LONG).show()
+        }
+        setResult(RESULT_OK)
+        finish()
+    }
+
+    // ── BFM Play OIDC token capture ──
+
+    /**
+     * 2026-06-21 : Capture automatique du token BFM depuis l'URL OIDC.
+     * Le SSO CAS BFM retourne un JWT RS512 dans le QUERY STRING :
+     *   https://www.rmcbfmplay.com/?access_token=eyJhbGciOiJSUzUxMiJ9...
+     * (et non dans le fragment comme initialement supposé).
+     * On accepte les JWT (eyJ...) ET les tokens BFM_ pour compat future.
+     */
+    private fun captureBfmOidcToken(url: String) {
+        if (captured) return
+        // Tenter d'abord le query string (?access_token=...), puis le fragment (#access_token=...)
+        val params = mutableMapOf<String, String>()
+        // Parse query params
+        val queryStart = url.indexOf('?')
+        if (queryStart >= 0) {
+            val queryEnd = url.indexOf('#', queryStart).let { if (it < 0) url.length else it }
+            val query = url.substring(queryStart + 1, queryEnd)
+            query.split("&").forEach { kv ->
+                val parts = kv.split("=", limit = 2)
+                if (parts.size == 2) params[parts[0]] = parts[1]
+            }
+        }
+        // Parse fragment params (fallback)
+        val fragStart = url.indexOf('#')
+        if (fragStart >= 0) {
+            val frag = url.substring(fragStart + 1)
+            frag.split("&").forEach { kv ->
+                val parts = kv.split("=", limit = 2)
+                if (parts.size == 2) params.putIfAbsent(parts[0], parts[1])
+            }
+        }
+        val rawToken = params["access_token"]
+        if (rawToken.isNullOrBlank()) {
+            Log.d(TAG, "BFM captureBfmOidcToken: no access_token in URL")
+            return
+        }
+        // Accepter les JWT (eyJ...) ET les tokens BFM_ (ancien format)
+        if (!rawToken.startsWith("eyJ") && !rawToken.startsWith("BFM_")) {
+            Log.d(TAG, "BFM captureBfmOidcToken: token doesn't look like JWT or BFM_ (starts with ${rawToken.take(10)})")
+            return
+        }
+        val expiresIn = params["expires_in"]?.toLongOrNull() ?: 86400L
+        val expTimestamp = (System.currentTimeMillis() / 1000L) + expiresIn
+
+        // 2026-06-21 : Le SSO CAS BFM retourne un JWT RS512. Le backend
+        // gaia-core attend le champ `tu` (token user = BFM_xxx) du JWT,
+        // PAS le JWT lui-même. On décode le payload pour extraire `tu`.
+        var bfmToken: String = rawToken
+        var accountId: String? = null
+        if (rawToken.startsWith("eyJ")) {
+            try {
+                val parts = rawToken.split(".")
+                if (parts.size >= 2) {
+                    // Decode le payload (base64url → JSON)
+                    val payloadB64 = parts[1]
+                    // Pad base64url si nécessaire
+                    val padded = payloadB64.replace('-', '+').replace('_', '/')
+                        .let { it + "=".repeat((4 - it.length % 4) % 4) }
+                    val payloadJson = String(android.util.Base64.decode(padded, android.util.Base64.DEFAULT))
+                    val payload = org.json.JSONObject(payloadJson)
+                    Log.d(TAG, "BFM JWT decoded: iss=${payload.optString("iss")}, sub=${payload.optString("sub").take(60)}")
+
+                    // Extraire tu (token user = BFM_xxx) → c'est le VRAI token API
+                    val tu = payload.optString("tu", "")
+                    if (tu.startsWith("BFM_")) {
+                        bfmToken = tu
+                        Log.d(TAG, "BFM JWT → tu extracted (len=${tu.length})")
+                    } else {
+                        Log.w(TAG, "BFM JWT has no BFM_ tu field, using raw JWT as token")
+                    }
+
+                    // Extraire accountId depuis fu (fiche user)
+                    val fuStr = payload.optString("fu", "")
+                    if (fuStr.isNotBlank()) {
+                        try {
+                            val fu = org.json.JSONObject(fuStr)
+                            val ficheUser = fu.optJSONObject("ficheUser")
+                            accountId = ficheUser?.optString("idAsc", null)
+                            if (!accountId.isNullOrBlank()) {
+                                Log.d(TAG, "BFM JWT → accountId from fu: ${accountId.take(15)}...")
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "BFM JWT fu parse failed: ${e.message}")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "BFM JWT decode failed, saving raw token: ${e.message}")
+            }
+        }
+
+        captured = true
+        BfmAuth.saveToken(this, bfmToken, exp = expTimestamp)
+        if (!accountId.isNullOrBlank()) {
+            BfmAuth.saveAccountId(this, accountId)
+        }
+        // Tenter aussi l'API profils (peut échouer si le token est un JWT)
+        fetchBfmAccountId(bfmToken)
+        Toast.makeText(this, "✓ Connecté à RMC BFM Play", Toast.LENGTH_SHORT).show()
+        Log.d(TAG, "BFM OIDC token captured → saved tu=${bfmToken.startsWith("BFM_")} (len=${bfmToken.length}, expires_in=$expiresIn)")
+        setResult(RESULT_OK)
+        finish()
+    }
+
+    /**
+     * Bouton "Terminer connexion BFM Play" — fallback si la capture auto
+     * n'a pas fonctionné. Tente d'abord l'URL courante (query+fragment),
+     * puis injecte du JS pour chercher le JWT dans localStorage/sessionStorage.
+     */
+    private fun forceSaveBfmToken() {
+        // D'abord tenter de récupérer le token depuis l'URL actuelle (query ou fragment)
+        val currentUrl = webView.url ?: ""
+        if (currentUrl.contains("access_token=")) {
+            captureBfmOidcToken(currentUrl)
+            if (captured) return
+        }
+        // Sinon, tenter de lire le token depuis localStorage via JS
+        // Chercher les JWT (eyJ...) ET les tokens BFM_ (ancien format)
+        webView.evaluateJavascript("""
+            (function() {
+              try {
+                function isToken(v) {
+                  return v && (v.indexOf('eyJ') === 0 || v.indexOf('BFM_') === 0);
+                }
+                // Essayer localStorage
+                var keys = Object.keys(localStorage);
+                for (var i = 0; i < keys.length; i++) {
+                  var v = localStorage.getItem(keys[i]);
+                  if (isToken(v)) return v;
+                  try {
+                    var j = JSON.parse(v);
+                    if (j && isToken(j.access_token)) return j.access_token;
+                    if (j && isToken(j.token)) return j.token;
+                  } catch(e) {}
+                }
+                // Essayer sessionStorage
+                keys = Object.keys(sessionStorage);
+                for (var i = 0; i < keys.length; i++) {
+                  var v = sessionStorage.getItem(keys[i]);
+                  if (isToken(v)) return v;
+                }
+                return '';
+              } catch(e) { return ''; }
+            })();
+        """.trimIndent()) { result ->
+            val token = result?.trim()?.replace("\"", "") ?: ""
+            if (token.startsWith("eyJ") || token.startsWith("BFM_")) {
+                captured = true
+                val expTimestamp = (System.currentTimeMillis() / 1000L) + 86400L
+                BfmAuth.saveToken(this, token, exp = expTimestamp)
+                fetchBfmAccountId(token)
+                Toast.makeText(this, "✓ Connecté à RMC BFM Play", Toast.LENGTH_SHORT).show()
+                setResult(RESULT_OK)
+                finish()
+            } else {
+                Toast.makeText(this,
+                    "⚠ Aucun token BFM trouvé — connecte-toi d'abord",
+                    Toast.LENGTH_LONG).show()
+                Log.w(TAG, "forceSaveBfmToken: no JWT/BFM_ token found in localStorage/URL")
+            }
+        }
+    }
+
+    /**
+     * Récupère l'accountId BFM via l'API profils (background, non bloquant).
+     * Stocké dans BfmAuth pour la customdata DRM.
+     */
+    private fun fetchBfmAccountId(token: String) {
+        Thread {
+            try {
+                val url = "https://ws-backendtv.rmcbfmplay.com/heimdall-core/public/api/v2/userProfiles?token=$token"
+                val req = okhttp3.Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "ONYX/1.0")
+                    .header("Accept", "application/json")
+                    .build()
+                val resp = okhttp3.OkHttpClient().newCall(req).execute()
+                val body = resp.body?.string().orEmpty()
+                if (resp.isSuccessful && body.isNotBlank()) {
+                    val json = org.json.JSONObject(body)
+                    // L'API peut retourner un accountId ou userId dans le profil
+                    val accountId = json.optString("accountId",
+                        json.optString("userId",
+                            json.optString("id", "")))
+                    if (accountId.isNotBlank()) {
+                        BfmAuth.saveAccountId(this@LoginWebViewActivity, accountId)
+                        Log.d(TAG, "BFM accountId saved: ${accountId.take(10)}...")
+                    } else {
+                        Log.w(TAG, "BFM profiles response has no accountId: ${body.take(200)}")
+                    }
+                } else {
+                    Log.w(TAG, "BFM profiles HTTP ${resp.code}: ${body.take(200)}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "BFM fetchAccountId failed: ${e.message}")
+            }
+        }.start()
+    }
+
     private fun captureM6(cookies: Map<String, String>) {
         // 2026-06-19 v40 (user "ta reconnexion ne fonctionne pas") : élargit
         //   la recherche cookies sur les 3 domaines M6+ (= les cookies Gigya
@@ -671,7 +1288,7 @@ class LoginWebViewActivity : AppCompatActivity() {
         if (captured) return
         captured = true
         Log.d(TAG, "User a cliqué 'Terminer connexion' → injection JS")
-        Toast.makeText(this, "Récupération du token TF1+…", Toast.LENGTH_SHORT).show()
+        Log.d(TAG, "Récupération du token TF1+…")
         webView.evaluateJavascript(JS_CAPTURE_TF1_JWT, null)
     }
 
@@ -713,14 +1330,246 @@ class LoginWebViewActivity : AppCompatActivity() {
         //   automatique avant expiration (= TF1JwtRefresher.needsRefresh()).
         val expSec = com.streamflixreborn.streamflix.utils.TF1JwtRefresher.parseJwtExp(token)
         TF1Auth.saveToken(this, token, refresh = null, exp = expSec)
-        Toast.makeText(this,
-            "✓ Connecté à TF1+ (JWT ${token.length} chars)",
-            Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "✓ TF1+ connecté", Toast.LENGTH_SHORT).show()
         Log.i(TAG, "JWT TF1+ saved (len=${token.length}, exp=$expSec)")
         setResult(RESULT_OK)
         finish()
     }
+
+    // ── Auto-fill credentials BFM dans le formulaire SSO ──
+
+    /**
+     * 2026-06-22 (user "je dois remettre mon mot de passe et mon mail à chaque
+     *   fois — c'est le pire des misères") :
+     *   Injecte les credentials sauvegardés (BfmSsoAuth) dans le formulaire
+     *   SSO BFM : remplit email + password + déclenche les events input/change
+     *   pour que le framework CAS les reconnaisse. L'user n'a plus qu'à
+     *   cliquer "Se connecter" sans rien retaper.
+     *   On ne fait PAS d'auto-submit (= l'user garde le contrôle du clic).
+     */
+    private fun injectBfmSavedCredentials(view: WebView?) {
+        val ctx = applicationContext
+        val email = com.streamflixreborn.streamflix.utils.BfmSsoAuth.savedEmail(ctx)
+        val pass = com.streamflixreborn.streamflix.utils.BfmSsoAuth.savedPassword(ctx)
+        if (email.isNullOrBlank() || pass.isNullOrBlank()) {
+            Log.d(TAG, "BFM autofill: no saved credentials")
+            return
+        }
+        // Escape JS string literals (backslash, quotes, newlines)
+        val emailJs = email.replace("\\", "\\\\").replace("'", "\\'")
+            .replace("\n", "\\n").replace("\r", "\\r")
+        val passJs = pass.replace("\\", "\\\\").replace("'", "\\'")
+            .replace("\n", "\\n").replace("\r", "\\r")
+
+        val js = """
+        (function() {
+          try {
+            if (window.__onyxBfmFilled) return;
+            var filled = false;
+            function fillForm() {
+              var emailInput = null, pwdInput = null;
+              document.querySelectorAll('input').forEach(function(el) {
+                var t = (el.type || '').toLowerCase();
+                var n = (el.name || el.id || '').toLowerCase();
+                var ph = (el.placeholder || '').toLowerCase();
+                if ((t === 'email' || n.indexOf('mail') >= 0 || n.indexOf('user') >= 0
+                    || n.indexOf('login') >= 0) && t !== 'password') {
+                  emailInput = el;
+                }
+                if (t === 'password' || n.indexOf('pass') >= 0) {
+                  pwdInput = el;
+                }
+              });
+              if (emailInput && pwdInput) {
+                // Set values via native setter (React/Angular compatible)
+                var nativeSet = Object.getOwnPropertyDescriptor(
+                  window.HTMLInputElement.prototype, 'value').set;
+                nativeSet.call(emailInput, '$emailJs');
+                nativeSet.call(pwdInput, '$passJs');
+                // Fire events so the CAS framework sees the change
+                ['input','change','blur'].forEach(function(evt) {
+                  emailInput.dispatchEvent(new Event(evt, {bubbles:true}));
+                  pwdInput.dispatchEvent(new Event(evt, {bubbles:true}));
+                });
+                emailInput.setAttribute('value', '$emailJs');
+                pwdInput.setAttribute('value', '$passJs');
+                window.__onyxBfmFilled = true;
+                filled = true;
+                console.log('[OnyxBFM] autofill OK');
+              }
+            }
+            fillForm();
+            if (!filled) {
+              // Form pas encore rendu (SPA) → retry toutes les 300ms max 15 fois
+              var attempts = 0;
+              var iv = setInterval(function() {
+                fillForm();
+                attempts++;
+                if (filled || attempts >= 15) clearInterval(iv);
+              }, 300);
+            }
+          } catch(e) { console.log('[OnyxBFM] autofill err: ' + e.message); }
+        })();
+        """.trimIndent()
+
+        view?.evaluateJavascript(js, null)
+        Log.d(TAG, "BFM autofill JS injected (email=${email.take(5)}…)")
+    }
+
+    // ── Bridge JS pour capturer les credentials BFM au submit ──
+
+    /**
+     * 2026-06-21 : sauvegarde email/password BFM dans BfmSsoAuth pour
+     * permettre le re-login automatique quand le token OIDC expire (~24h).
+     * Le JS injecté intercepte le submit du formulaire SSO et appelle
+     * OnyxBfmBridge.onCredentials(email, password).
+     */
+    inner class BfmCredsBridge {
+        @android.webkit.JavascriptInterface
+        fun onCredentials(email: String?, password: String?) {
+            if (email.isNullOrBlank() || password.isNullOrBlank()) {
+                Log.d(TAG, "BFM creds bridge: empty email or password")
+                return
+            }
+            Log.d(TAG, "BFM credentials captured (email=${email.take(5)}…)")
+            com.streamflixreborn.streamflix.utils.BfmSsoAuth.saveCredentials(
+                this@LoginWebViewActivity, email, password
+            )
+        }
+    }
 }
+
+/** 2026-06-21 (user "sur BFM, le mail et le mdp ne se sauvegardent pas, je
+ *  dois le rentrer à chaque fois — TF1 et M6 le font") :
+ *  La page SSO RMC BFM Play (sso.rmcbfmplay.com) n'a pas d'attributs
+ *  `autocomplete` sur ses inputs email/password → Android Autofill / Google
+ *  Password Manager ne reconnaît pas le formulaire et ne propose pas de
+ *  sauvegarder/restituer les credentials.
+ *
+ *  Fix : injecte les bons hints autocomplete + name + id pour que :
+ *  - Le password manager Android propose la sauvegarde après login réussi
+ *  - À la prochaine ouverture, les champs soient pré-remplis automatiquement
+ *
+ *  TF1 et M6 ont déjà ces attributs sur leur page de login (= c'est pour ça
+ *  que ça marche tout seul chez eux).
+ */
+private const val JS_FORCE_AUTOCOMPLETE_BFM = """
+(() => {
+  try {
+    if (window.__onyxBfmAutocompleteInjected) return;
+    window.__onyxBfmAutocompleteInjected = true;
+    function tagInputs() {
+      var anyEmail = false, anyPwd = false;
+      document.querySelectorAll('input').forEach(function(el) {
+        var t = (el.type || '').toLowerCase();
+        var name = (el.name || el.id || '').toLowerCase();
+        var ph = (el.placeholder || '').toLowerCase();
+        var lbl = (el.getAttribute('aria-label') || '').toLowerCase();
+        var emailHint = t === 'email' || name.indexOf('mail') >= 0 ||
+                        name.indexOf('login') >= 0 || name.indexOf('user') >= 0 ||
+                        ph.indexOf('mail') >= 0 || lbl.indexOf('mail') >= 0;
+        var pwdHint = t === 'password' || name.indexOf('pass') >= 0 ||
+                      ph.indexOf('pass') >= 0 || lbl.indexOf('pass') >= 0;
+        if (emailHint && t !== 'password') {
+          el.setAttribute('autocomplete', 'email');
+          el.setAttribute('inputmode', 'email');
+          if (!el.name) el.name = 'email';
+          if (!el.id) el.id = 'email';
+          anyEmail = true;
+        } else if (pwdHint) {
+          el.setAttribute('autocomplete', 'current-password');
+          if (!el.name) el.name = 'password';
+          if (!el.id) el.id = 'password';
+          anyPwd = true;
+        }
+      });
+      // Le form parent doit aussi avoir autocomplete=on pour que le PM
+      // Android propose la sauvegarde au submit.
+      document.querySelectorAll('form').forEach(function(f) {
+        f.setAttribute('autocomplete', 'on');
+        f.setAttribute('method', f.getAttribute('method') || 'post');
+      });
+      return 'BFM_AUTOFILL: email=' + anyEmail + ' pwd=' + anyPwd;
+    }
+    var r1 = tagInputs();
+    console.log('[OnyxBFM] ' + r1);
+    // Re-tag si la page injecte les inputs en JS asynchrone (React/Angular)
+    var attempts = 0;
+    var iv = setInterval(function() {
+      attempts++;
+      var r = tagInputs();
+      if (attempts >= 10) clearInterval(iv);
+    }, 500);
+    // 2026-06-21 : intercepter le submit du formulaire pour capturer
+    //   email/password et les sauvegarder via OnyxBfmBridge pour le
+    //   re-login automatique quand le token OIDC expire (~24h).
+    if (window.OnyxBfmBridge && !window.__onyxBfmSubmitHooked) {
+      window.__onyxBfmSubmitHooked = true;
+      function __onyxReadCreds() {
+        var email = '', pwd = '';
+        document.querySelectorAll('input').forEach(function(el) {
+          var t = (el.type || '').toLowerCase();
+          var n = (el.name || el.id || '').toLowerCase();
+          if ((t === 'email' || n.indexOf('mail') >= 0 || n.indexOf('user') >= 0
+              || n.indexOf('login') >= 0) && t !== 'password' && el.value) {
+            email = el.value;
+          }
+          if (t === 'password' && el.value) {
+            pwd = el.value;
+          }
+        });
+        return {email: email, pwd: pwd};
+      }
+      function __onyxSendCreds(tag) {
+        var c = __onyxReadCreds();
+        if (c.email && c.pwd && c.pwd.length >= 3) {
+          window.OnyxBfmBridge.onCredentials(c.email, c.pwd);
+          console.log('[OnyxBFM] credentials sent to bridge (' + tag + ')');
+        }
+      }
+      // Hook form submit
+      document.addEventListener('submit', function(e) {
+        try { __onyxSendCreds('submit'); } catch(ex) {}
+      }, true);
+      // Hook click sur boutons submit/connexion
+      document.addEventListener('click', function(e) {
+        try {
+          var el = e.target;
+          if (!el) return;
+          var tag = (el.tagName || '').toLowerCase();
+          var type = (el.type || '').toLowerCase();
+          var txt = (el.textContent || '').toLowerCase();
+          if ((tag === 'button' || tag === 'input') &&
+              (type === 'submit' || txt.indexOf('connexion') >= 0 ||
+               txt.indexOf('connect') >= 0 || txt.indexOf('login') >= 0 ||
+               txt.indexOf('sign in') >= 0)) {
+            __onyxSendCreds('click');
+          }
+        } catch(ex) {}
+      }, true);
+      // 2026-06-21 v2 (user "BFM se déconnecte à chaque fois qu'on quitte
+      //   le provider") : la page SSO CAS peut soumettre le formulaire via
+      //   AJAX/fetch sans déclencher l'event submit ni un vrai clic bouton.
+      //   → capture PÉRIODIQUE des inputs toutes les 2s dès que les deux
+      //   champs sont remplis. Comme ça, même si le JS submit ne fire pas,
+      //   on a les credentials AVANT la redirection OIDC.
+      var __onyxCredsSaved = false;
+      var __onyxCredIv = setInterval(function() {
+        try {
+          if (__onyxCredsSaved) { clearInterval(__onyxCredIv); return; }
+          var c = __onyxReadCreds();
+          if (c.email && c.pwd && c.pwd.length >= 3) {
+            window.OnyxBfmBridge.onCredentials(c.email, c.pwd);
+            __onyxCredsSaved = true;
+            console.log('[OnyxBFM] credentials captured (periodic)');
+            clearInterval(__onyxCredIv);
+          }
+        } catch(ex) {}
+      }, 2000);
+    }
+  } catch (e) { console.log('[OnyxBFM] err: ' + e.message); }
+})();
+"""
 
 /** 2026-06-19 v42 (user "Impossible de vous connecter" sur OAuth Google) :
  *  Google's allow_browser_login API check le JS fingerprint pour détecter

@@ -367,8 +367,15 @@ open class PapadustreamExtractor : Extractor() {
                                 : origPerm.call(window.navigator.permissions, p);
                         };
                     }
-                    // 5) Chrome runtime stub (Turnstile may check window.chrome)
-                    if (!window.chrome) window.chrome = { runtime: {} };
+                    // 5) Chrome runtime — objet complet (Turnstile vérifie plusieurs props)
+                    if (!window.chrome) {
+                        window.chrome = {
+                            app: { isInstalled: false, getDetails: function(){}, getIsInstalled: function(){}, installState: function(){}, runningState: function(){ return 'cannot_run'; } },
+                            runtime: { id: undefined, connect: function(){}, sendMessage: function(){}, onMessage: { addListener: function(){}, removeListener: function(){} }, PlatformOs: { ANDROID: 'android' }, lastError: null },
+                            csi: function(){ return {}; },
+                            loadTimes: function(){ return {}; }
+                        };
+                    }
                     log('stealth patches applied');
                 } catch(e) { log('stealth err: ' + e.message); }
 

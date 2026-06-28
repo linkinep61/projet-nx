@@ -365,11 +365,16 @@
             <!-- 2026-06-09 (user "les réglages tu les as pas mis où il faut
                  ils sont censés être dans l'onglet apparence") : toggle
                  global carrousel-comme-fond, déplacé depuis screen_playback. -->
-            <SwitchPreference
-                android:key="CAROUSEL_AS_BACKGROUND"
-                android:title="Carrousel comme fond d'écran"
-                android:summary="Affiche la bannière du film/série en focus en fond. Désactive pour un fond statique."
-                android:defaultValue="true" />
+            <!-- 2026-06-21 (user "réunir toutes ces préférences en une seule
+                 option pour éviter d'avoir trop de trucs partout") :
+                 4 modes regroupés dans UNE seule liste déroulante. -->
+            <ListPreference
+                android:key="HOME_BG_MODE"
+                android:title="Affichage du home"
+                android:summary="%s"
+                android:entries="@array/home_bg_mode_entries"
+                android:entryValues="@array/home_bg_mode_values"
+                android:defaultValue="carousel" />
 
             <!-- 2026-06-09 : fond d'écran personnalisé. -->
             <Preference

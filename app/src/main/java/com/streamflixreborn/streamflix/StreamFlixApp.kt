@@ -163,6 +163,10 @@ class StreamFlixApp : Application() {
             } catch (_: Throwable) {}
         }.start()
 
+        // 2026-06-28 v5 (user "avant c'était instantané") : pre-warm SUPPRIMÉ.
+        //   Il ajoutait de la latence visible (44s !) au lieu d'optimiser.
+        //   Revert à l'archi initiale : pas de warmUp, cache HomeBoot via getHome au click.
+
         // 2026-05-18 : UncaughtExceptionHandler — sauvegarde le stack trace
         //   dans last_crash.txt (lu par CrashActivity + buildBugReport).
         //   Sans ça, le fichier n'était jamais écrit, donc le rapport bug
@@ -310,12 +314,17 @@ class StreamFlixApp : Application() {
             com.streamflixreborn.streamflix.providers.LiveTvHubProvider
                 .installReplayDiskCache(cacheDir)
             com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+                .installFastDiskCache(cacheDir)
+            com.streamflixreborn.streamflix.providers.LiveTvHubProvider
                 .installAppContext(applicationContext)
             // 2026-06-18 : TF1Resolver lit le token TF1 via TF1Auth → Context.
             com.streamflixreborn.streamflix.utils.TF1Resolver
                 .installContext(applicationContext)
             // 2026-06-19 : M6Resolver lit le token M6 via M6Auth → Context.
             com.streamflixreborn.streamflix.utils.M6Resolver
+                .installContext(applicationContext)
+            // 2026-06-20 : BfmResolver lit le token BFM via BfmAuth → Context.
+            com.streamflixreborn.streamflix.utils.BfmResolver
                 .installContext(applicationContext)
             // 2026-06-19 v38 (user "creuse pourquoi OTF") : OtfTvService a
             //   besoin du Context pour Settings.Secure.ANDROID_ID (= le vrai
@@ -340,6 +349,9 @@ class StreamFlixApp : Application() {
                         com.streamflixreborn.streamflix.providers.LiveTvHubProvider
                             .warmReplayCache()
                         Log.d("StreamFlixApp", "Replay cache warmed at cold start (TV Hub active)")
+                        com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+                            .warmFastCache()
+                        Log.d("StreamFlixApp", "FAST cache warmed at cold start (TV Hub active)")
                     } catch (e: Throwable) {
                         Log.w("StreamFlixApp", "Replay warm failed: ${e.message}")
                     }

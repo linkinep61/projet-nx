@@ -238,7 +238,18 @@ object FranimeProvider : Provider {
             }
         }.ifBlank { "Anime #${optLong("id")}" }
 
+    /** 2026-06-23 (user "FRAnime, jaquettes longues à charger") : la grille
+     *  utilise `affiche_small` (~50 KB JPG) au lieu de `affiche` original
+     *  (1-2 MB PNG/JPG HD) → 20-40× moins de bandwidth → chargement quasi
+     *  instantané. Pour la fiche détail (= getMovie/getTvShow), on a un
+     *  `bestPosterFull()` séparé qui privilégie la HD. */
     private fun JSONObject.bestPoster(): String? {
+        return optString("affiche_small").takeIf { it.startsWith("http") }
+            ?: optString("affiche").takeIf { it.startsWith("http") }
+    }
+
+    /** Version HD pour la fiche détail uniquement (= image grande, mieux rendue). */
+    private fun JSONObject.bestPosterFull(): String? {
         return optString("affiche").takeIf { it.startsWith("http") }
             ?: optString("affiche_small").takeIf { it.startsWith("http") }
     }
@@ -307,9 +318,12 @@ object FranimeProvider : Provider {
             .map { it.toItem() }
         if (recent.isNotEmpty()) categories.add(Category(name = Category.FEATURED, list = recent))
 
-        // Derniers ajouts (par updatedDate, mix films/séries)
-        val latest = all.sortedByDescending { it.optString("updatedDate") }.take(40)
+        // Derniers ajouts (par updatedDate, mix films/séries) — sans les 8 du carousel
+        val recentIds = recent.mapNotNull { when (it) { is TvShow -> it.id; is Movie -> it.id; else -> null } }.toSet()
+        val latest = all.sortedByDescending { it.optString("updatedDate") }.take(48)
             .map { it.toItem() }
+            .filter { item -> val id = when (item) { is TvShow -> item.id; is Movie -> item.id; else -> "" }; id !in recentIds }
+            .take(40)
         if (latest.isNotEmpty()) categories.add(Category(name = "Derniers ajouts", list = latest))
 
         // 2026-05-17 : section dédiée Films (long-métrages anime)
@@ -440,7 +454,8 @@ object FranimeProvider : Provider {
         val animeId = id.toLongOrNull() ?: return fallback(id)
         val anime = getAnimeById(animeId) ?: return fallback(id)
         val saisons = anime.optJSONArray("saisons") ?: JSONArray()
-        val poster = anime.bestPoster()
+        // Fiche détail = HD (affiche original ~1 MB), c'est OK car 1 seul fetch.
+        val poster = anime.bestPosterFull()
         val seasons = (0 until saisons.length()).map { i ->
             val s = saisons.optJSONObject(i)
             val sNum = i + 1
@@ -453,6 +468,7 @@ object FranimeProvider : Provider {
         }.ifEmpty {
             listOf(Season(id = "$id/1", number = 1, title = "Saison 1", poster = poster))
         }
+
         return TvShow(
             id = id,
             title = anime.bestTitle(),
@@ -474,7 +490,8 @@ object FranimeProvider : Provider {
         // 2026-05-17 : récupère le film par id depuis le catalogue.
         val animeId = id.toLongOrNull() ?: return Movie(id = id, title = "Anime #$id")
         val anime = getAnimeById(animeId) ?: return Movie(id = id, title = "Anime #$id")
-        val poster = anime.bestPoster()
+        // Fiche détail = HD (affiche original ~1 MB), OK car 1 seul fetch.
+        val poster = anime.bestPosterFull()
         return Movie(
             id = id,
             title = anime.bestTitle(),
@@ -496,6 +513,7 @@ object FranimeProvider : Provider {
         if (sNum > saisons.length()) return emptyList()
         val saison = saisons.optJSONObject(sNum - 1) ?: return emptyList()
         val episodes = saison.optJSONArray("episodes") ?: return emptyList()
+
         return (0 until episodes.length()).map { i ->
             val ep = episodes.optJSONObject(i)
             val n = i + 1

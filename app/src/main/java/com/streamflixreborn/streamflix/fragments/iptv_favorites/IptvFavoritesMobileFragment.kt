@@ -25,6 +25,8 @@ import com.streamflixreborn.streamflix.ui.SpacingItemDecoration
 import com.streamflixreborn.streamflix.utils.IptvFavoritesStore
 import com.streamflixreborn.streamflix.utils.MiniPlayerController
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import androidx.transition.TransitionManager
+import androidx.transition.AutoTransition
 import com.streamflixreborn.streamflix.utils.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -145,16 +147,36 @@ class IptvFavoritesMobileFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             MiniPlayerController.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
                 if (_binding == null) return@collect
+                // 2026-06-22 : animation fluide — la liste se comprime
+                val wasVisible = binding.miniPlayerContainer.visibility == View.VISIBLE
                 when (state) {
                     is MiniPlayerController.State.Idle -> {
+                        if (wasVisible) {
+                            TransitionManager.beginDelayedTransition(
+                                binding.root as ViewGroup,
+                                AutoTransition().apply { duration = 300 }
+                            )
+                        }
                         binding.miniPlayerContainer.visibility = View.GONE
                     }
                     is MiniPlayerController.State.Loading -> {
+                        if (!wasVisible) {
+                            TransitionManager.beginDelayedTransition(
+                                binding.root as ViewGroup,
+                                AutoTransition().apply { duration = 300 }
+                            )
+                        }
                         com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.VISIBLE
                     }
                     is MiniPlayerController.State.Playing -> {
+                        if (!wasVisible) {
+                            TransitionManager.beginDelayedTransition(
+                                binding.root as ViewGroup,
+                                AutoTransition().apply { duration = 300 }
+                            )
+                        }
                         com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.GONE
@@ -243,7 +265,13 @@ class IptvFavoritesMobileFragment : Fragment() {
         }
 
         val favoriteIds = IptvFavoritesStore.getFavorites(provider.name)
-        if (favoriteIds.isEmpty()) {
+        // 2026-06-20 (user "Dans le TV hub quand je mets un favori Il n'apparaît
+        //   pas Dans le cœur que tu vois à gauche") : ne pas early-return si
+        //   au moins des favoris replay existent (TV Hub a 2 sources de favs).
+        val hasReplayFavs = try {
+            com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.all().isNotEmpty()
+        } catch (_: Throwable) { false }
+        if (favoriteIds.isEmpty() && !hasReplayFavs) {
             appAdapter.submitList(emptyList())
             Toast.makeText(
                 requireContext(),

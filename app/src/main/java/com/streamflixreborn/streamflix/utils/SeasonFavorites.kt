@@ -129,6 +129,9 @@ object SeasonFavorites {
     /** Toutes les saisons favorites du profil courant, plus récentes d'abord. */
     fun all(): List<Entry> = readAll().sortedByDescending { it.favoritedAt }
 
+    /** 2026-06-22 : vide toutes les saisons favorites du profil courant. */
+    fun clearAll() = writeAll(emptyList())
+
     /** Parse `seasonfav::<provider>::<showId>::<seasonNumber>` → (provider, showId, seasonNumber). */
     fun parseSyntheticId(syntheticId: String): Triple<String, String, Int>? {
         if (!syntheticId.startsWith(SYNTHETIC_ID_PREFIX)) return null

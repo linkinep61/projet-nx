@@ -111,20 +111,31 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
                                             is TvShow -> item.title
                                             else -> null
                                         } ?: return@async
-                                        // 2026-05-05 : normalise (apostrophe typo, annotations VF/saison) avant TMDB
                                         val normalized = com.streamflixreborn.streamflix.utils.TitleNormalizer.cleanForTmdbSearch(title)
-                                        val results = TMDb3.Search.multi(normalized.ifBlank { title })
+                                        val searchQuery = normalized.ifBlank { title }
+                                        if (searchQuery.length < 2) return@async
+                                        val results = TMDb3.Search.multi(searchQuery, language = "fr-FR")
+                                        // Matching strict : langue anime + titre similaire
                                         val animeMatch = results.results.firstOrNull { result ->
                                             when (result) {
-                                                is TMDb3.Movie -> result.originalLanguage in animeLanguages && result.backdropPath != null
-                                                is TMDb3.Tv -> result.originalLanguage in animeLanguages && result.backdropPath != null
+                                                is TMDb3.Movie -> result.originalLanguage in animeLanguages && result.backdropPath != null && run {
+                                                    val t = result.title?.trim() ?: ""; t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
+                                                }
+                                                is TMDb3.Tv -> result.originalLanguage in animeLanguages && result.backdropPath != null && run {
+                                                    val t = result.name?.trim() ?: ""; t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
+                                                }
                                                 else -> false
                                             }
                                         }
+                                        // Fallback : accepter n'importe quelle langue si titre match
                                         val anyMatch = animeMatch ?: results.results.firstOrNull { result ->
                                             when (result) {
-                                                is TMDb3.Movie -> result.backdropPath != null
-                                                is TMDb3.Tv -> result.backdropPath != null
+                                                is TMDb3.Movie -> result.backdropPath != null && run {
+                                                    val t = result.title?.trim() ?: ""; t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
+                                                }
+                                                is TMDb3.Tv -> result.backdropPath != null && run {
+                                                    val t = result.name?.trim() ?: ""; t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
+                                                }
                                                 else -> false
                                             }
                                         }
@@ -144,8 +155,21 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
                             }.awaitAll()
                         }
                     }
-                    categories.add(Category(name = Category.FEATURED, list = featuredItems))
-                    categories.add(Category(name = "En cours", list = allItems))
+                    // Ne garder dans le carrousel que les items avec backdrop TMDb HD (min 5 sinon liste complète)
+                    val carouselItems = featuredItems.filter { item ->
+                        val b = when (item) { is Movie -> item.banner; is TvShow -> item.banner; else -> null }
+                        b != null && b.contains("/t/p/")
+                    }
+                    val finalCarousel = if (carouselItems.size >= 5) carouselItems else featuredItems
+                    if (finalCarousel.isNotEmpty()) {
+                        categories.add(Category(name = Category.FEATURED, list = finalCarousel))
+                    }
+                    // 2026-06-23 : retirer du "En cours" les items déjà dans le carousel
+                    val featuredIds = finalCarousel.mapNotNull { when (it) { is TvShow -> it.id; is Movie -> it.id; else -> null } }.toSet()
+                    categories.add(Category(name = "En cours", list = allItems.filter { item ->
+                        val id = when (item) { is TvShow -> item.id; is Movie -> item.id; else -> "" }
+                        id !in featuredIds
+                    }))
                 }
 
                 // 2. Nouveau

@@ -526,9 +526,6 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             if (UserPreferences.enableTmdb) {
                 runCatching {
                     coroutineScope {
-                        // 2026-05-10 : CAP à 15 items pour éviter de spammer TMDB
-                        // (sinon ~500 appels/home → ANR Chromecast). Le reste se
-                        // chargera quand l'user scroll/clique.
                         featured.take(15).map { item ->
                             async {
                                 runCatching {
@@ -537,17 +534,38 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                                         is TvShow -> item.title.substringBefore(" - ")
                                         else -> return@async
                                     }
-                                    // 2026-05-05 : normalise (apostrophe typo, annotations VF/saison) avant TMDB
                                     val normalized = com.streamflixreborn.streamflix.utils.TitleNormalizer.cleanForTmdbSearch(title)
-                                    val results = TMDb3.Search.multi(normalized.ifBlank { title }, language = "fr-FR")
-                                    val tmdbBanner = results.results
-                                        .firstNotNullOfOrNull { r ->
-                                            when (r) {
-                                                is TMDb3.Movie -> r.backdropPath?.original
-                                                is TMDb3.Tv -> r.backdropPath?.original
-                                                else -> null
+                                    val searchQuery = normalized.ifBlank { title }
+                                    if (searchQuery.length < 2) return@async
+                                    val results = TMDb3.Search.multi(searchQuery, language = "fr-FR")
+                                    // Matching strict : type + titre similaire
+                                    val match = results.results.firstOrNull { r ->
+                                        when {
+                                            item is TvShow && r is TMDb3.Tv && r.backdropPath != null -> {
+                                                val t = r.name?.trim() ?: ""
+                                                t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
                                             }
+                                            item is Movie && r is TMDb3.Movie && r.backdropPath != null -> {
+                                                val t = r.title?.trim() ?: ""
+                                                t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
+                                            }
+                                            // Fallback : accepter l'autre type si titre match
+                                            r is TMDb3.Tv && r.backdropPath != null -> {
+                                                val t = r.name?.trim() ?: ""
+                                                t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
+                                            }
+                                            r is TMDb3.Movie && r.backdropPath != null -> {
+                                                val t = r.title?.trim() ?: ""
+                                                t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
+                                            }
+                                            else -> false
                                         }
+                                    }
+                                    val tmdbBanner = when (match) {
+                                        is TMDb3.Movie -> match.backdropPath?.original
+                                        is TMDb3.Tv -> match.backdropPath?.original
+                                        else -> null
+                                    }
                                     if (tmdbBanner != null) {
                                         when (item) {
                                             is Movie -> item.banner = tmdbBanner
@@ -560,17 +578,33 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                     }
                 }
             }
-            categories.add(0, Category(name = Category.FEATURED, list = featured))
+            // Ne garder dans le carrousel que les items avec backdrop TMDb HD (min 5 sinon liste complète)
+            val carouselItems = featured.filter { item ->
+                val b = when (item) { is Movie -> item.banner; is TvShow -> item.banner; else -> null }
+                b != null && b.contains("/t/p/")
+            }
+            val finalCarousel = if (carouselItems.size >= 5) carouselItems else featured
+            if (finalCarousel.isNotEmpty()) {
+                categories.add(0, Category(name = Category.FEATURED, list = finalCarousel))
+            }
         }
 
         // 2026-05-04 : on rajoute les catégories bonus chargées en parallèle.
         // Elles arrivent APRÈS les sections natives de la home pour ne pas
         // pousser les "Nouveautés" en bas. Items aussi versés dans allItems
         // au cas où la home n'avait pas de sections (carousel fallback).
+        // 2026-06-23 : dédup — retirer des bonus les items déjà dans les sections natives
+        val mainIds = allItems.mapNotNull { when (it) { is Movie -> it.id; is TvShow -> it.id; else -> null } }.toSet()
         bonusDeferred.forEach { deferred ->
             val bonus = deferred.await() ?: return@forEach
-            categories.add(bonus)
-            allItems.addAll(bonus.list)
+            val dedupedList = bonus.list.filter { item ->
+                val id = when (item) { is Movie -> item.id; is TvShow -> item.id; else -> "" }
+                id.isNotEmpty() && id !in mainIds
+            }
+            if (dedupedList.isNotEmpty()) {
+                categories.add(Category(name = bonus.name, list = dedupedList))
+                allItems.addAll(dedupedList)
+            }
         }
 
         return@coroutineScope categories
@@ -928,9 +962,8 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
         initializeService()
-        // 2026-05-04 : nouvelle voie AJAX en priorité (la div#episodeN
-        // n'existe plus dans le HTML, populée en JS via /engine/ajax/sx.php).
-        // Fallback HTML legacy si l'API AJAX echoue (très vieilles entrées).
+
+        // Raw newsId numérique — AJAX en priorité, HTML fallback.
         try {
             val viaAjax = fetchEpisodesFromAjax(seasonId)
             if (viaAjax.isNotEmpty()) return viaAjax
@@ -976,8 +1009,9 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             val epTitle = ep?.optString("title")?.takeIf { it.isNotBlank() } ?: "Épisode $num"
             val epPoster = ep?.optString("poster")?.takeIf { it.isNotBlank() && !it.startsWith("data:") }
             val epSynopsis = ep?.optString("synopsis")?.takeIf { it.isNotBlank() }
+            val epId = "$seasonId/$num"
             Episode(
-                id = "$seasonId/$num",
+                id = epId,
                 number = num,
                 title = epTitle,
                 poster = epPoster,
@@ -1051,7 +1085,8 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
 
         val out = mutableListOf<Video.Server>()
         val seen = HashSet<String>()
-        listOf("vf" to "VF", "vostfr" to "VOSTFR", "vo" to "VO").forEach { (key, label) ->
+        val versions = listOf("vf" to "VF", "vostfr" to "VOSTFR", "vo" to "VO")
+        versions.forEach { (key, label) ->
             val versionObj = json.optJSONObject(key) ?: return@forEach
             val episodeObj = versionObj.optJSONObject(episodeNumber.toString()) ?: return@forEach
             episodeObj.keys().asSequence().forEach forEachPlayer@{ playerName ->
@@ -1302,8 +1337,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             is Video.Type.Episode -> {
                 val parts = id.split("/")
                 val tvShowId = parts.getOrElse(0) { id }
-                val episodeNum = parts.getOrElse(1) { videoType.number.toString() }
-                    .toIntOrNull() ?: videoType.number
+                val episodeNum = parts.getOrNull(1)?.toIntOrNull() ?: videoType.number
                 resolveEpisodeServers(tvShowId, episodeNum)
             }
             is Video.Type.Movie -> resolveMovieServers(id)
@@ -1419,7 +1453,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         is Video.Type.Episode -> {
             val parts = id.split("/")
             val tvShowId = parts.getOrElse(0) { id }
-            val episodeNum = parts.getOrElse(1) { videoType.number.toString() }.toIntOrNull() ?: videoType.number
+            val episodeNum = parts.getOrNull(1)?.toIntOrNull() ?: videoType.number
             resolveEpisodeServers(tvShowId, episodeNum)
         }
         is Video.Type.Movie -> resolveMovieServers(id)

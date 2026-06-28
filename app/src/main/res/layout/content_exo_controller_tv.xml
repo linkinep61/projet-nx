@@ -4,7 +4,9 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/cl_exo_controller"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:clipChildren="false"
+    android:clipToPadding="false">
 
     <View
         android:id="@id/exo_controls_background"
@@ -26,7 +28,7 @@
         android:layout_marginEnd="16dp"
         android:textColor="#FFFFFF"
         android:textSize="34sp"
-        app:layout_constraintEnd_toStartOf="@id/btn_exo_external_player"
+        app:layout_constraintEnd_toStartOf="@id/exo_top_icons_bar"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
         tools:text="Title" />
@@ -39,56 +41,111 @@
         android:layout_marginTop="4dp"
         android:layout_marginEnd="16dp"
         android:textSize="20sp"
-        app:layout_constraintEnd_toStartOf="@id/btn_exo_external_player"
+        app:layout_constraintEnd_toStartOf="@id/exo_top_icons_bar"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/tv_exo_title"
         tools:text="Description" />
 
-    <!-- 2026-06-19 v34 (user "TV même chose que mobile : barre avec TOUS
-         les icônes tout en haut") : aspect_ratio + external_player
-         groupés EN HAUT À DROITE, alignés sur la même ligne. -->
-    <ImageView
-        android:id="@+id/btn_exo_aspect_ratio"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
-        android:layout_marginTop="7dp"
-        android:layout_marginEnd="16dp"
-        android:layout_marginBottom="7dp"
-        android:background="@drawable/bg_btn_exoplayer_tv"
-        android:focusable="true"
-        android:focusableInTouchMode="true"
-        android:nextFocusLeft="@id/btn_exo_aspect_ratio"
-        android:nextFocusRight="@id/btn_exo_external_player"
-        android:nextFocusDown="@id/exo_play_pause"
-        android:padding="12dp"
-        android:src="@drawable/exo_styled_controls_aspect_ratio"
-        android:tint="#FFFFFF"
-        app:layout_constraintBottom_toBottomOf="@id/tv_exo_subtitle"
-        app:layout_constraintEnd_toStartOf="@id/btn_exo_external_player"
-        app:layout_constraintTop_toTopOf="@id/tv_exo_title"
-        tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
-
-    <ImageView
-        android:id="@+id/btn_exo_external_player"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
-        android:layout_marginTop="7dp"
+    <!-- 2026-06-20 : barre d'icônes en HAUT À DROITE — serveur + 3-dots.
+         Les autres icônes (aspect ratio, external player) sont dans le popup 3-dots.
+         Elles restent dans le layout (GONE) pour le ViewBinding. -->
+    <LinearLayout
+        android:id="@+id/exo_top_icons_bar"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="30dp"
         android:layout_marginEnd="30dp"
-        android:layout_marginBottom="7dp"
-        android:background="@drawable/bg_btn_exoplayer_tv"
-        android:focusable="true"
-        android:focusableInTouchMode="true"
-        android:nextFocusLeft="@id/btn_exo_aspect_ratio"
-        android:nextFocusRight="@id/btn_exo_external_player"
-        android:nextFocusDown="@id/exo_play_pause"
-        android:padding="12dp"
-        android:src="@drawable/exo_styled_controls_external_player"
-        android:tint="#FFFFFF"
-        app:layout_constraintBottom_toBottomOf="@id/tv_exo_subtitle"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toTopOf="@id/tv_exo_title"
-        tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
+        app:layout_constraintTop_toTopOf="parent">
 
+        <!-- Masqué — dans le popup 3-dots -->
+        <ImageView
+            android:id="@+id/btn_exo_aspect_ratio"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone"
+            android:src="@drawable/exo_styled_controls_aspect_ratio"
+            android:tint="#FFFFFF"
+            tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
+
+        <!-- Masqué — dans le popup 3-dots -->
+        <ImageView
+            android:id="@+id/btn_exo_external_player"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone"
+            android:src="@drawable/exo_styled_controls_external_player"
+            android:tint="#FFFFFF"
+            tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
+
+        <!-- 2026-06-22 (user "comme sur mobile mettre un icône en haut Et qu'on
+             aille directement cliquer dessus pour le faire apparaître, comme ça
+             le bouton gauche retrouvera sa valeur par défaut") :
+             Bouton liste épisodes/chaînes — visible si VOD série OU IPTV.
+             Click → showChannelListPanel() (auto-route vers EpisodePanel pour VOD).
+             Placé AVANT btn_exo_server pour être à gauche dans la barre. -->
+        <ImageView
+            android:id="@+id/btn_exo_channel_list"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginEnd="8dp"
+            android:background="@drawable/bg_btn_exoplayer_tv"
+            android:contentDescription="Liste des épisodes / chaînes"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusLeft="@id/btn_exo_channel_list"
+            android:nextFocusRight="@id/btn_exo_server"
+            android:nextFocusDown="@id/exo_play_pause"
+            android:padding="12dp"
+            android:src="@drawable/ic_channel_list"
+            android:tint="#FFFFFF"
+            android:visibility="gone"
+            tools:ignore="UseAppTint"
+            tools:visibility="visible" />
+
+        <!-- 2026-06-20 : bouton Serveur — toujours visible. -->
+        <ImageView
+            android:id="@+id/btn_exo_server"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="@drawable/bg_btn_exoplayer_tv"
+            android:contentDescription="Changer de serveur"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusLeft="@id/btn_exo_channel_list"
+            android:nextFocusRight="@id/exo_settings"
+            android:nextFocusDown="@id/exo_play_pause"
+            android:padding="12dp"
+            android:src="@drawable/ic_server_swap"
+            android:tint="#FFFFFF"
+            tools:ignore="UseAppTint" />
+
+        <!-- 2026-06-20 : 3-dots → popup menu avec toutes les options.
+             2026-06-20 v2 (user "ordre logique fluide") : DOWN va sur +10s
+             (= bouton géographiquement sous le 3-dots à droite). -->
+        <ImageView
+            android:id="@+id/exo_settings"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/bg_btn_exoplayer_tv"
+            android:contentDescription="Plus d'options"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusLeft="@id/btn_exo_server"
+            android:nextFocusRight="@id/exo_settings"
+            android:nextFocusDown="@id/exo_ffwd"
+            android:padding="12dp"
+            android:src="@drawable/ic_overflow_menu"
+            android:tint="#FFFFFF"
+            tools:ignore="UseAppTint" />
+
+    </LinearLayout>
+
+    <!-- 2026-06-20 : centre refait — prev / -10s / play-pause / +10s / next.
+         Plus de gear (déplacé en haut) ni de replay (remplacé par rewind). -->
     <LinearLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
@@ -98,149 +155,113 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
+        <!-- 2026-06-22 v2 (user "les mêmes logos que l'image") :
+             |◄  ↺10  ⏸  ↻10  ►|
+             Prev/Next = 40dp (petits, sur les côtés)
+             Rew/Fwd = 48dp (↺10/↻10 avec le "10" dedans)
+             Play/Pause = 56dp (central, PAS de cercle autour)
+             Espacement 16dp entre boutons. -->
         <ImageView
             android:id="@+id/btn_custom_prev"
-            android:layout_width="80dp"
-            android:layout_height="80dp"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_gravity="center_vertical"
+            android:layout_marginEnd="16dp"
             android:background="@drawable/bg_btn_exoplayer_tv"
             android:focusable="true"
             android:focusableInTouchMode="true"
-            android:nextFocusRight="@id/exo_replay"
-            android:nextFocusUp="@id/tv_exo_subtitle"
+            android:nextFocusLeft="@id/btn_custom_prev"
+            android:nextFocusRight="@id/exo_rew"
+            android:nextFocusUp="@id/btn_exo_server"
             android:nextFocusDown="@id/exo_progress"
-            android:padding="10dp"
+            android:padding="6dp"
             android:src="@drawable/ic_previous"
             app:tint="#FFFFFF" />
 
         <ImageView
-            android:id="@+id/exo_replay"
-            android:layout_width="80dp"
-            android:layout_height="80dp"
+            android:id="@+id/exo_rew"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="center_vertical"
+            android:layout_marginEnd="16dp"
             android:background="@drawable/bg_btn_exoplayer_tv"
             android:focusable="true"
             android:focusableInTouchMode="true"
             android:nextFocusLeft="@id/btn_custom_prev"
             android:nextFocusRight="@id/exo_play_pause"
-            android:nextFocusUp="@id/tv_exo_subtitle"
+            android:nextFocusUp="@id/btn_exo_server"
             android:nextFocusDown="@id/exo_progress"
-            android:padding="10dp"
-            android:src="@drawable/ic_refresh"
-            app:tint="#FFFFFF" />
+            android:padding="6dp"
+            android:src="@drawable/ic_replay_10"
+            app:tint="#FFFFFF"
+            tools:ignore="ContentDescription" />
 
+        <!-- 2026-06-22 v4 (user "exactement comme l'image, cercle pas très gros") :
+             play/pause central = cercle gris opaque, 48dp (réduit). -->
         <ImageView
             android:id="@id/exo_play_pause"
-            android:layout_width="80dp"
-            android:layout_height="80dp"
-            android:background="@drawable/bg_btn_exoplayer_tv"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="center_vertical"
+            android:layout_marginEnd="16dp"
+            android:background="@drawable/bg_btn_exoplayer_tv_primary"
             android:focusable="true"
             android:focusableInTouchMode="true"
-            android:nextFocusLeft="@id/exo_replay"
-            android:nextFocusRight="@id/btn_custom_next"
-            android:nextFocusUp="@id/btn_exo_aspect_ratio"
+            android:nextFocusLeft="@id/exo_rew"
+            android:nextFocusRight="@id/exo_ffwd"
+            android:nextFocusUp="@id/btn_exo_server"
             android:nextFocusDown="@id/exo_progress"
-            android:padding="2dp"
+            android:padding="10dp"
             android:src="@drawable/exo_styled_controls_play"
             android:tint="#FFFFFF"
+            app:tint="#FFFFFF"
             tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
 
         <ImageView
-            android:id="@+id/btn_custom_next"
-            android:layout_width="80dp"
-            android:layout_height="80dp"
+            android:id="@+id/exo_ffwd"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="center_vertical"
+            android:layout_marginEnd="16dp"
             android:background="@drawable/bg_btn_exoplayer_tv"
             android:focusable="true"
             android:focusableInTouchMode="true"
             android:nextFocusLeft="@id/exo_play_pause"
-            android:nextFocusRight="@id/exo_settings"
-            android:nextFocusUp="@id/tv_exo_subtitle"
+            android:nextFocusRight="@id/btn_custom_next"
+            android:nextFocusUp="@id/exo_settings"
             android:nextFocusDown="@id/exo_progress"
-            android:padding="10dp"
-            android:src="@drawable/ic_next"
-            app:tint="#FFFFFF" />
+            android:padding="6dp"
+            android:src="@drawable/ic_forward_10"
+            app:tint="#FFFFFF"
+            tools:ignore="ContentDescription" />
 
-        <!-- Settings (gear) inline with the playback controls — directly to the right
-             of skip-forward (▶▶) so D-pad users go right-right-right to reach it. -->
         <ImageView
-            android:id="@+id/exo_settings"
-            android:layout_width="80dp"
-            android:layout_height="80dp"
+            android:id="@+id/btn_custom_next"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_gravity="center_vertical"
             android:background="@drawable/bg_btn_exoplayer_tv"
             android:focusable="true"
             android:focusableInTouchMode="true"
-            android:nextFocusLeft="@id/btn_custom_next"
-            android:nextFocusRight="@id/exo_settings"
-            android:nextFocusUp="@id/tv_exo_subtitle"
+            android:nextFocusLeft="@id/exo_ffwd"
+            android:nextFocusRight="@id/btn_skip_intro"
+            android:nextFocusUp="@id/exo_settings"
             android:nextFocusDown="@id/exo_progress"
-            android:padding="14dp"
-            android:src="@drawable/exo_styled_controls_settings"
-            android:tint="#FFFFFF"
-            tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
+            android:padding="6dp"
+            android:src="@drawable/ic_next"
+            app:tint="#FFFFFF" />
 
     </LinearLayout>
 
-    <!-- 2026-05-17 v3 (user "la 2e barre accumule du flux supplémentaire,
-         le player switche dessus quand barre 1 finie") : 3 widgets dans un
-         même conteneur, on toggle la visibilité selon VOD vs live IPTV.
-         - VOD : exo_progress visible (seek bar standard bound au player)
-         - Live IPTV : les 2 custom DefaultTimeBar visibles, driven
-           manuellement pour montrer barre 1 = chunk N en lecture, barre 2 =
-           chunk N+1 pré-chargé en avance. Switch quand barre 1 finit. -->
-    <!-- 2026-05-17 v4 (user "60 premières secondes en haut, switch sur la
-         2e en dessous") : barres stackées verticalement. Bar 1 (en haut)
-         = chunk N en lecture (60s). Bar 2 (en bas) = chunk N+1 pré-chargé
-         (60s). Quand bar 1 atteint 60s → thumb passe sur bar 2 (switch).
-         Quand bar 2 finit → bar 1 reprend avec chunk N+2.
-         Pour VOD, on cache les 2 customs et on montre exo_progress. -->
-    <LinearLayout
-        android:id="@+id/exo_progress_dual_container"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="22dp"
-        android:layout_marginEnd="22dp"
-        android:layout_marginBottom="4dp"
-        android:orientation="vertical"
-        app:layout_constraintBottom_toTopOf="@id/exo_bottom_bar"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent">
-
-        <!-- Standard seek bar (VOD) — visible par défaut, hidden pour live IPTV.
-             2026-06-19 v34 : nextFocusUp remonte au play/pause (centre).
-             aspect_ratio est en haut maintenant. -->
-        <androidx.media3.ui.DefaultTimeBar
-            android:id="@id/exo_progress"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:focusable="true"
-            android:focusableInTouchMode="true"
-            android:nextFocusUp="@id/exo_play_pause" />
-
-        <!-- Custom barre 1 (chunk en lecture, en haut) — visible pour live IPTV -->
-        <androidx.media3.ui.DefaultTimeBar
-            android:id="@+id/live_primary_progress"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:focusable="false"
-            android:visibility="gone"
-            tools:visibility="visible" />
-
-        <!-- Custom barre 2 (chunk pré-chargé, en bas) — visible pour live IPTV -->
-        <androidx.media3.ui.DefaultTimeBar
-            android:id="@+id/live_secondary_progress"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:focusable="false"
-            android:visibility="gone"
-            tools:visibility="visible" />
-    </LinearLayout>
-
+    <!-- 2026-06-20 : temps (position · durée) AU-DESSUS de la seekbar -->
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@id/exo_bottom_bar"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginStart="30dp"
         android:layout_marginEnd="30dp"
-        app:layout_constraintBottom_toBottomOf="parent"
+        android:layout_marginBottom="4dp"
+        app:layout_constraintBottom_toTopOf="@id/exo_progress_dual_container"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent">
 
@@ -283,16 +304,73 @@
             app:layout_constraintTop_toTopOf="parent"
             tools:text="00:00:00" />
 
-        <!-- 2026-06-19 v34 : btn_exo_aspect_ratio déplacé EN HAUT
-             (= barre top à côté de external_player). Le bottom_bar ne
-             contient plus que le timer. -->
-
     </androidx.constraintlayout.widget.ConstraintLayout>
 
-    <!-- 2026-06-19 v34 (user "passer l'intro en bas") : même bug que mobile —
-         exo_progress est dans exo_progress_dual_container (LinearLayout),
-         pas direct child du ConstraintLayout. Fix : référencer
-         exo_progress_dual_container (direct child). -->
+    <!-- 2026-06-21 (user "sur télé la barre soit plus petite, et réglée
+         pareil [que mobile]") :
+         marginBottom -16dp + clipChildren=false → ligne flush au bord bas
+         comme sur mobile.
+         Pour TV, le scrubber est un peu plus gros que mobile (focus D-pad
+         doit être bien visible). -->
+    <LinearLayout
+        android:id="@+id/exo_progress_dual_container"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="22dp"
+        android:layout_marginEnd="22dp"
+        android:layout_marginBottom="-10dp"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:orientation="vertical"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <!-- Standard seek bar (VOD) — visible par défaut, hidden pour live IPTV.
+             2026-06-21 (user "que la barre soit plus petite, réglée pareil") :
+             bar_height 4dp (légèrement épaissie, user "grossi un peu").
+             scrubber 16dp (visible en focus D-pad sur grand écran).
+             touch_target_height 32dp. -->
+        <!-- 2026-06-22 : couleurs forcées en blanc (la DefaultTimeBar
+             hérite de colorAccent du thème, ce qui donnait une barre rouge
+             sur certains thèmes). Même look que mobile = blanc pur. -->
+        <androidx.media3.ui.DefaultTimeBar
+            android:id="@id/exo_progress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:nextFocusUp="@id/exo_play_pause"
+            app:bar_height="5dp"
+            app:played_color="#FFFFFFFF"
+            app:scrubber_color="#FFFFFFFF"
+            app:unplayed_color="#33FFFFFF"
+            app:buffered_color="#CCFFFFFF"
+            app:scrubber_enabled_size="16dp"
+            app:scrubber_disabled_size="0dp"
+            app:scrubber_dragged_size="24dp"
+            app:touch_target_height="32dp" />
+
+        <!-- Custom barre 1 (chunk en lecture, en haut) — visible pour live IPTV -->
+        <androidx.media3.ui.DefaultTimeBar
+            android:id="@+id/live_primary_progress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:focusable="false"
+            android:visibility="gone"
+            tools:visibility="visible" />
+
+        <!-- Custom barre 2 (chunk pré-chargé, en bas) — visible pour live IPTV -->
+        <androidx.media3.ui.DefaultTimeBar
+            android:id="@+id/live_secondary_progress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:focusable="false"
+            android:visibility="gone"
+            tools:visibility="visible" />
+    </LinearLayout>
+
     <TextView
         android:id="@+id/btn_skip_intro"
         android:layout_width="wrap_content"
@@ -303,7 +381,12 @@
         android:drawableStart="@drawable/exo_styled_controls_fastforward"
         android:drawablePadding="8dp"
         android:focusable="true"
+        android:focusableInTouchMode="true"
         android:gravity="center"
+        android:nextFocusLeft="@id/btn_custom_next"
+        android:nextFocusRight="@id/btn_skip_intro"
+        android:nextFocusUp="@id/exo_settings"
+        android:nextFocusDown="@id/exo_progress"
         android:paddingStart="16dp"
         android:paddingTop="8dp"
         android:paddingEnd="16dp"
@@ -312,7 +395,7 @@
         android:textColor="#FFFFFF"
         android:textSize="14sp"
         android:visibility="gone"
-        app:layout_constraintBottom_toTopOf="@id/exo_progress_dual_container"
+        app:layout_constraintBottom_toTopOf="@id/exo_bottom_bar"
         app:layout_constraintEnd_toEndOf="parent"
         tools:visibility="visible" />
 

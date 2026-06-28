@@ -14,14 +14,16 @@ import javax.crypto.spec.SecretKeySpec
  * 2026-05-31 : OTF TV — API chiffrée AES qui retourne des URLs m3u8 directes.
  * Extrait de WiTvProvider pour être utilisé dans TV Hub.
  *
- * API : POST https://app.otf-tv.com/otf/authV3.php
+ * API : POST https://app.otf-tv.com/otf/authV4.php (V3 deprecated ~juin 2026)
  * Réponse : JSON chiffré AES-128-CBC contenant des groupes de chaînes
- * avec des URLs directes sur stm.linkip.org.
+ * avec des URLs directes sur blc2cr.linkip.org / stm.linkip.org.
  */
 object OtfTvService {
 
     private const val TAG = "OtfTvService"
-    private const val OTF_API_URL = "https://app.otf-tv.com/otf/authV3.php"
+    // 2026-06-20 : V3 retourne body vide depuis ~juin 2026, V4 fonctionne
+    //   (même clé AES, même format hash, même payload — seul l'endpoint change).
+    private const val OTF_API_URL = "https://app.otf-tv.com/otf/authV4.php"
     private const val OTF_AES_KEY = "@z5wFi5vDgtF_vds"
 
     data class OtfChannel(
@@ -91,6 +93,15 @@ object OtfTvService {
      *  Appelé par LiveTvHubProvider si on intercepte un OOM ailleurs. */
     fun markFailure() {
         lastFailureTimestamp = System.currentTimeMillis()
+    }
+
+    /** 2026-06-20 (user "au clic sur le dossier OTF vide ça devrait déclencher
+     *  le refresh") : reset le cache négatif + le cache positif pour forcer
+     *  un fetch frais au prochain fetchChannels(). */
+    fun resetForRefresh() {
+        lastFailureTimestamp = 0L
+        cachedChannels = null
+        cacheTimestamp = 0L
     }
 
     /**

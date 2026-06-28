@@ -136,14 +136,22 @@ class TvShowTvFragment : Fragment() {
     private fun isIptvChannel(tvShow: TvShow): Boolean {
         // v27 : exception pour replays TF1+/M6 séries → page detail (= liste épisodes), pas auto-play
         // 2026-06-19 : étendu aux 6 services M6+ + check isMovie (= films lancent direct)
+        // 2026-06-20 : ajout tmc/ tfx/ tf1-series-films/ lci/
         if ((tvShow.id.startsWith("livehub::replay::tf1/")
+            || tvShow.id.startsWith("livehub::replay::tmc/")
+            || tvShow.id.startsWith("livehub::replay::tfx/")
+            || tvShow.id.startsWith("livehub::replay::tf1-series-films/")
+            || tvShow.id.startsWith("livehub::replay::lci/")
             || tvShow.id.startsWith("livehub::replay::m6/")
             || tvShow.id.startsWith("livehub::replay::m6replay/")
             || tvShow.id.startsWith("livehub::replay::w9replay/")
             || tvShow.id.startsWith("livehub::replay::6terreplay/")
             || tvShow.id.startsWith("livehub::replay::gulli/")
             || tvShow.id.startsWith("livehub::replay::tevareplay/")
-            || tvShow.id.startsWith("livehub::replay::parispremierereplay/")) && !tvShow.isMovie) return false
+            || tvShow.id.startsWith("livehub::replay::parispremierereplay/")
+            || tvShow.id.startsWith("livehub::replay::program/")
+            || tvShow.id.startsWith("livehub::replay::plexshow::")
+            || tvShow.id.startsWith("livehub::replay::plutoshow::")) && !tvShow.isMovie) return false
         return tvShow.providerName == "OLA TV"
             || tvShow.providerName == "Vegeta TV"
             || tvShow.providerName == "Vavoo TV"

@@ -161,6 +161,12 @@
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/AppTheme.Mobile" />
 
+        <!-- 2026-06-10 : import fichier local JSON pour World Live (SAF picker). -->
+        <activity
+            android:name=".activities.WorldLiveFileImportActivity"
+            android:exported="false"
+            android:theme="@style/AppTheme.Transparent" />
+
         <!-- 2026-06-04 : Activity OTF dédiée — ExoPlayer 2.19.1 strict pattern. -->
         <activity
             android:name=".activities.player.OtfPlayerActivity"

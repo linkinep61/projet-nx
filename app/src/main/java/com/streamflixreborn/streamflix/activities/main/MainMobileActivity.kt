@@ -409,6 +409,11 @@ class MainMobileActivity : FragmentActivity() {
         updateAppDialog = null
     }
 
+    /**
+     * 2026-06-24 : bouton de glissement au bout de la barre de navigation.
+     * Toucher + glisser vers le haut/bas ajuste la position du contenu
+     * (paddingTop de rv_home dans HomeMobileFragment). Relâcher sauvegarde.
+     */
     private fun updateBottomNavigationVisibility(destinationId: Int?) {
         val showBottomNav =
             UserPreferences.currentProvider != null && isTopLevelProviderDestination(destinationId)

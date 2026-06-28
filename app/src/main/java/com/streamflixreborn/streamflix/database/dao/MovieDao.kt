@@ -48,6 +48,12 @@ interface MovieDao {
     @Query("DELETE FROM movies")
     fun deleteAll()
 
+    // 2026-06-27 (user "corbeille Continuer à regarder doit vider") : retire les
+    //   films de la rangée "Continuer à regarder" (= reset progression) SANS
+    //   toucher aux favoris. Le home filtre via lastEngagementTimeUtcMillis.
+    @Query("UPDATE movies SET lastEngagementTimeUtcMillis = NULL, lastPlaybackPositionMillis = NULL, durationMillis = NULL WHERE lastEngagementTimeUtcMillis IS NOT NULL")
+    fun clearContinueWatching()
+
     @Transaction
     fun save(movie: Movie) {
         val provider = UserPreferences.currentProvider?.name ?: "Unknown"

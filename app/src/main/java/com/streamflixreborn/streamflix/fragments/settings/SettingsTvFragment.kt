@@ -1108,6 +1108,44 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             }
             cat.addPreference(pref)
         }
+
+        // RMC BFM Play
+        val bfmKey = "tvhub_account_bfm"
+        if (findPreference<Preference>(bfmKey) == null) {
+            val pref = Preference(requireContext()).apply {
+                key = bfmKey
+                title = "Compte RMC BFM Play"
+                isIconSpaceReserved = false
+                summary = bfmAccountSummary()
+                setOnPreferenceClickListener {
+                    showAccountActionDialog(
+                        serviceLabel = "RMC BFM Play",
+                        isLoggedIn = com.streamflixreborn.streamflix.utils.BfmAuth.isLoggedIn(requireContext()),
+                        onConnect = {
+                            com.streamflixreborn.streamflix.activities.LoginWebViewActivity.start(
+                                requireContext(),
+                                com.streamflixreborn.streamflix.activities.LoginWebViewActivity.SERVICE_BFM,
+                            )
+                        },
+                        onDisconnect = {
+                            com.streamflixreborn.streamflix.utils.BfmAuth.clearToken(requireContext())
+                            com.streamflixreborn.streamflix.utils.BfmSsoAuth.clearCredentials(requireContext())
+                            clearWebViewAccountCookies(
+                                listOf(
+                                    "rmcbfmplay.com", ".rmcbfmplay.com", "www.rmcbfmplay.com",
+                                    "sso.rmcbfmplay.com", ".sfr.net",
+                                ),
+                            )
+                            summary = bfmAccountSummary()
+                            Toast.makeText(requireContext(),
+                                "RMC BFM Play : déconnecté", Toast.LENGTH_SHORT).show()
+                        },
+                    )
+                    true
+                }
+            }
+            cat.addPreference(pref)
+        }
     }
 
     private fun tf1AccountSummary(): String =
@@ -1117,6 +1155,11 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
 
     private fun m6AccountSummary(): String =
         if (com.streamflixreborn.streamflix.utils.M6Auth.isLoggedIn(requireContext()))
+            "✓ Connecté — cliquer pour reconnecter ou déconnecter"
+        else "Non connecté — cliquer pour se connecter"
+
+    private fun bfmAccountSummary(): String =
+        if (com.streamflixreborn.streamflix.utils.BfmAuth.isLoggedIn(requireContext()))
             "✓ Connecté — cliquer pour reconnecter ou déconnecter"
         else "Non connecté — cliquer pour se connecter"
 

@@ -33,11 +33,24 @@ class Converters {
 
     @TypeConverter
     fun fromSeason(value: Season?): String? {
-        return value?.id
+        if (value == null) return null
+        // Encode season number alongside ID so it survives DB round-trip.
+        // Separator "§§" chosen because no provider ID contains it.
+        // Legacy data (without "§§") falls back to number=0 on read.
+        return if (value.number > 0) "${value.id}§§${value.number}" else value.id
     }
 
     @TypeConverter
     fun toSeason(value: String?): Season? {
-        return value?.let { Season(it, 0) }
+        if (value == null) return null
+        // Parse "id§§number" format; legacy strings without "§§" get number=0.
+        val sep = value.lastIndexOf("§§")
+        return if (sep > 0 && sep < value.length - 2) {
+            val id = value.substring(0, sep)
+            val num = value.substring(sep + 2).toIntOrNull() ?: 0
+            Season(id, num)
+        } else {
+            Season(value, 0)
+        }
     }
 }

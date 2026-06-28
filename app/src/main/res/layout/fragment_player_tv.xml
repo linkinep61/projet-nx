@@ -396,6 +396,111 @@
             android:paddingBottom="16dp" />
     </LinearLayout>
 
+    <!-- 2026-06-20 (user "comme sur l'image, panel épisodes droite avec saisons +
+         cartes riches") : panneau VOD épisodes side-right. Slide depuis la droite,
+         saisons en haut, RecyclerView cards riches en bas. Background bindé sur
+         le thème (ThemeManager.palette.mobileNavBackground) à l'affichage. -->
+    <LinearLayout
+        android:id="@+id/layout_episode_panel"
+        android:layout_width="420dp"
+        android:layout_height="0dp"
+        android:background="#EE000000"
+        android:elevation="20dp"
+        android:focusable="false"
+        android:orientation="vertical"
+        android:padding="0dp"
+        android:visibility="gone"
+        android:translationX="420dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent">
+
+        <!-- Header : titre "Épisodes (N)" + bouton fermer ✕ -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="16dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="14dp"
+            android:paddingBottom="10dp">
+
+            <TextView
+                android:id="@+id/tv_episode_panel_title"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Épisodes"
+                android:textColor="#FFFFFF"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/btn_episode_panel_close"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:text="✕"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:background="@android:color/transparent"
+                android:minWidth="0dp"
+                android:padding="0dp"
+                android:focusable="true"
+                android:focusableInTouchMode="true" />
+        </LinearLayout>
+
+        <!-- 2026-06-24 (user "il manque pas VF et VOSTFR en haut, comme sur
+             l'image que je t'ai envoyée") : onglets LANGUE au-dessus des
+             saisons, visibles UNIQUEMENT si le provider supporte plusieurs
+             langues (= AnimeSama / Wiflix et co). GONE par défaut. -->
+        <HorizontalScrollView
+            android:id="@+id/hsv_episode_lang_tabs"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:scrollbars="none"
+            android:fillViewport="false"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/ll_episode_lang_tabs"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="6dp" />
+        </HorizontalScrollView>
+
+        <!-- Onglets saisons (HorizontalScrollView avec boutons dynamiques) -->
+        <HorizontalScrollView
+            android:id="@+id/hsv_episode_seasons"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:scrollbars="none"
+            android:fillViewport="false">
+
+            <LinearLayout
+                android:id="@+id/ll_episode_season_tabs"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="8dp" />
+        </HorizontalScrollView>
+
+        <!-- Liste épisodes -->
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rv_episode_panel_list"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:paddingBottom="16dp" />
+    </LinearLayout>
+
     <LinearLayout
         android:id="@+id/ll_brightness"
         android:layout_width="wrap_content"

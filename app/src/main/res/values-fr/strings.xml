@@ -72,16 +72,16 @@
     <string name="option_clear_program">Retirer de Continuer à regarder</string>
     <string name="option_cancel">Annuler</string>
 
-    <string name="episode_item_info">S%d E%d • %s</string>
-    <string name="episode_item_info_episode_only">E%d • %s</string>
+    <string name="episode_item_info" formatted="false">S%d E%d • %s</string>
+    <string name="episode_item_info_episode_only" formatted="false">E%d • %s</string>
 
     <string name="tv_show_item_episode_number">E%d</string>
-    <string name="tv_show_item_season_number_episode_number">S%d E%d</string>
+    <string name="tv_show_item_season_number_episode_number" formatted="false">S%d E%d</string>
     <string name="tv_show_item_type">Série</string>
 
-    <string name="tv_show_runtime_hours_minutes">%d h %d min</string>
+    <string name="tv_show_runtime_hours_minutes" formatted="false">%d h %d min</string>
     <string name="tv_show_runtime_minutes">%d min</string>
-    <string name="tv_show_watch_season_episode">Regarder S%d E%d</string>
+    <string name="tv_show_watch_season_episode" formatted="false">Regarder S%d E%d</string>
     <string name="tv_show_watch_episode">Regarder E%d</string>
     <string name="tv_show_trailer">Bande-annonce</string>
     <string name="tv_show_seasons">Saisons</string>
@@ -90,7 +90,7 @@
     <string name="tv_show_you_may_also_like">Vous pourriez aussi aimer</string>
 
     <string name="movie_item_type">Film</string>
-    <string name="movie_runtime_hours_minutes">%d h %d min</string>
+    <string name="movie_runtime_hours_minutes" formatted="false">%d h %d min</string>
     <string name="movie_runtime_minutes">%d min</string>
     <string name="movie_watch_now">Regarder maintenant</string>
     <string name="movie_trailer">Bande-annonce</string>
@@ -110,8 +110,8 @@
 
     <string name="genre_header_name">%s</string>
 
-    <string name="player_subtitle_tv_show">S%d E%d • %s</string>
-    <string name="player_subtitle_tv_show_episode_only">E%d • %s</string>
+    <string name="player_subtitle_tv_show" formatted="false">S%d E%d • %s</string>
+    <string name="player_subtitle_tv_show_episode_only" formatted="false">E%d • %s</string>
     <string name="player_next_episode_up_next">À suivre</string>
     <string name="player_next_episode_action">Lire maintenant</string>
     <string name="player_next_episode_dismiss">Masquer</string>

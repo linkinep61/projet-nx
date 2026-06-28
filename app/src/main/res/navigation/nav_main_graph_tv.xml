@@ -223,12 +223,15 @@
         tools:layout="@layout/fragment_player_tv">
         <argument
             android:name="id"
+            android:defaultValue=""
             app:argType="string" />
         <argument
             android:name="title"
+            android:defaultValue=""
             app:argType="string" />
         <argument
             android:name="subtitle"
+            android:defaultValue=""
             app:argType="string" />
         <argument
             android:name="videoType"

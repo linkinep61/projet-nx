@@ -10,6 +10,10 @@ class Category(
     var selectedIndex: Int = 0
     var itemSpacing: Int = 0
 
+    /** 2026-06-22 : callback pour vider toute la section d'un coup (poubelle).
+     *  Non null = la poubelle est affichée à côté du titre. */
+    var onClearSection: (() -> Unit)? = null
+
 
     override lateinit var itemType: AppAdapter.Type
 

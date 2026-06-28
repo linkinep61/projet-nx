@@ -6,13 +6,20 @@
     android:layout_height="match_parent"
     tools:context=".fragments.movie.MovieTvFragment">
 
+    <!-- 2026-06-23 (user "comme si l'affichage passait sur le fond d'écran,
+         le fond noir étoilé apparaît dans la moitié haute") : fitCenter
+         laissait des barres vides en haut/bas où le banner ne couvrait pas
+         tout (ratio image ≠ ratio écran TV) → on voyait le BG MainTvActivity
+         (= black hole) à travers. centerCrop garantit que le banner remplit
+         TOUTE la zone (rogne les bords si ratio différent) = plus de zone
+         transparente. -->
     <ImageView
         android:id="@+id/iv_movie_banner"
         android:layout_width="0dp"
         android:layout_height="0dp"
         android:background="@android:color/black"
         android:foreground="?attr/movie_banner_gradient_drawable"
-        android:scaleType="fitCenter"
+        android:scaleType="centerCrop"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"

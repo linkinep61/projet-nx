@@ -103,6 +103,19 @@ object TF1Auth {
     fun savedAt(ctx: Context): Long = backend.savedAt(ctx)
 }
 
+/** Token de session RMC BFM Play — récupéré via WebView sur rmcbfmplay.com. */
+object BfmAuth {
+    private val backend = object : ReplayAuthBase("replay_auth_bfm") {}
+    fun saveToken(ctx: Context, token: String, refresh: String? = null, exp: Long? = null) =
+        backend.saveToken(ctx, token, refresh, exp)
+    fun getToken(ctx: Context): String? = backend.getToken(ctx)
+    fun saveAccountId(ctx: Context, accountId: String) = backend.saveAccountId(ctx, accountId)
+    fun getAccountId(ctx: Context): String? = backend.getAccountId(ctx)
+    fun isLoggedIn(ctx: Context): Boolean = backend.isLoggedIn(ctx)
+    fun clearToken(ctx: Context) = backend.clearToken(ctx)
+    fun savedAt(ctx: Context): Long = backend.savedAt(ctx)
+}
+
 /** Token de session M6 6play — récupéré via WebView sur 6play.fr/connexion. */
 object M6Auth {
     private val backend = object : ReplayAuthBase("replay_auth_m6") {}

@@ -13,17 +13,26 @@ import com.streamflixreborn.streamflix.models.Season
 import com.streamflixreborn.streamflix.models.Show
 import com.streamflixreborn.streamflix.models.TvShow
 import com.streamflixreborn.streamflix.models.Video
+import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.utils.DnsResolver
+import com.streamflixreborn.streamflix.utils.NetworkClient
 import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.TMDb3.original
+import com.streamflixreborn.streamflix.utils.TMDb3.w780
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import com.streamflixreborn.streamflix.utils.WebViewResolver
+import android.util.Log
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import retrofit2.HttpException
@@ -51,10 +60,181 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
 
     private var service = FrenchAnimeService.build()
 
-    // Client OkHttp partagé pour searchDirect — évite de recréer un client à chaque appel
+    // 2026-06-21 (user "french-anime a maintenant le même captcha que Wiflix,
+    //   il faut mettre la même chose pour lui") : Cloudflare bypass via
+    //   WebViewResolver — même pattern que WiflixProvider. Détection du
+    //   challenge + fallback WebView pour récupérer les cookies cf_clearance.
+    private const val TAG_BYPASS = "FrenchAnimeBypass"
+    @Volatile private var webViewResolver: WebViewResolver? = null
+    @Volatile private var cloudflareActive = false
+
+    private val bypassClient: OkHttpClient by lazy {
+        NetworkClient.default.newBuilder()
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .writeTimeout(8, TimeUnit.SECONDS)
+            .build()
+    }
+
+    // Cache mémoire des documents (5 min) — évite les bypass redondants.
+    private const val DOC_CACHE_TTL_MS = 5 * 60 * 1000L
+    private val documentCache = mutableMapOf<String, Pair<Document, Long>>()
+
+    private fun getCachedDocument(url: String): Document? {
+        val entry = documentCache[url] ?: return null
+        if (System.currentTimeMillis() - entry.second > DOC_CACHE_TTL_MS) {
+            documentCache.remove(url)
+            return null
+        }
+        return entry.first
+    }
+
+    private fun cacheDocument(url: String, doc: Document) {
+        if (documentCache.size > 20) {
+            val now = System.currentTimeMillis()
+            documentCache.entries.removeAll { now - it.value.second > DOC_CACHE_TTL_MS }
+        }
+        documentCache[url] = Pair(doc, System.currentTimeMillis())
+    }
+
+    private val challengeKeywords = listOf(
+        "Just a moment...", "cf-browser-verification", "challenge-running",
+        "Checking your browser", "cf-turnstile"
+    )
+
+    private fun isCloudflareChallenge(doc: Document): Boolean {
+        val title = doc.title()
+        if (title.contains("Just a moment", ignoreCase = true) ||
+            title.contains("Checking your browser", ignoreCase = true)) return true
+        if (doc.selectFirst("#challenge-running") != null) return true
+        if (doc.selectFirst(".cf-browser-verification") != null) return true
+        if (doc.selectFirst("[name=cf-turnstile-response]") != null) return true
+        return false
+    }
+
+    private fun getResolver(): WebViewResolver {
+        return webViewResolver ?: WebViewResolver(StreamFlixApp.instance).also {
+            webViewResolver = it
+        }
+    }
+
+    /**
+     * Récupère un document avec bypass Cloudflare automatique.
+     * 1) Cache mémoire 5min
+     * 2) OkHttp avec cookies CF persistés (si bypass précédent)
+     * 3) Fallback WebView (silent par défaut → cf_clearance auto-injecté)
+     * 4) Après bypass WebView réussi → retry OkHttp avec le cookie frais
+     *    (= relance le scraping proprement, plus fiable que le HTML WebView)
+     *
+     * 2026-06-22 fix (user "il oublie de relancer le scrap après") :
+     *   - Après bypass WebView, retry OkHttp pour re-scraper proprement
+     *   - Ne PAS cacher les documents vides/challenge (sinon cache pourri 5 min)
+     */
+    private suspend fun getDocument(url: String, silentBypass: Boolean = true): Document {
+        getCachedDocument(url)?.let {
+            Log.d(TAG_BYPASS, "Cache HIT for $url")
+            return it
+        }
+        // Tentative 1 : OkHttp direct (cookie CF déjà en place ?)
+        val okHttpDoc = tryOkHttp(url)
+        if (okHttpDoc != null) return okHttpDoc
+
+        // Tentative 2 : WebView bypass (Turnstile)
+        Log.d(TAG_BYPASS, "Launching WebView Bypass for $url (silent=$silentBypass)")
+        val html = getResolver().get(url, silent = silentBypass)
+
+        // Si le bypass a échoué (silent fail / timeout) → ne PAS cacher, retourner doc vide
+        if (html.contains("silent fail") || html.contains("Timeout") || html.contains("no live activity")) {
+            Log.d(TAG_BYPASS, "WebView bypass failed for $url — NOT caching")
+            cloudflareActive = true
+            return Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+        }
+
+        // Bypass WebView a réussi → le cookie cf_clearance est maintenant dans le CookieManager.
+        // RELANCER via OkHttp pour récupérer un HTML propre du serveur (pas le HTML WebView
+        // qui peut avoir des artéfacts JS ou être incomplet).
+        Log.d(TAG_BYPASS, "WebView bypass succeeded for $url — retrying OkHttp with fresh cookie")
+        cloudflareActive = false
+        val freshDoc = tryOkHttp(url)
+        if (freshDoc != null) {
+            Log.d(TAG_BYPASS, "OkHttp retry after bypass SUCCESS for $url")
+            return freshDoc
+        }
+
+        // Fallback : utiliser le HTML du WebView tel quel
+        Log.d(TAG_BYPASS, "OkHttp retry after bypass FAILED for $url — using WebView HTML")
+        val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+        cacheDocument(url, doc)
+        return doc
+    }
+
+    /** Tente un fetch OkHttp. Retourne le Document si succès + pas de challenge, null sinon. */
+    private fun tryOkHttp(url: String): Document? {
+        return try {
+            val request = Request.Builder()
+                .url(url)
+                .header("Referer", baseUrl)
+                // 2026-06-28 : MÊME UA que le WebView stealth (Chrome 131).
+                //   Le cookie cf_clearance est lié au UA — mismatch = rejet CF.
+                .header("User-Agent", WebViewResolver.STEALTH_UA)
+                .build()
+            val response = bypassClient.newCall(request).execute()
+            if (response.isSuccessful) {
+                val html = response.body?.string() ?: ""
+                if (challengeKeywords.none { html.contains(it, ignoreCase = true) }) {
+                    val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+                    cacheDocument(url, doc)
+                    cloudflareActive = false
+                    doc
+                } else {
+                    Log.d(TAG_BYPASS, "Cloudflare challenge detected in HTML for $url")
+                    cloudflareActive = true
+                    null
+                }
+            } else {
+                Log.d(TAG_BYPASS, "HTTP ${response.code} for $url")
+                cloudflareActive = true
+                null
+            }
+        } catch (e: Exception) {
+            Log.d(TAG_BYPASS, "OkHttp failed for $url: ${e.message}")
+            null
+        }
+    }
+
+    /** Wrapper safe pour un appel Retrofit : si CF challenge détecté ou
+     *  exception réseau → fallback WebView via getDocument(url).
+     *  2026-06-21 v3 (user "je voulais le même pattern que Wiflix, le bypass
+     *  ne s'affiche pas") : EXACT pattern Wiflix.
+     *  - silentBypass param exposé au caller (= getHome force false pour
+     *    montrer le captcha la 1ère fois)
+     *  - Autres appels (search/episode/etc.) gardent default true. */
+    private suspend fun safeGetDoc(
+        url: String,
+        silentBypass: Boolean = true,
+        retrofitCall: suspend () -> Document,
+    ): Document {
+        if (!cloudflareActive) {
+            try {
+                val doc = retrofitCall()
+                if (!isCloudflareChallenge(doc)) return doc
+                Log.d(TAG_BYPASS, "CF challenge in Retrofit response for $url")
+                cloudflareActive = true
+            } catch (e: Exception) {
+                Log.d(TAG_BYPASS, "Retrofit failed for $url: ${e.message}")
+                cloudflareActive = true
+            }
+        }
+        return getDocument(url, silentBypass = silentBypass)
+    }
+
+    fun init(context: android.content.Context) {
+        webViewResolver = WebViewResolver(context)
+    }
+
+    // Client OkHttp partagé pour searchDirect — basé sur bypassClient pour hériter du cookie jar CF
     private val searchClient: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .dns(DnsResolver.doh)
+        bypassClient.newBuilder()
             .readTimeout(15, TimeUnit.SECONDS)
             .connectTimeout(10, TimeUnit.SECONDS)
             .followRedirects(false)
@@ -69,7 +249,21 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
     private val URL_DOMAIN_REGEX = Regex("""(?:https?:)?//(?:www\.)?([^.]+)\.""")
 
     override suspend fun getHome(): List<Category> {
-        val document = service.getHome()
+        var document = safeGetDoc(baseUrl, silentBypass = false) { service.getHome() }
+
+        // 2026-06-22 fix (user "il oublie de relancer le scrap après") :
+        // Si le document est vide (challenge/timeout), retry via OkHttp.
+        // Le bypass WebView a pu résoudre le Turnstile → cookie cf_clearance
+        // est maintenant dans le CookieManager → OkHttp devrait passer.
+        if (document.select(".block-main").isEmpty() && document.select(".owl-carousel .item").isEmpty()) {
+            Log.d(TAG_BYPASS, "getHome: document vide après bypass — retry OkHttp (cookie frais)")
+            documentCache.remove(baseUrl) // vider le cache pourri
+            kotlinx.coroutines.delay(500) // laisser le cookie se propager
+            document = try {
+                getDocument(baseUrl, silentBypass = false)
+            } catch (_: Exception) { document }
+        }
+
         val categories = mutableListOf<Category>()
 
         document.select(".owl-carousel .item").map { item ->
@@ -90,37 +284,56 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
                 banner = bannerUrl
             )
         }.filterNotNull().takeIf { it.isNotEmpty() }?.let { featuredItems ->
-            // Enhance banners with TMDB HD backdrops (filter Japanese/anime content)
+            // Enhance banners with TMDB HD backdrops — non-bloquant (timeout 1.5s global)
             if (UserPreferences.enableTmdb) {
                 val animeLanguages = setOf("ja", "ko", "zh")
-                for (item in featuredItems) {
-                    try {
-                        val title = (item as? TvShow)?.title ?: (item as? Movie)?.title ?: continue
-                        // 2026-05-05 : normalise (apostrophe typo, annotations VF/saison) avant TMDB
-                        val normalized = com.streamflixreborn.streamflix.utils.TitleNormalizer.cleanForTmdbSearch(title)
-                        val results = TMDb3.Search.multi(normalized.ifBlank { title })
-                        val match = results.results.firstOrNull { result ->
-                            when (result) {
-                                is TMDb3.Movie -> result.originalLanguage in animeLanguages && result.backdropPath != null
-                                is TMDb3.Tv -> result.originalLanguage in animeLanguages && result.backdropPath != null
-                                else -> false
+                withTimeoutOrNull(1500) {
+                    coroutineScope {
+                        featuredItems.map { item ->
+                            async {
+                                try {
+                                    val title = (item as? TvShow)?.title ?: (item as? Movie)?.title ?: return@async
+                                    val normalized = com.streamflixreborn.streamflix.utils.TitleNormalizer.cleanForTmdbSearch(title)
+                                    val searchQuery = normalized.ifBlank { title }
+                                    if (searchQuery.length < 2) return@async
+                                    val results = TMDb3.Search.multi(searchQuery, language = "fr-FR")
+                                    val match = results.results.firstOrNull { result ->
+                                        when (result) {
+                                            is TMDb3.Movie -> result.originalLanguage in animeLanguages && result.backdropPath != null && run {
+                                                val t = result.title?.trim() ?: ""; t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
+                                            }
+                                            is TMDb3.Tv -> result.originalLanguage in animeLanguages && result.backdropPath != null && run {
+                                                val t = result.name?.trim() ?: ""; t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
+                                            }
+                                            else -> false
+                                        }
+                                    }
+                                    val tmdbBanner = when (match) {
+                                        is TMDb3.Movie -> match.backdropPath?.original
+                                        is TMDb3.Tv -> match.backdropPath?.original
+                                        else -> null
+                                    }
+                                    if (tmdbBanner != null) {
+                                        when (item) {
+                                            is Movie -> item.banner = tmdbBanner
+                                            is TvShow -> item.banner = tmdbBanner
+                                        }
+                                    }
+                                } catch (_: Exception) {}
                             }
-                        }
-                        val tmdbBanner = when (match) {
-                            is TMDb3.Movie -> match.backdropPath?.original
-                            is TMDb3.Tv -> match.backdropPath?.original
-                            else -> null
-                        }
-                        if (tmdbBanner != null) {
-                            when (item) {
-                                is Movie -> item.banner = tmdbBanner
-                                is TvShow -> item.banner = tmdbBanner
-                            }
-                        }
-                    } catch (_: Exception) {}
+                        }.forEach { it.await() }
+                    }
                 }
             }
-            categories.add(Category(name = Category.FEATURED, list = featuredItems))
+            // Ne garder dans le carrousel que les items avec backdrop TMDb HD (min 5 sinon liste complète)
+            val carouselItems = featuredItems.filter { item ->
+                val b = when (item) { is Movie -> item.banner; is TvShow -> item.banner; else -> null }
+                b != null && b.contains("/t/p/")
+            }
+            val finalCarousel = if (carouselItems.size >= 5) carouselItems else featuredItems
+            if (finalCarousel.isNotEmpty()) {
+                categories.add(Category(name = Category.FEATURED, list = finalCarousel))
+            }
         }
 
         document.select(".block-main").forEach { block ->
@@ -173,12 +386,19 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
                         poster = poster
                     )
                 }
-            }.takeIf { it.isNotEmpty() }?.let { items ->
+            }.take(20) // Cap 20 items par catégorie — réduit les chargements jaquettes TV
+            .takeIf { it.isNotEmpty() }?.let { items ->
                 categories.add(Category(name = categoryName, list = items))
             }
         }
 
-        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films
+        // Retirer "Films" (doublon avec l'onglet Films dédié)
+        categories.removeAll { cat ->
+            val n = cat.name.lowercase().trim()
+            n == "films" || n == "film"
+        }
+
+        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.reste
         return categories.sortedWith(compareBy { cat ->
             val n = cat.name.lowercase()
             val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
@@ -199,7 +419,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
         if (query.isEmpty()) {
-            val document = service.getHome()
+            val document = safeGetDoc(baseUrl, silentBypass = false) { service.getHome() }
 
             val genres = document.select("div.side-b nav.side-c ul.flex-row li a").map {
                 Genre(
@@ -267,7 +487,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
 
         // Films VF/VOSTFR → Movie with isSeries=false (default)
         try {
-            service.getMovies(page).select("div.mov.clearfix").mapNotNull { mov ->
+            safeGetDoc("${baseUrl}films-vf-vostfr/page/$page") { service.getMovies(page) }.select("div.mov.clearfix").mapNotNull { mov ->
                 val a = mov.selectFirst("a.mov-t") ?: return@mapNotNull null
                 val link = a.attr("href")
                 val id = link.substringAfterLast("/").substringBefore(".html")
@@ -284,7 +504,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
 
         // Animes VF → Movie with isSeries=true
         try {
-            service.getTvSeries("animes-vf/page/$page/").select("div.mov.clearfix").mapNotNull { mov ->
+            safeGetDoc("${baseUrl}animes-vf/page/$page/") { service.getTvSeries("animes-vf/page/$page/") }.select("div.mov.clearfix").mapNotNull { mov ->
                 val a = mov.selectFirst("a.mov-t") ?: return@mapNotNull null
                 val link = a.attr("href")
                 val id = link.substringAfterLast("/").substringBefore(".html")
@@ -306,7 +526,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
 
         // Animes VOSTFR → TvShow with isMovie=false (default)
         try {
-            service.getTvSeries("animes-vostfr/page/$page/").select("div.mov.clearfix").mapNotNull { mov ->
+            safeGetDoc("${baseUrl}animes-vostfr/page/$page/") { service.getTvSeries("animes-vostfr/page/$page/") }.select("div.mov.clearfix").mapNotNull { mov ->
                 val a = mov.selectFirst("a.mov-t") ?: return@mapNotNull null
                 val link = a.attr("href")
                 val id = link.substringAfterLast("/").substringBefore(".html")
@@ -322,7 +542,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
 
         // Films VOSTFR → TvShow with isMovie=true (VOSTFR tab shows VOSTFR films only)
         try {
-            service.getMovies(page).select("div.mov.clearfix").mapNotNull { mov ->
+            safeGetDoc("${baseUrl}films-vf-vostfr/page/$page") { service.getMovies(page) }.select("div.mov.clearfix").mapNotNull { mov ->
                 val a = mov.selectFirst("a.mov-t") ?: return@mapNotNull null
                 val link = a.attr("href")
                 val id = link.substringAfterLast("/").substringBefore(".html")
@@ -340,7 +560,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
 
     override suspend fun getMovie(id: String): Movie = withContext(Dispatchers.IO) {
         // Lancer page + recherche en parallèle pour réduire la latence
-        val documentDeferred = async { service.getMovie(id) }
+        val documentDeferred = async { safeGetDoc("${baseUrl}films-vf-vostfr/$id.html") { service.getMovie(id) } }
 
         // On a besoin du titre pour la recherche, donc on attend le document d'abord
         val document = documentDeferred.await()
@@ -430,7 +650,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
     }
 
     override suspend fun getTvShow(id: String): TvShow = withContext(Dispatchers.IO) {
-        val document = service.getTvShow(id)
+        val document = safeGetDoc("${baseUrl}$id.html") { service.getTvShow(id) }
 
         val isFrench = document.selectFirst("ul.mov-list li:contains(Version) .mov-desc span")
             ?.text().isFrench()
@@ -467,24 +687,39 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
             if (searchQuery.isEmpty()) return@async Pair(seasons, recommendations)
 
             try {
-                val searchDoc = searchDirect(searchQuery, 1)
-                val searchBase = baseTitle.normalizeForCompare()
-                val alternateNames = mutableSetOf<String>()
+                var searchBase = baseTitle.normalizeForCompare()
+                val currentSlug = id.substringAfterLast("/")
+                val seenIds = mutableSetOf<String>()
+                android.util.Log.d("FrenchAnime", "getTvShow: id=$id currentSlug=$currentSlug searchQuery='$searchQuery' searchBase='$searchBase'")
 
-                searchDoc.select("div.mov").forEach { mov ->
-                    val a = mov.selectFirst("a.mov-t") ?: return@forEach
-                    val link = a.attr("href")
-                    val resultId = link.substringAfterLast("/").substringBefore(".html")
-                    val resultTitle = a.text()
-                    val resultPoster = mov.selectFirst(".mov-i img")?.attr("src")?.toUrl()
-                    val isTvShow = mov.selectFirst(".block-ep") != null
+                // ── Phase 1 : collecter TOUS les résultats de recherche (multi-pages) ──
+                data class SearchHit(
+                    val resultId: String, val resultTitle: String, val resultBase: String,
+                    val resultPoster: String?, val isTvShow: Boolean, val seasonNumber: Int
+                )
+                val allHits = mutableListOf<SearchHit>()
 
-                    val resultBase = resultTitle
-                        .replace(Regex("""[Ss]aison\s*\d+"""), "")
-                        .replace("FRENCH", "").replace("VOSTFR", "")
-                        .normalizeForCompare()
+                for (searchPage in 1..5) {
+                    val searchDoc = searchDirect(searchQuery, searchPage)
+                    val movItems = searchDoc.select("div.mov")
+                    if (movItems.isEmpty()) break
+                    var newOnPage = 0
 
-                    if (isTvShow) {
+                    movItems.forEach { mov ->
+                        val a = mov.selectFirst("a.mov-t") ?: return@forEach
+                        val link = a.attr("href")
+                        val resultId = link.substringAfterLast("/").substringBefore(".html")
+                        if (!seenIds.add(resultId)) return@forEach
+                        newOnPage++
+                        val resultTitle = a.text()
+                        val resultPoster = mov.selectFirst(".mov-i img")?.attr("src")?.toUrl()
+                        val isTvShow = mov.selectFirst(".block-ep") != null
+
+                        val resultBase = resultTitle
+                            .replace(Regex("""[Ss]aison\s*\d+"""), "")
+                            .replace("FRENCH", "").replace("VOSTFR", "")
+                            .normalizeForCompare()
+
                         val saisonText = mov.selectFirst(".block-sai")?.text() ?: ""
                         val seasonNumber = Regex("""[Ss]aison\s*(\d+)""").find(saisonText)
                             ?.groupValues?.get(1)?.toIntOrNull()
@@ -492,93 +727,88 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
                                 ?.groupValues?.get(1)?.toIntOrNull()
                             ?: 1
 
-                        if (titlesFuzzyMatch(resultBase, searchBase)) {
+                        allHits.add(SearchHit(resultId, resultTitle, resultBase, resultPoster, isTvShow, seasonNumber))
+                        android.util.Log.d("FrenchAnime", "  hit: id=$resultId isTvShow=$isTvShow s=$seasonNumber base='$resultBase' title='$resultTitle'")
+                    }
+                    if (newOnPage == 0) break
+                }
+                android.util.Log.d("FrenchAnime", "Phase1: ${allHits.size} hits total")
+
+                // ── Phase 2 : auto-corriger le titre de référence ──
+                // Si notre propre page est dans les résultats sous un titre DIFFÉRENT (ex: titre japonais
+                // alors que le h1 est en anglais), on utilise le titre du résultat de recherche.
+                val selfHit = allHits.find { it.resultId == currentSlug }
+                if (selfHit != null && selfHit.resultBase != searchBase) {
+                    searchBase = selfHit.resultBase
+                }
+
+                // Aussi identifier le titre le plus fréquent dans les résultats (= le cluster principal)
+                val titleClusters = allHits.filter { it.isTvShow }
+                    .groupBy { it.resultBase }
+                val largestCluster = titleClusters.maxByOrNull { it.value.size }
+                // Si le plus gros cluster ne matche pas searchBase mais contient notre page → l'adopter
+                if (largestCluster != null && largestCluster.key != searchBase
+                    && largestCluster.value.any { it.resultId == currentSlug }) {
+                    searchBase = largestCluster.key
+                }
+
+                android.util.Log.d("FrenchAnime", "Phase2: searchBase='$searchBase' selfHit=${selfHit?.resultId} largestCluster=${largestCluster?.key}(${largestCluster?.value?.size})")
+
+                // ── Phase 3 : extraire saisons + recommandations ──
+                allHits.forEach { hit ->
+                    if (hit.isTvShow) {
+                        val matched = titlesFuzzyMatch(hit.resultBase, searchBase)
+                        android.util.Log.d("FrenchAnime", "  Phase3: '${hit.resultBase}' vs '$searchBase' → match=$matched")
+                        if (matched) {
                             seasons.add(Season(
-                                id = resultId,
-                                number = seasonNumber,
-                                title = "Saison $seasonNumber",
-                                poster = resultPoster ?: poster,
+                                id = hit.resultId,
+                                number = hit.seasonNumber,
+                                title = "Saison ${hit.seasonNumber}",
+                                poster = hit.resultPoster ?: poster,
                             ))
-                        } else {
-                            val altName = resultTitle
-                                .replace(Regex("""[Ss]aison\s*\d+"""), "")
-                                .replace("FRENCH", "").replace("VOSTFR", "")
-                                .trim()
-                            if (altName.isNotEmpty() && !titlesFuzzyMatch(altName.normalizeForCompare(), searchBase)) {
-                                alternateNames.add(altName)
-                            }
                         }
                     }
-
                     // Recommandations (films et séries liés, excluant self)
-                    if (resultId != id) {
-                        val resultFranchise = resultBase
+                    if (hit.resultId != id && hit.resultId != currentSlug) {
+                        val resultFranchise = hit.resultBase
                             .replace(Regex("""(?i)\s*(film|movie|le film|the movie|saison).*"""), "")
                             .normalizeForCompare()
                             .split(Regex("""\s*[:]\s*|\s+[-–—]\s+"""))
-                            .firstOrNull()?.trim() ?: resultBase
+                            .firstOrNull()?.trim() ?: hit.resultBase
                         val recoBase = franchiseName.normalizeForCompare()
 
-                        if (titlesFuzzyMatch(resultBase, recoBase) || titlesFuzzyMatch(resultFranchise, recoBase)) {
+                        if (titlesFuzzyMatch(hit.resultBase, recoBase) || titlesFuzzyMatch(resultFranchise, recoBase)) {
                             recommendations.add(
-                                TvShow(id = resultId, title = resultTitle.toTitle(isFrench), poster = resultPoster)
+                                TvShow(id = hit.resultId, title = hit.resultTitle.toTitle(isFrench), poster = hit.resultPoster)
                             )
                         }
                     }
                 }
 
-                // Second pass avec noms alternatifs en parallèle
-                if (alternateNames.isNotEmpty()) {
-                    val altResults = alternateNames.map { altName ->
-                        async {
-                            try {
-                                val altQuery = altName
-                                    .replace(Regex("""[:\-–—·''""\[\]()!?,;]"""), " ")
-                                    .replace(Regex("""\s+"""), " ").trim()
-                                if (altQuery.isBlank()) return@async emptyList<Season>()
-                                val altDoc = searchDirect(altQuery, 1)
-                                val altBase = altName.normalizeForCompare()
-                                altDoc.select("div.mov").mapNotNull { mov ->
-                                    val a2 = mov.selectFirst("a.mov-t") ?: return@mapNotNull null
-                                    val link2 = a2.attr("href")
-                                    val resultId2 = link2.substringAfterLast("/").substringBefore(".html")
-                                    val resultTitle2 = a2.text()
-                                    val resultPoster2 = mov.selectFirst(".mov-i img")?.attr("src")?.toUrl()
-                                    val isTvShow2 = mov.selectFirst(".block-ep") != null
-                                    if (!isTvShow2) return@mapNotNull null
-
-                                    val saisonText2 = mov.selectFirst(".block-sai")?.text() ?: ""
-                                    val seasonNumber2 = Regex("""[Ss]aison\s*(\d+)""").find(saisonText2)
-                                        ?.groupValues?.get(1)?.toIntOrNull()
-                                        ?: Regex("""[Ss]aison\s*(\d+)""").find(resultTitle2)
-                                            ?.groupValues?.get(1)?.toIntOrNull()
-                                        ?: 1
-
-                                    val resultBase2 = resultTitle2
-                                        .replace(Regex("""[Ss]aison\s*\d+"""), "")
-                                        .replace("FRENCH", "").replace("VOSTFR", "")
-                                        .normalizeForCompare()
-
-                                    if (titlesFuzzyMatch(resultBase2, altBase) || titlesFuzzyMatch(resultBase2, searchBase)) {
-                                        Season(
-                                            id = resultId2,
-                                            number = seasonNumber2,
-                                            title = "Saison $seasonNumber2",
-                                            poster = resultPoster2 ?: poster,
-                                        )
-                                    } else null
-                                }
-                            } catch (_: Exception) { emptyList() }
+                // Si aucune saison trouvée par fuzzy match, mais le plus gros cluster de résultats
+                // a ≥2 entrées avec des saisons différentes → probablement notre anime sous un titre alternatif
+                if (seasons.isEmpty() && largestCluster != null && largestCluster.value.size >= 2) {
+                    val distinctSeasons = largestCluster.value.map { it.seasonNumber }.distinct()
+                    if (distinctSeasons.size >= 1) {
+                        largestCluster.value.forEach { hit ->
+                            seasons.add(Season(
+                                id = hit.resultId,
+                                number = hit.seasonNumber,
+                                title = "Saison ${hit.seasonNumber}",
+                                poster = hit.resultPoster ?: poster,
+                            ))
                         }
                     }
-                    altResults.forEach { seasons.addAll(it.await()) }
                 }
 
                 // Dedup + sort
                 val deduped = seasons.distinctBy { it.number }.sortedBy { it.number }
+                android.util.Log.d("FrenchAnime", "Final: ${deduped.size} seasons (before dedup: ${seasons.size})")
                 seasons.clear()
                 seasons.addAll(deduped)
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                android.util.Log.e("FrenchAnime", "getTvShow search error", e)
+            }
 
             Pair(seasons, recommendations)
         }
@@ -630,7 +860,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
     }
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
-        val document = service.getTvShow(seasonId)
+        val document = safeGetDoc("${baseUrl}$seasonId.html") { service.getTvShow(seasonId) }
 
         // Get poster for episodes
         val episodePoster = document.selectFirst("div.mov-img img[itemprop=thumbnailUrl]")
@@ -657,7 +887,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
 
     override suspend fun getGenre(id: String, page: Int): Genre {
         val document = try {
-            service.getGenre(id, page)
+            safeGetDoc("${baseUrl}genre/$id/page/$page") { service.getGenre(id, page) }
         } catch (e: HttpException) {
             when (e.code()) {
                 404 -> return Genre(id, "")
@@ -736,7 +966,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
             is Video.Type.Episode -> id.substringBeforeLast("_")
         }
 
-        val document = service.getTvShow(episodeId)
+        val document = safeGetDoc("${baseUrl}$episodeId.html") { service.getTvShow(episodeId) }
 
         val epsText = document.selectFirst("div.eps")?.text() ?: return emptyList()
         val episodeLines = epsText.split(" ")
@@ -836,7 +1066,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
 
     private suspend fun fetchTvShows(path: String): List<TvShow> {
         return try {
-            service.getTvSeries(path).let { document ->
+            safeGetDoc("${baseUrl}$path") { service.getTvSeries(path) }.let { document ->
                 document.select("div.mov.clearfix").mapNotNull { extractTvShows(it) }
             }
         } catch (e: Exception) {
@@ -957,49 +1187,20 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
      * redirects (301/302), OkHttp and Retrofit downgrade POST→GET losing the
      * form body.  This method manually follows redirects while keeping POST.
      */
-    private suspend fun searchDirect(query: String, page: Int): org.jsoup.nodes.Document = withContext(Dispatchers.IO) {
-        val formBody = okhttp3.FormBody.Builder()
-            .add("do", "search")
-            .add("subaction", "search")
-            .add("story", query)
-            .add("search_start", if (page > 1) page.toString() else "0")
-            .add("result_from", if (page > 1) ((page - 1) * SEARCH_PAGE_SIZE + 1).toString() else "1")
-            .add("full_search", "0")
-            .build()
-
-        val url = baseUrl
-
-        // POST direct — le service Retrofit gère déjà les redirects domaine,
-        // pas besoin du HEAD probe qui ajoutait 1-2s de latence
-        val request = okhttp3.Request.Builder()
-            .url(url)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36")
-            .header("Referer", url)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .post(formBody)
-            .build()
-
-        var response = searchClient.newCall(request).execute()
-
-        // Follow POST redirects preserving the body
-        var postRedirects = 0
-        while (response.isRedirect && postRedirects < 3) {
-            val location = response.header("Location") ?: break
-            val newUrl = request.url.resolve(location)?.toString() ?: break
-            response.close()
-            val redirectReq = okhttp3.Request.Builder()
-                .url(newUrl)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36")
-                .header("Referer", url)
-                .post(formBody)
-                .build()
-            response = searchClient.newCall(redirectReq).execute()
-            postRedirects++
+    private suspend fun searchDirect(query: String, page: Int): org.jsoup.nodes.Document {
+        // Utiliser GET via getDocument (= bypass CF WebView intégré)
+        // DLE supporte la recherche en GET : /index.php?do=search&subaction=search&story=...
+        val encodedQuery = java.net.URLEncoder.encode(query, "UTF-8")
+        val searchUrl = buildString {
+            append("${baseUrl}index.php?do=search&subaction=search&story=$encodedQuery")
+            if (page > 1) {
+                append("&search_start=$page")
+                append("&result_from=${(page - 1) * SEARCH_PAGE_SIZE + 1}")
+            }
+            append("&full_search=0")
         }
-
-        val html = response.body?.string() ?: ""
-        response.close()
-        org.jsoup.Jsoup.parse(html, url)
+        android.util.Log.d("FrenchAnime", "searchDirect: url=$searchUrl")
+        return getDocument(searchUrl, silentBypass = true)
     }
 
     override suspend fun onChangeUrl(forceRefresh: Boolean): String {

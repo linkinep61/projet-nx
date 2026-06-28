@@ -4,7 +4,9 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/cl_exo_controller"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:clipChildren="false"
+    android:clipToPadding="false">
 
     <View
         android:id="@+id/exo_controls_background"
@@ -91,14 +93,9 @@
             app:tint="#FFFFFF"
             tools:ignore="ContentDescription,PrivateResource" />
 
-        <ImageView
-            android:id="@+id/exo_replay"
-            android:layout_width="60dp"
-            android:layout_height="match_parent"
-            android:padding="10dp"
-            android:src="@drawable/ic_refresh"
-            app:tint="#FFFFFF"
-            tools:ignore="ContentDescription" />
+        <!-- 2026-06-20 : exo_replay (refresh) retiré du centre — le screenshot
+             cible ne montre que prev/-10s/play/+10s/next au centre.
+             exo_settings (gear) déplacé en haut à droite sous forme de 3-dots. -->
 
         <!-- Media3's PlayerControlView swaps the drawable at runtime (play↔
              pause) and the runtime swap ignores app:tint, so the button
@@ -131,44 +128,55 @@
             android:src="@drawable/ic_next"
             app:tint="#FFFFFF" />
 
-        <!-- Settings (gear) inline with the playback controls — directly to the right of
-             skip-forward (▶▶). Lock / PiP / aspect-ratio stay at the bottom-right.
-             Media3 also rebinds this drawable at runtime, hence both tints. -->
-        <ImageView
-            android:id="@+id/exo_settings"
-            android:layout_width="60dp"
-            android:layout_height="match_parent"
-            android:padding="10dp"
-            android:src="@drawable/exo_styled_controls_settings"
-            android:tint="#FFFFFF"
-            app:tint="#FFFFFF"
-            tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
-
     </LinearLayout>
 
     <!-- Mobile port v51 : conteneur vertical pour exo_progress (VOD) + dual-bars (live IPTV). -->
-    <!-- 2026-06-19 (user "barre de progression trop haute, ça cache les sous-titres
-         en pause") : barre placée TOUT en bas, exo_bottom_bar (= boutons + temps)
-         remonte au-dessus.
-         2026-06-19 v27 (user "remonter la barre d'un cran et décaler") :
-         marginBottom 4→24dp pour décoller la barre du bord, +marginStart/End
-         alignés sur les autres bars (16dp). -->
+    <!-- 2026-06-20 (user "la barre cela met bien tout en bas sur mobile") :
+         marginBottom 24dp → 0dp. La barre va TOUT EN BAS de l'écran.
+         (Antérieurement c'était 24dp suite à une autre demande, mais la nouvelle
+          consigne est tout en bas.) -->
+    <!-- 2026-06-21 v3 (user "la barre n'est pas encore assez basse, on voit
+         bien qu'il y a de la marge encore en bas de l'écran. Là vraiment
+         tout en bas") :
+         marginBottom -16dp (au lieu de -4dp). DefaultTimeBar a touch_target
+         de 24dp (12dp de chaque côté du scrubber) → on tire le container
+         de 16dp pour que la LIGNE blanche soit collée au bord bas de
+         l'écran. clipChildren=false sur le container ET le parent
+         (cl_exo_controller) pour ne pas couper le scrubber. -->
     <LinearLayout
         android:id="@+id/exo_progress_container"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginStart="16dp"
         android:layout_marginEnd="16dp"
-        android:layout_marginBottom="24dp"
+        android:layout_marginBottom="-10dp"
+        android:clipChildren="false"
+        android:clipToPadding="false"
         android:orientation="vertical"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent">
 
+        <!-- 2026-06-21 v3 (user "le bouton qui est sur la barre tu le fais un
+             peu plus gros pour qu'on puisse l'attraper") :
+             scrubber_enabled_size 14dp + dragged 20dp = bien grabbable.
+             bar_height 4dp (légèrement épaissie, user "grossi un peu").
+             touch_target_height 32dp (zone tactile généreuse). -->
+        <!-- 2026-06-22 : couleurs forcées en blanc pour éviter que le
+             colorAccent du thème ne teinte la barre en couleur. -->
         <androidx.media3.ui.DefaultTimeBar
             android:id="@+id/exo_progress"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
+            android:layout_height="wrap_content"
+            app:bar_height="5dp"
+            app:played_color="#FFFFFFFF"
+            app:scrubber_color="#FFFFFFFF"
+            app:unplayed_color="#33FFFFFF"
+            app:buffered_color="#CCFFFFFF"
+            app:scrubber_enabled_size="14dp"
+            app:scrubber_disabled_size="0dp"
+            app:scrubber_dragged_size="22dp"
+            app:touch_target_height="32dp" />
 
         <!-- Custom barre 1 (chunk en lecture) — visible pour live IPTV -->
         <androidx.media3.ui.DefaultTimeBar
@@ -257,108 +265,123 @@
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
+        <!-- 2026-06-20 : les boutons ci-dessous sont MASQUÉS (gone) et déplacés
+             dans le popup 3-dots. Ils restent dans le layout pour le ViewBinding
+             + les fonctionnalités existantes (cast SDK, record state, etc.). -->
         <ImageView
             android:id="@+id/btn_exo_lock"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginEnd="16dp"
-            android:padding="12dp"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone"
             android:src="@drawable/exo_styled_controls_lock"
             app:tint="#FFFFFF"
-            app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@id/btn_exo_cast"
+            app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent"
             tools:ignore="ContentDescription,PrivateResource" />
 
         <androidx.mediarouter.app.MediaRouteButton
             android:id="@+id/btn_exo_cast"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginEnd="16dp"
-            android:padding="12dp"
-            app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@id/btn_exo_wireless"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone"
+            app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent"
             app:mediaRouteButtonTint="#FFFFFF" />
 
         <ImageView
             android:id="@+id/btn_exo_wireless"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginEnd="16dp"
-            android:padding="12dp"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone"
             android:src="@drawable/ic_screen_share"
-            android:contentDescription="Diffuser l'écran sur TV (Miracast/LG/Samsung)"
             app:tint="#FFFFFF"
-            app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@id/btn_exo_picture_in_picture"
+            app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent"
             tools:ignore="PrivateResource" />
 
         <ImageView
             android:id="@+id/btn_exo_picture_in_picture"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginEnd="16dp"
-            android:padding="12dp"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone"
             android:src="@drawable/exo_styled_controls_picture_in_picture"
             app:tint="#FFFFFF"
-            app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@id/btn_live_record"
+            app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent"
             tools:ignore="ContentDescription,PrivateResource" />
 
         <ImageView
             android:id="@+id/btn_live_record"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginEnd="16dp"
-            android:padding="12dp"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone"
             android:src="@android:drawable/ic_menu_save"
-            android:contentDescription="Enregistrer"
-            app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@id/btn_exo_aspect_ratio"
+            app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent"
             app:tint="#FFFFFF" />
 
         <ImageView
             android:id="@+id/btn_exo_aspect_ratio"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginEnd="16dp"
-            android:padding="12dp"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone"
             android:src="@drawable/exo_styled_controls_aspect_ratio"
             app:tint="#FFFFFF"
-            app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@id/btn_exo_external_player"
+            app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent"
             tools:ignore="ContentDescription,PrivateResource" />
 
-        <!-- 2026-06-19 v34 : external_player n'est plus en TOUT à droite,
-             channel_list le remplace (= dernière icône à droite). -->
         <ImageView
             android:id="@+id/btn_exo_external_player"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginEnd="16dp"
-            android:padding="12dp"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone"
             android:src="@drawable/exo_styled_controls_external_player"
             app:tint="#FFFFFF"
-            app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@id/btn_exo_channel_list"
+            app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent"
             tools:ignore="ContentDescription" />
 
-        <!-- 2026-06-19 v34 (user "barre avec TOUS les icônes tout en haut") :
-             channel_list rejoint la barre du haut, en TOUT à droite. -->
+        <!-- IPTV only — channel list icon (reste visible si IPTV) -->
         <ImageView
             android:id="@+id/btn_exo_channel_list"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginEnd="16dp"
             android:padding="12dp"
             android:src="@drawable/ic_channel_list"
             android:contentDescription="Liste des chaines"
             android:visibility="gone"
+            app:tint="#FFFFFF"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toStartOf="@id/btn_exo_server"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <!-- 2026-06-20 : bouton Serveur — toujours visible,
+             accès direct au picker de serveurs sans passer par les 3-dots. -->
+        <ImageView
+            android:id="@+id/btn_exo_server"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="16dp"
+            android:padding="12dp"
+            android:src="@drawable/ic_server_swap"
+            android:contentDescription="Changer de serveur"
+            app:tint="#FFFFFF"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toStartOf="@id/exo_settings"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <!-- 2026-06-20 : 3-dots → ouvre un popup menu avec TOUTES les
+             options (lock, cast, wireless, PiP, record, ratio, externe,
+             paramètres). L'ID reste exo_settings pour le wiring. -->
+        <ImageView
+            android:id="@+id/exo_settings"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:padding="12dp"
+            android:src="@drawable/ic_overflow_menu"
+            android:contentDescription="Plus d'options"
             app:tint="#FFFFFF"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
@@ -422,6 +445,6 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:visibility="visible"
-        app:constraint_referenced_ids="btn_exo_back,tv_exo_title,tv_exo_subtitle,btn_exo_external_player,exo_center_controls,exo_progress,exo_bottom_bar,btn_custom_prev,btn_custom_next,btn_exo_channel_list,btn_exo_cast,btn_exo_wireless,btn_exo_picture_in_picture,btn_live_record,btn_exo_aspect_ratio,btn_skip_intro" />
+        app:constraint_referenced_ids="btn_exo_back,tv_exo_title,tv_exo_subtitle,btn_exo_external_player,exo_center_controls,exo_progress,exo_bottom_bar,btn_custom_prev,btn_custom_next,btn_exo_channel_list,btn_exo_cast,btn_exo_wireless,btn_exo_picture_in_picture,btn_live_record,btn_exo_aspect_ratio,btn_skip_intro,btn_exo_server,exo_settings" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

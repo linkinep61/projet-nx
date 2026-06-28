@@ -176,6 +176,9 @@ class CategoryViewHolder(
     ) {
         binding.tvCategoryTitle.text = category.name
 
+        // 2026-06-22 : poubelle pour vider la section (cœur / favoris)
+        setupClearButton(binding.ivCategoryClear, category)
+
         // 2026-05-31 : OTF TV — icône globe COLLÉE au texte, cliquable
         // 2026-06-19 : étendu à Adrar TV (= même UX)
         val hasGroupPicker = category.name.contains("OTF TV") || category.name.contains("Adrar TV")
@@ -226,6 +229,9 @@ class CategoryViewHolder(
         onTvShowClick: ((TvShow) -> Unit)?
     ) {
         binding.tvCategoryTitle.text = category.name
+
+        // 2026-06-22 : poubelle pour vider la section (cœur / favoris)
+        setupClearButton(binding.ivCategoryClear, category)
 
         // 2026-06-01 : OTF TV — globe + picker langue sur TV (focusable au D-pad)
         // 2026-06-19 : étendu à Adrar TV
@@ -309,17 +315,55 @@ class CategoryViewHolder(
     }
 
 
+    /**
+     * 2026-06-22 : icône poubelle à côté du titre de section dans l'onglet
+     * Cœur (favoris). Affichée uniquement si [category.onClearSection] est
+     * non null. Au clic → dialog de confirmation → suppression de tous les
+     * items de la section.
+     */
+    private fun setupClearButton(clearBtn: android.widget.ImageView, cat: Category) {
+        val callback = cat.onClearSection
+        if (callback == null) {
+            clearBtn.visibility = View.GONE
+            clearBtn.setOnClickListener(null)
+            clearBtn.isFocusable = false
+            return
+        }
+        clearBtn.visibility = View.VISIBLE
+        clearBtn.setColorFilter(0xAAFFFFFF.toInt(), android.graphics.PorterDuff.Mode.SRC_IN)
+        // Focus D-pad TV : highlight quand sélectionné
+        clearBtn.isFocusable = true
+        clearBtn.isFocusableInTouchMode = false
+        clearBtn.setOnFocusChangeListener { v, hasFocus ->
+            v.alpha = if (hasFocus) 1.0f else 0.6f
+            if (hasFocus) v.setBackgroundColor(0x33FFFFFF) else v.setBackgroundColor(0x00000000)
+        }
+        clearBtn.alpha = 0.6f
+        clearBtn.setOnClickListener {
+            val count = cat.list.size
+            android.app.AlertDialog.Builder(context)
+                .setTitle("Tout supprimer")
+                .setMessage("Supprimer les $count éléments de « ${cat.name} » ?")
+                .setPositiveButton("Supprimer") { _, _ -> callback() }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
+    }
+
     private fun displayMobileSwiper(
         binding: ContentCategorySwiperMobileBinding,
         onMovieClick: ((Movie) -> Unit)?,
         onTvShowClick: ((TvShow) -> Unit)?,
         onSwiperPageChanged: ((bannerUrl: String?) -> Unit)? = null
     ) {
-        // 2026-06-09 (user "bouton carrousel mobile ne désactive pas") : même
-        //   logique que TV — toggle OFF = HIDE complet du swiper.
-        if (!UserPreferences.carouselAsBackground) {
-            // hide tous les enfants visibles (root layout est wrap_content,
-            //   shrink à 0 quand tous les enfants GONE).
+        // 2026-06-21 (user "désactiver le carrousel en fond ça désactive aussi
+        //   le carrousel — il faut une option séparée pour carrément le
+        //   désactiver") : on utilise SHOW_CAROUSEL (= masquer le swiper item)
+        //   indépendamment de CAROUSEL_AS_BACKGROUND (= si la bannière sert
+        //   de fond ou pas). Pour rétro-compat : si CAROUSEL_AS_BACKGROUND
+        //   est OFF (= ancien comportement "tout désactiver"), on garde le
+        //   carrousel VISIBLE (= seulement le fond passe en mode statique).
+        if (!UserPreferences.showCarousel) {
             binding.vpCategorySwiper.visibility = android.view.View.GONE
             try { binding.tvCategoryTitle.visibility = android.view.View.GONE } catch (_: Throwable) {}
             itemView.visibility = android.view.View.GONE
@@ -451,11 +495,12 @@ class CategoryViewHolder(
 
         when (val fragment = context.toActivity()?.getCurrentFragment()) {
             is HomeTvFragment -> {
-                // 2026-06-09 (user "sur OFF tu désactives ce carrousel") :
-                //   toggle OFF = HIDE complet du swiper item + clear background.
-                //   Toggle ON = comportement actuel (image fullscreen background).
-                if (!UserPreferences.carouselAsBackground) {
-                    // Cache l'item entier (height=0 pour que RecyclerView ne lui réserve plus d'espace)
+                // 2026-06-21 (user "désactiver le carrousel en fond ça désactive
+                //   aussi le carrousel — il faut une option séparée") :
+                //   - SHOW_CAROUSEL → contrôle la visibilité du swiper item
+                //   - CAROUSEL_AS_BACKGROUND → contrôle seulement si la
+                //     bannière sert de fond plein écran
+                if (!UserPreferences.showCarousel) {
                     itemView.visibility = android.view.View.GONE
                     val lp = itemView.layoutParams
                     if (lp != null && lp.height != 0) {
@@ -464,16 +509,31 @@ class CategoryViewHolder(
                     }
                     binding.ivSwiperBannerInline.visibility = android.view.View.GONE
                 } else {
-                    // Restore visibilité
+                    // Swiper item visible
                     itemView.visibility = android.view.View.VISIBLE
                     val lp = itemView.layoutParams
                     if (lp != null && lp.height != androidx.recyclerview.widget.RecyclerView.LayoutParams.WRAP_CONTENT) {
                         lp.height = androidx.recyclerview.widget.RecyclerView.LayoutParams.WRAP_CONTENT
                         itemView.layoutParams = lp
                     }
-                    binding.ivSwiperBannerInline.visibility = android.view.View.GONE
-                    if (poster != null) {
+                    // 2026-06-22 (user "en mode carrousel uniquement il y a plus
+                    //   d'images dans le carrousel") : la bannière inline DANS le
+                    //   swiper item (= scroll avec lui) doit être visible quand
+                    //   carouselAsBackground=OFF (sinon iv_home_background plein
+                    //   écran prend le relais). Avant : toujours GONE → écran vide.
+                    if (poster != null && UserPreferences.carouselAsBackground) {
+                        // Mode "Carrousel comme fond" → l'image est en fullscreen
+                        binding.ivSwiperBannerInline.visibility = android.view.View.GONE
                         fragment.updateBackground(poster, false)
+                    } else if (poster != null) {
+                        // Mode "Carrousel uniquement" → l'image dans le swiper item
+                        binding.ivSwiperBannerInline.visibility = android.view.View.VISIBLE
+                        com.bumptech.glide.Glide.with(itemView.context)
+                            .load(com.streamflixreborn.streamflix.utils.optimizeArtworkUrl(poster, 1280))
+                            .transition(com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions.withCrossFade())
+                            .into(binding.ivSwiperBannerInline)
+                    } else {
+                        binding.ivSwiperBannerInline.visibility = android.view.View.GONE
                     }
                 }
 

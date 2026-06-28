@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-06-20 : menu popup déclenché par le bouton 3-dots du lecteur TV.
+     Regroupe les icônes qui étaient dans la barre du haut. -->
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item
+        android:id="@+id/menu_player_aspect_ratio"
+        android:icon="@drawable/exo_styled_controls_aspect_ratio"
+        android:title="Ratio d'affichage" />
+
+    <item
+        android:id="@+id/menu_player_settings"
+        android:icon="@drawable/exo_styled_controls_settings"
+        android:title="Paramètres" />
+
+</menu>

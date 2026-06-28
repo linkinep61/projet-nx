@@ -294,22 +294,13 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
         val movixSeriesD = async {
             try { MovixProvider.getTvShows(page = 1) } catch (_: Exception) { emptyList() }
         }
-        val movixTopRatedD = async {
-            try { MovixProvider.getTvShows(page = 2) } catch (_: Exception) { emptyList() }
-        }
-
         val papa = papaD.await()
         val enrichedPapa = if (papa.isNotEmpty()) enrichListWithTmdb(papa) else emptyList()
         val movixSeries = movixSeriesD.await()
-        val movixTop = movixTopRatedD.await()
 
         // Dedupe par titre normalisé (Papadustream prioritaire car liens vidéo dispo)
         val papaTitles = enrichedPapa.map { normalizeForMatch(it.title) }.toSet()
         val movixUnique = movixSeries.filter { normalizeForMatch(it.title) !in papaTitles }
-        val movixTopUnique = movixTop.filter {
-            val n = normalizeForMatch(it.title)
-            n !in papaTitles && movixSeries.none { ms -> normalizeForMatch(ms.title) == n }
-        }
 
         // FEATURED carousel — pattern AnimeSamaProvider exact :
         // 10 items max, items frais (Movie/TvShow) avec id+title+banner=poster
@@ -325,15 +316,22 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             )
         }
 
+        // Ne garder dans le carrousel que les items avec backdrop TMDb HD (min 5 sinon liste complète)
+        val carouselItems = featured.filter { item ->
+            val b = (item as? TvShow)?.banner
+            b != null && b.contains("/t/p/")
+        }
+        val finalCarousel = if (carouselItems.size >= 5) carouselItems else featured
+        val featuredIds = finalCarousel.map { (it as? TvShow)?.id ?: "" }.toSet()
+        val nouveautesDeduped = enrichedPapa.filter { it.id !in featuredIds }
+
         listOfNotNull(
-            featured.takeIf { it.isNotEmpty() }
+            finalCarousel.takeIf { it.isNotEmpty() }
                 ?.let { Category(name = Category.FEATURED, list = it) },
-            enrichedPapa.takeIf { it.isNotEmpty() }
+            nouveautesDeduped.takeIf { it.isNotEmpty() }
                 ?.let { Category(name = "Nouveautés Papadustream", list = it) },
             movixUnique.takeIf { it.isNotEmpty() }
-                ?.let { Category(name = "Séries Populaires", list = it.take(20)) },
-            movixTopUnique.takeIf { it.isNotEmpty() }
-                ?.let { Category(name = "Plus de Séries", list = it.take(20)) },
+                ?.let { Category(name = "Séries Populaires", list = it.take(30)) },
         )
     }
 
@@ -455,6 +453,7 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
         // Enrichissement TMDB (poster HD, banner, synopsis FR, posters par saison)
         // On passe papaShowId=id pour que la fn stocke le mapping papa→TMDB id.
         val enriched = enrichWithTmdb(baseShow, year?.toIntOrNull(), papaShowId = id)
+
         // Merge : on garde nos IDs Papadustream pour les saisons mais on récupère
         // les posters TMDB par numéro de saison (jaquette de chaque saison).
         val mergedSeasons = seasons.map { papaSeason ->
@@ -546,8 +545,9 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
 
         return episodeLinks.map { (epNum, label) ->
             val tmdbEp = tmdbEpisodes[epNum]
+            val epId = "$seasonId|$epNum"
             Episode(
-                id = "$seasonId|$epNum",
+                id = epId,
                 number = epNum,
                 title = tmdbEp?.title?.takeIf { it.isNotBlank() }
                     ?: label.takeIf { it.isNotBlank() && !it.matches(Regex("""\d+""")) }
@@ -619,11 +619,13 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
     }
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> = coroutineScope {
+        val effectiveId = id
+
         // Cas 1 : id Movix
         //   - Episode : "<tmdbId>-s<S>e<E>" (ex: "12345-s1e3")
         //   - Movie : "<tmdbId>" (juste un int)
-        val isMovixEpisode = id.matches(Regex("""^\d+-s\d+e\d+$"""))
-        val isMovixMovie = id.matches(Regex("""^\d+$"""))
+        val isMovixEpisode = effectiveId.matches(Regex("""^\d+-s\d+e\d+$"""))
+        val isMovixMovie = effectiveId.matches(Regex("""^\d+$"""))
         if (isMovixEpisode || isMovixMovie) {
             // Show importé de Movix → MOVIX EN PREMIER (pas de captcha, plus fluide),
             // Papa en dernier (12 sources mais nécessite captcha → friction).
@@ -632,8 +634,8 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             val cloudstreamServersD = async {
                 try {
                     val csId = when (videoType) {
-                        is Video.Type.Movie -> id
-                        is Video.Type.Episode -> id.substringBefore("-").let { tid ->
+                        is Video.Type.Movie -> effectiveId
+                        is Video.Type.Episode -> effectiveId.substringBefore("-").let { tid ->
                             "$tid:${videoType.season.number}:${videoType.number}"
                         }
                     }
@@ -641,14 +643,14 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
                 } catch (_: Exception) { emptyList() }
             }
             val movixServersD = async {
-                try { MovixProvider.getServersAsBackup(id, videoType) } catch (_: Exception) { emptyList() }
+                try { MovixProvider.getServersAsBackup(effectiveId, videoType) } catch (_: Exception) { emptyList() }
             }
-            val papaServersD = async { tryPapaByTmdbId(id, videoType) }
+            val papaServersD = async { tryPapaByTmdbId(effectiveId, videoType) }
             val movieboxServersD = async {
                 try {
                     val tmdbIdInt = when (videoType) {
-                        is Video.Type.Movie -> id.toIntOrNull()
-                        is Video.Type.Episode -> id.substringBefore("-").toIntOrNull()
+                        is Video.Type.Movie -> effectiveId.toIntOrNull()
+                        is Video.Type.Episode -> effectiveId.substringBefore("-").toIntOrNull()
                     }
                     if (tmdbIdInt != null) MovieboxProvider.getMovieboxSourcesByTmdbId(tmdbIdInt, videoType)
                     else emptyList()
@@ -656,7 +658,7 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             }
             // 2026-05-27 : scrape direct Wiflix (~2s, HTTP simple, 11-14 serveurs)
             val wiflixServersD = async {
-                try { MovixProvider.fetchWiflixDirectBackup(id, videoType) }
+                try { MovixProvider.fetchWiflixDirectBackup(effectiveId, videoType) }
                 catch (_: Exception) { emptyList() }
             }
             val cloudstream = cloudstreamServersD.await()
@@ -664,7 +666,7 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             val papa = papaServersD.await()
             val moviebox = movieboxServersD.await()
             val wiflix = wiflixServersD.await()
-            Log.d(TAG, "Hybrid getServers (Movix-id $id) : cloudstream=${cloudstream.size} + movix=${movix.size} + moviebox=${moviebox.size} + wiflix=${wiflix.size} + papa=${papa.size} (papa last)")
+            Log.d(TAG, "Hybrid getServers (Movix-id $effectiveId) : cloudstream=${cloudstream.size} + movix=${movix.size} + moviebox=${moviebox.size} + wiflix=${wiflix.size} + papa=${papa.size} (papa last)")
             // Papa en dernier (captcha CF friction). Cloudstream / Movix / Moviebox d'abord.
             // Dédup par NAME pour les backups Cloudstream/Nakios (Movix appelle
             // Cloudstream en interne, sign URLs diffèrent → distinctBy src ne marche pas).
@@ -680,11 +682,11 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             }
             return@coroutineScope sortByLanguagePref(merged)
         }
-        val parts = id.split("|")
+        val parts = effectiveId.split("|")
 
         // Cas 2 : épisode Papadustream natif "<genre>|<slug>|<S>|<E>"
         if (parts.size != 4) {
-            Log.w(TAG, "getServers: id épisode invalide $id")
+            Log.w(TAG, "getServers: id épisode invalide $effectiveId")
             return@coroutineScope emptyList()
         }
         val genre = parts[0]

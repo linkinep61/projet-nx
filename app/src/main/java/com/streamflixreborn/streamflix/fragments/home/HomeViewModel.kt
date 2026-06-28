@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
@@ -100,7 +101,8 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                 if (cache != null && cache.continueWatchingEpisodes.isNotEmpty()) {
                     emit(cache.continueWatchingEpisodes.map { it.toEpisode() })
                 } else {
-                    emitAll(database.episodeDao().getNextEpisodesToWatch())
+                    emitAll(database.episodeDao().getNextEpisodesToWatch()
+                        .catch { emit(emptyList()) })
                 }
             }.flowOn(Dispatchers.IO),
             database.tvShowDao().getAll().flowOn(Dispatchers.IO),
@@ -446,22 +448,29 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         }
         currentProvider = provider
 
-        // 2026-05-22 : attendre que le refresh URL du provider soit fini
-        // avant de lancer le fetch. Sans ça, getHome() part sur une vieille
-        // URL → timeout → moulinette infinie au 1er clic.
-        // 15s = assez pour les providers lents (1Jour1Film Cloudflare, portals
-        // FrenchStream/AnimeSama) ; si ça dépasse, on tente quand même.
-        val refreshJob = StreamFlixApp.instance.providerUrlRefreshJob
-        if (refreshJob != null && refreshJob.isActive) {
-            Log.d("HomeBoot", "[${provider.name}] waiting for URL refresh…")
-            withTimeoutOrNull(15_000L) { refreshJob.join() }
-            Log.d("HomeBoot", "[${provider.name}] URL refresh done (or timed out) +${System.currentTimeMillis() - t0}ms")
-        }
-
+        // 2026-06-23 (user "différer le chargement pour home instantané") :
+        //   AVANT, on bloquait sur URL refresh (~3s) AVANT même de lire le cache.
+        //   Maintenant : on lit le cache D'ABORD, on émet, et le wait URL ne
+        //   s'applique QUE si on n'a pas de cache récent. Si cache récent, le
+        //   refresh URL continue en BG sans bloquer.
         val appContext = StreamFlixApp.instance.applicationContext
         Log.d("HomeBoot", "[${provider.name}] start +${System.currentTimeMillis() - t0}ms")
         val cachedCategories = HomeCacheStore.read(appContext, provider)
-        Log.d("HomeBoot", "[${provider.name}] cache read +${System.currentTimeMillis() - t0}ms (categories=${cachedCategories?.size ?: 0})")
+        val cacheAgeForFastPath = HomeCacheStore.ageMs(appContext, provider)
+        val hasRecentCache = !cachedCategories.isNullOrEmpty() && cacheAgeForFastPath != null && cacheAgeForFastPath < 30 * 60 * 1000L
+        Log.d("HomeBoot", "[${provider.name}] cache read +${System.currentTimeMillis() - t0}ms (categories=${cachedCategories?.size ?: 0}, age=${cacheAgeForFastPath?.div(1000)}s)")
+
+        // Attendre URL refresh UNIQUEMENT si on n'a pas de cache récent
+        val refreshJob = StreamFlixApp.instance.providerUrlRefreshJob
+        if (refreshJob != null && refreshJob.isActive) {
+            if (hasRecentCache) {
+                Log.d("HomeBoot", "[${provider.name}] URL refresh in BG (cache récent, pas d'attente)")
+            } else {
+                Log.d("HomeBoot", "[${provider.name}] waiting for URL refresh…")
+                withTimeoutOrNull(15_000L) { refreshJob.join() }
+                Log.d("HomeBoot", "[${provider.name}] URL refresh done (or timed out) +${System.currentTimeMillis() - t0}ms")
+            }
+        }
 
         // 2026-05-22 : si le provider a un warm-up (ex. WiTV v2 : scan OLA),
         // NE PAS servir le cache disque tant que le warm-up n'est pas fini.
@@ -469,17 +478,20 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         // streams soient pré-cachés → lancement lent.
         val warmUpPending = false // WarmUpCapable retiré avec WiTV
 
-        // 2026-05-26 : AnimeSama a un Cloudflare Turnstile — ne PAS servir le
-        // cache avant le CF bypass, sinon le captcha pop 30s+ après l'ouverture.
-        // On montre le spinner Loading et getHome() fait le bypass en premier.
-        val needsCfCheck = provider.name == "AnimeSama"
-        if (!needsCfCheck && !cachedCategories.isNullOrEmpty() && !warmUpPending) {
+        // 2026-06-23 (user "AnimeSama met toujours du temps à s'ouvrir") :
+        //   STALE-WHILE-REVALIDATE. Avant : pour AnimeSama on bloquait sur
+        //   Loading pendant le CF bypass (~5-20s). Maintenant : on affiche le
+        //   cache (29 cat dispo) instantanément, le bypass + getHome se font
+        //   en BG, l'UI update quand getHome finit. Trade-off : si l'user
+        //   clique vite sur une fiche avant la fin du bypass, un captcha
+        //   peut apparaître à ce moment-là (= comportement existant).
+        if (!cachedCategories.isNullOrEmpty() && !warmUpPending) {
             _state.emit(State.SuccessLoading(cachedCategories))
-            Log.d("HomeBoot", "[${provider.name}] emit cache +${System.currentTimeMillis() - t0}ms")
+            Log.d("HomeBoot", "[${provider.name}] emit cache +${System.currentTimeMillis() - t0}ms (stale-while-revalidate)")
         } else {
             _state.emit(State.Loading)
-            if (warmUpPending) Log.d("HomeBoot", "[${provider.name}] warm-up pending → Loading (cache ignoré)")
-            if (needsCfCheck) Log.d("HomeBoot", "[${provider.name}] CF check pending → Loading (cache ignoré)")
+            if (warmUpPending) Log.d("HomeBoot", "[${provider.name}] warm-up pending → Loading (no cache)")
+            else Log.d("HomeBoot", "[${provider.name}] no cache → Loading")
         }
 
         loadUserDataCache(provider)
@@ -491,7 +503,16 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         // NE PAS skip si warm-up pending (le provider.getHome() doit tourner
         // pour que le warm-up bloquant s'exécute).
         val cacheAgeMs = HomeCacheStore.ageMs(appContext, provider)
+        // 2026-06-20 (user "le TV Hub ne se rafraîchit pas à son ouverture") :
+        //   si le cache TV Hub contient une section critique vide (OTF / Adrar),
+        //   considère que le cache est mort → force refresh. Sans ça, un fetch
+        //   OTF/Adrar échoué (= timeout 4s) caché 30 min affichait un dossier
+        //   vide jusqu'au refresh manuel.
+        val tvHubMissingCritical = provider is com.streamflixreborn.streamflix.providers.LiveTvHubProvider &&
+            !cachedCategories.isNullOrEmpty() &&
+            cachedCategories.none { c -> c.name.startsWith("OTF TV") }
         val cacheTtlMs = when {
+            tvHubMissingCritical -> 0L
             // Providers lents (Cloudflare, scrape) → 30 min
             provider.name.contains("Anime", ignoreCase = true) ||
             provider.name.contains("Dessin", ignoreCase = true) ||
@@ -503,8 +524,18 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
             // Providers normaux → 5 min
             else -> 5 * 60 * 1000L
         }
-        // 2026-05-26 : AnimeSama = jamais skip réseau (CF Turnstile check).
-        if (!needsCfCheck && !warmUpPending && !cachedCategories.isNullOrEmpty() && cacheAgeMs != null && cacheAgeMs < cacheTtlMs) {
+        if (tvHubMissingCritical) {
+            Log.w("HomeBoot", "[${provider.name}] cache missing OTF section → force refresh")
+        }
+        // 2026-06-23 : avec stale-while-revalidate, le cache est servi tout
+        //   de suite. On peut skip le réseau pour AnimeSama aussi si cache
+        //   récent (le CF check sera fait au prochain refresh).
+        // 2026-06-28 (user "c'est redevenu long et plus instantané et quand
+        //   je fais retour et que je reviens ça refait des chargements") :
+        //   retour au SKIP cache standard pour TOUS les providers (= WebJsProvider
+        //   inclus). Plus de re-fetch automatique. Le cache est servi instantanément
+        //   sur back-revient. Refresh manuel via bouton si nécessaire.
+        if (!warmUpPending && !cachedCategories.isNullOrEmpty() && cacheAgeMs != null && cacheAgeMs < cacheTtlMs) {
             Log.d("HomeBoot", "[${provider.name}] SKIP network (cache age ${cacheAgeMs / 1000}s, TTL ${cacheTtlMs / 60000}min) total=${System.currentTimeMillis() - t0}ms")
             return
         }
@@ -539,7 +570,15 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
             } else {
                 Log.w("HomeBoot", "[${provider.name}] partial result (${categories.size} cats) < cache (${cachedCategories.size}) — NOT overwriting cache")
             }
-            _state.emit(State.SuccessLoading(categories))
+            // 2026-06-28 (user "le home perd ses catégories 4 → 2") : si le
+            //   re-fetch est partiel ET qu'on avait un cache émis, on PRÉSERVE
+            //   l'état actuel pour éviter le flicker / la perte de catégories
+            //   au profit d'un résultat dégradé.
+            if (shouldWriteCache) {
+                _state.emit(State.SuccessLoading(categories))
+            } else {
+                Log.w("HomeBoot", "[${provider.name}] SKIP emit du résultat partiel — état actuel préservé")
+            }
 
             // Enrich carousels in the background — deferred so it doesn't
             // compete with player init or channel loading.

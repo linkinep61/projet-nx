@@ -43,275 +43,175 @@ object LiveTvHubPlusProvider : Provider, IptvProvider, ProgressiveHomeProvider {
     private val _additionalServersFlow = MutableSharedFlow<Video.Server>()
     override val additionalServersFlow: SharedFlow<Video.Server> = _additionalServersFlow.asSharedFlow()
 
+    // 2026-06-20 (user "remettre les dossiers, reconnecté au TV hub") :
+    //   mode DOSSIER — chaque catégorie M3U (Premium FR, Sport, TNT France,
+    //   etc.) devient un dossier cliquable, comme dans TV Hub. Au clic,
+    //   LiveHubFolderDialog affiche les chaînes du dossier. Plus de crash
+    //   sur les petits appareils car le home n'affiche que ~20 cards dossier
+    //   au lieu de 500+ cards chaînes.
+    //
+    //   Les contenus des dossiers sont stockés dans
+    //   LiveTvHubProvider.folderContents (= même registre que TV Hub) avec
+    //   des clés préfixées "wl_" pour éviter tout conflit avec TV Hub.
+
     override suspend fun getHome(): List<Category> {
-        val sections = mutableListOf<Category>()
-
-        // 2026-06-08 (user "tu gardes QUE les 2 derniers ajouts") : on ne
-        //   duplique PAS le contenu de TV Hub (France TV/Dric4rTV/OTF/etc.).
-        //   On affiche UNIQUEMENT les ajouts spécifiques à World Live.
-        //
-        //   Les IDs et providerName restent dans la famille TV Hub (`livehub::*`
-        //   + "TV Hub") pour que les réglages utilisateurs (bans, favoris,
-        //   prefs player) soient partagés avec TV Hub principal — l'user n'a
-        //   rien à reconfigurer.
-
-        // 2026-06-09 (user "on va tout condenser comme dans les IPTV, on fait
-        //   une liste, on clique dessus, on choisit la catégorie") : picker
-        //   catégorie style Vavoo. Une SEULE section dans le home dont le
-        //   contenu dépend de la catégorie choisie.
-        //
-        //   "Toutes les chaînes" (cat=all) → tout aplati dans 1 section.
-        //   "France/Cinéma/Sport/..." → filtre par keywords sur le group-title.
-        try {
+        return try {
             val wltvSections = WorldLiveTvProvider.getHome()
-            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
-            val currentCode = WorldLiveCategorySettings.getCurrentCode(ctx)
-            val currentLabel = WorldLiveCategorySettings.getCurrentLabel(ctx)
-            val isAll = currentCode == WorldLiveCategorySettings.ALL_CODE
-
-            // 2026-06-10 (user "une fois la source chargée elle n'affiche pas
-            //   directement toutes les chaînes Toutes les catégories — avec
-            //   chargement différé pour éviter les crashes, et nous on peut
-            //   sélectionner") :
-            //   - Mode "all" → toutes les catégories en sections séparées
-            //     (= comme Wiseplay). RecyclerView gère le lazy load des
-            //     ViewHolders donc pas de crash même sur 16k chaînes.
-            //   - Mode "catégorie X" → seulement cette section (= picker actif).
-            //
-            //   Cap MAX_PER_SECTION pour éviter qu'une section géante
-            //   (ex: Github IPTV ~10000) plombe l'init. Les chaînes au-delà
-            //   du cap restent accessibles via l'onglet "Toutes les chaînes".
-            val allChannelsMap = mutableMapOf<String, TvShow>()
-            val sectionsBuffer = mutableListOf<Category>()
-
-            for (cat in wltvSections) {
-                val matchesCategory = WorldLiveCategorySettings.matches(ctx, cat.name)
-                val channelsInSection = mutableListOf<TvShow>()
-                (cat.list as? List<*>)?.forEach { item ->
-                    val tv = item as? TvShow ?: return@forEach
-                    val newId = "livehub::worldlivetv::${tv.id}"
-                    if (com.streamflixreborn.streamflix.fragments.player.settings
-                            .IptvBannedChannels.isBanned(newId)) return@forEach
-                    val rebadged = TvShow(id = newId, title = tv.title ?: "").apply {
-                        providerName = "World Live"
-                        poster = tv.poster
-                        banner = tv.banner
-                    }
-                    val canonical = "wl" + tv.id.substringAfterLast("::").lowercase().trim()
-                    allChannelsMap[canonical] = rebadged
-                    if (matchesCategory) channelsInSection.add(rebadged)
-                }
-                if (channelsInSection.isNotEmpty()) {
-                    // Cap par section pour éviter crash sur init (16k chaînes).
-                    val capped = if (channelsInSection.size > MAX_PER_SECTION)
-                        channelsInSection.take(MAX_PER_SECTION) else channelsInSection
-                    sectionsBuffer.add(
-                        Category(
-                            name = if (isAll) cat.name else currentLabel,
-                            list = capped,
-                        )
-                    )
-                }
-            }
-
-            // Section "Favoris" en haut si l'user en a marqué.
-            try {
-                // 2026-06-10 (user "favoris dans folder pas affichés") :
-                //   ajoute les chaînes des folders à allChannelsMap pour
-                //   résoudre les favoris marqués via le dialog folder.
-                WorldLiveTvProvider.folderContents.values.forEach { items ->
-                    items.forEach { ch ->
-                        if (ch.isFolder) return@forEach
-                        val newId = "livehub::worldlivetv::${ch.id}"
-                        val rebadged = TvShow(id = newId, title = ch.name).apply {
-                            providerName = "World Live"
-                            poster = ch.logo
-                            banner = ch.logo
-                        }
-                        val canonical = "wl" + ch.id.substringAfterLast("::").lowercase().trim()
-                        allChannelsMap.putIfAbsent(canonical, rebadged)
-                    }
-                }
-                val favKeys = com.streamflixreborn.streamflix.utils.IptvFavoritesStore
-                    .getFavorites("World Live")
-                // 2026-06-10 (user "favoris dans folder ne s'affiche pas") :
-                //   fallback metadata cache si la chaîne n'est pas dans
-                //   allChannelsMap (= folderContents pas encore re-rempli).
-                val favShows = favKeys.mapNotNull { canonical ->
-                    allChannelsMap[canonical] ?: run {
-                        try {
-                            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
-                            val prefs = ctx.getSharedPreferences(
-                                "world_live_fav_meta", android.content.Context.MODE_PRIVATE,
-                            )
-                            val cachedName = prefs.getString("${canonical}_name", null)
-                                ?: return@run null
-                            val cachedLogo = prefs.getString("${canonical}_logo", "")
-                            // Reconstruct un id minimal — le canonical commence
-                            //   par "wl", on récupère le slug derrière.
-                            val slug = canonical.removePrefix("wl")
-                            val syntheticId = "livehub::worldlivetv::wltv::cache::$slug"
-                            TvShow(id = syntheticId, title = cachedName).apply {
-                                providerName = "World Live"
-                                poster = cachedLogo
-                                banner = cachedLogo
-                            }
-                        } catch (_: Throwable) { null }
-                    }
-                }
-                if (favShows.isNotEmpty()) {
-                    sections.add(Category(name = "Favoris", list = favShows))
-                }
-            } catch (_: Throwable) {}
-
-            // Mode all → toutes les sections. Mode catégorie → on les fusionne
-            //   en une seule section "currentLabel" (= comportement avant).
-            if (isAll) {
-                sections.addAll(sectionsBuffer)
-            } else {
-                val flat = sectionsBuffer.flatMap {
-                    (it.list as? List<*>)?.filterIsInstance<TvShow>() ?: emptyList()
-                }
-                if (flat.isNotEmpty()) {
-                    sections.add(
-                        Category(
-                            name = currentLabel,
-                            list = if (flat.size > MAX_PER_SECTION)
-                                flat.take(MAX_PER_SECTION) else flat,
-                        )
-                    )
-                }
-            }
+            buildFoldersFromWltv(wltvSections)
         } catch (t: Throwable) {
             Log.w(TAG, "World Live TV getHome failed: ${t.message}")
+            emptyList()
         }
-
-        return sections
     }
 
-    /** Cap de chaînes par section sur le home. Évite qu'une catégorie géante
-     *  (ex: Github IPTV 10k chaînes) crashe l'init. Les chaînes au-delà
-     *  restent accessibles via l'onglet "Toutes les chaînes". */
-    private const val MAX_PER_SECTION = 100
-
-    /** 2026-06-10 (user "chargement différé qui arrive au fur et à mesure") :
-     *  délègue au WorldLiveTvProvider.getHomeProgressive() avec un map pour
-     *  ré-appliquer le rebadge (livehub::worldlivetv::*) + favoris + filtre
-     *  catégorie. Chaque émission est ré-buildée comme un home complet. */
     override fun getHomeProgressive(): kotlinx.coroutines.flow.Flow<List<Category>> {
         return kotlinx.coroutines.flow.flow {
             WorldLiveTvProvider.getHomeProgressive().collect { wltvSections ->
-                emit(rebuildSectionsFromWltv(wltvSections))
+                emit(buildFoldersFromWltv(wltvSections))
             }
         }
     }
 
-    private fun rebuildSectionsFromWltv(wltvSections: List<Category>): List<Category> {
+    /**
+     * Groupe les sections World Live en dossiers. Chaque catégorie du M3U
+     * (Premium FR, Sport, etc.) = un dossier. Stocke le contenu dans
+     * [LiveTvHubProvider.folderContents] pour que [LiveHubFolderDialog]
+     * puisse l'afficher au clic (= même pipeline que TV Hub).
+     */
+    private fun buildFoldersFromWltv(wltvSections: List<Category>): List<Category> {
         val sections = mutableListOf<Category>()
-        try {
-            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
-            val currentCode = WorldLiveCategorySettings.getCurrentCode(ctx)
-            val currentLabel = WorldLiveCategorySettings.getCurrentLabel(ctx)
-            val isAll = currentCode == WorldLiveCategorySettings.ALL_CODE
-            val allChannelsMap = mutableMapOf<String, TvShow>()
-            val sectionsBuffer = mutableListOf<Category>()
-            for (cat in wltvSections) {
-                val matchesCategory = WorldLiveCategorySettings.matches(ctx, cat.name)
-                val channelsInSection = mutableListOf<TvShow>()
-                (cat.list as? List<*>)?.forEach { item ->
-                    val tv = item as? TvShow ?: return@forEach
-                    val newId = "livehub::worldlivetv::${tv.id}"
-                    if (com.streamflixreborn.streamflix.fragments.player.settings
-                            .IptvBannedChannels.isBanned(newId)) return@forEach
-                    val rebadged = TvShow(id = newId, title = tv.title ?: "").apply {
-                        providerName = "World Live"
-                        poster = tv.poster
-                        banner = tv.banner
-                    }
-                    val canonical = "wl" + tv.id.substringAfterLast("::").lowercase().trim()
-                    allChannelsMap[canonical] = rebadged
-                    if (matchesCategory) channelsInSection.add(rebadged)
+        val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
+        val allChannelsMap = mutableMapOf<String, TvShow>()
+        val folderShows = mutableListOf<TvShow>()
+
+        // 2026-06-23 : catégorie sélectionnée via le picker globe
+        val selectedCode = WorldLiveCategorySettings.getCurrentCode(ctx)
+        val filterActive = selectedCode != WorldLiveCategorySettings.ALL_CODE
+
+        // Quand une catégorie est sélectionnée, on affiche ses chaînes
+        // directement au lieu des folder cards.
+        val filteredChannels = mutableListOf<TvShow>()
+
+        for (cat in wltvSections) {
+            val channelsInSection = mutableListOf<TvShow>()
+            (cat.list as? List<*>)?.forEach { item ->
+                val tv = item as? TvShow ?: return@forEach
+                val newId = "livehub::worldlivetv::${tv.id}"
+                if (com.streamflixreborn.streamflix.fragments.player.settings
+                        .IptvBannedChannels.isBanned(newId)) return@forEach
+                val rebadged = TvShow(id = newId, title = tv.title ?: "").apply {
+                    providerName = "World Live"
+                    poster = tv.poster
+                    banner = tv.banner
                 }
-                if (channelsInSection.isNotEmpty()) {
-                    val capped = if (channelsInSection.size > MAX_PER_SECTION)
-                        channelsInSection.take(MAX_PER_SECTION) else channelsInSection
-                    sectionsBuffer.add(
-                        Category(
-                            name = if (isAll) cat.name else currentLabel,
-                            list = capped,
-                        )
-                    )
-                }
+                val canonical = "wl" + tv.id.substringAfterLast("::").lowercase().trim()
+                allChannelsMap[canonical] = rebadged
+                channelsInSection.add(rebadged)
             }
-            try {
-                // 2026-06-10 (user "favoris ajouté dans le folder n'apparaît
-                //   pas sur le home") : ajoute les chaînes DES FOLDERS à
-                //   allChannelsMap pour que les favoris résolvent même quand
-                //   l'user a marqué une chaîne via le dialog folder.
-                WorldLiveTvProvider.folderContents.values.forEach { items ->
-                    items.forEach { ch ->
-                        if (ch.isFolder) return@forEach
-                        val newId = "livehub::worldlivetv::${ch.id}"
-                        val rebadged = TvShow(id = newId, title = ch.name).apply {
-                            providerName = "World Live"
-                            poster = ch.logo
-                            banner = ch.logo
-                        }
-                        val canonical = "wl" + ch.id.substringAfterLast("::").lowercase().trim()
-                        // Ne pas overwrite si déjà présent dans top-level.
-                        allChannelsMap.putIfAbsent(canonical, rebadged)
-                    }
-                }
-                val favKeys = com.streamflixreborn.streamflix.utils.IptvFavoritesStore
-                    .getFavorites("World Live")
-                // 2026-06-10 (user "favoris dans folder ne s'affiche pas") :
-                //   fallback metadata cache si la chaîne n'est pas dans
-                //   allChannelsMap (= folderContents pas encore re-rempli).
-                val favShows = favKeys.mapNotNull { canonical ->
-                    allChannelsMap[canonical] ?: run {
-                        try {
-                            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
-                            val prefs = ctx.getSharedPreferences(
-                                "world_live_fav_meta", android.content.Context.MODE_PRIVATE,
-                            )
-                            val cachedName = prefs.getString("${canonical}_name", null)
-                                ?: return@run null
-                            val cachedLogo = prefs.getString("${canonical}_logo", "")
-                            // Reconstruct un id minimal — le canonical commence
-                            //   par "wl", on récupère le slug derrière.
-                            val slug = canonical.removePrefix("wl")
-                            val syntheticId = "livehub::worldlivetv::wltv::cache::$slug"
-                            TvShow(id = syntheticId, title = cachedName).apply {
-                                providerName = "World Live"
-                                poster = cachedLogo
-                                banner = cachedLogo
-                            }
-                        } catch (_: Throwable) { null }
-                    }
-                }
-                if (favShows.isNotEmpty()) {
-                    sections.add(Category(name = "Favoris", list = favShows))
-                }
-            } catch (_: Throwable) {}
-            if (isAll) {
-                sections.addAll(sectionsBuffer)
-            } else {
-                val flat = sectionsBuffer.flatMap {
-                    (it.list as? List<*>)?.filterIsInstance<TvShow>() ?: emptyList()
-                }
-                if (flat.isNotEmpty()) {
-                    sections.add(
-                        Category(
-                            name = currentLabel,
-                            list = if (flat.size > MAX_PER_SECTION)
-                                flat.take(MAX_PER_SECTION) else flat,
-                        )
-                    )
-                }
+            if (channelsInSection.isEmpty()) continue
+
+            // Clé dossier unique : wl_<catName_sanitized>
+            val folderKey = "wl_" + cat.name.lowercase()
+                .replace(Regex("[^a-z0-9]+"), "_")
+                .trim('_')
+
+            // Stocke dans LiveTvHubProvider.folderContents (= même registre
+            //   que TV Hub). LiveHubFolderDialog y accède au clic.
+            LiveTvHubProvider.folderContents[folderKey] = listOf(
+                Category(name = cat.name, list = channelsInSection)
+            )
+
+            // Si filtre actif et cette catégorie matche → collecter les chaînes
+            if (filterActive && cat.name.equals(selectedCode, ignoreCase = true)) {
+                filteredChannels.addAll(channelsInSection)
             }
-        } catch (t: Throwable) {
-            Log.w(TAG, "rebuildSectionsFromWltv failed: ${t.message}")
+
+            // Card dossier (pour le mode "Toutes les chaînes")
+            val count = channelsInSection.size
+            folderShows.add(
+                TvShow(
+                    id = "livehub::folder::$folderKey",
+                    title = "📁 ${cat.name} ($count)",
+                ).apply {
+                    providerName = "World Live"
+                    // Jaquette = logo de la 1re chaîne du dossier
+                    poster = channelsInSection.firstOrNull()?.poster
+                    banner = channelsInSection.firstOrNull()?.banner
+                }
+            )
         }
+
+        // Section Favoris en haut si l'user en a marqué.
+        try {
+            // Ajoute les chaînes des folders WorldLive à allChannelsMap
+            //   pour résoudre les favoris marqués via le dialog folder.
+            WorldLiveTvProvider.folderContents.values.forEach { items ->
+                items.forEach { ch ->
+                    if (ch.isFolder) return@forEach
+                    val newId = "livehub::worldlivetv::${ch.id}"
+                    val rebadged = TvShow(id = newId, title = ch.name).apply {
+                        providerName = "World Live"
+                        poster = ch.logo
+                        banner = ch.logo
+                    }
+                    val canonical = "wl" + ch.id.substringAfterLast("::").lowercase().trim()
+                    allChannelsMap.putIfAbsent(canonical, rebadged)
+                }
+            }
+            val favKeys = com.streamflixreborn.streamflix.utils.IptvFavoritesStore
+                .getFavorites("World Live")
+            val favShows = favKeys.mapNotNull { canonical ->
+                allChannelsMap[canonical] ?: run {
+                    try {
+                        val prefs = ctx.getSharedPreferences(
+                            "world_live_fav_meta", android.content.Context.MODE_PRIVATE,
+                        )
+                        val cachedName = prefs.getString("${canonical}_name", null)
+                            ?: return@run null
+                        val cachedLogo = prefs.getString("${canonical}_logo", "")
+                        val slug = canonical.removePrefix("wl")
+                        val syntheticId = "livehub::worldlivetv::wltv::cache::$slug"
+                        TvShow(id = syntheticId, title = cachedName).apply {
+                            providerName = "World Live"
+                            poster = cachedLogo
+                            banner = cachedLogo
+                        }
+                    } catch (_: Throwable) { null }
+                }
+            }
+            if (favShows.isNotEmpty()) {
+                sections.add(Category(name = "Favoris", list = favShows))
+            }
+        } catch (_: Throwable) {}
+
+        if (filterActive) {
+            // Catégorie sélectionnée → chaînes réparties en lignes
+            // verticales pour remplir l'écran (on scroll vers le bas).
+            if (filteredChannels.isNotEmpty()) {
+                val isTvFilter = com.streamflixreborn.streamflix.BuildConfig.APP_LAYOUT == "tv"
+                // TV : 7 chaînes/ligne (remplit la largeur d'un grand écran)
+                // Mobile : 8 chaînes/ligne
+                val perLineFilter = if (isTvFilter) 7 else 8
+                filteredChannels.chunked(perLineFilter).forEach { chunk ->
+                    sections.add(Category(name = selectedCode, list = chunk))
+                }
+            }
+        } else {
+            // "Toutes les chaînes" → dossiers répartis sur plusieurs lignes
+            // 2026-06-23 : on fixe le nombre PAR LIGNE (pas le nombre de
+            //   lignes) pour que chaque ligne soit bien remplie.
+            //   TV = 7 dossiers/ligne, mobile = 3 lignes.
+            if (folderShows.isNotEmpty()) {
+                val isTv = com.streamflixreborn.streamflix.BuildConfig.APP_LAYOUT == "tv"
+                val perLine = if (isTv) 7 else {
+                    (folderShows.size + 2) / 3  // 3 lignes sur mobile
+                }
+                folderShows.chunked(perLine).forEach { chunk ->
+                    sections.add(Category(name = "📁 Dossiers", list = chunk))
+                }
+            }
+        }
+
         return sections
     }
 

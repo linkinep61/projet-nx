@@ -23,7 +23,8 @@
             android:layout_height="@dimen/mini_player_height_mobile"
             app:use_controller="false"
             app:show_buffering="when_playing"
-            app:resize_mode="fit" />
+            app:resize_mode="fit"
+            app:surface_type="texture_view" />
 
         <LinearLayout
             android:id="@+id/mini_player_overlay"

@@ -28,6 +28,8 @@ import com.streamflixreborn.streamflix.providers.IptvProvider
 import com.streamflixreborn.streamflix.ui.SpacingItemDecoration
 import com.streamflixreborn.streamflix.utils.MiniPlayerController
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import androidx.transition.TransitionManager
+import androidx.transition.AutoTransition
 import com.streamflixreborn.streamflix.utils.dp
 import com.streamflixreborn.streamflix.utils.viewModelsFactory
 import com.streamflixreborn.streamflix.utils.CacheUtils
@@ -145,19 +147,31 @@ class TvShowsMobileFragment : Fragment() {
         if (_binding == null) return
         // 2026-06-09 : applique le fond d'écran personnalisé.
         com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(binding.root)
+        // 2026-06-23 v3 (user "le mini ne transfère pas — obligé de switch
+        //   sur TV et revenir") : TOUJOURS attacher le PlayerView de ce
+        //   fragment au MiniPlayerController, même si pas de chaîne en cours.
+        //   Comme ça quand l'user clique une chaîne depuis Toutes les c, le
+        //   Surface du Player va direct sur la PlayerView de CE fragment,
+        //   pas sur celle de HomeMobile qui n'est plus à l'écran.
+        MiniPlayerController.attachPlayerView(binding.miniPlayerView, null)
+        binding.miniPlayerView.post {
+            if (_binding != null) {
+                MiniPlayerController.attachPlayerView(binding.miniPlayerView, null)
+                Log.d("TvShowsMobile", "onResume: post-layout re-attach pour forcer Surface accroche")
+            }
+        }
+
         val channelId = MiniPlayerController.currentChannelId ?: return
 
         if (MiniPlayerController.getPlayer() == null) {
             Log.d("TvShowsMobile", "onResume: player was released, re-initializing for $channelId")
             MiniPlayerController.initPlayer(requireContext())
-            binding.miniPlayerView.player = MiniPlayerController.getPlayer()
+            MiniPlayerController.attachPlayerView(binding.miniPlayerView, null)
             MiniPlayerController.playChannel(
                 channelId,
                 MiniPlayerController.currentChannelName ?: channelId,
                 MiniPlayerController.currentChannelPoster
             )
-        } else {
-            binding.miniPlayerView.player = MiniPlayerController.getPlayer()
         }
 
         com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
@@ -436,16 +450,37 @@ class TvShowsMobileFragment : Fragment() {
 
         viewLifecycleOwner.lifecycleScope.launch {
             MiniPlayerController.state.flowWithLifecycle(lifecycle, Lifecycle.State.STARTED).collect { state ->
+                // 2026-06-22 : animation fluide — la liste se comprime
+                // quand le mini player apparaît (glissement smooth)
+                val wasVisible = binding.miniPlayerContainer.visibility == View.VISIBLE
                 when (state) {
                     is MiniPlayerController.State.Idle -> {
+                        if (wasVisible) {
+                            TransitionManager.beginDelayedTransition(
+                                binding.root as ViewGroup,
+                                AutoTransition().apply { duration = 300 }
+                            )
+                        }
                         binding.miniPlayerContainer.visibility = View.GONE
                     }
                     is MiniPlayerController.State.Loading -> {
+                        if (!wasVisible) {
+                            TransitionManager.beginDelayedTransition(
+                                binding.root as ViewGroup,
+                                AutoTransition().apply { duration = 300 }
+                            )
+                        }
                         com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.VISIBLE
                     }
                     is MiniPlayerController.State.Playing -> {
+                        if (!wasVisible) {
+                            TransitionManager.beginDelayedTransition(
+                                binding.root as ViewGroup,
+                                AutoTransition().apply { duration = 300 }
+                            )
+                        }
                         com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.GONE

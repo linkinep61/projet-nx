@@ -144,6 +144,45 @@ class TvShowViewHolder(
      */
     private fun handleIptvFavoriteLongPress(): Boolean {
         if (!isIptvProvider()) return false
+        // 2026-06-20 (user "si on veut le retirer des favoris Actuellement sur
+        //   l'image il est affiché On peut pas le retirer d'ici obligé d'aller
+        //   dans le hall avec le cœur Pour le retirer") : TV Hub a aussi des
+        //   favoris REPLAY (= films/séries replay stockés dans
+        //   ReplayFavoritesStore, id `livehub::replay::*`). On les détecte
+        //   AVANT le menu IPTV channels et on propose un retrait direct.
+        if (tvShow.id.startsWith("livehub::replay::")) {
+            val isFav = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore
+                .isFavorite(tvShow.id)
+            val option = if (isFav) "★ Retirer des favoris" else "★ Ajouter aux favoris"
+            androidx.appcompat.app.AlertDialog.Builder(context)
+                .setTitle(tvShow.title)
+                .setItems(arrayOf(option)) { _, _ ->
+                    // 2026-06-20 (user "le film Titanic est traité comme une
+                    //   série et ouvre une page synopsis") : préserver isMovie
+                    //   depuis le tvShow (= valeur correcte du M3U tvg-type),
+                    //   sinon Titanic perd son isMovie=true et le clic ouvre
+                    //   la synopsis au lieu du player.
+                    val nowFav = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore
+                        .toggle(tvShow.id, tvShow.title, tvShow.poster, tvShow.banner,
+                            isMovie = tvShow.isMovie)
+                    val msg = if (nowFav) "Ajouté aux favoris" else "Retiré des favoris"
+                    Toast.makeText(context, "${tvShow.title} — $msg", Toast.LENGTH_SHORT).show()
+                    // Invalide le cache TV Hub + refresh home pour que la
+                    //   section "Favoris Replay" se mette à jour immédiatement.
+                    try {
+                        val current = UserPreferences.currentProvider
+                        if (current != null) {
+                            (current as? com.streamflixreborn.streamflix.providers.LiveTvHubProvider)
+                                ?.clearHomeCache()
+                            com.streamflixreborn.streamflix.utils.HomeCacheStore
+                                .clear(context, current)
+                            UserPreferences.currentProvider = current
+                        }
+                    } catch (_: Throwable) { }
+                }
+                .show()
+            return true
+        }
         // 2026-05-08 : long-press IPTV propose un menu contextuel
         //  - Ajouter / Retirer des favoris (★ + ❤ servers)
         //  - Bannir / Débannir cette chaîne
@@ -247,7 +286,13 @@ class TvShowViewHolder(
         //   documentaire, etc.), on lance en mini lecteur direct → on garde
         //   isIptvProvider=true. Seules les VRAIES séries (= isMovie=false)
         //   doivent ouvrir la fiche détail avec saisons/épisodes.
+        // 2026-06-20 v6 : ajout tmc/ tfx/ tf1-series-films/ lci/ (= chaînes
+        //   TF1+ issues du M3U data-replay.m3u format "tf1plus://tmc/slug")
         val isReplayProgram = id.startsWith("livehub::replay::tf1/")
+            || id.startsWith("livehub::replay::tmc/")
+            || id.startsWith("livehub::replay::tfx/")
+            || id.startsWith("livehub::replay::tf1-series-films/")
+            || id.startsWith("livehub::replay::lci/")
             || id.startsWith("livehub::replay::m6/")
             || id.startsWith("livehub::replay::m6replay/")
             || id.startsWith("livehub::replay::w9replay/")
@@ -255,6 +300,9 @@ class TvShowViewHolder(
             || id.startsWith("livehub::replay::gulli/")
             || id.startsWith("livehub::replay::tevareplay/")
             || id.startsWith("livehub::replay::parispremierereplay/")
+            || id.startsWith("livehub::replay::program/")
+            || id.startsWith("livehub::replay::plexshow::")
+            || id.startsWith("livehub::replay::plutoshow::")
         if (isReplayProgram && !tvShow.isMovie) {
             android.util.Log.d("TvShowViewHolder", "v25 isIptvProvider FALSE for replay program: $id")
             return false
@@ -289,6 +337,34 @@ class TvShowViewHolder(
             }
         }
         action()
+    }
+
+    /** 2026-06-20 (user "le film Titanic est traité comme une série et ouvre
+     *  une page synopsis Il devrait partir instantanément") : pour les replay
+     *  TV Hub (id `livehub::replay::*`), consulter le ReplayFavoritesStore qui
+     *  est la source de vérité pour `isMovie`. Si l'item est un favori connu
+     *  comme film → lancer le player direct (= openReplayFavorite). Retourne
+     *  true si la navigation a été gérée. */
+    private fun routeReplayFavoriteIfMovie(navController: NavController): Boolean {
+        if (!tvShow.id.startsWith("livehub::replay::")) return false
+        val e = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore
+            .all().firstOrNull { it.id == tvShow.id } ?: return false
+        if (!e.isMovie && !tvShow.isMovie) return false
+        // Direct play en passant par les TvShow stockées (= toutes les data
+        //   nécessaires sont dans `tvShow` côté ViewHolder).
+        try {
+            // 2026-06-20 : ne set currentProvider que si différent (évite
+            //   AppDatabase.resetInstance + cascade notifier inutiles).
+            val current = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+            val alreadyOnHub = current?.name == "TV Hub" || current?.name == "World Live"
+            if (!alreadyOnHub) {
+                com.streamflixreborn.streamflix.providers.Provider.findByName("TV Hub")?.let {
+                    com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider = it
+                }
+            }
+            handleDirectPlay(navController)
+        } catch (_: Throwable) {}
+        return true
     }
 
     private fun handleDirectPlay(navController: NavController) {
@@ -396,6 +472,196 @@ class TvShowViewHolder(
         }
     }
 
+    /** 2026-06-19 (user "quand on clique sur un dossier qu'on clique sur un
+     *  épisode, une fois qu'on revient sur le home le dossier s'est transformé
+     *  en l'épisode") : navigue VERS la chaîne/programme sélectionné dans le
+     *  dialog d'un dossier TV Hub, SANS modifier tvShow (= sinon le RecyclerView
+     *  re-bind la card du dossier avec l'id du programme).
+     *
+     *  Distingue :
+     *  - Chaînes Live (livehub::replay::tf1live/m6live, et toutes les autres
+     *    chaînes IPTV WiTV/OTF/Adrar) → mini-player via MiniPlayerController.
+     *  - Programmes Replay VOD (Arte, France TV, etc.) → fiche tv_show pour
+     *    afficher saisons/épisodes. */
+    private fun navigateFromFolderSelection(root: android.view.View, selected: TvShow) {
+        val isReplayVod = selected.id.startsWith("livehub::replay::") &&
+            !selected.id.startsWith("livehub::replay::tf1live::") &&
+            !selected.id.startsWith("livehub::replay::m6live::") &&
+            !selected.id.startsWith("livehub::replay::__")
+        // 2026-06-23 v2 (user "la barre est censée se fermer directement
+        //   quand on clique sur une série pas un film — film on regarde dans
+        //   le mini-player, série on passe par la synopsis") : le dismiss
+        //   est appliqué CONDITIONNELLEMENT au moment de navigate vers la
+        //   fiche série (= hasEpisodeBrowsing plus bas). Pour les films on
+        //   garde le dialog ouvert car ils jouent dans le mini-player.
+        // 2026-06-20 v8 : findNavController via Activity (R.id.nav_main_fragment)
+        //   car root.findNavController() échoue silencieusement quand appelé
+        //   depuis le callback d'un AlertDialog (le root n'est plus dans la
+        //   hiérarchie NavHost à ce moment-là).
+        val navController: NavController? = try {
+            val activity = (root.context as? android.app.Activity)
+                ?: ((root.context as? android.content.ContextWrapper)?.baseContext as? android.app.Activity)
+            if (activity != null) {
+                androidx.navigation.Navigation.findNavController(activity, R.id.nav_main_fragment)
+            } else {
+                root.findNavController()
+            }
+        } catch (_: Throwable) {
+            try { root.findNavController() } catch (_: Throwable) { null }
+        }
+        if (navController == null) {
+            Log.e("TvShowViewHolder", "navigateFromFolderSelection: NavController introuvable !")
+            return
+        }
+        // 2026-06-24 (user "Samsung TV Plus s'ouvre plein écran sans drag
+        //   handle") : si selected est un folder World Live TV (= id
+        //   contient "::folder::"), on rouvre LiveHubFolderDialog au lieu
+        //   de naviger vers TvShowMobileFragment. Le dialog a la barre ≡
+        //   et se règle comme les autres dossiers.
+        val originalWlId = selected.id.removePrefix("livehub::worldlivetv::")
+        if (originalWlId.contains("::folder::")) {
+            val withoutPrefix = originalWlId.removePrefix("wltv::")
+            val parts = withoutPrefix.split("::folder::")
+            if (parts.size == 2) {
+                val groupSlug = parts[0]
+                val subAndIdx = parts[1]
+                val lastDash = subAndIdx.lastIndexOf('-')
+                if (lastDash >= 0) {
+                    val subSlug = subAndIdx.substring(0, lastDash)
+                    val idx = subAndIdx.substring(lastDash + 1)
+                    val folderPath = "$groupSlug/$subSlug/$idx"
+                    val key = "wlsub_$folderPath"
+                    com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.show(
+                        root.context, key, selected.title,
+                    ) { sub -> navigateFromFolderSelection(root, sub) }
+                    return
+                }
+            }
+        }
+        if (isReplayVod) {
+            // 2026-06-20 (user "le home se met en chargement infini après BACK
+            //   depuis synopsis Zodiaque") : ne PAS set currentProvider si déjà
+            //   sur TV Hub / World Live (= les 2 partagent le pipeline replay).
+            //   Sans cette garde, AppDatabase.resetInstance + notifyProviderChanged
+            //   se déclenchaient en parallèle de la navigation vers la synopsis
+            //   → race condition → home stuck en Loading après BACK.
+            val currentProvider = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+            val alreadyOnHubProvider = currentProvider?.name == "TV Hub" ||
+                currentProvider?.name == "World Live"
+            if (!alreadyOnHubProvider) {
+                com.streamflixreborn.streamflix.providers.Provider.findByName("TV Hub")?.let {
+                    com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider = it
+                }
+            }
+            // 2026-06-20 v8 : francetv / arte = vidéos unitaires (pas de saisons/
+            //   épisodes à browser) → lecture directe TOUJOURS, même si isMovie=false.
+            //   Seuls les programmes TF1+ et M6+ ont un vrai browsing épisodes via
+            //   buildTf1ReplayShow / buildM6ReplayShow.
+            val siId = selected.id.removePrefix("livehub::replay::")
+            val tf1Prefixes = listOf("tf1/", "tmc/", "tfx/", "tf1-series-films/", "lci/",
+                "tf1ep::", "tf1plus::")
+            val m6Prefixes = listOf("m6replay/", "w9replay/", "6terreplay/",
+                "gullireplay/", "m6ep::", "m6play::")
+            // 2026-06-26 : France TV programmes (séries / dessins animés Okoo) =
+            //   id "livehub::replay::program/<path>" → browsing épisodes via
+            //   buildFrancetvReplayShow (/apps/program/<path>).
+            val francetvPrefixes = listOf("program/", "plexshow::", "plutoshow::")
+            // 2026-06-21 : BFM Play replay = vidéos unitaires (chaque entrée
+            //   M3U est déjà un épisode, pas de saisons à browser comme TF1/M6)
+            //   → lecture directe TOUJOURS.
+            val hasEpisodeBrowsing = !selected.isMovie &&
+                (tf1Prefixes.any { siId.startsWith(it) } ||
+                 m6Prefixes.any { siId.startsWith(it) } ||
+                 francetvPrefixes.any { siId.startsWith(it) })
+            if (hasEpisodeBrowsing) {
+                // TF1+/M6+/BFM séries → fiche synopsis avec saisons/épisodes
+                Log.d("TvShowViewHolder", "navigateFromFolderSelection: série TF1+/M6+/BFM → synopsis (${selected.id})")
+                // 2026-06-23 (user "la barre est censée se fermer directement
+                //   quand on clique sur une série") : ferme tous les dialogs
+                //   AVANT la navigation pour que la fiche synopsis s'affiche
+                //   au premier plan. Films restent dans le mini → pas de dismiss.
+                try {
+                    com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.dismissAllPublic()
+                } catch (_: Throwable) {}
+                // 2026-06-23 (user "quand on clique sur l'épisode de la série
+                //   ça ne remplace pas la lecture déjà en cours dans le mini
+                //   Player") : stop le mini-player AVANT de naviguer vers la
+                //   fiche série. Comme ça la chaîne live s'arrête et l'épisode
+                //   peut prendre sa place sans conflit de Player.
+                try {
+                    MiniPlayerController.stop()
+                } catch (_: Throwable) {}
+                val args = Bundle().apply {
+                    putString("id", selected.id)
+                    putString("poster", selected.poster)
+                    putString("banner", selected.banner)
+                }
+                try {
+                    navController.navigate(R.id.action_global_tv_show, args)
+                } catch (e: Exception) {
+                    Log.e("TvShowViewHolder",
+                        "navigateFromFolderSelection série FAIL: ${e.message}", e)
+                }
+            } else {
+                // 2026-06-22 (user "films/téléfilms replay dans le mini lecteur
+                //   au lieu du grand lecteur — ça permet de voir s'il fonctionne")
+                //   Film OU vidéo unitaire (francetv/arte) → mini-player
+                Log.d("TvShowViewHolder", "navigateFromFolderSelection: replay film → mini-player (${selected.id}, isMovie=${selected.isMovie})")
+                val interceptor = MiniPlayerController.onIptvChannelClick
+                if (interceptor != null && interceptor(selected)) {
+                    return  // handled by mini player
+                }
+                // Fallback si mini player indisponible → lecture directe fullscreen
+                val title = selected.title.ifBlank { "Replay" }
+                val videoType = com.streamflixreborn.streamflix.models.Video.Type.Movie(
+                    id = selected.id,
+                    title = title,
+                    releaseDate = "",
+                    poster = selected.poster ?: "",
+                    imdbId = null,
+                )
+                val args = Bundle().apply {
+                    putString("id", selected.id)
+                    putString("title", title)
+                    putString("subtitle", title)
+                    putSerializable("videoType", videoType)
+                }
+                try {
+                    navController.navigate(R.id.action_global_player, args)
+                } catch (e: Exception) {
+                    Log.e("TvShowViewHolder",
+                        "navigateFromFolderSelection film FAIL: ${e.message}", e)
+                }
+            }
+        } else {
+            // Chaîne Live → mini-player (= comportement normal IPTV)
+            val interceptor = MiniPlayerController.onIptvChannelClick
+            if (interceptor != null && interceptor(selected)) {
+                return
+            }
+            val title = selected.title.ifBlank { "Live" }
+            val videoType = com.streamflixreborn.streamflix.models.Video.Type.Movie(
+                id = selected.id,
+                title = title,
+                releaseDate = "",
+                poster = selected.poster ?: "",
+                imdbId = null,
+            )
+            val args = Bundle().apply {
+                putString("id", selected.id)
+                putString("title", title)
+                putString("subtitle", title)
+                putSerializable("videoType", videoType)
+            }
+            try {
+                navController.navigate(R.id.action_global_player, args)
+            } catch (e: Exception) {
+                Log.e("TvShowViewHolder",
+                    "navigateFromFolderSelection live FAIL: ${e.message}", e)
+            }
+        }
+    }
+
     private fun resolveEpisodeSeason(episode: Episode?): Season? {
         if (episode == null) return null
 
@@ -495,7 +761,28 @@ class TvShowViewHolder(
 
     private fun displayMobileItem(binding: ItemTvShowMobileBinding) {
         binding.root.setOnClickListener {
+            // 2026-06-19 (user "fais un dossier pour eux ils cliquent et dedans
+            //   il y a OTF qui apparaît") : card dossier TV Hub → ouvre dialog
+            //   au lieu d'aller au player.
+            if (tvShow.id.startsWith("livehub::folder::")) {
+                val key = tvShow.id.removePrefix("livehub::folder::")
+                val label = tvShow.title.removePrefix("📁 ").substringBefore(" (")
+                com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.show(
+                    context, key, label
+                ) { selected ->
+                    // 2026-06-19 (user "quand on clique sur un dossier puis
+                    //   épisode, le dossier s'est transformé en l'épisode") :
+                    //   NE PAS modifier tvShow (= sinon RecyclerView re-bind
+                    //   la card avec l'id du programme). Navigation directe
+                    //   avec un Bundle construit à partir du selected.
+                    navigateFromFolderSelection(binding.root, selected)
+                }
+                return@setOnClickListener
+            }
             // 2026-05-25 : guards pour items synthétiques du cœur (favoris saison/épisode, reprises)
+            if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.SYNTHETIC_ID_PREFIX)) {
+                openReplayFavorite(binding.root.findNavController()); return@setOnClickListener
+            }
             if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
                 openSeasonFavorite(binding.root.findNavController()); return@setOnClickListener
             }
@@ -505,21 +792,74 @@ class TvShowViewHolder(
             if (tvShow.id.startsWith("resume_series_")) {
                 openResumeSeries(binding.root.findNavController()); return@setOnClickListener
             }
+            // 2026-06-20 (user "Titanic ouvre une synopsis") : replay favori film → direct.
+            if (routeReplayFavoriteIfMovie(binding.root.findNavController())) return@setOnClickListener
             // 2026-06-18 (user "Le système de connexion à côté du nom de la
             //   Playlist") : card synthétique "Se connecter à TF1/M6" → lance
             //   LoginWebViewActivity au lieu du player.
             if (tvShow.id.startsWith("livehub::replay::__login_")) {
                 val svc = tvShow.id.removePrefix("livehub::replay::__login_").removeSuffix("__")
-                if (svc.lowercase() == "tf1") {
-                    // 2026-06-18 : TF1+ utilise form natif (= pipeline Gigya
-                    //   nécessite email+password explicites, WebView ne sait
-                    //   pas extraire le JWT depuis localStorage).
-                    com.streamflixreborn.streamflix.activities.TF1LoginDialog.show(context)
-                } else {
-                    com.streamflixreborn.streamflix.activities.LoginWebViewActivity.start(
-                        context,
-                        com.streamflixreborn.streamflix.activities.LoginWebViewActivity.SERVICE_M6
-                    )
+                when (svc.lowercase()) {
+                    "tf1" -> {
+                        // 2026-06-18 : TF1+ utilise form natif (= pipeline Gigya
+                        //   nécessite email+password explicites, WebView ne sait
+                        //   pas extraire le JWT depuis localStorage).
+                        com.streamflixreborn.streamflix.activities.TF1LoginDialog.show(context)
+                    }
+                    "bfm" -> {
+                        // 2026-06-22 (user "à chaque fois la reconnexion nous
+                        //   ramène à la page WebView au lieu de réutiliser
+                        //   le mot de passe sauvé") :
+                        //   Si credentials déjà sauvés → relogin SILENT direct
+                        //   via BfmSsoAuth.reloginFromSaved (= comme TF1 fait).
+                        //   Sinon → BfmLoginDialog (form natif + saveCredentials).
+                        //   Ancien code lançait LoginWebViewActivity à chaque
+                        //   fois → form WebView à re-remplir manuellement.
+                        val ctxRef = context
+                        if (com.streamflixreborn.streamflix.utils.BfmSsoAuth.hasCredentials(ctxRef)) {
+                            android.widget.Toast.makeText(ctxRef,
+                                "Reconnexion BFM Play…",
+                                android.widget.Toast.LENGTH_SHORT).show()
+                            kotlinx.coroutines.CoroutineScope(
+                                kotlinx.coroutines.Dispatchers.IO +
+                                kotlinx.coroutines.SupervisorJob()
+                            ).launch {
+                                val token = try {
+                                    com.streamflixreborn.streamflix.utils.BfmSsoAuth.reloginFromSaved(ctxRef)
+                                } catch (_: Throwable) { null }
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                    if (token != null) {
+                                        android.widget.Toast.makeText(ctxRef,
+                                            "✓ Reconnecté à BFM Play",
+                                            android.widget.Toast.LENGTH_SHORT).show()
+                                        try {
+                                            com.streamflixreborn.streamflix.utils.UserPreferences
+                                                .currentProvider?.let { p ->
+                                                com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(ctxRef, p)
+                                            }
+                                            com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
+                                                .notifyProviderChanged()
+                                        } catch (_: Throwable) {}
+                                    } else {
+                                        // Relogin silent échoué → ouvre le dialog
+                                        //   pour permettre à l'user de re-saisir
+                                        //   ou de vérifier ses credentials.
+                                        com.streamflixreborn.streamflix.activities
+                                            .BfmLoginDialog.show(ctxRef)
+                                    }
+                                }
+                            }
+                        } else {
+                            // Pas de credentials → dialog natif (= comme TF1).
+                            com.streamflixreborn.streamflix.activities.BfmLoginDialog.show(ctxRef)
+                        }
+                    }
+                    else -> {
+                        com.streamflixreborn.streamflix.activities.LoginWebViewActivity.start(
+                            context,
+                            com.streamflixreborn.streamflix.activities.LoginWebViewActivity.SERVICE_M6
+                        )
+                    }
                 }
                 return@setOnClickListener
             }
@@ -569,6 +909,18 @@ class TvShowViewHolder(
         binding.root.setOnLongClickListener {
             // 2026-05-25 : retirer favori depuis le cœur (mobile)
             val cf = context.toActivity()?.getCurrentFragment()
+            // 2026-06-27 (user "favori replay on peut pas les retirer") : un favori
+            //   replay/fast (TV Hub) affiché AILLEURS que les Cœurs (home, dossier)
+            //   a son id RÉEL → l'appui long propose de le retirer (toggle off).
+            //   Dans les Cœurs l'id est synthétique (replayfav::) → isFavorite=false.
+            if (com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) {
+                showFavoriteLongPressDialog(context, tvShow.title, onRemove = {
+                    com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.toggle(
+                        tvShow.id, tvShow.title, tvShow.poster, tvShow.banner, tvShow.isMovie)
+                    android.widget.Toast.makeText(context, "Retiré des favoris", android.widget.Toast.LENGTH_SHORT).show()
+                }, onDownload = null)
+                return@setOnLongClickListener true
+            }
             if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
                 showFavoriteLongPressDialog(context, tvShow.title, onRemove = {
                     cf.removeFavorite(tvShow.id, false)
@@ -620,14 +972,69 @@ class TvShowViewHolder(
     private fun displayTvItem(binding: ItemTvShowTvBinding) {
         binding.root.apply {
             setOnClickListener {
+                // 2026-06-19 (user "fais un dossier pour eux ils cliquent et
+                //   dedans il y a OTF qui apparaît") : card dossier TV Hub →
+                //   ouvre dialog au lieu d'aller au player.
+                if (tvShow.id.startsWith("livehub::folder::")) {
+                    val key = tvShow.id.removePrefix("livehub::folder::")
+                    val label = tvShow.title.removePrefix("📁 ").substringBefore(" (")
+                    com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.show(
+                        context, key, label
+                    ) { selected ->
+                        navigateFromFolderSelection(binding.root, selected)
+                    }
+                    return@setOnClickListener
+                }
                 // 2026-06-18 (user "système de connexion") : card login synthétique
                 if (tvShow.id.startsWith("livehub::replay::__login_")) {
                     val svc = tvShow.id.removePrefix("livehub::replay::__login_").removeSuffix("__")
-                    val service = when (svc.lowercase()) {
-                        "tf1" -> com.streamflixreborn.streamflix.activities.LoginWebViewActivity.SERVICE_TF1
-                        else -> com.streamflixreborn.streamflix.activities.LoginWebViewActivity.SERVICE_M6
+                    // 2026-06-22 (user "quand on clique sur reconnexion, ça
+                    //   nous reconnecte vraiment, pas aller sur la page") :
+                    //   pour BFM, si credentials sauvés → relogin SILENT
+                    //   direct. Pour TF1 → TF1LoginDialog (form natif).
+                    //   Sinon WebView OIDC.
+                    when (svc.lowercase()) {
+                        "tf1" -> com.streamflixreborn.streamflix.activities.TF1LoginDialog.show(context)
+                        "bfm" -> {
+                            val ctxRef = context
+                            if (com.streamflixreborn.streamflix.utils.BfmSsoAuth.hasCredentials(ctxRef)) {
+                                android.widget.Toast.makeText(ctxRef,
+                                    "Reconnexion BFM Play…",
+                                    android.widget.Toast.LENGTH_SHORT).show()
+                                kotlinx.coroutines.CoroutineScope(
+                                    kotlinx.coroutines.Dispatchers.IO +
+                                    kotlinx.coroutines.SupervisorJob()
+                                ).launch {
+                                    val token = try {
+                                        com.streamflixreborn.streamflix.utils.BfmSsoAuth.reloginFromSaved(ctxRef)
+                                    } catch (_: Throwable) { null }
+                                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                        if (token != null) {
+                                            android.widget.Toast.makeText(ctxRef,
+                                                "✓ Reconnecté à BFM Play",
+                                                android.widget.Toast.LENGTH_SHORT).show()
+                                            try {
+                                                com.streamflixreborn.streamflix.utils.UserPreferences
+                                                    .currentProvider?.let { p ->
+                                                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(ctxRef, p)
+                                                }
+                                                com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
+                                                    .notifyProviderChanged()
+                                            } catch (_: Throwable) {}
+                                        } else {
+                                            com.streamflixreborn.streamflix.activities.BfmLoginDialog.show(ctxRef)
+                                        }
+                                    }
+                                }
+                            } else {
+                                com.streamflixreborn.streamflix.activities.BfmLoginDialog.show(context)
+                            }
+                        }
+                        else -> com.streamflixreborn.streamflix.activities.LoginWebViewActivity.start(
+                            context,
+                            com.streamflixreborn.streamflix.activities.LoginWebViewActivity.SERVICE_M6
+                        )
                     }
-                    com.streamflixreborn.streamflix.activities.LoginWebViewActivity.start(context, service)
                     return@setOnClickListener
                 }
                 // 2026-06-18 : card refresh TV Hub
@@ -661,6 +1068,9 @@ class TvShowViewHolder(
                     return@setOnClickListener
                 }
                 // 2026-05-24 : guards pour items synthétiques du cœur (favoris saison/épisode, reprises)
+                if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.SYNTHETIC_ID_PREFIX)) {
+                    openReplayFavorite(findNavController()); return@setOnClickListener
+                }
                 if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
                     openSeasonFavorite(findNavController()); return@setOnClickListener
                 }
@@ -683,7 +1093,12 @@ class TvShowViewHolder(
             }
             setOnLongClickListener {
                 val cf = context.toActivity()?.getCurrentFragment()
-                if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
+                // 2026-06-27 : favori replay/fast affiché hors Cœurs → retrait par appui long.
+                if (com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) {
+                    com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.toggle(
+                        tvShow.id, tvShow.title, tvShow.poster, tvShow.banner, tvShow.isMovie)
+                    android.widget.Toast.makeText(context, "Retiré des favoris", android.widget.Toast.LENGTH_SHORT).show()
+                } else if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
                     cf.removeFavorite(tvShow.id, false)
                 } else if (!handleIptvFavoriteLongPress()) {
                     ShowOptionsTvDialog(context, tvShow).show()
@@ -750,6 +1165,46 @@ class TvShowViewHolder(
         try { navController.navigate(R.id.season, args) } catch (_: Exception) {}
     }
 
+    /** 2026-06-20 : ouvre un favori replay (carte synthétique du cœur).
+     *  Films → player direct. Séries → fiche synopsis (= liste saisons/épisodes).
+     *  Switch au provider TV Hub avant navigation. */
+    private fun openReplayFavorite(navController: androidx.navigation.NavController) {
+        val e = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.findBySyntheticId(tvShow.id) ?: return
+        // Switch au provider TV Hub — sauf si on est déjà sur TV Hub / World Live.
+        val current = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+        val alreadyOnHub = current?.name == "TV Hub" || current?.name == "World Live"
+        if (!alreadyOnHub) {
+            com.streamflixreborn.streamflix.providers.Provider.findByName("TV Hub")?.let {
+                com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider = it
+            }
+        }
+        if (e.isMovie) {
+            // Film → lecture directe
+            val videoType = Video.Type.Movie(
+                id = e.id,
+                title = e.title,
+                releaseDate = "",
+                poster = e.poster ?: "",
+                imdbId = null,
+            )
+            val args = Bundle().apply {
+                putString("id", e.id)
+                putString("title", e.title)
+                putString("subtitle", e.title)
+                putSerializable("videoType", videoType)
+            }
+            try { navController.navigate(R.id.action_global_player, args) } catch (_: Exception) {}
+        } else {
+            // Série → synopsis (saisons/épisodes)
+            val args = Bundle().apply {
+                putString("id", e.id)
+                putString("poster", e.poster)
+                putString("banner", e.banner)
+            }
+            try { navController.navigate(R.id.tv_show, args) } catch (_: Exception) {}
+        }
+    }
+
     /** 2026-05-24 : ouvre un épisode favori (carte synthétique du cœur)
      *  → navigation DIRECTE au player sur cet épisode. */
     private fun openEpisodeFavorite(navController: androidx.navigation.NavController) {
@@ -761,7 +1216,7 @@ class TvShowViewHolder(
         val args = Bundle().apply {
             putString("id", e.episodeId)
             putString("title", e.showTitle)
-            putString("subtitle", "S${e.seasonNumber}E${e.episodeNumber} — ${e.episodeTitle ?: ""}")
+            putString("subtitle", "${if (e.seasonNumber > 0) "S${e.seasonNumber}" else ""}E${e.episodeNumber} — ${e.episodeTitle ?: ""}")
             putSerializable(
                 "videoType",
                 Video.Type.Episode(
@@ -803,7 +1258,7 @@ class TvShowViewHolder(
             val args = Bundle().apply {
                 putString("id", ep.id)
                 putString("title", resumeData.tvShow.title)
-                putString("subtitle", "S${resumeData.seasonNumber}E${resumeData.episodeNumber} — ${ep.title ?: ""}")
+                putString("subtitle", "${if (resumeData.seasonNumber > 0) "S${resumeData.seasonNumber}" else ""}E${resumeData.episodeNumber} — ${ep.title ?: ""}")
                 putSerializable(
                     "videoType",
                     Video.Type.Episode(
@@ -843,6 +1298,21 @@ class TvShowViewHolder(
 
     private fun displayGridMobileItem(binding: ItemTvShowGridMobileBinding) {
         binding.root.setOnClickListener {
+            // 2026-06-20 (user "dossiers inutilisables dans Toutes les chaînes") :
+            //   les cards dossier TV Hub doivent ouvrir le dialog comme sur le home.
+            if (tvShow.id.startsWith("livehub::folder::")) {
+                val key = tvShow.id.removePrefix("livehub::folder::")
+                val label = tvShow.title.removePrefix("📁 ").substringBefore(" (")
+                com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.show(
+                    context, key, label
+                ) { selected ->
+                    navigateFromFolderSelection(binding.root, selected)
+                }
+                return@setOnClickListener
+            }
+            if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.SYNTHETIC_ID_PREFIX)) {
+                openReplayFavorite(binding.root.findNavController()); return@setOnClickListener
+            }
             if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
                 openSeasonFavorite(binding.root.findNavController()); return@setOnClickListener
             }
@@ -854,6 +1324,8 @@ class TvShowViewHolder(
             if (tvShow.id.startsWith("resume_series_")) {
                 openResumeSeries(binding.root.findNavController()); return@setOnClickListener
             }
+            // 2026-06-20 (user "Titanic ouvre une synopsis") : replay favori film → direct.
+            if (routeReplayFavoriteIfMovie(binding.root.findNavController())) return@setOnClickListener
             checkProviderAndRun {
                 if (context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
                     com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin(tvShow.id)
@@ -867,6 +1339,15 @@ class TvShowViewHolder(
         }
         binding.root.setOnLongClickListener {
             val cf = context.toActivity()?.getCurrentFragment()
+            // 2026-06-27 : favori replay/fast affiché hors Cœurs → retrait par appui long.
+            if (com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) {
+                showFavoriteLongPressDialog(context, tvShow.title, onRemove = {
+                    com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.toggle(
+                        tvShow.id, tvShow.title, tvShow.poster, tvShow.banner, tvShow.isMovie)
+                    android.widget.Toast.makeText(context, "Retiré des favoris", android.widget.Toast.LENGTH_SHORT).show()
+                }, onDownload = null)
+                return@setOnLongClickListener true
+            }
             if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesMobileFragment) {
                 showFavoriteLongPressDialog(context, tvShow.title, onRemove = {
                     cf.removeFavorite(tvShow.id, false)
@@ -911,6 +1392,21 @@ class TvShowViewHolder(
     private fun displayGridTvItem(binding: ItemTvShowGridBinding) {
         binding.root.apply {
             setOnClickListener {
+                // 2026-06-20 (user "dossiers inutilisables dans Toutes les chaînes") :
+                //   les cards dossier TV Hub doivent ouvrir le dialog comme sur le home.
+                if (tvShow.id.startsWith("livehub::folder::")) {
+                    val key = tvShow.id.removePrefix("livehub::folder::")
+                    val label = tvShow.title.removePrefix("📁 ").substringBefore(" (")
+                    com.streamflixreborn.streamflix.providers.LiveHubFolderDialog.show(
+                        context, key, label
+                    ) { selected ->
+                        navigateFromFolderSelection(binding.root, selected)
+                    }
+                    return@setOnClickListener
+                }
+                if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.SYNTHETIC_ID_PREFIX)) {
+                    openReplayFavorite(findNavController()); return@setOnClickListener
+                }
                 if (tvShow.id.startsWith(com.streamflixreborn.streamflix.utils.SeasonFavorites.SYNTHETIC_ID_PREFIX)) {
                     openSeasonFavorite(findNavController()); return@setOnClickListener
                 }
@@ -922,6 +1418,9 @@ class TvShowViewHolder(
                 if (tvShow.id.startsWith("resume_series_")) {
                     openResumeSeries(findNavController()); return@setOnClickListener
                 }
+                // 2026-06-20 (user "le film Titanic ouvre une page synopsis") :
+                //   replay favori marqué comme film → player direct.
+                if (routeReplayFavoriteIfMovie(findNavController())) return@setOnClickListener
                 checkProviderAndRun {
                     if (context.toActivity()?.getCurrentFragment() is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
                         com.streamflixreborn.streamflix.utils.GlobalFavorites.switchToOrigin(tvShow.id)
@@ -935,7 +1434,12 @@ class TvShowViewHolder(
             }
             setOnLongClickListener {
                 val cf = context.toActivity()?.getCurrentFragment()
-                if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
+                // 2026-06-27 : favori replay/fast affiché hors Cœurs → retrait par appui long.
+                if (com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(tvShow.id)) {
+                    com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.toggle(
+                        tvShow.id, tvShow.title, tvShow.poster, tvShow.banner, tvShow.isMovie)
+                    android.widget.Toast.makeText(context, "Retiré des favoris", android.widget.Toast.LENGTH_SHORT).show()
+                } else if (cf is com.streamflixreborn.streamflix.fragments.global_favorites.GlobalFavoritesTvFragment) {
                     cf.removeFavorite(tvShow.id, false)
                 } else if (!handleIptvFavoriteLongPress()) {
                     ShowOptionsTvDialog(context, tvShow).show()
@@ -1120,13 +1624,21 @@ class TvShowViewHolder(
         binding.ivSwiperRatingIcon.isVisible = binding.tvSwiperRating.isVisible
 
         binding.tvSwiperOverview.text = tvShow.overview
-        binding.btnSwiperWatchNow.setOnClickListener {
+        // 2026-06-21 (user "quand je clique sur un épisode du carrousel sur
+        //   AnimeSama, ça ne lance rien comme si c'était pas connecté") :
+        //   le click n'était câblé QUE sur btnSwiperWatchNow. Si l'user tape
+        //   ailleurs sur la carte (jaquette, titre, synopsis), rien ne se
+        //   passait. Fix : étend le click handler à TOUTE la carte (root) +
+        //   bouton. Même comportement IPTV/non-IPTV qu'avant.
+        val swiperClick = View.OnClickListener {
             if (isIptvProvider()) {
                 handleDirectPlay(binding.root.findNavController())
             } else {
                 binding.root.findNavController().navigate(R.id.tv_show, tvShowArgs())
             }
         }
+        binding.btnSwiperWatchNow.setOnClickListener(swiperClick)
+        binding.root.setOnClickListener(swiperClick)
         // Long-press on the swiper card (featured carousel) — toggle favori for IPTV,
         // ouvre le dialog d'options (Téléchargement/Favori/Marquer vu/etc.) pour les
         // autres providers. Le binding du swiper est partagé Mobile/TV donc on
@@ -1192,10 +1704,10 @@ class TvShowViewHolder(
             version = tvShow.version,
         )
         binding.tvTvShowOverview.apply {
-            text = overviewText
-            isVisible = !overviewText.isNullOrBlank()
+            text = if (overviewText.isNullOrBlank()) "Aucun synopsis disponible." else overviewText
+            isVisible = true
         }
-        binding.tvTvShowOverviewLabel.isVisible = !overviewText.isNullOrBlank()
+        binding.tvTvShowOverviewLabel.isVisible = true
 
         // Note communautaire
         binding.root.findViewById<View>(R.id.include_community_rating)?.let { ratingRoot ->
@@ -1238,6 +1750,31 @@ class TvShowViewHolder(
                 )
                 if (isIptvProvider() && !isMonIptvEpisode) {
                     handleDirectPlay(findNavController())
+                } else if (episodeToWatch != null
+                    && (episodeToWatch.id.startsWith("@subfolder:")
+                        || episodeToWatch.overview == "@subfolder")
+                ) {
+                    // 2026-06-21 (user "sur AnimeSama, quand on lance le bouton
+                    //   Regarder Saison 1 ça lance directement, on n'a pas pu
+                    //   choisir VF ou VOSTFR, du coup il tombe sur aucun
+                    //   serveur. Si on clique en dessous sur VOSTFR ou VF ça
+                    //   marche") :
+                    //   episodeToWatch est un wrapper langue (@subfolder).
+                    //   Le player ne peut pas le lire — il faut d'abord
+                    //   choisir VF ou VOSTFR. On navigue vers la Season
+                    //   fragment qui affiche les sous-dossiers (cards VF /
+                    //   VOSTFR / saisons individuelles).
+                    val realSeasonId = episodeToWatch.id.removePrefix("@subfolder:")
+                    val args = Bundle().apply {
+                        putString("tvShowId", tvShow.id)
+                        putString("tvShowTitle", tvShow.title)
+                        putString("tvShowPoster", tvShow.poster)
+                        putString("tvShowBanner", tvShow.banner)
+                        putString("seasonId", realSeasonId)
+                        putInt("seasonNumber", episodeToWatch.number)
+                        putString("seasonTitle", episodeToWatch.title)
+                    }
+                    findNavController().navigate(R.id.season, args)
                 } else {
                     val videoType = Video.Type.Episode(
                         id = episodeToWatch!!.id,
@@ -1381,10 +1918,10 @@ class TvShowViewHolder(
             version = tvShow.version,
         )
         binding.tvTvShowOverview.apply {
-            text = overviewText
-            isVisible = !overviewText.isNullOrBlank()
+            text = if (overviewText.isNullOrBlank()) "Aucun synopsis disponible." else overviewText
+            isVisible = true
         }
-        binding.tvTvShowOverviewLabel.isVisible = !overviewText.isNullOrBlank()
+        binding.tvTvShowOverviewLabel.isVisible = true
 
         // Note communautaire
         binding.root.findViewById<View>(R.id.include_community_rating)?.let { ratingRoot ->
@@ -1427,6 +1964,31 @@ class TvShowViewHolder(
                 )
                 if (isIptvProvider() && !isMonIptvEpisode) {
                     handleDirectPlay(findNavController())
+                } else if (episodeToWatch != null
+                    && (episodeToWatch.id.startsWith("@subfolder:")
+                        || episodeToWatch.overview == "@subfolder")
+                ) {
+                    // 2026-06-21 (user "sur AnimeSama, quand on lance le bouton
+                    //   Regarder Saison 1 ça lance directement, on n'a pas pu
+                    //   choisir VF ou VOSTFR, du coup il tombe sur aucun
+                    //   serveur. Si on clique en dessous sur VOSTFR ou VF ça
+                    //   marche") :
+                    //   episodeToWatch est un wrapper langue (@subfolder).
+                    //   Le player ne peut pas le lire — il faut d'abord
+                    //   choisir VF ou VOSTFR. On navigue vers la Season
+                    //   fragment qui affiche les sous-dossiers (cards VF /
+                    //   VOSTFR / saisons individuelles).
+                    val realSeasonId = episodeToWatch.id.removePrefix("@subfolder:")
+                    val args = Bundle().apply {
+                        putString("tvShowId", tvShow.id)
+                        putString("tvShowTitle", tvShow.title)
+                        putString("tvShowPoster", tvShow.poster)
+                        putString("tvShowBanner", tvShow.banner)
+                        putString("seasonId", realSeasonId)
+                        putInt("seasonNumber", episodeToWatch.number)
+                        putString("seasonTitle", episodeToWatch.title)
+                    }
+                    findNavController().navigate(R.id.season, args)
                 } else {
                     val videoType = Video.Type.Episode(
                         id = episodeToWatch!!.id,
@@ -1537,6 +2099,11 @@ class TvShowViewHolder(
         if (isLanguageChoice()) {
             binding.tvTvShowSeasonsLabel.text = "Langue"
         }
+        // 2026-06-24 v8 RESET (user "il y a pas besoin de boutons
+        //   supplémentaires") : on cache les boutons VOSTFR/VF dans la
+        //   synopsis. Le switch langue se fait dans le panel épisodes du
+        //   player (cf onglets bleus VOSTFR/VF déjà fonctionnels).
+        try { binding.llTvShowLangTabs.visibility = android.view.View.GONE } catch (_: Throwable) {}
         binding.rvTvShowSeasons.apply {
             adapter = AppAdapter().apply { submitList(tvShow.seasons.onEach { it.itemType = AppAdapter.Type.SEASON_MOBILE_ITEM }) }
             if (itemDecorationCount == 0) {
@@ -1549,10 +2116,88 @@ class TvShowViewHolder(
         if (isLanguageChoice()) {
             binding.tvTvShowSeasonsLabel.text = "Langue"
         }
+        try { binding.llTvShowLangTabs.visibility = android.view.View.GONE } catch (_: Throwable) {}
         binding.hgvTvShowSeasons.apply {
             setRowHeight(ViewGroup.LayoutParams.WRAP_CONTENT)
             adapter = AppAdapter().apply { submitList(tvShow.seasons.onEach { it.itemType = AppAdapter.Type.SEASON_TV_ITEM }) }
             setItemSpacing(20)
+        }
+    }
+
+    /**
+     * 2026-06-24 (user "VOSTFR/VF dans le menu synepsie ET dans le panel
+     *   épisodes") : helper unifié qui binde 2 boutons VOSTFR/VF dans la
+     *   synopsis. Détecte AnimeSama, affiche les boutons, highlight celui
+     *   sélectionné, et au click navigate vers le même tvShow avec id
+     *   slug@vf/slug@vostfr → re-fetch des saisons en bonne langue.
+     */
+    private fun bindLangTabsForAnimeSama(
+        container: android.widget.LinearLayout,
+        btnVostfr: android.widget.TextView,
+        btnVf: android.widget.TextView,
+        isTv: Boolean,
+    ) {
+        val provider = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+        val isAnimeSama = provider?.name == "AnimeSama"
+        if (!isAnimeSama) {
+            container.visibility = android.view.View.GONE
+            return
+        }
+        container.visibility = android.view.View.VISIBLE
+        val idAfter = tvShow.id.substringAfter("@", "")
+        val currentLang = when {
+            idAfter.startsWith("vf") -> "vf"
+            idAfter.startsWith("vostfr") -> "vostfr"
+            else -> "vostfr" // défaut AnimeSama
+        }
+        // Sur TV : on garde le background = drawable selector (focus rouge auto).
+        // Sur mobile : on force la couleur bleue pour celui sélectionné.
+        if (!isTv) {
+            val selectedBg = android.graphics.Color.parseColor("#CC1565C0")
+            val unselectedBg = android.graphics.Color.parseColor("#33FFFFFF")
+            btnVostfr.setBackgroundColor(if (currentLang == "vostfr") selectedBg else unselectedBg)
+            btnVf.setBackgroundColor(if (currentLang == "vf") selectedBg else unselectedBg)
+        }
+        // 2026-06-24 v2 (user "on voit pas le quadrant quand on se déplace
+        //   dessus") : effet visuel SCALE + alpha au focus pour que le user
+        //   voie clairement quel bouton est focusé sur la télécommande.
+        if (isTv) {
+            val onFocus: (android.view.View, Boolean) -> Unit = { v, hasFocus ->
+                v.animate()
+                    .scaleX(if (hasFocus) 1.12f else 1.0f)
+                    .scaleY(if (hasFocus) 1.12f else 1.0f)
+                    .alpha(if (hasFocus) 1.0f else 0.85f)
+                    .setDuration(150L).start()
+            }
+            btnVostfr.alpha = 0.85f
+            btnVf.alpha = 0.85f
+            btnVostfr.setOnFocusChangeListener(onFocus)
+            btnVf.setOnFocusChangeListener(onFocus)
+        }
+        val slug = tvShow.id.substringBefore("@")
+        btnVostfr.setOnClickListener {
+            if (currentLang != "vostfr") {
+                val args = android.os.Bundle().apply {
+                    putString("id", "$slug@vostfr")
+                    putString("title", tvShow.title)
+                    putString("poster", tvShow.poster)
+                    putString("banner", tvShow.banner)
+                }
+                androidx.navigation.Navigation.findNavController(itemView)
+                    .navigate(com.streamflixreborn.streamflix.R.id.tv_show, args)
+            }
+        }
+        btnVf.setOnClickListener {
+            if (currentLang != "vf") {
+                val args = android.os.Bundle().apply {
+                    putString("id", "$slug@vf")
+                    putString("title", tvShow.title)
+                    putString("poster", tvShow.poster)
+                    putString("banner", tvShow.banner)
+                }
+                androidx.navigation.Navigation.findNavController(itemView)
+                    .navigate(com.streamflixreborn.streamflix.R.id.tv_show, args)
+            }
         }
     }
 

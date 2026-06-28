@@ -11,6 +11,13 @@ object ChannelListState {
     @Volatile var onDownPressed: (() -> Unit)? = null
     @Volatile var onCloseRequested: (() -> Unit)? = null
 
+    /** 2026-06-21 (user "on peut pas faire gauche ni droite sur les saisons") :
+     *  callbacks D-pad LEFT/RIGHT pour navigation INTERNE au panel.
+     *  Si null OU retourne false → comportement par défaut (LEFT = close,
+     *  RIGHT = ignoré). Si retourne true → callback a géré l'event. */
+    @Volatile var onLeftPressed: (() -> Boolean)? = null
+    @Volatile var onRightPressed: (() -> Boolean)? = null
+
     /** 2026-06-19 : invoque le toggle (show/hide) du panel chaînes. Permet à
      *  MainTvActivity d'ouvrir/fermer le panel sur D-pad LEFT quand le player
      *  est en plein écran et que le controller est MASQUÉ. Si le controller

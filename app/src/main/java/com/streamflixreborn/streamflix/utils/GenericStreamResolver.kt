@@ -92,10 +92,15 @@ object GenericStreamResolver {
                     when {
                         resp.code in 200..299 -> {
                             val ctype = resp.header("Content-Type")?.lowercase().orEmpty()
-                            // Si c'est du RSS / XML / HTML, fetch le body en GET pour parser
-                            //   les patterns universels (script fetch, m3u8 dans le HTML…).
+                            // Si c'est du RSS / XML / HTML / JSON, fetch le body en GET pour
+                            //   parser les patterns universels (script fetch, m3u8 dans le HTML,
+                            //   champ {"url":"...m3u8"} des réponses ftven/auth…).
                             //   Sinon c'est probablement un manifest = URL finale.
-                            if (ctype.contains("xml") || ctype.contains("html") || ctype.contains("text")) {
+                            // 2026-06-27 : ajout "json" — les liens c9v3.s.gy de la 3boxTv v2
+                            //   finissent souvent sur un endpoint d'auth (hdfauth.ftven.fr) qui
+                            //   renvoie {"url":"<m3u8 signé>"} ; extractStreamFromBody y trouve
+                            //   l'URL média interne.
+                            if (ctype.contains("xml") || ctype.contains("html") || ctype.contains("text") || ctype.contains("json")) {
                                 val getReq = Request.Builder().url(url).get()
                                 headers.forEach { (k, v) -> getReq.header(k, v) }
                                 val body = client.newCall(getReq.build()).execute().use { it.body?.string() }
@@ -179,6 +184,83 @@ object GenericStreamResolver {
     }
 
     /**
+     * Hôtes pour lesquels on sait qu'une page exécute du JavaScript pour
+     * construire l'URL m3u8 finale via XHR/fetch dynamique. Pour ces hôtes,
+     * le pipeline HTTP follow-redirect ne suffit jamais — il faut une WebView
+     * headless qui exécute la page complètement et intercepte la requête.
+     *
+     * C'est ce que Wiseplay fait via son parser `HostParser.WEB` (= classe
+     * vihosts.vp.a dans le DEX, reverse-engineered 2026-06-24).
+     */
+    private val WEBVIEW_REQUIRED_HOSTS = listOf(
+        "c9v3.s.gy",         // Rakuten/Sony/etc. — JS construit l'URL CDN finale
+        "scailhol.free.fr",  // PHP mini-proxy wrapping ftven/cloudfront
+        "textup.fr",         // Pluto TV (quand c'est un stream, pas une sub-list)
+        "hdfauth.ftven.fr",  // wrapper France TV avec ?url=<real_m3u8>
+        "html.bet",          // FAST channels (Samsung TV+, Pluto TV) — JS redirect vers stream
+    )
+
+    /**
+     * Résout l'URL [startUrl] en essayant d'abord la pipeline HTTP classique
+     * (= follow-redirect + pmpurl + body extract), puis en basculant sur
+     * `WebViewStreamResolver` (= WebView headless qui intercepte le 1er
+     * .m3u8/.mpd sortant) si :
+     *  - le hostname appartient à [WEBVIEW_REQUIRED_HOSTS], OU
+     *  - la résolution HTTP n'a pas abouti à une URL playable.
+     *
+     * 2026-06-24 — calqué sur le pipeline Wiseplay (= parser WEB de vihosts).
+     * À utiliser depuis WorldLiveTvProvider.getVideo() pour les patterns
+     * c9v3.s.gy/me/..., c9v3.s.gy/aDqr3F/..., textup.fr/...?filetype=txt.
+     *
+     * Coût : 5-12s (WebView startup + JS execution + 1er XHR). Cohérent
+     * avec "LCI très lent" observé sur Wiseplay par le user. Le résultat
+     * devrait être caché par le caller (WorldLiveStreamCache 30 min).
+     */
+    fun resolveWithJsFallback(
+        startUrl: String,
+        baseHeaders: Map<String, String> = emptyMap(),
+        webviewTimeoutMs: Long = 12_000L,
+    ): Resolved {
+        // 1. Pipeline HTTP classique (rapide, marche pour 95 % des cas)
+        val httpResult = resolve(startUrl, baseHeaders)
+        val needsWebView = !looksLikeMediaUrl(httpResult.url) ||
+            shouldForceWebView(startUrl) ||
+            shouldForceWebView(httpResult.url)
+        if (!needsWebView) {
+            return httpResult
+        }
+
+        Log.d(TAG, "fallback WebView for: $startUrl (httpResult=${httpResult.url})")
+        return try {
+            val wvResult = kotlinx.coroutines.runBlocking {
+                WebViewStreamResolver.resolve(
+                    entryUrl = startUrl,
+                    referer = baseHeaders["Referer"],
+                    userAgent = baseHeaders["User-Agent"]
+                        ?: "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+                    timeoutMs = webviewTimeoutMs,
+                    extraHeaders = baseHeaders.filterKeys { it !in setOf("Referer", "User-Agent") },
+                )
+            }
+            if (wvResult != null) {
+                Log.d(TAG, "WebView intercepted: ${wvResult.url}")
+                Resolved(url = wvResult.url, headers = wvResult.headers)
+            } else {
+                Log.w(TAG, "WebView timed out, returning HTTP result as-is")
+                httpResult
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "WebView fallback crashed: ${t.message}")
+            httpResult
+        }
+    }
+
+    private fun shouldForceWebView(url: String): Boolean {
+        val lower = url.lowercase()
+        return WEBVIEW_REQUIRED_HOSTS.any { lower.contains(it) }
+    }
+
+    /**
      * Décode `\/` → `/` (JSON-escaped paths fréquents dans les playlists).
      */
     private fun decodeJsonSlashes(s: String): String = s.replace("\\/", "/")
@@ -231,6 +313,70 @@ object GenericStreamResolver {
     private fun extractStreamFromBody(body: String, headers: Map<String, String>): String? {
         val ua = headers["User-Agent"] ?: ""
 
+        // 2026-06-25 (user "3box TV : il sait pas lancer les chaînes alors que
+        //   Wiseplay oui — ils ont ajouté un nouveau protocole") : nouveau
+        //   format RSS direct = `<description><![CDATA[<meta name="str"
+        //   content="<vraie_url_mpd>">]]></description>`. Plus de JS Nxt,
+        //   plus de atob, plus de token tpol — juste l'URL en clair dans
+        //   un meta tag. Wiseplay supporte ce format natif. On l'extrait
+        //   en priorité car c'est le plus simple et le plus récent.
+        if (body.contains("<meta") && body.contains("name=\"str\"")) {
+            val metaPattern = Regex(
+                """<meta\s+name=["']str["']\s+content=["'](https?://[^"']+)["']""",
+                RegexOption.IGNORE_CASE,
+            )
+            val match = metaPattern.find(body)
+            if (match != null) {
+                val url = match.groupValues[1]
+                if (!isPoisonedHost(url)) return url
+            }
+        }
+
+        // 2026-06-25 (TMC "ça mouline rien") : pattern 2e hop TVRadioZap pour
+        //   les chaînes hébergées sur s2.callofliberty.fr. Le RSS contient :
+        //     fetch("https://s2.callofliberty.fr/streams/"
+        //       + UA.split("~col"+ret)[1].split("~")[0].replace("-","/")
+        //       + ".m3u8?callofliberty=TOKEN")
+        //   Où ret = today's date format DDMYYYY (= "2562026" pour 25/6/2026).
+        //   On reproduit ça en Kotlin pour éviter d'exécuter le JS.
+        if (body.contains("callofliberty.fr/streams/", ignoreCase = true)) {
+            Log.d(TAG, "callofliberty body detected, len=${body.length}, ua_head=${ua.take(80)}")
+            val tokenMatch = Regex("""callofliberty=([A-Za-z0-9]{20,})""").find(body)
+            val token = tokenMatch?.groupValues?.get(1)
+            Log.d(TAG, "callofliberty token=$token, ua.contains(~col)=${ua.contains("~col")}")
+            if (token != null) {
+                // Try BOTH UTC and local date in case the device timezone differs
+                val cals = listOf(
+                    java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")),
+                    java.util.Calendar.getInstance(),
+                )
+                for (cal in cals) {
+                    val ret = "${cal.get(java.util.Calendar.DAY_OF_MONTH)}${cal.get(java.util.Calendar.MONTH) + 1}${cal.get(java.util.Calendar.YEAR)}"
+                    val marker = "~col$ret"
+                    val idx = ua.indexOf(marker)
+                    Log.d(TAG, "callofliberty try marker='$marker', idx=$idx")
+                    if (idx >= 0) {
+                        val afterMarker = ua.substring(idx + marker.length)
+                        val seg = afterMarker.substringBefore("~").replace("-", "/")
+                        if (seg.isNotBlank() && !seg.contains(" ")) {
+                            val finalUrl = "https://s2.callofliberty.fr/streams/$seg.m3u8?callofliberty=$token"
+                            Log.d(TAG, "callofliberty MATCHED → $finalUrl")
+                            return finalUrl
+                        }
+                    }
+                }
+                // Last resort : extract ~col<XXXXXXX>YYY~ from UA via regex (date-agnostic)
+                val regexUa = Regex("""~col(\d{6,8})([A-Za-z0-9\-_]+)~""")
+                val uaMatch = regexUa.find(ua)
+                if (uaMatch != null) {
+                    val seg = uaMatch.groupValues[2].replace("-", "/")
+                    val finalUrl = "https://s2.callofliberty.fr/streams/$seg.m3u8?callofliberty=$token"
+                    Log.d(TAG, "callofliberty REGEX fallback → $finalUrl")
+                    return finalUrl
+                }
+            }
+        }
+
         // 1. Pipeline 2-hop avec Nxt() : si le body contient une fonction
         //    `Nxt(navigator.userAgent...)`, le pipeline attend qu'on construise
         //    une URL suivante depuis le UA. Le script JS fait :
@@ -269,8 +415,10 @@ object GenericStreamResolver {
         }
 
         // 2. Pattern script JS direct : `==="<token>") { fetch(("<url>"...`
-        //    Le token vient du UA via `~tpol<token>~`.
-        val token = if (ua.contains("~tpol")) {
+        //    Le token vient du UA via `~tnpol<token>~` (ou ancien `~tpol`).
+        val token = if (ua.contains("~tnpol")) {
+            ua.substringAfter("~tnpol").substringBefore("~").trim()
+        } else if (ua.contains("~tpol")) {
             ua.substringAfter("~tpol").substringBefore("~").trim()
         } else null
 
@@ -383,7 +531,7 @@ object GenericStreamResolver {
     /** 2026-06-12 (logs OPPO : 16 fetch empoisonnés du RSS rsseverything,
      *  tous au pattern `cdn.adultiptv.net/gay.m3u8#XX/YY/index.m3u8?token=`) :
      *  le mainteneur du RSS a juste REMPLACÉ le préfixe
-     *  `https://www.latvdefrance.com/po/hls/transcoder` par
+     *  `https://www.latvdefrance.com/ca/hls/transcoder` par
      *  `http://cdn.adultiptv.net/gay.m3u8#`. Le segment derrière (`XX/YY/
      *  index.m3u8?token=...`) est CONSERVÉ. On peut donc reconstruire
      *  l URL latvdefrance originale en inversant ce remplacement.
@@ -398,7 +546,7 @@ object GenericStreamResolver {
         val tail = poisonedUrl.substringAfter(poisonedPrefix)
         if (tail.isBlank()) return null
         // tail = ex "02/1/index.m3u8?token=..."
-        val reconstructed = "https://www.latvdefrance.com/po/hls/transcoder$tail"
+        val reconstructed = "https://www.latvdefrance.com/ca/hls/transcoder$tail"
         // Sanity check : le résultat ne doit PAS être empoisonné
         return if (!isPoisonedHost(reconstructed)) reconstructed else null
     }
