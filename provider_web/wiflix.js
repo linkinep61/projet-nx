@@ -107,10 +107,33 @@
 
   // Parse les sections home d'un document (block-main) + construit la catégorie
   //   FEATURED "À l'affiche" (carrousel) à partir des 1ers items posterisés.
+  // Le GRAND slider principal du site (owl-carousel, "À l'affiche" curé par flemmix).
+  //   Item = a[href] > span.title1 (titre) + img. Les clones owl sont dédupliqués.
+  function parseSliderItems(doc) {
+    const out = [];
+    const seen = new Set();
+    const anchors = doc.querySelectorAll('.owl-carousel .item a[href], .owl-carousel a.item[href]');
+    anchors.forEach(function (a) {
+      const href = a.getAttribute('href') || '';
+      const id = hrefToId(href);
+      if (!id || seen.has(id)) return;
+      if (id.indexOf('film-en-streaming') < 0 && id.indexOf('serie-en-streaming') < 0) return;
+      seen.add(id);
+      const t1 = a.querySelector('.title1, span.title1');
+      let title = decode(t1 ? (t1.textContent || '') : (a.getAttribute('title') || ''));
+      out.push({ type: typeOfHref(href), id: id, title: title, poster: '', banner: '' });
+    });
+    return out;
+  }
+
   function parseHomeSections(doc) {
     const cats = [];
     const seenGlobal = new Set();
-    const featured = [];
+    // FEATURED = le grand slider principal flemmix (catégorie dédiée en tête).
+    const slider = parseSliderItems(doc);
+    if (slider.length >= 3) {
+      cats.push({ name: "À l'affiche", items: slider.slice(0, 20) });
+    }
     const blocks = doc.querySelectorAll('div.block-main');
     blocks.forEach(function (block) {
       const titleEl = block.querySelector('div.block-title, .block-title, h2');
@@ -121,33 +144,25 @@
         if (seenGlobal.has(it.id)) return false;
         seenGlobal.add(it.id); return true;
       });
-      if (items.length > 0) {
-        cats.push({ name: name, items: items });
-        items.forEach(function (it) {
-          if (featured.length < 12 && it.poster) featured.push(it);
-        });
-      }
+      if (items.length > 0) cats.push({ name: name, items: items });
     });
-    // Fallback : si pas de block-main, prend toutes les div.mov de la page
+    // Fallback : si pas de block-main ni slider, prend toutes les div.mov de la page
     if (cats.length === 0) {
       const items = parseMovCards(doc);
       if (items.length > 0) cats.push({ name: 'À la une', items: items });
-    }
-    // FEATURED (carrousel) en tête → le moteur mappe "À l'affiche" en Category.FEATURED
-    if (featured.length >= 3) {
-      cats.unshift({ name: "À l'affiche", items: featured.slice(0, 12) });
     }
     return cats;
   }
 
   const P = {
-    // HOME : parse le document déjà chargé (post-CF, instantané) puis fallback fetch '/'.
+    // HOME : fetch '/' (comportement d'origine qui marchait) → sections + slider.
     async getHome() {
-      let cats = parseHomeSections(document);
-      if (cats.length === 0) {
-        try { cats = parseHomeSections(parseHtml(await getText('/'))); } catch (e) {}
-      }
-      return cats;
+      try {
+        const cats = parseHomeSections(parseHtml(await getText('/')));
+        if (cats.length > 0) return cats;
+      } catch (e) {}
+      // fallback : document courant si le fetch échoue
+      return parseHomeSections(document);
     },
 
     // RECHERCHE : POST DLE /index.php?do=search (same-origin, cookie h_check=25).
