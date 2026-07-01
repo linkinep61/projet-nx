@@ -19,6 +19,24 @@
         app:layout_constraintVertical_bias="0.0"
         tools:ignore="ContentDescription" />
 
+    <!-- 2026-06-29 RESTAURÉ depuis APK v1.7.226 — Luminosité TV du fond/carrousel.
+         View noir à alpha variable au-dessus du iv_home_background.
+         Contrôlé par UserPreferences.carouselDim (SeekBar CAROUSEL_DIM, Paramètres TV).
+         alpha=0 → fond normal. alpha=1.0 → écran totalement noir.
+         Ne capte pas le focus pour ne pas bloquer la navigation D-pad. -->
+    <View
+        android:id="@+id/view_carousel_dim"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="@android:color/black"
+        android:alpha="0"
+        android:clickable="false"
+        android:focusable="false"
+        app:layout_constraintBottom_toBottomOf="@+id/iv_home_background"
+        app:layout_constraintEnd_toEndOf="@+id/iv_home_background"
+        app:layout_constraintStart_toStartOf="@+id/iv_home_background"
+        app:layout_constraintTop_toTopOf="@+id/iv_home_background" />
+
     <!-- Boutons mini player — barre HORIZONTALE en HAUT À GAUCHE de l'écran,
          détachée du mini lecteur. Ordre : ⛶ Agrandir → ⏸ Pause → ✕ Fermer.
          À côté du bouton quitter provider (sidebar). D-pad focusable. -->

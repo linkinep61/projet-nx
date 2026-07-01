@@ -535,7 +535,18 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         //   retour au SKIP cache standard pour TOUS les providers (= WebJsProvider
         //   inclus). Plus de re-fetch automatique. Le cache est servi instantanément
         //   sur back-revient. Refresh manuel via bouton si nécessaire.
-        if (!warmUpPending && !cachedCategories.isNullOrEmpty() && cacheAgeMs != null && cacheAgeMs < cacheTtlMs) {
+        // 2026-06-30 (user "un refresh à l'ouverture suffit en cas de jaquette
+        //   grise") : les providers CF (Wiflix, French Anime, DessinAnime…) relancent
+        //   UN getHome à l'ouverture → bypass → cookie/session frais → les jaquettes
+        //   se rechargent. Le cache est déjà affiché (stale-while-revalidate), donc
+        //   c'est invisible. ⚠ Le bypass est en mode léger (retry=1) pour ne pas
+        //   créer de rafale qui ferait throttler l'IP par Cloudflare.
+        val needsFreshCfBypass = provider.name.contains("Anime", ignoreCase = true) ||
+            provider.name.contains("Dessin", ignoreCase = true) ||
+            provider.name.contains("Wiflix", ignoreCase = true) ||
+            provider.name.contains("Franime", ignoreCase = true) ||
+            provider.name.contains("Manga", ignoreCase = true)
+        if (!needsFreshCfBypass && !warmUpPending && !cachedCategories.isNullOrEmpty() && cacheAgeMs != null && cacheAgeMs < cacheTtlMs) {
             Log.d("HomeBoot", "[${provider.name}] SKIP network (cache age ${cacheAgeMs / 1000}s, TTL ${cacheTtlMs / 60000}min) total=${System.currentTimeMillis() - t0}ms")
             return
         }

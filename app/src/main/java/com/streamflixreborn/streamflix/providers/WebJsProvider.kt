@@ -83,6 +83,16 @@ open class WebJsProvider(
     private val navMutex = kotlinx.coroutines.sync.Mutex()
 
     companion object {
+        // 2026-06-27 (REPAIR_HANDOFF #5) : coupe tout l'audio/vidéo de la WebView
+        //   headless (l'extraction clique parfois "play" → pas de son parasite).
+        private const val MUTE_JS = """
+            (function(){
+              function mute(){try{document.querySelectorAll('video,audio').forEach(function(m){m.muted=true;m.volume=0;});}catch(e){}}
+              mute();
+              try{ new MutationObserver(mute).observe(document.documentElement,{childList:true,subtree:true}); }catch(e){}
+            })();
+        """
+
         /**
          * Pre-warm TOUS les WebJsProvider au boot de l'app : navigate sur baseUrl
          * en background pour passer CF challenge + injection JS AVANT que l'user
@@ -167,7 +177,10 @@ open class WebJsProvider(
         wv.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
-            mediaPlaybackRequiresUserGesture = false
+            // 2026-06-27 (REPAIR_HANDOFF #5) : remis à true — l'extraction n'a pas
+            //   besoin de lancer la lecture ; on évite tout autoplay audio/vidéo
+            //   dans la WebView headless (+ muteAllMedia ci-dessous en renfort).
+            mediaPlaybackRequiresUserGesture = true
             userAgentString = android.webkit.WebSettings.getDefaultUserAgent(ctx)
             // Cache mode = DEFAULT (= comportement browser normal). LOAD_CACHE_ELSE_NETWORK
             // causait des timeouts sur les pages série jamais visitées (= rien en cache).
@@ -209,7 +222,10 @@ open class WebJsProvider(
         val src = ensureJsSource()
         val done = CompletableDeferred<Unit>()
         main.post {
-            webView?.evaluateJavascript(src) { done.complete(Unit) } ?: done.complete(Unit)
+            webView?.let { wv ->
+                wv.evaluateJavascript(src) { done.complete(Unit) }
+                wv.evaluateJavascript(MUTE_JS, null)  // REPAIR_HANDOFF #5
+            } ?: done.complete(Unit)
         }
         withTimeoutOrNull(8_000) { done.await() }
     }
@@ -294,7 +310,20 @@ open class WebJsProvider(
             val itemsArr = c.optJSONArray("items") ?: continue
             val items = ArrayList<AppAdapter.Item>()
             for (j in 0 until itemsArr.length()) itemsArr.optJSONObject(j)?.let { parseItem(it)?.let(items::add) }
-            if (items.isNotEmpty()) out.add(Category(name = c.optString("name", "—"), list = items))
+            // 2026-06-29 (REPAIR — user "active le carrousel dans l'app") : un provider
+            //   web peut nommer sa catégorie carrousel "" (vide) OU un libellé FR
+            //   ("À l'affiche", "En vedette", "À la une"...). On la mappe sur
+            //   Category.FEATURED (= "") pour que le home la rende en SWIPER, sinon
+            //   elle s'affiche en simple rail (= pas de carrousel, bug actuel).
+            val rawName = c.optString("name", "—")
+            val isFeatured = rawName.trim().lowercase().let { n ->
+                n.isEmpty() || n in setOf(
+                    "à l'affiche", "a l'affiche", "featured", "en vedette",
+                    "à la une", "a la une", "à découvrir en avant"
+                )
+            }
+            val catName = if (isFeatured) Category.FEATURED else rawName
+            if (items.isNotEmpty()) out.add(Category(name = catName, list = items))
         }
         return out
     }

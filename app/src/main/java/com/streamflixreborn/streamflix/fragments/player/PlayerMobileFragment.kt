@@ -430,6 +430,11 @@ class PlayerMobileFragment : Fragment() {
             }
         }
 
+    // 2026-06-30 : true si la case "toujours utiliser ce lecteur" était cochée
+    //   au moment de lancer le sélecteur → on mémorise le lecteur choisi + on
+    //   active le mode "toujours externe".
+    private var pendingExternalDefault = false
+
     private val chooserReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
@@ -439,9 +444,110 @@ class PlayerMobileFragment : Fragment() {
                     @Suppress("DEPRECATION")
                     intent?.getParcelableExtra(Intent.EXTRA_CHOSEN_COMPONENT)
                 }
-                Log.i("ExternalPlayer", "Mobile - App selezionata: ${clickedComponent?.packageName ?: "Sconosciuta"}")
+                val pkg = clickedComponent?.packageName
+                Log.i("ExternalPlayer", "Mobile - App selezionata: ${pkg ?: "Sconosciuta"}")
+                // Mémorise toujours le dernier lecteur externe choisi.
+                if (!pkg.isNullOrBlank()) {
+                    UserPreferences.externalPlayerPackage = pkg
+                    if (pendingExternalDefault) {
+                        UserPreferences.alwaysUseExternalPlayer = true
+                        try {
+                            Toast.makeText(requireContext(),
+                                "Ce lecteur sera utilisé par défaut", Toast.LENGTH_SHORT).show()
+                        } catch (_: Exception) {}
+                    }
+                }
+                pendingExternalDefault = false
             }
         }
+    }
+
+    // 2026-06-30 : empêche le re-lancement auto du lecteur externe à chaque
+    //   displayVideo() (switch de serveur) → une seule fois par ouverture.
+    private var didAutoLaunchExternal = false
+
+    private fun resolveExternalSourceUri(video: Video): Uri {
+        val initialSource = video.source
+        if (initialSource.startsWith("data:application/vnd.apple.mpegurl;base64,")) {
+            val playlistContent = decodeBase64Uri(initialSource)
+            val extractedUrl = if (playlistContent != null) extractUrlFromPlaylist(playlistContent) else null
+            if (extractedUrl != null) return extractedUrl.toUri()
+            return try {
+                val file = File(requireContext().cacheDir, "stream.m3u8")
+                FileOutputStream(file).use { it.write(playlistContent?.toByteArray() ?: ByteArray(0)) }
+                FileProvider.getUriForFile(requireContext(), "${requireContext().packageName}.provider", file)
+            } catch (ignored: Exception) { initialSource.toUri() }
+        }
+        return initialSource.toUri()
+    }
+
+    /** Lance le lecteur externe. directPackage != null → lance DIRECTEMENT ce
+     *  lecteur mémorisé (pas de sélecteur). null → ouvre le sélecteur système. */
+    private fun doExternalLaunch(video: Video, directPackage: String?) {
+        isIgnoringPip = true
+        val videoTitle = when (val type = args.videoType) {
+            is Video.Type.Movie -> type.title
+            is Video.Type.Episode -> "${type.tvShow.title} • S${type.season.number} E${type.number}"
+        }
+        val sourceUri = resolveExternalSourceUri(video)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(sourceUri, "video/*")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            putExtra("title", videoTitle)
+            putExtra("position", player.currentPosition.toInt())
+            putExtra("return_result", true)
+            putExtra("extra_headers", video.headers?.map { "${it.key}: ${it.value}" }?.toTypedArray())
+            if (video.headers != null) {
+                putExtra("headers", video.headers.flatMap { listOf(it.key, it.value) }.toTypedArray())
+            }
+        }
+        if (!directPackage.isNullOrBlank()) {
+            try {
+                intent.setPackage(directPackage)
+                try { player.pause() } catch (_: Exception) {}
+                startActivity(intent)
+                return
+            } catch (e: Exception) {
+                Log.w("ExternalPlayer", "Lecteur direct $directPackage indispo (${e.message}) — sélecteur")
+                intent.setPackage(null)
+            }
+        }
+        try {
+            val receiverIntent = Intent("ACTION_PLAYER_CHOSEN").apply { setPackage(requireContext().packageName) }
+            val pendingIntent = PendingIntent.getBroadcast(
+                requireContext(), 0, receiverIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                startActivity(Intent.createChooser(intent, getString(R.string.player_external_player_title), pendingIntent.intentSender))
+            } else {
+                startActivity(Intent.createChooser(intent, getString(R.string.player_external_player_title)))
+            }
+        } catch (e: Exception) {
+            Log.e("ExternalPlayer", "Errore selettore app", e)
+            startActivity(Intent.createChooser(intent, getString(R.string.player_external_player_title)))
+        }
+    }
+
+    /** Affiche une petite case "toujours utiliser ce lecteur" puis ouvre le
+     *  sélecteur. Si cochée + lecteur choisi → mode "toujours externe" activé. */
+    private fun promptExternalThenLaunch(video: Video) {
+        val cb = android.widget.CheckBox(requireContext()).apply {
+            text = "Toujours utiliser ce lecteur (ne plus passer par le lecteur interne)"
+            isChecked = UserPreferences.alwaysUseExternalPlayer
+            val pad = (16 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad, pad, pad)
+        }
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("Lecteur externe")
+            .setView(cb)
+            .setPositiveButton("Lancer") { _, _ ->
+                pendingExternalDefault = cb.isChecked
+                if (!cb.isChecked) UserPreferences.alwaysUseExternalPlayer = false
+                doExternalLaunch(video, directPackage = null)
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
     }
 
     private val pickLocalSubtitle = registerForActivityResult(
@@ -1276,11 +1382,13 @@ class PlayerMobileFragment : Fragment() {
                 val nonOla = reordered.filter { !it.name.startsWith("OLA[") }
                 val prevSelectedId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isSelected }?.id
                 val prevLoadingId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isLoading }?.id
+                val prevQualities = PlayerSettingsView.Settings.Server.list.associate { it.id to it.quality }
                 PlayerSettingsView.Settings.Server.list.clear()
                 PlayerSettingsView.Settings.Server.addAllUnique(nonOla.map {
                     PlayerSettingsView.Settings.Server(id = it.id, name = it.name).apply {
                         isSelected = (it.id == prevSelectedId)
                         isLoading = (it.id == prevLoadingId)
+                        quality = it.quality ?: prevQualities[it.id]
                     }
                 })
                 if (::player.isInitialized) {
@@ -1294,6 +1402,21 @@ class PlayerMobileFragment : Fragment() {
                 }
                 scheduleServerRefresh()
                 Log.d("PlayerMobileFragment", "Servers reordered (progressive): ${reordered.size}")
+            }
+        }
+
+        // 2026-06-30 : rafraîchir la qualité affichée quand le probe background termine
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewModel.qualityUpdated.collect {
+                val knownServers = servers
+                for (settingSrv in PlayerSettingsView.Settings.Server.list) {
+                    if (settingSrv.quality != null) continue
+                    val match = knownServers.find { it.id == settingSrv.id }
+                    if (match?.quality != null) {
+                        settingSrv.quality = match.quality
+                    }
+                }
+                scheduleServerRefresh()
             }
         }
 
@@ -2253,12 +2376,14 @@ class PlayerMobileFragment : Fragment() {
                     updatePlayerScale()
                     true
                 }
-                R.id.menu_player_external -> {
-                    Toast.makeText(requireContext(), getString(R.string.player_external_player_error_video), Toast.LENGTH_SHORT).show()
-                    true
-                }
                 R.id.menu_player_settings -> {
                     binding.settings.show()
+                    true
+                }
+                R.id.menu_player_external -> {
+                    // 2026-06-29 : délègue au lancement fonctionnel (chooser) déjà câblé
+                    // sur btnExoExternalPlayer — l'utilisateur choisit son lecteur (VLC, MX…).
+                    binding.pvPlayer.controller.binding.btnExoExternalPlayer.performClick()
                     true
                 }
                 else -> false

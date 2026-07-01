@@ -54,6 +54,12 @@ class PlayerSettingsTvView @JvmOverloads constructor(
     var onManualZoomClicked: (() -> Unit)? = null
     var onDownloadsClicked: (() -> Unit)? = null
 
+    // 2026-06-29 RESTAURÉ depuis APK v1.7.226 — callback que le PlayerTvFragment
+    //   set pour ré-appliquer applyPlayerDim() en TEMPS RÉEL pendant que l'user
+    //   bouge le slider (= sans avoir à fermer/rouvrir le panneau Serveurs).
+    //   La valeur transmise est le DIM (0..100), pas le progress du slider.
+    var onBrightnessChanged: ((Int) -> Unit)? = null
+
     init {
         binding.rvSettings.addItemDecoration(SpacingItemDecoration(6.dp(context)))
         binding.btnSettingsDownloads.setOnClickListener {
@@ -63,6 +69,11 @@ class PlayerSettingsTvView @JvmOverloads constructor(
         // D-pad: allow navigating UP from the list to the downloads button
         binding.rvSettings.nextFocusUpId = R.id.btn_settings_downloads
         binding.btnSettingsDownloads.nextFocusDownId = R.id.rv_settings
+        // 2026-06-29 (user "la luminosité du lecteur doit être un item du menu sous
+        //   Qualité, pas un slider en haut") : le slider du haut a été RETIRÉ (il
+        //   s'affichait dans tous les sous-panneaux et n'était pas focusable). La
+        //   luminosité est maintenant l'item de menu Settings.Brightness (cycle
+        //   focusable). onBrightnessChanged reste branché et appliqué par le fragment.
     }
 
     fun onBackPressed(): Boolean {
@@ -320,6 +331,24 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                         is Settings -> {
                             when (item) {
                                 Settings.Quality -> settingsView.displaySettings(Setting.QUALITY)
+                                Settings.Brightness -> {
+                                    // Cycle 100 → 75 → 50 → 25 → 100 % (playerDim 0/25/50/75).
+                                    val cur = com.streamflixreborn.streamflix.utils.UserPreferences.playerDim
+                                    val next = when { cur < 25 -> 25; cur < 50 -> 50; cur < 75 -> 75; else -> 0 }
+                                    com.streamflixreborn.streamflix.utils.UserPreferences.playerDim = next
+                                    // Callback fragment (si branché) …
+                                    settingsView.onBrightnessChanged?.invoke(next)
+                                    // … ET application DIRECTE robuste : le callback peut être
+                                    //   null selon le flux d'init → on trouve view_player_dim
+                                    //   dans la hiérarchie et on applique l'alpha nous-mêmes.
+                                    try {
+                                        settingsView.rootView?.findViewById<android.view.View>(R.id.view_player_dim)
+                                            ?.alpha = next / 100f
+                                    } catch (_: Throwable) {}
+                                    // MAJ de la row directement (pas de notifyDataSetChanged
+                                    //   → on garde le focus D-pad sur l'item).
+                                    binding.tvSettingMainText.text = "Luminosité — ${100 - next}%"
+                                }
                                 Settings.Audio -> settingsView.displaySettings(Setting.AUDIO)
                                 Settings.Subtitle -> settingsView.displaySettings(Setting.SUBTITLES)
                                 Settings.Speed -> settingsView.displaySettings(Setting.SPEED)
@@ -527,6 +556,9 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                             Settings.Quality -> setImageDrawable(
                                 ContextCompat.getDrawable(context, R.drawable.ic_player_settings_quality)
                             )
+                            Settings.Brightness -> setImageDrawable(
+                                ContextCompat.getDrawable(context, R.drawable.ic_brightness)
+                            )
                             Settings.Audio -> setImageDrawable(
                                 ContextCompat.getDrawable(context, R.drawable.ic_player_settings_audio)
                             )
@@ -617,6 +649,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                 text = when (item) {
                     is Settings -> when (item) {
                         Settings.Quality -> context.getString(R.string.player_settings_quality_label)
+                        Settings.Brightness -> "Luminosité — ${100 - com.streamflixreborn.streamflix.utils.UserPreferences.playerDim}%"
                         Settings.Audio -> context.getString(R.string.player_settings_audio_label)
                         Settings.Subtitle -> context.getString(R.string.player_settings_subtitles_label)
                         Settings.Speed -> context.getString(R.string.player_settings_speed_label)
@@ -801,6 +834,8 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     is Settings.Subtitle.OpenSubtitles.Subtitle -> item.openSubtitle.languageName
 
                     is Settings.Subtitle.SubDLSubtitles.Subtitle -> item.subDLSubtitle.lang?.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() } ?: ""
+
+                    is Settings.Server -> item.quality ?: ""
 
                     else -> ""
                 }

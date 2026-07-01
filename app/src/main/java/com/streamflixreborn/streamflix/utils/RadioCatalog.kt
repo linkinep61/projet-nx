@@ -238,6 +238,12 @@ object RadioCatalog {
         return HARDCODED_DRIC4RTV_RADIOS
     }
 
+    /** 2026-06-29 (REPAIR — user "807 vs 790 : les 17 radios manquent du dossier
+     *  Musique") : accès public aux 17 radios hardcodées (URLs CDN directes) pour
+     *  que LiveTvHubProvider.fetchMusiqueCategoriesPublic les ré-injecte dans le
+     *  dossier Musique du TV Hub (perdues quand Dric4rTV a été retiré du hub). */
+    fun hardcodedDricRadios(): List<RadioStation> = HARDCODED_DRIC4RTV_RADIOS
+
     private suspend fun loadBrowserRadios(): List<RadioStation> {
         return try {
             RadioBrowserClient.fetchFrenchStations(5000).map { s ->

@@ -56,17 +56,52 @@ class WebViewResolver(private val context: Context) {
      *  providers qui veulent un fallback discret sans interaction user. */
     private var silentMode: Boolean = false
 
+    // 2026-06-30 : on ne recharge qu'UNE fois après obtention du cf_clearance.
+    private var reloadedAfterClearance = false
+
+    // 2026-06-30 : 1 = pas de relance auto en rafale (la rafale 3× faisait
+    //   throttler l'IP par Cloudflare → tout en 403, jaquettes comprises).
+    private val MAX_BYPASS_ATTEMPTS = 1
+
     suspend fun get(url: String, headers: Map<String, String> = emptyMap(), silent: Boolean = false): String = mutex.withLock {
-        Log.d(TAG, "[WebView] Fetching: $url (IsTV: $isTv, silent=$silent)")
-        pollingCount = 0
-        silentMode = silent
-        val result = withTimeoutOrNull(if (silent) 30000 else 120000) {
-            suspendCancellableCoroutine { continuation ->
-                mainHandler.post { setupWebView(url, headers, continuation) }
-                continuation.invokeOnCancellation { cleanup() }
+        // 2026-06-30 (user "le captcha m'énerve, je veux plus jamais le voir, il
+        //   sera tout le temps masqué — il apparaît même hors du provider Wiflix
+        //   et ne se résout pas") : le bypass est DÉSORMAIS TOUJOURS SILENCIEUX.
+        //   On ignore le paramètre `silent` des appelants → le dialog "challenge
+        //   visible" n'est JAMAIS affiché (la condition !silentMode ci-dessous ne
+        //   sera jamais vraie). Le bypass tourne en arrière-plan : avec le UA
+        //   stealth + 25 polls (~7.5s), CF pose le cookie cf_clearance silencieusement,
+        //   ensuite OkHttp+cookie charge le vrai contenu ("ça marche une fois pour toutes").
+        // 2026-06-30 (user "si y a un blocage au chargement, il faut que ça se
+        //   relance automatiquement") : RELANCE AUTO. Si une tentative échoue
+        //   (silent fail / timeout / page vide), on relance le bypass jusqu'à 3 fois.
+        //   Le cf_clearance d'une tentative partielle est conservé (CookieManager) →
+        //   la tentative suivante charge souvent le contenu directement.
+        var result: String? = null
+        var attempt = 0
+        while (attempt < MAX_BYPASS_ATTEMPTS) {
+            attempt++
+            pollingCount = 0
+            reloadedAfterClearance = false
+            silentMode = true
+            Log.d(TAG, "[WebView] Fetching: $url (IsTV: $isTv, silencieux, tentative $attempt/$MAX_BYPASS_ATTEMPTS)")
+            result = withTimeoutOrNull(45000) {
+                suspendCancellableCoroutine { continuation ->
+                    mainHandler.post { setupWebView(url, headers, continuation) }
+                    continuation.invokeOnCancellation { cleanup() }
+                }
+            }
+            val r = result ?: ""
+            val failed = result == null || r.isBlank() ||
+                r.contains("<!-- silent fail -->") || r.contains("<!-- no live activity -->") ||
+                r.contains("<body>Timeout</body>")
+            if (!failed) break
+            if (attempt < MAX_BYPASS_ATTEMPTS) {
+                Log.d(TAG, "[WebView] tentative $attempt bloquée → relance auto pour $url")
+                kotlinx.coroutines.delay(1200)
             }
         }
-        if (result == null) Log.e(TAG, "[WebView] Global Timeout for $url")
+        if (result == null) Log.e(TAG, "[WebView] Global Timeout for $url (après $attempt tentatives)")
         return@withLock result ?: "<html><body>Timeout</body></html>"
     }
 
@@ -77,8 +112,55 @@ class WebViewResolver(private val context: Context) {
         //   pour les appels API normaux). STEALTH_UA est utilisé par le WebView
         //   bypass ET par les requêtes OkHttp post-bypass (le cookie cf_clearance
         //   est lié au UA — mismatch = rejet).
-        const val STEALTH_UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.39 Mobile Safari/537.36"
+        // 2026-06-30 (investigation Chrome sur flemmix.fast) : le vrai Chrome qui
+        //   résout le challenge CF est en version 149 (UA réduit "149.0.0.0"). Notre
+        //   UA était figé sur Chrome/131 → daté. Aligné sur 149 (format UA réduit
+        //   actuel) pour que CF nous traite comme un navigateur à jour.
+        // 2026-06-30 (investigation Chrome + logs device : CF renvoie
+        //   `critical-ch: Sec-CH-UA-Full-Version, Sec-CH-UA-Arch, Sec-CH-UA-Mobile…`)
+        //   → le challenge JSD oneshot COMPARE l'UA aux Client Hints. Si on FORCE
+        //   une version d'UA (ex 149) différente de la VRAIE version du moteur
+        //   WebView de l'appareil, les Client Hints (que le moteur envoie selon sa
+        //   vraie version) ne matchent pas → challenge échoue/boucle (Content:false).
+        //   FIX DURABLE : on dérive l'UA de la VRAIE version WebView (initStealthUa),
+        //   en retirant juste le token "wv" (= flag WebView) et "Version/4.0".
+        //   → UA + Client Hints cohérents, et ça ne redeviendra jamais "daté".
+        //   Valeur initiale = fallback si l'init n'a pas encore tourné.
+        /**
+         * Compteur incrémenté à chaque bypass CF réussi (cf_clearance obtenu).
+         * Utilisé par ArtworkLoader comme clé de signature Glide : après un
+         * bypass, la signature change → cache miss → Glide refait un vrai
+         * appel réseau au lieu de servir l'échec précédent en cache.
+         */
+        @JvmStatic @Volatile var cfBypassGeneration: Int = 0
+            private set
+
+        @JvmStatic
+        var STEALTH_UA: String = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36"
+            private set
+
+        @Volatile private var stealthUaInitDone = false
+
+        /** Dérive STEALTH_UA de la vraie version WebView de l'appareil (une fois). */
+        @JvmStatic
+        fun initStealthUa(context: android.content.Context) {
+            if (stealthUaInitDone) return
+            try {
+                val real = android.webkit.WebSettings.getDefaultUserAgent(context)
+                // On garde la VRAIE version Chrome du moteur (cohérence avec les
+                //   Client Hints) MAIS on normalise le modèle en téléphone courant
+                //   (Pixel 8 Pro). Avant, l'UA dérivé contenait "Chromecast Build/..."
+                //   → CF bloque les requêtes images (checkimg.php) venant d'un UA
+                //   "Chromecast" inhabituel. Un UA Pixel passe (= comportement d'avant).
+                val chromeVer = Regex("Chrome/([0-9.]+)").find(real)?.groupValues?.get(1) ?: "149.0.0.0"
+                val androidVer = Regex("Android (\\d+)").find(real)?.groupValues?.get(1) ?: "14"
+                STEALTH_UA = "Mozilla/5.0 (Linux; Android $androidVer; Pixel 8 Pro) " +
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVer Mobile Safari/537.36"
+                Log.d("WebViewResolver", "[WebView] STEALTH_UA normalisé (Pixel + vraie version) : $STEALTH_UA")
+                stealthUaInitDone = true
+            } catch (_: Throwable) {}
+        }
     }
 
     // 2026-06-28 : script JS anti-détection injecté AVANT que les scripts
@@ -162,11 +244,79 @@ class WebViewResolver(private val context: Context) {
                     configurable: true
                 });
             } catch(e) {}
+
+            // 9. navigator.userAgentData (Client Hints) — 2026-06-30 : le JSD strict
+            //    (French Anime) lit userAgentData + getHighEntropyValues et les compare
+            //    à l'UA. En WebView il est souvent absent/incohérent → bot. On le
+            //    reconstruit cohérent avec la version Chrome de l'UA (déjà dérivée du
+            //    vrai moteur), pour que les hints sec-ch-ua collent.
+            try {
+                var uaStr = navigator.userAgent || '';
+                var m = uaStr.match(/Chrome\/(\d+)\.(\d+)\.(\d+)\.(\d+)/);
+                var major = m ? m[1] : '149';
+                var full = m ? (m[1] + '.' + m[2] + '.' + m[3] + '.' + m[4]) : '149.0.0.0';
+                var isMobile = /Mobile/.test(uaStr);
+                var brands = [
+                    { brand: 'Chromium', version: major },
+                    { brand: 'Google Chrome', version: major },
+                    { brand: 'Not.A/Brand', version: '24' }
+                ];
+                var fullList = [
+                    { brand: 'Chromium', version: full },
+                    { brand: 'Google Chrome', version: full },
+                    { brand: 'Not.A/Brand', version: '24.0.0.0' }
+                ];
+                var uad = {
+                    brands: brands,
+                    mobile: isMobile,
+                    platform: 'Android',
+                    getHighEntropyValues: function(hints) {
+                        return Promise.resolve({
+                            architecture: '', bitness: '', brands: brands,
+                            fullVersionList: fullList, mobile: isMobile,
+                            model: 'Pixel 8 Pro', platform: 'Android',
+                            platformVersion: '14.0.0', uaFullVersion: full, wow64: false
+                        });
+                    },
+                    toJSON: function() { return { brands: brands, mobile: isMobile, platform: 'Android' }; }
+                };
+                Object.defineProperty(navigator, 'userAgentData', { get: function(){ return uad; }, configurable: true });
+            } catch(e) {}
+
+            // 10. WebGL vendor/renderer — sur Android TV le rendu logiciel renvoie
+            //     "Google SwiftShader" = signal headless/bot évident. On renvoie un
+            //     GPU mobile plausible.
+            try {
+                var spoofGl = function(proto) {
+                    if (!proto) return;
+                    var orig = proto.getParameter;
+                    proto.getParameter = function(p) {
+                        if (p === 37445) return 'Qualcomm';            // UNMASKED_VENDOR_WEBGL
+                        if (p === 37446) return 'Adreno (TM) 740';     // UNMASKED_RENDERER_WEBGL
+                        return orig.apply(this, arguments);
+                    };
+                };
+                spoofGl(window.WebGLRenderingContext && WebGLRenderingContext.prototype);
+                spoofGl(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype);
+            } catch(e) {}
+
+            // 11. deviceMemory / hardwareConcurrency réalistes (WebView TV → 0/1 = bot)
+            try {
+                if (!navigator.deviceMemory || navigator.deviceMemory < 2)
+                    Object.defineProperty(navigator, 'deviceMemory', { get: function(){ return 8; }, configurable: true });
+            } catch(e) {}
+            try {
+                if (!navigator.hardwareConcurrency || navigator.hardwareConcurrency < 2)
+                    Object.defineProperty(navigator, 'hardwareConcurrency', { get: function(){ return 8; }, configurable: true });
+            } catch(e) {}
         })();
     """.trimIndent()
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView(url: String, headers: Map<String, String>, continuation: kotlinx.coroutines.CancellableContinuation<String>) {
+        // 2026-06-30 : dérive l'UA stealth de la VRAIE version WebView (cohérence
+        //   UA ↔ Client Hints pour passer le challenge JSD) — une seule fois.
+        initStealthUa(context)
         webView = WebView(context).apply {
             setBackgroundColor(Color.BLACK)
             // IMPORTANTE: Su TV non deve essere focusable per lasciare il controllo al container
@@ -280,6 +430,8 @@ class WebViewResolver(private val context: Context) {
                 //   même si "cloudflare" traîne dans les scripts CDN/analytics.
                 || (hasClearance && hasContent && cleanHtml.length > 5000)) {
                 Log.d(TAG, "[WebView] SUCCESS detected! Closing bypass.")
+                cfBypassGeneration++
+                Log.d(TAG, "[WebView] cfBypassGeneration bumped to $cfBypassGeneration")
                 cookieManager.flush()
                 if (continuation.isActive) {
                     continuation.resume("<html>$cleanHtml</html>")
@@ -305,10 +457,23 @@ class WebViewResolver(private val context: Context) {
                 return@evaluateJavascript
             }
 
-            // Se dopo 2 polling (circa 3-4 secondi) non c'è contenuto, mostriamo il dialog per sbloccare.
-            //   Sauf en mode silent (background catalog scraping) — fail-fast.
-            if (silentMode && pollingCount >= 3 && !hasContent) {
-                Log.d(TAG, "[WebView] Silent mode + no content after 3 polls → fail silently")
+            // 2026-06-30 (user "il a réussi mais lent" — logs : 7 fetches, le 1er
+            //   bail à 25 polls AVANT que l'interstitiel CF ne redirige vers le
+            //   contenu → cycle de redémarrages lents). FIX : dès qu'on a le cookie
+            //   cf_clearance mais pas encore de contenu, on RECHARGE le WebView UNE
+            //   fois. CF sert alors le contenu directement (cookie valide) en ~1-2s,
+            //   au lieu d'attendre la redirection JS de la page challenge.
+            if (hasClearance && !hasContent && !reloadedAfterClearance && pollingCount >= 5) {
+                reloadedAfterClearance = true
+                Log.d(TAG, "[WebView] Clearance OK sans contenu → reload (CF servira le contenu avec le cookie)")
+                try { view?.reload() } catch (_: Exception) {}
+                return@evaluateJavascript
+            }
+
+            // Mode silent : si après 60 polls toujours pas de contenu → fail silencieux
+            //   (le reload-après-clearance ci-dessus a normalement déjà débloqué avant).
+            if (silentMode && pollingCount >= 60 && !hasContent) {
+                Log.d(TAG, "[WebView] Silent mode + no content after 60 polls → fail silently")
                 cookieManager.flush()
                 if (continuation.isActive) continuation.resume("<html><!-- silent fail --></html>")
                 cleanup()

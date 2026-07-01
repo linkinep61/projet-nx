@@ -95,8 +95,10 @@ object PlutoTvResolver {
         val now = System.currentTimeMillis()
         if (catToken != null && now - catTs < SESSION_TTL_MS) return@withContext true
         try {
-            // PAS de XFF (comme le navigateur) : on s'appuie sur l'IP réelle
-            //   (VPN France). Le XFF créait un décalage région/IP qui bloquait le VOD.
+            // 2026-06-29 : PAS de XFF — le forçage FR au boot faisait remonter des
+            //   chaînes officielles qui ne jouaient pas bien depuis le device
+            //   (« tout cassé » user). On garde l'IP réelle ; si l'API revient vide,
+            //   le dossier bascule sur le repli data-fast.m3u (qui, lui, joue).
             val req = Request.Builder().url(bootUrl(clientId))
                 .header("Accept", "application/json")
                 .header("User-Agent", CHROME_UA)

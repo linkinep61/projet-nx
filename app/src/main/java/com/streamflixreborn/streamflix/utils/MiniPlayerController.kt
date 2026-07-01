@@ -55,6 +55,16 @@ object MiniPlayerController {
             id.startsWith("radio::")
     }
 
+    // 2026-06-29 RESTAURÉ depuis APK v1.7.226 — décide si la grille doit
+    //   être rétrécie pour laisser de la place au mini-player.
+    //   true  → mini-player VIDÉO actif → grille rétrécie (zone vidéo dédiée).
+    //   false → pas de mini-player OU mini-player RADIO (=barre fine sans vidéo)
+    //          → grille pleine largeur.
+    fun shouldShrinkGridForCurrent(): Boolean {
+        val id = currentChannelId ?: return false
+        return !isRadioChannel(id)
+    }
+
     sealed class State {
         data object Idle : State()
         data class Loading(val channelId: String, val channelName: String) : State()
@@ -1956,13 +1966,28 @@ object MiniPlayerController {
         loadJob = scope.launch {
             try {
                 val p = player ?: return@launch
+                // 2026-06-29 (user "la radio ne s'arrête pas / on ne peut pas recevoir
+                //   les appels sur mobile") : RADIO = audio seul → handleAudioFocus=true.
+                //   Le player est créé avec handleAudioFocus=false (comportement IPTV/TV),
+                //   et playRadioDirect héritait de ce false → un appel entrant ne coupait
+                //   pas la radio. On REMET true ici : ExoPlayer demande le focus audio,
+                //   se met en pause sur AUDIOFOCUS_LOSS_TRANSIENT (appel) et reprend après.
+                try {
+                    p.setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                            .setUsage(C.USAGE_MEDIA)
+                            .build(),
+                        /* handleAudioFocus */ true
+                    )
+                } catch (_: Throwable) {}
                 val mediaItem = MediaItem.Builder()
                     .setUri(streamUrl.toUri())
                     .build()
                 p.setMediaItem(mediaItem)
                 p.prepare()
                 p.playWhenReady = true
-                Log.d(TAG, "playRadioDirect: prepared $channelName")
+                Log.d(TAG, "playRadioDirect: prepared $channelName (audioFocus=true)")
             } catch (t: Throwable) {
                 Log.w(TAG, "playRadioDirect failed: ${t.message}")
                 _state.value = State.Error(channelId, t.message ?: "Erreur lecture radio")
@@ -2114,6 +2139,20 @@ object MiniPlayerController {
         //   si actif (= switch radio → TV).
         if (isRadioChannel(channelId)) {
             startRadioForegroundService(channelName, "Radio")
+            // 2026-06-29 (user "un appel ne coupe pas la radio / on peut pas recevoir
+            //   d'appel pendant la radio") : pour une RADIO (audio seul) → on REMET
+            //   handleAudioFocus=true. ExoPlayer pause/duck alors automatiquement sur
+            //   un appel entrant (AUDIOFOCUS_LOSS_TRANSIENT) et reprend après.
+            //   (Pour l'IPTV/live on garde false = comportement TV, voir branche else.)
+            try {
+                player?.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                        .setUsage(C.USAGE_MEDIA)
+                        .build(),
+                    /* handleAudioFocus */ true
+                )
+            } catch (_: Throwable) {}
             // 2026-06-09 : retenir le provider d'origine pour le visual hide.
             radioOriginProviderName = UserPreferences.currentProvider?.name
             // 2026-06-09 : mémoriser la dernière radio jouée. streamUrl est
@@ -2124,6 +2163,17 @@ object MiniPlayerController {
             } catch (_: Throwable) {}
         } else {
             stopRadioForegroundService()
+            // 2026-06-29 : retour à l'IPTV/live → handleAudioFocus=false (comme une
+            //   TV : une notif système ou un autre son ne coupe pas le live).
+            try {
+                player?.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                        .setUsage(C.USAGE_MEDIA)
+                        .build(),
+                    /* handleAudioFocus */ false
+                )
+            } catch (_: Throwable) {}
             radioOriginProviderName = null
         }
         // 2026-06-17 (user "image figée mobile") : CRITIQUE — reset le flag

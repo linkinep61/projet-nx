@@ -171,7 +171,24 @@ object EpisodeManager {
         currentIndex = 0
     }
     fun setCurrentEpisode(episode: Episode) {
-        val index = episodes.indexOfFirst { it.id == episode.id }
+        var index = episodes.indexOfFirst { it.id == episode.id }
+        if (index < 0) {
+            // 2026-06-30 (user "AnimeSama/FrenchManga : à la reprise après fermeture
+            //   de l'appli, la flèche 'épisode précédent' est absente ; elle réapparaît
+            //   quand on passe au suivant") : à la reprise à froid, ces providers
+            //   re-fetchent la liste via un wrapper VF/VOSTFR → les IDs diffèrent de
+            //   l'épisode courant stocké → indexOfFirst par ID échoue → currentIndex
+            //   reste 0 → hasPreviousEpisode()=false. Repli : matcher par NUMÉRO
+            //   d'épisode (+ saison si connue) pour retrouver le bon index.
+            val targetNum = episode.number
+            val targetSeason = episode.season?.number
+            if (targetNum > 0) {
+                index = episodes.indexOfFirst { e ->
+                    e.number == targetNum &&
+                        (targetSeason == null || e.season?.number == null || e.season?.number == targetSeason)
+                }
+            }
+        }
         if (index >= 0) {
             currentIndex = index
         }

@@ -50,6 +50,18 @@ object ExtractorRanker {
     //   tomber sous un serveur neutre jamais mesuré (bias 0). Le bonus garantit
     //   "prouvé qui marche > inconnu".
     private const val PROVEN_BONUS = 15
+    // 2026-06-29 (REPAIR — user) : gros bonus pour les serveurs VÉRIFIÉS (étoile
+    //   verte = a déjà joué sur CE titre) → remontent en haut, juste sous les favoris.
+    private const val VERIFIED_BONUS = 300
+    // 2026-06-29 (REPAIR — user "remonter les serveurs étoiles dans le picker") :
+    //   les serveurs natifs marqués d'une ★ (Frembed Premium/Free VF + hosters
+    //   natifs résolus) remontent en haut, juste sous favoris/vérifiés.
+    private const val STAR_BONUS = 250
+    // 2026-06-29 (REPAIR — user "ils n'ont pas bougé") : les ★ Frembed VIP
+    //   (Premium/Free VF) sont des m3u8 senpai SANS extracteur connu → ils
+    //   tombaient sur le return 50 anticipé AVANT le bonus ★. Score de base élevé
+    //   appliqué tout en haut (juste sous les favoris) pour les remonter vraiment.
+    private const val STAR_BASE_SCORE = 450
 
     // 2026-05-27 : bonus qualité vidéo (user "les serveurs 1080p/720p en premier").
     // Ajouté au score pour que les hautes résolutions remontent dans le picker.
@@ -338,6 +350,13 @@ object ExtractorRanker {
         val isCaptchaGated = srcLower.contains("papadustream") || srcLower.contains("#xf=")
         if (isCaptchaGated && !hasFavorite) return -100
 
+        // ─── Serveurs ★ natifs (Frembed Premium/Free VF) → tout en haut ───
+        // 2026-06-29 (REPAIR — user "remonter les serveurs étoiles dans le picker /
+        //   ils n'ont pas bougé") : ces sources VIP sont des m3u8 senpai sans
+        //   extracteur connu → sans ce return anticipé elles tombaient à 50.
+        val isStar = server.name.trimStart().startsWith("★")
+        if (isStar && !hasFavorite) return STAR_BASE_SCORE - computeLanguagePenalty(nameLower)
+
         // ─── Identifie l'extracteur ───
         // Stratégie hybride en 2 temps :
         //  1. Si le NOM du server matche un pattern "Wrapper — Real" (Movix —
@@ -385,7 +404,16 @@ object ExtractorRanker {
         // toujours les cœurs lancés en premier"). +500 = supplante tout.
         val favoriteBonus = if (hasFavorite) ExtractorToggleStore.FAVORITE_BONUS else 0
 
-        return health + speedBias + provenBonus + qualityBonus + favoriteBonus - failurePenalty - languagePenalty
+        // 2026-06-29 (REPAIR — user "les serveurs vérifiés (étoile verte) doivent
+        //   remonter en haut de la liste") : gros bonus si le serveur a déjà JOUÉ
+        //   sur CE titre (statut VERIFIED), juste sous les favoris.
+        val verifiedBonus = if (statusOf(server) == ServerStatus.VERIFIED) VERIFIED_BONUS else 0
+
+        // 2026-06-29 (REPAIR — user) : serveurs ★ natifs (Frembed Premium/Free VF
+        //   + hosters natifs) remontés en haut du picker.
+        val starBonus = if (server.name.trimStart().startsWith("★")) STAR_BONUS else 0
+
+        return health + speedBias + provenBonus + qualityBonus + favoriteBonus + verifiedBonus + starBonus - failurePenalty - languagePenalty
     }
 
     /**

@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import com.streamflixreborn.streamflix.utils.SubDL
 
@@ -54,6 +55,19 @@ class PlayerViewModel(
     //   liste de serveurs et rafraîchit le picker en préservant la sélection.
     private val _serversReordered = MutableSharedFlow<List<Video.Server>>(extraBufferCapacity = 16)
     val serversReordered: SharedFlow<List<Video.Server>> = _serversReordered
+
+    // 2026-06-30 : qualité vidéo détectée par le probe HTTP (GET m3u8 + parse RESOLUTION).
+    // Émet Unit à chaque fois qu'au moins un Settings.Server.quality a été mis à jour.
+    // Les fragments collectent ce flow pour rafraîchir le picker.
+    private val _qualityUpdated = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
+    val qualityUpdated: SharedFlow<Unit> = _qualityUpdated
+
+    // Référence aux serveurs connus (pour écrire .quality dessus depuis le probe)
+    @Volatile
+    private var allKnownServers: List<Video.Server> = emptyList()
+
+    // Job unique pour le probe qualité — idempotent (ne relance pas si déjà actif)
+    private var qualityProbeJob: Job? = null
 
     // 2026-05-28 : flag indiquant que le flow progressif est encore en cours
     // de collecte. Si un onPlayerError arrive et que nextAutoFallbackServer==null,
@@ -219,6 +233,7 @@ class PlayerViewModel(
      */
     private fun preExtractTopServersInBackground(servers: List<Video.Server>) {
         preExtractJob?.cancel()
+        qualityProbeJob?.cancel()
         if (servers.isEmpty()) return
         // v69 + v74 (user "FRAnime galère à chaque serveur") :
         //   FranimeSession utilise un mutex global (WebView single-thread).
@@ -316,6 +331,32 @@ class PlayerViewModel(
                         }
                         val durationMs = System.currentTimeMillis() - startMs
                         if (result != null) {
+                            // 2026-06-30 : probe qualité IMMÉDIATEMENT après extraction,
+                            // AVANT le HEAD check qui peut invalider le cache via
+                            // invalidateCache(). Comme ça, même si HEAD échoue, le
+                            // label qualité est déjà écrit sur le serveur.
+                            val extractedUrl = result.source
+                            if (extractedUrl.isNotBlank()) {
+                                try {
+                                    val isHls = extractedUrl.contains(".m3u8", ignoreCase = true) ||
+                                        result.type?.contains("mpegurl", ignoreCase = true) == true ||
+                                        result.type?.contains("hls", ignoreCase = true) == true
+                                    val q = if (isHls) {
+                                        probeHlsQuality(extractedUrl, result.headers)
+                                    } else null
+                                    val finalQ = q ?: inferQualityFromUrl(extractedUrl)
+                                    if (finalQ != null) {
+                                        server.quality = finalQ
+                                        _qualityUpdated.emit(Unit)
+                                        Log.w("QualityProbe", "pre-extract[$idx]: ${server.name} → $finalQ (${durationMs}ms)")
+                                    } else {
+                                        Log.w("QualityProbe", "pre-extract[$idx]: ${server.name} → no quality (isHls=$isHls, url=${extractedUrl.take(60)})")
+                                    }
+                                } catch (e: Exception) {
+                                    Log.w("QualityProbe", "pre-extract[$idx]: ${server.name} quality probe error: ${e.message?.take(60)}")
+                                }
+                            }
+
                             // 2026-05-12 : validation HEAD du stream après extraction.
                             // Si le serveur de stream final est 404/410/timeout, on
                             // l'écarte AVANT qu'ExoPlayer perde 15s à constater l'échec.
@@ -446,6 +487,311 @@ class PlayerViewModel(
                     }
                 }
             }
+        }
+    }
+
+    // ─── 2026-06-30 : probe qualité vidéo via HTTP GET simple ─────────
+    // Après la pré-extraction, on parcourt les serveurs qui ont un résultat
+    // en cache et on GET le master m3u8 pour parser RESOLUTION=WxH.
+    // Fallback : inférence depuis l'URL (patterns "1080", "720", etc.).
+
+    /** Providers IPTV exclus du probe (pas pertinent pour du live). */
+    private val IPTV_PROVIDER_NAMES = setOf(
+        "WiTv", "OlaTv", "VegetaTv", "Vavoo", "LiveTvHub", "SportLive"
+    )
+
+    /**
+     * Lance le probe qualité en background pour TOUS les serveurs.
+     * IDEMPOTENT : si déjà en cours, ne relance PAS (les lots progressifs
+     * mettent à jour allKnownServers, la passe les relira automatiquement).
+     *
+     * Timing (user 2026-06-30) :
+     *   - Passe 1 à T+40s  : lecture du cache d'extraction sur TOUS les
+     *                         serveurs connus (allKnownServers). Les lots
+     *                         progressifs ont le temps d'arriver.
+     *   - Passe 2 à T+120s : extraction ACTIVE des serveurs restants.
+     */
+    private fun probeServerQualities(servers: List<Video.Server>) {
+        val providerName = UserPreferences.currentProvider?.name.orEmpty()
+        if (providerName in IPTV_PROVIDER_NAMES) return
+        allKnownServers = servers
+
+        // Idempotent : une seule instance à la fois
+        if (qualityProbeJob?.isActive == true) {
+            Log.w("QualityProbe", "Probe déjà en cours — skip (allKnownServers mis à jour: ${servers.size})")
+            return
+        }
+
+        qualityProbeJob = viewModelScope.launch(Dispatchers.IO) {
+            // ═══════════════════════════════════════════════════════════
+            //  PASSE 1 — T+25s : cache peek sur tous les serveurs connus
+            // ═══════════════════════════════════════════════════════════
+            Log.w("QualityProbe", "Passe 1 : attente 25s pour laisser les serveurs arriver...")
+            delay(25_000L)
+
+            // Snapshot des serveurs connus à cet instant (peut avoir grossi via progressif)
+            val pass1Servers = allKnownServers.toList()
+            val preExtractCount = pass1Servers.count { it.quality != null }
+            Log.w("QualityProbe", "Passe 1 démarrage : ${pass1Servers.size} serveurs connus, $preExtractCount déjà probés par pre-extract")
+
+            val pass1Remaining = pass1Servers.filter { it.quality == null }
+            if (pass1Remaining.isNotEmpty()) {
+                val semaphore1 = kotlinx.coroutines.sync.Semaphore(4)
+                val jobs1 = pass1Remaining.map { server ->
+                    launch {
+                        semaphore1.acquire()
+                        try {
+                            if (server.src.contains("papadustream", ignoreCase = true) ||
+                                server.src.contains("#xf=")) return@launch
+
+                            // Passe 1 = aperçu léger (lecture du cache d'extraction
+                            //   uniquement). Le tri complet de TOUS les serveurs par
+                            //   qualité se fait en Passe 2 (extraction active à T+90s).
+                            val video = com.streamflixreborn.streamflix.extractors.Extractor
+                                .peekCachedVideo(server.src) ?: return@launch
+                            probeAndAssignQuality(server, video, "passe1")
+                        } catch (e: Exception) {
+                            Log.w("QualityProbe", "Passe 1 erreur ${server.name}: ${e.message?.take(60)}")
+                        } finally {
+                            semaphore1.release()
+                        }
+                    }
+                }
+                jobs1.joinAll()
+            }
+            val afterPass1 = allKnownServers.count { it.quality != null }
+            Log.w("QualityProbe", "Passe 1 terminée : $afterPass1/${allKnownServers.size} détectés")
+
+            // ═══════════════════════════════════════════════════════════
+            //  PASSE 2 — T+120s : extraction ACTIVE des serveurs restants
+            // ═══════════════════════════════════════════════════════════
+            // 2026-06-30 (user "il attend 25s puis il enchaîne") : PAS de délai
+            //   supplémentaire — la Passe 2 (extraction active de tous les serveurs
+            //   restants) enchaîne DIRECTEMENT après la Passe 1. Seule attente = 25s
+            //   au démarrage (à partir du 1er serveur).
+            Log.w("QualityProbe", "Passe 2 : enchaînement direct (extraction active)...")
+
+            // Re-snapshot (peut encore avoir grossi)
+            val pass2Servers = allKnownServers.toList()
+            val pass2Remaining = pass2Servers.filter { it.quality == null }
+            Log.w("QualityProbe", "Passe 2 démarrage : ${pass2Remaining.size}/${pass2Servers.size} sans qualité")
+
+            if (pass2Remaining.isNotEmpty()) {
+                val semaphore2 = kotlinx.coroutines.sync.Semaphore(4)
+                val jobs2 = pass2Remaining.map { server ->
+                    launch {
+                        semaphore2.acquire()
+                        try {
+                            if (server.src.contains("papadustream", ignoreCase = true) ||
+                                server.src.contains("#xf=")) return@launch
+
+                            // 1) Essayer le cache d'abord (rapide)
+                            var video = com.streamflixreborn.streamflix.extractors.Extractor
+                                .peekCachedVideo(server.src)
+
+                            // 2) Si pas en cache → extraction active
+                            if (video == null) {
+                                video = try {
+                                    kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+                                        com.streamflixreborn.streamflix.extractors.Extractor
+                                            .extract(server.src, server)
+                                    }
+                                } catch (_: Exception) { null }
+
+                                if (video == null || video.source.isBlank()) {
+                                    Log.w("QualityProbe", "Passe 2: ${server.name} → extraction failed")
+                                    return@launch
+                                }
+                            }
+
+                            probeAndAssignQuality(server, video, "passe2")
+                        } catch (e: Exception) {
+                            Log.w("QualityProbe", "Passe 2 erreur ${server.name}: ${e.message?.take(60)}")
+                        } finally {
+                            semaphore2.release()
+                        }
+                    }
+                }
+                jobs2.joinAll()
+            }
+            val total = allKnownServers.count { it.quality != null }
+            Log.w("QualityProbe", "Probe terminé — $total/${allKnownServers.size} détectés")
+        }
+    }
+
+    /**
+     * Helper : probe HLS ou URL inference sur un Video, écrit server.quality, émet le flow.
+     */
+    private suspend fun probeAndAssignQuality(
+        server: Video.Server,
+        video: com.streamflixreborn.streamflix.models.Video,
+        tag: String,
+    ) {
+        val videoUrl = video.source
+        if (videoUrl.isBlank()) return
+
+        val isHls = videoUrl.contains(".m3u8", ignoreCase = true) ||
+            video.type?.contains("mpegurl", ignoreCase = true) == true ||
+            video.type?.contains("hls", ignoreCase = true) == true
+
+        val quality = if (isHls) probeHlsQuality(videoUrl, video.headers) else null
+        val assigned = if (quality != null) {
+            server.quality = quality
+            Log.w("QualityProbe", "$tag: ${server.name} → $quality")
+            true
+        } else {
+            val inferred = inferQualityFromUrl(videoUrl)
+            if (inferred != null) {
+                server.quality = inferred
+                Log.w("QualityProbe", "$tag: ${server.name} → $inferred (inferred)")
+                true
+            } else {
+                Log.w("QualityProbe", "$tag: ${server.name} → no quality (isHls=$isHls, url=${videoUrl.take(60)})")
+                false
+            }
+        }
+        if (assigned) {
+            _qualityUpdated.emit(Unit)
+            // 2026-06-30 (user "trie les serveurs par qualité au fur et à mesure,
+            //   mais exclus VOSTFR et VO du tri") : re-trie les VF par résolution
+            //   (desc) à chaque détection ; VOSTFR/VO gardent leur place.
+            if (isVfServer(server)) emitQualitySortedServers()
+        }
+    }
+
+    /** VRAI FR (bucket 0) = pas VOSTFR, pas VO, pas langue étrangère. */
+    private fun isVfServer(s: Video.Server): Boolean {
+        val n = s.name.lowercase()
+        if (n.contains("vostfr") || n.contains("sous-titr")) return false
+        if (Regex("""(^|[^a-z])vo([^a-z]|$)""").containsMatchIn(n)) return false
+        if (n.contains(Regex("\\b(raw|eng|english|spa|ita|german|deu|jap)\\b"))) return false
+        return true
+    }
+
+    /** Rang de qualité pour le tri (plus haut = meilleure résolution).
+     *  Générique : extrait le NOMBRE du label → trie N'IMPORTE quelle résolution
+     *  (576p, 900p, 1080p…), pas seulement les valeurs standard. */
+    private fun qualityRank(label: String?): Int {
+        if (label == null) return 0
+        if (label.contains("4K", ignoreCase = true) || label.contains("2160")) return 2160
+        // Premier nombre du label = la hauteur (ex "1080p" → 1080, "576p" → 576).
+        val n = Regex("""\d+""").find(label)?.value?.toIntOrNull()
+        if (n != null) return n
+        // Pas de chiffre (SD, HD sans nombre…) → bas mais au-dessus de "inconnu".
+        return 50
+    }
+
+    /** Re-trie les serveurs VF par qualité (desc), VOSTFR/VO EXCLUS (ordre conservé),
+     *  et émet la liste réordonnée pour le picker. Tri stable → à qualité égale on
+     *  garde l'ordre fiabilité existant. */
+    private suspend fun emitQualitySortedServers() {
+        val list = allKnownServers
+        if (list.isEmpty()) return
+        val vfSorted = list.filter { isVfServer(it) }.sortedByDescending { qualityRank(it.quality) }
+        val nonVf = list.filter { !isVfServer(it) }
+        val merged = vfSorted + nonVf
+        allKnownServers = merged
+        _serversReordered.emit(merged)
+    }
+
+    /**
+     * GET le master m3u8, parse les lignes RESOLUTION=WxH,
+     * retourne la meilleure résolution trouvée sous forme de label.
+     * Fallback : estimation via BANDWIDTH si pas de RESOLUTION.
+     */
+    private suspend fun probeHlsQuality(
+        url: String,
+        headers: Map<String, String>?,
+    ): String? = withContext(Dispatchers.IO) {
+        try {
+            val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 5_000
+            conn.readTimeout = 5_000
+            conn.instanceFollowRedirects = true
+            // 2026-06-30 : senpai-stream (m3u8 VIP Frembed) renvoie 404 à la sonde
+            //   sans Referer/Origin frembed + cf_clearance. On les ré-injecte ici
+            //   (même recette que le pass-through Extractor) → la sonde passe en 200
+            //   et le label qualité sort dès l'arrivée du 1er serveur.
+            val effHeaders = HashMap<String, String>()
+            headers?.let { effHeaders.putAll(it) }
+            if (url.contains("senpai-stream", ignoreCase = true)) {
+                if (!effHeaders.keys.any { it.equals("Referer", true) }) effHeaders["Referer"] = "https://frembed.hair/"
+                if (!effHeaders.keys.any { it.equals("Origin", true) }) effHeaders["Origin"] = "https://frembed.hair"
+                try {
+                    val ck = android.webkit.CookieManager.getInstance().getCookie("https://frembed.hair/")
+                    if (!ck.isNullOrBlank() && !effHeaders.keys.any { it.equals("Cookie", true) }) effHeaders["Cookie"] = ck
+                } catch (_: Exception) {}
+            }
+            effHeaders.forEach { (k, v) -> conn.setRequestProperty(k, v) }
+            conn.setRequestProperty("Accept", "*/*")
+
+            val body = try {
+                val code = conn.responseCode
+                if (code != 200) {
+                    Log.w("QualityProbe", "probeHls: HTTP $code pour ${url.take(80)}")
+                    return@withContext null
+                }
+                conn.inputStream.bufferedReader().use { it.readText() }
+            } finally {
+                conn.disconnect()
+            }
+
+            // 1) Parse RESOLUTION=<W>x<H> — prendre la hauteur max
+            val resPattern = Regex("""RESOLUTION=\d+x(\d+)""")
+            val heights = resPattern.findAll(body).mapNotNull { it.groupValues[1].toIntOrNull() }
+            val maxHeight = heights.maxOrNull()
+            if (maxHeight != null) return@withContext heightToLabel(maxHeight)
+
+            // 2) Fallback : estimer via BANDWIDTH (bits/s)
+            val bwPattern = Regex("""BANDWIDTH=(\d+)""")
+            val bandwidths = bwPattern.findAll(body).mapNotNull { it.groupValues[1].toLongOrNull() }
+            val maxBw = bandwidths.maxOrNull()
+            if (maxBw != null) {
+                val estimated = when {
+                    maxBw >= 8_000_000 -> "1080p"
+                    maxBw >= 3_500_000 -> "720p"
+                    maxBw >= 1_500_000 -> "480p"
+                    maxBw >= 600_000   -> "360p"
+                    else               -> "SD"
+                }
+                Log.w("QualityProbe", "probeHls: pas de RESOLUTION, estimé via BANDWIDTH=$maxBw → $estimated")
+                return@withContext estimated
+            }
+
+            // 3) Playlist simple (pas de variantes) → pas de qualité déterminable
+            Log.w("QualityProbe", "probeHls: ni RESOLUTION ni BANDWIDTH dans ${url.take(80)}")
+            null
+        } catch (e: Exception) {
+            Log.w("QualityProbe", "probeHls: erreur ${e.message} pour ${url.take(80)}")
+            null
+        }
+    }
+
+    /** Convertit une hauteur en pixels vers un label lisible. */
+    private fun heightToLabel(height: Int?): String? {
+        if (height == null || height <= 0) return null
+        return when {
+            height >= 2160 -> "4K"
+            height >= 1440 -> "1440p"
+            height >= 1080 -> "1080p"
+            height >= 720 -> "720p"
+            height >= 480 -> "480p"
+            height >= 360 -> "360p"
+            else -> "${height}p"
+        }
+    }
+
+    /** Inférence de qualité depuis l'URL (fallback si le GET m3u8 échoue). */
+    private fun inferQualityFromUrl(url: String): String? {
+        val lower = url.lowercase()
+        return when {
+            lower.contains("2160") || lower.contains("4k") || lower.contains("uhd") -> "4K"
+            lower.contains("1440") -> "1440p"
+            lower.contains("1080") -> "1080p"
+            lower.contains("720") -> "720p"
+            lower.contains("480") -> "480p"
+            lower.contains("360") -> "360p"
+            else -> null
         }
     }
 
@@ -591,6 +937,9 @@ class PlayerViewModel(
             // Si une pré-extraction échoue → silencieuse, normale path au clic.
             preExtractTopServersInBackground(finalServers)
 
+            // 2026-06-30 : probe qualité vidéo en background (HTTP GET simple)
+            probeServerQualities(finalServers)
+
             // NB: le collecteur additionalServerJob est déjà démarré AVANT le getServers
             // (cf bloc plus haut) pour ne pas rater les émissions IPTV synchrones.
         } catch (e: Exception) {
@@ -681,8 +1030,10 @@ class PlayerViewModel(
                     Log.i("StreamFlixES", "[SERVERS PROGRESSIVE] 1er lot affiché : ${finalOrdered.size} serveurs")
                     _state.emit(State.SuccessLoadingServers(finalOrdered))
                     preExtractTopServersInBackground(finalOrdered)
+                    probeServerQualities(finalOrdered)
                 } else {
                     Log.d("PlayerViewModel", "[SERVERS PROGRESSIVE] +${fresh.size} → ${ordered.size} (ré-ordonné par langue)")
+                    allKnownServers = ordered
                     _serversReordered.emit(ordered)
                 }
             }
@@ -711,6 +1062,7 @@ class PlayerViewModel(
             val ordered = orderByFrenchBuckets(raw)
             _state.emit(State.SuccessLoadingServers(ordered))
             preExtractTopServersInBackground(ordered)
+            probeServerQualities(ordered)
         }
     }
 
@@ -777,6 +1129,13 @@ class PlayerViewModel(
         //   parallèle saturent CPU + mémoire et le player tourne dans le vide.
         getVideoJob?.cancel()
         preExtractJob?.cancel()
+        // 2026-06-30 (user "la qualité serveur ne se déclenche plus") : NE PLUS
+        //   annuler qualityProbeJob ici. L'auto-play du meilleur serveur appelle
+        //   getVideo juste APRÈS getServers → ça tuait le probe qualité (attente
+        //   40s) avant qu'il ne tourne → aucun label. Le probe qualité est
+        //   indépendant de la lecture (HTTP GET léger en fond) → il doit survivre.
+        //   Il n'est réinitialisé qu'au chargement d'une NOUVELLE vidéo
+        //   (preExtractTopServersInBackground L236).
         val job = viewModelScope.launch(Dispatchers.IO) {
         Log.d("PlayerViewModel", "Inizio estrazione video dal server: ${server.name}")
         _state.emit(State.LoadingVideo(server))

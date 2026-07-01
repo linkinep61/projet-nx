@@ -277,6 +277,16 @@
                 android:title="@string/settings_keep_screen_on_app"
                 android:summary="@string/settings_keep_screen_on_app_summary"
                 android:defaultValue="false" />
+
+            <!-- 2026-06-29 RESTAURÉ depuis APK v1.7.226 — luminosité du LECTEUR.
+                 PLAYER_DIM : assombrit l'image du lecteur (utile la nuit).
+                 (CAROUSEL_DIM déplacé dans Apparence — il n'a rien à faire ici.) -->
+            <SeekBarPreference
+                android:key="PLAYER_DIM"
+                android:title="Luminosité du lecteur"
+                android:summary="Réduire la luminosité de l'image du lecteur (utile la nuit)"
+                android:max="100"
+                android:defaultValue="0" />
         </PreferenceCategory>
 
         <PreferenceCategory android:title="Mini Player IPTV">
@@ -375,6 +385,16 @@
                 android:entries="@array/home_bg_mode_entries"
                 android:entryValues="@array/home_bg_mode_values"
                 android:defaultValue="carousel" />
+
+            <!-- 2026-06-29 (user "la luminosité du carrousel c'est dans Apparence,
+                 pas dans les paramètres du lecteur") : assombrit UNIQUEMENT le
+                 carrousel du home (pas le fond d'écran). -->
+            <SeekBarPreference
+                android:key="CAROUSEL_DIM"
+                android:title="Luminosité du carrousel"
+                android:summary="Assombrit uniquement le carrousel du home (utile la nuit)"
+                android:max="100"
+                android:defaultValue="0" />
 
             <!-- 2026-06-09 : fond d'écran personnalisé. -->
             <Preference

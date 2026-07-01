@@ -26,6 +26,24 @@
         app:show_timeout="2000"
         app:surface_type="surface_view" />
 
+    <!-- 2026-06-29 RESTAURÉ depuis APK v1.7.226 — système de luminosité TV.
+         View noir à alpha variable au-dessus du PlayerView, contrôlé par
+         UserPreferences.playerDim (SeekBar PLAYER_DIM dans Paramètres TV).
+         alpha=0 = invisible (image normale), alpha=1.0 = écran totalement noir.
+         L'overlay ne capte pas le focus → ne bloque pas les contrôles. -->
+    <View
+        android:id="@+id/view_player_dim"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="@android:color/black"
+        android:alpha="0"
+        android:clickable="false"
+        android:focusable="false"
+        app:layout_constraintBottom_toBottomOf="@+id/pv_player"
+        app:layout_constraintEnd_toEndOf="@+id/pv_player"
+        app:layout_constraintStart_toStartOf="@+id/pv_player"
+        app:layout_constraintTop_toTopOf="@+id/pv_player" />
+
     <com.streamflixreborn.streamflix.fragments.player.settings.PlayerSettingsTvView
         android:id="@+id/settings"
         android:layout_width="350dp"

@@ -278,6 +278,18 @@ abstract class Extractor {
         private data class CachedExtraction(val video: Video, val expiresAtMillis: Long)
         private val extractionCache = ConcurrentHashMap<String, CachedExtraction>()
 
+        /**
+         * Lecture NON-DESTRUCTIVE du cache d'extraction.
+         * Retourne le [Video] caché si l'entrée existe ET n'est pas expirée,
+         * sinon null. Ne retire PAS l'entrée du cache (contrairement à extract()
+         * qui la consomme). Utilisé par le probe qualité headless pour éviter
+         * de ré-extraire un serveur déjà pré-extrait.
+         */
+        fun peekCachedVideo(embedUrl: String): Video? {
+            val cached = extractionCache[embedUrl] ?: return null
+            return if (System.currentTimeMillis() < cached.expiresAtMillis) cached.video else null
+        }
+
         // ── C: Server health tracking ──────────────────────────────────────
         // Per-extractor counters of recent failures. The provider's server-list sort
         // uses healthScore() to push servers that just blew up to the bottom, so the
@@ -760,7 +772,26 @@ abstract class Extractor {
             val directMediaRegex = Regex("""\.(mp4|m3u8|mpd)(\?|$|#)""", RegexOption.IGNORE_CASE)
             if (directMediaRegex.containsMatchIn(finalLink)) {
                 Log.i("Extractor", "No extractor matched, but URL looks like a direct media file → pass-through: $finalLink")
-                val direct = com.streamflixreborn.streamflix.models.Video(source = finalLink)
+                // 2026-06-29 (REPAIR — user "★ Frembed Free VF = Source error") : les
+                //   m3u8 VIP Frembed (host senpai-stream) sont protégés et renvoient
+                //   403 / BAD_HTTP_STATUS sans Referer frembed + cf_clearance. On
+                //   attache Referer/Origin/UA + cookie cf_clearance pour ces sources.
+                val passHeaders: Map<String, String>? =
+                    if (finalLink.contains("senpai-stream", ignoreCase = true)) {
+                        val cookie = try {
+                            android.webkit.CookieManager.getInstance().getCookie("https://frembed.hair/")
+                        } catch (e: Exception) { null }
+                        buildMap {
+                            put("Referer", "https://frembed.hair/")
+                            put("Origin", "https://frembed.hair")
+                            put("User-Agent", DEFAULT_USER_AGENT)
+                            if (!cookie.isNullOrBlank()) put("Cookie", cookie)
+                        }
+                    } else null
+                val direct = com.streamflixreborn.streamflix.models.Video(
+                    source = finalLink,
+                    headers = passHeaders,
+                )
                 return enforceFrenchSubtitlesOnly(direct)
             }
             Log.e("Extractor", "No extractors found for URL: $finalLink (original: $link)")

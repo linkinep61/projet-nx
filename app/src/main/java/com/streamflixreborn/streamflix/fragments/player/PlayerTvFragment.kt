@@ -437,6 +437,29 @@ class PlayerTvFragment : Fragment() {
                 ContextCompat.RECEIVER_NOT_EXPORTED
             )
         } catch (ignored: Exception) {}
+
+        // 2026-06-29 RESTAURÉ depuis APK v1.7.226 :
+        //   Applique le dim/luminosité player (= alpha d'un overlay noir au-dessus
+        //   du PlayerView, contrôlé par le SeekBar "Luminosité du lecteur" dans
+        //   Paramètres TV). À jouer à chaque onResume car la valeur peut avoir
+        //   changé entre 2 visites (= user a réglé dans Paramètres puis revient).
+        try { applyPlayerDim() } catch (_: Throwable) {}
+    }
+
+    // 2026-06-29 RESTAURÉ depuis APK v1.7.226 — système de luminosité TV player.
+    //   view_player_dim = un View noir à alpha variable au-dessus du PlayerView.
+    //   alpha=0 → pas de dim (image normale). alpha=1.0 → écran noir total.
+    //   La valeur 0..100 vient du SeekBar PLAYER_DIM dans Paramètres TV, stockée
+    //   dans UserPreferences.playerDim.
+    private fun applyPlayerDim() {
+        if (_binding == null) return
+        try {
+            val dim = UserPreferences.playerDim
+            binding.viewPlayerDim.alpha = dim / 100f
+        } catch (_: Throwable) {
+            // viewPlayerDim peut ne pas être dans le binding si le XML n'a pas
+            // encore été régénéré (= au build). Inoffensif.
+        }
     }
 
     override fun onCreateView(
@@ -458,6 +481,17 @@ class PlayerTvFragment : Fragment() {
 
     private fun isIptvChannelContext(): Boolean {
         val id = args.id
+        // 2026-06-29 : Exception SHOWS replay (Plex/Pluto/France TV/TF1+/M6+/BFM).
+        //   Les ids "livehub::replay::<provider>show::*" et "livehub::replay::program/*"
+        //   = fiches SÉRIE → ouvrir le détail avec liste d'épisodes, ne PAS auto-play
+        //   leur src opaque (plexshow:// / plutoshow:// / francetv://program/...).
+        val isReplayShow = id.startsWith("livehub::replay::") && (
+            id.contains("::plexshow::") || id.contains("::plutoshow::") ||
+            id.contains("::ftvshow::") || id.contains("::program/") ||
+            id.contains("::tf1plus::") || id.contains("::m6play::") ||
+            id.contains("::bfmplay::") || id.contains("::arteshow::")
+        )
+        if (isReplayShow) return false
         return id.startsWith("ch::") || id.startsWith("sport::") ||
             id.startsWith("ola::") || id.startsWith("ola_ep::") ||
             id.startsWith("vegeta::") || id.startsWith("vegeta_ep::") ||
@@ -1448,11 +1482,14 @@ class PlayerTvFragment : Fragment() {
                     val nonOla = reordered.filter { !it.name.startsWith("OLA[") }
                     val prevSelectedId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isSelected }?.id
                     val prevLoadingId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isLoading }?.id
+                    // Préserver la qualité déjà détectée par le probe
+                    val prevQualities = PlayerSettingsView.Settings.Server.list.associate { it.id to it.quality }
                     PlayerSettingsView.Settings.Server.list.clear()
                     PlayerSettingsView.Settings.Server.addAllUnique(nonOla.map {
                         PlayerSettingsView.Settings.Server(id = it.id, name = it.name).apply {
                             isSelected = (it.id == prevSelectedId)
                             isLoading = (it.id == prevLoadingId)
+                            quality = it.quality ?: prevQualities[it.id]
                         }
                     })
                     if (::player.isInitialized) {
@@ -1469,6 +1506,23 @@ class PlayerTvFragment : Fragment() {
                     }
                     scheduleServerRefresh()
                     Log.d("PlayerTvFragment", "Servers reordered (progressive): ${reordered.size}")
+                }
+            }
+
+            // 2026-06-30 : qualité vidéo détectée par le probe ExoPlayer headless.
+            // On rafraîchit le picker pour afficher le sub-text (1080p, 720p...).
+            viewLifecycleOwner.lifecycleScope.launch {
+                viewModel.qualityUpdated.collect {
+                    // Propager la qualité depuis les Video.Server vers les Settings.Server
+                    val knownServers = servers
+                    for (settingSrv in PlayerSettingsView.Settings.Server.list) {
+                        if (settingSrv.quality != null) continue
+                        val match = knownServers.find { it.id == settingSrv.id }
+                        if (match?.quality != null) {
+                            settingSrv.quality = match.quality
+                        }
+                    }
+                    scheduleServerRefresh()
                 }
             }
 
@@ -2045,7 +2099,9 @@ class PlayerTvFragment : Fragment() {
                 updatePlayerScale()
             }
 
-            // 2026-06-20 : 3-dots → popup menu avec toutes les options
+            // 2026-06-29 (user) : 3-points TV → popup « Paramètres » + « Lecteur
+            //   externe » (ratio retiré car inutile sur SurfaceView). « Lecteur
+            //   externe » APRÈS Paramètres.
             binding.pvPlayer.controller.binding.exoSettings.setOnClickListener { anchor ->
                 binding.pvPlayer.controllerShowTimeoutMs = binding.pvPlayer.controllerShowTimeoutMs
                 showPlayerOverflowMenu(anchor)
@@ -6067,29 +6123,55 @@ class PlayerTvFragment : Fragment() {
         // utilise un AlertDialog avec liste d'items, nativement focusable.
         // ──────────────────────────────────────────────────────────────────
         private fun showPlayerOverflowMenu(anchor: android.view.View) {
+            // 2026-06-29 (user) : « Ratio » retiré (inutile sur SurfaceView TV).
+            //   Popup = « Paramètres » puis « Lecteur externe » (au cas où l'user
+            //   veut lancer la vidéo dans VLC/MX sur la TV). NB : le lanceur Android
+            //   TV (Projectivy) peut intercepter l'intent → peut ne pas marcher.
             val labels = arrayOf(
-                "Ratio d'affichage",
-                "Lecteur externe",
-                "Paramètres"
+                "Paramètres",
+                "Lecteur externe"
             )
             androidx.appcompat.app.AlertDialog.Builder(requireContext())
                 .setItems(labels) { _, which ->
                     when (which) {
-                        0 -> { // Ratio d'affichage
-                            val newResize = UserPreferences.playerResize.next()
-                            Toast.makeText(requireContext(), newResize.stringRes, Toast.LENGTH_SHORT).show()
-                            UserPreferences.playerResize = newResize
-                            updatePlayerScale()
-                        }
-                        1 -> { // Lecteur externe
-                            Toast.makeText(requireContext(), getString(R.string.player_external_player_error_video), Toast.LENGTH_SHORT).show()
-                        }
-                        2 -> { // Paramètres
-                            binding.settings.show()
-                        }
+                        0 -> binding.settings.show()
+                        1 -> launchExternalPlayer()
                     }
                 }
                 .show()
+        }
+
+        /** 2026-06-29 (user "un lecteur externe style VLC sur la TV, qu'ils aient le
+         *  choix") : lance la vidéo courante dans un lecteur externe (VLC/MX…) via
+         *  un Intent ACTION_VIEW + chooser, avec l'URL du flux et les headers. */
+        private fun launchExternalPlayer() {
+            // 2026-06-29 (user "lecteur externe TV : 'Vidéo non encore chargée'") :
+            //   currentVideo peut être null sur certains flux (ex. chaîne IPTV
+            //   transférée du mini-player où displayVideo() est sauté → currentVideo
+            //   jamais posé). Repli : URL réellement en lecture depuis le player.
+            val source = currentVideo?.source
+                ?: try { player.currentMediaItem?.localConfiguration?.uri?.toString() } catch (_: Throwable) { null }
+            if (source.isNullOrBlank()) {
+                Toast.makeText(requireContext(), getString(R.string.player_external_player_error_video), Toast.LENGTH_SHORT).show()
+                return
+            }
+            try {
+                try { player.pause() } catch (_: Throwable) {}
+                val uri = android.net.Uri.parse(source)
+                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "video/*")
+                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    putExtra("title", resolvePlayerTitle())
+                    putExtra("position", player.currentPosition.toInt())
+                    currentVideo?.headers?.let { h ->
+                        putExtra("extra_headers", h.map { "${it.key}: ${it.value}" }.toTypedArray())
+                        putExtra("headers", h.flatMap { listOf(it.key, it.value) }.toTypedArray())
+                    }
+                }
+                startActivity(android.content.Intent.createChooser(intent, getString(R.string.player_external_player_title)))
+            } catch (e: Throwable) {
+                Toast.makeText(requireContext(), getString(R.string.player_external_player_error_video), Toast.LENGTH_SHORT).show()
+            }
         }
 
         private fun updatePlayerHeader(videoType: Video.Type = currentVideoTypeForUi()) {
@@ -7509,6 +7591,10 @@ class PlayerTvFragment : Fragment() {
             binding.settings.player = player
             binding.settings.subtitleView = binding.pvPlayer.subtitleView
             binding.settings.onSubtitlesClicked = { viewModel.getSubtitles(args.videoType) }
+            // 2026-06-29 RESTAURÉ depuis APK v1.7.226 — relie le slider luminosité
+            //   (= seekbar_brightness en haut du panneau Serveurs) à applyPlayerDim()
+            //   pour mise à jour en temps réel pendant que l'user bouge le slider.
+            binding.settings.onBrightnessChanged = { _ -> applyPlayerDim() }
             MiniPlayerController.clearTransitionFlag()
             // 2026-05-17 (user "frises avec répétition") : REPEAT_MODE_ONE
             //   ne re-fetch PAS l'URL — ça re-joue le contenu déjà bufferisé
