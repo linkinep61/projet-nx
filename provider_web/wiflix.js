@@ -78,10 +78,10 @@
       if (id.indexOf('film-en-streaming') < 0 && id.indexOf('serie-en-streaming') < 0) return;
       seen.add(id);
       let title = decode(a.getAttribute('title') || a.textContent || '');
-      const img = mov.querySelector('img');
-      let poster = img ? (img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || '') : '';
-      poster = absUrl(poster);
-      out.push({ type: typeOfHref(href), id: id, title: title, poster: poster, banner: poster });
+      // 2026-06-30 : on N'ÉMET PLUS le poster du site (checkimg.php derrière
+      //   Cloudflare → 403 pour Glide + fait throttler l'IP). Les jaquettes
+      //   viennent de TMDB côté app (tmdbPosters=true). Poster vide ici.
+      out.push({ type: typeOfHref(href), id: id, title: title, poster: '', banner: '' });
     });
     return out;
   }
