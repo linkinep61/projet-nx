@@ -23,8 +23,14 @@
   const BASE = 'https://flemmix.fast';
 
   async function getText(path) {
-    const r = await fetch(path, { headers: { 'Accept': 'text/html' } });
-    return await r.text();
+    // Timeout 12s (AbortController) → évite que getHome/listing hang 30s si le
+    //   fetch se fait bloquer par un CF challenge.
+    const ctrl = new AbortController();
+    const t = setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, 12000);
+    try {
+      const r = await fetch(path, { headers: { 'Accept': 'text/html' }, signal: ctrl.signal });
+      return await r.text();
+    } finally { clearTimeout(t); }
   }
   function parseHtml(html) {
     try { return new DOMParser().parseFromString(html, 'text/html'); }
@@ -99,29 +105,47 @@
     return { type: type, id: id, title: title, poster: poster, banner: poster, overview: overview };
   }
 
-  const P = {
-    // HOME : fetch '/' → sections div.block-main (block-title = nom, div.mov = items).
-    async getHome() {
-      const html = await getText('/');
-      const doc = parseHtml(html);
-      const cats = [];
-      const seenGlobal = new Set();
-      const blocks = doc.querySelectorAll('div.block-main');
-      blocks.forEach(function (block) {
-        const titleEl = block.querySelector('div.block-title, .block-title, h2');
-        let name = titleEl ? decode(titleEl.textContent || '') : '';
-        // collapse whitespace + retire "Voir la suite..." collé au titre
-        name = name.replace(/\s+/g, ' ').replace(/\s*(voir la suite|voir tout|tout voir|»|\.\.\.).*$/i, '').trim();
-        const items = parseMovCards(block).filter(function (it) {
-          if (seenGlobal.has(it.id)) return false;
-          seenGlobal.add(it.id); return true;
-        });
-        if (items.length > 0) cats.push({ name: name, items: items });
+  // Parse les sections home d'un document (block-main) + construit la catégorie
+  //   FEATURED "À l'affiche" (carrousel) à partir des 1ers items posterisés.
+  function parseHomeSections(doc) {
+    const cats = [];
+    const seenGlobal = new Set();
+    const featured = [];
+    const blocks = doc.querySelectorAll('div.block-main');
+    blocks.forEach(function (block) {
+      const titleEl = block.querySelector('div.block-title, .block-title, h2');
+      let name = titleEl ? decode(titleEl.textContent || '') : '';
+      // collapse whitespace + retire "Voir la suite..." collé au titre
+      name = name.replace(/\s+/g, ' ').replace(/\s*(voir la suite|voir tout|tout voir|»|\.\.\.).*$/i, '').trim();
+      const items = parseMovCards(block).filter(function (it) {
+        if (seenGlobal.has(it.id)) return false;
+        seenGlobal.add(it.id); return true;
       });
-      // Fallback : si pas de block-main, prend toutes les div.mov de la page
+      if (items.length > 0) {
+        cats.push({ name: name, items: items });
+        items.forEach(function (it) {
+          if (featured.length < 12 && it.poster) featured.push(it);
+        });
+      }
+    });
+    // Fallback : si pas de block-main, prend toutes les div.mov de la page
+    if (cats.length === 0) {
+      const items = parseMovCards(doc);
+      if (items.length > 0) cats.push({ name: 'À la une', items: items });
+    }
+    // FEATURED (carrousel) en tête → le moteur mappe "À l'affiche" en Category.FEATURED
+    if (featured.length >= 3) {
+      cats.unshift({ name: "À l'affiche", items: featured.slice(0, 12) });
+    }
+    return cats;
+  }
+
+  const P = {
+    // HOME : parse le document déjà chargé (post-CF, instantané) puis fallback fetch '/'.
+    async getHome() {
+      let cats = parseHomeSections(document);
       if (cats.length === 0) {
-        const items = parseMovCards(doc);
-        if (items.length > 0) cats.push({ name: 'À la une', items: items });
+        try { cats = parseHomeSections(parseHtml(await getText('/'))); } catch (e) {}
       }
       return cats;
     },
