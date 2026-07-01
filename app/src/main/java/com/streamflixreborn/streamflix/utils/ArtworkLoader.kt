@@ -177,6 +177,19 @@ fun optimizeArtworkUrl(url: String?, targetWidthPx: Int): String? {
         "&w=$targetWidthPx&output=webp&q=60"
 }
 
+/** Hosts protégés par Cloudflare — Glide utilise une signature qui inclut le
+ *  cfBypassGeneration de WebViewResolver pour invalider le cache disque après
+ *  chaque bypass CF réussi. Sans ça, Glide sert l'échec 403 précédent depuis
+ *  son cache au lieu de refaire un appel réseau (qui passerait car l'IP est
+ *  désormais "chaude" chez CF). */
+private fun isCfProtectedHost(url: String): Boolean {
+    val l = url.lowercase()
+    return l.contains("flemmix.") || l.contains("wiflix.") ||
+        l.contains("dessinanime") || l.contains("dessins-animes") ||
+        l.contains("french-anime") || l.contains("frenchanime") ||
+        l.contains("papadustream")
+}
+
 /** Délais de retry croissants (ms) pour les jaquettes qui échouent au 1er chargement. */
 private val ARTWORK_RETRY_DELAYS = longArrayOf(3_000, 8_000, 20_000)
 
@@ -220,6 +233,14 @@ private fun ImageView.loadRecoverableArtwork(
         val optimizedUrl = if (useDirect) requestedUrl else optimizeArtworkUrl(requestedUrl, targetWidthPx)
         var base = Glide.with(this).load(optimizedUrl).let { req ->
             if (memoryOptions != null) req.apply(memoryOptions) else req
+        }
+        // 2026-06-30 : pour les hosts CF, la signature inclut le compteur de
+        //   bypass → après chaque bypass réussi, Glide voit une signature
+        //   différente → cache miss → vrai appel réseau (l'IP est "chaude").
+        if (!isRetry && !optimizedUrl.isNullOrBlank() && isCfProtectedHost(optimizedUrl)) {
+            base = base.signature(
+                com.bumptech.glide.signature.ObjectKey("cfgen-${WebViewResolver.cfBypassGeneration}")
+            )
         }
         if (isRetry) {
             base = base.skipMemoryCache(true)

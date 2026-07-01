@@ -273,6 +273,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                         is Settings -> {
                             when (item) {
                                 Settings.Quality -> settingsView.displaySettings(Setting.QUALITY)
+                                Settings.Brightness -> {} // TV-only (pas dans listMobile)
                                 Settings.Audio -> settingsView.displaySettings(Setting.AUDIO)
                                 Settings.Subtitle -> settingsView.displaySettings(Setting.SUBTITLES)
                                 Settings.Speed -> settingsView.displaySettings(Setting.SPEED)
@@ -663,6 +664,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                 binding.ivSettingIcon.setImageDrawable(
                     ContextCompat.getDrawable(binding.root.context, when (item) {
                         Settings.Quality -> R.drawable.ic_player_settings_quality
+                        Settings.Brightness -> R.drawable.ic_brightness
                         Settings.Audio -> R.drawable.ic_player_settings_audio
                         Settings.Subtitle -> if (Settings.Subtitle.selected is Settings.Subtitle.TextTrackInformation) R.drawable.ic_player_settings_subtitle_on else R.drawable.ic_player_settings_subtitle_off
                         Settings.Speed -> R.drawable.ic_player_settings_playback_speed
@@ -681,6 +683,7 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                 text = when (item) {
                     is Settings -> when (item) {
                         Settings.Quality -> context.getString(R.string.player_settings_quality_label)
+                        Settings.Brightness -> "" // TV-only
                         Settings.Audio -> context.getString(R.string.player_settings_audio_label)
                         Settings.Subtitle -> context.getString(R.string.player_settings_subtitles_label)
                         Settings.Speed -> context.getString(R.string.player_settings_speed_label)
@@ -869,6 +872,8 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                     is Settings.Subtitle.OpenSubtitles.Subtitle -> item.openSubtitle.languageName
 
                     is Settings.Subtitle.SubDLSubtitles.Subtitle -> item.subDLSubtitle.lang?.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() } ?: ""
+
+                    is Settings.Server -> item.quality ?: ""
 
                     else -> ""
                 }

@@ -276,7 +276,7 @@ class TvShowsTvFragment : Fragment() {
             MiniPlayerController.currentChannelPoster?.let { poster ->
                 Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
             }
-            updateGridForMiniPlayer(true)
+            updateGridForMiniPlayer(MiniPlayerController.shouldShrinkGridForCurrent())
         }
 
         viewLifecycleOwner.lifecycleScope.launch {
@@ -305,7 +305,7 @@ class TvShowsTvFragment : Fragment() {
                         syncOverlayVisibility()
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.VISIBLE
-                        updateGridForMiniPlayer(true)
+                        updateGridForMiniPlayer(MiniPlayerController.shouldShrinkGridForCurrent())
                     }
                     is MiniPlayerController.State.Playing -> {
                         if (!wasVisible) {
@@ -319,7 +319,7 @@ class TvShowsTvFragment : Fragment() {
                         binding.miniPlayerChannelName.text = state.channelName
                         binding.miniPlayerLoading.visibility = View.GONE
                         updatePauseButton()
-                        updateGridForMiniPlayer(true)
+                        updateGridForMiniPlayer(MiniPlayerController.shouldShrinkGridForCurrent())
                         state.channelPoster?.let { poster ->
                             Glide.with(this@TvShowsTvFragment).load(poster).into(binding.miniPlayerChannelLogo)
                         }

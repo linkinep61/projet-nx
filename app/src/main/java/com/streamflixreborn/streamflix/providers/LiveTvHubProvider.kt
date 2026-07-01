@@ -1221,6 +1221,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             FolderDef("info", "Info", Regex("^Info$")),
             FolderDef("sport", "Sport", Regex("^Sport$")),
             FolderDef("musique", "Musique", Regex("^Musique$")),
+            FolderDef("stream4", "Stream4Free", Regex("^Stream4Free - .*")),
             FolderDef("documentaire", "Documentaire", Regex("^Documentaire$")),
             FolderDef("enfants", "Enfants", Regex("^Enfants$")),
             FolderDef("divertissement", "Divertissement", Regex("^Divertissement$")),
@@ -1287,7 +1288,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   (tf1plus/m6plus/francetv/arte/autres_replay) même si vides au
         //   boot (le contenu est fetché on-demand au click via lazy fetch).
         //   Sans ça, dossiers Replay invisibles au home en mode lazy.
-        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique")
+        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4")
         // 2026-06-20 (user "mettre une petite jaquette sur les dossiers pour faire
         //   joli, correspondant au replay/catégorie") : map folderKey → URL logo.
         //   Pour les bouquets de chaînes (TF1+/M6+/France TV/Arte/OTF/Adrar), on
@@ -1310,6 +1311,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             "lg_channels"    to "https://static.wikia.nocookie.net/wiggles/images/4/4f/LGChannels.png",
             // 2026-06-27 : logo dossier Musique (note de musique).
             "musique"        to "https://cdn-icons-png.flaticon.com/512/727/727218.png",
+            "stream4"        to "https://www.stream4free.tv/images/logos4f.png",
         )
         // 2026-06-27 (user "mets Rakuten TV, Sony One et Sport dans Autres Replays") :
         //   ces 3 dossiers ne s'affichent plus en haut du TV Hub ; ils deviennent
@@ -2421,6 +2423,12 @@ object LiveTvHubProvider : Provider, IptvProvider {
     /** getVideo : délègue au provider d'origine selon le prefix de l'id.
      *  Couvre tous les providers IPTV via IptvCrossDelegate. */
     override suspend fun getVideo(server: Video.Server): Video {
+        // 2026-06-29 (REPAIR — re-appliqué) : Stream4Free → résout `stream4free://<slug>`
+        //   frais à la lecture (page stream4free.tv → m3u8 data-stream.top).
+        if (com.streamflixreborn.streamflix.utils.Stream4FreeResolver.isStream4FreeUrl(server.src)) {
+            return com.streamflixreborn.streamflix.utils.Stream4FreeResolver.resolve(server.src)
+                ?: throw Exception("Stream4Free resolver failed for ${server.src}")
+        }
         // 2026-06-26 : Plex TV (FAST) → PlexTvResolver (token anonyme + master m3u8).
         //   Le scraper émet `plex://<channelId>` (stable, auto-refresh), résolu
         //   frais à la lecture → jamais d'URL périmée.
@@ -3689,6 +3697,20 @@ object LiveTvHubProvider : Provider, IptvProvider {
     private const val MUSIQUE_FALLBACK_URL =
         "https://iptv-org.github.io/iptv/categories/music.m3u"
 
+    // 2026-06-29 (REPAIR — re-appliqué) : dossier Stream4Free. M3U dédié
+    //   (refs stream4free://<slug>, résolues à la lecture). Cache RAM 30 min.
+    @Volatile private var stream4CacheSections: List<Category> = emptyList()
+    @Volatile private var stream4CacheTs: Long = 0L
+    // 2026-06-29 (REPAIR — user "le fail-safe Stream4Free doit être sur TOUS les
+    //   dossiers") : cache + fail-safe pour Pluto et Plex (sinon un seul await()
+    //   qui échoue tue tout le dossier à l'ouverture).
+    @Volatile private var plutoFolderCacheSections: List<Category> = emptyList()
+    @Volatile private var plutoFolderCacheTs: Long = 0L
+    @Volatile private var plexFolderCacheSections: List<Category> = emptyList()
+    @Volatile private var plexFolderCacheTs: Long = 0L
+    private const val STREAM4_M3U_URL =
+        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data-stream4free.m3u"
+
     fun installFastDiskCache(cacheDir: java.io.File) {
         if (fastDiskCacheFile == null) {
             fastDiskCacheFile = java.io.File(cacheDir, "fast-m3u.cache")
@@ -3706,7 +3728,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
             val t = line.trim()
             if (t.startsWith("#EXTINF:")) {
                 pendingExtinf = t
-            } else if (pendingExtinf != null && (t.startsWith("http://") || t.startsWith("https://"))) {
+            } else if (pendingExtinf != null && (t.startsWith("http://") || t.startsWith("https://") || t.startsWith("stream4free://"))) {
                 val url = t
                 val title = pendingExtinf.substringAfterLast(",").trim()
                 val rawGroupTitle = Regex("""group-title="([^"]+)"""")
@@ -4070,17 +4092,61 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 } catch (_: Throwable) { "" }
                 val seen = HashSet<String>()
                 val groups = LinkedHashMap<String, MutableList<TvShow>>()
-                // 1) copie git pré-agrégée
+                // 2026-06-29 (REPAIR — user "même device sans VPN, l'ancien trouve
+                //   807, le nouveau 790 → c'est le code") : on MERGE TOUTES les
+                //   sources (au lieu de git-OU-fallback). Avant : si data-musique.m3u
+                //   existait, on prenait UNIQUEMENT lui (790) en ignorant iptv-org +
+                //   WorldLive → on perdait ~17 chaînes. Maintenant union dédupliquée
+                //   par URL (l'ordre git d'abord garde nos métadonnées curées).
+                // 1) copie git pré-agrégée (curée), si présente
                 val gitBody = dl(MUSIQUE_M3U_URL)
                 if (gitBody.isNotBlank() && "#EXTM3U" in gitBody) {
                     ingestMusiqueM3u(gitBody, musicOnly = false, seen, groups)
-                } else {
-                    // 2) iptv-org music (base mondiale) — tout est musique
-                    ingestMusiqueM3u(dl(MUSIQUE_FALLBACK_URL), musicOnly = false, seen, groups)
-                    // + complément depuis nos playlists WorldLive (filtré musique, dédup)
-                    ingestMusiqueM3u(dl(MIX_FR_M3U_URL), musicOnly = true, seen, groups)
-                    ingestMusiqueM3u(dl(WORLDWIDE_M3U_URL).ifBlank { dl("https://epg.pw/test_channels_all.m3u") },
-                        musicOnly = true, seen, groups)
+                }
+                // 2) iptv-org music (base mondiale) — tout est musique
+                ingestMusiqueM3u(dl(MUSIQUE_FALLBACK_URL), musicOnly = false, seen, groups)
+                // 3) complément depuis nos playlists WorldLive (filtré musique, dédup URL)
+                ingestMusiqueM3u(dl(MIX_FR_M3U_URL), musicOnly = true, seen, groups)
+                ingestMusiqueM3u(dl(WORLDWIDE_M3U_URL).ifBlank { dl("https://epg.pw/test_channels_all.m3u") },
+                    musicOnly = true, seen, groups)
+                // 2026-06-29 (REPAIR — user "807 vs 790 : il manque les chaînes
+                //   hardcodées, ex '90 Is Good'") : ré-injecte les 17 radios Dric4rTv
+                //   hardcodées (RadioCatalog) + la chaîne musique custom "90 Is Good"
+                //   dans le dossier Musique. Elles avaient disparu quand Dric4rTV a
+                //   été retiré du hub (DRIC4RTV_IN_HUB=false). URLs CDN directes,
+                //   jouables via le pipeline FAST (fastChannelUrls). Dédup par URL.
+                run {
+                    data class ExtraMus(val id: String, val name: String, val poster: String?, val url: String, val ua: String?)
+                    val extras = ArrayList<ExtraMus>()
+                    com.streamflixreborn.streamflix.utils.RadioCatalog.hardcodedDricRadios().forEach { r ->
+                        val u = r.streamUrl ?: return@forEach
+                        extras.add(ExtraMus(r.id, r.name, r.poster, u, null))
+                    }
+                    // "90 Is Good (IT)" — chaîne musique 90s custom Dric4rTv (m3u8 direct Wowza).
+                    extras.add(ExtraMus(
+                        "livehub::dric4rtv::muzik::90isgoodit", "90 Is Good (IT)",
+                        "https://www.coolstreaming.us/img/ch/image40300666727.jpg",
+                        "https://64b16f23efbee.streamlock.net/isgoodforyou/isgoodforyou/playlist.m3u8",
+                        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                    ))
+                    var added = 0
+                    for (e in extras) {
+                        // Extras CURÉS : dédup par ID (PAS par URL). Avant, dédup par
+                        //   URL sautait "90 Is Good" si une entrée iptv-org partageait
+                        //   son URL sous un autre nom (→ introuvable à la recherche).
+                        if (fastChannelUrls.containsKey(e.id)) continue
+                        seen.add(e.url)
+                        val tv = TvShow(id = e.id, title = e.name).apply {
+                            providerName = "TV Hub"; poster = e.poster ?: ""; banner = e.poster ?: ""
+                        }
+                        groups.getOrPut("International") { mutableListOf() }.add(tv)
+                        fastChannelUrls[e.id] = e.url
+                        fastChannelNames[e.id] = e.name
+                        if (!e.poster.isNullOrBlank()) fastChannelLogos[e.id] = e.poster!!
+                        if (e.ua != null) fastChannelHeaders[e.id] = HashMap<String, String>().apply { put("User-Agent", e.ua!!) }
+                        added++
+                    }
+                    Log.w(TAG, "MUSIQ: +$added radios/custom Dric4rTv injectées")
                 }
                 // Français d'abord, puis le reste alpha
                 val ordered = groups.entries.sortedWith(
@@ -4101,17 +4167,47 @@ object LiveTvHubProvider : Provider, IptvProvider {
         }
     }
 
+    /** 2026-06-29 (REPAIR — re-appliqué) : fetch le M3U Stream4Free dédié et le
+     *  parse en catégories (group-title). Refs stream4free:// résolues à la lecture. */
+    suspend fun fetchStream4CategoriesPublic(): List<Category> {
+        val now = System.currentTimeMillis()
+        if (stream4CacheSections.isNotEmpty() && now - stream4CacheTs < MIX_FR_TTL_MS) {
+            return stream4CacheSections
+        }
+        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val req = okhttp3.Request.Builder().url(STREAM4_M3U_URL)
+                    .header("User-Agent", "Mozilla/5.0").build()
+                val body = replayClient.newCall(req).execute().use { it.body?.string().orEmpty() }
+                val cats = parseFastM3u(body)
+                if (cats.isNotEmpty()) { stream4CacheSections = cats; stream4CacheTs = now }
+                Log.d(TAG, "Stream4Free: ${cats.size} catégories")
+                cats
+            } catch (e: Throwable) {
+                Log.w(TAG, "Stream4 fetch failed: ${e.message}")
+                stream4CacheSections
+            }
+        }
+    }
+
     /** 2026-06-26 : Plex TV — lineup récupéré DEPUIS la connexion de l'appareil
      *  (géo-correct, respecte un éventuel VPN/WARP). Le scraper US ne pouvant pas
      *  fournir le bon lineup, le dossier Plex passe par ici au lieu de data-fast.m3u.
      *  Émet des chaînes `livehub::fast::plex_<id>` dont le src = `plex://<id>`,
      *  résolu à la lecture par PlexTvResolver (token frais + master m3u8). */
     suspend fun fetchPlexLineupCategoryPublic(): List<Category> {
+        val now = System.currentTimeMillis()
+        // Fail-safe (pattern Stream4Free) : cache frais → retour direct.
+        if (plexFolderCacheSections.isNotEmpty() && now - plexFolderCacheTs < MIX_FR_TTL_MS) {
+            return plexFolderCacheSections
+        }
         // 2026-06-26 (user "que le français" + "les chaînes TV ensemble") :
         //   chaînes Plex live FR, TOUTES ENSEMBLE (pas de catégories pour le live ;
         //   les catégories Action/Comédies = VOD "À la demande", chantier séparé).
-        val channels = com.streamflixreborn.streamflix.utils.PlexTvResolver.getChannels()
-            .filter { it.language == "fr" }
+        val channels = try {
+            com.streamflixreborn.streamflix.utils.PlexTvResolver.getChannels()
+                .filter { it.language == "fr" }
+        } catch (e: Throwable) { Log.w(TAG, "Plex channels failed: ${e.message}"); emptyList() }
         val out = ArrayList<Category>()
         if (channels.isNotEmpty()) {
             val shows = channels.map { ch ->
@@ -4130,11 +4226,13 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2026-06-27 (user "t'as oublié les films et séries de plex, un seul dossier
         //   live+films+séries en FR") : ajoute les catégories VOD (films par genre).
         //   Catalogue géo-FR (device en France via VPN). Items = `plexvod://<id>`.
-        out.addAll(fetchPlexVodCategories())
+        out.addAll(try { fetchPlexVodCategories() } catch (e: Throwable) { Log.w(TAG, "Plex VOD failed: ${e.message}"); emptyList() })
         // 2026-06-27 (user "on n'a pas oublié les séries ?") : OUI il y a des séries
         //   Plex on-demand → catégories séries (hubs _tv + éditoriaux séries).
-        out.addAll(fetchPlexShowCategories())
-        return out
+        out.addAll(try { fetchPlexShowCategories() } catch (e: Throwable) { Log.w(TAG, "Plex shows failed: ${e.message}"); emptyList() })
+        // Fail-safe : cache QUE si contenu, sinon dernier cache connu.
+        return if (out.isNotEmpty()) { plexFolderCacheSections = out; plexFolderCacheTs = now; out }
+        else plexFolderCacheSections
     }
 
     /** 2026-06-27 : catégories SÉRIES Plex (hubs séries par genre + éditoriaux).
@@ -4223,12 +4321,21 @@ object LiveTvHubProvider : Provider, IptvProvider {
      *  (displayPlutoFolder les range en 3 sous-dossiers). Tout via l'API officielle
      *  Pluto, géo-FR forcée au boot. */
     suspend fun fetchPlutoFolderCategoriesPublic(): List<Category> = coroutineScope {
+        val now = System.currentTimeMillis()
+        // Fail-safe (pattern Stream4Free) : cache frais → retour direct.
+        if (plutoFolderCacheSections.isNotEmpty() && now - plutoFolderCacheTs < MIX_FR_TTL_MS) {
+            return@coroutineScope plutoFolderCacheSections
+        }
         val resolver = com.streamflixreborn.streamflix.utils.PlutoTvResolver
-        val liveDef = async { resolver.getLiveCategories() }
-        val vodDef = async { resolver.getVodCategories() }
+        // Chaque branche est indépendante : si le LIVE échoue, le VOD reste (et
+        //   inversement). Un await() qui throw ne tue plus tout le dossier.
+        val liveDef = async { try { resolver.getLiveCategories() } catch (e: Throwable) { Log.w(TAG, "Pluto live failed: ${e.message}"); emptyList() } }
+        val vodDef = async { try { resolver.getVodCategories() } catch (e: Throwable) { Log.w(TAG, "Pluto vod failed: ${e.message}"); emptyList() } }
         val out = ArrayList<Category>()
+        val liveCats = liveDef.await()
+        val vodCats = vodDef.await()
         // LIVE
-        for (cat in liveDef.await()) {
+        for (cat in liveCats) {
             val shows = cat.channels.map { ch ->
                 val fastId = "livehub::fast::plutolive_${ch.id}"
                 fastChannelUrls[fastId] = "plutolive://${ch.id}"
@@ -4265,7 +4372,27 @@ object LiveTvHubProvider : Provider, IptvProvider {
             if (films.isNotEmpty()) out.add(Category(name = "Films — ${cat.name}", list = films))
             if (series.isNotEmpty()) out.add(Category(name = "Séries — ${cat.name}", list = series))
         }
-        out
+        if (out.isNotEmpty()) {
+            plutoFolderCacheSections = out; plutoFolderCacheTs = now
+            return@coroutineScope out
+        }
+        // 2026-06-29 (REPAIR — user "data-fast.m3u a 129 chaînes Pluto, c'est l'app
+        //   le souci") : l'API officielle Pluto revient vide (géo/session) → on
+        //   BASCULE sur les chaînes data-fast.m3u (group "Pluto TV - X"), jouables
+        //   via la branche html.bet → resolvePlutoStream de getVideo. Le dossier
+        //   s'ouvre toujours, comme Samsung TV+.
+        val fastPluto = try {
+            fetchFastCategories()
+                .filter { it.name.startsWith("Pluto TV", ignoreCase = true) }
+                .map { c ->
+                    val clean = c.name.removePrefix("Pluto TV - ").ifBlank { c.name }
+                    Category(name = clean, list = c.list)
+                }
+        } catch (e: Throwable) { Log.w(TAG, "Pluto FAST fallback failed: ${e.message}"); emptyList() }
+        if (fastPluto.isNotEmpty()) {
+            plutoFolderCacheSections = fastPluto; plutoFolderCacheTs = now
+            fastPluto
+        } else plutoFolderCacheSections
     }
 
     /** Fiche série Pluto (saisons + épisodes). showId = "livehub::replay::plutoshow::<id>". */

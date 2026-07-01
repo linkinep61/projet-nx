@@ -540,6 +540,23 @@ class TvShowsMobileFragment : Fragment() {
         val cs = ConstraintSet()
         cs.clone(root)
 
+        // 2026-06-29 (REPAIR — user "la radio ne doit PAS déclencher l'écrasement
+        //   du mini-lecteur") : radio = audio seul → on cache le conteneur vidéo,
+        //   onglets + grille restent plein écran (pas d'écrasement).
+        if (com.streamflixreborn.streamflix.utils.MiniPlayerController.isRadioChannel(
+                com.streamflixreborn.streamflix.utils.MiniPlayerController.currentChannelId)) {
+            container.visibility = View.GONE
+            cs.connect(tabLang.id, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)
+            cs.connect(tabLang.id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
+            cs.connect(tabLang.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
+            cs.connect(recycler.id, ConstraintSet.TOP, tabLang.id, ConstraintSet.BOTTOM)
+            cs.connect(recycler.id, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
+            cs.connect(recycler.id, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
+            cs.connect(recycler.id, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)
+            cs.applyTo(root)
+            return
+        }
+
         if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
             // Landscape: mini player on the right 1/3
             cs.connect(container.id, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)

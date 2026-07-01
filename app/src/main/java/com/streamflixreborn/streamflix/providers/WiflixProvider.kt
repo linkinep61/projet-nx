@@ -125,6 +125,11 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     @Volatile
     private var lastVisibleBypassAt = 0L
     private const val VISIBLE_BYPASS_COOLDOWN_MS = 60_000L
+    // 2026-06-29 (REPAIR — règle user) : captcha invisible par défaut, visible
+    //   seulement après 3 échecs silencieux consécutifs.
+    @Volatile
+    private var silentFailStreak = 0
+    private const val VISIBLE_AFTER_STREAK = 3
 
     // 2026-06-23 (user "Error 1015 You are being rate limited") : Cloudflare
     //   ban temporaire si trop de requêtes simultanées. Avant : home faisait
@@ -229,8 +234,10 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             return@withPermit Jsoup.parse("<html><!-- rate limited 1015 --></html>").apply { setBaseUri(baseUrl) }
         }
 
-        // Tentative 1 : OkHttp direct (cookie CF déjà en place ?)
-        val okHttpDoc = tryOkHttp(url)
+        // Tentative 1 : OkHttp direct UNIQUEMENT si le cookie cf_clearance est
+        //   déjà présent (sinon CF renvoie un 403 challenge garanti → on saute
+        //   direct au WebView bypass). Pattern aligné FrenchAnime / APK v1.7.226.
+        val okHttpDoc = if (hasCfClearanceCookie()) tryOkHttp(url) else null
         if (okHttpDoc != null) return@withPermit okHttpDoc
 
         // Tentative 2 : WebView bypass (Turnstile)
@@ -264,18 +271,25 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             return looksLikeChallenge && !hasRealContent
         }
         var bypassFailed = isBypassFailed(html)
-        if (bypassFailed && silentBypass) {
-            val nowEscalate = System.currentTimeMillis()
-            if (nowEscalate - lastVisibleBypassAt > VISIBLE_BYPASS_COOLDOWN_MS) {
-                lastVisibleBypassAt = nowEscalate
-                Log.d(TAG, "[Provider] Silent fail → ESCALATING to visible captcha for $url")
-                html = getResolver().get(url, silent = false)
-                bypassFailed = isBypassFailed(html)
-                if (!bypassFailed) {
-                    Log.d(TAG, "[Provider] Visible captcha SUCCESS for $url")
+        // 2026-06-29 (RÈGLE user) : captcha INVISIBLE par défaut. À chaque échec
+        //   silencieux on incrémente le streak ; on n'affiche le captcha VISIBLE
+        //   qu'à partir de 3 échecs consécutifs (résolution manuelle). Réussite
+        //   → streak remis à 0.
+        if (silentBypass) {
+            if (bypassFailed) {
+                silentFailStreak++
+                if (silentFailStreak >= VISIBLE_AFTER_STREAK &&
+                    System.currentTimeMillis() - lastVisibleBypassAt > VISIBLE_BYPASS_COOLDOWN_MS) {
+                    lastVisibleBypassAt = System.currentTimeMillis()
+                    Log.d(TAG, "[Provider] $silentFailStreak échecs silencieux → captcha VISIBLE pour $url")
+                    html = getResolver().get(url, silent = false)
+                    bypassFailed = isBypassFailed(html)
+                    if (!bypassFailed) { silentFailStreak = 0 }
+                } else {
+                    Log.d(TAG, "[Provider] Échec silencieux #$silentFailStreak (captcha reste invisible) pour $url")
                 }
             } else {
-                Log.d(TAG, "[Provider] Visible bypass cooldown active (${(VISIBLE_BYPASS_COOLDOWN_MS - (nowEscalate - lastVisibleBypassAt)) / 1000}s left) — skipping for $url")
+                silentFailStreak = 0
             }
         }
 
@@ -288,6 +302,10 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         }
 
         if (bypassFailed) {
+            // 2026-06-30 : OkHttp+cookie ne marche PAS sur flemmix (CF cf-mitigated:
+            //   challenge → 403, l'empreinte TLS d'OkHttp n'est pas celle d'un
+            //   navigateur). Le contenu DOIT venir du WebView. On abandonne ici (le
+            //   WebView a son budget de polls élargi pour rendre le contenu lui-même).
             Log.d(TAG, "[Provider] WebView bypass failed for $url — NOT caching")
             cloudflareActive = true
             return@withPermit Jsoup.parse(html).apply { setBaseUri(baseUrl) }
@@ -317,6 +335,13 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         return@withPermit doc
     }
 
+    /** 2026-06-29 (REPAIR — recopié du décompilé v1.7.226) : true si le cookie
+     *  cf_clearance est déjà présent dans le CookieManager pour ce domaine. */
+    private fun hasCfClearanceCookie(): Boolean = try {
+        val cookies = android.webkit.CookieManager.getInstance().getCookie(baseUrl) ?: ""
+        cookies.contains("cf_clearance=")
+    } catch (_: Throwable) { false }
+
     /** Tente un fetch OkHttp. Retourne le Document si succès + pas de challenge, null sinon. */
     private fun tryOkHttp(url: String): Document? {
         return try {
@@ -325,10 +350,16 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             //   le WebView avec Chrome/131 et qu'OkHttp envoie Chrome/116,
             //   Cloudflare rejette → HTML retourné = challenge → fallback
             //   WebView HTML avec \t dans les titres + images bloquées.
+            // 2026-06-27 (REPAIR_HANDOFF #2.1) : injecter le cookie cf_clearance
+            //   (CookieManager WebView) — sinon Cloudflare bloque TOUT OkHttp.
+            val webCookie = try {
+                android.webkit.CookieManager.getInstance().getCookie(baseUrl) ?: ""
+            } catch (_: Throwable) { "" }
             val request = Request.Builder()
                 .url(url)
                 .header("Referer", baseUrl)
                 .header("User-Agent", WebViewResolver.STEALTH_UA)
+                .apply { if (webCookie.isNotBlank()) header("Cookie", webCookie) }
                 .build()
             val response = bypassClient.newCall(request).execute()
             if (response.isSuccessful) {
@@ -401,12 +432,12 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             if (isCloudflareChallenge(doc)) {
                 Log.d(TAG, "[getHome] Cloudflare challenge in Retrofit response, using bypass")
                 cloudflareActive = true
-                getDocument(baseUrl, silentBypass = false)
+                getDocument(baseUrl, silentBypass = true)
             } else doc
         } catch (e: Exception) {
             Log.d(TAG, "[getHome] Retrofit failed: ${e.message}, using bypass")
             try {
-                getDocument(baseUrl, silentBypass = false)
+                getDocument(baseUrl, silentBypass = true)
             } catch (e2: Exception) {
                 Log.e(TAG, "[getHome] bypass also failed: ${e2.message}")
                 return@coroutineScope emptyList()
@@ -422,7 +453,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             documentCache.remove(baseUrl)
             kotlinx.coroutines.delay(500)
             document = try {
-                getDocument(baseUrl, silentBypass = false)
+                getDocument(baseUrl, silentBypass = true)
             } catch (_: Exception) { document }
         }
 

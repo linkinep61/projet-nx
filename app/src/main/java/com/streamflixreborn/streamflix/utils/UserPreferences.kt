@@ -81,6 +81,27 @@ object UserPreferences {
     @Volatile
     var isGlobalSearchEnabled: Boolean = false
 
+    // 2026-06-30 (user "case à cocher dans l'option lecteur externe : toujours
+    //   l'utiliser, ne plus passer par le lecteur interne, et mémoriser le
+    //   lecteur choisi") — persisté, mobile + TV.
+    private const val KEY_ALWAYS_EXTERNAL_PLAYER = "always_external_player"
+    private const val KEY_EXTERNAL_PLAYER_PACKAGE = "external_player_package"
+
+    /** Si true ET externalPlayerPackage non nul → la lecture lance directement
+     *  le lecteur externe mémorisé, sans sélecteur ni lecteur interne. */
+    var alwaysUseExternalPlayer: Boolean
+        get() = if (::prefs.isInitialized) prefs.getBoolean(KEY_ALWAYS_EXTERNAL_PLAYER, false) else false
+        set(value) { if (::prefs.isInitialized) prefs.edit().putBoolean(KEY_ALWAYS_EXTERNAL_PLAYER, value).apply() }
+
+    /** Package du lecteur externe mémorisé (ex. org.videolan.vlc). null = aucun. */
+    var externalPlayerPackage: String?
+        get() = if (::prefs.isInitialized) prefs.getString(KEY_EXTERNAL_PLAYER_PACKAGE, null) else null
+        set(value) {
+            if (!::prefs.isInitialized) return
+            if (value.isNullOrBlank()) prefs.edit().remove(KEY_EXTERNAL_PLAYER_PACKAGE).apply()
+            else prefs.edit().putString(KEY_EXTERNAL_PLAYER_PACKAGE, value).apply()
+        }
+
     /**
      * 2026-06-17 (user "il faut faire un bouton de bascule, de base il est pas
      * activé et on l'active") : toggle pour activer le tunnel Shadowsocks via
@@ -873,7 +894,27 @@ object UserPreferences {
             Key.HOME_TOP_OFFSET.setInt(value)
         }
 
+    // 2026-06-29 RESTAURÉ depuis l'APK v1.7.226 (= système de luminosité TV) :
+    //   playerDim : opacité 0-100 d'un View noir overlay au-dessus du PlayerView TV.
+    //              0 = pas de dim (image normale), 100 = écran noir total.
+    //   carouselDim : pareil pour le carrousel/swiper du home TV (= bannière du haut).
+    //   Les SeekBars sont dans settings_tv.xml. Les views overlay sont
+    //   view_player_dim (fragment_player_tv.xml) et view_carousel_dim (fragment_home_tv.xml).
+    var playerDim: Int
+        get() = Key.PLAYER_DIM.getInt() ?: 0
+        set(value) {
+            Key.PLAYER_DIM.setInt(value.coerceIn(0, 100))
+        }
+
+    var carouselDim: Int
+        get() = Key.CAROUSEL_DIM.getInt() ?: 0
+        set(value) {
+            Key.CAROUSEL_DIM.setInt(value.coerceIn(0, 100))
+        }
+
     private enum class Key {
+        PLAYER_DIM,
+        CAROUSEL_DIM,
         APP_LAYOUT,
         CURRENT_LANGUAGE,
         CURRENT_PROVIDER,

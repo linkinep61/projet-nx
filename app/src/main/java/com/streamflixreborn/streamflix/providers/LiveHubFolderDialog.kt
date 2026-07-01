@@ -26,6 +26,17 @@ import kotlinx.coroutines.withContext
  */
 object LiveHubFolderDialog {
 
+    /** 2026-06-29 (REPAIR — user "on ne trouvait pas '90 IS GOOD' sous plusieurs
+     *  formes") : normalise une chaîne pour la recherche → ignore accents,
+     *  espaces, apostrophes et ponctuation. Ainsi "90 IS GOOD", "90's", "90 s"
+     *  et "90s" deviennent comparables ("90isgood" / "90s"), et taper "90"
+     *  matche toutes ces variantes. Mieux que le simple `contains` lowercase. */
+    private fun normSearch(s: String): String =
+        java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{Mn}+"), "")
+            .lowercase()
+            .replace(Regex("[^a-z0-9]+"), "")
+
     /** 2026-06-21 (user "fond d'écran des dialogs doit suivre le thème user") :
      *  applique le background du thème user (= ThemeManager.palette
      *  mobileNavBackground) à un AlertDialog. Doit être appelé APRÈS dlg.show()
@@ -291,9 +302,44 @@ object LiveHubFolderDialog {
         }
         // Si on a du contenu cache (= WiTV/Adrar déjà chargés au boot, ou
         //   ce dossier a déjà été fetché on-demand) → affichage instant.
+        // 2026-06-30 : les dossiers avec un affichage custom (Plex, Pluto,
+        //   Autres Replays avec extras, Musique) ne doivent PAS prendre le
+        //   raccourci displayCategories sinon on perd leur vue spéciale
+        //   (sous-dossiers Films/Séries/Chaînes, Mix FR/WorldWide, agrégation).
         if (cached.isNotEmpty()) {
-            displayCategories(ctx, folderName, cached, onChannelSelected)
-            return
+            when (folderKey) {
+                "plex_tv" -> {
+                    displayPlexFolder(ctx, folderName, cached, onChannelSelected)
+                    return
+                }
+                "pluto_tv" -> {
+                    displayPlutoFolder(ctx, folderName, cached, onChannelSelected)
+                    return
+                }
+                "autres_replay" -> {
+                    val mixC = LiveTvHubProvider.folderContents["__ar_mix"] ?: emptyList()
+                    val wwC = LiveTvHubProvider.folderContents["__ar_ww"] ?: emptyList()
+                    val sportC = LiveTvHubProvider.folderContents["__ar_sport"] ?: emptyList()
+                    val rakC = LiveTvHubProvider.folderContents["__ar_rak"] ?: emptyList()
+                    val sonyC = LiveTvHubProvider.folderContents["__ar_sony"] ?: emptyList()
+                    val hasExtras = mixC.isNotEmpty() || wwC.isNotEmpty() ||
+                        sportC.isNotEmpty() || rakC.isNotEmpty() || sonyC.isNotEmpty()
+                    if (hasExtras) {
+                        displayCategoriesWithMixFr(ctx, folderName, cached, mixC,
+                            onChannelSelected, wwC, sportC, rakC, sonyC)
+                        return
+                    }
+                    // Pas d'extras en cache → fall through au lazy fetch ci-dessous
+                }
+                "musique" -> {
+                    // Ne pas prendre le raccourci cache — laisser le bloc musique
+                    // ci-dessous faire l'agrégation complète (iptv-org + nos playlists)
+                }
+                else -> {
+                    displayCategories(ctx, folderName, cached, onChannelSelected)
+                    return
+                }
+            }
         }
         // Sinon → fetch on-demand depuis fetchReplayCategories.
         //   On affiche un Toast loading puis le dialog quand prêt.
@@ -343,6 +389,18 @@ object LiveHubFolderDialog {
                     }
                     val hasExtras = mixCats.isNotEmpty() || wwCats.isNotEmpty() ||
                         sportCats.isNotEmpty() || rakCats.isNotEmpty() || sonyCats.isNotEmpty()
+                    // 2026-06-30 : cacher les extras pour que le 2ème clic sur
+                    //   "Autres Replays" retrouve la vue complète (avec Mix FR,
+                    //   WorldWide, Sport, Rakuten, Sony) au lieu des replays bruts.
+                    //   Les clés __ar_* ne sont PAS dans sectionKeys de
+                    //   groupSectionsIntoFolders → préservées lors du refresh home.
+                    if (folderKey == "autres_replay" && hasExtras) {
+                        if (mixCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_mix"] = mixCats
+                        if (wwCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_ww"] = wwCats
+                        if (sportCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_sport"] = sportCats
+                        if (rakCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_rak"] = rakCats
+                        if (sonyCats.isNotEmpty()) LiveTvHubProvider.folderContents["__ar_sony"] = sonyCats
+                    }
                     withContext(Dispatchers.Main) {
                         if (filtered.isEmpty() && !hasExtras) {
                             android.widget.Toast.makeText(
@@ -462,6 +520,34 @@ object LiveHubFolderDialog {
                     withContext(Dispatchers.Main) {
                         android.widget.Toast.makeText(
                             ctx, "Erreur Musique : ${t.message}", android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
+            return
+        }
+        // 2026-06-29 (REPAIR — re-appliqué) : Stream4Free — M3U dédié (stream4free://).
+        if (folderKey == "stream4") {
+            android.widget.Toast.makeText(
+                ctx, "Chargement de $folderName…", android.widget.Toast.LENGTH_SHORT
+            ).show()
+            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+            scope.launch {
+                try {
+                    val cats = LiveTvHubProvider.fetchStream4CategoriesPublic()
+                    withContext(Dispatchers.Main) {
+                        if (cats.isEmpty()) {
+                            android.widget.Toast.makeText(
+                                ctx, "Stream4Free indisponible — réessaie", android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        } else {
+                            displayCategories(ctx, folderName, cats, onChannelSelected)
+                        }
+                    }
+                } catch (t: Throwable) {
+                    withContext(Dispatchers.Main) {
+                        android.widget.Toast.makeText(
+                            ctx, "Erreur Stream4Free : ${t.message}", android.widget.Toast.LENGTH_LONG
                         ).show()
                     }
                 }
@@ -1016,14 +1102,15 @@ object LiveHubFolderDialog {
                 override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
                 override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
                 override fun afterTextChanged(e: android.text.Editable?) {
-                    val q = (e?.toString() ?: "").trim().lowercase()
+                    val rawQ = (e?.toString() ?: "").trim()
+                    val q = normSearch(rawQ)
                     val newCats: List<Category> = if (q.isEmpty()) {
                         categories.toList()
                     } else {
                         categories.mapNotNull { cat ->
-                            val matchSec = cat.name.lowercase().contains(q)
+                            val matchSec = normSearch(cat.name).contains(q)
                             val items = (cat.list as? List<*>)?.filterIsInstance<TvShow>().orEmpty()
-                            val matchingItems = items.filter { it.title.lowercase().contains(q) }
+                            val matchingItems = items.filter { normSearch(it.title).contains(q) }
                             when {
                                 matchSec -> cat                                    // section match → garde tout
                                 matchingItems.isNotEmpty() -> Category(name = cat.name, list = matchingItems)
@@ -1164,12 +1251,12 @@ object LiveHubFolderDialog {
                 override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
                 override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
                 override fun afterTextChanged(s: android.text.Editable?) {
-                    val q = s?.toString()?.trim()?.lowercase().orEmpty()
+                    val q = normSearch(s?.toString()?.trim().orEmpty())
                     if (q.isEmpty()) {
                         folderList.visibility = android.view.View.VISIBLE
                         resultsList.visibility = android.view.View.GONE
                     } else {
-                        results = allChannels.filter { it.title.lowercase().contains(q) }.take(400)
+                        results = allChannels.filter { normSearch(it.title).contains(q) }.take(400)
                         resultsAdapter.clear()
                         resultsAdapter.addAll(results.map { it.title })
                         resultsAdapter.notifyDataSetChanged()

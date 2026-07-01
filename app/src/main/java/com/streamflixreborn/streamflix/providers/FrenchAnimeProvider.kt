@@ -67,6 +67,16 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
     private const val TAG_BYPASS = "FrenchAnimeBypass"
     @Volatile private var webViewResolver: WebViewResolver? = null
     @Volatile private var cloudflareActive = false
+    // 2026-06-29 (REPAIR — règle user, même que Wiflix) : captcha invisible par
+    //   défaut ; visible seulement après 3 échecs silencieux consécutifs.
+    @Volatile private var silentFailStreak = 0
+    @Volatile private var lastVisibleBypassAt = 0L
+    private const val VISIBLE_AFTER_STREAK = 3
+    private const val VISIBLE_BYPASS_COOLDOWN_MS = 60_000L
+    // 2026-06-29 (user "captcha visible au 1er lancement, pages en 403 en cascade") :
+    //   verrou qui SÉRIALISE le bypass WebView (un seul à la fois). Le 1er pose le
+    //   cookie cf_clearance, les suivants (en attente) repartent en OkHttp direct.
+    private val bypassMutex = Mutex()
 
     private val bypassClient: OkHttpClient by lazy {
         NetworkClient.default.newBuilder()
@@ -135,48 +145,97 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
             Log.d(TAG_BYPASS, "Cache HIT for $url")
             return it
         }
-        // Tentative 1 : OkHttp direct (cookie CF déjà en place ?)
-        val okHttpDoc = tryOkHttp(url)
-        if (okHttpDoc != null) return okHttpDoc
+        // Tentative 1 (hors verrou, rapide) : OkHttp direct UNIQUEMENT si le cookie
+        //   cf_clearance existe déjà — sinon CF renvoie la page challenge.
+        if (hasCfClearanceCookie()) tryOkHttp(url)?.let { return it }
 
-        // Tentative 2 : WebView bypass (Turnstile)
-        Log.d(TAG_BYPASS, "Launching WebView Bypass for $url (silent=$silentBypass)")
-        val html = getResolver().get(url, silent = silentBypass)
+        // 2026-06-29 (user "captcha visible au 1er lancement, 403 en cascade") :
+        //   getHome lance ~15 pages en parallèle. Sans verrou, chacune lance son
+        //   propre bypass Turnstile AVANT que le cookie soit posé → contention sur
+        //   l'unique WebView → la plupart échouent (403) + captcha s'affiche.
+        //   Avec bypassMutex : UN SEUL bypass s'exécute ; les autres, en attente,
+        //   trouvent ensuite le cookie/cache et repartent en OkHttp direct.
+        return bypassMutex.withLock {
+            // Re-check : un autre appel a peut-être déjà bypassé pendant l'attente.
+            getCachedDocument(url)?.let {
+                Log.d(TAG_BYPASS, "Cache HIT (post-lock) for $url")
+                return@withLock it
+            }
+            if (hasCfClearanceCookie()) tryOkHttp(url)?.let { return@withLock it }
 
-        // Si le bypass a échoué (silent fail / timeout) → ne PAS cacher, retourner doc vide
-        if (html.contains("silent fail") || html.contains("Timeout") || html.contains("no live activity")) {
-            Log.d(TAG_BYPASS, "WebView bypass failed for $url — NOT caching")
-            cloudflareActive = true
-            return Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+            // Tentative 2 : WebView bypass (Turnstile) — un seul à la fois.
+            Log.d(TAG_BYPASS, "Launching WebView Bypass for $url (silent=$silentBypass)")
+            var html = getResolver().get(url, silent = silentBypass)
+
+            // 2026-06-29 (RÈGLE user, identique Wiflix) : captcha INVISIBLE par défaut ;
+            //   après 3 échecs silencieux consécutifs → captcha VISIBLE.
+            fun faFailed(h: String): Boolean =
+                h.contains("silent fail") || h.contains("Timeout") || h.contains("no live activity")
+            if (silentBypass) {
+                if (faFailed(html)) {
+                    silentFailStreak++
+                    if (silentFailStreak >= VISIBLE_AFTER_STREAK &&
+                        System.currentTimeMillis() - lastVisibleBypassAt > VISIBLE_BYPASS_COOLDOWN_MS) {
+                        lastVisibleBypassAt = System.currentTimeMillis()
+                        Log.d(TAG_BYPASS, "$silentFailStreak échecs silencieux → captcha VISIBLE pour $url")
+                        html = getResolver().get(url, silent = false)
+                        if (!faFailed(html)) { silentFailStreak = 0 }
+                    } else {
+                        Log.d(TAG_BYPASS, "Échec silencieux #$silentFailStreak (captcha reste invisible) pour $url")
+                    }
+                } else {
+                    silentFailStreak = 0
+                }
+            }
+
+            // Bypass échoué (silent fail / timeout) → ne PAS cacher, retourner doc vide
+            if (html.contains("silent fail") || html.contains("Timeout") || html.contains("no live activity")) {
+                Log.d(TAG_BYPASS, "WebView bypass failed for $url — NOT caching")
+                cloudflareActive = true
+                return@withLock Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+            }
+
+            // Bypass réussi → cookie cf_clearance posé. Re-fetch OkHttp pour un HTML propre.
+            Log.d(TAG_BYPASS, "WebView bypass succeeded for $url — retrying OkHttp with fresh cookie")
+            cloudflareActive = false
+            val freshDoc = tryOkHttp(url)
+            if (freshDoc != null) {
+                Log.d(TAG_BYPASS, "OkHttp retry after bypass SUCCESS for $url")
+                return@withLock freshDoc
+            }
+
+            // Fallback : HTML du WebView tel quel.
+            Log.d(TAG_BYPASS, "OkHttp retry after bypass FAILED for $url — using WebView HTML")
+            val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+            cacheDocument(url, doc)
+            return@withLock doc
         }
-
-        // Bypass WebView a réussi → le cookie cf_clearance est maintenant dans le CookieManager.
-        // RELANCER via OkHttp pour récupérer un HTML propre du serveur (pas le HTML WebView
-        // qui peut avoir des artéfacts JS ou être incomplet).
-        Log.d(TAG_BYPASS, "WebView bypass succeeded for $url — retrying OkHttp with fresh cookie")
-        cloudflareActive = false
-        val freshDoc = tryOkHttp(url)
-        if (freshDoc != null) {
-            Log.d(TAG_BYPASS, "OkHttp retry after bypass SUCCESS for $url")
-            return freshDoc
-        }
-
-        // Fallback : utiliser le HTML du WebView tel quel
-        Log.d(TAG_BYPASS, "OkHttp retry after bypass FAILED for $url — using WebView HTML")
-        val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
-        cacheDocument(url, doc)
-        return doc
     }
+
+    /** 2026-06-27 (REPAIR — recopié du décompilé v1.7.226) : true si le cookie
+     *  cf_clearance est déjà présent dans le CookieManager pour ce domaine. */
+    private fun hasCfClearanceCookie(): Boolean = try {
+        val cookies = android.webkit.CookieManager.getInstance().getCookie(baseUrl) ?: ""
+        cookies.contains("cf_clearance=")
+    } catch (_: Throwable) { false }
 
     /** Tente un fetch OkHttp. Retourne le Document si succès + pas de challenge, null sinon. */
     private fun tryOkHttp(url: String): Document? {
         return try {
+            // 2026-06-27 (REPAIR_HANDOFF #3) : injecter le cookie cf_clearance
+            //   (lu dans le CookieManager WebView) — sinon Cloudflare bloque OkHttp.
+            //   bypassClient (NetworkClient.default) ne proxie pas forcément ces
+            //   cookies, donc on les attache explicitement (pattern décompilé).
+            val webCookie = try {
+                android.webkit.CookieManager.getInstance().getCookie(baseUrl) ?: ""
+            } catch (_: Throwable) { "" }
             val request = Request.Builder()
                 .url(url)
                 .header("Referer", baseUrl)
                 // 2026-06-28 : MÊME UA que le WebView stealth (Chrome 131).
                 //   Le cookie cf_clearance est lié au UA — mismatch = rejet CF.
                 .header("User-Agent", WebViewResolver.STEALTH_UA)
+                .apply { if (webCookie.isNotBlank()) header("Cookie", webCookie) }
                 .build()
             val response = bypassClient.newCall(request).execute()
             if (response.isSuccessful) {
@@ -249,7 +308,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
     private val URL_DOMAIN_REGEX = Regex("""(?:https?:)?//(?:www\.)?([^.]+)\.""")
 
     override suspend fun getHome(): List<Category> {
-        var document = safeGetDoc(baseUrl, silentBypass = false) { service.getHome() }
+        var document = safeGetDoc(baseUrl, silentBypass = true) { service.getHome() }
 
         // 2026-06-22 fix (user "il oublie de relancer le scrap après") :
         // Si le document est vide (challenge/timeout), retry via OkHttp.
@@ -260,7 +319,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
             documentCache.remove(baseUrl) // vider le cache pourri
             kotlinx.coroutines.delay(500) // laisser le cookie se propager
             document = try {
-                getDocument(baseUrl, silentBypass = false)
+                getDocument(baseUrl, silentBypass = true)
             } catch (_: Exception) { document }
         }
 
@@ -419,7 +478,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
         if (query.isEmpty()) {
-            val document = safeGetDoc(baseUrl, silentBypass = false) { service.getHome() }
+            val document = safeGetDoc(baseUrl, silentBypass = true) { service.getHome() }
 
             val genres = document.select("div.side-b nav.side-c ul.flex-row li a").map {
                 Genre(

@@ -449,6 +449,7 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
             )
             val listTv = listOf(
                 Quality,
+                Brightness,
                 Audio,
                 Subtitle,
                 Speed,
@@ -479,6 +480,12 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
         }
 
         data object ManualZoom : Settings()
+
+        /** 2026-06-29 (user "la luminosité du lecteur doit être un item du menu,
+         *  sous Qualité, focusable télécommande — pas un slider en haut") :
+         *  item TV qui CYCLE les niveaux de luminosité au clic (100→75→50→25→100 %).
+         *  Pilote UserPreferences.playerDim (0 = clair / 100 = noir). */
+        data object Brightness : Settings()
 
         sealed class Gestures : Item {
             companion object : Settings() {
@@ -1373,6 +1380,10 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
             /** 2026-05-16 : True quand ce serveur est en cours d'extraction.
              *  Affiché avec un suffixe " ⟳" dans le picker. */
             @Volatile var isLoading: Boolean = false
+            /** Résolution vidéo détectée par le probe qualité.
+             *  Ex: "1080p", "720p", "4K". null = pas encore probé. */
+            @Volatile var quality: String? = null
+
             /** True si l'user a click la croix pour bannir ce server. Persisté
              *  dans IptvBannedServers + restauré au prochain ouverture. */
             var isBanned: Boolean = false

@@ -61,7 +61,21 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
         val link5vo: String?=null,
         val link6vo: String?=null,
         val link7vo: String?=null,
+        // 2026-06-29 (REPAIR — user "1080p/qualité") : label qualité par version
+        //   renvoyé par api/films (ex "HD", "1080p"). Affiché sur le nom du serveur.
+        val quality: String?=null,
+        @com.google.gson.annotations.SerializedName("qualityVostfr") val qualityVostfr: String?=null,
+        @com.google.gson.annotations.SerializedName("qualityVo") val qualityVo: String?=null,
     )
+
+    // 2026-06-29 (REPAIR — restauré depuis la version riche) : sources VIP natives
+    //   (Premium sans pub + Free VF) servies par api/streaming/player → m3u8 directs
+    //   senpai-stream (pass-through, joués tels quels par ExoPlayer).
+    data class StreamingPlayerSource(val label: String?=null, val url: String?=null, val mime: String?=null)
+    data class StreamingPlayerResponse(val title: String?=null, val sources: List<StreamingPlayerSource>?=null)
+
+    /** ★ sur les serveurs natifs Frembed (URL sur le domaine frembed.*). */
+    private fun isFrembedNative(url: String): Boolean = url.contains("frembed.", ignoreCase = true)
 
     private fun getExtractorName(url: String): String {
         // Try to identify using the central extractor registry first
@@ -95,7 +109,7 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
                                   index < 16 -> "VOSTFR"
                                   else -> "VO" }
                 (if (data.startsWith("/")) mainUrl.removeSuffix("/") + data else data).let {
-                    Video.Server(id = "link$index", name = "${getExtractorName(it)} ($lang)", src = it)
+                    Video.Server(id = "link$index", name = "${if (isFrembedNative(it)) "★ " else ""}${getExtractorName(it)} ($lang)", src = it)
                 }
             }
     }
@@ -116,11 +130,17 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
                         val request = chain.request()
                         val url = request.url
                         val origin = "${url.scheme}://${url.host}"
-                        val newRequest = request.newBuilder()
+                        val b = request.newBuilder()
                             .header("Referer", "$origin/")
                             .header("Origin", origin)
-                            .build()
-                        chain.proceed(newRequest)
+                        // 2026-06-29 (REPAIR — user "eux aussi protégés par le bypass
+                        //   cloudflare") : injecte le cookie cf_clearance (posé par le
+                        //   bypass WebView du provider) → frembid + hôtes CF acceptent.
+                        val cookies = try {
+                            android.webkit.CookieManager.getInstance().getCookie("$origin/")
+                        } catch (e: Exception) { null }
+                        if (!cookies.isNullOrBlank()) b.header("Cookie", cookies)
+                        chain.proceed(b.build())
                     }
                     .dns(DnsResolver.doh)
                     .build()
@@ -168,6 +188,16 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
             @Header("User-Agent") userAgent: String = USER_AGENT,
             @Header("Content-Type") contentType: String = "application/json"
         ): listLinks
+
+        // 2026-06-29 (REPAIR — restauré) : sources VIP natives (Premium/Free VF).
+        @GET("api/streaming/player")
+        suspend fun getStreamingPlayer(
+            @Query("tmdb") tmdb: String,
+            @Query("type") type: String,
+            @Query("sa") sa: Int? = null,
+            @Query("ep") ep: Int? = null,
+            @Header("User-Agent") userAgent: String = USER_AGENT
+        ): StreamingPlayerResponse
 
         @GET("api/series")
         suspend fun getTvShowLinks(
@@ -220,14 +250,31 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
                 initialServers.map { server ->
                     async(Dispatchers.IO) {
                         try {
-                            val response = streamResolver.getStreamLinks(server.src)
-                            val redirect = response.headers()["Location"]
-                            if (!redirect.isNullOrEmpty()) {
-                                val fullRedirect = if (redirect.startsWith("//")) "https:$redirect" else redirect
+                            // 2026-06-29 (REPAIR) : la nouvelle API redirige en CHAÎNE
+                            //   (frembed.bond → frembed.hair → hôte réel). On suit la
+                            //   chaîne jusqu'à atteindre un hôte non-frembed (Voe/Dood…).
+                            var currentSrc = server.src
+                            var finalUrl: String? = null
+                            for (hop in 0 until 5) {
+                                val response = streamResolver.getStreamLinks(currentSrc)
+                                val redirect = response.headers()["Location"]
+                                if (redirect.isNullOrEmpty()) break
+                                val full = when {
+                                    redirect.startsWith("//") -> "https:$redirect"
+                                    redirect.startsWith("/") -> {
+                                        val u = java.net.URL(currentSrc); "${u.protocol}://${u.host}$redirect"
+                                    }
+                                    else -> redirect
+                                }
+                                if (!isFrembedNative(full)) { finalUrl = full; break }
+                                currentSrc = full
+                            }
+                            if (finalUrl != null) {
                                 val lang = server.name.substringAfter(" (").substringBefore(")")
+                                val star = if (server.name.trimStart().startsWith("★")) "★ " else ""
                                 server.copy(
-                                    name = "${getExtractorName(fullRedirect)} ($lang)",
-                                    src = fullRedirect
+                                    name = "$star${getExtractorName(finalUrl!!)} ($lang)",
+                                    src = finalUrl!!
                                 )
                             } else {
                                 server
@@ -239,8 +286,35 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
                 }.awaitAll()
             }
 
+            // 2026-06-29 (REPAIR — restauré depuis la version riche) : sources VIP
+            //   natives (★ Frembed Premium sans pub + ★ Frembed Free VF) via
+            //   api/streaming/player → m3u8 directs senpai (pass-through). En tête.
+            val vipServers = try {
+                val tmdb = when (videoType) {
+                    is Video.Type.Movie -> videoType.id
+                    is Video.Type.Episode -> videoType.tvShow.id
+                }
+                val type = if (videoType is Video.Type.Episode) "serie" else "movie"
+                val sa = (videoType as? Video.Type.Episode)?.season?.number
+                val ep = (videoType as? Video.Type.Episode)?.number
+                val resp = service.getStreamingPlayer(tmdb, type, sa, ep)
+                Log.d("FrembedExtractor", "Native VIP sources: ${resp.sources?.size ?: 0}")
+                resp.sources.orEmpty().mapNotNull { s ->
+                    val u = s.url?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    Video.Server(id = "vip_${s.label}", name = "★ Frembed ${s.label ?: "VIP"} (French)", src = u)
+                }
+            } catch (e: Exception) {
+                Log.w("FrembedExtractor", "VIP fetch failed: ${e.message}"); emptyList()
+            }
+
+            // 2026-06-29 (REPAIR) : on retire les hosters NON résolus (src toujours
+            //   sur frembed/api/stream = injouables « No extractors found ») pour
+            //   éviter les doublons « ★ Frembed » inutiles. Le VIP reste le primaire.
+            val playableHosters = resolvedServers.filter {
+                !(isFrembedNative(it.src) && it.src.contains("api/stream"))
+            }
             // Compound sort: language priority (French > VOSTFR > VO), then reliability
-            resolvedServers.sortedWith(compareBy<Video.Server> { server ->
+            (vipServers + playableHosters).sortedWith(compareBy<Video.Server> { server ->
                 val name = server.name.uppercase()
                 when {
                     name.contains("FRENCH") || (name.contains("VF") && !name.contains("VOSTFR")) -> 0

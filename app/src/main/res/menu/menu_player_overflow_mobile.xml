@@ -34,13 +34,16 @@
         android:title="Ratio d'affichage" />
 
     <item
-        android:id="@+id/menu_player_external"
-        android:icon="@drawable/exo_styled_controls_external_player"
-        android:title="Lecteur externe" />
-
-    <item
         android:id="@+id/menu_player_settings"
         android:icon="@drawable/exo_styled_controls_settings"
         android:title="Paramètres" />
+
+    <!-- 2026-06-29 (user "le bouton pour changer le lecteur dans le menu déroulant mobile") :
+         « Lecteur externe » RÉTABLI, câblé sur le lancement fonctionnel (chooser) du bouton
+         btnExoExternalPlayer. Placé EN DERNIER (jamais en première position du menu). -->
+    <item
+        android:id="@+id/menu_player_external"
+        android:icon="@drawable/exo_styled_controls_external_player"
+        android:title="Lecteur externe" />
 
 </menu>

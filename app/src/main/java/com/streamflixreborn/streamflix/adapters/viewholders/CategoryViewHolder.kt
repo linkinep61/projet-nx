@@ -532,6 +532,22 @@ class CategoryViewHolder(
                             .load(com.streamflixreborn.streamflix.utils.optimizeArtworkUrl(poster, 1280))
                             .transition(com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions.withCrossFade())
                             .into(binding.ivSwiperBannerInline)
+                        // 2026-06-29 (REPAIR — user "Luminosité du carrousel doit
+                        //   assombrir QUE le carrousel, pas le fond") : voile noir
+                        //   semi-transparent sur la bannière du carrousel uniquement,
+                        //   piloté par UserPreferences.carouselDim (0..100). Le fond
+                        //   d'écran (iv_home_background) n'est PAS touché.
+                        val carouselDim = UserPreferences.carouselDim.coerceIn(0, 100)
+                        if (carouselDim > 0) {
+                            val a = (carouselDim * 230 / 100).coerceIn(0, 230)  // max ~90% noir
+                            binding.ivSwiperBannerInline.colorFilter =
+                                android.graphics.PorterDuffColorFilter(
+                                    android.graphics.Color.argb(a, 0, 0, 0),
+                                    android.graphics.PorterDuff.Mode.SRC_ATOP
+                                )
+                        } else {
+                            binding.ivSwiperBannerInline.colorFilter = null
+                        }
                     } else {
                         binding.ivSwiperBannerInline.visibility = android.view.View.GONE
                     }

@@ -73,5 +73,6 @@ data class Video(
         val mirrors: List<String> = emptyList(),
     ) : Serializable {
         var video: Video? = null
+        @Volatile var quality: String? = null
     }
 }

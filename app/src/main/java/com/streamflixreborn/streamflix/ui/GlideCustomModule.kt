@@ -92,12 +92,16 @@ class GlideCustomModule : AppGlideModule() {
                 //   Si Glide envoie l'ancien UA Chrome/116, CF rejette → jaquettes grises.
                 val host = request.url.host.lowercase()
                 val isCfHost = host.contains("wiflix") || host.contains("flemmix") ||
-                    host.contains("dessinanime") || host.contains("frenchanime") ||
+                    host.contains("dessinanime") || host.contains("dessins-animes") ||
+                    host.contains("frenchanime") || host.contains("french-anime") ||
                     host.contains("papadustream")
                 val ua = if (isCfHost)
                     com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA
                 else
                     com.streamflixreborn.streamflix.utils.NetworkClient.USER_AGENT
+                // 2026-06-30 : RETOUR au comportement d'origine (= APK qui marche).
+                //   Juste UA stealth + Referer, PAS d'injection du cookie cf_clearance
+                //   (mon ajout le faisait rejeter par CF → jaquettes 403/grises).
                 val newRequest = request.newBuilder()
                     .header("User-Agent", ua)
                     .header("Referer", "${request.url.scheme}://${request.url.host}/")

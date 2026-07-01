@@ -267,6 +267,9 @@ class HomeTvFragment : Fragment() {
         super.onResume()
         if (_binding == null) return
 
+        // 2026-06-29 RESTAURÉ depuis APK v1.7.226 : luminosité carrousel/fond TV.
+        try { applyCarouselDim() } catch (_: Throwable) {}
+
         // 2026-06-09 : applique le fond d'écran personnalisé (s'il existe) à
         //   chaque retour sur l'écran, au cas où il a été changé.
         com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(binding.root)
@@ -331,7 +334,10 @@ class HomeTvFragment : Fragment() {
 
         com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
         syncOverlayVisibility()
-        updateHomeGridForMiniPlayer(true)
+        // 2026-06-29 (user "la radio écrase toujours" sur TV) : ne PAS forcer
+        //   l'écrasement en dur ; adjustMiniPlayerForRadio() cache le bloc vidéo
+        //   et garde la grille pleine pour une radio, restaure le 16:9 pour une TV.
+        adjustMiniPlayerForRadio()
         binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
         MiniPlayerController.currentChannelPoster?.let { poster ->
             Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
@@ -387,7 +393,8 @@ class HomeTvFragment : Fragment() {
         if (MiniPlayerController.currentChannelId != null) {
             com.streamflixreborn.streamflix.utils.MiniPlayerController.applyMiniPlayerVisibility(binding.miniPlayerContainer, View.VISIBLE)
             syncOverlayVisibility()
-            updateHomeGridForMiniPlayer(true)
+            // 2026-06-29 (user "la radio écrase toujours" sur TV) : idem chemin attach.
+            adjustMiniPlayerForRadio()
             binding.miniPlayerChannelName.text = MiniPlayerController.currentChannelName ?: ""
             MiniPlayerController.currentChannelPoster?.let { poster ->
                 Glide.with(this).load(poster).into(binding.miniPlayerChannelLogo)
@@ -1009,6 +1016,27 @@ class HomeTvFragment : Fragment() {
 
         if (poster != null) {
             updateBackground(poster, null)
+        }
+    }
+
+    // 2026-06-29 RESTAURÉ depuis APK v1.7.226 — système de luminosité du carrousel/fond TV.
+    //   view_carousel_dim = un View noir à alpha variable au-dessus du swiper/carousel
+    //   (ou du iv_home_background si en mode fond d'écran).
+    //   alpha=0 → image normale. alpha=1.0 → écran noir total.
+    //   Contrôlé par UserPreferences.carouselDim (SeekBar CAROUSEL_DIM dans Paramètres TV).
+    private fun applyCarouselDim() {
+        if (_binding == null) return
+        try {
+            val dim = com.streamflixreborn.streamflix.utils.UserPreferences.carouselDim
+            // 2026-06-29 (REPAIR — user "assombrir QUE le carrousel, pas le fond
+            //   d'écran") : on assombrit le FOND (iv_home_background) UNIQUEMENT si
+            //   le carrousel EST le fond (carouselAsBackground). Sinon iv_home_background
+            //   = wallpaper user → on n'y touche PAS ; c'est la bannière inline du
+            //   carrousel (ivSwiperBannerInline) qui est assombrie dans CategoryViewHolder.
+            binding.viewCarouselDim.alpha =
+                if (com.streamflixreborn.streamflix.utils.UserPreferences.carouselAsBackground) dim / 100f else 0f
+        } catch (_: Throwable) {
+            // viewCarouselDim peut ne pas être encore régénéré dans le binding (= XML pas re-buildé).
         }
     }
 }

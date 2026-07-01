@@ -45,19 +45,28 @@ import kotlin.collections.map
 object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, ProgressiveServersProvider {
     override val name = "Frembed"
 
-    override val defaultPortalUrl: String = "https://audin213.com/"
+    // 2026-06-29 (REPAIR — user "mets la nouvelle URL directement en principal") :
+    //   domaine courant = frembed.hair (audin213.com + frembed.bond = anciens, on
+    //   les ignore dans le cache pour que les users existants basculent direct).
+    override val defaultPortalUrl: String = "https://frembed.hair/"
 
     override val portalUrl: String = defaultPortalUrl
         get() {
             val cachePortalURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_PORTAL_URL)
-            return cachePortalURL.ifEmpty { field }
+            val isValid = cachePortalURL.length > 10 && cachePortalURL.startsWith("http") &&
+                !cachePortalURL.contains("audin213") && !cachePortalURL.contains("frembed.bond")
+            return if (isValid) cachePortalURL else field
         }
 
-    override val defaultBaseUrl: String = "https://frembed.bond/"
+    // 2026-06-29 : URL de base = frembed.hair en dur (domaine courant).
+    override val defaultBaseUrl: String = "https://frembed.hair/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
-            return cacheURL.ifEmpty { field }
+            // ignore cache pourri (= "/", vide, sans http) + anciens domaines (audin213, bond)
+            val isValid = cacheURL.length > 10 && cacheURL.startsWith("http") &&
+                !cacheURL.contains("audin213") && !cacheURL.contains("frembed.bond")
+            return if (isValid) cacheURL else field
         }
 
     override val logo: String
