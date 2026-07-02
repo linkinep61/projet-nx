@@ -438,6 +438,26 @@
      * boutons hosts (hydrax/uqload/vidhide/sendvid/…). Trouve les boutons hosts
      * dynamiquement sans whitelist.
      */
+    // 2026-07-02 : genres DATE ("Nouveautes" = date d'ajout, toutes annees ; "Sorties <annee>").
+    //   Filtres server-side du catalogue (sortField/releaseYear) -> parseCards.
+    async getGenre(id, page) {
+      var p = page || 1;
+      var year = new Date().getFullYear();
+      var path;
+      if (id === '__recent__') {
+        path = '/catalogue?sortField=createdAt&sortOrder=desc&page=' + p;
+      } else if (id === '__releases_year__') {
+        path = '/catalogue?releaseYear=' + year + '&sortField=releaseDate&sortOrder=desc&page=' + p;
+      } else {
+        return [];
+      }
+      try {
+        var html = await getText(path);
+        return parseCards(html);
+      } catch (e) {
+        return [];
+      }
+    },
     async extractServers(lang) {
       // Si langue passée → click le bouton langue AVANT le scan des hosts.
       // Le site renouvelle les tokens nmlnode selon la langue choisie.
