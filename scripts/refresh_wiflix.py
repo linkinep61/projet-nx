@@ -38,8 +38,8 @@ def setup_warp():
     elif os.path.exists("/etc/os-release"):
         print("[VPN] Installation de Cloudflare WARP...", file=sys.stderr)
         cmds = [
-            "curl -fsSL https://pkg.cloudflarewarp.com/pubkey.gpg | sudo gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg",
-            'echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflarewarp.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list',
+            "curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg",
+            'echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list',
             "sudo apt-get update -qq && sudo apt-get install -y -qq cloudflare-warp",
         ]
         for c in cmds:
@@ -53,10 +53,13 @@ def setup_warp():
     for cmd in [
         ["warp-cli", "--accept-tos", "registration", "new"],
         ["warp-cli", "--accept-tos", "mode", "proxy"],
+        ["warp-cli", "--accept-tos", "set-mode", "proxy"],  # syntaxe récente
+        ["warp-cli", "--accept-tos", "proxy", "port", "40000"],
         ["warp-cli", "--accept-tos", "connect"],
     ]:
-        subprocess.run(cmd, capture_output=True)
-    time.sleep(6)
+        r = subprocess.run(cmd, capture_output=True)
+        print(f"[VPN] {' '.join(cmd[1:])} → rc={r.returncode} {r.stderr.decode()[:120]}", file=sys.stderr)
+    time.sleep(8)
     test = subprocess.run(
         ["curl", "-s", "-x", "socks5h://127.0.0.1:40000", "--max-time", "10",
          "https://ipinfo.io/ip"], capture_output=True)
