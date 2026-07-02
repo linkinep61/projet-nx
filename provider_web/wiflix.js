@@ -168,6 +168,21 @@
     // RECHERCHE : POST DLE /index.php?do=search (same-origin, cookie h_check=25).
     async search(q, page) {
       try { document.cookie = 'h_check=25; path=/'; } catch (e) {}
+      if (!q || !String(q).trim()) {
+        try {
+          var gdoc = parseHtml(await getText('/'));
+          var sbs = gdoc.querySelectorAll('div.side-b');
+          var gblock = sbs[1] || sbs[0];
+          var gout = [];
+          if (gblock) gblock.querySelectorAll('ul li a').forEach(function (a) {
+            var gh = a.getAttribute('href') || '';
+            var gslug = gh.replace(/\/$/, '').split('/').pop();
+            var gname = (a.textContent || '').trim();
+            if (gslug && gname) gout.push({ type: 'genre', id: gslug, title: gname });
+          });
+          return gout;
+        } catch (e) { return []; }
+      }
       const p = (page || 1);
       const r = await fetch('/index.php?do=search&subaction=search&story=' + encodeURIComponent(q) + '&search_start=' + (p - 1) + '&full_search=0&result_from=' + ((p - 1) * 10 + 1), { headers: { 'Accept': 'text/html' } });
       const html = await r.text();
@@ -203,7 +218,9 @@
         }
         return out;
       }
-      return [];
+      // Genre du SITE (slug barre laterale) -> films de ce genre.
+      var gp = p <= 1 ? '/film-en-streaming/' + id + '/' : '/film-en-streaming/' + id + '/page/' + p + '/';
+      try { return parseMovCards(parseHtml(await getText(gp))); } catch (e) { return []; }
     },
     async getTvShows(page) {
       const p = page || 1;
