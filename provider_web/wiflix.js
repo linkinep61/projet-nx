@@ -187,6 +187,44 @@
         } catch (e) {}
         return gout;
       }
+      try {
+        var __hash = (typeof dle_login_hash !== 'undefined') ? dle_login_hash : (window.dle_login_hash || '');
+        var __ar = await fetch('/index.php?controller=ajax&mod=search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
+          body: 'query=' + encodeURIComponent(q) + '&skin=flemmixnew&user_hash=' + encodeURIComponent(__hash)
+        });
+        var __adoc = parseHtml(await __ar.text());
+        var __ai = [];
+        var __links = __adoc.querySelectorAll('a');
+        for (var __k = 0; __k < __links.length; __k++) {
+          var __a = __links[__k];
+          var __h = __a.getAttribute('href') || '';
+          if (!/streaming|saison-complete/.test(__h)) continue;
+          var __info = __a.querySelector('.fsr-info');
+          var __te = __info ? (__info.firstElementChild || __info) : __a;
+          var __t = decode((__te.textContent || '').replace(/\s+/g, ' ').trim());
+          __t = __t.replace(/\s+(19|20)\d{2}\s+(French|TrueFrench|VOSTFR|VF|Multi|VOSTA|VO)\b.*$/i, '').trim();
+          if (!__t) continue;
+          var __img = __a.querySelector('.fsr-poster img');
+          var __po = __img ? (__img.getAttribute('src') || __img.getAttribute('data-src') || '') : '';
+          if (__po && __po.indexOf('http') !== 0) __po = BASE + (__po.charAt(0) === '/' ? __po : '/' + __po);
+          var __id = __h.replace(/^https?:\/\/[^\/]+\//, '').replace(/^\//, '');
+          var __ty = /serie-en-streaming|saison-complete/.test(__h) ? 'tv' : 'movie';
+          __ai.push({ type: __ty, id: __id, title: __t, poster: __po });
+        }
+        if (__ai.length) {
+          var __anq = String(q).toLowerCase().replace(/[^a-z0-9]/g, '');
+          if (__anq.length >= 2) {
+            var __an = function (t) { return String(t || '').toLowerCase().replace(/[^a-z0-9]/g, ''); };
+            var __ap = __ai.filter(function (it) { return __an(it.title).indexOf(__anq) === 0; });
+            if (__ap.length) return __ap;
+            var __ac = __ai.filter(function (it) { return __an(it.title).indexOf(__anq) >= 0; });
+            if (__ac.length) return __ac;
+          }
+          return __ai;
+        }
+      } catch (e) {}
       const p = (page || 1);
       const r = await fetch('/index.php?do=search&subaction=search&story=' + encodeURIComponent(q) + '&search_start=' + (p - 1) + '&full_search=0&result_from=' + ((p - 1) * 10 + 1), { headers: { 'Accept': 'text/html' } });
       const html = await r.text();
