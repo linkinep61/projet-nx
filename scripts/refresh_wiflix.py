@@ -150,18 +150,35 @@ def extract_sources_dom(page):
         return []
 
 
-def goto(page, path, wait_ms=2500):
+STEALTH_JS = """
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  window.chrome = window.chrome || { runtime: {}, app: {}, csi: function(){}, loadTimes: function(){} };
+  Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+  Object.defineProperty(navigator, 'languages', { get: () => ['fr-FR','fr','en-US','en'] });
+  try { Object.defineProperty(navigator, 'platform', { get: () => 'Linux armv8l' }); } catch(e){}
+"""
+
+def goto(page, path, wait_ms=2500, diag=False):
     url = path if path.startswith("http") else BASE + "/" + path.lstrip("/")
-    page.goto(url, wait_until="domcontentloaded", timeout=45000)
-    # attendre que le challenge CF se résolve (le vrai contenu apparaît)
-    for _ in range(20):
+    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    # attendre que le challenge CF se résolve (le vrai contenu apparaît). Jusqu'à 45s.
+    got = False
+    for _ in range(45):
         try:
-            has = page.evaluate("() => !!document.querySelector('div.mov, div.tabs-sel, header.full-title, [onclick*=loadVideo]')")
+            has = page.evaluate("() => !!document.querySelector('div.mov, div.tabs-sel, header.full-title, [onclick*=loadVideo], ul.eplist')")
             if has:
+                got = True
                 break
         except Exception:
             pass
         page.wait_for_timeout(1000)
+    if diag or not got:
+        try:
+            title = page.title()
+            btxt = page.evaluate("() => (document.body ? document.body.innerText : '').slice(0,180).replace(/\\s+/g,' ')")
+            print(f"  [diag {path}] got={got} origin={page.evaluate('()=>location.origin')} title={title!r} body={btxt!r}", file=sys.stderr)
+        except Exception as e:
+            print(f"  [diag {path}] err {e}", file=sys.stderr)
     page.wait_for_timeout(wait_ms)
 
 
@@ -183,10 +200,11 @@ def run():
             user_agent="Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
         )
+        ctx.add_init_script(STEALTH_JS)
         page = ctx.new_page()
 
         # 1) home → domaine live après redirection
-        goto(page, "/")
+        goto(page, "/", diag=True)
         data["domain"] = page.evaluate("() => location.origin")
         print(f"[wiflix] domaine live = {data['domain']}", file=sys.stderr)
 
@@ -201,28 +219,4 @@ def run():
 
         # 3) année en cours
         goto(page, f"/xfsearch/{YEAR}/")
-        data["year"][str(YEAR)] = parse_mov_cards_dom(page)
-        print(f"[wiflix] year {YEAR} = {len(data['year'][str(YEAR)])}", file=sys.stderr)
-
-        # 4) sources par film (bornées) — récents films + séries
-        pool = (data["recentFilms"] + data["recentSeries"])[:MAX_FILMS_SOURCES]
-        for it in pool:
-            try:
-                goto(page, it["id"], wait_ms=1500)
-                srcs = extract_sources_dom(page)
-                if srcs:
-                    data["sources"][it["id"]] = srcs
-            except Exception as e:
-                print(f"  src err {it['id']}: {e}", file=sys.stderr)
-        print(f"[wiflix] sources pour {len(data['sources'])} items", file=sys.stderr)
-
-        browser.close()
-
-    os.makedirs("provider_web", exist_ok=True)
-    with open("provider_web/wiflix.json", "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
-    print(f"[wiflix] wiflix.json écrit ({len(json.dumps(data))} o)", file=sys.stderr)
-
-
-if __name__ == "__main__":
-    run()
+        data["year"][
