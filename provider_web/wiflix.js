@@ -197,9 +197,11 @@
         var __pool = __items.filter(function (it) { return __norm(it.title).indexOf(__nq) === 0; });
         if (!__pool.length) __pool = __items.filter(function (it) { return __norm(it.title).indexOf(__nq) >= 0; });
         if (__pool.length) {
-          var __seen = {}, __out = [];
-          __pool.forEach(function (it) { var k = __norm(it.title); if (!__seen[k]) { __seen[k] = 1; __out.push(it); } });
-          return __out;
+          __pool.forEach(function (it) {
+            var sm = String(it.id || '').match(/saison-(\d+)/i);
+            if (sm && !/saison/i.test(String(it.title || ''))) it.title = String(it.title || '').trim() + ' - Saison ' + sm[1];
+          });
+          return __pool;
         }
       }
       return __items;
