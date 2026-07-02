@@ -79,9 +79,9 @@ def goto(page, path, wait_ms=2500, diag=False):
 
 def run():
     setup_warp()
-    from playwright.sync_api import sync_playwright
+    from patchright.sync_api import sync_playwright
     data = {"generatedAt": int(time.time()), "domain": BASE, "recentFilms": [], "recentSeries": [], "year": {}, "sources": {}}
-    la = {"headless": False, "args": ["--no-sandbox","--disable-blink-features=AutomationControlled","--disable-dev-shm-usage"]}
+    la = {"headless": False}
     if WARP_PROXY: la["proxy"] = {"server": WARP_PROXY}
     with sync_playwright() as pw:
         b = pw.chromium.launch(**la)
