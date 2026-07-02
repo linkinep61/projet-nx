@@ -169,19 +169,23 @@
     async search(q, page) {
       try { document.cookie = 'h_check=25; path=/'; } catch (e) {}
       if (!q || !String(q).trim()) {
+        var __y = new Date().getFullYear();
+        var gout = [
+          { type: 'genre', id: '__releases_year__', title: 'Sorties ' + __y },
+          { type: 'genre', id: '__recent__', title: 'Nouveautes' }
+        ];
         try {
           var gdoc = parseHtml(await getText('/'));
           var sbs = gdoc.querySelectorAll('div.side-b');
           var gblock = sbs[1] || sbs[0];
-          var gout = [];
           if (gblock) gblock.querySelectorAll('ul li a').forEach(function (a) {
             var gh = a.getAttribute('href') || '';
             var gslug = gh.replace(/\/$/, '').split('/').pop();
             var gname = (a.textContent || '').trim();
             if (gslug && gname) gout.push({ type: 'genre', id: gslug, title: gname });
           });
-          return gout;
-        } catch (e) { return []; }
+        } catch (e) {}
+        return gout;
       }
       const p = (page || 1);
       const r = await fetch('/index.php?do=search&subaction=search&story=' + encodeURIComponent(q) + '&search_start=' + (p - 1) + '&full_search=0&result_from=' + ((p - 1) * 10 + 1), { headers: { 'Accept': 'text/html' } });
