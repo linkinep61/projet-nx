@@ -23,10 +23,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Playwright (Chromium) + xvfb
+      - name: Install patchright (Playwright anti-CF) + xvfb
         run: |
-          pip install --quiet playwright
-          python -m playwright install chromium --with-deps
+          pip install --quiet patchright
+          python -m patchright install chromium --with-deps
           sudo apt-get install -y -qq xvfb
 
       - name: Run Wiflix scraper (WARP + Playwright headed sous xvfb)
