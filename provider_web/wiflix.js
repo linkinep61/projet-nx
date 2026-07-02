@@ -186,7 +186,15 @@
       const p = (page || 1);
       const r = await fetch('/index.php?do=search&subaction=search&story=' + encodeURIComponent(q) + '&search_start=' + (p - 1) + '&full_search=0&result_from=' + ((p - 1) * 10 + 1), { headers: { 'Accept': 'text/html' } });
       const html = await r.text();
-      return parseMovCards(parseHtml(html));
+      var __items = parseMovCards(parseHtml(html));
+      var __nq = String(q).toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (__nq.length >= 2) {
+        var __m = __items.filter(function (it) {
+          return String(it.title || '').toLowerCase().replace(/[^a-z0-9]/g, '').indexOf(__nq) >= 0;
+        });
+        if (__m.length) return __m;
+      }
+      return __items;
     },
 
     // FILMS : /film-en-streaming/ (page 1) puis /film-en-streaming/page/N/.
