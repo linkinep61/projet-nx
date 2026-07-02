@@ -194,12 +194,12 @@
       var __nq = String(q).toLowerCase().replace(/[^a-z0-9]/g, '');
       if (__nq.length >= 2) {
         var __norm = function (t) { return String(t || '').toLowerCase().replace(/[^a-z0-9]/g, ''); };
-        var __m = __items.filter(function (it) { return __norm(it.title).indexOf(__nq) >= 0; });
-        if (__m.length) {
-          __m.sort(function (a, b) {
-            return (__norm(a.title).indexOf(__nq) === 0 ? 0 : 1) - (__norm(b.title).indexOf(__nq) === 0 ? 0 : 1);
-          });
-          return __m;
+        var __pool = __items.filter(function (it) { return __norm(it.title).indexOf(__nq) === 0; });
+        if (!__pool.length) __pool = __items.filter(function (it) { return __norm(it.title).indexOf(__nq) >= 0; });
+        if (__pool.length) {
+          var __seen = {}, __out = [];
+          __pool.forEach(function (it) { var k = __norm(it.title); if (!__seen[k]) { __seen[k] = 1; __out.push(it); } });
+          return __out;
         }
       }
       return __items;
