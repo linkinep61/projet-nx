@@ -23,13 +23,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Playwright (Chromium)
+      - name: Install Playwright (Chromium) + xvfb
         run: |
           pip install --quiet playwright
           python -m playwright install chromium --with-deps
+          sudo apt-get install -y -qq xvfb
 
-      - name: Run Wiflix scraper (WARP + Playwright)
-        run: python scripts/refresh_wiflix.py
+      - name: Run Wiflix scraper (WARP + Playwright headed sous xvfb)
+        run: xvfb-run -a --server-args="-screen 0 1280x1024x24" python scripts/refresh_wiflix.py
 
       - name: Commit wiflix.json
         run: |
