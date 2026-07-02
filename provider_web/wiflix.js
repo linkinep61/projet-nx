@@ -188,6 +188,28 @@
     },
 
     // SÉRIES : /serie-en-streaming/ (page 1) puis /serie-en-streaming/page/N/.
+    async getGenre(id, page) {
+      var p = page || 1;
+      var year = new Date().getFullYear();
+      if (id === '__releases_year__') {
+        var yp = p <= 1 ? '/xfsearch/' + year + '/' : '/xfsearch/' + year + '/page/' + p + '/';
+        try { return parseMovCards(parseHtml(await getText(yp))); } catch (e) { return []; }
+      }
+      if (id === '__recent__') {
+        var fp = p <= 1 ? '/film-en-streaming/' : '/film-en-streaming/page/' + p + '/';
+        var sp = p <= 1 ? '/serie-en-streaming/' : '/serie-en-streaming/page/' + p + '/';
+        var films = [], series = [];
+        try { films = parseMovCards(parseHtml(await getText(fp))); } catch (e) {}
+        try { series = parseMovCards(parseHtml(await getText(sp))); } catch (e) {}
+        var out = [], i = 0, j = 0;
+        while (i < films.length || j < series.length) {
+          if (i < films.length) out.push(films[i++]);
+          if (j < series.length) out.push(series[j++]);
+        }
+        return out;
+      }
+      return [];
+    },
     async getTvShows(page) {
       const p = page || 1;
       const path = p <= 1 ? '/serie-en-streaming/' : '/serie-en-streaming/page/' + p + '/';
