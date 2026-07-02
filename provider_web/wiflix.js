@@ -168,13 +168,8 @@
     // RECHERCHE : POST DLE /index.php?do=search (same-origin, cookie h_check=25).
     async search(q, page) {
       try { document.cookie = 'h_check=25; path=/'; } catch (e) {}
-      const body = 'do=search&subaction=search&story=' + encodeURIComponent(q) +
-        '&search_start=' + (page || 1) + '&full_search=0&result_from=' + (((page || 1) - 1) * 10 + 1);
-      const r = await fetch('/index.php?do=search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body,
-      });
+      const p = (page || 1);
+      const r = await fetch('/index.php?do=search&subaction=search&story=' + encodeURIComponent(q) + '&search_start=' + (p - 1) + '&full_search=0&result_from=' + ((p - 1) * 10 + 1), { headers: { 'Accept': 'text/html' } });
       const html = await r.text();
       return parseMovCards(parseHtml(html));
     },
