@@ -80,8 +80,8 @@
 
   // og tags d'une page détail (SSR) → title/poster/overview/year
   function parseDetail(html, id) {
-    const og = (p) => (html.match(new RegExp('og:' + p + '" content="([^"]*)"')) || [])[1] || '';
-    let title = decode(og('title')).replace(/\s*[—|].*$/, '').trim();
+    const ogD=(p)=>{const el=document.querySelector('meta[property="og:'+p+'"]')||document.querySelector('meta[name="og:'+p+'"]');return el?(el.getAttribute('content')||''):'';};const ogH=(p)=>(html&&(html.match(new RegExp('og:'+p+'" content="([^"]*)"'))||[])[1])||'';const og=(p)=>ogD(p)||ogH(p);
+    let title = decode(og('title')).replace(/\s*[—|].*$/, '').trim(); if(!title){const h1=document.querySelector('h1'); title=h1?h1.textContent.trim():'';}
     const poster = og('image');
     const overview = decode(og('description'));
     return {
@@ -311,8 +311,7 @@
     },
 
     async getMovie(id) {
-      const html = await getText('/' + id);
-      return parseDetail(html, id);
+      return parseDetail(document.documentElement.outerHTML, id);
     },
 
     /**
