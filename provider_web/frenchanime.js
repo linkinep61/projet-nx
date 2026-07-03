@@ -1,7 +1,6 @@
-/* frenchanime.js — French Anime (french-anime.com) en WebJS.
- * CF géré par le WebView. Serveurs = embeds host (vidmoly/voe/luluvid/savefiles/up4fun...)
- * stockés dans div.eps au format "num!url1,url2,...". getVideo = Extractor.extract in-app.
- * PAS de TMDB (jaquettes anime non conformes) → posters du site.
+/* frenchanime.js — French Anime (french-anime.com) en WebJS. CF via WebView.
+ * Serveurs = embeds host dans div.eps "num!url1,url2,...". getVideo = Extractor.extract.
+ * PAS de TMDB (jaquettes anime non conformes) -> posters du site.
  */
 (function () {
   var BASE = location.origin;
@@ -39,6 +38,7 @@
     }).filter(Boolean);
   }
   async function getHome(){
+    try{ console.log('FA_DIAG url='+location.href+' | title='+document.title+' | bodyLen='+(document.body?document.body.innerText.length:0)+' | blockMain='+document.querySelectorAll('.block-main').length+' | mov='+document.querySelectorAll('div.mov').length); }catch(e){}
     var cats=[].slice.call(document.querySelectorAll('.block-main')).map(function(b){
       var t=b.querySelector('.block-title,h2,.bmt');
       return { name:clean(t?t.textContent:'')||'Animes', items:parseList(b) };
