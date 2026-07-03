@@ -1,1 +1,9 @@
-[]
+[
+  {
+    "name": "CoflixTest",
+    "baseUrl": "https://coflix.trade",
+    "jsUrl": "https://raw.githubusercontent.com/linkinep61/projet-nx/main/provider_web/coflix.js",
+    "enableNativeServers": true,
+    "tmdbPosters": false
+  }
+]
