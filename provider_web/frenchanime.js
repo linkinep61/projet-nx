@@ -1,14 +1,11 @@
 /* frenchanime.js — French Anime (french-anime.com) en WebJS. CF via WebView.
  * Serveurs = embeds host dans div.eps "num!url1,url2,...". getVideo = Extractor.extract.
- * PAS de TMDB -> posters du site. getHome/getMovies/getTvShows FETCH (cf_clearance cookie).
- * getHome : carrousel (.owl-carousel -> FEATURED) + 3 rails site (.block-main) + rails EXTRA
- *   via paths categorie (genre/ = 403 CF -> on utilise animes-vf/animes-vostfr qui MARCHENT).
- * Onglets FR/VOSTFR : getMovies (FR)=films VF (isSeries=false)+animes VF (isSeries=true) ;
- *                     getTvShows (VOSTFR)=animes VOSTFR (isMovie=false)+films VOSTFR (isMovie=true).
+ * PAS de TMDB -> posters du site. IMPORTANT : french-anime CF THROTTLE l'IP si trop de
+ * fetches -> getHome ne fait QU'UN fetch (carrousel + 3 rails du site). Onglets FR/VOSTFR
+ * ont leurs propres fetches (2 chacun). Ne PAS ajouter de rails multi-fetch au home.
  */
 (function () {
   var BASE = location.origin;
-  var EXTRA = [['animes-vf/page/1/','Derniers Animes VF'],['animes-vostfr/page/1/','Derniers Animes VOSTFR'],['films-vf-vostfr/page/2','Films (page 2)']];
   function abs(u){ if(!u) return u; if(u.indexOf('http')===0) return u; return BASE+(u.charAt(0)==='/'?'':'/')+u; }
   function relId(href){ try{ return new URL(href,BASE).pathname.replace(/^\//,''); }catch(e){ return href; } }
   function clean(s){ return (s||'').replace(/voir la suite\.*/i,'').replace(/\s+/g,' ').trim(); }
@@ -49,6 +46,7 @@
     }).filter(Boolean);
   }
   async function getHome(){
+    // UN SEUL fetch (carrousel + 3 rails du site) — french-anime throttle si +de fetches.
     var doc=document;
     try{ var d=await fetchDoc(''); if(d.querySelectorAll('.block-main').length||d.querySelectorAll('div.mov').length||d.querySelectorAll('.owl-carousel .item').length) doc=d; }catch(e){}
     var cats=[];
@@ -57,9 +55,6 @@
       var t=b.querySelector('.block-title,h2,.bmt'); var items=parseList(b);
       if(items.length) cats.push({ name:clean(t?t.textContent:'')||'Animes', items:items });
     });
-    for(var i=0;i<EXTRA.length;i++){
-      try{ var xd=await fetchDoc(EXTRA[i][0]); var xi=parseList(xd); if(xi.length) cats.push({ name:EXTRA[i][1], items:xi }); }catch(e){}
-    }
     if(!cats.length){ var all=parseList(doc); if(all.length) cats=[{name:'Nouveautes',items:all}]; }
     return cats;
   }
