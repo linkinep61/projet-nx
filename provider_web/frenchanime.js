@@ -1,13 +1,14 @@
 /* frenchanime.js — French Anime (french-anime.com) en WebJS. CF via WebView.
  * Serveurs = embeds host dans div.eps "num!url1,url2,...". getVideo = Extractor.extract.
  * PAS de TMDB -> posters du site. getHome/getMovies/getTvShows FETCH (cf_clearance cookie).
- * getHome : carrousel (.owl-carousel -> FEATURED) + 3 rails site (.block-main) + rails GENRES (fetch sequentiel).
+ * getHome : carrousel (.owl-carousel -> FEATURED) + 3 rails site (.block-main) + rails EXTRA
+ *   via paths categorie (genre/ = 403 CF -> on utilise animes-vf/animes-vostfr qui MARCHENT).
  * Onglets FR/VOSTFR : getMovies (FR)=films VF (isSeries=false)+animes VF (isSeries=true) ;
  *                     getTvShows (VOSTFR)=animes VOSTFR (isMovie=false)+films VOSTFR (isMovie=true).
  */
 (function () {
   var BASE = location.origin;
-  var GENRES = [['action','Action'],['aventure','Aventure'],['comedie','Comedie'],['fantasy','Fantasy'],['shonen','Shonen'],['romance','Romance']];
+  var EXTRA = [['animes-vf/page/1/','Derniers Animes VF'],['animes-vostfr/page/1/','Derniers Animes VOSTFR'],['films-vf-vostfr/page/2','Films (page 2)']];
   function abs(u){ if(!u) return u; if(u.indexOf('http')===0) return u; return BASE+(u.charAt(0)==='/'?'':'/')+u; }
   function relId(href){ try{ return new URL(href,BASE).pathname.replace(/^\//,''); }catch(e){ return href; } }
   function clean(s){ return (s||'').replace(/voir la suite\.*/i,'').replace(/\s+/g,' ').trim(); }
@@ -56,10 +57,8 @@
       var t=b.querySelector('.block-title,h2,.bmt'); var items=parseList(b);
       if(items.length) cats.push({ name:clean(t?t.textContent:'')||'Animes', items:items });
     });
-    // Rails GENRES (fetch SEQUENTIEL pour ne pas throttler le CF)
-    for(var gi=0; gi<GENRES.length; gi++){
-      try{ var gd=await fetchDoc('genre/'+GENRES[gi][0]+'/page/1'); var gitems=parseList(gd);
-        if(gitems.length) cats.push({ name:GENRES[gi][1], items:gitems }); }catch(e){}
+    for(var i=0;i<EXTRA.length;i++){
+      try{ var xd=await fetchDoc(EXTRA[i][0]); var xi=parseList(xd); if(xi.length) cats.push({ name:EXTRA[i][1], items:xi }); }catch(e){}
     }
     if(!cats.length){ var all=parseList(doc); if(all.length) cats=[{name:'Nouveautes',items:all}]; }
     return cats;
