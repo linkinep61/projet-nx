@@ -1,23 +1,30 @@
 /* frenchanime.js — French Anime (french-anime.com) en WebJS. CF via WebView.
  * Serveurs = embeds host dans div.eps "num!url1,url2,...". getVideo = Extractor.extract.
  * PAS de TMDB -> posters du site. getHome/getMovies/getTvShows FETCH (cf_clearance cookie).
- * Onglets FR/VOSTFR : getMovies (FR) = films VF (isSeries=false) + animes VF (isSeries=true) ;
- *                     getTvShows (VOSTFR) = animes VOSTFR (isMovie=false) + films VOSTFR (isMovie=true).
+ * getHome : carrousel (.owl-carousel .item -> FEATURED name="") + rails (.block-main).
+ * Onglets FR/VOSTFR : getMovies (FR)=films VF (isSeries=false)+animes VF (isSeries=true) ;
+ *                     getTvShows (VOSTFR)=animes VOSTFR (isMovie=false)+films VOSTFR (isMovie=true).
  */
 (function () {
   var BASE = location.origin;
   function abs(u){ if(!u) return u; if(u.indexOf('http')===0) return u; return BASE+(u.charAt(0)==='/'?'':'/')+u; }
   function relId(href){ try{ return new URL(href,BASE).pathname.replace(/^\//,''); }catch(e){ return href; } }
   function clean(s){ return (s||'').replace(/voir la suite\.*/i,'').replace(/\s+/g,' ').trim(); }
+  function imgUrl(img){ return img?(img.getAttribute('src')||img.getAttribute('data-src')||img.getAttribute('data-lazy-src')||img.getAttribute('data-original')):''; }
   function movVF(m){ var s=m.querySelector('.block-sai')||m.querySelector('.nbloc1'); return /french/i.test(s?s.textContent:''); }
   function parseMov(m){
     var a=m.querySelector('a.mov-t'); if(!a) return null;
     var href=a.getAttribute('href'); if(!href) return null;
-    var img=m.querySelector('.mov-i img');
-    var poster=img?(img.getAttribute('src')||img.getAttribute('data-src')||img.getAttribute('data-lazy-src')):'';
-    return { type:m.querySelector('.block-ep')?'tv':'movie', id:relId(href), title:a.textContent.trim(), poster:abs(poster) };
+    return { type:m.querySelector('.block-ep')?'tv':'movie', id:relId(href), title:a.textContent.trim(), poster:abs(imgUrl(m.querySelector('.mov-i img'))) };
   }
   function parseList(root){ return [].slice.call((root||document).querySelectorAll('div.mov')).map(parseMov).filter(Boolean); }
+  function parseOwl(doc){
+    return [].slice.call((doc||document).querySelectorAll('.owl-carousel .item')).map(function(it){
+      var a=it.querySelector('a'); if(!a) return null; var href=a.getAttribute('href'); if(!href) return null;
+      var t=(it.querySelector('.mov-t')||a).textContent;
+      return { type:it.querySelector('.block-ep')?'tv':'movie', id:relId(href), title:clean(t), poster:abs(imgUrl(it.querySelector('img'))) };
+    }).filter(Boolean);
+  }
   async function fetchDoc(path){
     var url = path.indexOf('http')===0 ? path : (BASE+'/'+path.replace(/^\//,''));
     var r=await fetch(url,{credentials:'include'});
@@ -26,9 +33,8 @@
   function detailBasics(doc){ doc=doc||document;
     var h1=doc.querySelector('h1[itemprop=name]');
     var pimg=doc.querySelector('div.mov-img img[itemprop=thumbnailUrl]')||doc.querySelector('.mov-img img');
-    var poster=pimg?(pimg.getAttribute('src')||pimg.getAttribute('data-src')):'';
     var d=doc.querySelector('[itemprop=description]')||doc.querySelector('div.mov-desc');
-    return { title:h1?h1.textContent.trim():'', poster:abs(poster), overview:d?d.textContent.trim():'' };
+    return { title:h1?h1.textContent.trim():'', poster:abs(imgUrl(pimg)), overview:d?d.textContent.trim():'' };
   }
   function parseEps(doc){ doc=doc||document;
     var eps=doc.querySelector('div.eps'); if(!eps) return [];
@@ -42,11 +48,13 @@
   }
   async function getHome(){
     var doc=document;
-    try{ var d=await fetchDoc(''); if(d.querySelectorAll('.block-main').length || d.querySelectorAll('div.mov').length) doc=d; }catch(e){}
-    var cats=[].slice.call(doc.querySelectorAll('.block-main')).map(function(b){
-      var t=b.querySelector('.block-title,h2,.bmt');
-      return { name:clean(t?t.textContent:'')||'Animes', items:parseList(b) };
-    }).filter(function(c){return c.items.length;});
+    try{ var d=await fetchDoc(''); if(d.querySelectorAll('.block-main').length||d.querySelectorAll('div.mov').length||d.querySelectorAll('.owl-carousel .item').length) doc=d; }catch(e){}
+    var cats=[];
+    var feat=parseOwl(doc); if(feat.length) cats.push({ name:'', items:feat }); // FEATURED -> carrousel
+    [].slice.call(doc.querySelectorAll('.block-main')).forEach(function(b){
+      var t=b.querySelector('.block-title,h2,.bmt'); var items=parseList(b);
+      if(items.length) cats.push({ name:clean(t?t.textContent:'')||'Animes', items:items });
+    });
     if(!cats.length){ var all=parseList(doc); if(all.length) cats=[{name:'Nouveautes',items:all}]; }
     return cats;
   }
