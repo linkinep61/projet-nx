@@ -1,13 +1,15 @@
 /* frenchanime.js — French Anime (french-anime.com) en WebJS. CF via WebView.
  * Serveurs = embeds host dans div.eps "num!url1,url2,...". getVideo = Extractor.extract.
- * PAS de TMDB (jaquettes anime non conformes) -> posters du site.
- * getHome FETCH la home (cf_clearance cookie) -> robuste meme si le WebView est reste sur une fiche.
+ * PAS de TMDB -> posters du site. getHome/getMovies/getTvShows FETCH (cf_clearance cookie).
+ * Onglets FR/VOSTFR : getMovies (FR) = films VF (isSeries=false) + animes VF (isSeries=true) ;
+ *                     getTvShows (VOSTFR) = animes VOSTFR (isMovie=false) + films VOSTFR (isMovie=true).
  */
 (function () {
   var BASE = location.origin;
   function abs(u){ if(!u) return u; if(u.indexOf('http')===0) return u; return BASE+(u.charAt(0)==='/'?'':'/')+u; }
   function relId(href){ try{ return new URL(href,BASE).pathname.replace(/^\//,''); }catch(e){ return href; } }
   function clean(s){ return (s||'').replace(/voir la suite\.*/i,'').replace(/\s+/g,' ').trim(); }
+  function movVF(m){ var s=m.querySelector('.block-sai')||m.querySelector('.nbloc1'); return /french/i.test(s?s.textContent:''); }
   function parseMov(m){
     var a=m.querySelector('a.mov-t'); if(!a) return null;
     var href=a.getAttribute('href'); if(!href) return null;
@@ -39,8 +41,6 @@
     }).filter(Boolean);
   }
   async function getHome(){
-    // FETCH la home (porte cf_clearance) au lieu de lire la page courante du WebView
-    // (qui peut etre restee sur une fiche/serie -> pas de .block-main -> 0 cat -> cache vide).
     var doc=document;
     try{ var d=await fetchDoc(''); if(d.querySelectorAll('.block-main').length || d.querySelectorAll('div.mov').length) doc=d; }catch(e){}
     var cats=[].slice.call(doc.querySelectorAll('.block-main')).map(function(b){
@@ -61,8 +61,24 @@
     return parseList(await fetchDoc('index.php?do=search&subaction=search&story='+encodeURIComponent(query)));
   }
   async function getGenre(id,page){ page=page||1; return parseList(await fetchDoc('genre/'+id+'/page/'+page)); }
-  async function getMovies(page){ page=page||1; return parseList(await fetchDoc('films-vf-vostfr/page/'+page)); }
-  async function getTvShows(page){ page=page||1; return parseList(await fetchDoc('animes-vostfr/page/'+page+'/')); }
+  async function getMovies(page){ page=page||1; var out=[];
+    try{ var d1=await fetchDoc('films-vf-vostfr/page/'+page);
+      [].slice.call(d1.querySelectorAll('div.mov')).forEach(function(m){ if(movVF(m)){ var it=parseMov(m); if(it){ it.type='movie'; it.isSeries=false; out.push(it); } } });
+    }catch(e){}
+    try{ var d2=await fetchDoc('animes-vf/page/'+page+'/');
+      [].slice.call(d2.querySelectorAll('div.mov')).forEach(function(m){ var it=parseMov(m); if(it){ it.type='movie'; it.isSeries=true; out.push(it); } });
+    }catch(e){}
+    return out;
+  }
+  async function getTvShows(page){ page=page||1; var out=[];
+    try{ var d1=await fetchDoc('animes-vostfr/page/'+page+'/');
+      [].slice.call(d1.querySelectorAll('div.mov')).forEach(function(m){ var it=parseMov(m); if(it){ it.type='tv'; it.isMovie=false; out.push(it); } });
+    }catch(e){}
+    try{ var d2=await fetchDoc('films-vf-vostfr/page/'+page);
+      [].slice.call(d2.querySelectorAll('div.mov')).forEach(function(m){ if(!movVF(m)){ var it=parseMov(m); if(it){ it.type='tv'; it.isMovie=true; out.push(it); } } });
+    }catch(e){}
+    return out;
+  }
   async function getMovie(id){ var b=detailBasics(document); return { id:id, type:'movie', title:b.title, poster:b.poster, overview:b.overview }; }
   async function getTvShow(id,lang){
     var b=detailBasics(document);
