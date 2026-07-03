@@ -1,10 +1,9 @@
 /*
- * papadustream-v2.js — Provider JS hébergé (moteur WebJsProvider), backup PAR TITRE.
- * Site : https://papadustream-v2.org (DLE-like, SANS captcha). Nom affiché "Papadustream V2".
- * Sources = liste de serveurs EN CLAIR dans le HTML de la page (JSON server_name/version/link).
- *   link = host direct (vidzy.cc, extrait par l'app) OU redirecteur kokoflix.lol/*_go.php -> Dood.
- * Recherche : /?s=<query> (HTML). Films OK ; séries = suivi.
- * Contrat WebJsProvider : search, getMovie, getTvShow, getEpisodesBySeason, extractServers.
+ * papadustream-v2.js — backup PAR TITRE (moteur WebJsProvider), sans captcha.
+ * baseUrl = passerelle stable papadustream.info (gateway:true). resolveContentBase() lit
+ * le lien « Accéder » → domaine de contenu courant ; le moteur y navigue (top-level, pas
+ * de CORS) puis travaille same-origin. Auto-répare les changements de domaine.
+ * Sources = JSON en clair dans la page (server_name/version/link) → Dood(kokoflix)/Vidzy.
  */
 (function () {
   function slugTitle(s) { return (s || '').replace(/-/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); }); }
@@ -32,7 +31,6 @@
     } catch (e) { return []; }
   }
 
-  // Parse les serveurs présents dans le HTML de la page courante (après navigation).
   function parseServers() {
     var html = document.documentElement.outerHTML;
     var out = [], seen = {};
@@ -47,12 +45,26 @@
     return out;
   }
 
+  // Lit le domaine de CONTENU courant depuis la passerelle (lien « Accéder »).
+  function resolveContentBase() {
+    try {
+      var links = [].slice.call(document.querySelectorAll('a[href]')).map(function (a) {
+        try { return new URL(a.href); } catch (e) { return null; }
+      }).filter(function (u) { return u && /papadustream/i.test(u.host) && u.host !== location.host; });
+      // priorité aux hôtes "de contenu" (souvent en -v2/-v3), sinon le 1er externe.
+      var pref = links.filter(function (u) { return /-v\d/i.test(u.host); });
+      var pick = (pref[0] || links[0]);
+      return pick ? pick.origin : location.origin;
+    } catch (e) { return location.origin; }
+  }
+
   var P = {
     async search(q, page) { return await doSearch(q); },
     async getMovie(id) { return { type: 'movie', id: id, title: '', poster: '', banner: '', overview: '' }; },
     async getTvShow(id) { return { type: 'tv', id: id, title: '', poster: '', banner: '', overview: '', seasons: [] }; },
     async getEpisodesBySeason(seasonId) { return []; },
     async extractServers() { return parseServers(); },
+    async resolveContentBase() { return resolveContentBase(); },
     async getHome() { return []; },
     async getMovies() { return []; },
     async getTvShows() { return []; }
