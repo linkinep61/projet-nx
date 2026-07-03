@@ -4,5 +4,11 @@
     "baseUrl": "https://webflix.art",
     "jsUrl": "https://raw.githubusercontent.com/linkinep61/projet-nx/main/provider_web/webflix.js",
     "byTmdb": true
+  },
+  {
+    "name": "Papadustream V2",
+    "baseUrl": "https://papadustream-v2.org",
+    "jsUrl": "https://raw.githubusercontent.com/linkinep61/projet-nx/main/provider_web/papadustream-v2.js",
+    "enableNativeServers": true
   }
 ]
