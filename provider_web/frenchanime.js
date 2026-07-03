@@ -1,9 +1,8 @@
 /* frenchanime.js — French Anime (french-anime.com) en WebJS. CF via WebView.
  * Serveurs = embeds host dans div.eps "num!url1,url2,...". getVideo = Extractor.extract.
- * PAS de TMDB -> posters du site. getHome : carrousel + 3 rails site + rails GENRES.
- * ANTI-DOUBLON : chaque rail n'affiche que les items PAS DEJA VUS (dedup inter-rails) ->
- *   un anime (ex One Piece, present dans plusieurs genres) apparait UNE seule fois.
- *   + skip page challenge CF + delai entre fetches (anti-throttle).
+ * PAS de TMDB -> posters du site. getHome : carrousel + rails site PLEINS + rails GENRES
+ *   DEDUPLIQUES (les genres n'affichent que des titres pas deja en vedette/top -> distincts
+ *   ET rails principaux bien fournis). + skip challenge CF + delai (anti-throttle).
  */
 (function () {
   var BASE = location.origin;
@@ -53,23 +52,19 @@
     var doc=document;
     try{ var d=await fetchDoc(''); if(d.querySelectorAll('.block-main').length||d.querySelectorAll('div.mov').length||d.querySelectorAll('.owl-carousel .item').length) doc=d; }catch(e){}
     var cats=[]; var seen={};
-    // rail = SEULEMENT les items pas encore vus (dedup inter-rails) -> pas de "One Piece x4"
-    function addRail(name, items){
-      if(!items || !items.length) return;
-      var fresh=items.filter(function(it){ return it.id && !seen[it.id]; });
-      if(fresh.length < 3) return; // trop peu de nouveau -> skip le rail
-      fresh.forEach(function(it){ seen[it.id]=1; });
-      cats.push({ name:name, items:fresh });
-    }
-    // carrousel = FEATURED (swiper) ; on le laisse complet mais on marque ses items vus
-    //   pour que les rails ne repetent pas les titres deja mis en avant en haut.
-    var feat=parseOwl(doc); if(feat.length){ for(var f=0;f<feat.length;f++){ if(feat[f].id) seen[feat[f].id]=1; } cats.push({ name:'', items:feat }); }
+    function mark(items){ for(var i=0;i<items.length;i++){ if(items[i].id) seen[items[i].id]=1; } }
+    // Carrousel FEATURED (plein) + on marque ses titres vus.
+    var feat=parseOwl(doc); if(feat.length){ mark(feat); cats.push({ name:'', items:feat }); }
+    // Rails du SITE (block-main) : PLEINS (rails principaux, pas de dedup) + marques vus.
     [].slice.call(doc.querySelectorAll('.block-main')).forEach(function(b){
-      var t=b.querySelector('.block-title,h2,.bmt'); addRail(clean(t?t.textContent:'')||'Animes', parseList(b));
+      var t=b.querySelector('.block-title,h2,.bmt'); var items=parseList(b);
+      if(items.length){ mark(items); cats.push({ name:clean(t?t.textContent:'')||'Animes', items:items }); }
     });
+    // Rails GENRES : seulement les titres PAS deja vus (dedup) -> distincts, pas de "One Piece x4".
     for(var gi=0; gi<GENRES.length; gi++){
       try{ var gd=await fetchDoc('genre/'+GENRES[gi][0]+'/page/1');
-        if(!isChallenge(gd)) addRail(GENRES[gi][1], parseList(gd)); }catch(e){}
+        if(!isChallenge(gd)){ var gitems=parseList(gd); var fresh=gitems.filter(function(it){ return it.id && !seen[it.id]; });
+          if(fresh.length >= 3){ mark(fresh); cats.push({ name:GENRES[gi][1], items:fresh }); } } }catch(e){}
       await delay(700);
     }
     if(!cats.length){ var all=parseList(doc); if(all.length) cats=[{name:'Nouveautes',items:all}]; }
