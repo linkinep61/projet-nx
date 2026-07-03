@@ -7,8 +7,9 @@
   },
   {
     "name": "Papadustream V2",
-    "baseUrl": "https://papadustream-v2.org",
+    "baseUrl": "https://papadustream.info",
     "jsUrl": "https://raw.githubusercontent.com/linkinep61/projet-nx/main/provider_web/papadustream-v2.js",
-    "enableNativeServers": true
+    "enableNativeServers": true,
+    "gateway": true
   }
 ]
