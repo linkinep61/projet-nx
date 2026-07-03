@@ -1,6 +1,7 @@
 /* frenchanime.js — French Anime (french-anime.com) en WebJS. CF via WebView.
  * Serveurs = embeds host dans div.eps "num!url1,url2,...". getVideo = Extractor.extract.
  * PAS de TMDB (jaquettes anime non conformes) -> posters du site.
+ * getHome FETCH la home (cf_clearance cookie) -> robuste meme si le WebView est reste sur une fiche.
  */
 (function () {
   var BASE = location.origin;
@@ -38,17 +39,21 @@
     }).filter(Boolean);
   }
   async function getHome(){
-    try{ console.log('FA_DIAG url='+location.href+' | title='+document.title+' | bodyLen='+(document.body?document.body.innerText.length:0)+' | blockMain='+document.querySelectorAll('.block-main').length+' | mov='+document.querySelectorAll('div.mov').length); }catch(e){}
-    var cats=[].slice.call(document.querySelectorAll('.block-main')).map(function(b){
+    // FETCH la home (porte cf_clearance) au lieu de lire la page courante du WebView
+    // (qui peut etre restee sur une fiche/serie -> pas de .block-main -> 0 cat -> cache vide).
+    var doc=document;
+    try{ var d=await fetchDoc(''); if(d.querySelectorAll('.block-main').length || d.querySelectorAll('div.mov').length) doc=d; }catch(e){}
+    var cats=[].slice.call(doc.querySelectorAll('.block-main')).map(function(b){
       var t=b.querySelector('.block-title,h2,.bmt');
       return { name:clean(t?t.textContent:'')||'Animes', items:parseList(b) };
     }).filter(function(c){return c.items.length;});
-    if(!cats.length){ var all=parseList(document); if(all.length) cats=[{name:'Nouveautes',items:all}]; }
+    if(!cats.length){ var all=parseList(doc); if(all.length) cats=[{name:'Nouveautes',items:all}]; }
     return cats;
   }
   async function search(query){
     if(!query){
-      return [].slice.call(document.querySelectorAll('div.side-b nav ul li a')).map(function(a){
+      var doc=document; if(!doc.querySelector('div.side-b nav ul li a')){ try{ doc=await fetchDoc(''); }catch(e){} }
+      return [].slice.call(doc.querySelectorAll('div.side-b nav ul li a')).map(function(a){
         var href=a.getAttribute('href')||''; var s=href.split('/genre/')[1]; if(s) s=s.replace(/\/.*$/,'');
         if(!s) return null; return { type:'genre', id:s, title:a.textContent.trim() };
       }).filter(Boolean);
