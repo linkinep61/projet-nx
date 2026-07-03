@@ -1,1 +1,8 @@
-[]
+[
+  {
+    "name": "Webflix",
+    "baseUrl": "https://webflix.art",
+    "jsUrl": "https://raw.githubusercontent.com/linkinep61/projet-nx/main/provider_web/webflix.js",
+    "byTmdb": true
+  }
+]
