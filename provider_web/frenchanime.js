@@ -1,12 +1,13 @@
 /* frenchanime.js — French Anime (french-anime.com) en WebJS. CF via WebView.
  * Serveurs = embeds host dans div.eps "num!url1,url2,...". getVideo = Extractor.extract.
  * PAS de TMDB -> posters du site. getHome/getMovies/getTvShows FETCH (cf_clearance cookie).
- * getHome : carrousel (.owl-carousel .item -> FEATURED name="") + rails (.block-main).
+ * getHome : carrousel (.owl-carousel -> FEATURED) + 3 rails site (.block-main) + rails GENRES (fetch sequentiel).
  * Onglets FR/VOSTFR : getMovies (FR)=films VF (isSeries=false)+animes VF (isSeries=true) ;
  *                     getTvShows (VOSTFR)=animes VOSTFR (isMovie=false)+films VOSTFR (isMovie=true).
  */
 (function () {
   var BASE = location.origin;
+  var GENRES = [['action','Action'],['aventure','Aventure'],['comedie','Comedie'],['fantasy','Fantasy'],['shonen','Shonen'],['romance','Romance']];
   function abs(u){ if(!u) return u; if(u.indexOf('http')===0) return u; return BASE+(u.charAt(0)==='/'?'':'/')+u; }
   function relId(href){ try{ return new URL(href,BASE).pathname.replace(/^\//,''); }catch(e){ return href; } }
   function clean(s){ return (s||'').replace(/voir la suite\.*/i,'').replace(/\s+/g,' ').trim(); }
@@ -50,11 +51,16 @@
     var doc=document;
     try{ var d=await fetchDoc(''); if(d.querySelectorAll('.block-main').length||d.querySelectorAll('div.mov').length||d.querySelectorAll('.owl-carousel .item').length) doc=d; }catch(e){}
     var cats=[];
-    var feat=parseOwl(doc); if(feat.length) cats.push({ name:'', items:feat }); // FEATURED -> carrousel
+    var feat=parseOwl(doc); if(feat.length) cats.push({ name:'', items:feat });
     [].slice.call(doc.querySelectorAll('.block-main')).forEach(function(b){
       var t=b.querySelector('.block-title,h2,.bmt'); var items=parseList(b);
       if(items.length) cats.push({ name:clean(t?t.textContent:'')||'Animes', items:items });
     });
+    // Rails GENRES (fetch SEQUENTIEL pour ne pas throttler le CF)
+    for(var gi=0; gi<GENRES.length; gi++){
+      try{ var gd=await fetchDoc('genre/'+GENRES[gi][0]+'/page/1'); var gitems=parseList(gd);
+        if(gitems.length) cats.push({ name:GENRES[gi][1], items:gitems }); }catch(e){}
+    }
     if(!cats.length){ var all=parseList(doc); if(all.length) cats=[{name:'Nouveautes',items:all}]; }
     return cats;
   }
