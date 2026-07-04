@@ -105,11 +105,12 @@
     var sNum=parseInt((b.title.match(/[Ss]aison\s*(\d+)/)||[])[1]||'1',10)||1;
     // Une saison NEUTRE "Saison N" (plus de dossier "FRENCH"/"VOSTFR" redondant).
     return { id:id, type:'tv', title:b.title, poster:b.poster, overview:b.overview,
-      seasons:[ { id:id+'#s', number:sNum, title:'Saison '+sNum } ] };
+      seasons:[ { id:id+'#s', number:sNum, title:'Saison '+sNum, poster:b.poster } ] };
   }
   async function getEpisodesBySeason(seasonId,lang){
     var showPath=seasonId.split('#')[0];
-    return parseEps(document).map(function(e){ return { id:showPath+'#ep'+e.num, number:e.num }; });
+    var b=detailBasics(document);
+    return parseEps(document).map(function(e){ return { id:showPath+'#ep'+e.num, number:e.num, title:'Épisode '+e.num, poster:b.poster }; });
   }
   async function extractServers(lang){
     var eps=parseEps(document); if(!eps.length) return [];
