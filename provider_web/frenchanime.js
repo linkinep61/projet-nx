@@ -8,7 +8,7 @@
  */
 (function () {
   var BASE = location.origin;
-  var GENRES = [['action','Action'],['aventure','Aventure'],['comedie','Comedie'],['fantasy','Fantasy'],['shonen','Shonen'],['romance','Romance'],['horreur','Horreur'],['sci-fi','Sci-Fi']];
+  var GENRES = [['action','Action'],['comedie','Comedie'],['shonen','Shonen'],['romance','Romance']];
   function abs(u){ if(!u) return u; if(u.indexOf('http')===0) return u; return BASE+(u.charAt(0)==='/'?'':'/')+u; }
   function relId(href){ try{ return new URL(href,BASE).pathname.replace(/^\//,''); }catch(e){ return href; } }
   function clean(s){ return (s||'').replace(/voir la suite\.*/i,'').replace(/\s+/g,' ').trim(); }
@@ -72,7 +72,7 @@
       try{ var gd=await fetchDoc('genre/'+GENRES[gi][0]+'/page/1');
         if(!isChallenge(gd)){ var gitems=parseList(gd); var fresh=gitems.filter(function(it){ return it.id && !seen[it.id]; });
           if(fresh.length >= 3){ mark(fresh); cats.push({ name:GENRES[gi][1], items:fresh }); } } }catch(e){}
-      await delay(700);
+      await delay(300);
     }
     if(!cats.length){ var all=parseList(doc); if(all.length) cats=[{name:'Nouveautes',items:all}]; }
     return cats;
