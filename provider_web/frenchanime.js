@@ -8,7 +8,7 @@
  */
 (function () {
   var BASE = location.origin;
-  var GENRES = [['action','Action'],['comedie','Comedie'],['shonen','Shonen'],['romance','Romance']];
+  var GENRES = [['action','Action'],['aventure','Aventure'],['comedie','Comedie'],['fantasy','Fantasy'],['shonen','Shonen'],['romance','Romance'],['horreur','Horreur'],['sci-fi','Sci-Fi']];
   function abs(u){ if(!u) return u; if(u.indexOf('http')===0) return u; return BASE+(u.charAt(0)==='/'?'':'/')+u; }
   function relId(href){ try{ return new URL(href,BASE).pathname.replace(/^\//,''); }catch(e){ return href; } }
   function clean(s){ return (s||'').replace(/voir la suite\.*/i,'').replace(/\s+/g,' ').trim(); }
