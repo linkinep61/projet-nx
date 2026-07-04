@@ -1,15 +1,1 @@
-[
-  {
-    "name": "Webflix",
-    "baseUrl": "https://webflix.art",
-    "jsUrl": "https://raw.githubusercontent.com/linkinep61/projet-nx/main/provider_web/webflix.js",
-    "byTmdb": true
-  },
-  {
-    "name": "Papadustream V2",
-    "baseUrl": "https://papadustream.info",
-    "jsUrl": "https://raw.githubusercontent.com/linkinep61/projet-nx/main/provider_web/papadustream-v2.js",
-    "enableNativeServers": true,
-    "gateway": true
-  }
-]
+[]
