@@ -1,26 +1,26 @@
 /*
  * dessinanime.js — Provider JS hébergé (moteur WebJsProvider).
- * Site : https://dessinanime.cc  (Next.js + Cloudflare)
+ * Site : https://dessinanime.cc (Next.js + Cloudflare)
  * S'exécute DANS une WebView sur le site → fetch same-origin + DOM + cookies CF.
  *
- * v3 (2026-06-27) — Catalogue COMPLET (port de DessinAnimeProvider Kotlin) :
- *   - getHome : fetch '/' + split en 9 catégories disjointes (Films populaires,
- *     Séries populaires, classiques, etc.), 15 items/rail
- *   - getMovies / getTvShows : pagination réelle via /catalogue?page=N
- *   - getTvShow : parse les VRAIES saisons (href="/tv/slug/N/1")
- *   - getEpisodesBySeason : parse les VRAIS épisodes (/tv/slug/seasonN/1 + href="/tv/slug/seasonN/M")
+ * v4 (2026-07-04) — FIX SAISONS/ÉPISODES + optimisation home :
+ *   - getTvShow : LIT LE DOM LIVE (plus de fetch+DOMParser qui recevait un
+ *     shell SPA 6KB sans données). WebJsProvider.kt navigate() a déjà chargé
+ *     la page → on poll l'hydratation Next.js pour trouver les saisons.
+ *   - getEpisodesBySeason : idem, DOM live + polling hydratation.
+ *   - getHome : réduit de 7 à 4 fetches parallèles (/ + catalogue 1-3).
  *   - extractServers (v2 inchangé) : intercepte fetch/XHR pour capter
  *     extractor.nmlnode.cc/proxy/{hls,mp4}?token=... générées au clic des
  *     boutons hosts. Sans whitelist host.
  *
  * Contrat (window.__P) :
- *   getHome() -> [ {name, items:[item]} ]
- *   search(q, page) -> [item]
+ *   getHome()                     -> [ {name, items:[item]} ]
+ *   search(q, page)               -> [item]
  *   getMovies(page) / getTvShows(page) -> [item]
- *   getMovie(id) / getTvShow(id) -> item (+ seasons pour tv)
- *   getEpisodesBySeason(seasonId) -> [episode]
- *   extractServers() -> [ {name, url} ]
- *   item   = {type:'movie'|'tv', id:'movie/<slug>'|'tv/<slug>', title, poster, banner, year, rating, overview}
+ *   getMovie(id) / getTvShow(id)  -> item (+ seasons pour tv)
+ *   getEpisodesBySeason(seasonId)  -> [episode]
+ *   extractServers()              -> [ {name, url} ]
+ *   item = {type:'movie'|'tv', id:'movie/<slug>'|'tv/<slug>', title, poster, banner, year, rating, overview}
  *   season = {id:'<showId>/<n>', number, title, poster}
  *   episode= {id:'<showId>/<season>/<ep>', number, title, poster}
  */
@@ -50,7 +50,6 @@
     return await r.json();
   }
   // OPTIMISATION CRITIQUE : réduit taille images TMDB original → w342 (10× + léger).
-  // Avant : 1-1.7 MB / image → home charge 10-15s. Après : 50-100 KB / image → 1-2s.
   function optimizeImgUrl(url) {
     if (!url) return url;
     return url.replace('/t/p/original/', '/t/p/w342/');
@@ -66,8 +65,6 @@
    * Parse les cartes du HOME ou /catalogue. Structure réelle SSR de dessinanime.cc :
    *   <img alt="<title>" src="<poster>" ...>
    *   ... <a href="/(movie|tv)/<slug>" ...>Titre</a>
-   *   (l'<a> ne CONTIENT PAS l'<img> — l'img est AVANT l'<a> dans le DOM)
-   * Le regex inversé (img → href) capture 48 cards sur le home (testé live).
    * Rating + année ne sont PAS dans le SSR (= hydratés CSR), on les ignore.
    */
   function parseCards(html) {
@@ -92,7 +89,26 @@
     return out;
   }
 
-  // og tags d'une page détail (SSR) → title/poster/overview/year
+  // og tags depuis le DOM live → title/poster/overview
+  function parseDetailFromDOM(id) {
+    const ogGet = function(p) {
+      const el = document.querySelector('meta[property="og:' + p + '"]');
+      return el ? (el.getAttribute('content') || '') : '';
+    };
+    let title = decode(ogGet('title')).replace(/\s*[—|].*$/, '').trim();
+    const poster = ogGet('image');
+    const overview = decode(ogGet('description'));
+    return {
+      type: id.indexOf('tv/') === 0 ? 'tv' : 'movie',
+      id: id,
+      title: title,
+      poster: poster,
+      banner: poster,
+      overview: overview,
+    };
+  }
+
+  // og tags d'une page détail (SSR string) → title/poster/overview/year
   function parseDetail(html, id) {
     const og = (p) => (html.match(new RegExp('og:' + p + '" content="([^"]*)"')) || [])[1] || '';
     let title = decode(og('title')).replace(/\s*[—|].*$/, '').trim();
@@ -123,14 +139,10 @@
   }
 
   // ─── Détection langue + clic bouton langue (VF/VOSTFR/VO) ──────────────
-  // dessinanime.cc affiche en haut de la page film/série des boutons langue :
-  // "Synopsis | VF | VOSTFR | VO | VF (4)". Le clic sur l'un change les sources
-  // ET les saisons VF correspondantes. On filtre les <button> par texte exact.
   function findLangBtn(lang) {
-    // lang = "vf" / "vostfr" / "vo"
     const targets = lang === 'vf' ? ['VF', 'VF (1)', 'VF (2)', 'VF (3)', 'VF (4)']
-                  : lang === 'vostfr' ? ['VOSTFR']
-                  : lang === 'vo' ? ['VO'] : [];
+      : lang === 'vostfr' ? ['VOSTFR']
+      : lang === 'vo' ? ['VO'] : [];
     const btns = [...document.querySelectorAll('button')];
     for (const t of targets) {
       const b = btns.find(b => (b.textContent || '').trim() === t);
@@ -140,7 +152,6 @@
   }
   async function clickLangIfNeeded(lang) {
     if (!lang) return;
-    // Poll jusqu'à 8s pour attendre l'hydratation Next.js des boutons langue
     let btn = null;
     for (let i = 0; i < 16; i++) {
       btn = findLangBtn(lang);
@@ -152,14 +163,10 @@
         ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(t => {
           btn.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
         });
-        // Laisse le temps au site de switcher les sources
         await new Promise(r => setTimeout(r, 1500));
       } catch (e) {}
     }
   }
-  // Détecte quelles langues sont disponibles (boutons VF/VOSTFR/VO visibles).
-  // Polling COURT (1.5s max) → pas de blocage Mutex WebView. Si pas hydraté =
-  // fallback empty (le Kotlin gérera "single lang").
   async function detectAvailableLanguages() {
     for (let i = 0; i < 3; i++) {
       const btns = [...document.querySelectorAll('button')];
@@ -192,40 +199,25 @@
 
   const P = {
     /**
-     * Home : fetch '/' + 2 pages catalogue en parallèle → split en 9 catégories
-     * disjointes (= chaque item dans UNE seule catégorie). Calque le natif Kotlin.
+     * Home : fetch '/' + 3 pages catalogue en parallèle → split en catégories
+     * disjointes. v4 = réduit de 7 à 4 fetches (+ rapide, même qualité).
      */
     async getHome() {
-      // STRATÉGIE 2026-06-28 v4.0 :
-      //  - ✖ supprime parseCards(document.documentElement.outerHTML) — POLLUTION :
-      //    quand le re-fetch tourne pendant que la WebView est sur une page
-      //    série/film, le DOM hydraté ajoute les items de CETTE page → résultat
-      //    instable (4 cats → 2 cats sur le 2e fetch). Stabilité > qté.
-      //  - ✔ fetch /  +  catalogue page 1..6 (= STABLE quelle que soit la nav).
-      //  - ✔ ajoute FEATURED ("À l'affiche") = carrousel en tête avec banner.
-      //  - ✔ MIN = 1 (= aucune catégorie perdue, même si elle a 1 item).
-      const [home, c1, c2, c3, c4, c5, c6] = await Promise.all([
+      const [home, c1, c2, c3] = await Promise.all([
         getText('/').catch(() => ''),
         getText('/catalogue?page=1').catch(() => ''),
         getText('/catalogue?page=2').catch(() => ''),
         getText('/catalogue?page=3').catch(() => ''),
-        getText('/catalogue?page=4').catch(() => ''),
-        getText('/catalogue?page=5').catch(() => ''),
-        getText('/catalogue?page=6').catch(() => ''),
       ]);
-      // Combine en gardant l'ordre (home en 1er = priorité), dédup par id
-      // PAS de DOM hydraté → stabilité de l'output entre fetches successifs.
       const allItems = [];
       const seenIds = new Set();
-      [parseCards(home), parseCards(c1), parseCards(c2), parseCards(c3),
-       parseCards(c4), parseCards(c5), parseCards(c6)].forEach(arr => {
+      [parseCards(home), parseCards(c1), parseCards(c2), parseCards(c3)].forEach(arr => {
         arr.forEach(it => { if (!seenIds.has(it.id)) { seenIds.add(it.id); allItems.push(it); } });
       });
       const films = allItems.filter(i => i.type === 'movie');
       const tvs = allItems.filter(i => i.type === 'tv');
 
       // FEATURED = 8 premiers items du home (mix films+séries) avec banner.
-      // Le code home Onyx sait afficher cette catégorie comme un carrousel.
       const featured = [];
       const featuredIds = new Set();
       for (const it of allItems) {
@@ -235,8 +227,6 @@
         featuredIds.add(it.id);
       }
 
-      // Pick disjoint : pas de rating/year en SSR → split séquentiel
-      // (les 1ers items du HTML = les plus visibles = "populaires" implicite)
       const usedFilms = new Set();
       const usedShows = new Set();
       const pick = (src, used, max) => {
@@ -250,23 +240,16 @@
         return out;
       };
 
-      // Films : 4 tranches disjointes (12 chacune = plus de catégories remplies)
-      const topFilms = pick(films, usedFilms, 12);
-      const classicFilms = pick(films, usedFilms, 12);
-      const remainFilms1 = pick(films, usedFilms, 12);
-      const remainFilms2 = pick(films, usedFilms, 12);
+      const topFilms = pick(films, usedFilms, 10);
+      const classicFilms = pick(films, usedFilms, 10);
+      const remainFilms = pick(films, usedFilms, 10);
+      const topShows = pick(tvs, usedShows, 10);
+      const classicShows = pick(tvs, usedShows, 10);
+      const remainShows = pick(tvs, usedShows, 10);
 
-      // Séries : 4 tranches disjointes (12 chacune)
-      const topShows = pick(tvs, usedShows, 12);
-      const classicShows = pick(tvs, usedShows, 12);
-      const remainShows1 = pick(tvs, usedShows, 12);
-      const remainShows2 = pick(tvs, usedShows, 12);
-
-      // À découvrir = items restants non utilisés (mix films+tv)
       const usedAll = new Set([...usedFilms, ...usedShows]);
-      const mixRemain = allItems.filter(it => !usedAll.has(it.id)).slice(0, 15);
+      const mixRemain = allItems.filter(it => !usedAll.has(it.id)).slice(0, 12);
 
-      // MIN abaissé à 1 → aucune catégorie ne disparaît.
       const MIN = 1;
       const cats = [];
       if (featured.length >= 3) cats.push({ name: 'À l\'affiche', items: featured });
@@ -274,10 +257,8 @@
       if (topShows.length >= MIN) cats.push({ name: 'Séries populaires', items: topShows });
       if (classicFilms.length >= MIN) cats.push({ name: 'Films classiques', items: classicFilms });
       if (classicShows.length >= MIN) cats.push({ name: 'Séries classiques', items: classicShows });
-      if (remainFilms1.length >= MIN) cats.push({ name: 'Films', items: remainFilms1 });
-      if (remainShows1.length >= MIN) cats.push({ name: 'Séries', items: remainShows1 });
-      if (remainFilms2.length >= MIN) cats.push({ name: 'Encore plus de films', items: remainFilms2 });
-      if (remainShows2.length >= MIN) cats.push({ name: 'Encore plus de séries', items: remainShows2 });
+      if (remainFilms.length >= MIN) cats.push({ name: 'Films', items: remainFilms });
+      if (remainShows.length >= MIN) cats.push({ name: 'Séries', items: remainShows });
       if (mixRemain.length >= MIN) cats.push({ name: 'À découvrir', items: mixRemain });
       return cats;
     },
@@ -287,11 +268,6 @@
       return mapSearch(arr);
     },
 
-    /**
-     * Pagination Films/Séries : fetch 5 pages /catalogue consécutives en parallèle
-     * (= ~25-35 items par page Onyx au lieu de ~5-7). Le user scrolle = page 2
-     * = pages catalogue 6-10, etc. Plus de défilement fluide.
-     */
     async getMovies(page) {
       const BATCH = 20;
       const start = ((page || 1) - 1) * BATCH + 1;
@@ -330,53 +306,60 @@
     },
 
     /**
-     * Détail série : fetch() same-origin (cookies CF du warmup) + DOMParser.
-     * PAS de navigation WebView → zéro nouveau challenge CF Turnstile.
-     * v7 (2026-07-03) : remplace le polling DOM live par fetch + DOMParser.
+     * v4 — Détail série : LIT LE DOM LIVE (plus de fetch+DOMParser).
+     * WebJsProvider.kt a DÉJÀ navigué vers /tv/<slug> → le DOM est rendu.
+     * On poll l'hydratation Next.js pour trouver les liens de saison.
+     * Le shell SSR (6KB) ne contient PAS les saisons → fetch était cassé.
      */
     async getTvShow(id, lang) {
       const slug = id.replace(/^tv\//, '');
-      // Fetch la page de la série via same-origin (cookies CF passent)
-      // getTextSafe = retry si CF challenge "Just a moment..."
-      const html = await getTextSafe('/' + id);
-      console.log('[DA] getTvShow fetch /' + id + ' → ' + html.length + ' chars, starts: ' + html.substring(0, 200).replace(/\n/g,' '));
-      const base = parseDetail(html, id);
+
+      // Metadata depuis les og tags du DOM live (disponibles immédiatement dans le SSR)
+      const base = parseDetailFromDOM(id);
       base.availableLanguages = [];
-      // Parse les saisons depuis le HTML fetchè (SSR = saisons déjà présentes)
-      const doc = new DOMParser().parseFromString(html, 'text/html');
+
+      // Regex pour matcher les liens de saison : /tv/{slug}/{N}/1
       const escSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const seasonHrefRe = new RegExp('^\\/tv\\/' + escSlug + '\\/(\\d+)\\/1$');
-      console.log('[DA] regex: ' + seasonHrefRe.source);
-      const seasonNums = new Set();
-      const allAnchors = doc.querySelectorAll('a[href]');
-      console.log('[DA] anchors in parsed doc: ' + allAnchors.length);
-      // Log first 5 hrefs that contain the slug for debugging
-      let dbgCount = 0;
-      for (const a of allAnchors) {
-        const href = a.getAttribute('href') || '';
-        if (href.includes(slug) && dbgCount < 5) { console.log('[DA] href with slug: ' + href); dbgCount++; }
-        const m = href.match(seasonHrefRe);
-        if (m) seasonNums.add(parseInt(m[1], 10));
+
+      // Poll le DOM live pour les liens de saison (hydratation Next.js)
+      var seasonNums = new Set();
+      for (var attempt = 0; attempt < 20; attempt++) {
+        var anchors = document.querySelectorAll('a[href]');
+        for (var ai = 0; ai < anchors.length; ai++) {
+          var href = anchors[ai].getAttribute('href') || '';
+          var m = href.match(seasonHrefRe);
+          if (m) seasonNums.add(parseInt(m[1], 10));
+        }
+        if (seasonNums.size > 0) break;
+        await new Promise(function(r) { setTimeout(r, 500); });
       }
-      console.log('[DA] seasonNums: ' + [...seasonNums].join(','));
-      // Pour chaque saison, cherche son image associée dans le HTML parsé
-      const seasons = [...seasonNums].sort((a, b) => a - b).map(n => {
-        const a = [...doc.querySelectorAll('a[href]')].find(x => {
-          const m = (x.getAttribute('href') || '').match(seasonHrefRe);
-          return m && +m[1] === n;
-        });
-        let poster = base.poster;
-        if (a) {
-          const img = a.querySelector('img') || a.parentElement?.querySelector('img');
-          if (img) poster = img.src || img.getAttribute('data-src') || poster;
+      console.log('[DA] getTvShow ' + id + ' → ' + seasonNums.size + ' seasons (DOM live, ' + attempt + ' polls)');
+
+      // Construire la liste des saisons avec poster
+      var sortedNums = [...seasonNums].sort(function(a, b) { return a - b; });
+      var seasons = sortedNums.map(function(n) {
+        var sPoster = base.poster;
+        // Chercher le lien de cette saison pour récupérer son image
+        var allLinks = document.querySelectorAll('a[href]');
+        for (var li = 0; li < allLinks.length; li++) {
+          var lm = (allLinks[li].getAttribute('href') || '').match(seasonHrefRe);
+          if (lm && parseInt(lm[1], 10) === n) {
+            var img = allLinks[li].querySelector('img');
+            if (img) {
+              sPoster = optimizeImgUrl(img.src || img.getAttribute('data-src')) || sPoster;
+            }
+            break;
+          }
         }
         return {
           id: id + '/' + n,
           number: n,
           title: 'Saison ' + n,
-          poster: poster,
+          poster: sPoster,
         };
       });
+
       if (seasons.length === 0) {
         seasons.push({ id: id + '/1', number: 1, title: 'Saison 1', poster: base.poster });
       }
@@ -385,59 +368,78 @@
     },
 
     /**
-     * Liste les épisodes d'une saison via fetch() same-origin + DOMParser.
-     * PAS de navigation WebView → zéro nouveau challenge CF Turnstile.
-     * v7 (2026-07-03) : remplace le polling DOM live par fetch + DOMParser.
-     * Le SSR Next.js contient TOUS les épisodes d'un coup (pas de polling nécessaire).
+     * v4 — Liste les épisodes d'une saison via DOM LIVE.
+     * WebJsProvider.kt a DÉJÀ navigué vers /tv/{slug}/{season}/1.
+     * On poll l'hydratation Next.js pour trouver les liens d'épisode.
+     * Structure DOM d'un épisode :
+     *   <a href="/tv/{slug}/{season}/{ep}">
+     *     <img alt="Titre épisode" src="...">
+     *     <span>EP N</span>
+     *     <p class="font-semibold">Titre (Nom Série)</p>
+     *   </a>
      */
     async getEpisodesBySeason(seasonId, lang) {
-      const parts = seasonId.split('/');
+      var parts = seasonId.split('/');
       if (parts.length < 3 || parts[0] !== 'tv') return [];
-      const slug = parts[1];
-      const seasonNum = parts[2];
-      const escSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const epHrefRe = new RegExp('^\\/tv\\/' + escSlug + '\\/' + seasonNum + '\\/(\\d+)$');
-      // Fetch la page saison via same-origin (cookies CF passent)
-      // getTextSafe = retry si CF challenge
-      const html = await getTextSafe('/tv/' + slug + '/' + seasonNum + '/1');
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      const seen = new Set();
-      const out = [];
-      for (const a of doc.querySelectorAll('a[href]')) {
-        const m = (a.getAttribute('href') || '').match(epHrefRe);
-        if (!m) continue;
-        const epNum = parseInt(m[1], 10);
-        if (seen.has(epNum)) continue;
-        seen.add(epNum);
-        // Image (vignette épisode) : <img> dans le bloc <a> ou parent
-        const img = a.querySelector('img') || a.parentElement?.querySelector('img');
-        let poster = img ? (img.src || img.getAttribute('data-src')) : null;
-        // Titre : cherche un élément avec class title, sinon le texte du <a>
-        let title = null;
-        const titleEl = a.querySelector('[class*=title], h1, h2, h3, h4, h5') || a.parentElement?.querySelector('[class*=title], h1, h2, h3, h4, h5');
-        if (titleEl) title = (titleEl.textContent || '').trim();
-        if (!title) title = (a.textContent || '').trim();
-        if (title && (title === ('Épisode ' + epNum) || title.length > 80)) title = null;
-        out.push({
-          id: 'tv/' + slug + '/' + seasonNum + '/' + epNum,
-          number: epNum,
-          title: title || ('Épisode ' + epNum),
-          poster: poster || null,
-        });
+      var slug = parts[1];
+      var seasonNum = parts[2];
+      var escSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      var epHrefRe = new RegExp('^\\/tv\\/' + escSlug + '\\/' + seasonNum + '\\/(\\d+)$');
+
+      // Poll le DOM live pour les liens d'épisode (hydratation Next.js)
+      var seen = new Set();
+      var out = [];
+      for (var attempt = 0; attempt < 20; attempt++) {
+        var anchors = document.querySelectorAll('a[href]');
+        for (var ai = 0; ai < anchors.length; ai++) {
+          var a = anchors[ai];
+          var href = a.getAttribute('href') || '';
+          var m = href.match(epHrefRe);
+          if (!m) continue;
+          var epNum = parseInt(m[1], 10);
+          if (seen.has(epNum)) continue;
+          seen.add(epNum);
+
+          // Titre : préférer img.alt (propre, sans suffixe nom de série)
+          var img = a.querySelector('img');
+          var title = null;
+          if (img && img.alt) {
+            title = img.alt.trim();
+          }
+          if (!title) {
+            // Fallback : texte du premier <p> (contient souvent "Titre (Série)")
+            var p = a.querySelector('p');
+            if (p) {
+              title = p.textContent.trim().replace(/\s*\([^)]+\)\s*$/, '').trim();
+            }
+          }
+
+          var poster = null;
+          if (img) {
+            poster = optimizeImgUrl(img.src || img.getAttribute('data-src')) || null;
+          }
+
+          out.push({
+            id: 'tv/' + slug + '/' + seasonNum + '/' + epNum,
+            number: epNum,
+            title: title || ('Épisode ' + epNum),
+            poster: poster,
+          });
+        }
+        if (out.length > 0) break;
+        await new Promise(function(r) { setTimeout(r, 500); });
       }
-      out.sort((a, b) => a.number - b.number);
+      console.log('[DA] getEpisodesBySeason ' + seasonId + ' → ' + out.length + ' episodes (DOM live, ' + attempt + ' polls)');
+      out.sort(function(a, b) { return a.number - b.number; });
       return out;
     },
 
     /**
      * extractServers v2 — Intercepte fetch + XHR pour capter les URLs
      * extractor.nmlnode.cc/proxy/{hls,mp4,dash}?token=... générées au clic des
-     * boutons hosts (hydrax/uqload/vidhide/sendvid/…). Trouve les boutons hosts
-     * dynamiquement sans whitelist.
+     * boutons hosts (hydrax/uqload/vidhide/sendvid/…).
      */
     async extractServers(lang) {
-      // Si langue passée → click le bouton langue AVANT le scan des hosts.
-      // Le site renouvelle les tokens nmlnode selon la langue choisie.
       if (lang) await clickLangIfNeeded(lang);
       const captured = [];
       const seenToken = new Set();
