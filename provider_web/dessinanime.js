@@ -324,17 +324,26 @@
       const slug = id.replace(/^tv\//, '');
       // Fetch la page de la série via same-origin (cookies CF passent)
       const html = await getText('/' + id);
+      console.log('[DA] getTvShow fetch /' + id + ' → ' + html.length + ' chars, status ok, starts: ' + html.substring(0, 200).replace(/\n/g,' '));
       const base = parseDetail(html, id);
       base.availableLanguages = [];
       // Parse les saisons depuis le HTML fetchè (SSR = saisons déjà présentes)
       const doc = new DOMParser().parseFromString(html, 'text/html');
       const escSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const seasonHrefRe = new RegExp('^\\/tv\\/' + escSlug + '\\/(\\d+)\\/1$');
+      console.log('[DA] regex: ' + seasonHrefRe.source);
       const seasonNums = new Set();
-      for (const a of doc.querySelectorAll('a[href]')) {
-        const m = (a.getAttribute('href') || '').match(seasonHrefRe);
+      const allAnchors = doc.querySelectorAll('a[href]');
+      console.log('[DA] anchors in parsed doc: ' + allAnchors.length);
+      // Log first 5 hrefs that contain the slug for debugging
+      let dbgCount = 0;
+      for (const a of allAnchors) {
+        const href = a.getAttribute('href') || '';
+        if (href.includes(slug) && dbgCount < 5) { console.log('[DA] href with slug: ' + href); dbgCount++; }
+        const m = href.match(seasonHrefRe);
         if (m) seasonNums.add(parseInt(m[1], 10));
       }
+      console.log('[DA] seasonNums: ' + [...seasonNums].join(','));
       // Pour chaque saison, cherche son image associée dans le HTML parsé
       const seasons = [...seasonNums].sort((a, b) => a - b).map(n => {
         const a = [...doc.querySelectorAll('a[href]')].find(x => {
