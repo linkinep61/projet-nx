@@ -1,8 +1,10 @@
 /* frenchanime.js — French Anime (french-anime.com) en WebJS. CF via WebView.
- * Serveurs = embeds host dans div.eps "num!url1,url2,...". getVideo = Extractor.extract.
- * PAS de TMDB -> posters du site. getHome : carrousel + rails site PLEINS + rails GENRES
- *   DEDUPLIQUES (les genres n'affichent que des titres pas deja en vedette/top -> distincts
- *   ET rails principaux bien fournis). + skip challenge CF + delai (anti-throttle).
+ * 2026-07-03 REFONTE (user) : plus de split VF/VOSTFR au catalogue. Deux onglets
+ *   SIMPLES = Séries (getTvShows) et Films (getMovies), chacun avec le FRANÇAIS EN
+ *   TÊTE puis le VOSTFR à la suite (dispo quand même). Fiche = pas de dossier
+ *   "FRENCH" redondant : une saison "Saison N" qui mène direct aux épisodes.
+ *   Serveurs TAGGÉS par la langue de la fiche (champ "Version") → le player trie
+ *   VF/VOSTFR correctement. getVideo = Extractor.extract côté app.
  */
 (function () {
   var BASE = location.origin;
@@ -37,6 +39,14 @@
     var d=doc.querySelector('[itemprop=description]')||doc.querySelector('div.mov-desc');
     return { title:h1?h1.textContent.trim():'', poster:abs(imgUrl(pimg)), overview:d?d.textContent.trim():'' };
   }
+  // Langue de la fiche depuis le champ "Version" (FRENCH / VOSTFR). Sert au tag serveurs.
+  function pageVersionLabel(doc){ doc=doc||document;
+    var li=[].slice.call(doc.querySelectorAll('ul.mov-list li')).filter(function(l){var lab=l.querySelector('.mov-label');return lab&&/version/i.test(lab.textContent);})[0];
+    var t=li?li.textContent.replace(/version/i,'').replace(/[:]/g,'').trim():'';
+    if(/vostfr/i.test(t)) return 'VOSTFR';
+    if(/french|(^|[^a-z])vf([^a-z]|$)/i.test(t)) return 'VF';
+    return '';
+  }
   function parseEps(doc){ doc=doc||document;
     var eps=doc.querySelector('div.eps'); if(!eps) return [];
     var t=eps.textContent.trim(); if(!t) return [];
@@ -53,14 +63,11 @@
     try{ var d=await fetchDoc(''); if(d.querySelectorAll('.block-main').length||d.querySelectorAll('div.mov').length||d.querySelectorAll('.owl-carousel .item').length) doc=d; }catch(e){}
     var cats=[]; var seen={};
     function mark(items){ for(var i=0;i<items.length;i++){ if(items[i].id) seen[items[i].id]=1; } }
-    // Carrousel FEATURED (plein) + on marque ses titres vus.
     var feat=parseOwl(doc); if(feat.length){ mark(feat); cats.push({ name:'', items:feat }); }
-    // Rails du SITE (block-main) : PLEINS (rails principaux, pas de dedup) + marques vus.
     [].slice.call(doc.querySelectorAll('.block-main')).forEach(function(b){
       var t=b.querySelector('.block-title,h2,.bmt'); var items=parseList(b);
       if(items.length){ mark(items); cats.push({ name:clean(t?t.textContent:'')||'Animes', items:items }); }
     });
-    // Rails GENRES : seulement les titres PAS deja vus (dedup) -> distincts, pas de "One Piece x4".
     for(var gi=0; gi<GENRES.length; gi++){
       try{ var gd=await fetchDoc('genre/'+GENRES[gi][0]+'/page/1');
         if(!isChallenge(gd)){ var gitems=parseList(gd); var fresh=gitems.filter(function(it){ return it.id && !seen[it.id]; });
@@ -81,32 +88,30 @@
     return parseList(await fetchDoc('index.php?do=search&subaction=search&story='+encodeURIComponent(query)));
   }
   async function getGenre(id,page){ page=page||1; return parseList(await fetchDoc('genre/'+id+'/page/'+page)); }
-  async function getMovies(page){ page=page||1; var out=[];
-    try{ var d1=await fetchDoc('films-vf-vostfr/page/'+page);
-      [].slice.call(d1.querySelectorAll('div.mov')).forEach(function(m){ if(movVF(m)){ var it=parseMov(m); if(it){ it.type='movie'; it.isSeries=false; out.push(it); } } });
+  // FILMS (onglet Films) : tous les films, FRANÇAIS EN TÊTE puis VOSTFR.
+  async function getMovies(page){ page=page||1; var vf=[], vo=[];
+    try{ var d=await fetchDoc('films-vf-vostfr/page/'+page);
+      [].slice.call(d.querySelectorAll('div.mov')).forEach(function(m){ var it=parseMov(m); if(!it) return; it.type='movie'; it.isSeries=false; (movVF(m)?vf:vo).push(it); });
     }catch(e){}
-    try{ var d2=await fetchDoc('animes-vf/page/'+page+'/');
-      [].slice.call(d2.querySelectorAll('div.mov')).forEach(function(m){ var it=parseMov(m); if(it){ it.type='movie'; it.isSeries=true; out.push(it); } });
-    }catch(e){}
-    return out;
+    return vf.concat(vo);
   }
+  // SÉRIES (onglet Séries) : toutes les séries, FRANÇAIS EN TÊTE (animes-vf) puis VOSTFR (animes-vostfr).
   async function getTvShows(page){ page=page||1; var out=[];
-    try{ var d1=await fetchDoc('animes-vostfr/page/'+page+'/');
-      [].slice.call(d1.querySelectorAll('div.mov')).forEach(function(m){ var it=parseMov(m); if(it){ it.type='tv'; it.isMovie=false; out.push(it); } });
+    try{ var dvf=await fetchDoc('animes-vf/page/'+page+'/');
+      [].slice.call(dvf.querySelectorAll('div.mov')).forEach(function(m){ var it=parseMov(m); if(it){ it.type='tv'; it.isMovie=false; out.push(it); } });
     }catch(e){}
-    try{ var d2=await fetchDoc('films-vf-vostfr/page/'+page);
-      [].slice.call(d2.querySelectorAll('div.mov')).forEach(function(m){ if(!movVF(m)){ var it=parseMov(m); if(it){ it.type='tv'; it.isMovie=true; out.push(it); } } });
+    try{ var dvo=await fetchDoc('animes-vostfr/page/'+page+'/');
+      [].slice.call(dvo.querySelectorAll('div.mov')).forEach(function(m){ var it=parseMov(m); if(it){ it.type='tv'; it.isMovie=false; out.push(it); } });
     }catch(e){}
     return out;
   }
   async function getMovie(id){ var b=detailBasics(document); return { id:id, type:'movie', title:b.title, poster:b.poster, overview:b.overview }; }
   async function getTvShow(id,lang){
     var b=detailBasics(document);
-    var sNum=(b.title.match(/[Ss]aison\s*(\d+)/)||[])[1];
-    var verLi=[].slice.call(document.querySelectorAll('ul.mov-list li')).filter(function(li){var l=li.querySelector('.mov-label');return l&&/version/i.test(l.textContent);})[0];
-    var ver=verLi?verLi.textContent.replace(/version/i,'').replace(/[:]/g,'').replace(/\s+/g,' ').trim():'';
+    var sNum=parseInt((b.title.match(/[Ss]aison\s*(\d+)/)||[])[1]||'1',10)||1;
+    // Une saison NEUTRE "Saison N" (plus de dossier "FRENCH"/"VOSTFR" redondant).
     return { id:id, type:'tv', title:b.title, poster:b.poster, overview:b.overview,
-      seasons:[ { id:id+'#s', number:parseInt(sNum||'1',10)||1, title:ver||('Saison '+(sNum||1)) } ] };
+      seasons:[ { id:id+'#s', number:sNum, title:'Saison '+sNum } ] };
   }
   async function getEpisodesBySeason(seasonId,lang){
     var showPath=seasonId.split('#')[0];
@@ -114,11 +119,13 @@
   }
   async function extractServers(lang){
     var eps=parseEps(document); if(!eps.length) return [];
+    var ver=pageVersionLabel(document); // "VF" / "VOSTFR" / ""
     var m=(location.hash||'').match(/#ep(\d+)/); var chosen;
     if(m){ var n=parseInt(m[1],10); chosen=eps.filter(function(e){return e.num===n;})[0]; }
     if(!chosen) chosen=eps[0];
     if(!chosen) return [];
-    return chosen.urls.map(function(u){ var h=''; try{ h=new URL(u).hostname.replace(/^www\./,''); }catch(e){} return { name:h||'Lecteur', url:u }; });
+    return chosen.urls.map(function(u){ var h=''; try{ h=new URL(u).hostname.replace(/^www\./,''); }catch(e){}
+      return { name:(h||'Lecteur')+(ver?' ('+ver+')':''), url:u }; });
   }
   window.__P={ getHome:getHome, search:search, getGenre:getGenre, getMovies:getMovies, getTvShows:getTvShows,
     getMovie:getMovie, getTvShow:getTvShow, getEpisodesBySeason:getEpisodesBySeason, extractServers:extractServers };
