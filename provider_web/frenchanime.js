@@ -68,12 +68,6 @@
       var t=b.querySelector('.block-title,h2,.bmt'); var items=parseList(b);
       if(items.length){ mark(items); cats.push({ name:clean(t?t.textContent:'')||'Animes', items:items }); }
     });
-    for(var gi=0; gi<GENRES.length; gi++){
-      try{ var gd=await fetchDoc('genre/'+GENRES[gi][0]+'/page/1');
-        if(!isChallenge(gd)){ var gitems=parseList(gd); var fresh=gitems.filter(function(it){ return it.id && !seen[it.id]; });
-          if(fresh.length >= 3){ mark(fresh); cats.push({ name:GENRES[gi][1], items:fresh }); } } }catch(e){}
-      await delay(300);
-    }
     if(!cats.length){ var all=parseList(doc); if(all.length) cats=[{name:'Nouveautes',items:all}]; }
     return cats;
   }
