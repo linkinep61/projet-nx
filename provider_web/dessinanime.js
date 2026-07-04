@@ -31,6 +31,20 @@
     const r = await fetch(path, { headers: { 'Accept': 'text/html,application/json' } });
     return await r.text();
   }
+  // Fetch avec retry si CF challenge ("Just a moment..."). Attend que le cookie
+  // cf_clearance soit posé par le Turnstile (traitement async en background).
+  async function getTextSafe(path, maxRetries) {
+    maxRetries = maxRetries || 4;
+    for (var i = 0; i < maxRetries; i++) {
+      var html = await getText(path);
+      if (html.length > 8000 && !/Just a moment|checking your browser|challenge-platform|cf-browser-verification/i.test(html)) {
+        return html;
+      }
+      console.log('[DA] fetch ' + path + ' got CF challenge (' + html.length + ' chars), retry ' + (i + 1) + '/' + maxRetries);
+      await new Promise(function(r) { setTimeout(r, 3000); });
+    }
+    return await getText(path);
+  }
   async function getJson(path) {
     const r = await fetch(path, { headers: { 'Accept': 'application/json' } });
     return await r.json();
@@ -323,8 +337,9 @@
     async getTvShow(id, lang) {
       const slug = id.replace(/^tv\//, '');
       // Fetch la page de la série via same-origin (cookies CF passent)
-      const html = await getText('/' + id);
-      console.log('[DA] getTvShow fetch /' + id + ' → ' + html.length + ' chars, status ok, starts: ' + html.substring(0, 200).replace(/\n/g,' '));
+      // getTextSafe = retry si CF challenge "Just a moment..."
+      const html = await getTextSafe('/' + id);
+      console.log('[DA] getTvShow fetch /' + id + ' → ' + html.length + ' chars, starts: ' + html.substring(0, 200).replace(/\n/g,' '));
       const base = parseDetail(html, id);
       base.availableLanguages = [];
       // Parse les saisons depuis le HTML fetchè (SSR = saisons déjà présentes)
@@ -383,7 +398,8 @@
       const escSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const epHrefRe = new RegExp('^\\/tv\\/' + escSlug + '\\/' + seasonNum + '\\/(\\d+)$');
       // Fetch la page saison via same-origin (cookies CF passent)
-      const html = await getText('/tv/' + slug + '/' + seasonNum + '/1');
+      // getTextSafe = retry si CF challenge
+      const html = await getTextSafe('/tv/' + slug + '/' + seasonNum + '/1');
       const doc = new DOMParser().parseFromString(html, 'text/html');
       const seen = new Set();
       const out = [];
