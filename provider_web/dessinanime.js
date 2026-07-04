@@ -80,8 +80,8 @@
 
   // og tags d'une page détail (SSR) → title/poster/overview/year
   function parseDetail(html, id) {
-    const ogD=(p)=>{const el=document.querySelector('meta[property="og:'+p+'"]')||document.querySelector('meta[name="og:'+p+'"]');return el?(el.getAttribute('content')||''):'';};const ogH=(p)=>(html&&(html.match(new RegExp('og:'+p+'" content="([^"]*)"'))||[])[1])||'';const og=(p)=>ogD(p)||ogH(p);
-    let title = decode(og('title')).replace(/\s*[—|].*$/, '').trim(); if(!title){const h1=document.querySelector('h1'); title=h1?h1.textContent.trim():'';}
+    const og = (p) => (html.match(new RegExp('og:' + p + '" content="([^"]*)"')) || [])[1] || '';
+    let title = decode(og('title')).replace(/\s*[—|].*$/, '').trim();
     const poster = og('image');
     const overview = decode(og('description'));
     return {
@@ -311,41 +311,33 @@
     },
 
     async getMovie(id) {
-      return parseDetail(document.documentElement.outerHTML, id);
+      const html = await getText('/' + id);
+      return parseDetail(html, id);
     },
 
     /**
-     * Détail série : og tags du SSR + saisons depuis le DOM hydraté.
-     * Le moteur Kotlin a navigué la WebView sur /<id>, donc on lit document.* directement.
-     * Polling 12s max pour attendre l'hydration Next.js des liens saison.
+     * Détail série : fetch() same-origin (cookies CF du warmup) + DOMParser.
+     * PAS de navigation WebView → zéro nouveau challenge CF Turnstile.
+     * v7 (2026-07-03) : remplace le polling DOM live par fetch + DOMParser.
      */
     async getTvShow(id, lang) {
       const slug = id.replace(/^tv\//, '');
-      const base = parseDetail(document.documentElement.outerHTML, id);
-      // Si langue passée → click le bouton langue avant de parser les saisons
-      // (Sur dessinanime.cc le clic VF/VOSTFR change la liste des saisons dispo.)
-      if (lang) await clickLangIfNeeded(lang);
-      // detectAvailableLanguages RETIRÉ (v6) : le wrapper VF/VOSTFR a été
-      // abandonné côté Kotlin → cette détection ralentissait getTvShow de 8s
-      // pour rien (= timeout 20s pile au polling saisons cumulé).
+      // Fetch la page de la série via same-origin (cookies CF passent)
+      const html = await getText('/' + id);
+      const base = parseDetail(html, id);
       base.availableLanguages = [];
-      // Poll DOM jusqu'à 12s pour les liens saison "/tv/<slug>/<N>/1"
+      // Parse les saisons depuis le HTML fetchè (SSR = saisons déjà présentes)
+      const doc = new DOMParser().parseFromString(html, 'text/html');
       const escSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const seasonHrefRe = new RegExp('^\\/tv\\/' + escSlug + '\\/(\\d+)\\/1$');
-      let seasonNums = new Set();
-      for (let i = 0; i < 24; i++) {
-        const links = [...document.querySelectorAll('a[href]')];
-        seasonNums = new Set();
-        for (const a of links) {
-          const m = (a.getAttribute('href') || '').match(seasonHrefRe);
-          if (m) seasonNums.add(parseInt(m[1], 10));
-        }
-        if (seasonNums.size > 0) break;
-        await new Promise(r => setTimeout(r, 500));
+      const seasonNums = new Set();
+      for (const a of doc.querySelectorAll('a[href]')) {
+        const m = (a.getAttribute('href') || '').match(seasonHrefRe);
+        if (m) seasonNums.add(parseInt(m[1], 10));
       }
-      // Pour chaque saison, cherche son image associée dans le DOM (la card)
+      // Pour chaque saison, cherche son image associée dans le HTML parsé
       const seasons = [...seasonNums].sort((a, b) => a - b).map(n => {
-        const a = [...document.querySelectorAll('a[href]')].find(x => {
+        const a = [...doc.querySelectorAll('a[href]')].find(x => {
           const m = (x.getAttribute('href') || '').match(seasonHrefRe);
           return m && +m[1] === n;
         });
@@ -369,9 +361,10 @@
     },
 
     /**
-     * Liste les épisodes d'une saison via le DOM hydraté Next.js.
-     * Le moteur Kotlin a navigué la WebView sur /tv/<slug>/<seasonNum>/1, on lit le DOM.
-     * Polling 12s pour attendre l'hydratation de tous les épisodes (= sinon ~6 sur 12).
+     * Liste les épisodes d'une saison via fetch() same-origin + DOMParser.
+     * PAS de navigation WebView → zéro nouveau challenge CF Turnstile.
+     * v7 (2026-07-03) : remplace le polling DOM live par fetch + DOMParser.
+     * Le SSR Next.js contient TOUS les épisodes d'un coup (pas de polling nécessaire).
      */
     async getEpisodesBySeason(seasonId, lang) {
       const parts = seasonId.split('/');
@@ -380,33 +373,12 @@
       const seasonNum = parts[2];
       const escSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const epHrefRe = new RegExp('^\\/tv\\/' + escSlug + '\\/' + seasonNum + '\\/(\\d+)$');
-      // Si langue passée → click le bouton langue avant de lister épisodes
-      if (lang) await clickLangIfNeeded(lang);
-      // Poll DOM jusqu'à 12s
-      let bestCount = 0;
-      let stableCycles = 0;
-      for (let i = 0; i < 24; i++) {
-        const links = [...document.querySelectorAll('a[href]')];
-        const found = new Set();
-        for (const a of links) {
-          const m = (a.getAttribute('href') || '').match(epHrefRe);
-          if (m) found.add(parseInt(m[1], 10));
-        }
-        if (found.size === bestCount) {
-          stableCycles++;
-          // 2 cycles stables avec ≥ 5 épisodes → on s'arrête (chargement fini)
-          if (stableCycles >= 2 && bestCount >= 5) break;
-        } else {
-          bestCount = found.size;
-          stableCycles = 0;
-        }
-        await new Promise(r => setTimeout(r, 500));
-      }
-      // Lecture finale du DOM
-      const links = [...document.querySelectorAll('a[href]')];
+      // Fetch la page saison via same-origin (cookies CF passent)
+      const html = await getText('/tv/' + slug + '/' + seasonNum + '/1');
+      const doc = new DOMParser().parseFromString(html, 'text/html');
       const seen = new Set();
       const out = [];
-      for (const a of links) {
+      for (const a of doc.querySelectorAll('a[href]')) {
         const m = (a.getAttribute('href') || '').match(epHrefRe);
         if (!m) continue;
         const epNum = parseInt(m[1], 10);
@@ -438,26 +410,6 @@
      * boutons hosts (hydrax/uqload/vidhide/sendvid/…). Trouve les boutons hosts
      * dynamiquement sans whitelist.
      */
-    // 2026-07-02 : genres DATE ("Nouveautes" = date d'ajout, toutes annees ; "Sorties <annee>").
-    //   Filtres server-side du catalogue (sortField/releaseYear) -> parseCards.
-    async getGenre(id, page) {
-      var p = page || 1;
-      var year = new Date().getFullYear();
-      var path;
-      if (id === '__recent__') {
-        path = '/catalogue?sortField=createdAt&sortOrder=desc&page=' + p;
-      } else if (id === '__releases_year__') {
-        path = '/catalogue?releaseYear=' + year + '&sortField=releaseDate&sortOrder=desc&page=' + p;
-      } else {
-        return [];
-      }
-      try {
-        var html = await getText(path);
-        return parseCards(html);
-      } catch (e) {
-        return [];
-      }
-    },
     async extractServers(lang) {
       // Si langue passée → click le bouton langue AVANT le scan des hosts.
       // Le site renouvelle les tokens nmlnode selon la langue choisie.
