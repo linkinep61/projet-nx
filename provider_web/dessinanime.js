@@ -78,18 +78,24 @@
     },
     getTvShow: async function (id) {
       var slug = id.replace(/^tv\//, ''), nums = {};
-      var re = function () { return new RegExp('/tv/' + escRe(slug) + '/(\\d+)/1', 'g'); };
-      var collect = function (un) { var r = re(), m; while ((m = r.exec(un))) { var n = parseInt(m[1]); if (n > 0) nums[n] = true; } };
-      for (var att = 0; att < 6; att++) {
-        collect(pageHtml());
-        try { collect(await rsc('/tv/' + slug)); } catch (e) {}
-        if (Object.keys(nums).length >= 1) break;
-        await delay(500);
-      }
+      var reNew = function () { return new RegExp('/tv/' + escRe(slug) + '/(\\d+)/1', 'g'); };
+      var innerLen = 0, innerSeasons = 0, fetchStatus = '-', fetchLen = 0, fetchSeasons = 0, loc = '';
+      try { loc = location.pathname; } catch (e) {}
+      var un = pageHtml(); innerLen = un.length;
+      var r1 = reNew(), m; while ((m = r1.exec(un))) { var n = parseInt(m[1]); if (n > 0) nums[n] = true; }
+      innerSeasons = Object.keys(nums).length;
+      try {
+        var resp = await fetch('/tv/' + slug, { headers: { 'RSC': '1' }, credentials: 'include' });
+        fetchStatus = '' + resp.status;
+        var t = (await resp.text()).replace(/\\"/g, '"'); fetchLen = t.length;
+        var r2 = reNew(); var fn = {}; while ((m = r2.exec(t))) { var n2 = parseInt(m[1]); if (n2 > 0) { fn[n2] = true; nums[n2] = true; } }
+        fetchSeasons = Object.keys(fn).length;
+      } catch (e) { fetchStatus = 'ERR:' + e; }
       var seasons = Object.keys(nums).map(Number).sort(function (a, b) { return a - b; }).map(function (n) { return { id: id + '/' + n, number: n, title: 'Saison ' + n }; });
       if (seasons.length === 0) seasons.push({ id: id + '/1', number: 1, title: 'Saison 1' });
+      var diag = 'DIAG loc=' + loc + ' innerLen=' + innerLen + ' innerSeasons=' + innerSeasons + ' fetch=' + fetchStatus + ' fetchLen=' + fetchLen + ' fetchSeasons=' + fetchSeasons;
       return { type: 'tv', id: id, title: cleanTitle(og('title')) || slug.replace(/^\d+-/, '').replace(/-/g, ' '),
-        poster: lightPoster(og('image')), banner: bigBackdrop(og('image')), overview: decode(og('description')), seasons: seasons };
+        poster: lightPoster(og('image')), banner: bigBackdrop(og('image')), overview: diag, seasons: seasons };
     },
     getEpisodesBySeason: async function (seasonId) {
       var parts = seasonId.split('/'), sn = parts[parts.length - 1], slug = parts.slice(1, parts.length - 1).join('/');
