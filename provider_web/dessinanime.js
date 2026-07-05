@@ -93,9 +93,10 @@
       } catch (e) { fetchStatus = 'ERR:' + e; }
       var seasons = Object.keys(nums).map(Number).sort(function (a, b) { return a - b; }).map(function (n) { return { id: id + '/' + n, number: n, title: 'Saison ' + n }; });
       if (seasons.length === 0) seasons.push({ id: id + '/1', number: 1, title: 'Saison 1' });
-      var diag = 'DIAG loc=' + loc + ' innerLen=' + innerLen + ' innerSeasons=' + innerSeasons + ' fetch=' + fetchStatus + ' fetchLen=' + fetchLen + ' fetchSeasons=' + fetchSeasons;
+      var diag = 'DAJS loc=' + loc + ' innerLen=' + innerLen + ' innerSeasons=' + innerSeasons + ' fetch=' + fetchStatus + ' fetchLen=' + fetchLen + ' fetchSeasons=' + fetchSeasons;
+      try { console.log(diag); } catch (e) {}
       return { type: 'tv', id: id, title: cleanTitle(og('title')) || slug.replace(/^\d+-/, '').replace(/-/g, ' '),
-        poster: lightPoster(og('image')), banner: bigBackdrop(og('image')), overview: diag, seasons: seasons };
+        poster: lightPoster(og('image')), banner: bigBackdrop(og('image')), overview: decode(og('description')), seasons: seasons };
     },
     getEpisodesBySeason: async function (seasonId) {
       var parts = seasonId.split('/'), sn = parts[parts.length - 1], slug = parts.slice(1, parts.length - 1).join('/');
