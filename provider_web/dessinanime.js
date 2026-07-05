@@ -1,5 +1,5 @@
 /*
- * dessinanime.js — Provider WebJS hébergé. v8 2026-07-04 (jaquettes episodes + saisons).
+ * dessinanime.js — Provider WebJS hébergé. v9 2026-07-04 (jaquettes + hydrax en dernier).
  * Site : https://dessinanime.cc (Next.js RSC + Cloudflare).
  * Le moteur navigue la WebView sur la page détail ET résout le challenge Turnstile CF
  * (waitForRealContent) → on lit la page RÉELLEMENT chargée (innerHTML + meta og).
@@ -105,6 +105,8 @@
         }
         if (g.iframe_url) servers.push({ name: name + ' (embed)', url: g.iframe_url });
       }
+      // Hydrax (nmlnode mp4) = codec souvent incompatible ExoPlayer → on le met EN DERNIER.
+      servers.sort(function (a, b) { var ah = /hydrax/i.test(a.name) ? 1 : 0, bh = /hydrax/i.test(b.name) ? 1 : 0; return ah - bh; });
       return servers;
     },
   };
