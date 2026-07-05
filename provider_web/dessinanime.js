@@ -1,5 +1,5 @@
 /*
- * dessinanime.js — Provider WebJS hébergé. v10 2026-07-04 (retire mp4 Hydrax codec KO).
+ * dessinanime.js — Provider WebJS hébergé. v11 2026-07-04 (Hydrax restaure - fix codec cote player).
  * Site : https://dessinanime.cc (Next.js RSC + Cloudflare).
  * Le moteur navigue la WebView sur la page détail ET résout le challenge Turnstile CF
  * (waitForRealContent) → on lit la page RÉELLEMENT chargée (innerHTML + meta og).
@@ -100,18 +100,11 @@
       for (var i = 0; i < sources.length; i++) {
         var g = sources[i], host = (g.host || 'lecteur'), name = host.charAt(0).toUpperCase() + host.slice(1);
         if (g.sources && g.sources.length) {
-          if (g.type === 'm3u8') {
-            // HLS direct (Vidhide/Uqload) — jouable par ExoPlayer.
-            if (g.sources[0] && g.sources[0].source) servers.push({ name: name + ' ' + (g.sources[0].label || ''), url: g.sources[0].source });
-          }
-          // type 'mp4' (Hydrax nmlnode) = codec HEVC incompatible Chromecast/ExoPlayer (erreur
-          //   codec à la lecture) → on NE pousse PAS le flux direct. On garde uniquement l'embed
-          //   ci-dessous comme repli (résolu par l'extracteur in-app).
+          if (g.type === 'm3u8') { if (g.sources[0] && g.sources[0].source) servers.push({ name: name + ' ' + (g.sources[0].label || ''), url: g.sources[0].source }); }
+          else { var s = g.sources.slice().sort(function (a, b) { return (parseInt(b.label) || 0) - (parseInt(a.label) || 0); }); for (var j = 0; j < s.length; j++) if (s[j].source) servers.push({ name: name + ' ' + (s[j].label || ''), url: s[j].source }); }
         }
         if (g.iframe_url) servers.push({ name: name + ' (embed)', url: g.iframe_url });
       }
-      // Repli Hydrax (embed) en dernier — les serveurs qui lisent (Vidhide/Uqload) d'abord.
-      servers.sort(function (a, b) { var ah = /hydrax/i.test(a.name) ? 1 : 0, bh = /hydrax/i.test(b.name) ? 1 : 0; return ah - bh; });
       return servers;
     },
   };
