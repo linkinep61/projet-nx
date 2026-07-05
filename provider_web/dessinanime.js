@@ -1,112 +1,583 @@
 /*
- * dessinanime.js — Provider WebJS hébergé. v11 2026-07-04 (Hydrax restaure - fix codec cote player).
- * Site : https://dessinanime.cc (Next.js RSC + Cloudflare).
- * Le moteur navigue la WebView sur la page détail ET résout le challenge Turnstile CF
- * (waitForRealContent) → on lit la page RÉELLEMENT chargée (innerHTML + meta og).
- * Home/catalogue = fetch RSC (CF autorise /catalogue) ; recherche = /api/search JSON.
+ * dessinanime.js — Provider JS hébergé (moteur WebJsProvider).
+ * Site : https://dessinanime.cc  (Next.js + Cloudflare)
+ * S'exécute DANS une WebView sur le site → fetch same-origin + DOM + cookies CF.
+ *
+ * v5 (2026-07-04) — Home = VRAIES catégories du site (DOM hydraté) :
+ *   - getHome : parse les sections RÉELLES du home après hydratation Next.js
+ *     (En Tendance, Nouveaux Films, Mieux Notés, Top Français, Nouveaux Épisodes).
+ *     Carrousel + 5 rails. Fallback fetch si DOM pas hydraté.
+ *   - getMovies : parcourt les 372 pages catalogue (batches de 10×5), filtre
+ *     type=movie. Couvre l'intégralité du catalogue en ~8 pages de scroll.
+ *   - getTvShows : idem mais type=tv (plus abondant → batch plus petit).
+ *   - getTvShow / getEpisodesBySeason / extractServers : inchangés (v3).
+ *
+ * Contrat (window.__P) :
+ *   getHome() -> [ {name, items:[item]} ]
+ *   search(q, page) -> [item]
+ *   getMovies(page) / getTvShows(page) -> [item]
+ *   getMovie(id) / getTvShow(id) -> item (+ seasons pour tv)
+ *   getEpisodesBySeason(seasonId) -> [episode]
+ *   extractServers() -> [ {name, url} ]
+ *   item   = {type:'movie'|'tv', id:'movie/<slug>'|'tv/<slug>', title, poster, banner, year, rating, overview}
+ *   season = {id:'<showId>/<n>', number, title, poster}
+ *   episode= {id:'<showId>/<season>/<ep>', number, title, poster}
  */
 (function () {
-  var BASE = 'https://dessinanime.cc';
-  function rsc(path) { return fetch(path, { headers: { 'RSC': '1' }, credentials: 'include' }).then(function (r) { return r.text(); }).then(function (t) { return t.replace(/\\"/g, '"'); }); }
-  function json(path) { return fetch(path, { headers: { 'Accept': 'application/json' }, credentials: 'include' }).then(function (r) { return r.json(); }); }
-  function pageHtml() { return document.documentElement.innerHTML.replace(/\\"/g, '"'); }
-  function og(p) { var m = document.querySelector('meta[property="og:' + p + '"]'); return m ? m.content : ''; }
-  function cleanTitle(t) { return (t || '').replace(/\s*[—|].*$/, '').replace(/\s*Streaming.*$/i, '').trim(); }
-  function decode(s) { return (s || '').replace(/&#x27;/g, "'").replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\\u002F/gi, '/'); }
-  function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-  function lightPoster(u) { return (u || '').replace('/original/', '/w342/').replace('/w1280/', '/w342/').replace('/w500/', '/w342/'); }
-  function bigBackdrop(u) { return (u || '').replace('/w342/', '/w780/').replace('/original/', '/w780/'); }
-  function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  const BASE = 'https://dessinanime.cc';
 
-  function parseItems(un) {
-    var re = /"src":"(https:\/\/image\.tmdb\.org\/[^"]+)"[\s\S]{0,700}?"href":"\/(movie|tv)\/([^"\/]+)"[^}]*?"children":"([^"]*)"/g;
-    var out = [], seen = {}, m;
-    while ((m = re.exec(un))) {
-      var type = m[2], slug = m[3], id = type + '/' + slug;
-      if (seen[id]) continue; seen[id] = true;
-      var p = lightPoster(m[1]);
-      out.push({ type: type, id: id, title: decode(m[4]) || slug.replace(/^\d+-/, '').replace(/-/g, ' '), poster: p, banner: p });
+  async function getText(path) {
+    const r = await fetch(path, { headers: { 'Accept': 'text/html,application/json' } });
+    return await r.text();
+  }
+  async function getJson(path) {
+    const r = await fetch(path, { headers: { 'Accept': 'application/json' } });
+    return await r.json();
+  }
+  // OPTIMISATION : réduit taille images TMDB original → w342 (10× + léger).
+  function optimizeImgUrl(url) {
+    if (!url) return url;
+    return url.replace('/t/p/original/', '/t/p/w342/');
+  }
+
+  function decode(s) {
+    return (s || '')
+      .replace(/&#x27;/g, "'").replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+  }
+
+  /**
+   * Parse les cartes depuis le HTML brut (SSR) — utilisé par le fallback getHome,
+   * getMovies, getTvShows. Regex inversé img→href.
+   */
+  function parseCards(html) {
+    const re = /<img\b[^>]*\balt="([^"]*)"[^>]*\bsrc="([^"]+)"[^>]*>[\s\S]{0,1500}?<a[^>]+href="\/(movie|tv)\/([^"\/]+)"[^>]*>/g;
+    const out = [];
+    const seen = new Set();
+    let m;
+    while ((m = re.exec(html))) {
+      const type = m[3];
+      const slug = m[4];
+      const id = type + '/' + slug;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push({
+        type: type,
+        id: id,
+        title: decode(m[1]),
+        poster: optimizeImgUrl(m[2]),
+        banner: optimizeImgUrl(m[2]),
+      });
     }
     return out;
   }
-  function parseSources(un) {
-    var mk = '"sources":[{"type"'; var i = un.indexOf(mk); if (i < 0) return [];
-    var start = i + '"sources":'.length, depth = 0, end = -1;
-    for (var k = start; k < un.length && k < start + 60000; k++) { if (un[k] === '[') depth++; else if (un[k] === ']') { depth--; if (depth === 0) { end = k + 1; break; } } }
-    if (end < 0) return []; try { return JSON.parse(un.substring(start, end)); } catch (e) { return []; }
+
+  // og tags d'une page détail (SSR) → title/poster/overview/year
+  function parseDetail(html, id) {
+    const og = (p) => (html.match(new RegExp('og:' + p + '" content="([^"]*)"')) || [])[1] || '';
+    let title = decode(og('title')).replace(/\s*[—|].*$/, '').trim();
+    const poster = og('image');
+    const overview = decode(og('description'));
+    return {
+      type: id.indexOf('tv/') === 0 ? 'tv' : 'movie',
+      id: id,
+      title: title,
+      poster: poster,
+      banner: poster,
+      overview: overview,
+    };
   }
-  function chunk(arr, size, names) { var out = []; for (var i = 0, n = 0; i < arr.length; i += size, n++) out.push({ name: names[n] || (names[0] + ' ' + (n + 1)), items: arr.slice(i, i + size) }); return out; }
 
-  var P = {
-    getHome: async function () {
-      var all = [], seen = {};
-      for (var pg = 1; pg <= 8; pg++) {
-        try { var items = parseItems(await rsc('/catalogue?page=' + pg)); if (!items.length) break;
-          for (var i = 0; i < items.length; i++) if (!seen[items[i].id]) { seen[items[i].id] = true; all.push(items[i]); }
-        } catch (e) { break; }
+  function mapSearch(arr) {
+    return (arr || []).map(function (x) {
+      const type = (x.mediaType === 'TV') ? 'tv' : 'movie';
+      return {
+        type: type,
+        id: type + '/' + x.slug,
+        title: x.title,
+        poster: x.posterPath || '',
+        banner: x.posterPath || '',
+        year: x.releaseYear || null,
+      };
+    });
+  }
+
+  // ─── Détection langue + clic bouton langue (VF/VOSTFR/VO) ──────────────
+  function findLangBtn(lang) {
+    const targets = lang === 'vf' ? ['VF', 'VF (1)', 'VF (2)', 'VF (3)', 'VF (4)']
+                  : lang === 'vostfr' ? ['VOSTFR']
+                  : lang === 'vo' ? ['VO'] : [];
+    const btns = [...document.querySelectorAll('button')];
+    for (const t of targets) {
+      const b = btns.find(b => (b.textContent || '').trim() === t);
+      if (b) return b;
+    }
+    return null;
+  }
+  async function clickLangIfNeeded(lang) {
+    if (!lang) return;
+    let btn = null;
+    for (let i = 0; i < 16; i++) {
+      btn = findLangBtn(lang);
+      if (btn) break;
+      await new Promise(r => setTimeout(r, 500));
+    }
+    if (btn) {
+      try {
+        ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(t => {
+          btn.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+        });
+        await new Promise(r => setTimeout(r, 1500));
+      } catch (e) {}
+    }
+  }
+  async function detectAvailableLanguages() {
+    for (let i = 0; i < 3; i++) {
+      const btns = [...document.querySelectorAll('button')];
+      const out = [];
+      if (btns.some(b => /^VF($|\s*\()/.test((b.textContent || '').trim()))) out.push('vf');
+      if (btns.some(b => /^VOSTFR$/.test((b.textContent || '').trim()))) out.push('vostfr');
+      if (btns.some(b => /^VO$/.test((b.textContent || '').trim()))) out.push('vo');
+      if (out.length > 0) return out;
+      await new Promise(r => setTimeout(r, 500));
+    }
+    return [];
+  }
+
+  // ─── Heuristique boutons hosts (extractServers v2) ──────────────────────
+  const NAV_NOISE = /Catalogue|Recherche|Connect|Partager|Open|Dismiss|Précédent|Suivant|Previous|Next|Proposer|Slide|Search|Share|Settings|Profile/i;
+  function isHostBtn(b) {
+    const t = (b.textContent || '').trim();
+    if (t.length < 2 || t.length > 24) return false;
+    if (NAV_NOISE.test(t)) return false;
+    const par = b.parentElement;
+    if (!par) return false;
+    const siblings = [...par.children].filter(c => c.tagName === 'BUTTON');
+    if (siblings.length < 2 || siblings.length > 20) return false;
+    const cls = (par.className || '').toString();
+    return /flex\s+flex-wrap/.test(cls) || /gap-2/.test(cls) || siblings.length >= 3;
+  }
+  function findHostBtns() {
+    return [...document.querySelectorAll('button')].filter(isHostBtn);
+  }
+
+  // ─── DOM Section Parser (v5) ────────────────────────────────────────────
+  // Parse les VRAIES sections du home hydraté Next.js.
+  // Structure DOM :
+  //   <div class="relative flex flex-col gap-2">   ← section container
+  //     <header class="flex items-end ...">
+  //       <p>EN TENDANCE</p>                        ← titre section ALL CAPS
+  //     </header>
+  //     <div> ... [role="group"] slides ...          ← items
+  //   </div>
+  // Chaque slide :
+  //   <div role="group">
+  //     <div><div><img alt="..." src="poster"></div>  ← poster
+  //           <div><a href="/movie|tv/slug">Title</a></div></div>
+  //   </div>
+
+  /**
+   * Trouve les sections du home par titre <p> ALL CAPS.
+   * Retourne [{title, container}] pour chaque section demandée.
+   */
+  function findDomSections(wantedTitles) {
+    const allPs = [...document.querySelectorAll('p')];
+    const usedPs = new Set();
+    const result = [];
+    for (const wanted of wantedTitles) {
+      const p = allPs.find(p => !usedPs.has(p) && p.textContent.trim() === wanted);
+      if (!p) continue;
+      usedPs.add(p);
+      // Remonte au container de la section
+      let container = null;
+      if (p.parentElement && p.parentElement.tagName === 'HEADER') {
+        container = p.parentElement.parentElement;
+      } else if (p.parentElement && p.parentElement.tagName === 'SECTION') {
+        container = p.parentElement;
       }
-      var tv = all.filter(function (x) { return x.type === 'tv'; });
-      var mv = all.filter(function (x) { return x.type === 'movie'; });
-      var cats = [];
-      if (all.length) cats.push({ name: "À l'affiche", items: all.slice(0, 6).map(function (x) { return { type: x.type, id: x.id, title: x.title, poster: x.poster, banner: bigBackdrop(x.poster) }; }) });
-      cats = cats.concat(chunk(tv, 16, ['Séries', 'Séries — suite', 'Encore plus de séries', 'Séries à découvrir', 'Sélection séries', 'Séries populaires']));
-      cats = cats.concat(chunk(mv, 16, ['Films', 'Films — suite', 'Encore plus de films']));
-      return cats;
-    },
-    getMovies: async function (page) { return parseItems(await rsc('/catalogue?page=' + (page || 1))).filter(function (x) { return x.type === 'movie'; }); },
-    getTvShows: async function (page) { return parseItems(await rsc('/catalogue?page=' + (page || 1))).filter(function (x) { return x.type === 'tv'; }); },
-    search: async function (q, page) {
-      if (!q) return [];
-      var arr = await json('/api/search?q=' + encodeURIComponent(q));
-      return (arr || []).map(function (x) {
-        var type = ('' + x.mediaType).toUpperCase() === 'MOVIE' ? 'movie' : 'tv';
-        var p = lightPoster(x.posterPath || '');
-        return { type: type, id: type + '/' + x.slug, title: x.title, poster: p, banner: p, year: x.releaseYear ? String(x.releaseYear) : null };
-      });
-    },
-
-    // DÉTAIL : la WebView est navigée sur la page (challenge résolu par le moteur) → on lit la page.
-    getMovie: async function (id) {
-      return { type: 'movie', id: id, title: cleanTitle(og('title')) || id.replace(/^movie\//, '').replace(/^\d+-/, '').replace(/-/g, ' '),
-        poster: lightPoster(og('image')), banner: bigBackdrop(og('image')), overview: decode(og('description')) };
-    },
-    getTvShow: async function (id) {
-      var slug = id.replace(/^tv\//, ''), nums = {};
-      var collect = function (un) { var re = new RegExp('/tv/' + escRe(slug) + '/(\\d+)/1', 'g'), m; while ((m = re.exec(un))) { var n = parseInt(m[1]); if (n > 0) nums[n] = true; } };
-      for (var att = 0; att < 5; att++) { collect(pageHtml()); if (Object.keys(nums).length >= 1) break; await delay(500); }
-      var _sp = lightPoster(og('image'));
-      var seasons = Object.keys(nums).map(Number).sort(function (a, b) { return a - b; }).map(function (n) { return { id: id + '/' + n, number: n, title: 'Saison ' + n, poster: _sp }; });
-      if (seasons.length === 0) seasons.push({ id: id + '/1', number: 1, title: 'Saison 1', poster: _sp });
-      return { type: 'tv', id: id, title: cleanTitle(og('title')) || slug.replace(/^\d+-/, '').replace(/-/g, ' '),
-        poster: lightPoster(og('image')), banner: bigBackdrop(og('image')), overview: decode(og('description')), seasons: seasons };
-    },
-    getEpisodesBySeason: async function (seasonId) {
-      var parts = seasonId.split('/'), sn = parts[parts.length - 1], slug = parts.slice(1, parts.length - 1).join('/');
-      var nums = {};
-      var collect = function (un) { var re = new RegExp('/tv/' + escRe(slug) + '/' + sn + '/(\\d+)', 'g'), m; while ((m = re.exec(un))) { var n = parseInt(m[1]); if (n > 0) nums[n] = true; } };
-      for (var att = 0; att < 5; att++) { collect(pageHtml()); if (Object.keys(nums).length >= 1) break; await delay(500); }
-      var sorted = Object.keys(nums).map(Number).sort(function (a, b) { return a - b; });
-      var un = pageHtml();
-      return sorted.map(function (n) {
-        var href = '/tv/' + slug + '/' + sn + '/' + n, ci = un.indexOf('"href":"' + href + '"'), title = 'Épisode ' + n, poster = '';
-        if (ci >= 0) { var c = un.substring(ci, ci + 1000); var im = c.match(/"src":"(https:\/\/image\.tmdb\.org\/[^"]+)","alt":"([^"]*)"/); if (im) { poster = lightPoster(im[1]); var t = decode(im[2]); if (t && !/^épisode/i.test(t)) title = t; } }
-        return { id: seasonId + '/' + n, number: n, title: title, poster: poster };
-      });
-    },
-    extractServers: async function () {
-      var sources = [];
-      for (var att = 0; att < 5 && sources.length === 0; att++) { sources = parseSources(pageHtml()); if (sources.length === 0) await delay(500); }
-      var servers = [];
-      for (var i = 0; i < sources.length; i++) {
-        var g = sources[i], host = (g.host || 'lecteur'), name = host.charAt(0).toUpperCase() + host.slice(1);
-        if (g.sources && g.sources.length) {
-          if (g.type === 'm3u8') { if (g.sources[0] && g.sources[0].source) servers.push({ name: name + ' ' + (g.sources[0].label || ''), url: g.sources[0].source }); }
-          else { var s = g.sources.slice().sort(function (a, b) { return (parseInt(b.label) || 0) - (parseInt(a.label) || 0); }); for (var j = 0; j < s.length; j++) if (s[j].source) servers.push({ name: name + ' ' + (s[j].label || ''), url: s[j].source }); }
+      if (!container) {
+        let el = p.parentElement;
+        for (let i = 0; i < 5; i++) {
+          if (!el) break;
+          const cards = el.querySelectorAll('a[href*="/movie/"], a[href*="/tv/"]');
+          if (cards.length >= 2 && cards.length <= 30) { container = el; break; }
+          el = el.parentElement;
         }
-        if (g.iframe_url) servers.push({ name: name + ' (embed)', url: g.iframe_url });
       }
-      return servers;
+      if (container) result.push({ title: wanted, container: container });
+    }
+    return result;
+  }
+
+  /**
+   * Extrait les items d'un container de section.
+   * Cherche les slides [role="group"] (carousel) OU les <a> directs (grid).
+   */
+  function extractSectionItems(container, seenIds) {
+    const items = [];
+    // Stratégie 1 : slides carousel [role="group"]
+    const slides = container.querySelectorAll('[role="group"]');
+    if (slides.length >= 2) {
+      slides.forEach(function (slide) {
+        const a = slide.querySelector('a[href*="/movie/"], a[href*="/tv/"]');
+        if (!a) return;
+        const href = a.getAttribute('href') || '';
+        const m = href.match(/^\/(movie|tv)\/([^\/]+)/);
+        if (!m) return;
+        const id = m[1] + '/' + m[2];
+        if (seenIds.has(id)) return;
+        seenIds.add(id);
+        const img = slide.querySelector('img');
+        const poster = img ? (img.src || img.getAttribute('data-src') || '') : '';
+        const title = img ? (img.alt || '') : (a.textContent || '').trim();
+        items.push({
+          type: m[1],
+          id: id,
+          title: decode(title),
+          poster: optimizeImgUrl(poster),
+          banner: optimizeImgUrl(poster),
+        });
+      });
+      return items;
+    }
+    // Stratégie 2 : liens <a> directs (sections grid)
+    const links = container.querySelectorAll('a[href*="/movie/"], a[href*="/tv/"]');
+    links.forEach(function (a) {
+      const href = a.getAttribute('href') || '';
+      const m = href.match(/^\/(movie|tv)\/([^\/]+)/);
+      if (!m) return;
+      const id = m[1] + '/' + m[2];
+      if (seenIds.has(id)) return;
+      seenIds.add(id);
+      // Cherche l'image dans le parent (card)
+      const card = a.closest('[role="group"]') || a.closest('div.group') || a.parentElement?.parentElement;
+      const img = card ? card.querySelector('img') : null;
+      const poster = img ? (img.src || img.getAttribute('data-src') || '') : '';
+      const title = img ? (img.alt || '') : (a.textContent || '').trim();
+      items.push({
+        type: m[1],
+        id: id,
+        title: decode(title),
+        poster: optimizeImgUrl(poster),
+        banner: optimizeImgUrl(poster),
+      });
+    });
+    return items;
+  }
+
+  const P = {
+    /**
+     * Home v5 : VRAIES catégories du site depuis le DOM hydraté.
+     * Sections parsées (dans l'ordre) :
+     *   1. EN TENDANCE → carrousel "À l'affiche"
+     *   2. NOUVEAUX AJOUTS (FILMS) → rail films
+     *   3. MIEUX NOTES → rail films
+     *   4. TOP FRANCAIS → rail séries
+     *   5. NOUVEAUX EPISODES → rail séries
+     * Fallback : fetch SSR + split artificiel si DOM pas hydraté.
+     */
+    async getHome() {
+      // Attendre l'hydratation Next.js (sections ALL CAPS dans des <p>)
+      const WANTED = [
+        'EN TENDANCE',
+        'NOUVEAUX AJOUTS (FILMS)',
+        'MIEUX NOTES',
+        'TOP FRANCAIS',
+        'NOUVEAUX EPISODES'
+      ];
+      let domSections = [];
+      for (let i = 0; i < 20; i++) { // 10s max
+        domSections = findDomSections(WANTED);
+        if (domSections.length >= 3) break;
+        await new Promise(function (r) { setTimeout(r, 500); });
+      }
+
+      // ── DOM hydraté : parse les vraies sections ──
+      if (domSections.length >= 3) {
+        const cats = [];
+        const seenIds = new Set();
+        const displayNames = {
+          'EN TENDANCE': 'À l\'affiche',
+          'NOUVEAUX AJOUTS (FILMS)': 'Nouveaux Films',
+          'MIEUX NOTES': 'Mieux Notés',
+          'TOP FRANCAIS': 'Top Français',
+          'NOUVEAUX EPISODES': 'Nouveaux Épisodes',
+        };
+        for (const sec of domSections) {
+          const items = extractSectionItems(sec.container, seenIds);
+          if (items.length < 1) continue;
+          cats.push({ name: displayNames[sec.title] || sec.title, items: items });
+        }
+        // Si ≥3 catégories, on a un bon home
+        if (cats.length >= 3) return cats;
+      }
+
+      // ── Fallback : fetch SSR (si hydratation échouée / WebView pas sur home) ──
+      var pages = await Promise.all([
+        getText('/').catch(function () { return ''; }),
+        getText('/catalogue?page=1').catch(function () { return ''; }),
+        getText('/catalogue?page=2').catch(function () { return ''; }),
+        getText('/catalogue?page=3').catch(function () { return ''; }),
+        getText('/catalogue?page=4').catch(function () { return ''; }),
+        getText('/catalogue?page=5').catch(function () { return ''; }),
+        getText('/catalogue?page=6').catch(function () { return ''; }),
+      ]);
+      var allItems = [];
+      var seenFb = new Set();
+      pages.forEach(function (html) {
+        parseCards(html).forEach(function (it) {
+          if (!seenFb.has(it.id)) { seenFb.add(it.id); allItems.push(it); }
+        });
+      });
+      var films = allItems.filter(function (i) { return i.type === 'movie'; });
+      var tvs = allItems.filter(function (i) { return i.type === 'tv'; });
+      var featured = allItems.slice(0, 8).filter(function (it) { return !!it.poster; });
+      var fbCats = [];
+      if (featured.length >= 3) fbCats.push({ name: 'À l\'affiche', items: featured });
+      if (films.length >= 1) fbCats.push({ name: 'Nouveaux Films', items: films.slice(0, 15) });
+      if (tvs.length >= 1) fbCats.push({ name: 'Top Séries', items: tvs.slice(0, 15) });
+      var remainMix = allItems.filter(function (it) { return !featured.includes(it); }).slice(0, 15);
+      if (remainMix.length >= 1) fbCats.push({ name: 'À découvrir', items: remainMix });
+      return fbCats;
+    },
+
+    async search(q, page) {
+      const arr = await getJson('/api/search?q=' + encodeURIComponent(q));
+      return mapSearch(arr);
+    },
+
+    /**
+     * Pagination Films : parcourt les pages catalogue par batches de 10,
+     * jusqu'à 5 batches (= 50 pages catalogue par page app).
+     * Avec ~1.2 films/page catalogue, ça donne ~60 films par page app.
+     * Les 372 pages catalogue sont couvertes en ~8 pages de scroll.
+     */
+    async getMovies(page) {
+      var BATCH = 10;       // pages en parallèle par batch
+      var MAX_BATCHES = 5;  // batches max avant de rendre la main
+      var MIN_ITEMS = 20;   // objectif minimum de films
+      var start = ((page || 1) - 1) * BATCH * MAX_BATCHES + 1;
+      var items = [];
+      var seen = new Set();
+
+      for (var b = 0; b < MAX_BATCHES; b++) {
+        var batchStart = start + b * BATCH;
+        var htmls = await Promise.all(
+          Array.from({ length: BATCH }, function (_, i) {
+            return getText('/catalogue?page=' + (batchStart + i)).catch(function () { return ''; });
+          })
+        );
+        htmls.forEach(function (html) {
+          parseCards(html).filter(function (i) { return i.type === 'movie'; }).forEach(function (it) {
+            if (!seen.has(it.id)) { seen.add(it.id); items.push(it); }
+          });
+        });
+        // Stop tôt si on a assez de films
+        if (items.length >= MIN_ITEMS) break;
+      }
+      return items;
+    },
+
+    async getTvShows(page) {
+      var BATCH = 10;
+      var MAX_BATCHES = 3;  // TV shows plus abondants → 30 pages suffisent
+      var start = ((page || 1) - 1) * BATCH * MAX_BATCHES + 1;
+      var items = [];
+      var seen = new Set();
+
+      for (var b = 0; b < MAX_BATCHES; b++) {
+        var batchStart = start + b * BATCH;
+        var htmls = await Promise.all(
+          Array.from({ length: BATCH }, function (_, i) {
+            return getText('/catalogue?page=' + (batchStart + i)).catch(function () { return ''; });
+          })
+        );
+        htmls.forEach(function (html) {
+          parseCards(html).filter(function (i) { return i.type === 'tv'; }).forEach(function (it) {
+            if (!seen.has(it.id)) { seen.add(it.id); items.push(it); }
+          });
+        });
+        if (items.length >= 20) break;
+      }
+      return items;
+    },
+
+    async getMovie(id) {
+      const html = await getText('/' + id);
+      return parseDetail(html, id);
+    },
+
+    /**
+     * Détail série : og tags du SSR + saisons depuis le DOM hydraté.
+     */
+    async getTvShow(id, lang) {
+      const slug = id.replace(/^tv\//, '');
+      const base = parseDetail(document.documentElement.outerHTML, id);
+      if (lang) await clickLangIfNeeded(lang);
+      base.availableLanguages = [];
+      const escSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const seasonHrefRe = new RegExp('^\\/tv\\/' + escSlug + '\\/(\\d+)\\/1$');
+      let seasonNums = new Set();
+      for (let i = 0; i < 24; i++) {
+        const links = [...document.querySelectorAll('a[href]')];
+        seasonNums = new Set();
+        for (const a of links) {
+          const m = (a.getAttribute('href') || '').match(seasonHrefRe);
+          if (m) seasonNums.add(parseInt(m[1], 10));
+        }
+        if (seasonNums.size > 0) break;
+        await new Promise(r => setTimeout(r, 500));
+      }
+      const seasons = [...seasonNums].sort((a, b) => a - b).map(n => {
+        const a = [...document.querySelectorAll('a[href]')].find(x => {
+          const m = (x.getAttribute('href') || '').match(seasonHrefRe);
+          return m && +m[1] === n;
+        });
+        let poster = base.poster;
+        if (a) {
+          const img = a.querySelector('img') || a.parentElement?.querySelector('img');
+          if (img) poster = img.src || img.getAttribute('data-src') || poster;
+        }
+        return {
+          id: id + '/' + n,
+          number: n,
+          title: 'Saison ' + n,
+          poster: poster,
+        };
+      });
+      if (seasons.length === 0) {
+        seasons.push({ id: id + '/1', number: 1, title: 'Saison 1', poster: base.poster });
+      }
+      base.seasons = seasons;
+      return base;
+    },
+
+    /**
+     * Liste les épisodes d'une saison via le DOM hydraté Next.js.
+     */
+    async getEpisodesBySeason(seasonId, lang) {
+      const parts = seasonId.split('/');
+      if (parts.length < 3 || parts[0] !== 'tv') return [];
+      const slug = parts[1];
+      const seasonNum = parts[2];
+      const escSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const epHrefRe = new RegExp('^\\/tv\\/' + escSlug + '\\/' + seasonNum + '\\/(\\d+)$');
+      if (lang) await clickLangIfNeeded(lang);
+      let bestCount = 0;
+      let stableCycles = 0;
+      for (let i = 0; i < 24; i++) {
+        const links = [...document.querySelectorAll('a[href]')];
+        const found = new Set();
+        for (const a of links) {
+          const m = (a.getAttribute('href') || '').match(epHrefRe);
+          if (m) found.add(parseInt(m[1], 10));
+        }
+        if (found.size === bestCount) {
+          stableCycles++;
+          if (stableCycles >= 2 && bestCount >= 5) break;
+        } else {
+          bestCount = found.size;
+          stableCycles = 0;
+        }
+        await new Promise(r => setTimeout(r, 500));
+      }
+      const links = [...document.querySelectorAll('a[href]')];
+      const seen = new Set();
+      const out = [];
+      for (const a of links) {
+        const m = (a.getAttribute('href') || '').match(epHrefRe);
+        if (!m) continue;
+        const epNum = parseInt(m[1], 10);
+        if (seen.has(epNum)) continue;
+        seen.add(epNum);
+        const img = a.querySelector('img') || a.parentElement?.querySelector('img');
+        let poster = img ? (img.src || img.getAttribute('data-src')) : null;
+        let title = null;
+        const titleEl = a.querySelector('[class*=title], h1, h2, h3, h4, h5') || a.parentElement?.querySelector('[class*=title], h1, h2, h3, h4, h5');
+        if (titleEl) title = (titleEl.textContent || '').trim();
+        if (!title) title = (a.textContent || '').trim();
+        if (title && (title === ('Épisode ' + epNum) || title.length > 80)) title = null;
+        out.push({
+          id: 'tv/' + slug + '/' + seasonNum + '/' + epNum,
+          number: epNum,
+          title: title || ('Épisode ' + epNum),
+          poster: poster || null,
+        });
+      }
+      out.sort((a, b) => a.number - b.number);
+      return out;
+    },
+
+    /**
+     * extractServers v2 — Intercepte fetch + XHR pour capter les URLs
+     * extractor.nmlnode.cc/proxy/{hls,mp4,dash}?token=...
+     */
+    async extractServers(lang) {
+      if (lang) await clickLangIfNeeded(lang);
+      const captured = [];
+      const seenToken = new Set();
+      function captureUrl(url) {
+        if (!url || typeof url !== 'string') return;
+        if (url.indexOf('extractor.nmlnode.cc/proxy/') < 0) return;
+        const m = url.match(/\/proxy\/(hls|mp4|dash)\?token=([A-Za-z0-9_-]+)/);
+        if (!m) return;
+        if (seenToken.has(m[2])) return;
+        seenToken.add(m[2]);
+        captured.push('https://extractor.nmlnode.cc/proxy/' + m[1] + '?token=' + m[2]);
+      }
+      const origFetch = window.fetch;
+      window.fetch = function (input, init) {
+        try {
+          const u = typeof input === 'string' ? input : (input && input.url);
+          captureUrl(u);
+        } catch (e) {}
+        return origFetch.apply(this, arguments);
+      };
+      const origOpen = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (method, url) {
+        try { captureUrl(url); } catch (e) {}
+        return origOpen.apply(this, arguments);
+      };
+
+      let btns = [];
+      for (let i = 0; i < 24; i++) {
+        btns = findHostBtns();
+        if (btns.length > 0) break;
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      const counts = {};
+      const out = [];
+      for (const btn of btns) {
+        const label = (btn.textContent || '').trim();
+        counts[label] = (counts[label] || 0) + 1;
+        const niceName = counts[label] > 1 ? (label + ' #' + counts[label]) : label;
+        const beforeLen = captured.length;
+        try { btn.scrollIntoView({ block: 'center' }); } catch (e) {}
+        try {
+          ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) {
+            btn.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+          });
+        } catch (e) {}
+        let url = null;
+        for (let i = 0; i < 25; i++) {
+          if (captured.length > beforeLen) { url = captured[captured.length - 1]; break; }
+          const vid = document.querySelector('video');
+          if (vid && vid.currentSrc && vid.currentSrc.indexOf('extractor.nmlnode.cc') >= 0) {
+            captureUrl(vid.currentSrc);
+            if (captured.length > beforeLen) { url = captured[captured.length - 1]; break; }
+          }
+          await new Promise(r => setTimeout(r, 200));
+        }
+        if (url) out.push({ name: niceName, url: url });
+      }
+
+      try { window.fetch = origFetch; } catch (e) {}
+      try { XMLHttpRequest.prototype.open = origOpen; } catch (e) {}
+
+      return out;
     },
   };
+
   window.__P = P;
 })();
