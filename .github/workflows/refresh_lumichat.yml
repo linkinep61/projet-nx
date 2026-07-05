@@ -8,6 +8,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+  actions: write
 concurrency:
   group: refresh-lumichat-only
   cancel-in-progress: false
@@ -31,7 +32,7 @@ jobs:
           LUMI_WORKERS: '25'
           LUMI_TIMEOUT: '30'
           LUMI_OUT: 'data-lumichat.m3u'
-        run: python scripts/refresh_lumichat.py
+        run: python lumichat/refresh_lumichat.py
       - name: Commit & push if changed
         run: |
           git config user.name "github-actions[bot]"
@@ -44,3 +45,11 @@ jobs:
             git pull --rebase origin main || git rebase --abort
             git push
           fi
+      - name: Auto-cleanup old workflow runs
+        if: always()
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 5
