@@ -1,14 +1,17 @@
 /*
- * dessinanime.js — Provider WebJS hébergé (moteur WebJsProvider). v6 2026-07-04.
+ * dessinanime.js — Provider WebJS hébergé. v7 2026-07-04.
  * Site : https://dessinanime.cc (Next.js RSC + Cloudflare).
- * detailViaFetch=true côté moteur : le WebView RESTE sur baseUrl (contexte validé CF), et le
- * JS récupère TOUTES les données par fetch RSC (naviguer vers une page détail déclenche un
- * challenge CF sur TV → 403). Home/catalogue = RSC ; recherche = /api/search JSON.
+ * Le moteur navigue la WebView sur la page détail ET résout le challenge Turnstile CF
+ * (waitForRealContent) → on lit la page RÉELLEMENT chargée (innerHTML + meta og).
+ * Home/catalogue = fetch RSC (CF autorise /catalogue) ; recherche = /api/search JSON.
  */
 (function () {
   var BASE = 'https://dessinanime.cc';
   function rsc(path) { return fetch(path, { headers: { 'RSC': '1' }, credentials: 'include' }).then(function (r) { return r.text(); }).then(function (t) { return t.replace(/\\"/g, '"'); }); }
   function json(path) { return fetch(path, { headers: { 'Accept': 'application/json' }, credentials: 'include' }).then(function (r) { return r.json(); }); }
+  function pageHtml() { return document.documentElement.innerHTML.replace(/\\"/g, '"'); }
+  function og(p) { var m = document.querySelector('meta[property="og:' + p + '"]'); return m ? m.content : ''; }
+  function cleanTitle(t) { return (t || '').replace(/\s*[—|].*$/, '').replace(/\s*Streaming.*$/i, '').trim(); }
   function decode(s) { return (s || '').replace(/&#x27;/g, "'").replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\\u002F/gi, '/'); }
   function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
   function lightPoster(u) { return (u || '').replace('/original/', '/w342/').replace('/w1280/', '/w342/').replace('/w500/', '/w342/'); }
@@ -26,7 +29,6 @@
     }
     return out;
   }
-  function firstImg(un) { var m = un.match(/"src":"(https:\/\/image\.tmdb\.org\/[^"]+)","alt":"([^"]*)"/); return m ? { src: m[1], alt: decode(m[2]) } : null; }
   function parseSources(un) {
     var mk = '"sources":[{"type"'; var i = un.indexOf(mk); if (i < 0) return [];
     var start = i + '"sources":'.length, depth = 0, end = -1;
@@ -34,15 +36,6 @@
     if (end < 0) return []; try { return JSON.parse(un.substring(start, end)); } catch (e) { return []; }
   }
   function chunk(arr, size, names) { var out = []; for (var i = 0, n = 0; i < arr.length; i += size, n++) out.push({ name: names[n] || (names[0] + ' ' + (n + 1)), items: arr.slice(i, i + size) }); return out; }
-  // fetch RSC robuste (retry si 403/vide) — CF peut throttler ponctuellement
-  async function rscRetry(path, tries) {
-    var last = '';
-    for (var i = 0; i < (tries || 4); i++) {
-      try { last = await rsc(path); if (last && last.length > 12000 && last.indexOf('Just a moment') < 0) return last; } catch (e) {}
-      await delay(500);
-    }
-    return last;
-  }
 
   var P = {
     getHome: async function () {
@@ -72,51 +65,36 @@
       });
     },
 
+    // DÉTAIL : la WebView est navigée sur la page (challenge résolu par le moteur) → on lit la page.
     getMovie: async function (id) {
-      var slug = id.replace(/^movie\//, '');
-      var un = await rscRetry('/movie/' + slug);
-      var img = firstImg(un);
-      var ov = un.match(/"overview":"([^"]{20,})"/);
-      return { type: 'movie', id: id, title: (img && img.alt) || slug.replace(/^\d+-/, '').replace(/-/g, ' '),
-        poster: img ? lightPoster(img.src) : '', banner: img ? bigBackdrop(img.src) : '', overview: ov ? decode(ov[1]) : '' };
+      return { type: 'movie', id: id, title: cleanTitle(og('title')) || id.replace(/^movie\//, '').replace(/^\d+-/, '').replace(/-/g, ' '),
+        poster: lightPoster(og('image')), banner: bigBackdrop(og('image')), overview: decode(og('description')) };
     },
-
     getTvShow: async function (id) {
-      var slug = id.replace(/^tv\//, '');
-      var _st = '-', _len = 0, _loc = '';
-      try { _loc = location.pathname; } catch (e) {}
-      try { var _r = await fetch('/tv/' + slug, { headers: { 'RSC': '1' }, credentials: 'include' }); _st = '' + _r.status; var _t = await _r.text(); _len = _t.length; } catch (e) { _st = 'ERR'; }
-      var _cs = '-'; try { var _cr = await fetch('/catalogue?page=1', { headers: { 'RSC': '1' }, credentials: 'include' }); _cs = '' + _cr.status; } catch (e) { _cs = 'ERR'; }
-      var _ck = ''; try { _ck = document.cookie.indexOf('cf_clearance') >= 0 ? 'docCF' : 'noDocCF'; } catch (e) {}
-      try { console.log('DAJS2 id=' + id + ' loc=' + _loc + ' tvFetch=' + _st + ' tvLen=' + _len + ' catFetch=' + _cs + ' cookie=' + _ck); } catch (e) {}
-      var un = await rscRetry('/tv/' + slug);
-      var nums = {}, re = new RegExp('/tv/' + escRe(slug) + '/(\\d+)/1', 'g'), m;
-      while ((m = re.exec(un))) { var n = parseInt(m[1]); if (n > 0) nums[n] = true; }
-      var seasons = Object.keys(nums).map(Number).sort(function (a, b) { return a - b; }).map(function (k) { return { id: id + '/' + k, number: k, title: 'Saison ' + k }; });
+      var slug = id.replace(/^tv\//, ''), nums = {};
+      var collect = function (un) { var re = new RegExp('/tv/' + escRe(slug) + '/(\\d+)/1', 'g'), m; while ((m = re.exec(un))) { var n = parseInt(m[1]); if (n > 0) nums[n] = true; } };
+      for (var att = 0; att < 5; att++) { collect(pageHtml()); if (Object.keys(nums).length >= 1) break; await delay(500); }
+      var seasons = Object.keys(nums).map(Number).sort(function (a, b) { return a - b; }).map(function (n) { return { id: id + '/' + n, number: n, title: 'Saison ' + n }; });
       if (seasons.length === 0) seasons.push({ id: id + '/1', number: 1, title: 'Saison 1' });
-      var img = firstImg(un);
-      var ov = un.match(/"overview":"([^"]{20,})"/);
-      return { type: 'tv', id: id, title: (img && img.alt) || slug.replace(/^\d+-/, '').replace(/-/g, ' '),
-        poster: img ? lightPoster(img.src) : '', banner: img ? bigBackdrop(img.src) : '', overview: ov ? decode(ov[1]) : '', seasons: seasons };
+      return { type: 'tv', id: id, title: cleanTitle(og('title')) || slug.replace(/^\d+-/, '').replace(/-/g, ' '),
+        poster: lightPoster(og('image')), banner: bigBackdrop(og('image')), overview: decode(og('description')), seasons: seasons };
     },
-
     getEpisodesBySeason: async function (seasonId) {
       var parts = seasonId.split('/'), sn = parts[parts.length - 1], slug = parts.slice(1, parts.length - 1).join('/');
-      var un = await rscRetry('/tv/' + slug + '/' + sn + '/1');
-      var nums = {}, re = new RegExp('/tv/' + escRe(slug) + '/' + sn + '/(\\d+)', 'g'), m;
-      while ((m = re.exec(un))) { var n = parseInt(m[1]); if (n > 0) nums[n] = true; }
+      var nums = {};
+      var collect = function (un) { var re = new RegExp('/tv/' + escRe(slug) + '/' + sn + '/(\\d+)', 'g'), m; while ((m = re.exec(un))) { var n = parseInt(m[1]); if (n > 0) nums[n] = true; } };
+      for (var att = 0; att < 5; att++) { collect(pageHtml()); if (Object.keys(nums).length >= 1) break; await delay(500); }
       var sorted = Object.keys(nums).map(Number).sort(function (a, b) { return a - b; });
+      var un = pageHtml();
       return sorted.map(function (n) {
         var href = '/tv/' + slug + '/' + sn + '/' + n, ci = un.indexOf('"href":"' + href + '"'), title = 'Épisode ' + n, poster = '';
-        if (ci >= 0) { var c = un.substring(Math.max(0, ci - 500), ci); var im = firstImg(c); if (im) { poster = lightPoster(im.src); if (im.alt && !/^épisode/i.test(im.alt)) title = im.alt; } }
+        if (ci >= 0) { var c = un.substring(Math.max(0, ci - 500), ci); var im = c.match(/"src":"(https:\/\/image\.tmdb\.org\/[^"]+)","alt":"([^"]*)"/); if (im) { poster = lightPoster(im[1]); var t = decode(im[2]); if (t && !/^épisode/i.test(t)) title = t; } }
         return { id: seasonId + '/' + n, number: n, title: title, poster: poster };
       });
     },
-
-    // path = "/tv/<slug>/<season>/<episode>" ou "/movie/<slug>" (passé par le moteur)
-    extractServers: async function (path) {
-      var un = await rscRetry(path || location.pathname);
-      var sources = parseSources(un);
+    extractServers: async function () {
+      var sources = [];
+      for (var att = 0; att < 5 && sources.length === 0; att++) { sources = parseSources(pageHtml()); if (sources.length === 0) await delay(500); }
       var servers = [];
       for (var i = 0; i < sources.length; i++) {
         var g = sources[i], host = (g.host || 'lecteur'), name = host.charAt(0).toUpperCase() + host.slice(1);
