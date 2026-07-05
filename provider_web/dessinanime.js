@@ -1,5 +1,5 @@
 /*
- * dessinanime.js — Provider WebJS hébergé. v7 2026-07-04.
+ * dessinanime.js — Provider WebJS hébergé. v8 2026-07-04 (jaquettes episodes + saisons).
  * Site : https://dessinanime.cc (Next.js RSC + Cloudflare).
  * Le moteur navigue la WebView sur la page détail ET résout le challenge Turnstile CF
  * (waitForRealContent) → on lit la page RÉELLEMENT chargée (innerHTML + meta og).
@@ -74,8 +74,9 @@
       var slug = id.replace(/^tv\//, ''), nums = {};
       var collect = function (un) { var re = new RegExp('/tv/' + escRe(slug) + '/(\\d+)/1', 'g'), m; while ((m = re.exec(un))) { var n = parseInt(m[1]); if (n > 0) nums[n] = true; } };
       for (var att = 0; att < 5; att++) { collect(pageHtml()); if (Object.keys(nums).length >= 1) break; await delay(500); }
-      var seasons = Object.keys(nums).map(Number).sort(function (a, b) { return a - b; }).map(function (n) { return { id: id + '/' + n, number: n, title: 'Saison ' + n }; });
-      if (seasons.length === 0) seasons.push({ id: id + '/1', number: 1, title: 'Saison 1' });
+      var _sp = lightPoster(og('image'));
+      var seasons = Object.keys(nums).map(Number).sort(function (a, b) { return a - b; }).map(function (n) { return { id: id + '/' + n, number: n, title: 'Saison ' + n, poster: _sp }; });
+      if (seasons.length === 0) seasons.push({ id: id + '/1', number: 1, title: 'Saison 1', poster: _sp });
       return { type: 'tv', id: id, title: cleanTitle(og('title')) || slug.replace(/^\d+-/, '').replace(/-/g, ' '),
         poster: lightPoster(og('image')), banner: bigBackdrop(og('image')), overview: decode(og('description')), seasons: seasons };
     },
@@ -88,7 +89,7 @@
       var un = pageHtml();
       return sorted.map(function (n) {
         var href = '/tv/' + slug + '/' + sn + '/' + n, ci = un.indexOf('"href":"' + href + '"'), title = 'Épisode ' + n, poster = '';
-        if (ci >= 0) { var c = un.substring(Math.max(0, ci - 500), ci); var im = c.match(/"src":"(https:\/\/image\.tmdb\.org\/[^"]+)","alt":"([^"]*)"/); if (im) { poster = lightPoster(im[1]); var t = decode(im[2]); if (t && !/^épisode/i.test(t)) title = t; } }
+        if (ci >= 0) { var c = un.substring(ci, ci + 1000); var im = c.match(/"src":"(https:\/\/image\.tmdb\.org\/[^"]+)","alt":"([^"]*)"/); if (im) { poster = lightPoster(im[1]); var t = decode(im[2]); if (t && !/^épisode/i.test(t)) title = t; } }
         return { id: seasonId + '/' + n, number: n, title: title, poster: poster };
       });
     },
