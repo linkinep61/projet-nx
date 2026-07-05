@@ -79,6 +79,7 @@
       // rails de 14, noms variés, ZÉRO doublon (un item n'est que dans Séries OU Films)
       cats = cats.concat(chunk(tv, 14, ['Séries', 'Séries — suite', 'Encore plus de séries', 'Séries à découvrir']));
       cats = cats.concat(chunk(mv, 14, ['Films', 'Films — suite', 'Encore plus de films', 'Films à découvrir']));
+      try{console.log('DA_HOME items='+all.length+' tv='+tv.length+' mv='+mv.length+' cats='+cats.map(function(c){return c.name+':'+c.items.length;}).join(','));}catch(e){}
       return cats;
     },
     getMovies: async function (page) {
@@ -116,6 +117,7 @@
       var seasons = Object.keys(nums).map(Number).sort(function (a, b) { return a - b; })
         .map(function (n) { return { id: id + '/' + n, number: n, title: 'Saison ' + n }; });
       if (seasons.length === 0) seasons.push({ id: id + '/1', number: 1, title: 'Saison 1' });
+      try{console.log('DA_TVSHOW id='+id+' seasons='+seasons.length+' innerLen='+pageHtml().length+' loc='+location.pathname);}catch(e){}
       return { type: 'tv', id: id, title: cleanTitle(og('title')) || slug.replace(/^\d+-/, '').replace(/-/g, ' '),
         poster: lightPoster(og('image')), banner: bigBackdrop(og('image')), overview: decode(og('description')), seasons: seasons };
     },
