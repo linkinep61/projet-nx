@@ -83,6 +83,10 @@
 
     getTvShow: async function (id) {
       var slug = id.replace(/^tv\//, '');
+      var _st = '-', _len = 0, _loc = '';
+      try { _loc = location.pathname; } catch (e) {}
+      try { var _r = await fetch('/tv/' + slug, { headers: { 'RSC': '1' }, credentials: 'include' }); _st = '' + _r.status; var _t = await _r.text(); _len = _t.length; } catch (e) { _st = 'ERR'; }
+      try { console.log('DAJS2 id=' + id + ' loc=' + _loc + ' fetch=' + _st + ' len=' + _len); } catch (e) {}
       var un = await rscRetry('/tv/' + slug);
       var nums = {}, re = new RegExp('/tv/' + escRe(slug) + '/(\\d+)/1', 'g'), m;
       while ((m = re.exec(un))) { var n = parseInt(m[1]); if (n > 0) nums[n] = true; }
