@@ -1,0 +1,53 @@
+# Teste EN AMONT les chaines LumiChat, ne garde que les vivantes, regenere data/lumichat/data-lumichat.m3u.
+name: refresh-lumichat
+on:
+  schedule:
+    - cron: '0 */12 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: refresh-lumichat-only
+  cancel-in-progress: false
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: pip install requests
+      - name: Probe LumiChat + regenerate M3U (vivantes seulement)
+        env:
+          LUMI_WORKERS: '25'
+          LUMI_TIMEOUT: '30'
+          LUMI_OUT: 'data/lumichat/data-lumichat.m3u'
+        run: python scripts/lumichat/refresh_lumichat.py
+      - name: Commit & push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/lumichat/data-lumichat.m3u
+          if git diff --staged --quiet; then
+            echo "No changes"
+          else
+            git commit -m "auto: refresh data/lumichat/data-lumichat.m3u (chaines vivantes)"
+            git pull --rebase origin main || git rebase --abort
+            git push
+          fi
+      - name: Auto-cleanup old workflow runs
+        if: always()
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 5
