@@ -1,6 +1,6 @@
 /*
  * dessinanime.js — Provider WebJS hébergé (moteur WebJsProvider).
- * Site : https://dessinanime.cc (Next.js RSC + Cloudflare). v4 2026-07-04.
+ * Site : https://dessinanime.cc (Next.js RSC + Cloudflare). v5 2026-07-04 (carrousel + polling robuste).
  * Home NON-REDONDANT (Séries/Films disjoints, 8 pages, rails de 16) + détail ULTRA-ROBUSTE
  * (union page chargée innerHTML + fetch RSC ×2 + retry). Recherche via /api/search JSON.
  */
@@ -51,8 +51,14 @@
       var tv = all.filter(function (x) { return x.type === 'tv'; });
       var mv = all.filter(function (x) { return x.type === 'movie'; });
       // Rails de 16, DISJOINTS (un item n'est que dans Séries OU Films) → zéro doublon.
-      var cats = chunk(tv, 16, ['Séries', 'Séries — suite', 'Encore plus de séries', 'Séries à découvrir', 'Sélection séries', 'Séries populaires'])
-        .concat(chunk(mv, 16, ['Films', 'Films — suite', 'Encore plus de films']));
+      var cats = [];
+      // Carrousel FEATURED (le moteur rend "À l'affiche" en SWIPER) : 6 premiers, bannière large.
+      if (all.length) {
+        var feat = all.slice(0, 6).map(function (x) { return { type: x.type, id: x.id, title: x.title, poster: x.poster, banner: bigBackdrop(x.poster) }; });
+        cats.push({ name: "À l'affiche", items: feat });
+      }
+      cats = cats.concat(chunk(tv, 16, ['Séries', 'Séries — suite', 'Encore plus de séries', 'Séries à découvrir', 'Sélection séries', 'Séries populaires']));
+      cats = cats.concat(chunk(mv, 16, ['Films', 'Films — suite', 'Encore plus de films']));
       return cats;
     },
     getMovies: async function (page) { return parseItems(await rsc('/catalogue?page=' + (page || 1))).filter(function (x) { return x.type === 'movie'; }); },
@@ -72,10 +78,14 @@
     },
     getTvShow: async function (id) {
       var slug = id.replace(/^tv\//, ''), nums = {};
-      var collect = function (un) { var re = new RegExp('/tv/' + escRe(slug) + '/(\\d+)/1', 'g'), m; while ((m = re.exec(un))) { var n = parseInt(m[1]); if (n > 0) nums[n] = true; } };
-      collect(pageHtml());
-      try { collect(await rsc('/tv/' + slug)); } catch (e) {}
-      if (Object.keys(nums).length === 0) { await delay(600); collect(pageHtml()); try { collect(await rsc('/tv/' + slug)); } catch (e) {} }
+      var re = function () { return new RegExp('/tv/' + escRe(slug) + '/(\\d+)/1', 'g'); };
+      var collect = function (un) { var r = re(), m; while ((m = r.exec(un))) { var n = parseInt(m[1]); if (n > 0) nums[n] = true; } };
+      for (var att = 0; att < 6; att++) {
+        collect(pageHtml());
+        try { collect(await rsc('/tv/' + slug)); } catch (e) {}
+        if (Object.keys(nums).length >= 1) break;
+        await delay(500);
+      }
       var seasons = Object.keys(nums).map(Number).sort(function (a, b) { return a - b; }).map(function (n) { return { id: id + '/' + n, number: n, title: 'Saison ' + n }; });
       if (seasons.length === 0) seasons.push({ id: id + '/1', number: 1, title: 'Saison 1' });
       return { type: 'tv', id: id, title: cleanTitle(og('title')) || slug.replace(/^\d+-/, '').replace(/-/g, ' '),
@@ -85,9 +95,12 @@
       var parts = seasonId.split('/'), sn = parts[parts.length - 1], slug = parts.slice(1, parts.length - 1).join('/');
       var nums = {}, chunks = [];
       var collect = function (un) { chunks.push(un); var re = new RegExp('/tv/' + escRe(slug) + '/' + sn + '/(\\d+)', 'g'), m; while ((m = re.exec(un))) { var n = parseInt(m[1]); if (n > 0) nums[n] = true; } };
-      collect(pageHtml());
-      try { collect(await rsc('/tv/' + slug + '/' + sn + '/1')); } catch (e) {}
-      if (Object.keys(nums).length <= 1) { await delay(600); collect(pageHtml()); try { collect(await rsc('/tv/' + slug + '/' + sn + '/1')); } catch (e) {} }
+      for (var att = 0; att < 6; att++) {
+        collect(pageHtml());
+        try { collect(await rsc('/tv/' + slug + '/' + sn + '/1')); } catch (e) {}
+        if (Object.keys(nums).length >= 1) break;
+        await delay(500);
+      }
       var sorted = Object.keys(nums).map(Number).sort(function (a, b) { return a - b; }), big = chunks.join('');
       return sorted.map(function (n) {
         var href = '/tv/' + slug + '/' + sn + '/' + n, ci = big.indexOf('"href":"' + href + '"'), title = 'Épisode ' + n, poster = '';
@@ -96,9 +109,12 @@
       });
     },
     extractServers: async function () {
-      var sources = parseSources(pageHtml());
-      if (sources.length === 0) { try { sources = parseSources(await rsc(location.pathname)); } catch (e) {} }
-      if (sources.length === 0) { await delay(600); sources = parseSources(pageHtml()); if (sources.length === 0) { try { sources = parseSources(await rsc(location.pathname)); } catch (e) {} } }
+      var sources = [];
+      for (var att = 0; att < 6 && sources.length === 0; att++) {
+        sources = parseSources(pageHtml());
+        if (sources.length === 0) { try { sources = parseSources(await rsc(location.pathname)); } catch (e) {} }
+        if (sources.length === 0) await delay(500);
+      }
       var servers = [];
       for (var i = 0; i < sources.length; i++) {
         var g = sources[i], host = (g.host || 'lecteur'), name = host.charAt(0).toUpperCase() + host.slice(1);
