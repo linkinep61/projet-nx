@@ -17,6 +17,9 @@ LIMIT   = int(os.environ.get("LUMI_LIMIT", "0"))
 WORKERS = int(os.environ.get("LUMI_WORKERS", "20"))
 TIMEOUT = int(os.environ.get("LUMI_TIMEOUT", "30"))
 OUT     = os.environ.get("LUMI_OUT", "data-lumichat.m3u")
+COUNTRY = os.environ.get("LUMI_COUNTRY", "FR").upper()          # ne garder que ce pays (ALL = tous)
+SKIP_DEAD = os.environ.get("LUMI_SKIP_DEAD", "1") == "1"        # sauter les sources 0% vivantes
+DEAD_SRC_PREFIXES = ("vavoo", "livewatch")
 
 def fetch_channels():
     last = None
@@ -61,6 +64,12 @@ def resolve_ok(cid):
 def main():
     t0 = time.time()
     chans = fetch_channels()
+    # PRE-FILTRE : on ne teste que ce qui est reellement utile -> probe bien plus rapide.
+    if COUNTRY and COUNTRY != "ALL":
+        chans = [c for c in chans if (c.get("cc") or "").upper() == COUNTRY]
+    if SKIP_DEAD:
+        chans = [c for c in chans if not c["id"].lower().startswith(DEAD_SRC_PREFIXES)]
+    print(f"[lumichat] pre-filtre: pays={COUNTRY}, skip_morts={SKIP_DEAD} -> {len(chans)} chaines a tester", flush=True)
     if LIMIT > 0: chans = chans[:LIMIT]
     total = len(chans)
     print(f"[lumichat] {total} chaines a tester (workers={WORKERS}, timeout={TIMEOUT}s)", flush=True)
