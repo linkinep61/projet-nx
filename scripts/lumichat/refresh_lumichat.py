@@ -21,6 +21,28 @@ COUNTRY = os.environ.get("LUMI_COUNTRY", "FR").upper()          # ne garder que 
 SKIP_DEAD = os.environ.get("LUMI_SKIP_DEAD", "1") == "1"        # sauter les sources 0% vivantes
 DEAD_SRC_PREFIXES = ("vavoo", "livewatch")
 
+import re
+def parse_existing_m3u(path):
+    """Fallback : lit la liste de chaines depuis le M3U deja dans le depot (si l'API timeout)."""
+    if not os.path.exists(path):
+        return []
+    out, pending = [], None
+    for line in open(path, encoding="utf-8"):
+        t = line.strip()
+        if t.startswith("#EXTINF"):
+            pending = t
+        elif pending and t.startswith("lumichat://"):
+            cid = t[len("lumichat://"):]
+            def g(a):
+                m = re.search(a + r'="([^"]*)"', pending); return m.group(1) if m else ""
+            name = pending.rsplit(",", 1)[-1].strip()
+            out.append({"id": cid, "name": name or cid, "group": g("group-title") or "LumiChat",
+                        "logo": g("tvg-logo"), "cc": g("tvg-country")})
+            pending = None
+        elif not t.startswith("#"):
+            pending = None
+    return out
+
 def fetch_channels():
     last = None
     for attempt in range(5):
@@ -36,7 +58,10 @@ def fetch_channels():
             print(f"[lumichat] fetch_channels essai {attempt+1}/5 KO ({e}) - retry dans {5*(attempt+1)}s", flush=True)
             time.sleep(5 * (attempt + 1))
     else:
-        raise last
+        print(f"[lumichat] API KO ({last}) -> FALLBACK sur le M3U existant {OUT}", flush=True)
+        fb = parse_existing_m3u(OUT)
+        print(f"[lumichat] fallback: {len(fb)} chaines lues depuis {OUT}", flush=True)
+        return fb
     cats = (r.json().get("categories") or {})
     out = []
     for cat in cats.values():
