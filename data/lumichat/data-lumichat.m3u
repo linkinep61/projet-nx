@@ -1,1 +1,13 @@
 #EXTM3U
+#EXTINF:-1 tvg-id="Africa-24-Sport-1080p&source=list9" tvg-logo="http://51.158.145.100/picons/logos/FRANCENEW/AFRICA24.png" group-title="Sports" tvg-country="FR",Africa 24 Sport (1080p)
+lumichat://Africa-24-Sport-1080p&source=list9
+#EXTINF:-1 tvg-id="witv-chaines-live-4-bein-sport-1-fr-html" tvg-logo="https://witv.football/images/logo/bein-sports-1-logo.png" group-title="Sports" tvg-country="FR",Bein Sport 1 - Fr
+lumichat://witv-chaines-live-4-bein-sport-1-fr-html
+#EXTINF:-1 tvg-id="116" tvg-logo="http://photo-tmdb.com/stalker_portal/misc/logos/320/1366.png?16189" group-title="Sports" tvg-country="FR",beIN SPORT 1 France
+lumichat://116
+#EXTINF:-1 tvg-id="beIN-SPORTS-3-FR&source=list8" tvg-logo="http://photo-tmdb.com/stalker_portal/misc/logos/320/533.png?99752" group-title="Sports" tvg-country="FR",beIN SPORT 3 FR
+lumichat://beIN-SPORTS-3-FR&source=list8
+#EXTINF:-1 tvg-id="beIN-SPORTS-MAX-10-FR&source=list8" tvg-logo="http://photo-tmdb.com/stalker_portal/misc/logos/320/6371.png?92235" group-title="Sports" tvg-country="FR",beIN SPORT MAX 10 FR
+lumichat://beIN-SPORTS-MAX-10-FR&source=list8
+#EXTINF:-1 tvg-id="beIN-SPORTS-MAX-4-FR&source=list8" tvg-logo="http://photo-tmdb.com/stalker_portal/misc/logos/320/6347.jpg?11466" group-title="Sports" tvg-country="FR",beIN SPORT MAX 4 FR
+lumichat://beIN-SPORTS-MAX-4-FR&source=list8
