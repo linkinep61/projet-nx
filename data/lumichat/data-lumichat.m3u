@@ -1,3 +1,7 @@
 #EXTM3U
-#EXTINF:-1 tvg-id="witv-chaines-live-4-bein-sport-1-fr-html" tvg-logo="https://witv.football/images/logo/bein-sports-1-logo.png" group-title="Sports" tvg-country="FR",Bein Sport 1 - Fr
-lumichat://witv-chaines-live-4-bein-sport-1-fr-html
+#EXTINF:-1 tvg-id="Africa-24-Sport-1080p&source=list9" tvg-logo="http://51.158.145.100/picons/logos/FRANCENEW/AFRICA24.png" group-title="Sports" tvg-country="FR",Africa 24 Sport (1080p)
+lumichat://Africa-24-Sport-1080p&source=list9
+#EXTINF:-1 tvg-id="witv-chaines-live-6-bein-sport-2-fr-html" tvg-logo="https://witv.football/images/logo/bein-sports-2-logo.png" group-title="Sports" tvg-country="FR",Bein Sport 2 - Fr
+lumichat://witv-chaines-live-6-bein-sport-2-fr-html
+#EXTINF:-1 tvg-id="witv-chaines-live-7-bein-sport-3-fr-html" tvg-logo="https://witv.football/images/logo/bein-sports-3-logo.png" group-title="Sports" tvg-country="FR",Bein Sport 3 - Fr
+lumichat://witv-chaines-live-7-bein-sport-3-fr-html
