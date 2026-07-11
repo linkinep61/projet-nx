@@ -40,6 +40,7 @@ object XtreamCodesClient {
         OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
+            .callTimeout(90, TimeUnit.SECONDS)
             .followRedirects(true)
             .sslSocketFactory(sslCtx.socketFactory, trustAll[0] as javax.net.ssl.X509TrustManager)
             .hostnameVerifier { _, _ -> true }

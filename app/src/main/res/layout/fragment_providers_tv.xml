@@ -91,8 +91,29 @@
         android:focusableInTouchMode="false"
         android:contentDescription="Radio"
         android:background="@drawable/bg_tv_button_focus"
+        android:nextFocusRight="@id/btn_global_favorites"
         app:layout_constraintBottom_toBottomOf="@id/btn_global_favorites"
         app:layout_constraintEnd_toStartOf="@id/btn_global_favorites"
+        app:layout_constraintTop_toTopOf="@id/btn_global_favorites"
+        tools:ignore="UseAppTint" />
+
+    <!-- 2026-07-05 (user "à côté du cœur à droite pour éteindre l'app") :
+         bouton power-off = nuclearCachePurge + Process.killProcess. -->
+    <ImageView
+        android:id="@+id/btn_power_off"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_marginStart="16dp"
+        android:padding="10dp"
+        android:src="@drawable/ic_power_off"
+        android:tint="#FFFFFF"
+        android:focusable="true"
+        android:focusableInTouchMode="false"
+        android:contentDescription="Éteindre"
+        android:background="@drawable/bg_tv_button_focus"
+        android:nextFocusLeft="@id/btn_global_favorites"
+        app:layout_constraintBottom_toBottomOf="@id/btn_global_favorites"
+        app:layout_constraintStart_toEndOf="@id/btn_global_favorites"
         app:layout_constraintTop_toTopOf="@id/btn_global_favorites"
         tools:ignore="UseAppTint" />
 

@@ -75,6 +75,7 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS)
             .build()
     }
 
@@ -85,6 +86,7 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(90, TimeUnit.SECONDS)
+            .callTimeout(120, TimeUnit.SECONDS)
             .writeTimeout(90, TimeUnit.SECONDS)
             .build()
     }
@@ -1462,10 +1464,18 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         if (page > 1) return emptyList()
         ensureRegistry()
         val q = query.trim().lowercase()
-        if (q.isBlank()) return channelRegistry.map { channelToTvShow(it) }
+        // 2026-07-02 (user "certains crashent à l'ouverture de la recherche, la playlist
+        //   M3U est trop grosse") : à l'OUVERTURE (query vide) on ne charge PAS tout le
+        //   registre (des dizaines de milliers de chaînes → OOM/crash sur appareils
+        //   modestes). On affiche juste une vingtaine de jaquettes ; l'utilisateur tape
+        //   pour trouver ce qu'il veut (le filtre ci-dessous couvre TOUT le registre).
+        if (q.isBlank()) return channelRegistry.take(20).map { channelToTvShow(it) }
         return channelRegistry
+            .asSequence()
             .filter { it.name.lowercase().contains(q) }
+            .take(300)  // borne les résultats de frappe (évite de mapper 10k+ matches)
             .map { channelToTvShow(it) }
+            .toList()
     }
 
     override suspend fun getMovie(id: String): Movie =

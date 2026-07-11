@@ -47,8 +47,8 @@ android {
         applicationId "com.streamfr.app"
         minSdk 23
         targetSdk 35
-        versionCode 10927
-        versionName "1.7.227"
+        versionCode 10928
+        versionName "1.7.228"
 
         // 2026-05-11 : RESTAURATION x86 (32-bit) — abandonné en v19 par erreur.
         // Certains émulateurs (Genymotion, AVD images anciennes) et surtout les
@@ -64,6 +64,8 @@ android {
         buildConfigField "String", "SUBDL_API_KEY", "\"${properties.getProperty("SUBDL_API_KEY")}\""
         buildConfigField "String", "RABBITSTREAM_SOURCE_API", "\"${properties.getProperty("RABBITSTREAM_SOURCE_API")}\""
         buildConfigField "String", "OPENSUBTITLES_API_KEY", "\"${properties.getProperty("OPENSUBTITLES_API_KEY") ?: ""}\""
+        buildConfigField "String", "GITHUB_CRASH_TOKEN", "\"${properties.getProperty("GITHUB_CRASH_TOKEN") ?: ""}\""
+        buildConfigField "String", "GITHUB_CRASH_REPO", "\"${properties.getProperty("GITHUB_CRASH_REPO") ?: ""}\""
     }
 
     sourceSets {

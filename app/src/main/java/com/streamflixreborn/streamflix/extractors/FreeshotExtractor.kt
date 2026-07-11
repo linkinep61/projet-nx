@@ -74,6 +74,7 @@ open class FreeshotExtractor : Extractor() {
         OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
+            .callTimeout(30, TimeUnit.SECONDS)
             .followRedirects(true)
             .build()
     }

@@ -108,7 +108,8 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
     //   backup par un autre provider (ex DessinAnime) → évite double-backup,
     //   latence inutile et récursion. Même patron que MovixProvider.
     @Volatile var skipBackupsForBackupCall: Boolean = false
-
+    // 2026-07-09 : flag anti-boucle TMDB. Quand getAnimeSamaSourcesByTitle résout
+    //   les serveurs natifs, il appelle getTvShow/getEpisodesBySeason en INTERNE.
     /**
      * Fetches all Film slugs from the AnimeSama catalogue (all pages, up to 20).
      * Cached after first call so subsequent pages/tabs are instant.
@@ -138,6 +139,7 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         .dns(DnsResolver.doh)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(45, TimeUnit.SECONDS)
         // Preserve POST method & body on redirects (site may change domain)
         .followRedirects(false)
         .addInterceptor { chain ->
@@ -1014,8 +1016,9 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         val genresRaw = genresMatch?.groupValues?.get(1)?.let { Jsoup.parse(it).text() } ?: ""
         val genresText = sanitizeAnimeSamaField(genresRaw, extractAfterSynopsis = false)
 
-        val seasons = mutableListOf<Season>()
         val animePoster = "${IMG_BASE}${slug}.jpg"
+
+        val seasons = mutableListOf<Season>()
 
         // ── Film/OAV entry shortcut ──
         // When the user clicked a specific film from a tab (FR or VOSTFR),
@@ -1464,7 +1467,18 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 else -> return emptyList()
             }
             val episodeIndex = episodeNum - 1
-            Log.d(TAG, "[TV Servers] id=$id → jsPath=$jsPath epNum=$episodeNum epIdx=$episodeIndex")
+            // 2026-07-04 : dériver la langue du path épisode pour tagger les serveurs
+            // Format: "slug/saison1/vf/3" ou "slug/vostfr/3" → on cherche "vf"/"vostfr" dans les parts
+            val tvLangLabel = run {
+                // parts sans le dernier (= numéro épisode)
+                val pathParts = parts.dropLast(1).map { it.lowercase() }
+                when {
+                    pathParts.any { it == "vostfr" } -> " (VOSTFR)"
+                    pathParts.any { it == "vf" }     -> " (VF)"
+                    else -> ""  // pas de langue détectable → pas de tag
+                }
+            }
+            Log.d(TAG, "[TV Servers] id=$id → jsPath=$jsPath epNum=$episodeNum epIdx=$episodeIndex lang=$tvLangLabel")
 
             val fetchUrl = "${baseUrl}catalogue/$jsPath/episodes.js"
             Log.d(TAG, "[TV Servers] Fetching: $fetchUrl")
@@ -1484,10 +1498,10 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                 if (episodeIndex < urls.size) {
                     val url = urls[episodeIndex]
                     val serverName = getServerName(varName, url)
-                    Log.d(TAG, "[TV Servers] $varName → $serverName → ${url.take(80)}")
+                    Log.d(TAG, "[TV Servers] $varName → $serverName$tvLangLabel → ${url.take(80)}")
                     servers.add(Video.Server(
                         id = varName,
-                        name = serverName,
+                        name = "$serverName$tvLangLabel",
                         src = url,
                     ))
                 }
@@ -1532,50 +1546,9 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         val slug = id.substringBefore("@").substringBefore("/")
         val title = slug.replace("-", " ").trim()
 
-        // 2026-05-06 : Cloudstream backup #2 — MovieBox+ via /resource (FR strict).
-        val cloudstreamBackup = if (!skipBackupsForBackupCall && title.isNotBlank()) {
-            try {
-                val csVideoType: Video.Type = when (videoType) {
-                    is Video.Type.Movie -> Video.Type.Movie(
-                        id = "0", title = title,
-                        releaseDate = videoType.releaseDate, poster = videoType.poster,
-                        imdbId = videoType.imdbId,
-                    )
-                    is Video.Type.Episode -> Video.Type.Episode(
-                        id = "0", number = videoType.number, title = videoType.title,
-                        poster = videoType.poster, overview = videoType.overview,
-                        tvShow = videoType.tvShow.copy(id = "0", title = title),
-                        season = videoType.season,
-                    )
-                }
-                CloudstreamProvider.getServers("0", csVideoType)
-                    .also { if (it.isNotEmpty()) Log.d(TAG, "+ Cloudstream: ${it.size}") }
-            } catch (_: Exception) { emptyList() }
-        } else emptyList()
-
-        val movieboxBackup = if (!skipBackupsForBackupCall && title.isNotBlank()) {
-            try {
-                val type = if (videoType is Video.Type.Movie) 1 else 2
-                MovieboxProvider.getMovieboxSourcesByTitle(
-                    title, null, type,
-                    seasonNumber = if (videoType is Video.Type.Episode) videoType.season.number else null,
-                    episodeNumber = if (videoType is Video.Type.Episode) videoType.number else null,
-                )
-                    .also { if (it.isNotEmpty()) Log.d(TAG, "+ Moviebox: ${it.size}") }
-            } catch (_: Exception) { emptyList() }
-        } else emptyList()
-
-        // 2026-05-06 : Papadustream backup EN DERNIER (captcha CF). Anime providers
-        // qui ont aussi du contenu sur Papadustream (séries TV-only) bénéficient.
-        val papaBackup = if (!skipBackupsForBackupCall && title.isNotBlank() && videoType is Video.Type.Episode) {
-            try {
-                PapadustreamProvider.getPapaSourcesByTitle(
-                    title = title,
-                    seasonNum = videoType.season.number,
-                    episodeNum = videoType.number,
-                ).also { if (it.isNotEmpty()) Log.d(TAG, "+ Papa: ${it.size}") }
-            } catch (_: Exception) { emptyList() }
-        } else emptyList()
+        // 2026-07-04 : backups inline DÉSACTIVÉS → registre central (BackupRegistry.fetchAll
+        //   dans PlayerViewModel via ProgressiveServersProvider). Plus de Cloudstream/Moviebox/
+        //   Papadustream inline ici — le registre les gère en parallèle.
 
         // 2026-05-10 v3 : BRUTE FORCE — pénalité -500000 sur tout VO/VOSTFR.
         // Garantit absolument qu'aucun VO/VOSTFR ne peut jamais passer au-dessus
@@ -1587,11 +1560,9 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             n.contains("(VO)", ignoreCase = true) ||
             Regex("""\bVO\b""").containsMatchIn(n)
         }
-        val all = servers + cloudstreamBackup + movieboxBackup + papaBackup
-        val sorted = all.withIndex().sortedByDescending { (idx, srv) ->
-            // Score: idx inversé (préserve ordre original) + -500000 si VO/VOSTFR
+        val sorted = servers.withIndex().sortedByDescending { (idx, srv) ->
             val voOffset = if (isVoLike(srv)) -500000 else 0
-            (1000 - idx) + voOffset  // les VF gardent leur ordre, les VO chutent
+            (1000 - idx) + voOffset
         }.map { it.value }
         return sorted
     }
@@ -1603,87 +1574,15 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
      *   L'user voit les sources natives instantanément + les backups arrivent
      *   ~5-10s après sans bloquer la lecture.
      */
+    // 2026-07-04 : simplifié — natif SEUL, le registre central (BackupRegistry.fetchAll
+    //   dans PlayerViewModel) gère tous les backups (Cloudstream/Moviebox/Papa/etc.)
+    //   en parallèle. Plus de doublons inline.
     override fun getServersProgressive(id: String, videoType: Video.Type): kotlinx.coroutines.flow.Flow<List<Video.Server>> =
         kotlinx.coroutines.flow.channelFlow {
-            // 1) Natif AnimeSama (= ce que getServers fait au début, sans les backups)
-            val native: List<Video.Server> = try {
-                val prevSkip = skipBackupsForBackupCall
-                skipBackupsForBackupCall = true  // disable backups dans getServers pour ne récup que le natif
-                try { getServers(id, videoType) } finally { skipBackupsForBackupCall = prevSkip }
-            } catch (e: Exception) {
-                Log.w(TAG, "[Progressive] native fetch failed: ${e.message}")
-                emptyList()
-            }
-            if (native.isNotEmpty()) {
-                Log.d(TAG, "[Progressive] native émis: ${native.size}")
-                send(native)
-            }
-
-            // 2) Backups parallèles (= seulement si pas déjà appelé en mode backup
-            //    par un autre provider, pour éviter récursion)
-            if (skipBackupsForBackupCall) return@channelFlow
-            val slug = id.substringBefore("@").substringBefore("/")
-            val title = slug.replace("-", " ").trim()
-            if (title.isBlank()) return@channelFlow
-
-            val backups = coroutineScope {
-                val csDef = async(Dispatchers.IO) {
-                    try {
-                        val csVideoType: Video.Type = when (videoType) {
-                            is Video.Type.Movie -> Video.Type.Movie(
-                                id = "0", title = title,
-                                releaseDate = videoType.releaseDate, poster = videoType.poster,
-                                imdbId = videoType.imdbId,
-                            )
-                            is Video.Type.Episode -> Video.Type.Episode(
-                                id = "0", number = videoType.number, title = videoType.title,
-                                poster = videoType.poster, overview = videoType.overview,
-                                tvShow = videoType.tvShow.copy(id = "0", title = title),
-                                season = videoType.season,
-                            )
-                        }
-                        CloudstreamProvider.getServers("0", csVideoType)
-                            .also { Log.d(TAG, "[Progressive] +CS: ${it.size}") }
-                    } catch (_: Exception) { emptyList() }
-                }
-                val mbDef = async(Dispatchers.IO) {
-                    try {
-                        val type = if (videoType is Video.Type.Movie) 1 else 2
-                        MovieboxProvider.getMovieboxSourcesByTitle(
-                            title, null, type,
-                            seasonNumber = if (videoType is Video.Type.Episode) videoType.season.number else null,
-                            episodeNumber = if (videoType is Video.Type.Episode) videoType.number else null,
-                        ).also { Log.d(TAG, "[Progressive] +MB: ${it.size}") }
-                    } catch (_: Exception) { emptyList() }
-                }
-                val papaDef = async(Dispatchers.IO) {
-                    if (videoType !is Video.Type.Episode) emptyList()
-                    else try {
-                        PapadustreamProvider.getPapaSourcesByTitle(
-                            title = title,
-                            seasonNum = videoType.season.number,
-                            episodeNum = videoType.number,
-                        ).also { Log.d(TAG, "[Progressive] +Papa: ${it.size}") }
-                    } catch (_: Exception) { emptyList() }
-                }
-                csDef.await() + mbDef.await() + papaDef.await()
-            }
-            if (backups.isNotEmpty()) {
-                // Émettre native + backups, re-trier VF d'abord
-                val combined = native + backups
-                val isVoLike: (Video.Server) -> Boolean = { srv ->
-                    val n = srv.name
-                    n.contains("VOSTFR", ignoreCase = true) ||
-                    n.contains("(VO)", ignoreCase = true) ||
-                    Regex("""\bVO\b""").containsMatchIn(n)
-                }
-                val sorted = combined.withIndex().sortedByDescending { (idx, srv) ->
-                    val voOffset = if (isVoLike(srv)) -500000 else 0
-                    (1000 - idx) + voOffset
-                }.map { it.value }
-                Log.d(TAG, "[Progressive] +backups émis: total=${sorted.size}")
-                send(sorted)
-            }
+            try {
+                val native = kotlinx.coroutines.withContext(Dispatchers.IO) { getServers(id, videoType) }
+                if (native.isNotEmpty()) send(native)
+            } catch (e: Exception) { Log.w(TAG, "progressive native KO: ${e.message}") }
         }
 
     /**
@@ -1695,10 +1594,23 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
      */
     suspend fun getAnimeSamaSourcesByTitle(title: String, videoType: Video.Type): List<Video.Server> {
         if (title.isBlank()) return emptyList()
+        // 2026-07-07 : matching renforcé via BackupRegistry.titleMatches (anti faux-positifs).
+        //   L'ancien matching maison (contains/startsWith sur 2 chars normalisés) matchait
+        //   "K.O." sur n'importe quel anime contenant "ko" (DragonBall KOai, ToKYo Ghoul…).
+        //   Désormais on délègue au même algorithme durci que les autres backups.
+        //   Garde supplémentaire : titre normalisé ≤ 2 chars → exact seulement (trop de bruit sinon).
         val norm = { s: String -> s.lowercase().replace(Regex("[^a-z0-9]"), "") }
         val want = norm(title)
         if (want.isBlank()) return emptyList()
-        val matches = { n: String -> n == want || n.startsWith(want) || want.startsWith(n) || (n.length >= 4 && n.contains(want)) }
+        val strictShort = want.length <= 2
+        val matches = { candidateTitle: String ->
+            if (strictShort) {
+                // Titre ultra-court (ex: "K.O." → "ko") → exact seulement
+                norm(candidateTitle) == want
+            } else {
+                com.streamflixreborn.streamflix.utils.BackupRegistry.titleMatches(candidateTitle, title)
+            }
+        }
         return try {
             val items = kotlinx.coroutines.withTimeoutOrNull(9_000L) { search(title, 1) } ?: return emptyList()
             val prev = skipBackupsForBackupCall
@@ -1706,13 +1618,13 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             try {
                 when (videoType) {
                     is Video.Type.Movie -> {
-                        val movie = items.filterIsInstance<Movie>().firstOrNull { matches(norm(it.title)) }
+                        val movie = items.filterIsInstance<Movie>().firstOrNull { matches(it.title) }
                             ?: return emptyList()
                         Log.d(TAG, "[backup] AnimeSama movie match: ${movie.title} (${movie.id})")
                         getServers(movie.id, videoType)
                     }
                     is Video.Type.Episode -> {
-                        val show = items.filterIsInstance<TvShow>().firstOrNull { matches(norm(it.title)) }
+                        val show = items.filterIsInstance<TvShow>().firstOrNull { matches(it.title) }
                             ?: return emptyList()
                         Log.d(TAG, "[backup] AnimeSama show match: ${show.title} (${show.id})")
                         val full = kotlinx.coroutines.withTimeoutOrNull(9_000L) { getTvShow(show.id) }

@@ -74,6 +74,7 @@ object TF1GigyaAuth {
         OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(12, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS)
             .cookieJar(cookieJar)
             .build()
     }

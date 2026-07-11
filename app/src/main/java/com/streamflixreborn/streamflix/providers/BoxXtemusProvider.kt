@@ -130,6 +130,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(45, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
@@ -917,6 +918,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
                                     .followRedirects(true)
                                     .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
                                     .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                                    .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                                     // 2026-06-12 : CookieJar partagé avec LocalHlsProxy
                                     .cookieJar(com.streamflixreborn.streamflix.utils.LocalHlsProxy.getCookieJar())
                                     .build()
@@ -1054,6 +1056,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
             .followSslRedirects(true)
             .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             // 2026-06-12 : partage le CookieJar du LocalHlsProxy. Les cookies
             //   posés par u301.com seront persistés et retransmis quand le
             //   proxy fera les calls m3u8/segments. Sans ça SFR rejette la
@@ -1444,7 +1447,8 @@ object BoxXtemusProvider : Provider, IptvProvider {
                 .header("User-Agent", customUa).build()
             val client = okhttp3.OkHttpClient.Builder()
                 .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS).build()
+                .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS).build()
             val resp = client.newCall(req).execute()
             val body = resp.body?.string() ?: ""
             resp.close()
@@ -1799,6 +1803,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
             val client = okhttp3.OkHttpClient.Builder()
                 .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
                 .followRedirects(true)
                 .build()
             val req = okhttp3.Request.Builder()
@@ -1842,6 +1847,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
             val client = okhttp3.OkHttpClient.Builder()
                 .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .followRedirects(true)
                 .build()
             val req = okhttp3.Request.Builder()
@@ -1973,6 +1979,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
             val client = okhttp3.OkHttpClient.Builder()
                 .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
             // 2026-06-12 (logs OPPO Tahiti) : le RSS rsseverything bloque les
             // UA Chrome/standard et renvoie un décoy ("DailyArt Magazine
@@ -2435,6 +2442,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
                                 val proxyClient = okhttp3.OkHttpClient.Builder()
                                     .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
                                     .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                                    .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                                     .followRedirects(true)
                                     .build()
                                 val resp = proxyClient.newCall(builder.build()).execute()
@@ -2516,6 +2524,7 @@ object BoxXtemusProvider : Provider, IptvProvider {
                                     .followSslRedirects(true)
                                     .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
                                     .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                                    .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                                     .build()
                                 val origReq = okhttp3.Request.Builder()
                                     .url(reqUrl)

@@ -76,6 +76,15 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
+        <!-- 2026-07-09 : espaceur GAUCHE (même largeur que btn_seek_playpause à droite) pour
+             recentrer le bouton play PILE sur le gros bouton bleu du player web quand le bouton
+             pause dédié seekplayer est affiché. Caché sinon. -->
+        <Space
+            android:id="@+id/btn_seek_spacer"
+            android:layout_width="60dp"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
+
         <ImageView
             android:id="@+id/btn_custom_prev"
             android:layout_width="60dp"
@@ -127,6 +136,19 @@
             android:padding="10dp"
             android:src="@drawable/ic_next"
             app:tint="#FFFFFF" />
+
+        <!-- 2026-07-09 : bouton play/pause FIABLE dédié aux lecteurs WebView (seekplayer) où
+             le bouton play/pause principal sert à la RAFALE de clics. Caché par défaut. -->
+        <ImageView
+            android:id="@+id/btn_seek_playpause"
+            android:layout_width="60dp"
+            android:layout_height="match_parent"
+            android:padding="12dp"
+            android:visibility="gone"
+            android:src="@drawable/exo_styled_controls_pause"
+            android:tint="#FFFFFF"
+            app:tint="#FFFFFF"
+            tools:ignore="ContentDescription,PrivateResource,UseAppTint" />
 
     </LinearLayout>
 

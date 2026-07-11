@@ -100,6 +100,8 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.TextView
 import androidx.core.content.FileProvider
 import androidx.navigation.NavOptions
@@ -264,6 +266,60 @@ class PlayerMobileFragment : Fragment() {
                 } catch(e){}
             })();
         """
+
+        // 2026-07-09 : SeekStreaming (seekplayer) — plein écran du player vidstack, blocage
+        //   popups/pubs, et FORCE le chargement du flux (vidstack fait du lazy-load + un leurre
+        //   preload.m3u8 ; startLoading() + play() lancent la vraie lecture).
+        private const val SEEKPLAYER_PLAY_JS = """
+            (function(){
+                try { window.open=function(){return null;}; }catch(e){}
+                try {
+                    var css=document.createElement('style');
+                    css.textContent='html,body{margin:0!important;padding:0!important;background:#000!important;'
+                        +'width:100vw!important;height:100vh!important;overflow:hidden!important;}'
+                        +'media-player,media-provider,video{width:100vw!important;height:100vh!important;'
+                        +'position:fixed!important;top:0!important;left:0!important;object-fit:contain!important;'
+                        +'z-index:2147483000!important;background:#000!important;}'
+                        +'a[target="_blank"],[class*="popup"],[id*="popup"],[class*="interstitial"]{display:none!important;pointer-events:none!important;}';
+                    (document.head||document.documentElement).appendChild(css);
+                } catch(e){}
+                function go(){
+                    try {
+                        var mp=document.querySelector('media-player');
+                        if(mp){ try{ mp.load='eager'; mp.setAttribute('load','eager'); }catch(e){}
+                                try{ if(mp.startLoading) mp.startLoading(); }catch(e){}
+                                try{ if(mp.play) mp.play(); }catch(e){} }
+                        var v=document.querySelector('video');
+                        if(v){ try{ v.play(); }catch(e){} }
+                        // tue les liens pub plein écran (onclick ads)
+                        document.querySelectorAll('a[target="_blank"]').forEach(function(a){ try{a.remove();}catch(e){} });
+                        // auto-clique le dialogue « Vous regardiez cette vidéo… Reprendre ? » (non
+                        //   cliquable sous notre overlay / à la télécommande) → on reprend tout seul.
+                        document.querySelectorAll('button,a,[role="button"]').forEach(function(b){
+                          var t=((b.textContent||b.innerText||'')+'').trim();
+                          if(t==='Reprendre'||t.indexOf('Reprendre')===0){ try{b.click();}catch(e){} }
+                        });
+                    } catch(e){}
+                }
+                go(); var n=0; var t=setInterval(function(){ n++; go(); if(n>20)clearInterval(t); }, 1000);
+            })();
+        """
+
+        // 2026-07-09 (user « un 2e bouton dédié qui NE FAIT QUE la rafale de clics ») : rafale de
+        //   ~15 clics synthétiques sur le vrai bouton du player web pour DÉCLENCHER/reprendre la
+        //   lecture (un geste est requis ; un seul clic « prend » rarement dans la WebView).
+        private const val SEEK_BURST_JS = """
+            (function(){try{
+              var v=document.querySelector('video');var mp=document.querySelector('media-player');
+              function clickAt(el,x,y){if(!el)return;var base={bubbles:true,cancelable:true,composed:true,clientX:x,clientY:y,screenX:x,screenY:y,view:window,button:0,pointerId:1,pointerType:'mouse',isPrimary:true,width:1,height:1};function pe(t,b){var o={};for(var k in base)o[k]=base[k];o.buttons=b;return new PointerEvent(t,o);}function me(t,b){var o={};for(var k in base)o[k]=base[k];o.buttons=b;return new MouseEvent(t,o);}try{el.dispatchEvent(pe('pointerdown',1));el.dispatchEvent(me('mousedown',1));el.dispatchEvent(pe('pointerup',0));el.dispatchEvent(me('mouseup',0));el.dispatchEvent(me('click',0));}catch(e){try{el.click&&el.click();}catch(e2){}}}
+              try{if(mp){mp.load='eager';if(mp.startLoading)mp.startLoading();}}catch(e){}
+              var b=document.querySelector('.vds-play-button')||document.querySelector('media-play-button');
+              if(b){var r=b.getBoundingClientRect();var bx=Math.round(r.left+r.width/2)||1,by=Math.round(r.top+r.height/2)||1;for(var i=0;i<15;i++)clickAt(b,bx,by);}
+              else{var box=(mp||v||document.body).getBoundingClientRect();var cx=Math.round(box.left+box.width/2),cy=Math.round(box.top+box.height/2);for(var j=0;j<15;j++){var t=document.elementFromPoint(cx,cy)||mp||v;clickAt(t,cx,cy);}}
+              try{if(v)v.play();}catch(e){}
+              console.log('SEEKPP activate paused='+(v?v.paused:'?'));
+            }catch(e){console.log('SEEKPP err '+e);}})();
+        """
     }
 
     /** Flag : a-t-on déjà auto-sélectionné un sous-titre OpenSubtitles ?
@@ -309,6 +365,23 @@ class PlayerMobileFragment : Fragment() {
     // IPTV: when all initial servers fail but progressive (OLA) servers may still arrive,
     // keep the player open and wait for additionalServer emissions instead of navigating up.
     private var awaitingMoreServers = false
+    // 2026-07-05 (ANR DessinAnime, pile watchdog : main bloqué dans le collecteur
+    //   SuccessLoadingServers à PlayerMobileFragment.kt:1096) : le ViewModel ré-émet
+    //   SuccessLoadingServers à CHAQUE lot de serveurs progressifs (DessinAnime en émet
+    //   des dizaines via ses backups). Le collecteur re-lançait alors l'auto-pick + la
+    //   boucle d'attente 3s + viewModel.getVideo() sur le thread principal à chaque vague
+    //   → émissions ré-entrantes (flowWithLifecycle + StateFlow) → main saturé → ANR.
+    //   Ce flag garantit que l'auto-pick/lecture ne démarre qu'UNE fois par cycle de
+    //   chargement (remis à false sur LoadingServers, càd aussi sur reloadServersAfterBypass).
+    //   Le picker de serveurs, lui, continue de se mettre à jour à chaque émission.
+    private var initialServerPicked = false
+    // 2026-07-05 (user "C STAR épuise ses variantes visibles et abandonne, alors que le
+    //   pool complet a 100+ streams") : quand le switch a vidé la liste visible, on tire
+    //   des remplaçants depuis le POOL COMPLET du provider (Phase 3 non émise). Borné par
+    //   MAX_POOL_REPLACEMENTS par ouverture de chaîne pour éviter une boucle infinie.
+    private var poolReplacementCount = 0
+    private var poolReplacementChannelId: String? = null
+    private val MAX_POOL_REPLACEMENTS = 20
     private var awaitTimeoutHandler: android.os.Handler? = null
     private var awaitTimeoutRunnable: Runnable? = null
 
@@ -368,6 +441,10 @@ class PlayerMobileFragment : Fragment() {
     // ── WebView overlay (Netu anti-bot bypass — touch-friendly for mobile) ──
     private var webViewOverlay: FrameLayout? = null
     private var overlayWebView: WebView? = null
+    // 2026-07-09 : lecteur miroir branché sur la PlayerView pour les WebView-lecteurs (seekplayer/
+    //   abyss/player4me) → nos contrôles natifs pilotent la <video> de la WebView.
+    private var webMirrorPlayer: WebPlayerMirror? = null
+    private var webMirrorPoll: Runnable? = null
     private var pendingWebViewVideo: Video? = null
     private var pendingWebViewServer: Video.Server? = null
     @Volatile private var m3u8Intercepted = false
@@ -806,7 +883,48 @@ class PlayerMobileFragment : Fragment() {
         // Pre-install Play Services Cronet provider asynchronously so it's ready
         // by the time a LuluVdo/vidzy video needs Chrome's TLS stack
         initCronetEngine()
-        initializePlayer(false)
+
+        // 2026-07-05 : transfert seamless mini→fullscreen (même logique que TV).
+        // Si le mini-player est en transition, on récupère son ExoPlayer VIVANT
+        // au lieu d'en créer un nouveau → zéro coupure, zéro re-chargement.
+        val isIptvChannelId = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+            args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::") ||
+            args.id.startsWith("myiptv-live::") || args.id.startsWith("myiptv::")
+        val isBypassMiniPlayerId = args.id.startsWith("myiptv-movie::") ||
+            args.id.startsWith("myiptv-ep-stk::") ||
+            !isIptvChannelId
+        if (!isBypassMiniPlayerId) {
+            try {
+                if (com.streamflixreborn.streamflix.utils.MiniPlayerController.isPlaying() ||
+                    com.streamflixreborn.streamflix.utils.MiniPlayerController.currentChannelId != null) {
+                    if (!com.streamflixreborn.streamflix.utils.MiniPlayerController.transitioningToFullscreen) {
+                        // VOD-like dans un provider IPTV → kill le mini
+                        Log.d("PlayerMobileFragment", "IPTV launch, mini actif mais pas en transition → stopAsync")
+                        com.streamflixreborn.streamflix.utils.MiniPlayerController.stopAsync()
+                    }
+                }
+            } catch (_: Exception) {}
+        } else {
+            // VOD = pas de handoff
+            try {
+                if (com.streamflixreborn.streamflix.utils.MiniPlayerController.isPlaying() ||
+                    com.streamflixreborn.streamflix.utils.MiniPlayerController.currentChannelId != null) {
+                    Log.d("PlayerMobileFragment", "VOD launch, mini actif → stopAsync (kill)")
+                    com.streamflixreborn.streamflix.utils.MiniPlayerController.stopAsync()
+                }
+            } catch (_: Exception) {}
+        }
+
+        val transferred = if (isBypassMiniPlayerId) null
+            else com.streamflixreborn.streamflix.utils.MiniPlayerController.transferPlayer()
+        if (transferred != null) {
+            attachTransferredPlayer(transferred)
+        } else {
+            initializePlayer(false)
+        }
         initializeVideo()
 
         // For IPTV (WiTv / OlaTv) extraction can take 5-15s; the PlayerView
@@ -856,6 +974,9 @@ class PlayerMobileFragment : Fragment() {
                         // début pour pas laisser un écran noir vide. La barre
                         // de progression fictive simule un chargement de 5s.
                         showLoadingOverlay()
+                        // 2026-07-05 : nouveau cycle de chargement → ré-autorise l'auto-pick
+                        //   une fois (cf initialServerPicked, anti-ANR DessinAnime).
+                        initialServerPicked = false
                     }
                     is PlayerViewModel.State.SuccessLoadingServers -> {
                         servers = state.servers
@@ -992,9 +1113,9 @@ class PlayerMobileFragment : Fragment() {
                                 viewModel.reloadServersAfterBypass()
                             }
                             binding.settings.onServerFavoriteToggled = {
-                                // Re-trigger : le tri par favoris est appliqué au prochain
-                                // setMediaServers, donc on relance pour que la liste se réordonne.
-                                viewModel.reloadServersAfterBypass()
+                                // 2026-07-08 : re-trier les serveurs pour que les cœurs
+                                // remontent immédiatement en tête (VOD + IPTV).
+                                viewModel.resortServers()
                             }
 
                             // 2026-06-03 v2 (user "Elles disparaissent") : ne CLEAR que sur
@@ -1021,11 +1142,23 @@ class PlayerMobileFragment : Fragment() {
                             //  2. Sinon, prendre le 1er favori marqué par l'user
                             //     (par ordre de marquage = priorité utilisateur).
                             //  3. Sinon servers.first() par défaut.
+                            // 2026-07-07 (user « le transfert plein écran OLA coupe à 2s et recharge
+                            //   tout ») : les ids OLA sont `ola_stream::cid::label::url` avec l'URL
+                            //   ÉPHÉMÈRE. Une comparaison par id EXACT échoue entre le serveur joué
+                            //   par le mini et celui de la liste fraîche/du favori → l'app croit être
+                            //   sur un « mauvais serveur » → getVideo() → rechargement complet à ~2s
+                            //   (quand le getServers OLA finit). On compare l'id CANONIQUE (sans URL),
+                            //   comme le fragment TV le fait déjà pour les favoris.
+                            fun canonicalServerId(rawId: String): String {
+                                val parts = rawId.split("::")
+                                return if (parts.size >= 4 && parts[0].endsWith("_stream"))
+                                    "${parts[0]}::${parts[1]}::${parts[2]}" else rawId
+                            }
                             val miniServer = if (com.streamflixreborn.streamflix.utils.MiniPlayerController.transitioningToFullscreen) {
                                 com.streamflixreborn.streamflix.utils.MiniPlayerController.currentMiniServer()
                             } else null
                             val matchedMiniServer = miniServer?.let { mini ->
-                                state.servers.firstOrNull { it.id == mini.id }
+                                state.servers.firstOrNull { canonicalServerId(it.id) == canonicalServerId(mini.id) }
                             }
                             // Favoris multi-server (max 5, ordre = priorité)
                             val orderedFavIds = IptvFavorites.getFavoritesForChannel(currentChannelKey)
@@ -1038,55 +1171,73 @@ class PlayerMobileFragment : Fragment() {
                                 !IptvBannedServers.isBanned(currentChannelKey, srv.id)
                             }
 
-                            // 2026-05-16 : si pas de mini/favori (= auto-pick), attendre
-                            // max 3s que le pre-extract HEAD scan ait flagué les morts.
-                            // Sinon le initial pick tombe sur Movix Premium mort → 60s
-                            // timeout avant fallback. Avec ce délai, on évite ça.
-                            // Early exit dès que ≥2 servers sont flagués broken (HEAD scan
-                            // a fait son job) OU dès qu'un pre-extract cache HIT existe.
-                            if (matchedMiniServer == null && favServer == null) {
-                                val startBrokenCount = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames().size
-                                Log.d("PlayerMobileFragment", "Initial-pick: waiting up to 3s for HEAD scan (start broken=$startBrokenCount)")
-                                var waited = 0L
-                                while (waited < 3_000L) {
-                                    kotlinx.coroutines.delay(250L)
-                                    waited += 250L
-                                    val nowBroken = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames().size
-                                    if (nowBroken >= startBrokenCount + 2) {
-                                        Log.d("PlayerMobileFragment", "Initial-pick: HEAD scan flagged $nowBroken broken, proceeding (waited=${waited}ms)")
-                                        break
-                                    }
-                                }
-                            }
+                            // 2026-07-06 (user "il doit PAS y avoir de blocage, les serveurs
+                            //   doivent arriver et s'afficher ; on enlève le blocage") :
+                            //   SUPPRIMÉ l'attente artificielle de 3s (« attendre que le HEAD scan
+                            //   flague les morts ») qui tournait DANS le collecteur viewModel.state
+                            //   sur le thread principal. Couplée au flowWithLifecycle + StateFlow,
+                            //   cette attente tenait le collecteur ouvert pendant que les émissions
+                            //   (vagues de backups DessinAnime) s'empilaient en ré-entrance → le main
+                            //   thread ne rendait plus la main au looper → ANR ("ONYX ne répond pas").
+                            //   On pique désormais le serveur immédiatement ; si le 1er est mort, le
+                            //   fallback onPlayerError + la course de vivacité s'en chargent.
 
-                            // Compute broken set for initial-pick filtering (same logic
-                            // que nextAutoFallbackServer).
-                            fun ipExtractorCore(name: String): String {
-                                val stripped = name.substringAfter(" — ").substringAfter(" · ").trim()
-                                return stripped.substringBefore(" - ").substringBefore(" (").substringBefore(" [").trim().uppercase()
-                            }
-                            val ipBrokenCores = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames()
-                                .map { ipExtractorCore(it) }.filter { it.isNotBlank() }.toSet()
-                            fun ipIsBroken(srv: Video.Server): Boolean =
-                                ipBrokenCores.isNotEmpty() && ipExtractorCore(srv.name) in ipBrokenCores
-
-                            // Initial server preferred non-broken, non-banned.
-                            val firstNonBrokenNonBanned = state.servers.firstOrNull { srv ->
-                                !IptvBannedServers.isBanned(currentChannelKey, srv.id) && !ipIsBroken(srv)
-                            }
+                            // 2026-07-07 (user « le tri se fait QUE avec la langue, les favoris et la
+                            //   qualité, tout le reste on s'en fout ; si un tri peut interférer et
+                            //   bouffer de la mémoire on vire ») : SUPPRIMÉ le skip « broken »
+                            //   (brokenServerNames() itérait la map serverHealth sur le MAIN THREAD =
+                            //   l'ANR). La liste arrive déjà triée langue/qualité/favoris par le
+                            //   ViewModel. Pick = mini → favori → 1er non-banni → 1er. Un serveur qui
+                            //   foire est géré par l'auto-switch onPlayerError, pas par un pré-tri.
                             val initialServer = matchedMiniServer
                                 ?: favServer
-                                ?: firstNonBrokenNonBanned
                                 ?: firstNonBanned
                                 ?: state.servers.first()
                             if (matchedMiniServer != null) {
                                 Log.d("PlayerMobileFragment", "Mini→fullscreen : reprise sur ${matchedMiniServer.name}")
                             } else if (favServer != null) {
-                                Log.d("PlayerMobileFragment", "Favori prioritaire : ${favServer.name} (${orderedFavIds.size}/${IptvFavorites.MAX_FAVORITES_PER_CHANNEL})")
-                            } else if (firstNonBrokenNonBanned != null) {
-                                Log.d("PlayerMobileFragment", "Initial-pick non-broken: ${firstNonBrokenNonBanned.name} (skipped ${ipBrokenCores.size} broken)")
+                                Log.d("PlayerMobileFragment", "Favori prioritaire : ${favServer.name}")
+                            } else {
+                                Log.d("PlayerMobileFragment", "Initial-pick: ${initialServer.name}")
                             }
-                            viewModel.getVideo(initialServer)
+
+                            // 2026-07-05 : guard transfert seamless mini→fullscreen
+                            //   (même logique que PlayerTvFragment L1191).
+                            //   Si le player a été transféré depuis le mini (déjà en lecture),
+                            //   on SKIP viewModel.getVideo() pour ne PAS déclencher displayVideo()
+                            //   qui recrée le player → restart de zéro. Le player transféré joue
+                            //   déjà le bon flux. On pose juste currentServer pour que le picker
+                            //   serveurs / fallback marchent.
+                            val miniPlayingId = com.streamflixreborn.streamflix.utils.MiniPlayerController.getCurrentPlayingServerId()
+                            val miniIsOnWrongServer = attachedFromMiniPlayer &&
+                                favServer != null &&
+                                miniPlayingId != null &&
+                                canonicalServerId(miniPlayingId) != canonicalServerId(favServer.id)
+                            // 2026-07-05 : démarrage de lecture UNE seule fois par cycle
+                            //   (anti-ANR DessinAnime). Les émissions SuccessLoadingServers
+                            //   suivantes (lots de backups) mettent à jour le picker plus haut
+                            //   mais ne relancent PAS getVideo (= plus de rafale ré-entrante
+                            //   sur le thread principal).
+                            if (!initialServerPicked) {
+                                if (attachedFromMiniPlayer && !miniIsOnWrongServer) {
+                                    initialServerPicked = true
+                                    currentServer = initialServer
+                                    Log.d("PlayerMobileFragment", "Skip viewModel.getVideo() — player already running (transferred from mini), currentServer=${initialServer.name}")
+                                } else if (state.autoPlay) {
+                                    initialServerPicked = true
+                                    if (miniIsOnWrongServer) {
+                                        Log.w("PlayerMobileFragment", "Mini joue '$miniPlayingId' mais favori = '${favServer?.id}' → force switch sur favori (${favServer?.name})")
+                                    }
+                                    viewModel.getVideo(initialServer)
+                                } else {
+                                    // 2026-07-07 : serveurs AFFICHÉS, mais auto-play EN ATTENTE d'un serveur
+                                    //   non-VOSTFR/VO. On ne lance rien ; le ViewModel ré-émet
+                                    //   SuccessLoadingServers(autoPlay=true) dès qu'un VF arrive (ou 12s).
+                                    Log.d("PlayerMobileFragment", "Serveurs affichés — auto-play en attente (hors VOSTFR/VO)")
+                                }
+                            } else {
+                                Log.d("PlayerMobileFragment", "SuccessLoadingServers (lot suivant) — picker mis à jour, pas de re-getVideo (initialServerPicked)")
+                            }
                         }
 
                     }
@@ -1896,6 +2047,20 @@ class PlayerMobileFragment : Fragment() {
             binding.pvPlayer.hideController()
             binding.pvPlayer.enterManualZoomMode()
         }
+        // 2026-07-06 : persistance du zoom manuel par serveur (Sibnet, etc.)
+        // 2026-07-10 : + zoom manuel GLOBAL « collant » (LAST_KEY) → suit sur toutes les vidéos
+        //   suivantes jusqu'à modif/reset (reset = 1f,1f → save() supprime la clé).
+        (binding.pvPlayer as? PlayerMobileView)?.onZoomChanged = { sx, sy ->
+            com.streamflixreborn.streamflix.utils.ZoomPrefsStore.save(
+                com.streamflixreborn.streamflix.utils.ZoomPrefsStore.LAST_KEY, sx, sy
+            )
+            val key = com.streamflixreborn.streamflix.utils.ZoomPrefsStore.extractKey(
+                currentServer, currentVideo?.source
+            )
+            if (key != null) {
+                com.streamflixreborn.streamflix.utils.ZoomPrefsStore.save(key, sx, sy)
+            }
+        }
     }
 
  private fun updatePlayerScale() {
@@ -1919,8 +2084,13 @@ class PlayerMobileFragment : Fragment() {
                 videoSurfaceView?.scaleY = 1.5f
             }
             else -> {
-                videoSurfaceView?.scaleX = 1f
-                videoSurfaceView?.scaleY = 1f
+                // 2026-07-10 (user « garder le même zoom d'une vidéo à l'autre ») : au lieu de forcer
+                //   1f (ce qui écraserait le zoom manuel collant), on applique le dernier zoom manuel
+                //   GLOBAL s'il existe.
+                val z = com.streamflixreborn.streamflix.utils.ZoomPrefsStore.load(
+                    com.streamflixreborn.streamflix.utils.ZoomPrefsStore.LAST_KEY)
+                videoSurfaceView?.scaleX = z?.first ?: 1f
+                videoSurfaceView?.scaleY = z?.second ?: 1f
             }
         }
     }
@@ -2117,21 +2287,43 @@ class PlayerMobileFragment : Fragment() {
         awaitingMoreServers = true
         cancelAwaitTimeoutOnly()
         val handler = android.os.Handler(android.os.Looper.getMainLooper())
-        val r = Runnable {
-            if (!awaitingMoreServers) return@Runnable
-            awaitingMoreServers = false
-            if (isAdded) {
-                Toast.makeText(
-                    requireContext(),
-                    "Aucune source disponible.",
-                    Toast.LENGTH_LONG
-                ).show()
-                try { findNavController().navigateUp() } catch (_: Exception) { }
+        awaitTimeoutHandler = handler
+        // 2026-07-06 (règle implacable — user) : on ne "coupe" (Aucune source) QUE si :
+        //   (1) la recherche de serveurs est FINIE d'elle-même (progressiveStillCollecting=false),
+        //   ET (2) TOUS les serveurs trouvés ont été essayés (aucun non-DEAD restant).
+        //   Tant que la recherche tourne → on ré-attend (poll 4s), jamais de coupure prématurée.
+        //   Borné naturellement : la recherche progressive se termine (plafond de collecte ~45s).
+        val poll = object : Runnable {
+            override fun run() {
+                if (!awaitingMoreServers) return
+                // Recherche encore en cours → on attend, on ne coupe pas.
+                if (viewModel.progressiveStillCollecting) {
+                    handler.postDelayed(this, 4_000L)
+                    return
+                }
+                // Recherche terminée : reste-t-il un serveur JAMAIS essayé ? → on le tente.
+                val untried = nextAutoFallbackServer(servers, currentServer)
+                if (untried != null) {
+                    Log.d("PlayerMobileFragment", "Await: recherche finie, serveur non essayé restant → ${untried.name}")
+                    awaitingMoreServers = false
+                    viewModel.getVideo(untried)
+                    return
+                }
+                // Recherche finie ET tous les serveurs essayés → SEULEMENT là on abandonne.
+                Log.d("PlayerMobileFragment", "Await: recherche finie + tous serveurs essayés → Aucune source")
+                awaitingMoreServers = false
+                if (isAdded) {
+                    Toast.makeText(
+                        requireContext(),
+                        "Aucune source disponible.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    try { findNavController().navigateUp() } catch (_: Exception) { }
+                }
             }
         }
-        awaitTimeoutHandler = handler
-        awaitTimeoutRunnable = r
-        handler.postDelayed(r, timeoutMs)
+        awaitTimeoutRunnable = poll
+        handler.postDelayed(poll, 3_000L)
     }
 
     /** Cancel the timeout AND clear the awaiting flag (call when a server succeeds or user leaves). */
@@ -2182,57 +2374,36 @@ class PlayerMobileFragment : Fragment() {
      *  dans le picker (qui montre la liste complète).
      */
     private fun nextAutoFallbackServer(allServers: List<Video.Server>, current: Video.Server?): Video.Server? {
-        if (current == null) return null
-        // 2026-05-28 : indexOf par ID au lieu de equals — après un refresh
-        // progressif, l'objet `current` (ancien lot) n'est plus == au même
-        // serveur dans la nouvelle liste (champs mirror/video modifiés).
-        val curIdx = allServers.indexOfFirst { it.id == current.id }
-        if (curIdx < 0) return null
-
-        val currentLang = detectServerLanguage(current.name)
-
-        // 2026-05-12 : skip les serveurs flaggés broken par le pre-extract
-        // HEAD check. Match par "core extractor" (ex: "VidMoLy") pour que
-        // les variantes avec/sans "Movix —" préfix matchent.
-        fun extractorCore(name: String): String {
-            val stripped = name.substringAfter(" — ").substringAfter(" · ").trim()
-            return stripped.substringBefore(" - ").substringBefore(" (").substringBefore(" [").trim().uppercase()
-        }
-        val brokenCores = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames()
-            .map { extractorCore(it) }.filter { it.isNotBlank() }.toSet()
-        fun isBroken(srv: Video.Server): Boolean {
-            // 2026-05-24 : serveur rouge PAR TITRE (extraction fail / onPlayerError)
-            //   → skip direct, pas besoin d'attendre 3 fails globaux.
-            val titleStatus = com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(srv.id)
-            if (titleStatus == com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD) return true
-            if (brokenCores.isEmpty()) return false
-            return extractorCore(srv.name) in brokenCores
-        }
-
-        // Étape 1 : cherche le prochain server NON-BROKEN de la MÊME langue.
-        for (i in (curIdx + 1) until allServers.size) {
-            val candidate = allServers[i]
-            if (detectServerLanguage(candidate.name) == currentLang && !isBroken(candidate)) {
-                return candidate
-            }
-        }
-
-        // Étape 2 : cherche N'IMPORTE QUEL serveur NON-BROKEN d'une autre langue
-        // (VF prioritaire, puis VOSTFR, puis VO). Avant : VO → "STOP" = bug si
-        // le 1er serveur auto-play était taggé [MULTI] (= VO) → 0 fallback.
-        val nextAny = allServers.firstOrNull {
-            it.id != current.id && !isBroken(it)
-        }
-        if (nextAny != null) return nextAny
-
-        // Dernier recours — accepte un broken HEAD (HEAD peut mentir)
-        // MAIS JAMAIS un serveur DEAD per-titre (a réellement échoué SUR CE contenu).
-        val lastResort = allServers.firstOrNull {
-            it.id != current.id &&
-                com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(it.id) !=
+        // 2026-07-06 (logique "implacable" — user) : on essaie CHAQUE serveur UNE seule fois,
+        //   dans l'ORDRE de la liste (déjà triée VF-d'abord), et on saute UNIQUEMENT ceux déjà
+        //   essayés (marqués DEAD pour CE titre = ils ont réellement échoué à l'extraction ou à
+        //   la lecture). Retourne null SEULEMENT quand TOUS les serveurs ont été essayés.
+        //   SUPPRIMÉ : les "passes" qui effaçaient les DEAD et rebouclaient sur des serveurs déjà
+        //   morts (cause du re-pick d'un serveur mort, ex Videasy VOSTFR), et le skip basé sur les
+        //   drapeaux HEAD peu fiables. On ne se fie qu'à l'échec RÉEL sur ce titre.
+        return allServers.firstOrNull { srv ->
+            (current == null || srv.id != current.id) &&
+                com.streamflixreborn.streamflix.utils.TitleServerStatus.statusOf(srv.id) !=
                     com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.DEAD
         }
-        return lastResort
+    }
+
+    /** 2026-07-04 : compteur de passes complètes (reprise depuis le haut, DEAD effacés).
+     *  Phase 1 (passes 0-3) : serveurs NON-VOSTFR/VO = FR probable (marqués ou non).
+     *  Phase 2 (passes 4-7) : serveurs VOSTFR/VO (le reste).
+     *  Remis à 0 dès qu'un flux atteint READY → chaque lecture a ses propres passes. */
+    private var autoPassCount = 0
+    private val AUTO_VF_PASSES_M = 4
+    private val AUTO_REST_PASSES_M = 4
+
+    /** Vrai si le serveur N'EST PAS explicitement marqué VOSTFR ou VO.
+     *  = tout ce qui pourrait être FR (y compris non marqué). */
+    private fun isLikelyFrSrv(s: com.streamflixreborn.streamflix.models.Video.Server): Boolean {
+        val n = s.name.lowercase()
+        if (n.contains("vostfr") || n.contains("sous-titr")) return false
+        if (Regex("""(^|[^a-z])vo([^a-z]|$)""").containsMatchIn(n)) return false
+        if (n.contains(Regex("\\b(raw|eng|english|spa|ita|german|deu|jap)\\b"))) return false
+        return true
     }
 
     /** Détection langue cohérente avec ExtractorRanker. Retourne "vf", "vostfr", "vo". */
@@ -4084,8 +4255,11 @@ class PlayerMobileFragment : Fragment() {
         updatePlayerHeader()
         updateLiveRecordButton()
 
-        // Clean up any existing WebView overlay (e.g. switching servers)
-        if (webViewOverlay != null && !(video.needsWebViewClick && !video.webViewUrl.isNullOrBlank())) {
+        // Clean up any existing WebView overlay (e.g. switching servers). 2026-07-09 : on ferme
+        //   TOUJOURS l'ancien overlay avant d'afficher la nouvelle source (même webview→webview),
+        //   sinon showWebViewOverlay sort tôt (webViewOverlay != null) et le nouveau serveur reste
+        //   bloqué. Le picker serveurs (bottom-sheet) s'ouvre PAR-DESSUS sans passer par ici.
+        if (webViewOverlay != null) {
             hideWebViewOverlay()
         }
 
@@ -4178,7 +4352,8 @@ class PlayerMobileFragment : Fragment() {
             // 2026-05-19 v85k : uqload + abyssa passent par Cronet (TLS Chrome
             //   bypass JA3) — voir needsCronet(). Pas besoin de branche OkHttp ici.
             if (!videoUa.isNullOrBlank() && videoUa != NetworkClient.USER_AGENT &&
-                !(sourceHost.contains("uqload") || sourceHost.contains("abyssa") || sourceHost.contains("abysscdn"))) {
+                !(sourceHost.contains("uqload") || sourceHost.contains("abyssa") || sourceHost.contains("abysscdn")
+                    || sourceHost.contains("citron-edge"))) {
                 try {
                     val customFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
                         .setUserAgent(videoUa)
@@ -4359,6 +4534,8 @@ class PlayerMobileFragment : Fragment() {
                 video.source.contains(".m3u8")
                 || video.source.contains("/live/")
                 || video.type == androidx.media3.common.MimeTypes.APPLICATION_M3U8
+                // 2026-07-05 : IANA standard (défense en profondeur)
+                || video.type?.lowercase() == "application/vnd.apple.mpegurl"
             )
             // 2026-05-11 : détection DASH (.mpd) — utilisé par 3BoxTV (LCI live etc.).
             // Sans cette branche, le DASH tombe dans ProgressiveMediaSource qui
@@ -4758,15 +4935,40 @@ class PlayerMobileFragment : Fragment() {
                     //   anti-flap. Sans ça le flux restait figé indéfiniment.
                     if (isLiveIptv && !transferLiveRecoveryActive) {
                         transferLiveRecoveryActive = true
+                        // 2026-07-05 (user "reste coincé sur le 1er serveur, peine perdue,
+                        //   pas de switch sur flux muet") : pour une chaîne OLA dont le
+                        //   serveur courant n'a JAMAIS atteint READY (tuning initial), un
+                        //   flux qui connecte mais n'envoie aucune image ne doit PAS boucler
+                        //   en re-prepare sur le MÊME serveur → on SAUTE activement au variant
+                        //   suivant (vérifié-vivant par la course parallèle du provider). Une
+                        //   fois READY (sticky), on garde le re-prepare same-server pour les
+                        //   blips transitoires (ne pas churner un flux qui marchait).
+                        val isOlaCh = args.id.startsWith("ola::") || args.id.startsWith("ola_ep::")
                         viewLifecycleOwner.lifecycleScope.launch {
                             try {
+                                var initialSwitchTries = 0
                                 while (_binding != null &&
                                     (try { player.playbackState == Player.STATE_BUFFERING } catch (_: Exception) { false })) {
-                                    kotlinx.coroutines.delay(12_000L)
+                                    // Fenêtre courte (7s) tant que ça n'a jamais démarré sur OLA
+                                    // (on veut sauter vite un serveur muet) ; 12s sinon.
+                                    val neverWorked = !iptvCurrentStreamHasWorked
+                                    kotlinx.coroutines.delay(if (neverWorked && isOlaCh) 7_000L else 12_000L)
                                     if (_binding == null) break
                                     val stillBuffering = try { player.playbackState == Player.STATE_BUFFERING } catch (_: Exception) { false }
                                     if (!stillBuffering) break
                                     if (preemptiveReloadInFlight) continue
+
+                                    // CAS 1 — jamais démarré + OLA : le serveur courant est muet
+                                    //   → hop au variant suivant (max 6 tentatives) au lieu de
+                                    //   re-prepare le même. getVideo relance un cycle propre.
+                                    if (!iptvCurrentStreamHasWorked && isOlaCh && initialSwitchTries < 6) {
+                                        initialSwitchTries++
+                                        Log.w("PlayerMobileFragment", "Live BUFFERING (jamais READY) → switch variant OLA #$initialSwitchTries")
+                                        val switched = tryNextChannelVariant(currentServer)
+                                        if (switched) break  // nouveau getVideo → nouveau listener/loop
+                                        // plus de variant → on retombe sur le re-prepare ci-dessous
+                                    }
+
                                     val nowFlapB = System.currentTimeMillis()
                                     recentReloadTimestamps.removeAll { (nowFlapB - it) > RELOAD_FLAP_WINDOW_MS }
                                     if (recentReloadTimestamps.size >= RELOAD_FLAP_THRESHOLD) {
@@ -4820,6 +5022,8 @@ class PlayerMobileFragment : Fragment() {
                             args.id,
                         )
                     }
+                    // 2026-07-04 : lecture réussie → ré-arme les 8 passes pour la prochaine fois.
+                    autoPassCount = 0
                 }
 
                 // Live IPTV auto-resume: re-prepare on STATE_ENDED (playlist tail
@@ -5142,7 +5346,13 @@ class PlayerMobileFragment : Fragment() {
                     val errMsg = (error.cause?.message ?: error.message ?: "").lowercase()
                     // 2026-05-17 : 500/502/503 ajoutés (parité TV) — Stalker/Xtream
                     // token expiré donne souvent 5xx → fresh handshake résout.
-                    val isPermanentHttpError = errMsg.contains("response code: 403") ||
+                    // 2026-07-05 (parité TV — user "reste coincé, retente le même serveur mort") :
+                    //   ERROR_CODE_IO_BAD_HTTP_STATUS traité comme permanent via le CODE d'erreur
+                    //   (le parsing du message ne matchait pas toujours le statut exact).
+                    val isBadHttpStatusCode = error.errorCode ==
+                        androidx.media3.common.PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS
+                    val isPermanentHttpError = isBadHttpStatusCode ||
+                        errMsg.contains("response code: 403") ||
                         errMsg.contains("response code: 404") ||
                         errMsg.contains("response code: 410") ||
                         errMsg.contains("response code: 451") ||
@@ -5168,9 +5378,11 @@ class PlayerMobileFragment : Fragment() {
                         com.streamflixreborn.streamflix.fragments.player.settings.IptvFavorites
                             .isFavorite(args.id, server.id)
                     } catch (_: Exception) { false }
+                    // 2026-07-05 : démarrage + erreur HTTP permanente → pas de cooldown, switch direct.
+                    val bypassCooldown = !iptvCurrentStreamHasWorked && isPermanentHttpError
                     if (shouldSwitch && isFavoriteServer) {
                         Log.d("PlayerMobileFragment", "IPTV switch demandé mais server est favori — on retry à la place")
-                    } else if (shouldSwitch && sinceLastSwitch < switchCooldownMs) {
+                    } else if (shouldSwitch && sinceLastSwitch < switchCooldownMs && !bypassCooldown) {
                         Log.d("PlayerMobileFragment", "IPTV switch demandé mais cooldown ${(switchCooldownMs - sinceLastSwitch)/1000}s — on retry à la place")
                     } else if (shouldSwitch) {
                         Log.w("PlayerMobileFragment", "IPTV switch on ${server.name} ($errCodeName, retry=$iptvRetryCount, hasWorked=$iptvCurrentStreamHasWorked, permanentHttp=$isPermanentHttpError)")
@@ -5188,7 +5400,32 @@ class PlayerMobileFragment : Fragment() {
                             lastAutoSwitchTime = nowMs
                             return
                         }
-                        Log.e("PlayerMobileFragment", "IPTV switch demandé mais pas de server suivant disponible")
+                        // 2026-07-05 (user "souvent il n'y a plus de serveur") : la liste visible
+                        //   est épuisée → on tire un remplaçant dans le POOL COMPLET du provider
+                        //   (streams Phase 3 non émis, 100+ pour une chaîne populaire). Dédup +
+                        //   skip domaines morts gérés par requestSingleReplacement (renvoie null
+                        //   quand le pool est vraiment épuisé). Borné par MAX_POOL_REPLACEMENTS.
+                        if (poolReplacementChannelId != args.id) {
+                            poolReplacementChannelId = args.id
+                            poolReplacementCount = 0
+                        }
+                        val poolProv = UserPreferences.currentProvider
+                        if (poolProv is com.streamflixreborn.streamflix.providers.OlaTvProvider &&
+                            poolReplacementCount < MAX_POOL_REPLACEMENTS) {
+                            val repl = poolProv.requestSingleReplacement(server.id)
+                            if (repl != null) {
+                                poolReplacementCount++
+                                Log.w("PlayerMobileFragment", "Pool replacement #$poolReplacementCount pour ${server.name} → ${repl.name}")
+                                pruneBrokenVariant(server)
+                                triedChannelVariantIds.add(repl.id)
+                                iptvRetryCount = 0
+                                iptvCurrentStreamHasWorked = false
+                                lastAutoSwitchTime = nowMs
+                                viewModel.getVideo(repl)
+                                return
+                            }
+                        }
+                        Log.e("PlayerMobileFragment", "IPTV switch demandé mais pas de server suivant disponible (pool épuisé)")
                     }
 
                     // 2026-05-12 (user) : HARD CAP pour éviter boucle infinie.
@@ -5422,6 +5659,35 @@ class PlayerMobileFragment : Fragment() {
 
         player.prepare()
         player.play()
+
+        // 2026-07-06 : auto-appliquer le zoom persisté pour ce serveur (ex: Sibnet).
+        //   Le zoom est purement visuel (scaleX/Y sur la SurfaceView), indépendant
+        //   du pipeline media. On l'applique APRÈS prepare/play pour que la surface
+        //   existe. disableAllClipping nécessaire pour que le scale>1 ne soit pas coupé.
+        try {
+            // 2026-07-10 : zoom « collant » — d'abord le dernier zoom manuel GLOBAL (suit d'une vidéo à
+            //   l'autre), sinon le zoom par serveur (ex: Sibnet). Reste tant qu'il n'est pas modifié/reset.
+            val saved = com.streamflixreborn.streamflix.utils.ZoomPrefsStore.load(
+                com.streamflixreborn.streamflix.utils.ZoomPrefsStore.LAST_KEY
+            ) ?: com.streamflixreborn.streamflix.utils.ZoomPrefsStore.extractKey(server, video.source)
+                ?.let { com.streamflixreborn.streamflix.utils.ZoomPrefsStore.load(it) }
+            if (saved != null) {
+                binding.pvPlayer.videoSurfaceView?.let { vv ->
+                    vv.scaleX = saved.first
+                    vv.scaleY = saved.second
+                    // Désactiver le clipping pour que le scale>1 soit visible
+                    var current: View? = binding.pvPlayer
+                    while (current != null) {
+                        (current as? ViewGroup)?.let { it.clipChildren = false; it.clipToPadding = false }
+                        val p = current.parent
+                        current = if (p is View) p else null
+                    }
+                    Log.d("PlayerMobileFragment", "Zoom collant appliqué: scaleX=${saved.first}, scaleY=${saved.second}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("PlayerMobileFragment", "Zoom auto-apply failed: ${e.message}")
+        }
 
         // Enable auto-PiP on Android 12+ once playback starts
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -6172,7 +6438,11 @@ class PlayerMobileFragment : Fragment() {
         //   source que telephone (202.90.76.81). Mais OkHttp Android = 403. Donc TLS
         //   fingerprint Android Conscrypt detecte et blacklisted. Cronet (Chromium TLS)
         //   bypass car identique a un vrai Chrome.
-        return url.contains("vidzy.live", ignoreCase = true)
+        // 2026-07-06 : vidzy.cc/vidzy.to = CDN Vidmoly alternatif, même
+        // JA3 que vidzy.live. vmwesa.online = autre CDN Vidmoly (rotation).
+        // Sans Cronet → UnknownHostException sur Chromecast (DNS système KO).
+        return url.contains("vidzy.", ignoreCase = true)
+            || url.contains("vmwesa.online", ignoreCase = true)
             || url.contains("cfglobalcdn.com", ignoreCase = true)
             || url.contains("anime-sama.", ignoreCase = true)
             || url.contains("uqload.is", ignoreCase = true)
@@ -6186,6 +6456,10 @@ class PlayerMobileFragment : Fragment() {
             //   couvrir tous les TLD Hydrax (.cc/.io/.net…), comme PlayerTvFragment.
             || url.contains("abyssa", ignoreCase = true)
             || url.contains("abysscdn", ignoreCase = true)
+            // 2026-07-09 : Nakios CDN (sv.citron-edge.lol) fait du JA3 fingerprinting
+            //   strict. DefaultHttpDataSource (TLS Java) → redirect Telegram (anti-hotlink).
+            //   Cronet (TLS Chrome) + Referer nakios.store → 206 OK.
+            || url.contains("citron-edge", ignoreCase = true)
     }
 
     private fun needsDoH(url: String): Boolean {
@@ -6328,6 +6602,7 @@ class PlayerMobileFragment : Fragment() {
             private val dnsClient = OkHttpClient.Builder()
                 .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
 
             /** Multiple DoH providers — different providers may return different IPs */
@@ -6437,6 +6712,7 @@ class PlayerMobileFragment : Fragment() {
             .dns(jsonDohDns)
             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
@@ -6471,6 +6747,7 @@ class PlayerMobileFragment : Fragment() {
                 .cookieJar(NetworkClient.cookieJar)
                 .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
                 .followRedirects(true)
                 .followSslRedirects(true)
                 .build()
@@ -6497,6 +6774,89 @@ class PlayerMobileFragment : Fragment() {
             .setAllowCrossProtocolRedirects(true)
         // 2026-05-10 : wrapper auto-reconnect sur EOF pour live MPEG-TS (cf PlayerTvFragment).
         return com.streamflixreborn.streamflix.utils.LiveReconnectingHttpDataSource.Factory(base)
+    }
+
+    // 2026-07-05 : flag pour savoir si le player vient du mini (transfert seamless)
+    private var attachedFromMiniPlayer = false
+
+    /**
+     * 2026-07-05 : Attache le player ExoPlayer transféré depuis le mini-player
+     * SANS le stopper ni le re-créer → lecture continue, zéro coupure.
+     * Même logique que PlayerTvFragment.attachTransferredPlayer().
+     */
+    private fun attachTransferredPlayer(transferred: ExoPlayer) {
+        Log.d("PlayerMobileFragment", "Attaching transferred ExoPlayer from mini player")
+        attachedFromMiniPlayer = true
+        player = transferred
+        if (!::httpDataSource.isInitialized) {
+            httpDataSource = createHttpDataSourceFactory("")
+        }
+        dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
+        val isLiveIptvHere = args.id.startsWith("ch::") || args.id.startsWith("sport::") ||
+            args.id.startsWith("ola::") || args.id.startsWith("ola_ep::") ||
+            args.id.startsWith("vegeta::") || args.id.startsWith("vegeta_ep::") ||
+            args.id.startsWith("livehub::") || args.id.startsWith("sportlive::") ||
+            args.id.startsWith("match::") || args.id.startsWith("vavoo::") || args.id.startsWith("myiptv-live::")
+        player.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                .build(), !isLiveIptvHere)
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setPreferredAudioLanguage("fr").build()
+        mediaSession = MediaSession.Builder(requireContext(), player)
+            .setId("player_mobile_${System.nanoTime()}")
+            .build()
+        binding.pvPlayer.player = player
+        binding.settings.player = player
+        binding.settings.subtitleView = binding.pvPlayer.subtitleView
+        binding.settings.onSubtitlesClicked = { viewModel.getSubtitles(args.videoType) }
+        com.streamflixreborn.streamflix.utils.MiniPlayerController.clearTransitionFlag()
+        // REPEAT_MODE_OFF pour live (cf TV fragment)
+        if (isLiveIptvHere) {
+            player.repeatMode = androidx.media3.common.Player.REPEAT_MODE_OFF
+        }
+        if (!player.playWhenReady) {
+            player.playWhenReady = true
+        }
+        // Listener recovery minimal (même logique que TV) pour que le live
+        // puisse reprendre après STATE_ENDED/erreur.
+        attachTransferRecoveryListener()
+        Log.d("PlayerMobileFragment", "Transferred player attached — seamless (repeat=${player.repeatMode} playWhenReady=${player.playWhenReady})")
+    }
+
+    /** Listener recovery minimal pour le path transfer-from-mini.
+     *  Le listener complet de displayVideo() n'est pas attaché ici pour
+     *  éviter un re-init du player. Quand le flux live s'épuise (STATE_ENDED)
+     *  ou se déconnecte (STATE_IDLE), on re-prepare() pour re-fetch l'URL. */
+    private fun attachTransferRecoveryListener() {
+        val recoveryListener = object : androidx.media3.common.Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                when (state) {
+                    androidx.media3.common.Player.STATE_ENDED,
+                    androidx.media3.common.Player.STATE_IDLE -> {
+                        Log.d("PlayerMobileFragment", "Transfer recovery: STATE=$state → prepare()")
+                        try {
+                            player.seekToDefaultPosition()
+                            player.prepare()
+                            player.playWhenReady = true
+                        } catch (_: Exception) {}
+                    }
+                    androidx.media3.common.Player.STATE_READY -> {
+                        Log.d("PlayerMobileFragment", "Transfer recovery: STATE_READY")
+                    }
+                }
+            }
+            override fun onPlayerError(error: PlaybackException) {
+                Log.e("PlayerMobileFragment", "Transfer recovery: error ${error.errorCodeName} → prepare()")
+                try {
+                    player.seekToDefaultPosition()
+                    player.prepare()
+                    player.playWhenReady = true
+                } catch (_: Exception) {}
+            }
+        }
+        try { player.addListener(recoveryListener) } catch (_: Exception) {}
     }
 
     private fun initializePlayer(extraBuffering: Boolean, softwareDecoder: Boolean = currentSoftwareDecoder, videoUrl: String = "") {
@@ -6584,10 +6944,319 @@ class PlayerMobileFragment : Fragment() {
     // ═══════════════════════════════════════════════════════════════════
 
     @android.annotation.SuppressLint("SetJavaScriptEnabled")
+    /**
+     * 2026-07-09 : superpose NOTRE barre de contrôle au-dessus d'un overlay WebView-player
+     * (abyss / seekplayer / player4me) pour que l'app garde la main : retour, pause/play (piloté
+     * en JS sur la balise <video>), seek, liste serveurs, paramètres. Tap = afficher/masquer,
+     * auto-masquage après quelques secondes. « Comme notre player », même si le flux joue en WebView.
+     */
+    private fun addOverlayPlayerControls(ctx: Context, overlay: FrameLayout, wv: WebView) {
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        fun fmt(s: Int): String { val m = s / 60; val sec = s % 60; return "%d:%02d".format(m, sec) }
+
+        // Layer NON cliquable : les taps au CENTRE passent au player web (indispensable pour le
+        //   « tape play » d'abyss). Seules nos barres (haut/bas) captent leurs propres taps.
+        val layer = FrameLayout(ctx).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            elevation = 45f
+        }
+
+        // ── Barre du haut : retour + titre ──
+        val topBar = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.parseColor("#B3000000"))
+            setPadding(28, 20, 28, 20)
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP)
+        }
+        val backBtn = android.widget.ImageView(ctx).apply {
+            setImageResource(android.R.drawable.ic_media_previous)
+            setColorFilter(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(80, 80)
+            isClickable = true; isFocusable = true
+        }
+        val titleTv = TextView(ctx).apply {
+            text = resolvePlayerTitle()
+            setTextColor(Color.WHITE); textSize = 15f
+            setPadding(28, 0, 0, 0); maxLines = 1
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        topBar.addView(backBtn); topBar.addView(titleTv)
+
+        // ── Barre du bas : seek + boutons ──
+        val bottomBar = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#B3000000"))
+            setPadding(28, 12, 28, 20)
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
+        }
+        val timeTv = TextView(ctx).apply {
+            text = "0:00 / 0:00"; setTextColor(Color.WHITE); textSize = 12f
+        }
+        val seek = android.widget.SeekBar(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+        val btnRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+            setPadding(0, 8, 0, 0)
+        }
+        fun mkBtn(icon: Int, label: String): LinearLayout {
+            val b = LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+                isClickable = true; isFocusable = true
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            b.addView(android.widget.ImageView(ctx).apply {
+                setImageResource(icon); setColorFilter(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(70, 70)
+            })
+            b.addView(TextView(ctx).apply {
+                text = label; setTextColor(Color.WHITE); textSize = 11f; gravity = Gravity.CENTER
+            })
+            return b
+        }
+        val playPause = mkBtn(android.R.drawable.ic_media_pause, "Pause")
+        val playIcon = playPause.getChildAt(0) as android.widget.ImageView
+        val playLabel = playPause.getChildAt(1) as TextView
+        val serversBtn = mkBtn(android.R.drawable.ic_menu_sort_by_size, "Serveurs")
+        val settingsBtn = mkBtn(android.R.drawable.ic_menu_manage, "Paramètres")
+        btnRow.addView(playPause); btnRow.addView(serversBtn); btnRow.addView(settingsBtn)
+        bottomBar.addView(timeTv); bottomBar.addView(seek); bottomBar.addView(btnRow)
+
+        // Barres TOUJOURS visibles (focusables → navigables à la télécommande sur TV, et
+        //   l'utilisateur peut toujours mettre en pause / changer de serveur). Pas d'auto-masquage
+        //   pour éviter d'avoir à re-capter les taps (qui doivent rester au player web au centre).
+        fun scheduleHide() { /* no-op : barres persistantes */ }
+
+        // ── Pause / play (JS) ──
+        playPause.setOnClickListener {
+            wv.evaluateJavascript(
+                "(function(){var v=document.querySelector('video');if(!v)return 'x';if(v.paused){v.play();return 'playing';}v.pause();return 'paused';})()"
+            ) { r ->
+                val playing = r?.contains("playing") == true
+                playIcon.setImageResource(if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play)
+                playLabel.text = if (playing) "Pause" else "Lecture"
+            }
+            scheduleHide()
+        }
+        // ── Serveurs : on OUVRE la liste PAR-DESSUS (bottom-sheet) SANS fermer la vidéo. Le swap
+        //   d'overlay se fait seulement à la sélection d'un serveur (displayVideo → hideWebViewOverlay).
+        serversBtn.setOnClickListener {
+            try { binding.settings.showServers() } catch (_: Exception) {}
+        }
+        // ── Paramètres : menu overflow du player, ancré sur le bouton ──
+        settingsBtn.setOnClickListener { anchor -> try { showPlayerOverflowMenu(anchor) } catch (_: Exception) {} }
+        // ── Retour : ferme l'overlay + back normal du player ──
+        backBtn.setOnClickListener {
+            hideWebViewOverlay()
+            try { binding.pvPlayer.controller.binding.btnExoBack.performClick() } catch (_: Exception) {}
+        }
+
+        // ── Seek : poll position/durée depuis la <video>, drag pour se déplacer ──
+        var userSeeking = false
+        val poll = object : Runnable {
+            override fun run() {
+                if (webViewOverlay == null) return
+                if (!userSeeking) {
+                    try {
+                        wv.evaluateJavascript(
+                            "(function(){var v=document.querySelector('video');return v&&v.duration?Math.floor(v.currentTime)+'/'+Math.floor(v.duration):'0/0';})()"
+                        ) { r ->
+                            val parts = r?.trim('"')?.split('/')
+                            if (parts != null && parts.size == 2) {
+                                val cur = parts[0].toIntOrNull() ?: 0
+                                val dur = parts[1].toIntOrNull() ?: 0
+                                if (dur > 0) { seek.max = dur; if (!userSeeking) seek.progress = cur; timeTv.text = "${fmt(cur)} / ${fmt(dur)}" }
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+                handler.postDelayed(this, 1000)
+            }
+        }
+        handler.postDelayed(poll, 1500)
+        seek.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
+                if (fromUser) timeTv.text = "${fmt(p)} / ${fmt(sb?.max ?: 0)}"
+            }
+            override fun onStartTrackingTouch(sb: android.widget.SeekBar?) { userSeeking = true }
+            override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
+                val target = sb?.progress ?: 0
+                try { wv.evaluateJavascript("(function(){var v=document.querySelector('video');if(v)v.currentTime=$target;})()", null) } catch (_: Exception) {}
+                userSeeking = false; scheduleHide()
+            }
+        })
+
+        layer.addView(bottomBar); layer.addView(topBar)
+        overlay.addView(layer)
+        scheduleHide()
+    }
+
+    /**
+     * 2026-07-09 : branche un [WebPlayerMirror] sur la PlayerView pour que NOS contrôles natifs
+     * pilotent la <video> de la WebView (play/pause/seek), mobile ET télécommande TV. Ajoute aussi
+     * un capteur de tap transparent au-dessus de la WebView pour convoquer/masquer le controller
+     * (la WebView capterait sinon les taps et le controller ne s'afficherait jamais).
+     */
+    private fun attachWebMirrorPlayer(overlay: FrameLayout, wv: WebView) {
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        val mirror = WebPlayerMirror(
+            android.os.Looper.getMainLooper(),
+            onPlayPause = {
+                // VRAI MotionEvent Android sur la WebView, PILE là où est le gros bouton bleu du
+                //   player web = centre HORIZONTAL, à la hauteur de la BARRE de contrôle (Y du bouton
+                //   play natif). MotionEvent = touch RÉEL (isTrusted=true) → démarrage fiable.
+                try {
+                    if (wv.width > 0 && wv.height > 0) {
+                        val x = wv.width / 2f
+                        // Y = hauteur du bouton play natif (la barre), converti en coords WebView.
+                        val playBtn = try { binding.pvPlayer.controller.binding.exoPlayPause } catch (_: Exception) { null }
+                        val y: Float = if (playBtn != null && playBtn.height > 0) {
+                            val loc = IntArray(2); playBtn.getLocationOnScreen(loc)
+                            val wvLoc = IntArray(2); wv.getLocationOnScreen(wvLoc)
+                            (loc[1] + playBtn.height / 2 - wvLoc[1]).toFloat().coerceIn(1f, (wv.height - 1).toFloat())
+                        } else wv.height / 2f
+                        val t = android.os.SystemClock.uptimeMillis()
+                        val down = android.view.MotionEvent.obtain(t, t, android.view.MotionEvent.ACTION_DOWN, x, y, 0)
+                        val up = android.view.MotionEvent.obtain(t, t + 60, android.view.MotionEvent.ACTION_UP, x, y, 0)
+                        wv.dispatchTouchEvent(down); wv.dispatchTouchEvent(up)
+                        down.recycle(); up.recycle()
+                        Log.d("PlayerMobile", "SEEK real-tap at $x,$y (wv ${wv.width}x${wv.height})")
+                    }
+                } catch (_: Exception) {}
+            },
+            onSeekTo = { ms ->
+                try {
+                    wv.evaluateJavascript(
+                        "(function(){var v=document.querySelector('video');if(v)v.currentTime=${ms / 1000.0};})()", null)
+                } catch (_: Exception) {}
+            },
+        )
+        webMirrorPlayer = mirror
+        try { binding.pvPlayer.player = mirror } catch (e: Exception) { Log.w("PlayerMobile", "attach mirror KO: ${e.message}") }
+        try { binding.pvPlayer.showController() } catch (_: Exception) {}
+
+        // Bouton du MILIEU (exoPlayPause, centré sur le gros bouton bleu) = UNIQUEMENT l'auto-clic :
+        //   on override son clic pour envoyer un VRAI MotionEvent sur la WebView pile sur le bouton
+        //   bleu (centre horizontal, hauteur de la barre). Il ne passe plus par la logique play/pause
+        //   du miroir → plus d'interaction avec le bouton pause dédié.
+        try {
+            binding.pvPlayer.controller.binding.exoPlayPause.setOnClickListener {
+                try {
+                    if (wv.width > 0 && wv.height > 0) {
+                        val x = wv.width / 2f
+                        val pb = binding.pvPlayer.controller.binding.exoPlayPause
+                        val loc = IntArray(2); pb.getLocationOnScreen(loc)
+                        val wvLoc = IntArray(2); wv.getLocationOnScreen(wvLoc)
+                        val y = (loc[1] + pb.height / 2 - wvLoc[1]).toFloat().coerceIn(1f, (wv.height - 1).toFloat())
+                        val t = android.os.SystemClock.uptimeMillis()
+                        val down = android.view.MotionEvent.obtain(t, t, android.view.MotionEvent.ACTION_DOWN, x, y, 0)
+                        val up = android.view.MotionEvent.obtain(t, t + 60, android.view.MotionEvent.ACTION_UP, x, y, 0)
+                        wv.dispatchTouchEvent(down); wv.dispatchTouchEvent(up)
+                        down.recycle(); up.recycle()
+                        Log.d("PlayerMobile", "SEEK milieu real-tap at $x,$y")
+                    }
+                } catch (_: Exception) {}
+            }
+        } catch (_: Exception) {}
+
+        // Bouton PAUSE dédié (dans la barre, câblé EN DIRECT) : v.pause()/v.play() FIABLE. La pause
+        //   d'une vidéo qui joue ne nécessite aucun geste → v.pause() marche à coup sûr. Le play/
+        //   lancement (qui exige un vrai geste) est géré par le bouton principal (MotionEvent).
+        try {
+            val ppBtn = binding.pvPlayer.controller.binding.root
+                .findViewById<android.widget.ImageView>(R.id.btn_seek_playpause)
+            ppBtn?.visibility = View.VISIBLE
+            // Espaceur gauche pour garder le bouton play centré sur le bouton bleu.
+            binding.pvPlayer.controller.binding.root
+                .findViewById<View>(R.id.btn_seek_spacer)?.visibility = View.VISIBLE
+            ppBtn?.setOnClickListener {
+                try {
+                    wv.evaluateJavascript(
+                        "(function(){try{var v=document.querySelector('video');if(!v)return;var mp=document.querySelector('media-player');" +
+                        "if(v.paused){try{v.play();}catch(e){}try{if(mp&&mp.play)mp.play();}catch(e){}}" +
+                        "else{try{v.pause();}catch(e){}try{if(mp&&mp.pause)mp.pause();}catch(e){}}}catch(e){}})()", null)
+                } catch (_: Exception) {}
+            }
+        } catch (_: Exception) {}
+
+        // Capteur de tap : affiche/masque le controller natif au tap (la WebView capterait sinon
+        //   les taps → le controller ne s'afficherait jamais).
+        val tapCatcher = View(requireContext()).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            isClickable = true
+            setOnClickListener {
+                try {
+                    if (binding.pvPlayer.isControllerFullyVisible) binding.pvPlayer.hideController()
+                    else binding.pvPlayer.showController()
+                } catch (_: Exception) {}
+            }
+        }
+        overlay.addView(tapCatcher)
+
+        val poll = object : Runnable {
+            override fun run() {
+                if (webMirrorPlayer !== mirror || webViewOverlay == null) return
+                try {
+                    wv.evaluateJavascript(
+                        "(function(){var v=document.querySelector('video');return v?(Math.round(v.currentTime*1000)+'/'+Math.round((v.duration||0)*1000)+'/'+(v.paused?0:1)):'0/0/0';})()"
+                    ) { r ->
+                        val p = r?.trim('"')?.split('/')
+                        if (p != null && p.size == 3) {
+                            mirror.update(p[0].toLongOrNull() ?: 0L, p[1].toLongOrNull() ?: 0L, p[2] == "1")
+                        }
+                    }
+                } catch (_: Exception) {}
+                handler.postDelayed(this, 500)
+            }
+        }
+        webMirrorPoll = poll
+        handler.postDelayed(poll, 800)
+    }
+
+    private fun detachWebMirrorPlayer() {
+        webMirrorPoll?.let { android.os.Handler(android.os.Looper.getMainLooper()).removeCallbacks(it) }
+        webMirrorPoll = null
+        // Re-cache le bouton play/pause dédié seekplayer + son espaceur.
+        try {
+            binding.pvPlayer.controller.binding.root
+                .findViewById<android.widget.ImageView>(R.id.btn_seek_playpause)?.visibility = View.GONE
+            binding.pvPlayer.controller.binding.root
+                .findViewById<View>(R.id.btn_seek_spacer)?.visibility = View.GONE
+        } catch (_: Exception) {}
+        // RESTAURE le play/pause NORMAL : mon override du bouton central pointait vers la WebView
+        //   (détruite) → sans ça le player normal ne pouvait plus se mettre en pause.
+        try {
+            binding.pvPlayer.controller.binding.exoPlayPause.setOnClickListener {
+                try { if (::player.isInitialized) { if (player.playWhenReady) player.pause() else player.play() } } catch (_: Exception) {}
+            }
+        } catch (_: Exception) {}
+        if (webMirrorPlayer != null) {
+            webMirrorPlayer = null
+            // Restaure le vrai ExoPlayer sur la PlayerView.
+            try { if (::player.isInitialized) binding.pvPlayer.player = player } catch (_: Exception) {}
+        }
+    }
+
     private fun showWebViewOverlay(embedUrl: String) {
         if (webViewOverlay != null) return
         val ctx = requireContext()
-        val rootView = binding.root as ViewGroup
+        // Embeds où la WebView EST le lecteur (abyss/seekplayer/player4me) : la WebView va DANS la
+        //   zone vidéo du player natif (overlayFrameLayout = derrière les contrôles) et on branche
+        //   un lecteur MIROIR (WebPlayerMirror) sur la PlayerView → NOS contrôles natifs pilotent la
+        //   vidéo web (play/pause/seek), mobile ET télécommande TV. Les autres embeds gardent
+        //   l'overlay plein écran sur la racine.
+        val webViewIsPlayer = embedUrl.contains("seekplayer") || embedUrl.contains("abyss") || embedUrl.contains("4meplayer")
+        val nativeVideoOverlay = binding.pvPlayer.overlayFrameLayout
+        val useNativeControls = webViewIsPlayer && nativeVideoOverlay != null
+        val rootView: ViewGroup = if (useNativeControls) nativeVideoOverlay!! else binding.root as ViewGroup
         m3u8Intercepted = false
         daddyLiveCdnPageUrl = null
 
@@ -6598,7 +7267,9 @@ class PlayerMobileFragment : Fragment() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
             setBackgroundColor(Color.BLACK)
-            elevation = 30f
+            // Élévation 0 dans la zone vidéo native (rester DERRIÈRE les contrôles) ; 30f en overlay
+            //   plein écran (DaddyLive/Netu).
+            elevation = if (useNativeControls) 0f else 30f
         }
 
         // ── WebView (user can touch/tap directly) ──
@@ -6632,6 +7303,19 @@ class PlayerMobileFragment : Fragment() {
         //   marche bien") : on porte le traitement Player4me du TV vers le mobile —
         //   chargement direct + Referer, blocage des pubs (ressources + navigation), SSL.
         val isPlayer4me = embedUrl.contains("4meplayer")
+        // 2026-07-09 : SeekStreaming (seekplayer.vip/.me) de Movix. Player vidstack P2P/HLS
+        //   inextractible headless (flux révélé seulement en lecture réelle) → on le JOUE dans
+        //   l'overlay WebView comme abyss : nav top-level hors seekplayer bloquée (tue les redirects
+        //   pub), pubs coupées, autoplay + plein écran injectés.
+        val isSeekPlayer = embedUrl.contains("seekplayer")
+        val seekAdHosts = listOf(
+            "boredomcuff", "spleniidizzy", "gappedpeatmen", "popads", "popcash", "propeller",
+            "onclick", "adsterra", "hilltopads", "monetag", "clickadu", "doubleclick",
+            "googlesyndication", "syndication", "exoclick", "juicyads", "trafficjunky",
+        )
+        if (isSeekPlayer) {
+            wv.settings.userAgentString = com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA
+        }
         val abyssNavAllow = listOf(
             "abysscdn.com", "abyss.to", "abyssa.cc", "abyssplayer.com", "hydrax.net",
             "iamcdn.net", "googleapis.com", "jwpcdn.com", "jsdelivr.net",
@@ -6661,6 +7345,14 @@ class PlayerMobileFragment : Fragment() {
                     if (!ok) { Log.d("PlayerMobile", "Player4me NAV BLOCKED: $nh"); return true }
                     return false
                 }
+                // SeekStreaming : bloque toute NAVIGATION top-level qui n'est pas seekplayer
+                //   (= les redirects pub au 1er clic). Le flux vidéo/CDN se charge en ressource
+                //   (shouldInterceptRequest), pas en navigation → non impacté.
+                if (isSeekPlayer) {
+                    val nh = request?.url?.host ?: return false
+                    if (!nh.contains("seekplayer.")) { Log.d("PlayerMobile", "Seek NAV BLOCKED: $nh"); return true }
+                    return false
+                }
                 if (!isAbyssEmbed) return false
                 val navHost = request?.url?.host ?: return false
                 val allowed = abyssNavAllow.any { navHost == it || navHost.endsWith(".$it") }
@@ -6671,6 +7363,16 @@ class PlayerMobileFragment : Fragment() {
                 view: WebView?, request: WebResourceRequest?
             ): WebResourceResponse? {
                 val url = request?.url?.toString() ?: return null
+
+                // SeekStreaming : coupe les hôtes de pub (le player charge sinon des onclick/pop).
+                if (isSeekPlayer) {
+                    val sh = request?.url?.host ?: ""
+                    if (seekAdHosts.any { sh.contains(it, ignoreCase = true) }) {
+                        Log.d("PlayerMobile", "Seek AD BLOCKED: $sh")
+                        return WebResourceResponse("text/plain", "UTF-8",
+                            java.io.ByteArrayInputStream("".toByteArray()))
+                    }
+                }
 
                 // Abyss/Hydrax: player dedie sans pub
                 if (isAbyssEmbed) {
@@ -6811,6 +7513,11 @@ class PlayerMobileFragment : Fragment() {
                 if (isPlayer4me) {
                     view?.evaluateJavascript(PLAYER4ME_AD_KILL_JS, null)
                 }
+                // ── SeekStreaming : plein écran + autoplay du player vidstack ──
+                if (isSeekPlayer) {
+                    view?.evaluateJavascript(SEEKPLAYER_PLAY_JS, null)
+                    view?.postDelayed({ view.evaluateJavascript(SEEKPLAYER_PLAY_JS, null) }, 2500)
+                }
             }
 
             // 2026-05-21 : accepter les certs SSL invalides dans l'overlay player
@@ -6842,7 +7549,9 @@ class PlayerMobileFragment : Fragment() {
 
         // ── Hint text ──
         val hint = TextView(ctx).apply {
-            text = if (isDaddyLiveEmbed) "Chargement du flux DaddyLive..." else "Appuyez sur le bouton play pour lancer la vidéo"
+            text = if (isSeekPlayer) "Astuce : appuyez plusieurs fois sur ▶ / ⏸"
+                else if (isDaddyLiveEmbed) "Chargement de la vidéo…"
+                else "Appuyez sur le bouton play pour lancer la vidéo"
             setTextColor(Color.WHITE)
             textSize = 14f
             setShadowLayer(4f, 0f, 0f, Color.BLACK)
@@ -6858,6 +7567,10 @@ class PlayerMobileFragment : Fragment() {
         overlay.addView(wv)
         overlay.addView(hint)
         rootView.addView(overlay)
+        // Branche le lecteur MIROIR sur la PlayerView → nos contrôles natifs pilotent la WebView.
+        if (useNativeControls) {
+            attachWebMirrorPlayer(overlay, wv)
+        }
 
         webViewOverlay = overlay
         overlayWebView = wv
@@ -6873,6 +7586,10 @@ class PlayerMobileFragment : Fragment() {
             //   dessinanime.cc (anti-hotlink). Identique au TV.
             Log.d("PlayerMobile", "Loading Player4me directly: ${embedUrl.take(100)}")
             wv.loadUrl(embedUrl, mapOf("Referer" to "https://dessinanime.cc/"))
+        } else if (isSeekPlayer) {
+            // SeekStreaming : chargement DIRECT de l'embed (le player vidstack joue dedans).
+            Log.d("PlayerMobile", "Loading SeekStreaming directly: ${embedUrl.take(100)}")
+            wv.loadUrl(embedUrl)
         } else {
             // Other embeds: use iframe wrapper (page expects to be in an iframe)
             val baseHost = if (isAbyssEmbed) "https://dessinanime.cc/" else "https://frembed.cyou/"
@@ -6905,10 +7622,14 @@ class PlayerMobileFragment : Fragment() {
         pendingWebViewVideo = null
         pendingWebViewServer = null
 
+        // Restaure le vrai ExoPlayer AVANT de détruire la WebView (le miroir la référence).
+        detachWebMirrorPlayer()
         wv?.let {
             try { it.stopLoading(); it.destroy() } catch (_: Exception) {}
         }
-        (binding.root as? ViewGroup)?.removeView(overlay)
+        // 2026-07-09 : l'overlay peut vivre dans binding.root OU dans overlayFrameLayout du player
+        //   natif → on retire depuis son vrai parent.
+        (overlay.parent as? ViewGroup)?.removeView(overlay)
         Log.d("PlayerMobile", "WebView overlay hidden")
     }
 

@@ -107,4 +107,49 @@
         <item>16</item>
         <item>18</item>
     </string-array>
+
+    <!-- 2026-07-10 (user "désactiver les backups un par un") : sources de backup.
+         Les COCHÉES = actives. entryValues = noms EXACTS passés à emit() (clé du gate). -->
+    <string-array name="backup_source_labels">
+        <item>Cloudstream</item>
+        <item>Movix</item>
+        <item>Frembed</item>
+        <item>Moviebox</item>
+        <item>Nakios</item>
+        <item>Webflix</item>
+        <item>CoflixWiki</item>
+        <item>AniCloud (animes)</item>
+        <item>Papadustream V2</item>
+        <item>Embed (Videasy VOSTFR)</item>
+        <item>Wiflix</item>
+        <item>FrenchStream</item>
+        <item>1Jour1Film</item>
+        <item>aplouf</item>
+        <item>AnimeSama (animes)</item>
+        <item>VoirAnime (animes)</item>
+        <item>FrenchManga (animes)</item>
+        <item>VoirDrama (dramas)</item>
+        <item>DessinAnime</item>
+    </string-array>
+    <string-array name="backup_source_keys">
+        <item>Cloudstream</item>
+        <item>Movix</item>
+        <item>Frembed</item>
+        <item>Moviebox</item>
+        <item>Nakios</item>
+        <item>Webflix</item>
+        <item>CoflixWiki</item>
+        <item>AniCloud</item>
+        <item>Papadustream V2</item>
+        <item>Embed</item>
+        <item>Wiflix</item>
+        <item>FrenchStream</item>
+        <item>1Jour1Film</item>
+        <item>aplouf</item>
+        <item>AnimeSama</item>
+        <item>VoirAnime</item>
+        <item>FrenchManga</item>
+        <item>VoirDrama</item>
+        <item>DessinAnime</item>
+    </string-array>
 </resources>

@@ -70,6 +70,7 @@ object PlutoTvResolver {
         OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS)
             .build()
     }
 

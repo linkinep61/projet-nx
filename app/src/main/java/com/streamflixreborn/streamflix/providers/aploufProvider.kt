@@ -23,9 +23,6 @@ import com.streamflixreborn.streamflix.utils.TitleNormalizer
 import com.streamflixreborn.streamflix.utils.TmdbUtils
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.channelFlow
-import kotlinx.coroutines.launch
 import android.util.Log
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -37,7 +34,7 @@ import retrofit2.http.GET
 import retrofit2.http.Query
 import retrofit2.http.Url
 
-object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, ProgressiveServersProvider {
+object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
     override val name = "aplouf"
 
@@ -429,31 +426,6 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             .map { srv -> srv.copy(id = "cs_backup__${srv.id}", name = "Cloudstream — ${srv.name}") }
     }.getOrNull().orEmpty()
 
-    override fun getServersProgressive(
-        id: String, videoType: Video.Type,
-    ): Flow<List<Video.Server>> = channelFlow {
-        initializeService()
-        // Natif : part tout de suite.
-        launch {
-            try {
-                val native = getServers(id, videoType)
-                if (native.isNotEmpty()) send(native)
-            } catch (e: Exception) { Log.w("aplouf", "Progressive native failed: ${e.message}") }
-        }
-        // Backups : après résolution tmdbId, lancés en parallèle.
-        launch {
-            val tid = resolveAploufTmdbId(videoType) ?: return@launch
-            launch {
-                try { val mx = fetchAploufMovixBackup(tid, videoType); if (mx.isNotEmpty()) send(mx) }
-                catch (e: Exception) { Log.w("aplouf", "Progressive Movix failed: ${e.message}") }
-            }
-            launch {
-                try { val cs = fetchAploufCloudstreamBackup(tid, videoType); if (cs.isNotEmpty()) send(cs) }
-                catch (e: Exception) { Log.w("aplouf", "Progressive CS failed: ${e.message}") }
-            }
-        }
-    }
-
     override suspend fun getVideo(server: Video.Server): Video {
         // Délégation backups
         if (server.id.startsWith("movix_backup__")) {
@@ -558,6 +530,7 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             private val client = OkHttpClient.Builder()
                 .readTimeout(30, TimeUnit.SECONDS)
                 .connectTimeout(30, TimeUnit.SECONDS)
+                .callTimeout(45, TimeUnit.SECONDS)
                 .addInterceptor { chain ->
                     val newRequest = chain.request().newBuilder()
                         .addHeader("User-agent", user_agent)

@@ -1290,6 +1290,21 @@ object TMDb3 {
             @SerializedName("videos") val videos: Result<Video>? = null,
             @SerializedName("images") val images: Images? = null,
             @SerializedName("recommendations") val recommendations: PageResult<MultiItem>? = null,
+            @SerializedName("alternative_titles") val alternativeTitles: AlternativeTitlesWrapper? = null,
+        )
+
+        /** Wrapper pour alternative_titles : TMDB utilise "titles" pour les films, "results" pour les séries. */
+        data class AlternativeTitlesWrapper(
+            val titles: List<AlternativeTitle>? = null,
+            val results: List<AlternativeTitle>? = null,
+        ) {
+            fun all(): List<AlternativeTitle> = (titles.orEmpty()) + (results.orEmpty())
+        }
+
+        data class AlternativeTitle(
+            @SerializedName("iso_3166_1") val iso31661: String? = null,
+            val title: String? = null,
+            val type: String? = null,
         )
 
         data class Country(
@@ -1414,6 +1429,7 @@ object TMDb3 {
             @SerializedName("images") val images: Images? = null,
             @SerializedName("created_by") val createdBy: List<CreatedBy>? = null,
             @SerializedName("recommendations") val recommendations: PageResult<MultiItem>? = null,
+            @SerializedName("alternative_titles") val alternativeTitles: Movie.AlternativeTitlesWrapper? = null,
         )
 
         data class ContentRating(

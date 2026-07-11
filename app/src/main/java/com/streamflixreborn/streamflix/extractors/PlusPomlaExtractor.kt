@@ -57,6 +57,7 @@ class PlusPomlaExtractor : Extractor() {
                 val client = OkHttpClient.Builder()
                     .readTimeout(30, TimeUnit.SECONDS)
                     .connectTimeout(30, TimeUnit.SECONDS)
+                    .callTimeout(45, TimeUnit.SECONDS)
                     .followRedirects(true)
                     .followSslRedirects(true)
                     .build()

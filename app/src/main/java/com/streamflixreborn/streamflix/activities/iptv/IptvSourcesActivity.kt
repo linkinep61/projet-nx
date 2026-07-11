@@ -631,6 +631,7 @@ class IptvSourcesActivity : FragmentActivity() {
                             val client = okhttp3.OkHttpClient.Builder()
                                 .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
                                 .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                                .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
                                 .build()
                             val req = okhttp3.Request.Builder().url(url).build()
                             client.newCall(req).execute().use { resp ->

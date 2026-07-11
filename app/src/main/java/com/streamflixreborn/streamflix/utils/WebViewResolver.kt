@@ -56,6 +56,31 @@ class WebViewResolver(private val context: Context) {
      *  providers qui veulent un fallback discret sans interaction user. */
     private var silentMode: Boolean = false
 
+    // 2026-07-04 (DessinAnime : le player RSC/nmlnode arrive en STREAMING tardif,
+    //   après le contenu de base href="/tv/". Si non nul, le bypass ne rend PAS la
+    //   main tant que ce marqueur n'est pas présent dans le HTML capturé — évite de
+    //   renvoyer une page hydratée à moitié (357 Ko) sans les sources du lecteur).
+    //   Un plafond de polls (ci-dessous) empêche l'attente infinie si absent.
+    private var requiredMarker: String? = null
+
+    // 2026-07-04 : si non nul, une fois le cf_clearance obtenu, on exécute un fetch
+    //   `RSC:1` DANS le WebView (contexte navigateur → passe CF là où OkHttp reçoit 403)
+    //   et on renvoie sa réponse (légère, ~184 Ko) au lieu d'attendre l'hydratation de la
+    //   page complète. C'est le mécanisme même par lequel le player DessinAnime récupère
+    //   ses sources. Escape temporel via pollStartMs pour ne jamais bloquer > 12s.
+    private var rscFetchUrl: String? = null
+    private var pollStartMs: Long = 0L
+    // 2026-07-04 : délai max d'attente du marker (contentMarker) avant de rendre l'innerHTML tel
+    //   quel. Défaut 12s (inchangé). Les fiches DessinAnime /tv/* sur Chromecast s'hydratent en
+    //   ~15-18s (liens de saison rendus tard par React) → on passe un délai plus long pour ne
+    //   pas capturer une page pré-hydratée SANS saisons.
+    private var markerTimeoutMs: Long = 12_000L
+
+    // 2026-07-04 : mode pré-chauffage LÉGER — on rend la main DÈS que le cookie cf_clearance
+    //   est posé, sans attendre le rendu de la page complète (lourde). Sert au warm-up boot
+    //   pour obtenir la clearance sans geler le CPU (Chromecast) avec toute la SPA.
+    private var clearanceOnly: Boolean = false
+
     // 2026-06-30 : on ne recharge qu'UNE fois après obtention du cf_clearance.
     private var reloadedAfterClearance = false
 
@@ -63,7 +88,12 @@ class WebViewResolver(private val context: Context) {
     //   throttler l'IP par Cloudflare → tout en 403, jaquettes comprises).
     private val MAX_BYPASS_ATTEMPTS = 1
 
-    suspend fun get(url: String, headers: Map<String, String> = emptyMap(), silent: Boolean = false): String = mutex.withLock {
+    suspend fun get(url: String, headers: Map<String, String> = emptyMap(), silent: Boolean = false, contentMarker: String? = null, rscFetchUrl: String? = null, clearanceOnly: Boolean = false, markerTimeoutMs: Long = 12_000L): String = mutex.withLock {
+        requiredMarker = contentMarker
+        this.rscFetchUrl = rscFetchUrl
+        this.clearanceOnly = clearanceOnly
+        this.markerTimeoutMs = markerTimeoutMs
+        pollStartMs = System.currentTimeMillis()
         // 2026-06-30 (user "le captcha m'énerve, je veux plus jamais le voir, il
         //   sera tout le temps masqué — il apparaît même hors du provider Wiflix
         //   et ne se résout pas") : le bypass est DÉSORMAIS TOUJOURS SILENCIEUX.
@@ -85,7 +115,13 @@ class WebViewResolver(private val context: Context) {
             reloadedAfterClearance = false
             silentMode = true
             Log.d(TAG, "[WebView] Fetching: $url (IsTV: $isTv, silencieux, tentative $attempt/$MAX_BYPASS_ATTEMPTS)")
-            result = withTimeoutOrNull(45000) {
+            // 2026-07-07 (user : « un bypass Cloudflare bloque toute l'appli ») : le challenge CF
+            //   tourne sur le MAIN THREAD (mainHandler). À FROID (cookie cf_clearance perdu après
+            //   force-stop), DessinAnime moulinait ~46s → toute l'app figée, TOUS les autres
+            //   providers (aplouf, Wiflix…) bloqués derrière. On CAPE le challenge silencieux à
+            //   13s : s'il ne passe pas, échec rapide → le main thread se libère → les autres
+            //   repartent. À chaud (cookie présent) le contenu arrive en <2s, non concerné.
+            result = withTimeoutOrNull(13000) {
                 suspendCancellableCoroutine { continuation ->
                     mainHandler.post { setupWebView(url, headers, continuation) }
                     continuation.invokeOnCancellation { cleanup() }
@@ -94,8 +130,28 @@ class WebViewResolver(private val context: Context) {
             val r = result ?: ""
             val failed = result == null || r.isBlank() ||
                 r.contains("<!-- silent fail -->") || r.contains("<!-- no live activity -->") ||
+                r.contains("<!-- rate limited 1015 -->") ||
                 r.contains("<body>Timeout</body>")
             if (!failed) break
+            // 2026-07-07 (user : « une fois déclenché, SEUL effacer les données remet l'app
+            //   normale ; force-stop ne suffit pas ») : le challenge a ÉCHOUÉ → le cf_clearance
+            //   présent est POISON (stale / throttlé par CF). Il est persisté sur DISQUE par le
+            //   CookieManager → survit au force-stop → à chaque réouverture on le renvoie → CF
+            //   re-rejette / re-throttle → challenge INFINI → gel. C'est ça qui obligeait à
+            //   « effacer les données » à la main. On l'EFFACE nous-mêmes : la prochaine
+            //   ouverture repart d'un cookie propre, plus besoin de clear-data.
+            runCatching {
+                val cm = CookieManager.getInstance()
+                val host = android.net.Uri.parse(url).host ?: ""
+                cm.setCookie(url, "cf_clearance=; Max-Age=0; Path=/")
+                if (host.isNotBlank()) {
+                    cm.setCookie("https://$host/", "cf_clearance=; Max-Age=0; Path=/")
+                    val root = host.removePrefix("www.").removePrefix("ww1.")
+                    cm.setCookie("https://$host/", "cf_clearance=; Max-Age=0; Path=/; Domain=.$root")
+                }
+                cm.flush()
+                Log.w(TAG, "[WebView] Challenge CF ÉCHOUÉ → cf_clearance EFFACÉ pour '$host' (anti-poison, plus besoin de clear-data)")
+            }
             if (attempt < MAX_BYPASS_ATTEMPTS) {
                 Log.d(TAG, "[WebView] tentative $attempt bloquée → relance auto pour $url")
                 kotlinx.coroutines.delay(1200)
@@ -106,6 +162,17 @@ class WebViewResolver(private val context: Context) {
     }
 
     companion object {
+        // 2026-07-06 (crash/ANR lancement serveurs) : le parsing du HTML de challenge CF
+        //   (cleanHtml + dizaines de .contains, dont un scan ignoreCase des keywords =
+        //   Character.toUpperCase sur TOUT le HTML) tournait sur le MAIN THREAD dans le
+        //   callback WebView, répété toutes les 300 ms. Chromecast + grosse page → main
+        //   bloqué >2,5 s → ANR → crash. On déporte le calcul lourd sur ce thread de fond
+        //   unique (daemon, partagé, jamais arrêté), puis on repasse au main SEULEMENT pour
+        //   les décisions qui touchent la WebView.
+        private val analysisExecutor: java.util.concurrent.ExecutorService =
+            java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+                Thread(r, "WebViewResolver-analysis").apply { isDaemon = true }
+            }
         // 2026-06-28 : User-Agent réaliste Chrome 131 (dernière stable Android).
         //   L'ancien UA Chrome/116 est vieux de 2 ans → score bot élevé chez CF.
         //   NB : on ne touche PAS NetworkClient.USER_AGENT (utilisé par OkHttp
@@ -161,19 +228,20 @@ class WebViewResolver(private val context: Context) {
                 stealthUaInitDone = true
             } catch (_: Throwable) {}
         }
-    }
 
-    // 2026-06-28 : script JS anti-détection injecté AVANT que les scripts
-    //   Cloudflare ne s'exécutent (via onPageStarted). Spoofes les empreintes
-    //   que CF Turnstile vérifie pour distinguer un WebView d'un vrai Chrome :
-    //   - navigator.webdriver = undefined (WebView met true → red flag #1)
-    //   - window.chrome = objet Chrome réaliste (absent en WebView → red flag #2)
-    //   - navigator.plugins = faux plugins (vide en WebView → red flag #3)
-    //   - navigator.permissions.query = pas d'erreur sur "notifications"
-    //   - WebGL renderer = pas "SwiftShader" (indicateur headless)
-    //   Résultat : le Turnstile devrait s'auto-résoudre comme dans un vrai
-    //   navigateur (~2-3s), sans que le user ait besoin de cliquer.
-    private val STEALTH_JS = """
+        // 2026-06-28 : script JS anti-détection injecté AVANT que les scripts
+        //   Cloudflare ne s'exécutent (via onPageStarted). Spoofes les empreintes
+        //   que CF Turnstile vérifie pour distinguer un WebView d'un vrai Chrome :
+        //   - navigator.webdriver = undefined (WebView met true → red flag #1)
+        //   - window.chrome = objet Chrome réaliste (absent en WebView → red flag #2)
+        //   - navigator.plugins = faux plugins (vide en WebView → red flag #3)
+        //   - navigator.permissions.query = pas d'erreur sur "notifications"
+        //   - WebGL renderer = pas "SwiftShader" (indicateur headless)
+        //   Résultat : le Turnstile devrait s'auto-résoudre comme dans un vrai
+        //   navigateur (~2-3s), sans que le user ait besoin de cliquer.
+        // 2026-07-03 : déplacé dans companion object + internal pour que
+        //   WebJsProvider.navigate() puisse l'injecter dans onPageStarted.
+        internal val STEALTH_JS = """
         (function() {
             // 1. navigator.webdriver = undefined (le signal #1 que CF vérifie)
             try {
@@ -238,9 +306,20 @@ class WebViewResolver(private val context: Context) {
             //    (on ne change pas le rendu, juste on s'assure que c'est pas vide)
 
             // 8. Cacher que c'est un WebView via le feature check
+            // 2026-07-04 (BUG CRITIQUE) : l'ancien getter renvoyait
+            //   `navigator.__originalUA || navigator.userAgent` — mais __originalUA
+            //   n'était JAMAIS défini → le getter s'appelait LUI-MÊME → RÉCURSION
+            //   INFINIE → "RangeError: Maximum call stack size exceeded" à chaque
+            //   lecture de navigator.userAgent. Next.js/React lit navigator.userAgent
+            //   pendant l'hydratation → crash → le player DessinAnime ne se montait
+            //   jamais dans le WebView (0 serveur natif sur les séries), alors que le
+            //   même contenu marche dans Chrome (sans stealth). FIX : on capture le
+            //   vrai UA UNE fois AVANT de redéfinir, et le getter renvoie cette
+            //   valeur fixe (aucun auto-appel).
             try {
+                var __capturedUA = navigator.userAgent;
                 Object.defineProperty(navigator, 'userAgent', {
-                    get: function() { return navigator.__originalUA || navigator.userAgent; },
+                    get: function() { return __capturedUA; },
                     configurable: true
                 });
             } catch(e) {}
@@ -311,6 +390,7 @@ class WebViewResolver(private val context: Context) {
             } catch(e) {}
         })();
     """.trimIndent()
+    } // companion object
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView(url: String, headers: Map<String, String>, continuation: kotlinx.coroutines.CancellableContinuation<String>) {
@@ -341,6 +421,10 @@ class WebViewResolver(private val context: Context) {
             }
 
             webViewClient = object : WebViewClient() {
+                // 2026-07-04 : blocage de ressources RETIRÉ — bloquer les polices (.woff2) en
+                //   renvoyant une réponse VIDE faisait caler `document.fonts.ready` sur certains
+                //   sites (DessinAnime) → l'hydratation React ne se terminait jamais → page shell
+                //   27 Ko sans saisons/sources. Le gain de vitesse ne valait pas la casse.
                 override fun onPageStarted(view: WebView?, currentUrl: String?, favicon: android.graphics.Bitmap?) {
                     super.onPageStarted(view, currentUrl, favicon)
                     // 2026-06-28 : injecter les patches anti-détection le PLUS
@@ -375,25 +459,74 @@ class WebViewResolver(private val context: Context) {
         val cookies = cookieManager.getCookie(currentUrl) ?: ""
         val hasClearance = cookies.contains("cf_clearance")
         
-        view?.evaluateJavascript("(function() { return document.documentElement.innerHTML; })();") { html ->
+        // 2026-07-04 : mode RSC — une fois le contexte navigateur prêt, on déclenche (et
+        //   retente à chaque poll tant que ça échoue, ex : clearance pas encore posé → 403)
+        //   un fetch `RSC:1` same-origin. Dès qu'il renvoie 200, on retourne SA réponse (les
+        //   sources du player) au lieu de l'innerHTML. Sinon on retourne l'innerHTML normal.
+        val evalJs = rscFetchUrl?.let { rsc ->
+            "(function(){try{" +
+            "if(!window.__rscBusy&&!window.__rscDone){window.__rscBusy=true;" +
+            "fetch('" + rsc + "',{headers:{'RSC':'1'},credentials:'include'})" +
+            ".then(function(r){if(r.status===200)return r.text();throw r.status;})" +
+            ".then(function(t){window.__rscResult=t;window.__rscDone=true;})" +
+            ".catch(function(e){window.__rscBusy=false;});}" +
+            "if(window.__rscDone)return window.__rscResult;}catch(e){}" +
+            "return document.documentElement.innerHTML;})();"
+        } ?: "(function() { return document.documentElement.innerHTML; })();"
+        view?.evaluateJavascript(evalJs) { html ->
+          // 2026-07-06 : calcul lourd déporté sur analysisExecutor (thread de fond). HTML
+          //   lowercasé UNE fois, scans case-sensitive sur cette copie (fini le
+          //   Character.toUpperCase par caractère × keywords). Retour au main SEULEMENT
+          //   pour les décisions qui touchent la WebView.
+          analysisExecutor.execute {
             val cleanHtml = html?.trim()?.removeSurrounding("\"")
                 ?.replace("\\u003C", "<")?.replace("\\\"", "\"")?.replace("\\n", "\n")?.replace("\\t", "\t") ?: ""
-            
-            val isChallenge = challengeKeywords.any { cleanHtml.contains(it, ignoreCase = true) }
-            val hasContent = cleanHtml.contains("article") || cleanHtml.contains("iframe") ||
-                             cleanHtml.contains("TPost") || cleanHtml.contains("grid-item") ||
-                             cleanHtml.contains("optnslst") || // Rilevamento server Cine24h (come da registro)
-                             cleanHtml.contains("block-main") || cleanHtml.contains("mov-t") ||
-                             cleanHtml.contains("mov-list") || cleanHtml.contains("posterimg") || // Wiflix
-                             cleanHtml.contains("grabScroll") || cleanHtml.contains("catalog-card") ||
-                             cleanHtml.contains("fadeJours") || cleanHtml.contains("anime-card-premium") || // AnimeSama
+            val lower = cleanHtml.lowercase()
+
+            val isChallenge = challengeKeywords.any { lower.contains(it.lowercase()) }
+            val hasContent = lower.contains("article") || lower.contains("iframe") ||
+                             lower.contains("tpost") || lower.contains("grid-item") ||
+                             lower.contains("optnslst") || // Rilevamento server Cine24h (come da registro)
+                             lower.contains("block-main") || lower.contains("mov-t") ||
+                             lower.contains("mov-list") || lower.contains("posterimg") || // Wiflix
+                             lower.contains("grabscroll") || lower.contains("catalog-card") ||
+                             lower.contains("fadejours") || lower.contains("anime-card-premium") || // AnimeSama
                              // 2026-06-09 (user "la page devrait être instantanée") :
                              //   DessinAnime est en Next.js → garde "_next/" et
                              //   "__NEXT_DATA__" comme marqueurs de content.
-                             cleanHtml.contains("_next/") || cleanHtml.contains("__NEXT_DATA__") ||
-                             cleanHtml.contains("dessinanime")
+                             lower.contains("_next/") || lower.contains("__next_data__") ||
+                             lower.contains("dessinanime")
 
+            val hasRealSiteLinks = lower.contains("href=\"/movie/") ||
+                lower.contains("href=\"/tv/") ||
+                lower.contains("href=\"/film/") ||
+                lower.contains("href=\"/serie/") ||
+                (lower.contains("posterimg") && lower.contains("mov-t")) ||
+                (lower.contains("<iframe") &&
+                    !lower.contains("challenges.cloudflare.com") &&
+                    lower.contains("dessinanime"))
+            val isRateLimited = lower.contains("error 1015") ||
+                lower.contains("you are being rate limited") ||
+                lower.contains("has banned you temporarily")
+            val markerGateOk = requiredMarker.let { mk ->
+                mk == null || cleanHtml.contains(mk) || (System.currentTimeMillis() - pollStartMs) > markerTimeoutMs
+            }
+
+           mainHandler.post {
+            if (continuation.isCompleted || webView == null) return@post
             Log.d(TAG, "[WebView] Status -> Challenge: $isChallenge, Content: $hasContent, Clearance: $hasClearance, Polling: $pollingCount")
+
+            // 2026-07-04 : mode pré-chauffage — dès que le cookie cf_clearance est posé ET que
+            //   la page de challenge n'est plus affichée, on rend la main SANS attendre le rendu
+            //   complet de la SPA (léger CPU = pas d'ANR au boot). Le cookie est flush → persisté.
+            if (clearanceOnly && hasClearance && !isChallenge) {
+                Log.d(TAG, "[WebView] clearanceOnly → cf_clearance posé, on s'arrête (pré-chauffage léger).")
+                cfBypassGeneration++
+                cookieManager.flush()
+                if (continuation.isActive) continuation.resume("<html><!-- clearance warmed --></html>")
+                cleanup()
+                return@post
+            }
 
             // 2026-05-26 : un ancien cookie cf_clearance PÉRIMÉ peut être présent
             // alors que le challenge est toujours actif → ne PAS court-circuiter
@@ -404,31 +537,25 @@ class WebViewResolver(private val context: Context) {
             //   isChallenge reste toujours true mais le contenu est là.
             //   Après 3 polls (~6s), si on a du contenu volumineux + clearance,
             //   on considère le bypass réussi (false positive du keyword).
-            // 2026-06-09 : SUCCESS si la page contient des liens RÉELS du site
-            //   (href="/movie/" ou "/tv/") — c'est le contenu, peu importe si
-            //   "cloudflare" ou "Un instant" traînent encore dans des scripts.
-            val hasRealSiteLinks = cleanHtml.contains("href=\"/movie/") ||
-                cleanHtml.contains("href=\"/tv/") ||
-                // 2026-06-23 : Wiflix — ses liens réels sont /film/ et /serie/
-                //   PLUS ses marqueurs de contenu (posterimg, mov-t, mov-list)
-                //   qui prouvent que le site a chargé DERRIÈRE le faux-positif
-                //   "cloudflare" (= CDN analytics, pas un challenge actif).
-                cleanHtml.contains("href=\"/film/") ||
-                cleanHtml.contains("href=\"/serie/") ||
-                // Wiflix content markers — si présents, c'est le VRAI site
-                (cleanHtml.contains("posterimg") && cleanHtml.contains("mov-t")) ||
-                // 2026-06-09 v2 : page film avec iframe lecteur (PAS Turnstile)
-                (cleanHtml.contains("<iframe", ignoreCase = true) &&
-                    !cleanHtml.contains("challenges.cloudflare.com", ignoreCase = true) &&
-                    cleanHtml.contains("dessinanime", ignoreCase = true))
-            if (hasRealSiteLinks
+            // 2026-06-09 : SUCCESS si la page contient des liens RÉELS du site.
+            //   hasRealSiteLinks + markerGateOk calculés en fond (analysisExecutor).
+            if (markerGateOk && (hasRealSiteLinks
                 || (!isChallenge && hasContent && cleanHtml.length > 1000)
                 || (hasClearance && !isChallenge)
                 || (!isChallenge && hasContent && hasClearance && cleanHtml.length > 5000 && pollingCount >= 3)
                 // 2026-06-28 : si le cookie cf_clearance est posé ET la page a
                 //   du vrai contenu ET c'est assez gros, c'est du vrai contenu
                 //   même si "cloudflare" traîne dans les scripts CDN/analytics.
-                || (hasClearance && hasContent && cleanHtml.length > 5000)) {
+                || (hasClearance && hasContent && cleanHtml.length > 5000)
+                // 2026-07-06 (user "le warm ne finit pas à temps → 1er clic aussi long qu'un
+                //   captcha") : SORTIE RAPIDE dès clearance + contenu réel (marqueurs article/
+                //   iframe/_next…), SANS attendre length>5000 (la page Next.js met ~15s à grossir
+                //   sur Chromecast → le warm pollait 53×). hasContent=true = on est DÉJÀ passé le
+                //   Turnstile (la page de challenge n'a pas ces marqueurs). SÛR car TOUT ce bloc
+                //   est gardé par markerGateOk : un getServers (marqueur de source requis) attend
+                //   toujours sa vraie source ; seul le warm (sans marqueur) sort tôt → ~5s au lieu
+                //   de ~20s → le cf_clearance est prêt AVANT le 1er clic sur une jaquette.
+                || (hasClearance && hasContent && pollingCount >= 3))) {
                 Log.d(TAG, "[WebView] SUCCESS detected! Closing bypass.")
                 cfBypassGeneration++
                 Log.d(TAG, "[WebView] cfBypassGeneration bumped to $cfBypassGeneration")
@@ -437,7 +564,7 @@ class WebViewResolver(private val context: Context) {
                     continuation.resume("<html>$cleanHtml</html>")
                     cleanup()
                 }
-                return@evaluateJavascript
+                return@post
             }
 
             // 2026-06-28 : détecter la page "Error 1015 — You are being rate
@@ -446,15 +573,13 @@ class WebViewResolver(private val context: Context) {
             //   résoudre (pas de Turnstile). Afficher le dialog est inutile et
             //   confus pour le user. On renvoie un marker silencieux ; le
             //   WiflixProvider détectera le 1015 et activera le cooldown 15min.
-            val isRateLimited = cleanHtml.contains("Error 1015", ignoreCase = true) ||
-                cleanHtml.contains("You are being rate limited", ignoreCase = true) ||
-                cleanHtml.contains("has banned you temporarily", ignoreCase = true)
+            // isRateLimited calculé en fond ci-dessus (analysisExecutor).
             if (isRateLimited) {
                 Log.w(TAG, "[WebView] Rate limit 1015 detected — NOT showing dialog, returning silently")
                 cookieManager.flush()
                 if (continuation.isActive) continuation.resume("<html><!-- rate limited 1015 --></html>")
                 cleanup()
-                return@evaluateJavascript
+                return@post
             }
 
             // 2026-06-30 (user "il a réussi mais lent" — logs : 7 fetches, le 1er
@@ -467,7 +592,19 @@ class WebViewResolver(private val context: Context) {
                 reloadedAfterClearance = true
                 Log.d(TAG, "[WebView] Clearance OK sans contenu → reload (CF servira le contenu avec le cookie)")
                 try { view?.reload() } catch (_: Exception) {}
-                return@evaluateJavascript
+                return@post
+            }
+
+            // 2026-07-04 : reload marker-based. Page détail DessinAnime : clearance OK + "contenu"
+            //   (faux positif "cloudflare"/"dessinanime" dans les scripts) MAIS le marker requis
+            //   (lien de saison /tv/slug/N/1) toujours absent → CF a servi une page challenge/
+            //   partielle. UN reload avec le cookie sert le vrai contenu server-rendered (saisons).
+            if (hasClearance && !reloadedAfterClearance && pollingCount >= 8 &&
+                requiredMarker != null && !cleanHtml.contains(requiredMarker!!)) {
+                reloadedAfterClearance = true
+                Log.d(TAG, "[WebView] Clearance OK mais marker absent → reload (contenu réel server-rendered)")
+                try { view?.reload() } catch (_: Exception) {}
+                return@post
             }
 
             // Mode silent : si après 60 polls toujours pas de contenu → fail silencieux
@@ -477,7 +614,7 @@ class WebViewResolver(private val context: Context) {
                 cookieManager.flush()
                 if (continuation.isActive) continuation.resume("<html><!-- silent fail --></html>")
                 cleanup()
-                return@evaluateJavascript
+                return@post
             }
             if (!silentMode && dialog == null && (
                     (pollingCount >= 2 && !hasContent) ||
@@ -495,7 +632,12 @@ class WebViewResolver(private val context: Context) {
             //   silent=100 (30s), visible=400 (120s). Avant : 80 (24s)
             //   trop court pour que le user résolve le Turnstile → dialog
             //   fermé, challenge HTML renvoyé = cache empoisonné.
-            val maxPolls = if (silentMode) 100 else 400
+            // 2026-07-04 : en silencieux on poll assez longtemps pour couvrir markerTimeoutMs
+            //   (fiches DessinAnime : challenge CF à froid ~30-40s). Défaut 12s → 100 polls (30s,
+            //   inchangé). markerTimeoutMs plus grand (détail tv) → on étend proportionnellement.
+            // 2026-07-07 : cap silencieux à ~43 polls (~13s à 300ms) — cohérent avec le timeout
+            //   13s ci-dessus. Ne mouline plus 30-45s sur le main thread pour un CF récalcitrant.
+            val maxPolls = if (silentMode) 43 else 400
             if (pollingCount < maxPolls) {
                 mainHandler.postDelayed({ checkChallengeStatus(view, currentUrl, continuation) }, 300)
             } else {
@@ -503,6 +645,8 @@ class WebViewResolver(private val context: Context) {
                 if (continuation.isActive) continuation.resume("<html>$cleanHtml</html>")
                 cleanup()
             }
+           } // fin mainHandler.post (décisions WebView sur le main thread)
+          } // fin analysisExecutor.execute (calcul lourd hors main thread)
         }
     }
 

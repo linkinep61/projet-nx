@@ -85,6 +85,18 @@ object ExtractorRanker {
     // Pas besoin de deviner qui est bloqué ou pas.
     private val FRENCH_ISP_BLOCKED_PATTERNS = emptyList<String>()
 
+    // 2026-07-05 : domaines Netu/WAAW pour le fast-path du filtre disabled.
+    //   Quand disabled = {"netu"} seul (= FORCE_DISABLED, cas standard), on filtre
+    //   par simple check de domaine URL au lieu de résoudre le nom d'extracteur
+    //   (identifyServiceName = itère 100+ extracteurs, lazy-lock SYNCHRONIZED,
+    //   bloque 5s+ après un restart froid du Chromecast).
+    private val NETU_HOSTS = listOf(
+        "waaw1.tv", "netu.tv", "hqq.tv", "waaw.tv",
+        "netu.ac", "hqq.ac", "waaw.ac", "waaw.to",
+        "younetu.org", "netu.frembed.bond"
+    )
+    private val NETU_HOSTS_SET = setOf("netu")
+
     /**
      * Bias empirique de vitesse de démarrage par extracteur.
      * Ajouté au score : positif = remonte dans le picker, négatif = descend.
@@ -271,33 +283,58 @@ object ExtractorRanker {
      * (sort stable Kotlin).
      */
     fun rankServers(servers: List<Video.Server>): List<Video.Server> {
+        val _rs = System.currentTimeMillis()
+        Log.d("RANK", "ENTER n=${servers.size} thread=${Thread.currentThread().name}")
         if (servers.size <= 1) return servers
 
         // 2026-05-27 : filtre les extracteurs désactivés manuellement par l'user.
+        // 2026-07-05 : OPTIM — resolveExtractorName() itère 80+ extracteurs par serveur
+        //   (coûte 30-4500ms sous charge CPU) et n'est nécessaire QUE si l'user a désactivé
+        //   des extracteurs PERSONNALISÉS. Quand disabled = FORCE_DISABLED seul (= "netu"),
+        //   on filtre par simple check de domaine URL → O(1) par serveur, zéro contention.
+        Log.d("RANK", "A avant getDisabled ${System.currentTimeMillis()-_rs}ms")
         val disabled = ExtractorToggleStore.getDisabled()
-        val filtered = if (disabled.isEmpty()) servers else servers.filter { server ->
-            val extName = resolveExtractorName(server)?.lowercase()
-            extName == null || extName !in disabled  // inconnu = on garde (sécurité)
+        Log.d("RANK", "B après getDisabled=${disabled.size} ${System.currentTimeMillis()-_rs}ms")
+        val filtered = if (disabled.isEmpty()) servers else {
+            val userDisabled = disabled - NETU_HOSTS_SET  // domaines netu = gérés par URL
+            val hasNetuDisabled = disabled.contains("netu")
+            Log.d("RANK", "C userDisabled=${userDisabled.size} hasNetu=$hasNetuDisabled ${System.currentTimeMillis()-_rs}ms")
+            if (userDisabled.isEmpty() && hasNetuDisabled) {
+                // Fast path : seul "netu" est disabled → filtre par domaine URL (quasi-gratuit)
+                Log.d("RANK", "D FAST-PATH netu-only")
+                servers.filter { server ->
+                    val host = try { java.net.URI(server.src).host?.lowercase() ?: "" } catch (_: Exception) { "" }
+                    !NETU_HOSTS.any { host.contains(it) }
+                }
+            } else if (disabled.isNotEmpty()) {
+                // Slow path : l'user a des extracteurs custom désactivés → résolution complète
+                Log.d("RANK", "D SLOW-PATH resolveExtractorName")
+                servers.filter { server ->
+                    val extName = resolveExtractorName(server)?.lowercase()
+                    extName == null || extName !in disabled  // inconnu = on garde (sécurité)
+                }
+            } else servers
         }
+        Log.d("RANK", "E après filtre filtered=${filtered.size} ${System.currentTimeMillis()-_rs}ms")
         if (filtered.isEmpty()) return servers  // sécurité : si tout filtré, on garde tout
 
-        // Précalcule le mapping name → failureCount pour éviter de re-parser
-        // le JSON à chaque comparaison.
-        val failureMap: Map<String, Int> = ExtractorFailureTracker.getFailures()
-            .associate { it.name to it.count }
+        // 2026-07-04 (user "qualité, cœur, langue ça suffit" + "un serveur qui arrive en 0,5s
+        //   doit s'afficher en 0,5s, il y a un blocage qui retient l'arrivée"). Tri ULTRA-LÉGER.
+        //   AVANT : par serveur on appelait UserPreferences.currentProvider (itère Provider.
+        //   providers), ExtractorToggleStore.isFavorite (getStringSet prefs), resolveExtractorName
+        //   (identifyServiceName = boucle sur TOUS les extracteurs). × N serveurs × re-tri à
+        //   CHAQUE lot → 4-10s par lot pendant que le registre tourne → serveurs en bloc.
+        //   MAINTENANT : on lit currentProvider + favoris UNE SEULE FOIS ; on ne résout le nom
+        //   d'extracteur QUE si l'user a des favoris (rare). Sans favori → score = qualité pure
+        //   (match de chaîne) = quasi-gratuit, aucune contention.
+        val currentProviderName = UserPreferences.currentProvider?.name ?: ""
+        val favorites = if (currentProviderName.isNotEmpty())
+            ExtractorToggleStore.getFavorites(currentProviderName) else emptySet()
 
-        // Score chaque server une fois.
-        val scored = filtered.map { server -> ScoredServer(server, computeScore(server, failureMap)) }
+        val scored = filtered.map { server -> ScoredServer(server, computeScore(server, favorites)) }
 
-        // Log pour debug (visible dans le rapport bug aussi).
-        if (Log.isLoggable(TAG, Log.DEBUG)) {
-            scored.forEach { s ->
-                Log.d(TAG, "  ${s.server.name.padEnd(40)} → score=${s.score}")
-            }
-        }
-
-        // Sort par score décroissant. `sortedByDescending` est stable côté
-        // ordre original pour les égalités.
+        // Sort par score décroissant. `sortedByDescending` est stable → ordre d'origine préservé
+        //   pour les égalités (donc l'ordre d'arrivée des serveurs à qualité égale).
         return scored.sortedByDescending { it.score }.map { it.server }
     }
 
@@ -325,95 +362,37 @@ object ExtractorRanker {
      *  Score d'un Netu : -200.
      *  Ordre final : tous les VF (sains) > Filemoon broken > VOSTFR sains > VO > Netu.
      */
-    private fun computeScore(server: Video.Server, failureMap: Map<String, Int>): Int {
+    // 2026-07-04 — VERSION LÉGÈRE (user "qualité, cœur, langue VF/VOSTFR/VO, ça suffit").
+    //   AUCUNE lecture de stats d'extracteurs (santé/échecs/latence/vitesse/vérifié) → zéro
+    //   contention avec le registre (qui les ÉCRIT en probant 20 sources). Score =
+    //     • cœur (favori) → supplante tout
+    //     • sinon Papadustream natif (captcha CF) → tout en bas
+    //     • sinon QUALITÉ (4K > 1080 > 720 > …)
+    //   La LANGUE (VF > VOSTFR > VO) est appliquée par orderByFrenchBuckets par-dessus.
+    //   Le marquage ROUGE/VERT d'un serveur (échec/vérifié) reste géré à l'AFFICHAGE via
+    //   statusOf()/TitleServerStatus (map mémoire par titre), indépendamment de ce tri.
+    private fun computeScore(server: Video.Server, favorites: Set<String>): Int {
         val nameLower = server.name.lowercase()
         val srcLower = server.src.lowercase()
+        // 2026-07-04 (user "il devait y avoir des passes de qualité, et les qualités devaient
+        //   remonter au classement, pourquoi ça le fait plus") : la qualité PROBÉE (server.quality,
+        //   remplie par QualityProbe passe 1/2/3) PRIME sur le nom. Avant je ne lisais que le nom
+        //   → les qualités probées (4K/1080/720) ne remontaient plus. On concatène quality+nom.
+        val qualityStr = server.quality?.lowercase().orEmpty() + " " + nameLower
 
-        // 2026-05-27 : check favori AVANT les pénalités ISP/captcha.
-        // Un cœur supplante TOUT le tri automatique (user : "si on met un cœur
-        // c'est définitif, ça sera toujours les cœurs qui seront lancés en premier").
-        val currentProviderName = UserPreferences.currentProvider?.name ?: ""
-        val earlyExtName = (resolveExtractorName(server) ?: server.name).lowercase()
-        val hasFavorite = currentProviderName.isNotEmpty() &&
-            ExtractorToggleStore.isFavorite(earlyExtName, currentProviderName)
-
-        // ─── Pénalité ISP-block : force en bas de liste (SAUF si cœur) ───
-        val isFrenchIspBlocked = FRENCH_ISP_BLOCKED_PATTERNS.any { p ->
-            nameLower.contains(p) || srcLower.contains(p)
+        // Cœur : SEULEMENT si l'user a défini des favoris (sinon on NE résout PAS le nom
+        //   d'extracteur = coûteux : identifyServiceName boucle sur tous les extracteurs).
+        if (favorites.isNotEmpty()) {
+            val extName = (resolveExtractorName(server) ?: server.name).lowercase()
+            if (extName in favorites) return ExtractorToggleStore.FAVORITE_BONUS + computeQualityBonus(qualityStr)
         }
-        if (isFrenchIspBlocked && !hasFavorite) return -200
 
-        // ─── Papadustream natif → TOUJOURS en dernier (SAUF si cœur) ───
-        // Ses sources sont gated par un captcha Cloudflare Turnstile, lentes et peu
-        // fiables. On les force à score fixe -100 : tout backup sain passe devant,
-        // même un VOSTFR ou un serveur jamais testé. Le captcha = ultime dernier recours.
+        // Papadustream natif (captcha Cloudflare Turnstile) → dernier recours (check de nom, gratuit).
         val isCaptchaGated = srcLower.contains("papadustream") || srcLower.contains("#xf=")
-        if (isCaptchaGated && !hasFavorite) return -100
+        if (isCaptchaGated) return -100
 
-        // ─── Serveurs ★ natifs (Frembed Premium/Free VF) → tout en haut ───
-        // 2026-06-29 (REPAIR — user "remonter les serveurs étoiles dans le picker /
-        //   ils n'ont pas bougé") : ces sources VIP sont des m3u8 senpai sans
-        //   extracteur connu → sans ce return anticipé elles tombaient à 50.
-        val isStar = server.name.trimStart().startsWith("★")
-        if (isStar && !hasFavorite) return STAR_BASE_SCORE - computeLanguagePenalty(nameLower)
-
-        // ─── Identifie l'extracteur ───
-        // Stratégie hybride en 2 temps :
-        //  1. Si le NOM du server matche un pattern "Wrapper — Real" (Movix —
-        //     Voe, Nakios — Filemoon, etc.), prends "Real" pour le speed bias
-        //     parce que c'est ce que le user perçoit (et ce qui détermine la
-        //     vitesse perçue côté CDN final).
-        //  2. Sinon, identifyServiceName(URL) — c'est l'extracteur réel qui
-        //     va tourner.
-        //  Fallback : extractKeywordFromServerName si rien d'autre marche.
-        val nameBasedExtractor = extractKeywordFromServerName(server.name)
-        val urlBasedExtractor = Extractor.identifyServiceName(server.src)
-        val isWrappedName = server.name.contains(Regex("\\s[—–-]\\s"))
-        val extractorName = when {
-            // Pattern "Wrapper — Real" : prends le name-based qui reflète le vrai extracteur
-            isWrappedName && nameBasedExtractor != null -> nameBasedExtractor
-            urlBasedExtractor != null -> urlBasedExtractor
-            nameBasedExtractor != null -> nameBasedExtractor
-            else -> return 50 - computeLanguagePenalty(nameLower)
-        }
-
-        // healthScore : 0 si broken dans les 5 dernières min, 1 sinon.
-        val health = (Extractor.healthScore(extractorName) * 100).toInt()
-
-        // Failure count persistant. Cap à 10 → max -80 de pénalité.
-        val failureCount = failureMap[extractorName] ?: 0
-        val failurePenalty = minOf(failureCount, 10) * 8
-
-        // Speed bias : +25 (Voe) à -25 (Meritend WebView).
-        val speedBias = speedBiasFor(extractorName)
-
-        // Pénalité langue : VF en haut, VOSTFR au milieu, VO tout en bas.
-        val languagePenalty = computeLanguagePenalty(nameLower)
-
-        // 2026-05-21 : bonus "prouvé fonctionnel". Si l'extracteur est sain,
-        // sans échec récent ET qu'on a déjà des mesures d'extraction réussies
-        // (donc il a marché chez l'user), on le remonte au-dessus des jamais-testés.
-        // Corrige le cas VOE (qui marche) qui passait sous Doodstream (jamais mesuré).
-        val hasProvenSamples = ExtractorLatencyTracker.getAvgMs(extractorName) != null
-        val provenBonus = if (health >= 100 && failureCount == 0 && hasProvenSamples) PROVEN_BONUS else 0
-
-        // 2026-05-27 : bonus qualité vidéo (user "les 1080p/720p en premier").
-        val qualityBonus = computeQualityBonus(nameLower)
-
-        // 2026-05-27 : bonus favori par provider (user "cœur = définitif,
-        // toujours les cœurs lancés en premier"). +500 = supplante tout.
-        val favoriteBonus = if (hasFavorite) ExtractorToggleStore.FAVORITE_BONUS else 0
-
-        // 2026-06-29 (REPAIR — user "les serveurs vérifiés (étoile verte) doivent
-        //   remonter en haut de la liste") : gros bonus si le serveur a déjà JOUÉ
-        //   sur CE titre (statut VERIFIED), juste sous les favoris.
-        val verifiedBonus = if (statusOf(server) == ServerStatus.VERIFIED) VERIFIED_BONUS else 0
-
-        // 2026-06-29 (REPAIR — user) : serveurs ★ natifs (Frembed Premium/Free VF
-        //   + hosters natifs) remontés en haut du picker.
-        val starBonus = if (server.name.trimStart().startsWith("★")) STAR_BONUS else 0
-
-        return health + speedBias + provenBonus + qualityBonus + favoriteBonus + verifiedBonus + starBonus - failurePenalty - languagePenalty
+        // Sinon : la qualité (probée en priorité, sinon nom).
+        return computeQualityBonus(qualityStr)
     }
 
     /**

@@ -153,6 +153,12 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
     private data class CachedServers(val servers: List<Video.Server>, val expiresAtMs: Long)
     private val serversCache = ConcurrentHashMap<String, CachedServers>()
 
+    /** 2026-07-04 : vide les caches en mémoire. Appelé par ProviderCacheRefresh. */
+    fun clearCaches() {
+        endpointHealth.clear()
+        serversCache.clear()
+    }
+
     private fun serversCacheKey(id: String, videoType: Video.Type): String = when (videoType) {
         is Video.Type.Movie -> "movie:$id"
         is Video.Type.Episode -> "tv:$id:e${videoType.number}"
@@ -858,20 +864,39 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             val seasonRegex = Regex("""\bSaison\s+(\d+)\b""", RegexOption.IGNORE_CASE)
             val allShorts = mutableListOf<org.jsoup.nodes.Element>()
             val seenHrefs = HashSet<String>()
-            for (searchPage in 1..10) {
+            // 2026-07-09 (user « FrenchStream annulé en backup, trop lent ») : la recherche
+            //   « FROM » ramène AUSSI plein de films parasites contenant « from » → l'ancien
+            //   arrêt « aucun nouveau lien » paginait 10× (~1s/page) → 6,6s → annulé + HTTP 429.
+            //   Nouveau : on détecte les SAISONS de CE show à la volée et on ARRÊTE dès qu'une
+            //   page n'apporte aucune nouvelle saison. Cap 4 pages (sécurité). La saison courante
+            //   est de toute façon garantie plus bas par `withCurrent`.
+            val seenSeasonNums = HashSet<Int>()
+            fun seasonNumOf(item: org.jsoup.nodes.Element): Int? {
+                val linkEl = item.selectFirst("a.short-poster") ?: return null
+                val rawAlt = linkEl.attr("alt").orEmpty()
+                val shortTitleEl = item.selectFirst("div.short-title")?.text().orEmpty()
+                val sTitle = if (shortTitleEl.isNotBlank()) shortTitleEl
+                    else rawAlt.removePrefix("Regarder ").removeSuffix(" en streaming complet").removeSuffix(" en streaming").trim()
+                val sClean = sTitle.substringBeforeLast("- Saison").trim()
+                if (!sClean.equals(cleanTitle, ignoreCase = true)) return null
+                return seasonRegex.find(sTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            }
+            for (searchPage in 1..4) {
                 val searchDoc = service.searchGet(query = cleanTitle, searchStart = searchPage)
                 val pageShorts = searchDoc.select("div.short")
                 Log.d("FrenchStream", "searchGet '$cleanTitle' page=$searchPage returned ${pageShorts.size} div.short")
                 if (pageShorts.isEmpty()) break
-                var newOnPage = 0
+                var newSeasonThisPage = 0
                 pageShorts.forEach { item ->
                     val href = item.selectFirst("a.short-poster")?.attr("href").orEmpty()
                     if (href.isNotBlank() && seenHrefs.add(href)) {
                         allShorts.add(item)
-                        newOnPage++
+                        val sNum = seasonNumOf(item)
+                        if (sNum != null && seenSeasonNums.add(sNum)) newSeasonThisPage++
                     }
                 }
-                if (newOnPage == 0) break // page entière déjà vue
+                // Arrêt dès qu'une page n'apporte AUCUNE nouvelle saison de ce show.
+                if (newSeasonThisPage == 0) break
             }
             val foundSeasons = allShorts.mapNotNull { item ->
                 val linkEl = item.selectFirst("a.short-poster") ?: return@mapNotNull null
@@ -1020,6 +1045,31 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
         }
     }
 
+    // 2026-07-07 (user « le site a 6 sources propres — VIDZY/UQLOAD/DOOD/VOE/FILMOON/NETU —
+    //   mais l'app affiche une pile de "Kakaflix", faut refaire tout ça ») : les URLs des
+    //   players FS passent toutes par des miroirs kakaflix → identifyServiceName renvoie
+    //   « Kakaflix » pour TOUT et écrase le vrai nom du player. On affiche donc le NOM DU
+    //   PLAYER (clé du site), et on ne retombe sur identifyServiceName que si la clé est
+    //   générique/vide. La lecture n'est pas touchée (l'extraction suit l'URL, pas le nom).
+    private fun fsDisplayName(playerName: String, url: String): String {
+        val p = playerName.trim()
+        val generic = p.isBlank() || Regex("(?i)^player\\s*\\d*$").matches(p) || p.equals("default", true)
+        val base = if (!generic) p
+            else com.streamflixreborn.streamflix.extractors.Extractor.identifyServiceName(url)
+                ?.takeIf { it.isNotBlank() } ?: p.ifBlank { "Serveur" }
+        return base.replaceFirstChar { it.uppercase() }
+    }
+
+    /** Libellé de version normalisé (insensible à la casse). default/DEFAULT → VF. */
+    private fun fsVersionLabel(raw: String): String = when (raw.trim().lowercase()) {
+        "default", "vf" -> "VF"
+        "vff" -> "VFF"
+        "vfq" -> "VFQ"
+        "vostfr" -> "VOSTFR"
+        "vo" -> "VO"
+        else -> raw.trim().uppercase()
+    }
+
     /** 2026-05-04 : récupère les Video.Server d'un FILM via l'API AJAX
      *  `/engine/ajax/film_api.php?id={newsId}`. Le JSON retourne :
      *    {"players":{"vidzy":{"default":"url","vostfr":"url","vfq":"url"},
@@ -1055,11 +1105,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                 if (ignoreSource(playerName, url)) return@forEach
                 if (!seen.add(url)) return@forEach
                 // 2026-06-02 : voir commentaire dans le parser épisode (idem).
-                val realName = com.streamflixreborn.streamflix.extractors.Extractor
-                    .identifyServiceName(url)
-                    ?.takeIf { it.isNotBlank() }
-                    ?: playerName.replaceFirstChar { it.uppercase() }
-                val displayName = "$realName ($versionLabel)"
+                val displayName = "${fsDisplayName(playerName, url)} ($versionLabel)"
                 out.add(Video.Server(
                     id = "fs_film_${playerName}_$versionKey",
                     name = displayName,
@@ -1101,11 +1147,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                 //   On préfère le nom déduit de l'URL via identifyServiceName.
                 //   kokoflix.lol/osaka_go.php → désormais matché par VoeExtractor
                 //   (déplacé de Dood vers Voe via aliasUrls + rotatingDomain).
-                val realName = com.streamflixreborn.streamflix.extractors.Extractor
-                    .identifyServiceName(url)
-                    ?.takeIf { it.isNotBlank() }
-                    ?: playerName.replaceFirstChar { it.uppercase() }
-                val displayName = "$realName ($label)"
+                val displayName = "${fsDisplayName(playerName, url)} ($label)"
                 out.add(Video.Server(
                     id = "fs_ajax_${key}_${episodeNumber}_${playerName}",
                     name = displayName,
@@ -1259,12 +1301,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                             if (!seen.add(url)) return@forEach
                             if (ignoreSource(playerName, url)) return@forEach
                             // 2026-06-02 : same as ajax/film, prefer URL-detected name
-                            val realName = com.streamflixreborn.streamflix.extractors.Extractor
-                                .identifyServiceName(url)
-                                ?.takeIf { it.isNotBlank() }
-                                ?: playerName
-                            val displayName = if (versionName == "Default")
-                                realName else "$realName ($versionName)"
+                            val displayName = "${fsDisplayName(playerName, url)} (${fsVersionLabel(versionName)})"
                             out.add(Video.Server(
                                 id = "fs_player_${i}_${versionName}",
                                 name = displayName,
@@ -1292,7 +1329,8 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                             if (versionUrl.isNotBlank() && seen.add(versionUrl)) {
                                 if (ignoreSource(playerName, versionUrl)) return@forEach
                                 val displayName = if (versionName.isNotBlank())
-                                    "$playerName ($versionName)" else playerName
+                                    "${fsDisplayName(playerName, versionUrl)} (${fsVersionLabel(versionName)})"
+                                    else fsDisplayName(playerName, versionUrl)
                                 out.add(Video.Server(
                                     id = "fs_player_${i}_${versionName}",
                                     name = displayName,
@@ -1304,7 +1342,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                         if (!ignoreSource(playerName, defaultUrl)) {
                             out.add(Video.Server(
                                 id = "fs_player_$i",
-                                name = playerName,
+                                name = fsDisplayName(playerName, defaultUrl),
                                 src = defaultUrl,
                             ))
                         }
@@ -1372,7 +1410,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
 
         // 2026-05-06 : Cloudstream en backup #2 (priorité après natif, avant Movix/Moviebox)
         // car il démarre vite (TMDB-driven, MovieBox+ playback via /resource bcdn).
-        val cloudstreamBackup = if (tmdbIdResolved != null) runCatching {
+        val cloudstreamBackup = if (tmdbIdResolved != null && !com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) runCatching {
             val csId = when (videoType) {
                 is Video.Type.Movie -> "$tmdbIdResolved"
                 is Video.Type.Episode -> "$tmdbIdResolved:${videoType.season.number}:${videoType.number}"
@@ -1383,7 +1421,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             CloudstreamProvider.getServers(csId, csVideoType)
         }.getOrNull().orEmpty() else emptyList()
 
-        val movixBackup = if (tmdbIdResolved != null) runCatching {
+        val movixBackup = if (tmdbIdResolved != null && !com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) runCatching {
             val movixVideoType = if (videoType is Video.Type.Episode)
                 videoType.copy(tvShow = videoType.tvShow.copy(id = "$tmdbIdResolved"))
             else videoType
@@ -1396,7 +1434,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                 .filter { srv -> !srv.id.startsWith("fstream-") }
         }.getOrNull().orEmpty() else emptyList()
 
-        val movieboxBackup = if (tmdbIdResolved != null) runCatching {
+        val movieboxBackup = if (tmdbIdResolved != null && !com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) runCatching {
             MovieboxProvider.getMovieboxSourcesByTmdbId(tmdbIdResolved, videoType)
         }.getOrNull().orEmpty() else emptyList()
 
@@ -1520,7 +1558,8 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             catch (e: Exception) { Log.w("FrenchStream", "Progressive native failed: ${e.message}") }
         }
         // Backups : après résolution tmdbId, lancés en parallèle.
-        launch {
+        // 2026-07-04 : backups inline DÉSACTIVÉS → registre central.
+        if (!com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) launch {
             val tid = resolveFsTmdbId(id, videoType) ?: return@launch
             launch { try { val cs = fetchFsCloudstreamBackup(tid, videoType); if (cs.isNotEmpty()) send(cs) } catch (e: Exception) { Log.w("FrenchStream", "Progressive CS failed: ${e.message}") } }
             launch { try { val mx = fetchFsMovixBackup(tid, videoType); if (mx.isNotEmpty()) send(mx) } catch (e: Exception) { Log.w("FrenchStream", "Progressive Movix failed: ${e.message}") } }
@@ -1669,6 +1708,7 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
             private val client = OkHttpClient.Builder()
                 .readTimeout(60, TimeUnit.SECONDS)
                 .connectTimeout(30, TimeUnit.SECONDS)
+                .callTimeout(90, TimeUnit.SECONDS)
                 .dns(DnsResolver.doh)
                 .followRedirects(false)
                 .addInterceptor { chain ->

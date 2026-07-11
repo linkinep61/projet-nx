@@ -101,6 +101,9 @@ object SubDL {
         companion object {
             fun build(): Service {
                 val client = OkHttpClient.Builder()
+                    .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                    .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                     .addInterceptor { chain ->
                         val requestBuilder = chain.request().newBuilder()
                             .addHeader("Accept", "application/json")

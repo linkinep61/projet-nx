@@ -106,16 +106,26 @@
             android:label="Connexion Replay"
             android:theme="@style/Theme.AppCompat.NoActionBar" />
 
+        <!-- 2026-07-06 : splash animé = point d'entrée (mobile + TV). Il route
+             ensuite vers MainMobileActivity ou MainTvActivity selon le device. -->
+        <activity
+            android:name=".activities.SplashActivity"
+            android:exported="true"
+            android:theme="@style/SplashLaunch"
+            android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <activity
             android:name=".activities.main.MainMobileActivity"
             android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize"
             android:exported="true"
             android:supportsPictureInPicture="true"
             android:theme="@style/AppTheme.SplashScreen">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
 
@@ -199,6 +209,13 @@
             android:theme="@style/Theme.AppCompat.NoActionBar" />
 
         <activity
+            android:name=".activities.tools.NetMirrorWebPlayerActivity"
+            android:exported="false"
+            android:hardwareAccelerated="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.AppCompat.NoActionBar" />
+
+        <activity
             android:name=".activities.tools.LocalPlayerActivity"
             android:exported="false"
             android:hardwareAccelerated="true"
@@ -214,16 +231,20 @@
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
             android:screenOrientation="sensorLandscape"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+        <!-- 2026-07-05 : OtfPlayerTvActivity (variante TV) manquait dans ce manifest "default"
+             → crash ActivityNotFoundException à l'ouverture d'OTF sur la Chromecast (APP_LAYOUT=default).
+             Copiée depuis tv/AndroidManifest.xml. -->
+        <activity
+            android:name=".activities.player.OtfPlayerTvActivity"
+            android:exported="false"
+            android:hardwareAccelerated="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
 
         <activity
             android:name=".activities.main.MainTvActivity"
             android:exported="true"
-            android:theme="@style/AppTheme.Tv">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:theme="@style/AppTheme.Tv" />
 
         <service
             android:name=".download.DownloadService"
@@ -245,6 +266,15 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/provider_paths" />
         </provider>
+
+        <!-- 2026-07-07 : Ecran crash — process séparé, survit au kill du main -->
+        <activity
+            android:name=".CrashActivity"
+            android:process=":crash"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
 
         <!-- 2026-05-31 : Google Cast SDK — envoie le flux vidéo à la Chromecast -->
         <meta-data

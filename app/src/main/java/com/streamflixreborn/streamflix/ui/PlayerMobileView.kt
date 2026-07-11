@@ -28,6 +28,10 @@ class PlayerMobileView @JvmOverloads constructor(
     var isManualZoomEnabled: Boolean = false
         private set
 
+    /** 2026-07-06 : callback pour persister le zoom à chaque changement.
+     *  Le fragment y branche ZoomPrefsStore.save(). */
+    var onZoomChanged: ((scaleX: Float, scaleY: Float) -> Unit)? = null
+
     private var zoomToast: Toast? = null
 
     private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
@@ -47,6 +51,7 @@ class PlayerMobileView @JvmOverloads constructor(
                 videoView.scaleY = videoView.scaleY.coerceIn(0.25f, 5.0f)
 
                 showZoomToast("Zoom X: ${String.format(Locale.US, "%.2f", videoView.scaleX)} | Y: ${String.format(Locale.US, "%.2f", videoView.scaleY)}")
+                onZoomChanged?.invoke(videoView.scaleX, videoView.scaleY)
                 return true
             }
             return false
@@ -58,6 +63,7 @@ class PlayerMobileView @JvmOverloads constructor(
                 videoView.scaleX = 1.0f
                 videoView.scaleY = 1.0f
                 showZoomToast("Zoom Reset: 1.00")
+                onZoomChanged?.invoke(1.0f, 1.0f)
                 return true
             }
             return false
@@ -85,6 +91,9 @@ class PlayerMobileView @JvmOverloads constructor(
         if (!isManualZoomEnabled) return
         isManualZoomEnabled = false
         zoomToast?.cancel()
+        // 2026-07-06 : persister le zoom final à la sortie du mode
+        val vv = videoSurfaceView
+        if (vv != null) onZoomChanged?.invoke(vv.scaleX, vv.scaleY)
         player?.play()
     }
 

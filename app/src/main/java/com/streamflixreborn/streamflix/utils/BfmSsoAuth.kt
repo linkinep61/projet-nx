@@ -87,6 +87,7 @@ object BfmSsoAuth {
         OkHttpClient.Builder()
             .connectTimeout(12, TimeUnit.SECONDS)
             .readTimeout(12, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS)
             .build()
     }
 
@@ -187,6 +188,7 @@ object BfmSsoAuth {
         OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS)
             .followRedirects(false)   // on suit les redirects manuellement
             .followSslRedirects(false)
             .cookieJar(object : CookieJar {

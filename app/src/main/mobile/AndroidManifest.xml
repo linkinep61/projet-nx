@@ -205,6 +205,15 @@
             </intent-filter>
         </receiver>
 
+        <!-- 2026-07-07 : Ecran crash — process séparé, survit au kill du main -->
+        <activity
+            android:name=".CrashActivity"
+            android:process=":crash"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+
         <meta-data
             android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
             android:value="com.streamflixreborn.streamflix.utils.CastOptionsProvider" />

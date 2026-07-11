@@ -49,6 +49,19 @@ open class MovieboxExtractor : Extractor() {
     }
 
     override suspend fun extract(link: String): Video {
+        // 2026-07-10 : les serveurs « Moviebox » natifs portent DÉJÀ une URL CDN DIRECTE
+        //   (sacdn/bcdn.hakunaymatata.com, DASH `/dash/…index.mpd` ou MP4) résolue via
+        //   l'API MOBILE signée d'aoneroom. Il ne faut RIEN ré-extraire (ni WebView ni
+        //   h5-api) : on la joue telle quelle avec les headers CDN corrects
+        //   (Referer moviebox.ph + UA mobile + Bearer), sinon le CDN renvoie 403.
+        if (link.contains("hakunaymatata", ignoreCase = true) ||
+            link.contains("/dash/") || link.endsWith(".mpd")
+        ) {
+            return Video(
+                source = link,
+                headers = com.streamflixreborn.streamflix.utils.AoneroomClient.streamPlaybackHeaders(link),
+            )
+        }
         // Tente d'abord l'API directe (rapide). Fallback WebView si ça foire.
         extractViaApi(link)?.let {
             Log.i(TAG, "Extraction via API directe ✓")

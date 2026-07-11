@@ -47,6 +47,7 @@ object CastProxy {
             .hostnameVerifier { _, _ -> true }
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
+            .callTimeout(90, TimeUnit.SECONDS)
             .followRedirects(true).followSslRedirects(true)
             .build()
     }

@@ -48,6 +48,28 @@ class GlideCustomModule : AppGlideModule() {
         builder.setMemoryCache(LruResourceCache(memoryCacheSize))
         android.util.Log.d("GlideCustom", "Memory cache=${memoryCacheSize / 1024 / 1024}MB (isTv=$isTv, heap=${appMemory / 1024 / 1024}MB)")
 
+        // 2026-07-07 (ANR home Leanback sur Chromecast) : le pool de décodage Glide par défaut
+        //   (~1 thread/cœur) SATURE le CPU faible quand la grille TV charge beaucoup de jaquettes
+        //   en parallèle → le layout leanback (GridLayoutManager.onLayoutChildren, MAIN THREAD)
+        //   s'étire >5s → ANR. On BRIDE les pools Glide "source" (téléchargement/décodage) ET
+        //   "disk-cache" à 2 threads sur TV → le main thread garde des cycles pour le layout.
+        //   Mobile inchangé (pools par défaut). Les jaquettes chargent un poil moins vite, mais
+        //   plus de gel de la grille.
+        if (isTv) {
+            try {
+                builder.setSourceExecutor(
+                    com.bumptech.glide.load.engine.executor.GlideExecutor.newSourceBuilder()
+                        .setThreadCount(2).setName("glide-source").build()
+                )
+                builder.setDiskCacheExecutor(
+                    com.bumptech.glide.load.engine.executor.GlideExecutor.newDiskCacheBuilder()
+                        .setThreadCount(1).setName("glide-disk").build()
+                )
+            } catch (e: Throwable) {
+                android.util.Log.w("GlideCustom", "setSourceExecutor bridé KO: ${e.message}")
+            }
+        }
+
         // Default to RGB_565 for lower memory usage
         builder.setDefaultRequestOptions(
             RequestOptions().format(DecodeFormat.PREFER_RGB_565)

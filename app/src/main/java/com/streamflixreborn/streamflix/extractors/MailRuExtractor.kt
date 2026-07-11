@@ -7,12 +7,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.util.concurrent.TimeUnit
 
 class MailRuExtractor : Extractor() {
     override val name = "MailRu"
     override val mainUrl = "https://my.mail.ru"
 
-    private val client = OkHttpClient.Builder().build()
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(30, TimeUnit.SECONDS)
+        .build()
 
     override suspend fun extract(link: String): Video {
         val videoId = extractVideoId(link) ?: throw Exception("Could not extract video ID from URL")

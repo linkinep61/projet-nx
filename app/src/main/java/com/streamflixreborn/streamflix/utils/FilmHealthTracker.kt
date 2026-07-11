@@ -116,12 +116,11 @@ object FilmHealthTracker {
      */
     @Synchronized
     fun markEmpty(providerName: String, filmId: String) {
-        if (providerName.isBlank() || filmId.isBlank()) return
-        val key = makeKey(providerName, filmId)
-        val expiresAt = System.currentTimeMillis() + EMPTY_TTL_MS
-        ensureCacheLoaded()[key] = expiresAt
-        persistAsync()
-        Log.d(TAG, "markEmpty: $key (expires in 7 days)")
+        // 2026-07-07 (user « pas besoin de marquer les films et les bloquer ; rien ne doit
+        //   être marqué 7 jours et bloqué, ça doit pas exister ») : marquage DÉSACTIVÉ.
+        //   On ne persiste plus aucun film comme « présumé vide » — chaque ouverture repart
+        //   propre, aucun film n'est rétrogradé/bloqué sur un échec passé.
+        return
     }
 
     /**
@@ -142,10 +141,9 @@ object FilmHealthTracker {
     /** Vrai si le film est marqué présumé vide ET que la marque n'a pas expiré. */
     @Synchronized
     fun isEmpty(providerName: String, filmId: String): Boolean {
-        if (providerName.isBlank() || filmId.isBlank()) return false
-        val key = makeKey(providerName, filmId)
-        val expiresAt = ensureCacheLoaded()[key] ?: return false
-        return System.currentTimeMillis() < expiresAt
+        // 2026-07-07 (user) : marquage désactivé → aucun film n'est jamais « présumé vide ».
+        //   Neutralise aussi les marques 7 jours déjà persistées (jamais relues comme vraies).
+        return false
     }
 
     /**

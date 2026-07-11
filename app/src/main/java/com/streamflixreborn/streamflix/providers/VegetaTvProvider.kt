@@ -59,6 +59,7 @@ object VegetaTvProvider : Provider, IptvProvider {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(45, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .protocols(listOf(Protocol.HTTP_1_1))

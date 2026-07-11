@@ -16,10 +16,24 @@ object Stream4FreeResolver {
 
     private val M3U8_REGEX = Regex("""https?://[a-z0-9]+\.data-stream\.top/[a-f0-9]+/hls/[^"'\s<>]+\.m3u8""")
 
+    // 2026-07-10 (user "localiser d'où viennent vraiment les flux au lieu de scraper") : les flux
+    //   viennent de `data-stream.top` (sv1..sv7) via une URL `…/{token64}/hls/{chaîne}.m3u8`, et le
+    //   TOKEN est STABLE par chaîne (vérifié en direct : identique après reload). On CACHE donc
+    //   l'URL directe par chaîne : on ne scrape la page stream4free QU'UNE FOIS, puis on rejoue
+    //   data-stream.top directement (zapping instantané, et resilient si la page est momentanément
+    //   down). TTL long (6 h) ; si l'URL cachée finit par tomber (token/serveur qui tourne), le
+    //   player échoue → on invalide et on re-scrape au prochain essai.
+    private const val CACHE_TTL_MS = 6L * 60L * 60L * 1000L
+    private val urlCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
+
+    /** Invalide le cache d'une chaîne (à appeler si sa lecture directe échoue → force re-scrape). */
+    fun invalidate(slug: String) { urlCache.remove(slug.removePrefix("stream4free://").trim()) }
+
     private val client by lazy {
         OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)
+            .callTimeout(30, TimeUnit.SECONDS)
             .followRedirects(true)
             .build()
     }
@@ -33,6 +47,14 @@ object Stream4FreeResolver {
         if (slug.isEmpty()) {
             Log.w(TAG, "resolve: slug vide")
             return@withContext null
+        }
+
+        // Cache-hit : token stable → on rejoue l'URL directe data-stream.top sans re-scraper la page.
+        urlCache[slug]?.let { (cachedUrl, ts) ->
+            if (System.currentTimeMillis() - ts < CACHE_TTL_MS) {
+                Log.d(TAG, "resolve CACHE-HIT: $slug → $cachedUrl (direct data-stream.top, pas de scrape)")
+                return@withContext videoOf(cachedUrl)
+            }
         }
 
         val pageUrl = "$BASE_URL/$slug"
@@ -65,19 +87,23 @@ object Stream4FreeResolver {
                 }
 
                 Log.d(TAG, "resolve OK: $slug → $m3u8Url")
-                Video(
-                    source = m3u8Url,
-                    headers = mapOf(
-                        "User-Agent" to Extractor.DEFAULT_USER_AGENT,
-                        "Referer" to "$BASE_URL/",
-                        "Origin" to BASE_URL
-                    ),
-                    type = "application/vnd.apple.mpegurl"
-                )
+                urlCache[slug] = m3u8Url to System.currentTimeMillis()
+                videoOf(m3u8Url)
             }
         } catch (e: Throwable) {
             Log.e(TAG, "resolve failed for $slug: ${e.message}")
             null
         }
     }
+
+    /** Construit le Video direct data-stream.top (Referer/Origin stream4free obligatoires). */
+    private fun videoOf(m3u8Url: String): Video = Video(
+        source = m3u8Url,
+        headers = mapOf(
+            "User-Agent" to Extractor.DEFAULT_USER_AGENT,
+            "Referer" to "$BASE_URL/",
+            "Origin" to BASE_URL,
+        ),
+        type = "application/vnd.apple.mpegurl",
+    )
 }

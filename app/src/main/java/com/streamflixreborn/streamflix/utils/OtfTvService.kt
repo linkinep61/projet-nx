@@ -174,6 +174,7 @@ object OtfTvService {
             .followSslRedirects(false)
             .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
             .build()
         val req = Request.Builder()
             .url(OTF_API_URL)

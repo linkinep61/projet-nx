@@ -60,6 +60,10 @@ class PlayerTvView @JvmOverloads constructor(
     /** Callback OK/ENTER quand overlay actif → performClick sur le bouton. */
     var onOverlayConfirmRequested: (() -> Unit)? = null
 
+    /** 2026-07-06 : callback pour persister le zoom à chaque changement.
+     *  Le fragment y branche ZoomPrefsStore.save(). */
+    var onZoomChanged: ((scaleX: Float, scaleY: Float) -> Unit)? = null
+
     private var zoomToast: Toast? = null
 
     fun enterManualZoomMode() {
@@ -70,10 +74,11 @@ class PlayerTvView @JvmOverloads constructor(
 
     fun exitManualZoomMode() {
         isManualZoomEnabled = false
-        videoSurfaceView?.apply {
-            scaleX = 1f
-            scaleY = 1f
-        }
+        // 2026-07-06 : NE PLUS reset à 1.0 — le zoom est persisté par serveur.
+        //   Le user quitte le mode zoom mais garde son réglage. Double-tap/reset
+        //   = explicit clear (via le callback onZoomChanged(1.0, 1.0) dans le D-pad BACK).
+        val vv = videoSurfaceView
+        if (vv != null) onZoomChanged?.invoke(vv.scaleX, vv.scaleY)
         zoomToast?.cancel()
         player?.play()
     }
@@ -92,18 +97,22 @@ class PlayerTvView @JvmOverloads constructor(
                     KeyEvent.KEYCODE_DPAD_UP -> {
                         videoView.scaleY += 0.01f
                         showZoomToast("Zoom Y: ${String.format(Locale.US, "%.2f", videoView.scaleY)}")
+                        onZoomChanged?.invoke(videoView.scaleX, videoView.scaleY)
                     }
                     KeyEvent.KEYCODE_DPAD_DOWN -> {
                         videoView.scaleY -= 0.01f
                         showZoomToast("Zoom Y: ${String.format(Locale.US, "%.2f", videoView.scaleY)}")
+                        onZoomChanged?.invoke(videoView.scaleX, videoView.scaleY)
                     }
                     KeyEvent.KEYCODE_DPAD_LEFT -> {
                         videoView.scaleX -= 0.01f
                         showZoomToast("Zoom X: ${String.format(Locale.US, "%.2f", videoView.scaleX)}")
+                        onZoomChanged?.invoke(videoView.scaleX, videoView.scaleY)
                     }
                     KeyEvent.KEYCODE_DPAD_RIGHT -> {
                         videoView.scaleX += 0.01f
                         showZoomToast("Zoom X: ${String.format(Locale.US, "%.2f", videoView.scaleX)}")
+                        onZoomChanged?.invoke(videoView.scaleX, videoView.scaleY)
                     }
                     KeyEvent.KEYCODE_BACK -> {
                         exitManualZoomMode()

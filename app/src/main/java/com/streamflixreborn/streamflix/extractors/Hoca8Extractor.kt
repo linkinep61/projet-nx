@@ -159,6 +159,7 @@ open class Hoca8Extractor : Extractor() {
                                     val client = okhttp3.OkHttpClient.Builder()
                                         .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
                                         .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                                        .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                                         .followRedirects(true)
                                         .build()
                                     val req = okhttp3.Request.Builder()

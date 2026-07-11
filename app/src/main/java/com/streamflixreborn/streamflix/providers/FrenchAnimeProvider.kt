@@ -28,6 +28,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
@@ -44,7 +46,7 @@ import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Path
 
-object FrenchAnimeProvider : Provider, ProviderConfigUrl {
+object FrenchAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProvider {
     override val defaultBaseUrl: String = "https://french-anime.com/"
     override val baseUrl: String = FrenchAnimeProvider.defaultBaseUrl
         get() {
@@ -291,6 +293,21 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
         webViewResolver = WebViewResolver(context)
     }
 
+    /** 2026-07-03 (user "les jaquettes FrenchAnime ne chargent pas au démarrage, pas de
+     *  préchauffage CF ; en quittant/revenant elles finissent par charger") : pré-résout le
+     *  challenge Cloudflare de french-anime.com AU BOOT → pose le cf_clearance AVANT que
+     *  Glide demande les jaquettes (hébergées sur ce domaine CF). Sans ça, au 1er affichage
+     *  les posters partent avant le cookie → grises. Le bypass utilise une WebView TRANSITOIRE
+     *  (WebViewResolver, créée puis détruite) → aucune WebView persistante (TV OK). */
+    suspend fun warmUpCf() {
+        try {
+            getDocument(baseUrl, silentBypass = true)
+            Log.d(TAG_BYPASS, "warmUpCf: cf_clearance FrenchAnime préchauffé au boot")
+        } catch (e: Exception) {
+            Log.w(TAG_BYPASS, "warmUpCf failed: ${e.message}")
+        }
+    }
+
     // Client OkHttp partagé pour searchDirect — basé sur bypassClient pour hériter du cookie jar CF
     private val searchClient: OkHttpClient by lazy {
         bypassClient.newBuilder()
@@ -308,6 +325,17 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
     private val URL_DOMAIN_REGEX = Regex("""(?:https?:)?//(?:www\.)?([^.]+)\.""")
 
     override suspend fun getHome(): List<Category> {
+        // 2026-07-03 (opti #3 — user "un truc plus rapide") : cache disque du home. Si un
+        //   cache FRAIS (<30 min) existe → retour INSTANTANÉ, aucun fetch CF. Sinon on fait
+        //   le fetch complet et on réécrit le cache (voir fin de fonction). Ouvertures
+        //   suivantes = instantanées, comme les WebJS.
+        run {
+            val ctx = StreamFlixApp.instance
+            val cached = com.streamflixreborn.streamflix.utils.HomeCacheStore.read(ctx, this)
+            val age = com.streamflixreborn.streamflix.utils.HomeCacheStore.ageMs(ctx, this) ?: Long.MAX_VALUE
+            if (!cached.isNullOrEmpty() && age < 30 * 60 * 1000L) return cached
+        }
+
         var document = safeGetDoc(baseUrl, silentBypass = true) { service.getHome() }
 
         // 2026-06-22 fix (user "il oublie de relancer le scrap après") :
@@ -392,6 +420,8 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
             val finalCarousel = if (carouselItems.size >= 5) carouselItems else featuredItems
             if (finalCarousel.isNotEmpty()) {
                 categories.add(Category(name = Category.FEATURED, list = finalCarousel))
+                // PAS de seenHome pour le FEATURED — c'est un carrousel bannière,
+                // les mêmes items peuvent (et doivent) apparaître dans les blocs en dessous.
             }
         }
 
@@ -457,8 +487,9 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
             n == "films" || n == "film"
         }
 
-        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.reste
-        return categories.sortedWith(compareBy { cat ->
+        // 2026-07-04 : genres populaires (lancés en parallèle au début) — comme Wiflix
+        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.genres
+        val sortedHome = categories.sortedWith(compareBy { cat ->
             val n = cat.name.lowercase()
             val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
             val isSeries = n.contains("séri") || n.contains("seri") || n.contains("saison") || n.contains("tv")
@@ -474,6 +505,11 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
                 else -> 6
             }
         })
+        // 2026-07-03 (opti #3) : écrit le cache disque du home → prochaine ouverture instantanée.
+        if (sortedHome.isNotEmpty()) {
+            try { com.streamflixreborn.streamflix.utils.HomeCacheStore.write(StreamFlixApp.instance, this, sortedHome) } catch (_: Exception) {}
+        }
+        return sortedHome
     }
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
@@ -1063,52 +1099,22 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
             }
         }
 
-        // 2026-05-05/06 : Cloudstream + Moviebox backups pour les animes FR.
-        val title = id.substringBefore("/").substringBefore("@").replace("-", " ").trim()
+        // 2026-07-04 : backups inline DÉSACTIVÉS → registre central (BackupRegistry.fetchAll
+        //   dans PlayerViewModel via ProgressiveServersProvider). Les backups Cloudstream/
+        //   Moviebox/Papadustream sont maintenant gérés par le registre, plus besoin ici.
+        return sorted
+    }
 
-        val cloudstreamBackup = if (title.isNotBlank()) {
-            try {
-                val csVideoType: Video.Type = when (videoType) {
-                    is Video.Type.Movie -> Video.Type.Movie(
-                        id = "0", title = title, releaseDate = videoType.releaseDate,
-                        poster = videoType.poster, imdbId = videoType.imdbId,
-                    )
-                    is Video.Type.Episode -> Video.Type.Episode(
-                        id = "0", number = videoType.number, title = videoType.title,
-                        poster = videoType.poster, overview = videoType.overview,
-                        tvShow = videoType.tvShow.copy(id = "0", title = title),
-                        season = videoType.season,
-                    )
-                }
-                CloudstreamProvider.getServers("0", csVideoType)
-                    .also { if (it.isNotEmpty()) android.util.Log.d("FrenchAnime", "+ Cloudstream: ${it.size}") }
-            } catch (_: Exception) { emptyList() }
-        } else emptyList()
-
-        val movieboxBackup = if (title.isNotBlank()) {
-            try {
-                val type = if (videoType is Video.Type.Movie) 1 else 2
-                MovieboxProvider.getMovieboxSourcesByTitle(
-                    title, null, type,
-                    seasonNumber = if (videoType is Video.Type.Episode) videoType.season.number else null,
-                    episodeNumber = if (videoType is Video.Type.Episode) videoType.number else null,
-                )
-                    .also { if (it.isNotEmpty()) android.util.Log.d("FrenchAnime", "+ Moviebox: ${it.size}") }
-            } catch (_: Exception) { emptyList() }
-        } else emptyList()
-
-        // Papadustream backup en dernier (captcha CF)
-        val papaBackup = if (title.isNotBlank() && videoType is Video.Type.Episode) {
-            try {
-                PapadustreamProvider.getPapaSourcesByTitle(
-                    title = title,
-                    seasonNum = videoType.season.number,
-                    episodeNum = videoType.number,
-                ).also { if (it.isNotEmpty()) android.util.Log.d("FrenchAnime", "+ Papa: ${it.size}") }
-            } catch (_: Exception) { emptyList() }
-        } else emptyList()
-
-        return sorted + cloudstreamBackup + movieboxBackup + papaBackup
+    // ── Chargement PROGRESSIF (2026-07-04) ─────────────────────────────
+    //   Natifs émis tout de suite → le registre central (BackupRegistry.fetchAll
+    //   dans PlayerViewModel) ajoute les backups au fil de l'eau.
+    override fun getServersProgressive(id: String, videoType: Video.Type): Flow<List<Video.Server>> = channelFlow {
+        // 2026-07-04 : on garde withContext(IO) ici — le fix dispatcher est
+        //   centralisé dans PlayerViewModel via .flowOn(IO) sur le nativeFlow.
+        try {
+            val servers = withContext(Dispatchers.IO) { getServers(id, videoType) }
+            if (servers.isNotEmpty()) send(servers)
+        } catch (e: Exception) { Log.w("FrenchAnime", "progressive native KO: ${e.message}") }
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
@@ -1272,15 +1278,37 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl {
     private interface FrenchAnimeService {
         companion object {
             fun build(): FrenchAnimeService {
-                val client = OkHttpClient.Builder()
-                    .dns(DnsResolver.doh)
-                    .readTimeout(30, TimeUnit.SECONDS)
-                    .connectTimeout(30, TimeUnit.SECONDS)
+                // 2026-07-03 (réplique du pattern Wiflix qui charge INSTANTANÉ) : le client
+                //   part de NetworkClient.default → hérite du cookieJar PARTAGÉ (pont WebView↔
+                //   OkHttp). Le cf_clearance posé par le bypass se propage alors automatiquement
+                //   à OkHttp ET à Glide (mêmes cookies) → les jaquettes CF chargent direct,
+                //   comme Wiflix. Timeouts courts (10/8s) alignés sur Wiflix (au lieu de 30s)
+                //   pour ne pas bloquer sur un fetch mort. DoH déjà porté par NetworkClient.default.
+                val client = com.streamflixreborn.streamflix.utils.NetworkClient.default.newBuilder()
+                    .readTimeout(10, TimeUnit.SECONDS)
+                    .connectTimeout(8, TimeUnit.SECONDS)
                     // Preserve POST method & body on redirects (301/302/303).
                     // Without this, OkHttp downgrades POST→GET and drops form
                     // data, which breaks the DLE search endpoint when the site
                     // redirects to a new domain.
                     .followRedirects(false)
+                    // 2026-07-03 (opti #1 — user "un truc plus rapide") : le client Retrofit
+                    //   n'embarquait NI le cf_clearance NI le STEALTH_UA → CHAQUE fetch se
+                    //   prenait un 403 CF et repassait par le bypass WebView (tempête de 403,
+                    //   throttle, lenteur). On injecte le MÊME pattern que tryOkHttp : STEALTH_UA
+                    //   + cookie cf_clearance (lu du CookieManager). Après UN seul bypass, toutes
+                    //   les pages passent direct en OkHttp → chargement bien plus rapide.
+                    .addInterceptor { chain ->
+                        val orig = chain.request()
+                        val cookie = try {
+                            android.webkit.CookieManager.getInstance().getCookie(orig.url.toString())
+                        } catch (_: Throwable) { null }
+                        val b = orig.newBuilder()
+                            .header("User-Agent", WebViewResolver.STEALTH_UA)
+                            .header("Referer", "https://french-anime.com/")
+                        if (!cookie.isNullOrBlank()) b.header("Cookie", cookie)
+                        chain.proceed(b.build())
+                    }
                     .addInterceptor { chain ->
                         var request = chain.request()
                         var response = chain.proceed(request)

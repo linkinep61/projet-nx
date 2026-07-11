@@ -95,7 +95,11 @@ class IptvFavoritesMobileFragment : Fragment() {
             if (MiniPlayerController.onIptvChannelClick == null) {
                 MiniPlayerController.onIptvChannelClick = { tvShow ->
                     if (tvShow.id == MiniPlayerController.currentChannelId) {
-                        MiniPlayerController.stopAsync()
+                        // 2026-07-06 : parité IptvFavoritesTvFragment — transitioningToFullscreen
+                        //   au lieu de stopAsync() pour le same-channel click (= ouvrir le fullscreen
+                        //   en réutilisant le player sans le détruire).
+                        MiniPlayerController.transitioningToFullscreen = true
+                        if (_binding != null) { binding.miniPlayerView.player = null }
                         false
                     } else {
                         MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
@@ -208,7 +212,9 @@ class IptvFavoritesMobileFragment : Fragment() {
 
         MiniPlayerController.onIptvChannelClick = { tvShow ->
             if (tvShow.id == MiniPlayerController.currentChannelId) {
-                MiniPlayerController.stopAsync()
+                // 2026-07-06 : parité IptvFavoritesTvFragment — transitioningToFullscreen
+                MiniPlayerController.transitioningToFullscreen = true
+                if (_binding != null) { binding.miniPlayerView.player = null }
                 false
             } else {
                 Log.d(TAG, "Mini player intercept (favorites): ${tvShow.title} (${tvShow.id})")

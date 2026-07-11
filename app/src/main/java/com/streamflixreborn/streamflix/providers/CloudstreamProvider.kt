@@ -33,6 +33,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.CacheControl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -158,7 +159,7 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
     }
 
     private const val MAIN_PAGE_PATH = "/wefeed-mobile-bff/tab-operating"
-    private const val SEARCH_PATH = "/wefeed-mobile-bff/subject-api/search"
+    private const val SEARCH_PATH = "/wefeed-mobile-bff/subject-api/search/v2"
     private const val SUBJECT_GET_PATH = "/wefeed-mobile-bff/subject-api/get"
     private const val RESOURCE_PATH = "/wefeed-mobile-bff/subject-api/resource"
     private const val PLAY_INFO_PATH = "/wefeed-mobile-bff/subject-api/play-info"
@@ -205,6 +206,18 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         Extractor.sharedClient.newBuilder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
+            // 2026-07-09 : MovieBox+ API renvoie HTTP 407 pour les erreurs d'auth
+            // (au lieu du standard 441 "miss token"). OkHttp lance une ProtocolException
+            // pour 407 quand il n'y a pas de proxy configuré → on ne reçoit JAMAIS la
+            // réponse. Ce network interceptor convertit 407 → 477 AVANT que le
+            // RetryAndFollowUpInterceptor interne ne lance l'exception, permettant à
+            // notre code apiPost/apiGet de le traiter normalement.
+            .addNetworkInterceptor { chain ->
+                val response = chain.proceed(chain.request())
+                if (response.code == 407) {
+                    response.newBuilder().code(477).message("Auth Required (remapped from 407)").build()
+                } else response
+            }
             .build()
     }
 
@@ -282,6 +295,65 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
      *  Évite de cycler sur 21 hosts morts avant de tomber sur un vivant. */
     @Volatile private var lastGoodHost: String? = null
 
+    // 2026-07-09 : Bearer JWT pour les POST. L'API MovieBox+ exige un token
+    //   sur TOUS les POST (search, etc.) — erreur 441 "miss token" sans lui.
+    //   Le token est renvoyé dans le header de réponse `x-user` de n'importe
+    //   quel GET réussi (JSON: {"token":"eyJ...","uid":...}).
+    //   On le cache et on le rafraîchit automatiquement en cas de 441.
+    @Volatile private var bearerToken: String? = null
+
+    /** Extrait le JWT du header `x-user` de la réponse, si présent. */
+    private fun captureBearer(resp: okhttp3.Response) {
+        val xUser = resp.header("x-user") ?: return
+        try {
+            val json = JSONObject(xUser)
+            val token = json.optString("token", "")
+            if (token.isNotBlank()) {
+                bearerToken = token
+                Log.d(TAG, "Bearer capturé (${token.length} chars)")
+            }
+        } catch (_: Exception) { /* pas de JSON valide, ignorer */ }
+    }
+
+    /** Assure qu'on a un Bearer token. Fait un GET léger si nécessaire. */
+    private suspend fun ensureBearer(): String? {
+        bearerToken?.let { return it }
+        // Pas de token en cache → faire un GET /tab-operating pour en récupérer un
+        Log.d(TAG, "Pas de Bearer en cache, fetch via GET...")
+        for (host in orderedHosts()) {
+            val url = "$host/wefeed-mobile-bff/tab-operating?tab=home"
+            try {
+                val req = Request.Builder().url(url)
+                    .cacheControl(API_NO_CACHE)
+                    .apply {
+                        signedHeaders("GET", url).forEach { (k, v) -> header(k, v) }
+                    }.build()
+                val resp = httpClient.newCall(req).execute()
+                resp.use {
+                    // Toujours tenter de capturer le Bearer, même sur erreur
+                    // (l'API peut inclure x-user dans les headers de réponse d'erreur)
+                    captureBearer(it)
+                    val respCode = it.code
+                    if (it.isSuccessful || respCode == 477) {
+                        lastGoodHost = host
+                        it.body?.string() // drain body
+                        bearerToken?.let { tok ->
+                            Log.d(TAG, "ensureBearer via $host → OK (HTTP $respCode)")
+                            return tok
+                        }
+                        Log.d(TAG, "ensureBearer $host → HTTP $respCode but no bearer in x-user")
+                    } else {
+                        Log.d(TAG, "ensureBearer $host → HTTP $respCode")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "ensureBearer $host error: ${e.message}")
+            }
+        }
+        Log.w(TAG, "Impossible de récupérer un Bearer token")
+        return null
+    }
+
     /** Retourne la liste des hosts dans l'ordre à essayer : last-good d'abord,
      *  puis le reste du pool. */
     private fun orderedHosts(): List<String> {
@@ -291,22 +363,61 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         } else HOST_POOL
     }
 
+    // 2026-07-07 : CacheControl pour TOUS les appels API MovieBox+.
+    //   Les requêtes sont signées HMAC avec un timestamp → chaque appel a une
+    //   signature UNIQUE, mais l'URL (= clé de cache OkHttp) reste la MÊME.
+    //   Sans noCache+noStore, OkHttp cache la réponse sur disque (extractor-http/)
+    //   et sert la réponse CACHÉE aux appels suivants → si c'était une erreur ou
+    //   une réponse vide, TOUS les serveurs sont bloqués indéfiniment.
+    //   Le user devait effacer les données de l'app pour débloquer.
+    private val API_NO_CACHE = CacheControl.Builder().noCache().noStore().build()
+
     private suspend fun apiGet(path: String, params: Map<String, String> = emptyMap()): JSONObject? = withContext(Dispatchers.IO) {
         val query = params.entries.joinToString("&") { "${it.key}=${java.net.URLEncoder.encode(it.value, "UTF-8")}" }
         val pathWithQuery = if (query.isNotBlank()) "$path?$query" else path
+        // 2026-07-09 : Bearer JWT maintenant obligatoire pour TOUS les endpoints
+        //   (GET /resource, /get, /play-info retournent 441 sans).
+        val token = ensureBearer()
         for (host in orderedHosts()) {
             val url = "$host$pathWithQuery"
             try {
-                val req = Request.Builder().url(url).apply {
-                    signedHeaders("GET", url).forEach { (k, v) -> header(k, v) }
-                }.build()
+                val req = Request.Builder().url(url)
+                    .cacheControl(API_NO_CACHE)
+                    .apply {
+                        signedHeaders("GET", url).forEach { (k, v) -> header(k, v) }
+                        if (token != null) header("Authorization", "Bearer $token")
+                    }.build()
                 val resp = httpClient.newCall(req).execute()
                 resp.use {
                     val code = it.code
-                    if (code in setOf(403, 407, 429, 500, 502, 503, 504)) {
-                        // 2026-05-09 : log explicite incluant le path pour debug
-                        // (MovieBox+ /resource qui retournerait silencieusement 407
-                        // serait un signal de signature cassée).
+                    if (code == 441 || code == 477) {
+                        // Token manquant/expiré → refresh et retry UNE fois
+                        Log.d(TAG, "apiGet $host$pathWithQuery → $code, refresh Bearer")
+                        bearerToken = null
+                        val newToken = ensureBearer()
+                        if (newToken != null) {
+                            val req2 = Request.Builder().url(url)
+                                .cacheControl(API_NO_CACHE)
+                                .apply {
+                                    signedHeaders("GET", url).forEach { (k, v) -> header(k, v) }
+                                    header("Authorization", "Bearer $newToken")
+                                }.build()
+                            val resp2 = httpClient.newCall(req2).execute()
+                            resp2.use { r2 ->
+                                if (r2.isSuccessful) {
+                                    captureBearer(r2)
+                                    val body2 = r2.body?.string() ?: return@withContext null
+                                    Log.d(TAG, "apiGet ${pathWithQuery.take(60)} → ${r2.code} size=${body2.length} (retry OK)")
+                                    lastGoodHost = host
+                                    return@withContext JSONObject(body2)
+                                } else {
+                                    Log.d(TAG, "apiGet $host$pathWithQuery retry → ${r2.code}")
+                                }
+                            }
+                        }
+                        return@use
+                    }
+                    if (code in setOf(403, 429, 500, 502, 503, 504)) {
                         Log.d(TAG, "apiGet $host$pathWithQuery returned $code, retry next")
                         return@use
                     }
@@ -314,11 +425,10 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                         Log.d(TAG, "apiGet $host$pathWithQuery NOT OK (code=$code), giving up")
                         return@withContext null
                     }
+                    captureBearer(it)
                     val body = it.body?.string() ?: return@withContext null
-                    // 2026-05-09 : diagnostic. Si le body est vide ou ne contient
-                    // pas "list", c'est suspect (changement format API ?).
                     Log.d(TAG, "apiGet ${pathWithQuery.take(60)} → ${code} size=${body.length} (head: ${body.take(150)})")
-                    lastGoodHost = host  // mémorise le host qui répond
+                    lastGoodHost = host
                     return@withContext JSONObject(body)
                 }
             } catch (e: Exception) {
@@ -330,24 +440,76 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
 
     private suspend fun apiPost(path: String, jsonBody: JSONObject): JSONObject? = withContext(Dispatchers.IO) {
         val bodyStr = jsonBody.toString()
+        // 2026-07-09 : Bearer JWT obligatoire pour les POST (441 "miss token" sans).
+        val token = ensureBearer()
+        if (token == null) {
+            Log.w(TAG, "apiPost $path : pas de Bearer, abandon")
+            return@withContext null
+        }
+
         for (host in orderedHosts()) {
             val url = "$host$path"
             try {
-                // 2026-05-07 : Content-Type "application/json" sans charset.
-                // Pour éviter qu'OkHttp ajoute un charset, on construit le RequestBody
-                // avec mediaType=null puis on set Content-Type manuellement après .post().
+                // 2026-07-08 : Content-Type "application/json" pour POST.
+                // Le header HTTP utilise "application/json" (comme CNCVerse).
+                val postContentType = "application/json"
                 val req = Request.Builder().url(url)
-                    .post(bodyStr.toRequestBody(null))
+                    .cacheControl(API_NO_CACHE)
+                    .post(bodyStr.toByteArray(Charsets.UTF_8).toRequestBody("application/json".toMediaType()))
                     .apply {
-                        signedHeaders("POST", url, bodyStr).forEach { (k, v) -> header(k, v) }
+                        signedHeaders("POST", url, bodyStr, contentType = postContentType)
+                            .forEach { (k, v) -> header(k, v) }
+                        header("Authorization", "Bearer $token")
                     }.build()
                 val resp = httpClient.newCall(req).execute()
                 resp.use {
                     val code = it.code
-                    if (code in setOf(403, 407, 429, 500, 502, 503, 504)) return@use
-                    if (!it.isSuccessful) return@withContext null
+                    if (code == 441 || code == 477) {
+                        // 441 = "miss token" (original), 477 = remapped 407 (auth error)
+                        val errBody477 = it.body?.string()?.take(500) ?: "(no body)"
+                        Log.d(TAG, "apiPost $host$path → $code, body=$errBody477")
+                        Log.d(TAG, "apiPost $host$path → $code, refresh Bearer")
+                        bearerToken = null
+                        val newToken = ensureBearer()
+                        if (newToken != null) {
+                            // Retry UNE fois avec le nouveau token
+                            val req2 = Request.Builder().url(url)
+                                .cacheControl(API_NO_CACHE)
+                                .post(bodyStr.toByteArray(Charsets.UTF_8).toRequestBody("application/json".toMediaType()))
+                                .apply {
+                                    signedHeaders("POST", url, bodyStr, contentType = postContentType)
+                                        .forEach { (k, v) -> header(k, v) }
+                                    header("Authorization", "Bearer $newToken")
+                                }.build()
+                            val resp2 = httpClient.newCall(req2).execute()
+                            resp2.use { r2 ->
+                                if (r2.isSuccessful) {
+                                    captureBearer(r2)
+                                    val body2 = r2.body?.string() ?: return@withContext null
+                                    Log.d(TAG, "apiPost ${path.take(60)} → ${r2.code} size=${body2.length} (retry OK)")
+                                    lastGoodHost = host
+                                    return@withContext JSONObject(body2)
+                                } else {
+                                    val retryBody = r2.body?.string()?.take(500) ?: "(no body)"
+                                    Log.w(TAG, "apiPost $host$path retry → ${r2.code} body=$retryBody")
+                                }
+                            }
+                        }
+                        return@use // essayer host suivant
+                    }
+                    if (code in setOf(403, 429, 500, 502, 503, 504)) {
+                        Log.d(TAG, "apiPost $host$path returned $code, retry next")
+                        return@use
+                    }
+                    if (!it.isSuccessful) {
+                        val errBody = it.body?.string()?.take(300) ?: "(no body)"
+                        Log.w(TAG, "apiPost $host$path NOT OK (code=$code) body=$errBody")
+                        return@withContext null
+                    }
+                    captureBearer(it)
                     val body = it.body?.string() ?: return@withContext null
-                    lastGoodHost = host  // mémorise le host qui répond
+                    Log.d(TAG, "apiPost ${path.take(60)} → $code size=${body.length}")
+                    lastGoodHost = host
                     return@withContext JSONObject(body)
                 }
             } catch (e: Exception) {
@@ -386,18 +548,41 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         val cacheKey = "$normQuery|${year ?: 0}"
         tmdbToSubjectIdCache[cacheKey]?.let { return it.ifBlank { null } }
 
+        // 2026-07-08 : endpoint v2 (v1 deprecated). page=1 (v2 est 1-indexed).
         val resp = apiPost(SEARCH_PATH, JSONObject().apply {
             put("keyword", cleanQuery)
-            put("page", 0)
-            put("perPage", 20)  // Le serveur MovieBox+ refuse perPage>20 avec LIMIT_EXCEED
+            put("page", 1)
+            put("perPage", 20)
         })
         if (resp == null) {
             Log.w(TAG, "findSubjectId('$cleanQuery') : apiPost retourné null (search API down)")
             return null
         }
-        val items = resp.optJSONObject("data")?.optJSONArray("items")
-        if (items == null || items.length() == 0) {
-            Log.w(TAG, "findSubjectId('$cleanQuery') : 0 items retournés par MovieBox+")
+
+        // v2 response : data.results[].subjects[] (au lieu de data.items[] en v1)
+        val data = resp.optJSONObject("data")
+        val items: MutableList<JSONObject> = mutableListOf()
+        // Essayer le format v2 d'abord
+        val results = data?.optJSONArray("results")
+        if (results != null) {
+            for (r in 0 until results.length()) {
+                val subjects = results.optJSONObject(r)?.optJSONArray("subjects") ?: continue
+                for (s in 0 until subjects.length()) {
+                    subjects.optJSONObject(s)?.let { items.add(it) }
+                }
+            }
+        }
+        // Fallback format v1 (data.items[]) au cas où
+        if (items.isEmpty()) {
+            val v1Items = data?.optJSONArray("items")
+            if (v1Items != null) {
+                for (i in 0 until v1Items.length()) {
+                    v1Items.optJSONObject(i)?.let { items.add(it) }
+                }
+            }
+        }
+        if (items.isEmpty()) {
+            Log.w(TAG, "findSubjectId('$cleanQuery') : 0 items retournés par MovieBox+ (v2)")
             return null
         }
 
@@ -406,8 +591,7 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             val year: Int, val subjectType: Int,
         )
         val candidates = mutableListOf<Candidate>()
-        for (i in 0 until items.length()) {
-            val s = items.optJSONObject(i) ?: continue
+        for (s in items) {
             val sid = s.optString("subjectId").takeIf { it.isNotBlank() } ?: continue
             val itTitle = s.optString("title")
             val cleanIt = itTitle.replace(LANG_SUFFIX_REGEX, "").trim()
@@ -482,10 +666,16 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             val best = withinRange.minByOrNull {
                 titleScore(it) * 100 + kotlin.math.abs(it.year - year)
             }
-            if (best != null) {
+            // 2026-07-07 : seuil titleScore ≤ 3 — rejeter les candidats sans aucun match
+            // titre (titleScore=10 = ni exact, ni startsWith, ni contains). Sans ce seuil,
+            // un film au titre court pouvait matcher n'importe quoi dans la bonne tranche d'année.
+            if (best != null && titleScore(best) <= 3) {
                 tmdbToSubjectIdCache[cacheKey] = best.sid
                 Log.d(TAG, "findSubjectId('$cleanQuery' year=$year) → fallback best=${best.cleanTitle} (${best.year}) sid=${best.sid} (titleScore=${titleScore(best)}, yearDelta=${kotlin.math.abs(best.year - year)})")
                 return best.sid
+            }
+            if (best != null) {
+                Log.d(TAG, "findSubjectId('$cleanQuery' year=$year) → rejeté fallback best=${best.cleanTitle} (titleScore=${titleScore(best)} > 3, pas de match titre)")
             }
         }
         Log.d(TAG, "findSubjectId('$cleanQuery' year=$year) → no match (${candidates.size} candidats, mais aucun avec année proche)")
@@ -502,6 +692,16 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
     private val frSignalCache = ConcurrentHashMap<String, FrSignal>()
     /** Vue compat : raccourci pour l'ancien `hasFrenchAudioOrSub`. */
     private val frAvailabilityCache = ConcurrentHashMap<String, Boolean>()
+
+    /** 2026-07-04 : vide TOUS les caches en mémoire (serveurs, sous-titres, mapping
+     *  TMDB, signal FR). Appelé par ProviderCacheRefresh. */
+    fun clearCaches() {
+        frenchCaptionsCache.clear()
+        cloudstreamStreamsCache.clear()
+        tmdbToSubjectIdCache.clear()
+        frSignalCache.clear()
+        frAvailabilityCache.clear()
+    }
 
     /** Fetch /subject-api/get pour `subjectId` et détermine quel signal FR existe :
      *
@@ -1800,29 +2000,14 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             }
         }
 
-        // 2026-05-08 : pipeline /resource RÉACTIVÉ. Les 406 venaient du bump
-        // UA/CLIENT_INFO en 50090111 — restauration en 50020045 = ça remarche.
+        // 2026-07-08 : pipeline /resource DÉSACTIVÉ — bcdn.hakunaymatata.com
+        // renvoie 429 systématiquement (rate-limit CDN). Les 4 requêtes /resource
+        // parallèles gaspillaient du temps réseau pour rien. SEUL /play-info
+        // (hcdn3) est utilisé maintenant → lecture immédiate sans 429.
+        // NOTE : /resource peut être réactivé si bcdn remarche un jour.
         if (!subjectId.isNullOrBlank()) {
             val sid: String = subjectId!!
-            // Tenter /resource pour les 4 résolutions en parallèle
-            val resolutions = listOf(360, 480, 720, 1080)
-            val streams = resolutions.map { resoltn ->
-                async { findResourceStream(sid, se, ep, resoltn) }
-            }.awaitAll().filterNotNull().distinctBy { it.first }.sortedByDescending { it.first }
-
-            for ((idx, t) in streams.withIndex()) {
-                servers.add(
-                    Video.Server(
-                        id = "cs_resource_${sid}_${se}_${ep}_${t.first}_$idx",
-                        name = "Cloudstream [${t.first}p MP4]",
-                        src = t.second,
-                    )
-                )
-            }
-            // 2026-05-07 v2 : fallback /play-info RÉACTIVÉ uniquement quand /resource
-            // n'a rien (cas films comme Les Tuche 2 où MovieBox+ stocke uniquement
-            // sur hcdn3). Marqué "(pub possible)" pour clarté — souvent pre-roll.
-            if (servers.isEmpty()) {
+            run {
                 val params = mutableMapOf("subjectId" to sid)
                 if (se > 0) params["se"] = "$se"
                 if (ep > 0) params["ep"] = "$ep"
@@ -1830,6 +2015,12 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                 val data = resp?.optJSONObject("data")
                 val streamArr = data?.optJSONArray("streams")
                 if (streamArr != null) {
+                    val existingResolutions = servers.map { s ->
+                        s.name.let { n ->
+                            val m = Regex("(\\d+)p").find(n)
+                            m?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                        }
+                    }.toSet()
                     val list = (0 until streamArr.length()).mapNotNull { i ->
                         val s = streamArr.optJSONObject(i) ?: return@mapNotNull null
                         val u = s.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
@@ -1840,24 +2031,22 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                         servers.add(
                             Video.Server(
                                 id = "cs_playinfo_${sid}_${se}_${ep}_${t.first}_$idx",
-                                name = "Cloudstream [${t.first}p MP4] (pub possible)",
+                                name = "Cloudstream [${t.first}p]",
                                 src = t.second,
                             )
                         )
+                    }
+                    if (list.isNotEmpty()) {
+                        Log.d(TAG, "getServers $id : +${list.size} streams play-info (hcdn)")
                     }
                 }
             }
             Log.d(TAG, "getServers $id : MovieBox+ → ${servers.size} streams")
         }
 
-        // 2026-05-08 : Append fast path resourceDetectors EN TÊTE (les MP4 directs
-        // bcdn.hakunaymatata.com sont les plus rapides + zéro pubs = best UX).
-        val rdServers = resourceDetectorsD.await()
-        if (rdServers.isNotEmpty()) {
-            // Insert au début : ils s'affichent en premier dans le picker
-            servers.addAll(0, rdServers)
-            Log.d(TAG, "getServers $id : +${rdServers.size} streams resourceDetectors (fast path)")
-        }
+        // 2026-07-08 : resourceDetectors (bcdn) DÉSACTIVÉS — renvoient 429.
+        // On attend quand même le Deferred pour éviter un leak de coroutine.
+        resourceDetectorsD.await()  // drain sans utiliser
 
         // 2026-05-08 : POLITIQUE STRICTE FR-only (user s'est plaint des [VF auto]
         // qui menteaient pour Matrix anglais). Règle : les servers Cloudstream
@@ -1881,9 +2070,9 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         val csServers = servers.filter { it.id.startsWith("cs_") }
         if (csServers.size >= 1 && subjectId != null) {
             val streams = csServers.mapNotNull { srv ->
-                val match = Regex("\\[(\\d+)p (MP4|HLS)]").find(srv.name) ?: return@mapNotNull null
+                val match = Regex("\\[(\\d+)p(?:\\s*(MP4|HLS))?]").find(srv.name) ?: return@mapNotNull null
                 val res = match.groupValues[1].toIntOrNull() ?: return@mapNotNull null
-                val format = match.groupValues[2]
+                val format = match.groupValues.getOrNull(2)?.ifEmpty { null } ?: "MP4"
                 val linkType = if (format == "HLS") 1 else 2
                 Triple(res, srv.src, linkType)
             }.distinctBy { it.first }.sortedByDescending { it.first }
@@ -1892,25 +2081,33 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                 Log.d(TAG, "getServers $id : ${streams.size} qualité(s) Cloudstream cachées : ${streams.map { it.first }.joinToString()}p")
             }
         }
-        if (csServers.size > 1) {
-            // 2026-05-08 (revert) : user veut UNIQUEMENT les 2 premières qualités
-            // (1080p + 720p, ou les 2 plus hautes dispo). 480p/360p drop —
-            // niveau de qualité inacceptable + clutter le picker. Trie par
-            // résolution desc, dédup par résolution (MP4 prioritaire), puis
-            // take(2).
-            val sorted = csServers.sortedWith(compareByDescending<Video.Server> {
+        // 2026-07-08 : bcdn.hakunaymatata.com renvoie 429 systématiquement.
+        // On SUPPRIME tous les serveurs bcdn (cs_resource_ + cs_rd_) et on ne
+        // garde QUE les play-info (hcdn3) qui fonctionnent. Top 2 résolutions.
+        run {
+            val bcdnIds = servers.filter {
+                it.id.startsWith("cs_resource_") || it.id.startsWith("cs_rd_")
+            }.map { it.id }.toSet()
+            if (bcdnIds.isNotEmpty()) {
+                servers.removeAll { it.id in bcdnIds }
+                Log.d(TAG, "getServers $id : ${bcdnIds.size} bcdn supprimés (429)")
+            }
+        }
+        val csServersDedup = servers.filter { it.id.startsWith("cs_") }
+        if (csServersDedup.size > 2) {
+            val sorted = csServersDedup.sortedByDescending {
                 Regex("\\[(\\d+)p").find(it.name)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            }.thenBy { if (it.name.contains("MP4")) 0 else 1 })
+            }
             val seenRes = mutableSetOf<Int>()
-            val uniqueByRes = sorted.filter { srv ->
+            val kept = sorted.filter { srv ->
                 val r = Regex("\\[(\\d+)p").find(srv.name)?.groupValues?.get(1)?.toIntOrNull() ?: -1
                 seenRes.add(r)
-            }.take(2)  // 2026-05-08 : top 2 résolutions seulement
+            }.take(2)
             val others = servers.filter { !it.id.startsWith("cs_") }
             servers.clear()
-            servers.addAll(uniqueByRes)
+            servers.addAll(kept)
             servers.addAll(others)
-            Log.d(TAG, "getServers $id : ${uniqueByRes.size} qualités Cloudstream gardées (top 2 : ${uniqueByRes.map { it.name }})")
+            Log.d(TAG, "getServers $id : ${kept.size} Cloudstream gardés (${kept.map { it.name }})")
         }
 
         val getRespFinal = getRespD.await()
@@ -2104,6 +2301,8 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             try { val n = fetchNativeCloudstreamServers(id, videoType); if (n.isNotEmpty()) emitDeduped(n) }
             catch (e: Exception) { Log.w(TAG, "Progressive native failed: ${e.message}") }
         }
+        // 2026-07-04 : backups inline Cloudstream DÉSACTIVÉS → tout passe par le registre central.
+        if (!com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) {
         launch {
             try { val k = fetchNakiosBackup(tmdbId, videoType, se, ep); if (k.isNotEmpty()) emitDeduped(k) }
             catch (e: Exception) { Log.w(TAG, "Progressive Nakios failed: ${e.message}") }
@@ -2133,12 +2332,15 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             //   (MovieBox+, Nakios, Movix, Wiflix, FS) ont le temps de
             //   répondre en premier. Coflix arrive en dernier si toujours
             //   pertinent (films absents ailleurs comme Aventures croisées).
-            launch {
-                kotlinx.coroutines.delay(8_000L)
-                try { val cf = fetchCoflixBackup(tmdbId, videoType, se, ep); if (cf.isNotEmpty()) emitDeduped(cf) }
-                catch (e: Exception) { Log.w(TAG, "Progressive Coflix failed: ${e.message}") }
-            }
+            // 2026-07-08 : ancien Coflix DÉSACTIVÉ (domaines morts → page dons Telegram).
+            // CoflixWiki (coflix.wiki) est dans BackupRegistry à la place.
+            // launch {
+            //     kotlinx.coroutines.delay(8_000L)
+            //     try { val cf = fetchCoflixBackup(tmdbId, videoType, se, ep); if (cf.isNotEmpty()) emitDeduped(cf) }
+            //     catch (e: Exception) { Log.w(TAG, "Progressive Coflix failed: ${e.message}") }
+            // }
         }
+        } // 2026-07-04 : fin gate INLINE_BACKUPS_DISABLED (backups Cloudstream → registre)
     }
 
     /** 2026-06-03 — Backup Coflix. Cloudstream est tmdbId-based ; Coflix est
@@ -2534,13 +2736,20 @@ $url
         if (subtitles.isNotEmpty()) {
             Log.d(TAG, "getVideo ${server.id} : +${subtitles.size} sous-titre(s) FR auto")
         }
+        // 2026-07-08 : le CDN bcdn.hakunaymatata.com renvoie 429 sans Bearer.
+        // On ajoute le token JWT aux headers de lecture, comme pour les appels API.
+        val hdrs = mutableMapOf(
+            "Referer" to "https://moviebox.ph/",
+            "User-Agent" to USER_AGENT,
+        )
+        val token = bearerToken ?: try { ensureBearer() } catch (_: Exception) { null }
+        if (token != null) {
+            hdrs["Authorization"] = "Bearer $token"
+        }
         return Video(
             source = source,
             subtitles = subtitles,
-            headers = mutableMapOf(
-                "Referer" to "https://moviebox.ph/",
-                "User-Agent" to USER_AGENT,
-            ),
+            headers = hdrs,
         )
     }
 

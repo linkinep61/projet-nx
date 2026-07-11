@@ -24,6 +24,9 @@ import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.TmdbUtils
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
@@ -77,6 +80,20 @@ private interface MovieboxService {
         @Query("page") page: Int = 1,
         @Query("perPage") perPage: Int = 12,
     ): MovieboxRecommendationsResp
+
+    // 2026-07-09 : résolution des VRAIS flux Moviebox. `subject/play` renvoie les mp4
+    //   SIGNÉS (data.streams[].url = CDN hakunaymatata ?sign=&t=) — endpoint NON token-gaté
+    //   (contrairement à subject/search). se/ep = saison/épisode (0/0 pour un film).
+    @GET("subject/play")
+    suspend fun getPlay(
+        @HeaderMap headers: Map<String, String>,
+        @Query("subjectId") subjectId: String,
+        @Query("se") se: Int,
+        @Query("ep") ep: Int,
+        // 2026-07-09 : detailPath OBLIGATOIRE — sans lui, les saisons anciennes renvoient 0
+        //   stream (vérifié : FROM S2E2 = 0 sans detailPath, 3 flux avec).
+        @Query("detailPath") detailPath: String,
+    ): MovieboxPlayResp
 }
 
 data class MovieboxSearchBody(
@@ -100,6 +117,24 @@ data class MovieboxDetailData(
 )
 
 data class MovieboxRecommendationsResp(val code: Int = 0, val message: String? = null, val data: MovieboxSearchData? = null)
+
+// 2026-07-09 : réponse de subject/play (flux mp4 signés).
+data class MovieboxPlayResp(val code: Int = 0, val message: String? = null, val data: MovieboxPlayData? = null)
+data class MovieboxPlayData(
+    val streams: List<MovieboxStream>? = null,
+    val hasResource: Boolean = false,
+    val vipLocked: Boolean = false,
+)
+data class MovieboxStream(
+    val id: String? = null,
+    val url: String? = null,          // mp4 signé (?sign=&t=) sur CDN hakunaymatata
+    val format: String? = null,       // "MP4"
+    val resolutions: String? = null,  // "360" / "480" / "720" / "1080"
+    val size: String? = null,
+    val duration: Int? = 0,
+    val codecName: String? = null,    // "h264"
+    val vipLocked: Boolean = false,
+)
 
 data class MovieboxPager(
     val hasMore: Boolean = false,
@@ -255,11 +290,18 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
 
     // ─── HTTP ──────────────────────────────────────────────────────────────
 
+    // 2026-07-09 : la recherche POST subject/search est token-gatée (« invalid token »). L'ancien
+    //   intercepteur de signature CONSOMMAIT le body one-shot (writeTo) → la vraie requête partait
+    //   sans body → le serveur attendait 45s (hang qui bloquait tout le registre). RETIRÉ. La
+    //   recherche backup Moviebox échoue donc VITE (pas de hang) tant qu'on n'a pas la vraie
+    //   signature web. La LECTURE (subject/play) n'a pas besoin de ça.
+
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .dns(DnsResolver.doh)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS)
             .followRedirects(true)
             .build()
     }
@@ -273,11 +315,23 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
             .create(MovieboxService::class.java)
     }
 
+    // 2026-07-09 : le serveur h5-api sert les streams à tout VRAI navigateur (vérifié : même sans
+    //   aucun header custom, un fetch Chrome → 3 streams). OkHttp échoue (hasResource=false) car il
+    //   manque les Client-Hints `sec-ch-ua*` qui prouvent un Chromium. On les ajoute (mimique Chrome
+    //   131 desktop) + Accept/Accept-Language/Sec-Fetch pour ressembler à un fetch XHR de navigateur.
     private fun apiHeaders(): Map<String, String> = mapOf(
         "Origin" to "https://themoviebox.org",
-        "Referer" to "https://themoviebox.org/fr",
+        "Referer" to "https://themoviebox.org/",
         "x-client-info" to "lang=fr;hostName=themoviebox.org",
         "User-Agent" to USER_AGENT,
+        "Accept" to "application/json, text/plain, */*",
+        "Accept-Language" to "fr-FR,fr;q=0.9,en;q=0.8",
+        "sec-ch-ua" to "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
+        "sec-ch-ua-mobile" to "?0",
+        "sec-ch-ua-platform" to "\"Windows\"",
+        "Sec-Fetch-Dest" to "empty",
+        "Sec-Fetch-Mode" to "cors",
+        "Sec-Fetch-Site" to "cross-site",
     )
 
     // ─── Filtrage français ─────────────────────────────────────────────────
@@ -927,6 +981,60 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
         )
     }
 
+    /**
+     * 2026-07-09 (RÉÉCRITURE) : résout les VRAIS flux Moviebox via l'API MOBILE SIGNÉE d'aoneroom
+     *   (`/wefeed-mobile-bff/subject-api/play-info`, HMAC `x-tr-signature`), PAS via le h5-api
+     *   navigateur (`subject/play`). Raison prouvée EN DIRECT : le h5-api sert la vidéo à tout vrai
+     *   navigateur (fetch Chrome = 3 streams même sans headers), mais REFUSE OkHttp (hasResource=false
+     *   quels que soient le detailPath, les headers, les client-hints) → c'est un gate client
+     *   intrinsèque (TLS/navigateur) infranchissable côté OkHttp. L'API MOBILE, elle, accepte OkHttp
+     *   dès qu'elle est signée — c'est le même backend aoneroom = les serveurs de Moviebox, donc ça
+     *   reste « Moviebox » (PAS une délégation : on résout un subjectId PRÉCIS, aucune recherche par
+     *   titre). Le code de signature/host-rotation/bearer est mutualisé avec CloudstreamProvider
+     *   (`resolveStreamsBySubjectId`) qui est déjà prouvé fonctionnel en OkHttp.
+     *   Piste FR (dub) d'abord (VF), puis subject original (VOSTFR). Dédup par URL.
+     */
+    private suspend fun resolveMovieboxStreams(
+        detail: MovieboxSubject, subjectId: String, videoType: Video.Type, id: String,
+    ): List<Video.Server> {
+        val frDub = detail.dubs?.firstOrNull { it.lanCode.equals("fr", ignoreCase = true) }
+        // Le vrai season/episode est ENCODÉ dans l'id (`mvbx::ep::<subjectId>::<se>::<ep>`),
+        //   PAS fiable dans videoType (season.number=0 pour Moviebox). Parse depuis l'id, fallback videoType.
+        val epParts = id.substringAfter("mvbx::ep::", "").split("::")
+        val playSe = epParts.getOrNull(1)?.toIntOrNull() ?: (videoType as? Video.Type.Episode)?.season?.number ?: 0
+        val playEp = epParts.getOrNull(2)?.toIntOrNull() ?: (videoType as? Video.Type.Episode)?.number ?: 0
+        val originalSid = detail.dubs?.firstOrNull()?.subjectId?.takeIf { it.isNotBlank() } ?: subjectId
+        val seenUrls = HashSet<String>()
+        suspend fun resolve(sid: String, langLabel: String): List<Video.Server> {
+            if (sid.isBlank()) return emptyList()
+            val streams = runCatching {
+                com.streamflixreborn.streamflix.utils.AoneroomClient.resolveStreamsBySubjectId(sid, playSe, playEp)
+            }.onFailure { Log.w(TAG, "resolveStreams($sid) KO: ${it.javaClass.simpleName}: ${it.message}") }
+                .getOrDefault(emptyList())
+            Log.i(TAG, "play-info $langLabel sid=$sid se=$playSe ep=$playEp → streams=${streams.size}")
+            return streams.mapNotNull { (res, url) ->
+                if (!seenUrls.add(url)) return@mapNotNull null
+                Video.Server(
+                    id = "mvbxplay::${url.hashCode()}",
+                    name = "Moviebox ${if (res > 0) "${res}p" else "MP4"} $langLabel",
+                    src = url,
+                )
+            }
+        }
+        val out = mutableListOf<Video.Server>()
+        if (frDub?.subjectId != null) {
+            out += resolve(frDub.subjectId!!, "(VF)")
+        }
+        // Le subject "courant" (celui browsé) : peut être la piste FR OU l'originale.
+        if (subjectId != frDub?.subjectId && subjectId != originalSid) {
+            out += resolve(subjectId, "(VOSTFR)")
+        }
+        if (frDub?.subjectId != originalSid) {
+            out += resolve(originalSid, "(VOSTFR)")
+        }
+        return out
+    }
+
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
         val subjectId = id
             .removePrefix("mvbx::m::")
@@ -944,133 +1052,14 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
             service.getDetailById(apiHeaders(), subjectId).data?.subject
         }.getOrNull() ?: return emptyList()
 
-        val frDub = detail.dubs?.firstOrNull { it.lanCode.equals("fr", ignoreCase = true) }
-        val effectiveDetailPath = frDub?.detailPath ?: detail.detailPath ?: return emptyList()
-        val effectiveSubjectId = frDub?.subjectId ?: subjectId
-
-        // Pour les épisodes, on injecte saison/épisode dans l'URL player.
-        val (sNum, eNum) = when (videoType) {
-            is Video.Type.Episode -> videoType.season.number to videoType.number
-            else -> null to null
-        }
-        val moviebox = listOf(
-            buildMovieboxServer(
-                effectiveDetailPath,
-                effectiveSubjectId,
-                "Moviebox VF",
-                seasonNumber = sNum,
-                episodeNumber = eNum,
-            )
-        )
-
-        // 2026-05-21 : résolution TMDB partagée (Movix + Cloudstream backups)
-        val rawTitle = detail.title.orEmpty()
-        val normalizedTitle = normalizeTitleForTmdb(rawTitle)
-        val backupYear = detail.releaseDate?.take(4)?.toIntOrNull()
-        val resolvedTmdbId: Int? = synchronized(tmdbCacheLock) { movieboxToTmdbId[subjectId] } ?: run {
-            val variants = listOf(normalizedTitle, rawTitle).filter { it.isNotBlank() }.distinct()
-            var foundId: String? = null
-            for (v in variants) {
-                foundId = when (videoType) {
-                    is Video.Type.Movie -> TmdbUtils.getMovie(v, backupYear, "fr-FR")?.id
-                    is Video.Type.Episode -> TmdbUtils.getTvShow(v, backupYear, "fr-FR")?.id
-                }
-                if (foundId != null) break
-            }
-            if (foundId == null && backupYear != null) {
-                for (v in variants) {
-                    foundId = when (videoType) {
-                        is Video.Type.Movie -> TmdbUtils.getMovie(v, null, "fr-FR")?.id
-                        is Video.Type.Episode -> TmdbUtils.getTvShow(v, null, "fr-FR")?.id
-                    }
-                    if (foundId != null) break
-                }
-            }
-            val foundIdInt = foundId?.toIntOrNull()
-            Log.d(TAG, "Backup TMDB lookup: raw='$rawTitle' → variants=$variants year=$backupYear → tmdbId=$foundIdInt")
-            if (foundIdInt != null) synchronized(tmdbCacheLock) { movieboxToTmdbId[subjectId] = foundIdInt }
-            foundIdInt
-        }
-
-        // Movix backup
-        val movixBackup = runCatching {
-            val tmdbId = resolvedTmdbId
-            if (tmdbId == null) {
-                Log.w(TAG, "No TMDB match for '$normalizedTitle' (year=$backupYear) — skip Movix backup")
-                emptyList()
-            } else when (videoType) {
-                is Video.Type.Movie -> MovixProvider.getServersAsBackup("$tmdbId", videoType)
-                is Video.Type.Episode -> {
-                    // 2026-05-05 v3 : MovixProvider lit `videoType.tvShow.id` pour
-                    // tirer le tmdbId TV — mais ici on a un Episode venant de
-                    // Moviebox, donc tvShow.id = `mvbx::s::xxxx` (pas un TMDB id).
-                    // On reconstruit un Video.Type.Episode avec tvShow.id = tmdbId
-                    // pour que Movix puisse appeler ses endpoints correctement.
-                    val movixVideoType = videoType.copy(
-                        tvShow = videoType.tvShow.copy(id = "$tmdbId")
-                    )
-                    val movixEpisodeId = "$tmdbId-s${videoType.season.number}e${videoType.number}"
-                    Log.d(TAG, "Movix backup Episode: tmdbId=$tmdbId s${videoType.season.number}e${videoType.number}")
-                    MovixProvider.getServersAsBackup(movixEpisodeId, movixVideoType)
-                }
-            }
-        }.getOrElse {
-            Log.d(TAG, "Movix backup failed for moviebox $subjectId: ${it.message}")
-            emptyList()
-        }
-
-        if (movixBackup.isNotEmpty()) {
-            Log.d(TAG, "+ Movix backup pour Moviebox $subjectId : ${movixBackup.size} sources")
-        }
-
-        // 2026-05-05 : Coflix backup — site français qui agrège plusieurs hosters
-        // (Lulustream, VOE, Vidoza, Darkibox, Veev, Goodstream...) par titre.
-        // Ne dépend pas de TMDB (search par titre direct), donc ça marche même
-        // quand la lookup TMDB échoue.
-        val coflixBackup = runCatching {
-            val cleanTitle = normalizeTitleForTmdb(detail.title.orEmpty())
-            val year = detail.releaseDate?.take(4)?.toIntOrNull()
-            when (videoType) {
-                is Video.Type.Movie -> CoflixSourceProvider.getMovieSources(cleanTitle, year)
-                is Video.Type.Episode -> CoflixSourceProvider.getEpisodeSources(
-                    showTitle = cleanTitle,
-                    year = year,
-                    seasonNumber = videoType.season.number,
-                    episodeNumber = videoType.number,
-                )
-            }
-        }.getOrElse {
-            Log.d(TAG, "Coflix backup failed: ${it.message}")
-            emptyList()
-        }
-        if (coflixBackup.isNotEmpty()) {
-            Log.d(TAG, "+ Coflix backup pour Moviebox $subjectId : ${coflixBackup.size} sources")
-        }
-
-        // 2026-05-21 : Cloudstream backup — MovieBox+ via /resource bcdn (sans pre-roll).
-        val cloudstreamBackup = runCatching {
-            if (resolvedTmdbId != null) {
-                val csId = when (videoType) {
-                    is Video.Type.Movie -> "$resolvedTmdbId"
-                    is Video.Type.Episode -> "$resolvedTmdbId:${sNum}:${eNum}"
-                }
-                CloudstreamProvider.getServers(csId, videoType)
-            } else emptyList()
-        }.getOrElse {
-            Log.d(TAG, "Cloudstream backup failed for moviebox $subjectId: ${it.message}")
-            emptyList()
-        }
-        if (cloudstreamBackup.isNotEmpty()) {
-            Log.d(TAG, "+ Cloudstream backup pour Moviebox $subjectId : ${cloudstreamBackup.size} sources")
-        }
-
-        // Ordre = NATIVE Moviebox → Movix backup → Cloudstream → Coflix EN DERNIER.
-        // Dedup par src (au cas où les backups partagent des sources).
-        val seen = mutableSetOf<String>()
-        val ordered = (moviebox + movixBackup + cloudstreamBackup + coflixBackup)
-            .filter { it.src.isBlank() || seen.add(it.src.lowercase().trim()) }
-        return ordered
+        // 2026-07-09 : VRAIS flux Moviebox via subject/play (mp4 signés, non token-gaté).
+        //   Avant : URL de la PAGE web (extraction WebView lente/fragile) → « aucune vidéo ne
+        //   se lit ». Maintenant : mp4 directs joués par ExoPlayer.
+        // 2026-07-09 (user « Moviebox ne doit remonter QUE son propre serveur ») : plus AUCUN
+        //   backup Movix/Cloudstream/Coflix branché sur Moviebox — uniquement ses flux natifs.
+        return resolveMovieboxStreams(detail, subjectId, videoType, id)
     }
+
 
     // ─── Chargement progressif (2026-05-21) ──────────────────────────────
 
@@ -1089,110 +1078,29 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
             service.getDetailById(apiHeaders(), subjectId).data?.subject
         }.getOrNull() ?: return@channelFlow
 
-        val frDub = detail.dubs?.firstOrNull { it.lanCode.equals("fr", ignoreCase = true) }
-        val effectiveDetailPath = frDub?.detailPath ?: detail.detailPath ?: return@channelFlow
-        val effectiveSubjectId = frDub?.subjectId ?: subjectId
-        val (sNum, eNum) = when (videoType) {
-            is Video.Type.Episode -> videoType.season.number to videoType.number
-            else -> null to null
-        }
-
-        // 1) Natif = part direct
+        // 1) Natif = part direct — VRAIS flux mp4 via subject/play (plus l'ancien serveur page web).
         launch {
             try {
-                val native = listOf(buildMovieboxServer(
-                    effectiveDetailPath, effectiveSubjectId, "Moviebox VF",
-                    seasonNumber = sNum, episodeNumber = eNum,
-                ))
-                send(native)
+                val native = resolveMovieboxStreams(detail, subjectId, videoType, id)
+                if (native.isNotEmpty()) send(native)
             } catch (e: Exception) {
                 Log.w(TAG, "Progressive native failed: ${e.message}")
-            }
-        }
-
-        // Résolution TMDB partagée pour backups
-        val rawTitle = detail.title.orEmpty()
-        val normalizedTitle = normalizeTitleForTmdb(rawTitle)
-        val backupYear = detail.releaseDate?.take(4)?.toIntOrNull()
-        val resolvedTmdbId: Int? = synchronized(tmdbCacheLock) { movieboxToTmdbId[subjectId] } ?: run {
-            val variants = listOf(normalizedTitle, rawTitle).filter { it.isNotBlank() }.distinct()
-            var foundId: String? = null
-            for (v in variants) {
-                foundId = when (videoType) {
-                    is Video.Type.Movie -> TmdbUtils.getMovie(v, backupYear, "fr-FR")?.id
-                    is Video.Type.Episode -> TmdbUtils.getTvShow(v, backupYear, "fr-FR")?.id
-                }
-                if (foundId != null) break
-            }
-            if (foundId == null && backupYear != null) {
-                for (v in variants) {
-                    foundId = when (videoType) {
-                        is Video.Type.Movie -> TmdbUtils.getMovie(v, null, "fr-FR")?.id
-                        is Video.Type.Episode -> TmdbUtils.getTvShow(v, null, "fr-FR")?.id
-                    }
-                    if (foundId != null) break
-                }
-            }
-            val foundIdInt = foundId?.toIntOrNull()
-            if (foundIdInt != null) synchronized(tmdbCacheLock) { movieboxToTmdbId[subjectId] = foundIdInt }
-            foundIdInt
-        }
-
-        // 2) Movix backup
-        if (resolvedTmdbId != null) {
-            launch {
-                try {
-                    val movix = when (videoType) {
-                        is Video.Type.Movie -> MovixProvider.getServersAsBackup("$resolvedTmdbId", videoType)
-                        is Video.Type.Episode -> {
-                            val mvt = videoType.copy(tvShow = videoType.tvShow.copy(id = "$resolvedTmdbId"))
-                            val meid = "$resolvedTmdbId-s${sNum}e${eNum}"
-                            MovixProvider.getServersAsBackup(meid, mvt)
-                        }
-                    }
-                    if (movix.isNotEmpty()) send(movix)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Progressive Movix failed: ${e.message}")
-                }
-            }
-        }
-
-        // 3) Cloudstream backup
-        if (resolvedTmdbId != null) {
-            launch {
-                try {
-                    val csId = when (videoType) {
-                        is Video.Type.Movie -> "$resolvedTmdbId"
-                        is Video.Type.Episode -> "$resolvedTmdbId:${sNum}:${eNum}"
-                    }
-                    val cs = CloudstreamProvider.getServers(csId, videoType)
-                    if (cs.isNotEmpty()) send(cs)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Progressive Cloudstream failed: ${e.message}")
-                }
-            }
-        }
-
-        // 4) Coflix backup (par titre, pas tmdbId)
-        launch {
-            try {
-                val cleanTitle = normalizeTitleForTmdb(detail.title.orEmpty())
-                val year = detail.releaseDate?.take(4)?.toIntOrNull()
-                val coflix = when (videoType) {
-                    is Video.Type.Movie -> CoflixSourceProvider.getMovieSources(cleanTitle, year)
-                    is Video.Type.Episode -> CoflixSourceProvider.getEpisodeSources(
-                        showTitle = cleanTitle, year = year,
-                        seasonNumber = videoType.season.number, episodeNumber = videoType.number,
-                    )
-                }
-                if (coflix.isNotEmpty()) send(coflix)
-            } catch (e: Exception) {
-                Log.w(TAG, "Progressive Coflix failed: ${e.message}")
             }
         }
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
+        // 2026-07-09 : flux Moviebox direct (subject/play) = mp4 SIGNÉ → lu tel quel par
+        //   ExoPlayer (pas d'extraction). Referer/UA pour le CDN hakunaymatata.
+        if (server.id.startsWith("mvbxplay::") || server.src.contains("hakunaymatata", ignoreCase = true)) {
+            // 2026-07-09 : le CDN hakunaymatata renvoie 403 avec Referer themoviebox + UA desktop.
+            //   Les flux viennent de l'API MOBILE (play-info) → il faut les MÊMES headers que
+            //   Cloudstream pour les lire : Referer moviebox.ph + UA mobile + Bearer JWT.
+            return Video(
+                source = server.src,
+                headers = com.streamflixreborn.streamflix.utils.AoneroomClient.streamPlaybackHeaders(server.src),
+            )
+        }
         // Délègue à l'extracteur générique (MovieboxExtractor) qui matche par URL
         return Extractor.extract(server.src, server)
     }
@@ -1254,40 +1162,87 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
         videoType: Video.Type,
     ): List<Video.Server> {
         return try {
-            val (title, year, type) = when (videoType) {
+            // 2026-07-10 (backup unifié) : on passe par l'API MOBILE signée d'aoneroom
+            //   (la seule qui marche) — recherche par titre+année → subjectId, puis résolution
+            //   des vrais flux (CDN hakunaymatata + cookies CloudFront). Matching STRICT : rien
+            //   plutôt qu'un mauvais film.
+            val isMovie = videoType is Video.Type.Movie
+            val (title, year) = when (videoType) {
                 is Video.Type.Movie -> {
                     val det = com.streamflixreborn.streamflix.utils.TMDb3.Movies
                         .details(movieId = tmdbId, language = "fr-FR")
-                    Triple(
-                        det.title.takeIf { it.isNotBlank() } ?: det.originalTitle,
-                        det.releaseDate?.take(4)?.toIntOrNull(),
-                        SUBJECT_MOVIE
-                    )
+                    (det.title.takeIf { it.isNotBlank() } ?: det.originalTitle) to
+                        det.releaseDate?.take(4)?.toIntOrNull()
                 }
                 is Video.Type.Episode -> {
                     val det = com.streamflixreborn.streamflix.utils.TMDb3.TvSeries
                         .details(seriesId = tmdbId, language = "fr-FR")
-                    Triple(
-                        det.name.takeIf { it.isNotBlank() } ?: det.originalName,
-                        det.firstAirDate?.take(4)?.toIntOrNull(),
-                        SUBJECT_SERIES
-                    )
+                    (det.name.takeIf { it.isNotBlank() } ?: det.originalName) to
+                        det.firstAirDate?.take(4)?.toIntOrNull()
                 }
             }
-            // Pour un Episode on propage saison/épisode pour que l'URL Moviebox
-            // ouvre le bon couple (sinon le site web fallback à la dernière S/E
-            // mémorisée par la session).
-            val (sNum, eNum) = when (videoType) {
+            if (title.isBlank()) return emptyList()
+            val searchSid = com.streamflixreborn.streamflix.utils.AoneroomClient
+                .findSubjectId(title, year, isMovie)
+            Log.i(TAG, "backup tmdbId=$tmdbId title='$title' year=$year isMovie=$isMovie → findSubjectId=$searchSid")
+            if (searchSid == null) return emptyList()
+            val (se, ep) = when (videoType) {
                 is Video.Type.Episode -> videoType.season.number to videoType.number
-                else -> null to null
+                else -> 0 to 0
             }
-            if (title.isBlank()) emptyList()
-            else getMovieboxSourcesByTitle(title, year, type, seasonNumber = sNum, episodeNumber = eNum)
+            // 2026-07-10 (user "les autres langues qui sont pas françaises, enlève-les") :
+            //   FRANÇAIS UNIQUEMENT. On charge le détail (dubs) et on ne garde que :
+            //     - la piste doublée FR (lanCode=fr, type 0)              → « Français »
+            //     - l'audio original SI sous-titres FR dispo             → « VOSTFR »
+            //   Tous les autres doublages (russe, espagnol…) sont ignorés. detail h5 = OkHttp OK.
+            val detail = runCatching {
+                service.getDetailById(apiHeaders(), searchSid).data?.subject
+            }.getOrNull()
+            data class Track(val sid: String, val label: String, val rank: Int)
+            val dubs = detail?.dubs.orEmpty()
+            val frDub = dubs.firstOrNull {
+                it.lanCode.equals("fr", ignoreCase = true) && it.type == 0 && !it.subjectId.isNullOrBlank()
+            }
+            val hasFrSub = dubs.any { it.lanCode.equals("fr", ignoreCase = true) && it.type == 1 } ||
+                (detail?.subtitles?.contains("Français", ignoreCase = true) == true)
+            val origSid = dubs.firstOrNull { it.original && !it.subjectId.isNullOrBlank() }?.subjectId ?: searchSid
+            val tracks = mutableListOf<Track>()
+            if (frDub?.subjectId != null) tracks.add(Track(frDub.subjectId!!, "Français", 0))
+            if (hasFrSub && origSid != frDub?.subjectId) tracks.add(Track(origSid, "VOSTFR", 1))
+            val ordered = tracks.sortedBy { it.rank }
+            Log.i(TAG, "backup '$title' : dubs=${dubs.size} frDub=${frDub?.subjectId != null} frSub=$hasFrSub → ${ordered.size} piste(s) FR")
+            val seenUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+            val out = coroutineScope {
+                val deferreds: List<kotlinx.coroutines.Deferred<List<Video.Server>>> = ordered.map { t ->
+                    async {
+                        // runCatching : une piste qui échoue ne doit PAS annuler les autres.
+                        runCatching {
+                            com.streamflixreborn.streamflix.utils.AoneroomClient
+                                .resolveStreamsBySubjectId(t.sid, se, ep)
+                                .mapNotNull { pair ->
+                                    val res = pair.first
+                                    val url = pair.second
+                                    if (!seenUrls.add(url)) null
+                                    else Video.Server(
+                                        id = "mvbxplay::${url.hashCode()}",
+                                        // wrap() du registre ajoute déjà « Moviebox · » → on ne met que la langue.
+                                        name = "${t.label}${if (res > 0) " ${res}p" else ""}",
+                                        src = url,
+                                    )
+                                }
+                        }.getOrDefault(emptyList())
+                    }
+                }
+                deferreds.awaitAll().flatten()
+            }
+            Log.i(TAG, "backup '$title' → ${out.size} serveur(s) Moviebox")
+            out
         } catch (e: Exception) {
             Log.d(TAG, "getMovieboxSourcesByTmdbId($tmdbId) failed: ${e.message}")
             emptyList()
         }
     }
+
 
     suspend fun getMovieboxSourcesByTitle(
         title: String,
@@ -1335,7 +1290,10 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
                 else 0.0
                 var score = when {
                     sTitle == normalizedTarget -> 100
-                    targetWords.isNotEmpty() && sWords.containsAll(targetWords) && lenDiffPct <= 0.30 -> 90
+                    // 2026-07-03 (report correction backup) : direction SÛRE « tous les mots
+                    //   cherchés présents » → plus de bridage lenDiffPct (rejetait à tort les
+                    //   fiches décorées « … VF Complet Streaming »). L'année départage déjà.
+                    targetWords.isNotEmpty() && sWords.containsAll(targetWords) -> 90
                     sWords.isNotEmpty() && targetWords.containsAll(sWords) && lenDiffPct <= 0.30 -> 80
                     else -> 0
                 }

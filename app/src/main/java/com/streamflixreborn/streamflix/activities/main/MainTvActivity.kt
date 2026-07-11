@@ -551,16 +551,23 @@ class MainTvActivity : FragmentActivity() {
                 // Les boutons mini player (⛶ ⏸ ✕) sont maintenant en overlay
                 // dans le layout fragment, accessibles via D-pad.
                 R.id.livehub_refresh_menu -> {
-                    // 2026-06-19 (user "bouton refresh du home, ça efface les
-                    //   données du home pour ce genre de cas Wiflix") :
-                    //   refresh complet du home via HomeCacheStore clear +
-                    //   pour les providers à domaine dynamique (Wiflix etc.),
-                    //   clear aussi PROVIDER_URL pour forcer re-discovery via
-                    //   le portail au prochain initializeService().
+                    // 2026-07-04 (user "le bouton refresh doit vider tous les caches
+                    //   serveurs/résolution/extraction SAUF les préchauffes bypass CF") :
+                    //   ProviderCacheRefresh.refreshNonIptv purge :
+                    //     - CloudstreamProvider / MovixProvider / FrenchStreamProvider (caches serveur)
+                    //     - Extractor.clearAllCache() (URLs m3u8/mp4 résolues)
+                    //     - HomeCacheStore (home provider)
+                    //     - UserPreferences.clearProviderCache (données stockées)
+                    //   Ne touche PAS au warmUp WebJS ni au bypass CF (= préchauffes gardées).
+                    //   Pour les providers à domaine dynamique (Wiflix etc.), on clear aussi
+                    //   PROVIDER_URL pour forcer re-discovery via le portail.
                     try {
+                        // Purge globale NON-IPTV (tous les caches serveur + extraction + home)
+                        com.streamflixreborn.streamflix.utils.ProviderCacheRefresh
+                            .refreshNonIptv(this)
+                        // Re-discovery URL pour providers à domaine dynamique
                         com.streamflixreborn.streamflix.utils.UserPreferences
                             .currentProvider?.let { p ->
-                            com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(this, p)
                             if (p is com.streamflixreborn.streamflix.providers.ProviderConfigUrl) {
                                 try {
                                     com.streamflixreborn.streamflix.utils.UserPreferences
@@ -573,7 +580,7 @@ class MainTvActivity : FragmentActivity() {
                         }
                         com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
                             .notifyProviderChanged()
-                        android.widget.Toast.makeText(this, "Home rafraîchi", android.widget.Toast.LENGTH_SHORT).show()
+                        android.widget.Toast.makeText(this, "Caches purgés — Home rafraîchi", android.widget.Toast.LENGTH_SHORT).show()
                     } catch (_: Throwable) {}
                     return@setOnItemSelectedListener false
                 }
@@ -581,6 +588,8 @@ class MainTvActivity : FragmentActivity() {
                     showVavooTunnelPicker()
                     return@setOnItemSelectedListener false
                 }
+                // kill_app_menu retiré de la sidebar 2026-07-05 — déplacé sur
+                // fragment_providers_tv (btn_power_off à droite du cœur).
             }
             val handled = androidx.navigation.ui.NavigationUI.onNavDestinationSelected(menuItem, navController)
             val provider = UserPreferences.currentProvider
@@ -1299,7 +1308,7 @@ class MainTvActivity : FragmentActivity() {
         binding.navMain.menu.findItem(R.id.search)?.isVisible = true
         // Anime providers : titles/icons spécifiques (Films→Séries VOSTFR, etc.)
         val animeOnlyProviders = setOf(
-            "VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga",
+            "VoirDrama", "VoirAnime", "AnimeSama", "FrenchManga",
         )
         val isAnimeOnly = provider.name in animeOnlyProviders
         binding.navMain.menu.findItem(R.id.movies)?.apply {

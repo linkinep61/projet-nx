@@ -55,6 +55,11 @@ object OlaTvProvider : Provider, IptvProvider {
     private const val OLA_TV_SECRET = "MRZEREZIS"
     // The cid whose category_name = "2020" is the primary FR server (user-confirmed).
     private const val OLA_TV_PRIMARY_FR = "2020"
+    // 2026-07-06 : liste des cids VIVANTS pré-testée en amont (GitHub Actions nx-data,
+    //   probe handshake Stalker toutes les 4h). L'app filtre le scan Phase 3 dessus →
+    //   on ne teste plus ~1269 cids morts à chaque ouverture, seulement les vivants.
+    private const val OLA_LIVE_CIDS_URL =
+        "https://raw.githubusercontent.com/xdata-mix/nx-data/main/data/olatv/live-cids.json"
 
     // ───────── HTTP ─────────
 
@@ -108,6 +113,60 @@ object OlaTvProvider : Provider, IptvProvider {
     // cid → category_name (numeric tag)
     @Volatile private var olaTvServerMap: Map<String, String> = emptyMap()
 
+    // 2026-07-06 : cids FR VIVANTS classés par richesse (nx-data live-cids.json), TTL 6h.
+    //   ORDONNÉE (meilleurs cids FR en premier). Vide = pas de filtrage (fallback historique).
+    @Volatile private var olaLiveCids: List<String> = emptyList()
+    @Volatile private var liveCidsLoadedAt = 0L
+    private const val LIVE_CIDS_TTL = 6 * 60 * 60 * 1000L // 6h
+
+    /** Charge (cache TTL) la liste ORDONNÉE des cids FR classés par richesse (nx-data).
+     *  Liste vide si indisponible → le scan retombe sur son comportement complet (aléatoire). */
+    private fun loadLiveCids(): List<String> {
+        val now = System.currentTimeMillis()
+        if (olaLiveCids.isNotEmpty() && now - liveCidsLoadedAt < LIVE_CIDS_TTL) return olaLiveCids
+        try {
+            val req = Request.Builder().url(OLA_LIVE_CIDS_URL)
+                .header("User-Agent", USER_AGENT).build()
+            client.newCall(req).execute().use { resp ->
+                val body = resp.body?.string()
+                if (resp.isSuccessful && !body.isNullOrBlank()) {
+                    val arr = JSONObject(body).optJSONArray("cids")
+                    if (arr != null && arr.length() > 0) {
+                        val list = ArrayList<String>(arr.length())
+                        val seen = HashSet<String>()
+                        for (i in 0 until arr.length()) {
+                            val c = arr.optString(i).trim()
+                            if (c.isNotEmpty() && seen.add(c)) list.add(c)
+                        }
+                        if (list.isNotEmpty()) {
+                            olaLiveCids = list
+                            liveCidsLoadedAt = now
+                            Log.d(TAG, "loadLiveCids: ${list.size} cids FR classés chargés (nx-data)")
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "loadLiveCids KO (${e.message}) — scan sans filtre live-cids")
+        }
+        return olaLiveCids
+    }
+
+    /**
+     * 2026-07-07 (user « autant télécharger tous les CI au démarrage, ça évite que ça cherche
+     *   pour rien ») : précharge la liste des cids FR VALIDÉS (nx-data live-cids.json) AU BOOT.
+     *   1 seul fetch léger vers raw.githubusercontent, en fond (IO), hors main thread, SANS
+     *   WebView CF, SANS handshake portail, SANS toucher un autre provider → isolé (respecte
+     *   « les providers ne s'impactent pas »). Résultat : à la 1ʳᵉ ouverture d'OLA, la liste
+     *   validée est déjà en mémoire → Phase 3 ingère direct les bons cids, zéro scan à l'aveugle,
+     *   zéro attente du fetch. Ne construit PAS le registre au boot (ça reste à l'ouverture d'OLA).
+     */
+    fun prefetchLiveCidsAtBoot() {
+        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try { loadLiveCids() } catch (_: Throwable) {}
+        }
+    }
+
     // ───────── Phase 3: multi-cid background scan ─────────
     // FR cids confirmed to have FR channels. Includes the primary + any discovered via scan.
     private val frCids = java.util.concurrent.CopyOnWriteArrayList<String>()
@@ -132,7 +191,10 @@ object OlaTvProvider : Provider, IptvProvider {
     private const val RENEWAL_BATCH_SIZE = 24
 
     // Disk cache for the discovered FR cid list — 24h TTL
-    private const val FR_CIDS_CACHE_FILE = "olatv_fr_cids.json"
+    // 2026-07-07 : suffixe "_r2" bumpé pour INVALIDER l'ancien cache top-first (24h) → force
+    //   un scan frais dans le NOUVEL ordre inversé (cids du bas d'abord). Sinon le cache
+    //   masquerait le changement pendant 24h.
+    private const val FR_CIDS_CACHE_FILE = "olatv_fr_cids_r2.json"
 
     // 2026-06-15 (user "ola tv démarre lentement, élimine les serveurs DOWN") :
     //   ban-set persistant des CIDs morts (no FR genre OU 0 stream OU exception)
@@ -1178,6 +1240,51 @@ object OlaTvProvider : Provider, IptvProvider {
         }
     }
 
+    /** 2026-07-05 (user "rends la course plus stricte, sans risque") : plus fiable que
+     *  le HEAD — récupère les premiers octets et vérifie que la réponse est BIEN un flux
+     *  média, pas une page HTML 200 (fausse source, erreur/landing) qui passe le HEAD mais
+     *  fait échouer ExoPlayer (PARSING_CONTAINER_UNSUPPORTED) ~6s plus tard.
+     *
+     *  SÛR PAR CONSTRUCTION : ne renvoie false QUE si on est SÛR que c'est bidon (HTML) ou
+     *  mort (4xx/5xx/timeout). Tout cas ambigu/inconnu → true (jamais rétrograder un vrai
+     *  flux). Résultat utilisé uniquement pour l'ordre/pré-chauffe (jamais retirer un
+     *  serveur), donc zéro risque pour la lecture. Partagé mini + grand lecteur. */
+    private fun probeStreamPlayable(url: String): Boolean {
+        return try {
+            val req = Request.Builder().url(url)
+                .header("User-Agent", USER_AGENT)
+                .header("Range", "bytes=0-2047")
+                .get().build()
+            probeClientFast.newCall(req).execute().use { resp ->
+                // Mort réseau/HTTP dur → false (comme HEAD).
+                if (!resp.isSuccessful && resp.code !in 300..399) {
+                    Log.d(TAG, "probeGET FAIL (${resp.code}) ${url.take(80)}")
+                    return false
+                }
+                // Content-Type explicitement HTML → fausse source.
+                val ctype = (resp.header("Content-Type") ?: "").lowercase()
+                if (ctype.contains("text/html") || ctype.contains("application/xhtml")) {
+                    Log.d(TAG, "probeGET JUNK html-ctype ${url.take(80)}")
+                    return false
+                }
+                // Sniff des 1ers octets : si ça commence par du HTML → bidon.
+                val head = try { resp.peekBody(512L).string() } catch (_: Exception) { "" }
+                val lower = head.trimStart().lowercase()
+                if (lower.startsWith("<!doctype") || lower.startsWith("<html") ||
+                    lower.startsWith("<head") || (lower.startsWith("<") && lower.contains("<html"))) {
+                    Log.d(TAG, "probeGET JUNK html-body ${url.take(80)}")
+                    return false
+                }
+                // Tout le reste (m3u8 #EXTM3U, TS 0x47, mp4 ftyp, ou inconnu) → jouable.
+                Log.d(TAG, "probeGET OK ${url.take(80)}")
+                true
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "probeGET TIMEOUT ${url.take(80)} — ${e.message}")
+            false
+        }
+    }
+
     private fun getMacCredentials(cid: String): MacCredentials? {
         macCredsCache[cid]?.let { return it }
         try {
@@ -1741,12 +1848,27 @@ object OlaTvProvider : Provider, IptvProvider {
             //   il en reste 20-30 vraiment à tester.
             loadBannedCids()
             val bannedBefore = olaBannedCids.size
-            val candidates = olaTvServerMap.keys
-                .filter { it != primaryCid && it !in olaBannedCids }
-                .shuffled()
-                .take(PHASE3_MAX_CANDIDATES)
+            // 2026-07-06 : cids FR classés par richesse (nx-data). On prend les MEILLEURS
+            //   d'abord (ordre du fichier), au lieu du hasard. Fallback historique (aléatoire)
+            //   si la liste est indisponible.
+            // 2026-07-07 (user « inverse l'ordre des CI, c'est tout le temps ceux du BAS qui
+            //   fonctionnent ») : live-cids est classé par RICHESSE (nb de chaînes FR), pas par
+            //   fiabilité, et le scan s'arrête à PHASE3_MAX_FR_CIDS=15 → seuls les 15 cids du HAUT
+            //   étaient ingérés, jamais ceux du bas (qui, eux, lisent réellement). On INVERSE :
+            //   on essaie les cids du bas d'abord → ils entrent dans les 15 ingérés.
+            val live = loadLiveCids().reversed()
+            val usingLive = live.isNotEmpty()
+            val candidates = if (usingLive) {
+                live.filter { it != primaryCid && it !in olaBannedCids && it in olaTvServerMap.keys }
+                    .take(PHASE3_MAX_CANDIDATES)
+            } else {
+                olaTvServerMap.keys
+                    .filter { it != primaryCid && it !in olaBannedCids }
+                    .shuffled()
+                    .take(PHASE3_MAX_CANDIDATES)
+            }
             Log.d(TAG, "Phase 3 fresh scan: probing ${candidates.size} candidate cids " +
-                    "(skipped $bannedBefore previously DOWN)…")
+                    "(skipped $bannedBefore DOWN, live-cids=${if (live.isEmpty()) "off" else "${live.size} classés"})…")
 
             val foundCids = java.util.concurrent.CopyOnWriteArrayList<String>()
             foundCids.add(primaryCid)
@@ -1760,7 +1882,12 @@ object OlaTvProvider : Provider, IptvProvider {
                         try {
                             if (foundCids.size >= PHASE3_MAX_FR_CIDS) return@async
                             // 1) Test rapide "a-t-il un genre FR ?" — si non, ban.
-                            if (!cidHasFrenchGenre(cid)) {
+                            // 2026-07-07 (user « n'ingérer QUE les cids validés, éviter de chercher
+                            //   pour rien ») : les cids de live-cids sont DÉJÀ validés FR par le CI
+                            //   nx-data (fr_counts>0) → on SAUTE le probe cidHasFrenchGenre
+                            //   (handshake + get_genres) redondant et on ingère direct. Économise un
+                            //   aller-retour portail par cid → Phase 3 nettement plus rapide.
+                            if (!usingLive && !cidHasFrenchGenre(cid)) {
                                 newlyBanned.add(cid)
                                 return@async
                             }
@@ -2373,29 +2500,63 @@ object OlaTvProvider : Provider, IptvProvider {
             // CRITICAL: clear the replay buffer so a new subscriber (e.g. MiniPlayerController
             // switching from TF1 to France 2) doesn't receive stale servers from the previous channel.
             _additionalServers.resetReplayCache()
-            // 2026-05-09 : pre-warm parallèle des top 3 servers — résout les URLs en
-            // background pour qu'elles soient en cache quand l'user clique. Saute le
-            // handshake/create_link au moment du play → instant play sur les top 3.
+            // 2026-07-05 (user "reste coincé sur le 1er serveur ; il faut tester les cid
+            //   PENDANT la lecture pour lire vite") : COURSE DE VIVACITÉ PARALLÈLE
+            //   (profil Équilibré). Avant, on ne PRÉ-RÉSOLVAIT que 3 URLs sans jamais
+            //   vérifier qu'elles streament réellement → le lecteur pouvait rester bloqué
+            //   sur un serveur qui répond mais n'envoie aucune image. Maintenant on prend
+            //   les 8 premiers cid et EN PARALLÈLE (Semaphore 6) : on RÉSOUT (create_link
+            //   si portail MAC) PUIS on PROBE HEAD la vivacité réelle.
+            //     • vivant → resolvedUrlCache (instant-play) + probeOkCache (known-good,
+            //       remonte en tête au prochain tri) + retiré de demotedUrls.
+            //     • mort   → demotedUrls → le getVideo de CE variant échouera VITE
+            //       (rejet immédiat) et le lecteur sautera au variant suivant au lieu de
+            //       bufferiser 45s sur un flux muet.
+            //   SKIP allégé si Cast actif (évite de saturer le handshake Chromecast).
             scope.launch(Dispatchers.IO) {
-                streamsSnapshot.take(3).forEach { stream ->
+                val castBusy = try {
+                    com.streamflixreborn.streamflix.utils.CastHelper.isCastingOrPending(
+                        com.streamflixreborn.streamflix.StreamFlixApp.instance)
+                } catch (_: Throwable) { false }
+                val probeCount = if (castBusy) 3 else 8
+                val liveSem = kotlinx.coroutines.sync.Semaphore(if (castBusy) 3 else 6)
+                streamsSnapshot.take(probeCount).forEach { stream ->
                     launch {
+                        liveSem.acquire()
                         try {
-                            val creds = getMacCredentials(stream.cid) ?: return@launch
                             val rawCmd = stream.url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
-                            // Skip si URL directe ou déjà en cache résolu
-                            if (rawCmd.startsWith("http") && !rawCmd.contains("localhost") &&
-                                !rawCmd.contains("127.0.0.1")) return@launch
                             val cacheKey = "${stream.cid}::${stream.url}"
-                            val cachedTs = resolvedUrlTs[cacheKey] ?: 0L
-                            if (resolvedUrlCache.containsKey(cacheKey) &&
-                                (System.currentTimeMillis() - cachedTs) < RESOLVED_URL_TTL_MS) return@launch
-                            val resolved = resolveStreamCmd(creds.baseUrl, creds.mac, stream.url)
-                            if (resolved != null) {
-                                resolvedUrlCache[cacheKey] = resolved
-                                resolvedUrlTs[cacheKey] = System.currentTimeMillis()
-                                Log.d(TAG, "  pre-warmed cid=${stream.cid} ${stream.label}")
+                            val isDirect = rawCmd.startsWith("http") &&
+                                !rawCmd.contains("localhost") && !rawCmd.contains("127.0.0.1")
+                            val resolved: String? = when {
+                                isDirect -> rawCmd
+                                resolvedUrlCache.containsKey(cacheKey) &&
+                                    (System.currentTimeMillis() - (resolvedUrlTs[cacheKey] ?: 0L)) < RESOLVED_URL_TTL_MS ->
+                                    resolvedUrlCache[cacheKey]
+                                else -> {
+                                    val creds = getMacCredentials(stream.cid) ?: return@launch
+                                    resolveStreamCmd(creds.baseUrl, creds.mac, stream.url)
+                                }
                             }
-                        } catch (_: Exception) {}
+                            if (resolved.isNullOrBlank()) return@launch
+                            // Vivacité RÉELLE + anti-faux-vivant : GET partiel qui écarte
+                            // les réponses 200-mais-HTML (fausses sources injouables).
+                            if (probeStreamPlayable(resolved)) {
+                                if (!isDirect) {
+                                    resolvedUrlCache[cacheKey] = resolved
+                                    resolvedUrlTs[cacheKey] = System.currentTimeMillis()
+                                }
+                                probeOkCache.add(resolved)
+                                demotedUrls.remove(resolved)
+                                Log.d(TAG, "  live-race OK cid=${stream.cid} ${stream.label}")
+                            } else {
+                                demotedUrls.add(resolved)
+                                Log.d(TAG, "  live-race DEAD cid=${stream.cid} ${stream.label}")
+                            }
+                        } catch (_: Exception) {
+                        } finally {
+                            liveSem.release()
+                        }
                     }
                 }
             }

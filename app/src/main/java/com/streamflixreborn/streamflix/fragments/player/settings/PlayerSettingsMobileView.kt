@@ -568,6 +568,8 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                             binding.ivSettingFavorite.imageTintList = android.content.res.ColorStateList.valueOf(
                                 if (nowFav) 0xFFFF4444.toInt() else 0xFF808080.toInt()
                             )
+                            // 2026-07-08 : déclenche le re-tri complet (favoris en tête)
+                            settingsView.onServerFavoriteToggled?.invoke(item)
                             settingsView.refreshServerList()
                         }
                     } else {

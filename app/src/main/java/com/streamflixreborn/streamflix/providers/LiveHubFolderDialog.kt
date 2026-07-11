@@ -507,6 +507,15 @@ object LiveHubFolderDialog {
                     // + agrégation (iptv-org + nos playlists, dédup, par langue).
                     val agg = LiveTvHubProvider.fetchMusiqueCategoriesPublic()
                     val cats = existing + agg
+                    // 2026-07-05 (user "chaînes du même dossier = IPTV au lieu de
+                    //   musique") : persister les chaînes agrégées dans folderContents
+                    //   sous une clé dédiée, pour que folderSiblingsOf() les retrouve
+                    //   quand le player demande les frères du dossier courant.
+                    //   La clé "__musique_agg" n'est PAS touchée par
+                    //   groupSectionsIntoFolders (= pas effacée au refresh getHome).
+                    if (agg.isNotEmpty()) {
+                        LiveTvHubProvider.folderContents["__musique_agg"] = agg
+                    }
                     withContext(Dispatchers.Main) {
                         if (cats.isEmpty()) {
                             android.widget.Toast.makeText(
@@ -526,34 +535,31 @@ object LiveHubFolderDialog {
             }
             return
         }
-        // 2026-06-29 (REPAIR — re-appliqué) : Stream4Free — M3U dédié (stream4free://).
-        if (folderKey == "stream4") {
-            android.widget.Toast.makeText(
-                ctx, "Chargement de $folderName…", android.widget.Toast.LENGTH_SHORT
-            ).show()
+        // 2026-07-10 (user "nouveau dossier séparé CF") : Stream4Free CF (test) — scrape live + CF.
+        if (folderKey == "stream4cf") {
+            android.widget.Toast.makeText(ctx, "Chargement de $folderName…", android.widget.Toast.LENGTH_SHORT).show()
             val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
             scope.launch {
                 try {
-                    val cats = LiveTvHubProvider.fetchStream4CategoriesPublic()
+                    val cats = LiveTvHubProvider.fetchStream4CfCategoriesLive()
                     withContext(Dispatchers.Main) {
                         if (cats.isEmpty()) {
-                            android.widget.Toast.makeText(
-                                ctx, "Stream4Free indisponible — réessaie", android.widget.Toast.LENGTH_LONG
-                            ).show()
+                            android.widget.Toast.makeText(ctx, "Stream4Free CF indisponible (CF ?) — réessaie", android.widget.Toast.LENGTH_LONG).show()
                         } else {
                             displayCategories(ctx, folderName, cats, onChannelSelected)
                         }
                     }
                 } catch (t: Throwable) {
                     withContext(Dispatchers.Main) {
-                        android.widget.Toast.makeText(
-                            ctx, "Erreur Stream4Free : ${t.message}", android.widget.Toast.LENGTH_LONG
-                        ).show()
+                        android.widget.Toast.makeText(ctx, "Erreur Stream4Free CF : ${t.message}", android.widget.Toast.LENGTH_LONG).show()
                     }
                 }
             }
             return
         }
+        // 2026-07-10 (user "supprime la version de base") : ancienne branche Stream4Free `stream4`
+        //   (résolveur OkHttp + git) RETIRÉE. Stream4Free = maintenant la clé `stream4cf` (version CF).
+        // 2026-07-10 (user "supprime LumiChat partout") : branche lazy-fetch LumiChat RETIRÉE.
         // 2026-06-24 : FAST channels — lazy fetch from data-fast.m3u
         if (folderKey in FAST_FOLDER_KEYS) {
             android.widget.Toast.makeText(
@@ -594,12 +600,12 @@ object LiveHubFolderDialog {
         }
         // 2026-06-20 (user "au clic ça devrait déclencher le refresh de cette
         //   playlist en question / chargement de la playlist puis ça affiche") :
-        //   pour OTF / Adrar vides au clic, force un fetch frais et affiche le
+        //   pour OTF vide au clic, force un fetch frais et affiche le
         //   contenu après plutôt qu'un toast "vide" décevant.
         // 2026-06-20 (user "avant on avait un filtre qui permettait de changer
         //   les langues, il faudrait un truc pour changer de langue") :
         //   pour OTF, on affiche d'abord un picker de langue/groupe.
-        if (folderKey == "otf" || folderKey == "adrar") {
+        if (folderKey == "otf") {
             android.widget.Toast.makeText(
                 ctx, "Chargement de la playlist $folderName…",
                 android.widget.Toast.LENGTH_SHORT
@@ -607,24 +613,7 @@ object LiveHubFolderDialog {
             val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
             scope.launch {
                 try {
-                    if (folderKey == "otf") {
-                        showOtfWithGroupPicker(ctx, folderName, onChannelSelected)
-                    } else {
-                        val sections = fetchAdrarSections()
-                        if (sections.isNotEmpty()) {
-                            LiveTvHubProvider.folderContents[folderKey] = sections
-                        }
-                        withContext(Dispatchers.Main) {
-                            if (sections.isEmpty()) {
-                                android.widget.Toast.makeText(
-                                    ctx, "Playlist $folderName indisponible — réessaie dans 1 minute",
-                                    android.widget.Toast.LENGTH_LONG
-                                ).show()
-                            } else {
-                                displayCategories(ctx, folderName, sections, onChannelSelected)
-                            }
-                        }
-                    }
+                    showOtfWithGroupPicker(ctx, folderName, onChannelSelected)
                 } catch (t: Throwable) {
                     withContext(Dispatchers.Main) {
                         android.widget.Toast.makeText(
@@ -899,30 +888,6 @@ object LiveHubFolderDialog {
         }
         if (shows.isEmpty()) return emptyList()
         return listOf(Category(name = "OTF TV - $groupName", list = shows))
-    }
-
-    /** 2026-06-20 : fetch Adrar on-demand (tous les groupes). */
-    private suspend fun fetchAdrarSections(): List<com.streamflixreborn.streamflix.models.Category> {
-        val svc = com.streamflixreborn.streamflix.utils.AdrarTvService
-        val channels = try {
-            kotlinx.coroutines.withTimeoutOrNull(15_000L) { svc.fetchChannels() } ?: emptyList()
-        } catch (_: Throwable) { emptyList() }
-        if (channels.isEmpty()) return emptyList()
-        val groups = channels.map { it.group }.filter { it.isNotBlank() }.distinct()
-        return groups.mapNotNull { g ->
-            val shows = channels.filter { it.group == g }.mapNotNull { ch ->
-                val id = "livehub::adar::${svc.keyOf(ch)}"
-                if (com.streamflixreborn.streamflix.fragments.player.settings
-                        .IptvBannedChannels.isBanned(id)) return@mapNotNull null
-                com.streamflixreborn.streamflix.models.TvShow(id = id, title = ch.name).apply {
-                    providerName = "TV Hub"
-                    poster = ch.logo
-                    banner = ch.logo
-                }
-            }
-            if (shows.isEmpty()) null else
-                com.streamflixreborn.streamflix.models.Category(name = "Adrar TV - $g", list = shows)
-        }
     }
 
     private val REPLAY_FOLDER_KEYS = setOf(
@@ -1348,7 +1313,10 @@ object LiveHubFolderDialog {
             displayCategories(ctx, "Séries", series, onChannelSelected)
         })
         if (folders.isEmpty()) { displayCategories(ctx, folderName, allCats, onChannelSelected); return }
-        showSimpleFolderList(ctx, folderName, folders)
+        // 2026-07-04 (user "quand on va dans Stream4Free on pourrait verrouiller
+        //   un film ou une série ou un Live") : passe le parentFolderKey pour
+        //   activer le contrôle parental sur chaque sous-dossier (long-press).
+        showSimpleFolderList(ctx, folderName, folders, parentFolderKey = "folder:stream4")
     }
 
     /** 2026-06-27 : dossier Pluto unique en 3 sous-dossiers (📡 Chaînes / 🎬 Films /
@@ -1375,14 +1343,22 @@ object LiveHubFolderDialog {
             displayCategories(ctx, "Séries", series, onChannelSelected)
         })
         if (folders.isEmpty()) { displayCategories(ctx, folderName, allCats, onChannelSelected); return }
-        showSimpleFolderList(ctx, folderName, folders)
+        // 2026-07-04 : idem que Stream4 — active le contrôle parental sur les
+        //   sous-dossiers Pluto (Chaînes en direct / Films / Séries).
+        showSimpleFolderList(ctx, folderName, folders, parentFolderKey = "folder:pluto_tv")
     }
 
-    /** Petit dialog liste-de-dossiers réutilisable (titre + liste + RETOUR). */
+    /** Petit dialog liste-de-dossiers réutilisable (titre + liste + RETOUR).
+     *
+     *  2026-07-04 (user "quand on va dans Stream4Free on pourrait verrouiller
+     *  un film ou une série ou un Live") : `parentFolderKey` optionnel — si
+     *  fourni, active le contrôle parental sur chaque sous-dossier (long-press
+     *  → PIN dialog, gate au click). Si null → comportement legacy (pas de verrou). */
     private fun showSimpleFolderList(
         ctx: Context,
         folderName: String,
         folders: List<Pair<String, () -> Unit>>,
+        parentFolderKey: String? = null,
     ) {
         val dp = ctx.resources.displayMetrics.density
         val isTV = ctx.resources.configuration.uiMode and
@@ -1393,7 +1369,69 @@ object LiveHubFolderDialog {
         )
         val listView = android.widget.ListView(ctx).apply {
             this.adapter = adapter
-            setOnItemClickListener { _, _, idx, _ -> folders[idx].second.invoke() }
+            setOnItemClickListener { _, _, idx, _ ->
+                val (label, action) = folders[idx]
+                // 2026-07-04 : gate contrôle parental sur les sous-dossiers.
+                //   Si le sous-dossier est verrouillé ET pas débloqué session
+                //   → PIN dialog (unlock 30 min) puis lance l'action.
+                if (parentFolderKey != null) {
+                    val subKey = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                        .subFolderKey(parentFolderKey, label)
+                    if (!com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                            .isAccessible(ctx, subKey)) {
+                        com.streamflixreborn.streamflix.ui.PinDialog.showAuth(
+                            context = ctx,
+                            title = "🔒 $label — Code parental",
+                            onSuccess = {
+                                com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                                    .unlockForSession(subKey)
+                                action.invoke()
+                            },
+                            onCancel = null,
+                        )
+                        return@setOnItemClickListener
+                    }
+                    // Refresh timestamp (30 min glissantes) puis exécute l'action.
+                    com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                        .touchSessionUnlock(subKey)
+                }
+                action.invoke()
+            }
+            // 2026-07-04 : long-press sur un sous-dossier → menu contrôle parental
+            //   (verrouiller/déverrouiller par PIN). Feature disponible SEULEMENT
+            //   si parentFolderKey a été fourni par le caller.
+            if (parentFolderKey != null) {
+                setOnItemLongClickListener { _, _, idx, _ ->
+                    val label = folders[idx].first
+                    val subKey = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                        .subFolderKey(parentFolderKey, label)
+                    val wasLocked = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                        .isLocked(ctx, subKey)
+                    val option = if (wasLocked) "🔓 Retirer le contrôle parental"
+                                 else "🔒 Contrôle parental (verrouiller)"
+                    androidx.appcompat.app.AlertDialog.Builder(ctx)
+                        .setTitle(label)
+                        .setItems(arrayOf(option)) { _, _ ->
+                            val title = if (wasLocked) "Retirer le contrôle parental"
+                                        else "Activer le contrôle parental"
+                            com.streamflixreborn.streamflix.ui.PinDialog.showAuth(
+                                context = ctx,
+                                title = title,
+                                onSuccess = {
+                                    val nowLocked = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                                        .toggleLock(ctx, subKey)
+                                    val msg = if (nowLocked) "🔒 $label verrouillé"
+                                              else "🔓 $label déverrouillé"
+                                    android.widget.Toast.makeText(ctx, msg,
+                                        android.widget.Toast.LENGTH_SHORT).show()
+                                },
+                                onCancel = null,
+                            )
+                        }
+                        .show()
+                    true
+                }
+            }
         }
         val titleLabel = android.widget.TextView(ctx).apply {
             text = "📁 $folderName"
@@ -1766,7 +1804,6 @@ object LiveHubFolderDialog {
         //   Liste texte = UNIQUEMENT pour les chaînes IPTV (= pas de jaquettes).
         val isIptvChannel = channels.any {
             it.id.startsWith("livehub::otf::") ||
-            it.id.startsWith("livehub::adar::") ||
             it.id.startsWith("livehub::witv::") ||
             it.id.startsWith("livehub::sport::") ||
             it.id.startsWith("livehub::vegeta::")
@@ -1940,6 +1977,15 @@ object LiveHubFolderDialog {
         channels: List<TvShow>,
         onChannelSelected: (TvShow) -> Unit,
     ) {
+        // 2026-07-05 (user "chaînes du même dossier affiche des IPTV au lieu du
+        //   dossier") : persiste les chaînes de la grille dans folderContents
+        //   pour que getOrderedChannelIds → folderSiblingsOf retrouve les frères
+        //   du dossier courant. La clé "__grid_active" est écrasée à chaque
+        //   ouverture de grille = toujours les chaînes de la dernière grille vue.
+        //   N'est PAS touchée par groupSectionsIntoFolders (clé interne __).
+        LiveTvHubProvider.folderContents["__grid_active"] = listOf(
+            Category(name = category.name, list = channels)
+        )
         val MPC = com.streamflixreborn.streamflix.utils.MiniPlayerController
         val dp = ctx.resources.displayMetrics.density
         val isTV = ctx.resources.configuration.uiMode and
@@ -2034,9 +2080,31 @@ object LiveHubFolderDialog {
                     android.text.Html.fromHtml(ch.title,
                         android.text.Html.FROM_HTML_MODE_LEGACY).toString().trim()
                 } catch (_: Throwable) { ch.title }
-                tvTitle.text = if (isCurrent) "▶ $decodedTitle" else decodedTitle
+                // 2026-07-05 (user "le favori a bien fonctionné mais il n'apparaît
+                //   pas sur l'interface") : indicateur ★ sur les chaînes favorites.
+                //   Même logique que le long-press : replay + dynamique (segments
+                //   imbriqués) → ReplayFavoritesStore ; curé simple → IptvFavoritesStore.
+                val chIsDynamic = ch.id.startsWith("livehub::") &&
+                    !ch.id.startsWith("livehub::replay::") &&
+                    !ch.id.startsWith("livehub::folder::") &&
+                    ch.id.removePrefix("livehub::").contains("::")
+                val isFavHere = when {
+                    ch.id.startsWith("livehub::replay::") || chIsDynamic ->
+                        com.streamflixreborn.streamflix.utils.ReplayFavoritesStore.isFavorite(ch.id)
+                    ch.id.startsWith("livehub::") ->
+                        com.streamflixreborn.streamflix.utils.IptvFavoritesStore
+                            .isFavorite(ch.providerName ?: "TV Hub", ch.id)
+                    else -> false
+                }
+                val prefix = when {
+                    isCurrent -> "▶ "
+                    isFavHere -> "★ "
+                    else -> ""
+                }
+                tvTitle.text = "$prefix$decodedTitle"
                 tvTitle.setTextColor(
                     if (isCurrent) android.graphics.Color.parseColor("#FF4CAF50")
+                    else if (isFavHere) android.graphics.Color.parseColor("#FFFFD700")
                     else android.graphics.Color.WHITE
                 )
                 val posterUrl = ch.poster
@@ -2085,16 +2153,55 @@ object LiveHubFolderDialog {
             //   accepte aussi, et on PERSISTE leur URL (id = hash non
             //   reconstructible) pour qu'elles restent jouables depuis les Cœurs.
             val isReplay = ch.id.startsWith("livehub::replay::")
-            val isFast = ch.id.startsWith("livehub::fast::")
-            if (isReplay || isFast) {
+            // 2026-07-05 (user "90 Is Good ne se met pas en favori") :
+            //   DYNAMIQUE = tout livehub:: avec segments imbriqués
+            //   (livehub::fast::*, livehub::dric4rtv::*, livehub::otf::*,
+            //   livehub::adar::*, livehub::francetv::*, etc.). Ces chaînes
+            //   ne sont PAS dans la liste HubChannel → IptvFavoritesStore
+            //   ne peut pas les retrouver. On les route vers
+            //   ReplayFavoritesStore (= "Favoris Replay" sur le home).
+            //   CURÉ = livehub::<clé_simple> sans :: imbriqué (TF1, MTV…)
+            //   → dans la liste HubChannel → IptvFavoritesStore OK.
+            val isDynamic = !isReplay && ch.id.startsWith("livehub::") &&
+                !ch.id.startsWith("livehub::folder::") &&
+                ch.id.removePrefix("livehub::").contains("::")
+            val isCurated = ch.id.startsWith("livehub::") &&
+                !isReplay && !isDynamic && !ch.id.startsWith("livehub::folder::")
+            if (isReplay || isDynamic) {
                 val store = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore
                 val nowFav = store.toggle(
                     id = ch.id, title = ch.title,
                     poster = ch.poster, banner = ch.banner,
-                    isMovie = ch.isMovie || isFast,
+                    isMovie = ch.isMovie || isDynamic,
                 )
-                if (isFast && nowFav) LiveTvHubProvider.persistFastFavorite(ch.id)
+                if (isDynamic && nowFav) LiveTvHubProvider.persistFastFavorite(ch.id)
+                // 2026-07-05 : invalider le cache mémoire du home pour que le
+                //   favori apparaisse dans "Favoris Replay" au retour.
+                LiveTvHubProvider.clearHomeCache()
                 val msg = if (nowFav) "★ ${ch.title} ajouté aux favoris"
+                          else "☆ ${ch.title} retiré des favoris"
+                android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show()
+                gridAdapter.notifyDataSetChanged()
+                true
+            } else if (isCurated) {
+                // 2026-07-05 (user "dans le dossier musique, appui long ne met pas
+                //   en favori") : les chaînes curées (MTV, MCM, M6 Music…) utilisent
+                //   IptvFavoritesStore (= ★ channel-fav), pas ReplayFavoritesStore.
+                val provName = ch.providerName ?: "TV Hub"
+                val wasFav = com.streamflixreborn.streamflix.utils.IptvFavoritesStore
+                    .isFavorite(provName, ch.id)
+                com.streamflixreborn.streamflix.utils.IptvFavoritesStore
+                    .toggle(provName, ch.id)
+                // 2026-07-05 : invalider AUSSI le cache mémoire du provider pour
+                //   que le favori apparaisse dans "Favoris" (cœur) au retour.
+                LiveTvHubProvider.clearHomeCache()
+                try {
+                    val current = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+                    if (current != null) {
+                        com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(ctx, current)
+                    }
+                } catch (_: Throwable) {}
+                val msg = if (!wasFav) "★ ${ch.title} ajouté aux favoris"
                           else "☆ ${ch.title} retiré des favoris"
                 android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show()
                 gridAdapter.notifyDataSetChanged()

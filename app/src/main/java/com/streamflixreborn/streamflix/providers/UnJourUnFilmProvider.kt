@@ -20,6 +20,8 @@ import com.streamflixreborn.streamflix.models.Video
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.jsoup.nodes.Document
@@ -44,7 +46,7 @@ import retrofit2.http.FormUrlEncoded
 import retrofit2.http.POST
 import android.util.Base64
 
-object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
+object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, ProgressiveServersProvider {
     override val name = "1Jour1Film"
 
     const val USER_AGENT = NetworkClient.USER_AGENT
@@ -959,8 +961,13 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
 
         val apivoirfilm = ApiVoirFilmExtractor()
         val onregadeou = OnRegardeOuExtractor()
-        var apiUrl = ""
-        var onregardeUrl = ""
+        // 2026-07-01 (user "4 serveurs sur le site, 3 dans l'app") : ces URLs étaient
+        //   de simples variables + un `if/else if` en fin → si le film avait À LA FOIS
+        //   un serveur ApiVoirFilm ET un OnRegardeOu, un seul était gardé (l'autre
+        //   jeté) ; et 2 serveurs du même type → seul le dernier survivait. Passées en
+        //   LISTES → on étend TOUS les serveurs spéciaux, aucun n'est perdu.
+        val apiUrls = mutableListOf<String>()
+        val onregardeUrls = mutableListOf<String>()
 
         val servers = mutableListOf<Video.Server>()
 
@@ -992,16 +999,27 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                                 for (i in 0 until epServers.length()) {
                                     val srv = epServers.getJSONObject(i)
                                     val label = srv.optString("label", "")
-                                    val url = srv.optString("url", "")
+                                    // 2026-07-01 : décodage base64 (cf boucle film) → routage onregardeou correct.
+                                    // ⚠ FIX : dans j1fEpsData (épisodes de série) le champ URL
+                                    //   s'appelle "u" (base64), PAS "url" (qui, lui, est le champ
+                                    //   des FILMS dans J1F_SRV). Sans ça → url vide → tous les
+                                    //   serveurs d'épisodes ignorés → « aucune source » (ex From).
+                                    val url = srv.optString("u", "").ifBlank { srv.optString("url", "") }.let { raw ->
+                                        if (raw.startsWith("http", true)) raw
+                                        else try {
+                                            val d = String(android.util.Base64.decode(raw.trim(), android.util.Base64.DEFAULT))
+                                            if (d.startsWith("http", true)) d else raw
+                                        } catch (_: Exception) { raw }
+                                    }
                                     val flags = srv.optString("flags", "")
 
                                     if (url.isNotEmpty() && !ignoreSource("", url)) {
                                         val flagPrefix = if (flags.isNotEmpty()) "$flags " else ""
 
                                         if (url.startsWith(apivoirfilm.mainUrl)) {
-                                            apiUrl = url
+                                            apiUrls.add(url)
                                         } else if (url.startsWith(onregadeou.mainUrl)) {
-                                            onregardeUrl = url
+                                            onregardeUrls.add(url)
                                         } else {
                                             val serviceName = Extractor.identifyServiceName(url)
                                             val displayName = if (serviceName != null) {
@@ -1025,12 +1043,8 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 }
 
                 // Return early with season-based results
-                val other = if (apiUrl.isNotEmpty())
-                    apivoirfilm.expand(apiUrl, baseUrl, "FR ")
-                else if (onregardeUrl.isNotEmpty())
-                    onregadeou.expand(onregardeUrl, baseUrl, "FR ")
-                else
-                    emptyList()
+                val other = apiUrls.flatMap { apivoirfilm.expand(it, baseUrl, "FR ") } +
+                    onregardeUrls.flatMap { onregadeou.expand(it, baseUrl, "FR ") }
 
                 return sortServersByLanguage(servers + other)
             }
@@ -1061,13 +1075,24 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                 for (i in 0 until jsonArray.length()) {
                     val serverObj = jsonArray.getJSONObject(i)
                     val label = serverObj.optString("label", "")
-                    val url = serverObj.optString("url", "")
+                    // 2026-07-01 : les URLs J1F_SRV arrivent en BASE64 (ex "aHR0…" =
+                    //   onregardeou.site/...). On DÉCODE ici, sinon le test
+                    //   `startsWith(onregadeou.mainUrl)` échouait → le serveur VF HD ++
+                    //   tombait en "serveur normal" et expand() (qui expose les 4
+                    //   mirrors internes) n'était JAMAIS appelé.
+                    val url = serverObj.optString("url", "").let { raw ->
+                        if (raw.startsWith("http", true)) raw
+                        else try {
+                            val d = String(android.util.Base64.decode(raw.trim(), android.util.Base64.DEFAULT))
+                            if (d.startsWith("http", true)) d else raw
+                        } catch (_: Exception) { raw }
+                    }
 
                     if (url.isNotEmpty() && !ignoreSource("", url)) {
                         if (url.startsWith(apivoirfilm.mainUrl)) {
-                            apiUrl = url
+                            apiUrls.add(url)
                         } else if (url.startsWith(onregadeou.mainUrl)) {
-                            onregardeUrl = url
+                            onregardeUrls.add(url)
                         } else {
                             val serviceName = Extractor.identifyServiceName(url)
                             val displayName = if (serviceName != null) {
@@ -1091,7 +1116,7 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         }
 
         // Legacy DooPlay AJAX fallback (post-ID probe, max 10 requests)
-        if (servers.isEmpty() && apiUrl.isEmpty() && onregardeUrl.isEmpty()) {
+        if (servers.isEmpty() && apiUrls.isEmpty() && onregardeUrls.isEmpty()) {
             // Extract WordPress post ID from body/article class (e.g. "postid-12345")
             // without re-serializing the DOM via document.html().
             val bodyClasses = document.body().className() + " " +
@@ -1124,9 +1149,9 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
                     if (ignoreSource("", embedUrl)) continue
 
                     if (embedUrl.startsWith(apivoirfilm.mainUrl)) {
-                        apiUrl = embedUrl
+                        apiUrls.add(embedUrl)
                     } else if (embedUrl.startsWith(onregadeou.mainUrl)) {
-                        onregardeUrl = embedUrl
+                        onregardeUrls.add(embedUrl)
                     } else {
                         val serviceName = Extractor.identifyServiceName(embedUrl)
                         servers.add(Video.Server(
@@ -1139,12 +1164,8 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             }
         }
 
-        val other = if (apiUrl.isNotEmpty())
-            apivoirfilm.expand(apiUrl, baseUrl, "FR ")
-        else if (onregardeUrl.isNotEmpty())
-            onregadeou.expand(onregardeUrl, baseUrl, "FR ")
-        else
-            emptyList()
+        val other = apiUrls.flatMap { apivoirfilm.expand(it, baseUrl, "FR ") } +
+            onregardeUrls.flatMap { onregadeou.expand(it, baseUrl, "FR ") }
 
         return sortServersByLanguage(servers + other)
     }
@@ -1191,7 +1212,28 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
         })
     }
 
+    // 2026-07-02 : BackupRegistry central — 1Jour1Film n'avait AUCUN backup. On ajoute
+    //   les backups en PROGRESSIF (le natif d'abord, puis le registre au fil de l'eau) →
+    //   toujours du contenu même si le natif 1jour1film échoue. Zéro doublon (dédup registre).
+    override fun getServersProgressive(id: String, videoType: Video.Type): kotlinx.coroutines.flow.Flow<List<Video.Server>> =
+        kotlinx.coroutines.flow.channelFlow {
+            // 1) Serveurs NATIFS 1Jour1Film (émis en premier).
+            launch {
+                try {
+                    val native = getServers(id, videoType)
+                    if (native.isNotEmpty()) trySend(native)
+                } catch (e: Exception) {
+                    android.util.Log.w("UnJourUnFilm", "native getServers: ${e.message}")
+                }
+            }
+            // 2026-07-02 (refonte v2) : les backups arrivent via le REGISTRE central
+            //   (PlayerViewModel.launchCentralRegistry) pour TOUS les providers. Ici on
+            //   n'émet QUE le natif 1Jour1Film.
+            awaitClose { }
+        }
+
     override suspend fun getVideo(server: Video.Server): Video {
+        // (Hook BackupRegistry retiré : registre non réintégré pour l'instant.)
         return Extractor.extract(server.src)
     }
 
