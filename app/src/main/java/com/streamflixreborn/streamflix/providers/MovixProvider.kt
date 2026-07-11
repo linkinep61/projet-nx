@@ -790,7 +790,8 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         val backdrop_path: String?,
         val release_date: String?,
         val vote_average: Double?,
-        val overview: String?
+        val overview: String?,
+        val genre_ids: List<Int>? = null
     )
 
     data class TmdbTvListItem(
@@ -800,7 +801,8 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         val backdrop_path: String?,
         val first_air_date: String?,
         val vote_average: Double?,
-        val overview: String?
+        val overview: String?,
+        val genre_ids: List<Int>? = null
     )
 
     data class TmdbTrendingItem(
@@ -813,7 +815,15 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         val release_date: String?,
         val first_air_date: String?,
         val vote_average: Double?,
-        val overview: String?
+        val overview: String?,
+        val genre_ids: List<Int>? = null
+    )
+
+    // 2026-07-11 — collections TMDB (« Les sagas incontournables » sur movix.chat)
+    data class TmdbCollectionResult(
+        val id: Int,
+        val name: String?,
+        val parts: List<TmdbMovieListItem>?
     )
 
     // ==================== INITIALIZATION ====================
@@ -937,107 +947,183 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         val categories = mutableListOf<Category>()
 
         try {
-            // Featured - trending
+            // 2026-07-11 (user « prends la copie EXACTE du home de movix.chat » +
+            //   « l'interface se renouvelle n'importe comment à chaque refresh, enlève ça ») :
+            //   home = RÉPLIQUE FIDÈLE de movix.chat, DÉTERMINISTE (aucune page random),
+            //   SANS filtre langue (movix.chat n'en met pas → mêmes jaquettes). Ordre + requêtes
+            //   TMDB identiques : Tendances jour → Tendances semaine → Sagas incontournables
+            //   (collections) → Films populaires → Séries récentes → Films récents → genres.
+            // Filtre catalogue (bouton « Filtrer le catalogue »). null = Monde → réplique
+            //   EXACTE movix.chat (aucun param langue). Sinon on filtre les rangées discover.
+            val langFilter = movixCatalogOriginalLanguage()
+            // 2026-07-11 (user « enlève dessins animés / manga, on a déjà des providers anime »):
+            //   on exclut le genre TMDB Animation (16) partout SAUF dans les Sagas (respectées).
+            //   Côté discover = param serveur without_genres ; côté trending/populaires = filtre
+            //   client sur genre_ids.
+            val ANIM_GENRE = 16
+            fun notAnim(ids: List<Int>?): Boolean = ids?.contains(ANIM_GENRE) != true
+            fun mv(item: TmdbMovieListItem) = Movie(
+                id = item.id.toString(),
+                title = item.title ?: "",
+                poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
+                banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
+                rating = item.vote_average,
+                overview = item.overview,
+                released = item.release_date,
+            )
+            fun tv(item: TmdbTvListItem) = TvShow(
+                id = item.id.toString(),
+                title = item.name ?: "",
+                poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
+                banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
+                rating = item.vote_average,
+                overview = item.overview,
+                released = item.first_air_date,
+            )
+
+            // Featured (hero) = trending du jour
             val trending = tmdbService.getTrending(apiKey = TMDB_API_KEY)
-            val featuredItems = trending.results?.take(10)?.mapNotNull { item ->
-                when (item.media_type) {
-                    "movie" -> Movie(
-                        id = item.id.toString(),
-                        title = item.title ?: item.name ?: "",
-                        poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
-                        banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
-                        rating = item.vote_average,
-                        overview = item.overview,
-                        released = item.release_date
-                    )
-                    "tv" -> TvShow(
-                        id = item.id.toString(),
-                        title = item.name ?: item.title ?: "",
-                        poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
-                        banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
-                        rating = item.vote_average,
-                        overview = item.overview,
-                        released = item.first_air_date
-                    )
-                    else -> null
-                }
-            } ?: emptyList()
-            if (featuredItems.isNotEmpty()) {
-                categories.add(Category(name = Category.FEATURED, list = featuredItems))
-            }
-
-            // 2026-06-13 (user "le home Movix ne se met pas à jour, j'ai
-            //   l'impression de voir tout le temps la même chose") : pages
-            //   TMDB randomisées entre 1 et 5 pour chaque section. Cache 5 min,
-            //   donc à chaque expiration on voit des titres différents.
-            val pagePopularTv = (1..5).random()
-            val pageTopTv = (1..5).random()
-            val pagePopularMovies = (1..5).random()
-            val pageTopMovies = (1..5).random()
-
-            // Séries récentes en premier
-            val popularTv = tmdbService.discoverTvShows(apiKey = TMDB_API_KEY, page = pagePopularTv, sortBy = "popularity.desc", withOriginalLanguage = movixCatalogOriginalLanguage())
-            val tvItems = popularTv.results?.map { item ->
-                TvShow(
+            fun trendItem(item: TmdbTrendingItem): AppAdapter.Item? = when (item.media_type) {
+                "movie" -> Movie(
                     id = item.id.toString(),
-                    title = item.name ?: "",
+                    title = item.title ?: item.name ?: "",
                     poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
                     banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
-                    rating = item.vote_average,
-                    released = item.first_air_date
+                    rating = item.vote_average, overview = item.overview, released = item.release_date,
                 )
-            } ?: emptyList()
-            if (tvItems.isNotEmpty()) {
-                categories.add(Category(name = "Séries populaires", list = tvItems))
-            }
-
-            // Top rated TV
-            val topTv = tmdbService.discoverTvShows(apiKey = TMDB_API_KEY, page = pageTopTv, sortBy = "vote_average.desc", withOriginalLanguage = movixCatalogOriginalLanguage(), voteCountGte = 200)
-            val topTvItems = topTv.results?.map { item ->
-                TvShow(
+                "tv" -> TvShow(
                     id = item.id.toString(),
-                    title = item.name ?: "",
+                    title = item.name ?: item.title ?: "",
                     poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
                     banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
-                    rating = item.vote_average,
-                    released = item.first_air_date
+                    rating = item.vote_average, overview = item.overview, released = item.first_air_date,
                 )
-            } ?: emptyList()
-            if (topTvItems.isNotEmpty()) {
-                categories.add(Category(name = "Séries les mieux notées", list = topTvItems))
+                else -> null
+            }
+            // IMPORTANT : FEATURED (carrousel) et « Tendances du jour » doivent utiliser des
+            //   INSTANCES DISTINCTES. itemType est un champ mutable par instance ; si on partage
+            //   les mêmes objets, la boucle du fragment écrase le type « swiper » (match_parent)
+            //   du carrousel par « mobile » → crash ViewPager2 « Pages must fill... match_parent ».
+            val trendingRaw = trending.results?.filter { notAnim(it.genre_ids) } ?: emptyList()
+            val featuredList = trendingRaw.take(10).mapNotNull { trendItem(it) }
+            val tendancesJour = trendingRaw.mapNotNull { trendItem(it) }
+            if (featuredList.isNotEmpty()) {
+                categories.add(Category(name = Category.FEATURED, list = featuredList))
+                categories.add(Category(name = "Tendances du jour", list = tendancesJour))
             }
 
-            // Puis les films
-            val popularMovies = tmdbService.discoverMovies(apiKey = TMDB_API_KEY, page = pagePopularMovies, sortBy = "popularity.desc", withOriginalLanguage = movixCatalogOriginalLanguage())
-            val movieItems = popularMovies.results?.map { item ->
-                Movie(
-                    id = item.id.toString(),
-                    title = item.title ?: "",
-                    poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
-                    banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
-                    rating = item.vote_average,
-                    released = item.release_date
-                )
-            } ?: emptyList()
-            if (movieItems.isNotEmpty()) {
-                categories.add(Category(name = "Films populaires", list = movieItems))
+            // Tendances (semaine)
+            runCatching {
+                val week = tmdbService.getTrendingWeek(apiKey = TMDB_API_KEY)
+                val weekItems = week.results?.filter { notAnim(it.genre_ids) }
+                    ?.mapNotNull { trendItem(it) } ?: emptyList()
+                if (weekItems.isNotEmpty()) categories.add(Category(name = "Tendances", list = weekItems))
             }
 
-            // Top rated movies
-            val topMovies = tmdbService.discoverMovies(apiKey = TMDB_API_KEY, page = pageTopMovies, sortBy = "vote_average.desc", withOriginalLanguage = movixCatalogOriginalLanguage(), voteCountGte = 200)
-            val topMovieItems = topMovies.results?.map { item ->
-                Movie(
-                    id = item.id.toString(),
-                    title = item.title ?: "",
-                    poster = item.poster_path?.let { "$TMDB_IMG_W500$it" },
-                    banner = item.backdrop_path?.let { "$TMDB_IMG_ORIGINAL$it" },
-                    rating = item.vote_average,
-                    released = item.release_date
-                )
-            } ?: emptyList()
-            if (topMovieItems.isNotEmpty()) {
-                categories.add(Category(name = "Films les mieux notés", list = topMovieItems))
+            // Les sagas incontournables (collections TMDB — franchises = quasi toujours dispo)
+            val sagas = listOf(
+                "Star Wars" to 10, "Harry Potter" to 1241, "Le Seigneur des Anneaux" to 119,
+                "Avengers" to 86311, "Spider-Man" to 556, "Fast & Furious" to 9485,
+                "Matrix" to 2344, "Alien" to 8091, "X-Men" to 748,
+                "Iron Man" to 131292, "Thor" to 131296, "Captain America" to 131295,
+                "Le Hobbit" to 121938, "Pirates des Caraïbes" to 295,
+                "Mission: Impossible" to 87359, "Die Hard" to 1570,
+                "Terminator" to 528, "L'Arme Fatale" to 945,
+            )
+            // UNE seule rangée « Les sagas incontournables » = films des franchises
+            //   (2-3 par saga, ordre des sagas), dédup. Cartes films natives (posters
+            //   portrait) → s'affichent parfaitement. (La carte-collection cliquable
+            //   facon site = évolution UI dédiée à venir.)
+            val sagaFilms = coroutineScope {
+                sagas.map { (_, sId) ->
+                    async {
+                        runCatching {
+                            tmdbService.getCollection(id = sId, apiKey = TMDB_API_KEY).parts
+                                ?.filter { !it.poster_path.isNullOrBlank() && !it.title.isNullOrBlank() }
+                                ?.sortedByDescending { it.vote_average ?: 0.0 }
+                                ?.take(3)
+                                ?.map { mv(it) }
+                                ?: emptyList()
+                        }.getOrNull().orEmpty()
+                    }
+                }.awaitAll()
             }
+            val sagaRow = sagaFilms.flatten().distinctBy { it.id }
+            if (sagaRow.isNotEmpty()) {
+                categories.add(Category(name = "Les sagas incontournables", list = sagaRow))
+            }
+
+            // Films populaires (2 pages pour garder ~20 items après filtre anime)
+            runCatching {
+                val p1 = tmdbService.getPopularMovies(apiKey = TMDB_API_KEY, page = 1).results ?: emptyList()
+                val p2 = runCatching { tmdbService.getPopularMovies(apiKey = TMDB_API_KEY, page = 2).results }.getOrNull() ?: emptyList()
+                val items = (p1 + p2).filter { notAnim(it.genre_ids) }.distinctBy { it.id }.take(20).map { mv(it) }
+                if (items.isNotEmpty()) categories.add(Category(name = "Films populaires", list = items))
+            }
+
+            // Fenêtre « récents » : 18 derniers mois, déterministe (borne = aujourd'hui)
+            val dateFmt = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+            val todayStr = dateFmt.format(java.util.Date())
+            val sinceStr = dateFmt.format(java.util.Calendar.getInstance().apply {
+                add(java.util.Calendar.MONTH, -18)
+            }.time)
+
+            // Séries récentes
+            runCatching {
+                val rec = tmdbService.discoverTvShows(
+                    apiKey = TMDB_API_KEY, page = 1, sortBy = "first_air_date.desc",
+                    voteCountGte = 30, firstAirDateGte = sinceStr, firstAirDateLte = todayStr,
+                    withOriginalLanguage = langFilter, withoutGenres = "16",
+                )
+                val items = rec.results?.map { tv(it) } ?: emptyList()
+                if (items.isNotEmpty()) categories.add(Category(name = "Séries récentes", list = items))
+            }
+
+            // Films récents
+            runCatching {
+                val rec = tmdbService.discoverMovies(
+                    apiKey = TMDB_API_KEY, page = 1, sortBy = "primary_release_date.desc",
+                    voteCountGte = 30, primaryReleaseDateGte = sinceStr, primaryReleaseDateLte = todayStr,
+                    withOriginalLanguage = langFilter, withoutGenres = "16",
+                )
+                val items = rec.results?.mapNotNull { m -> m.title?.takeIf { it.isNotBlank() }?.let { mv(m) } } ?: emptyList()
+                if (items.isNotEmpty()) categories.add(Category(name = "Films récents", list = items))
+            }
+
+            // Rangées par genre — discover/movie?with_genres=X&sort_by=popularity.desc&page=1
+            //   ordre movix.chat, PAGE 1 déterministe. langFilter = null (Monde) → jaquettes
+            //   identiques à movix.chat ; sinon filtrées par la langue choisie au bouton.
+            val genreRows = listOf(
+                "Aventure" to "12", "Fantastique" to "14", "Drame" to "18",
+                "Action" to "28", "Comédie" to "35", "Thriller" to "53", "Crime" to "80",
+                "Science-Fiction" to "878", "Horreur" to "27",
+            )
+            val genreCats = coroutineScope {
+                genreRows.map { (gName, gId) ->
+                    async {
+                        runCatching {
+                            // 2 pages → après la dédup inter-genres il reste ~15-20 items/rangée
+                            val r1 = tmdbService.discoverMovies(
+                                apiKey = TMDB_API_KEY, page = 1,
+                                sortBy = "popularity.desc", withGenres = gId,
+                                withOriginalLanguage = langFilter, withoutGenres = "16",
+                            ).results ?: emptyList()
+                            val r2 = runCatching {
+                                tmdbService.discoverMovies(
+                                    apiKey = TMDB_API_KEY, page = 2,
+                                    sortBy = "popularity.desc", withGenres = gId,
+                                    withOriginalLanguage = langFilter, withoutGenres = "16",
+                                ).results
+                            }.getOrNull() ?: emptyList()
+                            val items = (r1 + r2).distinctBy { it.id }.mapNotNull { item ->
+                                item.title?.takeIf { it.isNotBlank() }?.let { mv(item) }
+                            }
+                            if (items.isNotEmpty()) Category(name = gName, list = items) else null
+                        }.getOrNull()
+                    }
+                }.awaitAll().filterNotNull()
+            }
+            categories.addAll(genreCats)
 
         } catch (e: kotlinx.coroutines.CancellationException) {
             // 2026-05-12 : ne PAS swallow CancellationException — sinon HomeViewModel
@@ -1047,6 +1133,34 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             throw e
         } catch (e: Exception) {
             Log.e("MovixProvider", "Error loading home: ${e.message}")
+        }
+
+        // 2026-07-11 (user « respecte les endpoints du site » + « pas de doublons ») :
+        //   dédup UNIQUEMENT entre rangées de GENRES (évite le même blockbuster dans
+        //   Action+Aventure+SF). Les rangées signature (Tendances jour/semaine, Populaires,
+        //   Sagas, Récents) restent INTACTES = contenu exact des endpoints movix.chat
+        //   (le site ne déduplique pas ses rangées trending → on les recopie fidèlement).
+        run {
+            val genreRowNames = setOf(
+                "Aventure", "Fantastique", "Animation", "Drame", "Action",
+                "Comédie", "Thriller", "Crime", "Science-Fiction", "Horreur",
+            )
+            val seen = HashSet<String>()
+            val deduped = mutableListOf<Category>()
+            for (cat in categories) {
+                if (cat.name !in genreRowNames) { deduped.add(cat); continue }
+                val kept = cat.list.filter { item ->
+                    val key = when (item) {
+                        is com.streamflixreborn.streamflix.models.Movie -> "m:${item.id}"
+                        is com.streamflixreborn.streamflix.models.TvShow -> "s:${item.id}"
+                        else -> return@filter true
+                    }
+                    seen.add(key)
+                }
+                if (kept.isNotEmpty()) deduped.add(cat.copy(list = kept.take(20)))
+            }
+            categories.clear()
+            categories.addAll(deduped)
         }
 
         // 2026-05-09 : pousser les films marqués "présumés vides" en bas
@@ -1066,23 +1180,9 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             cat.copy(list = healthSorted)
         }
 
-        // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films
-        return sortedByHealth.sortedWith(compareBy { cat ->
-            val n = cat.name.lowercase()
-            val isRecent = n.contains("récen") || n.contains("nouveau") || n.contains("nouvelle") || n.contains("derni") || n.contains("ajouté")
-            val isSeries = n.contains("séri") || n.contains("seri") || n.contains("saison") || n.contains("tv")
-            val isFilm = n.contains("film") || n.contains("movie") || n.contains("cinéma")
-            when {
-                cat.name == Category.FEATURED -> 0
-                n.contains("épisode") || n.contains("episode") -> 1
-                isRecent && isSeries -> 2
-                isRecent && isFilm -> 3
-                isSeries -> 4
-                isFilm -> 5
-                isRecent -> 1
-                else -> 6
-            }
-        })
+        // 2026-07-11 : ordre d'insertion PRÉSERVÉ = réplique exacte de movix.chat
+        //   (FEATURED déjà en tête). Plus de re-tri par nom (cassait l'ordre du site).
+        return sortedByHealth
     }
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
@@ -3342,6 +3442,19 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
             @Query("language") language: String = "fr-FR"
         ): TmdbPageResult<TmdbTrendingItem>
 
+        @GET("trending/all/week")
+        suspend fun getTrendingWeek(
+            @Query("api_key") apiKey: String,
+            @Query("language") language: String = "fr-FR"
+        ): TmdbPageResult<TmdbTrendingItem>
+
+        @GET("collection/{id}")
+        suspend fun getCollection(
+            @Path("id") id: Int,
+            @Query("api_key") apiKey: String,
+            @Query("language") language: String = "fr-FR"
+        ): TmdbCollectionResult
+
         @GET("movie/popular")
         suspend fun getPopularMovies(
             @Query("api_key") apiKey: String,
@@ -3380,6 +3493,9 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
             @Query("with_origin_country") withOriginCountry: String? = null,
             @Query("with_original_language") withOriginalLanguage: String? = null,
             @Query("vote_count.gte") voteCountGte: Int? = null,
+            @Query("primary_release_date.gte") primaryReleaseDateGte: String? = null,
+            @Query("primary_release_date.lte") primaryReleaseDateLte: String? = null,
+            @Query("without_genres") withoutGenres: String? = null,
             @Query("include_adult") includeAdult: Boolean = false
         ): TmdbPageResult<TmdbMovieListItem>
 
@@ -3393,6 +3509,9 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
             @Query("with_origin_country") withOriginCountry: String? = null,
             @Query("with_original_language") withOriginalLanguage: String? = null,
             @Query("vote_count.gte") voteCountGte: Int? = null,
+            @Query("first_air_date.gte") firstAirDateGte: String? = null,
+            @Query("first_air_date.lte") firstAirDateLte: String? = null,
+            @Query("without_genres") withoutGenres: String? = null,
             @Query("include_adult") includeAdult: Boolean = false
         ): TmdbPageResult<TmdbTvListItem>
 

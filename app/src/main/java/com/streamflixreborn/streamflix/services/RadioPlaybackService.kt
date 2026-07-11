@@ -101,6 +101,20 @@ class RadioPlaybackService : Service() {
         super.onDestroy()
     }
 
+    /**
+     * 2026-07-11 (user "quand on ferme l'application la radio ne se quitte pas") :
+     * appelé quand le user swipe l'app depuis les récents. Sans cet override,
+     * le foreground service survit à la fermeture de l'app et l'audio continue
+     * indéfiniment. On stoppe le player + le service.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.d(TAG, "onTaskRemoved — stopping radio")
+        try { MiniPlayerController.stopAsync() } catch (_: Throwable) {}
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
     private fun ensureChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val mgr = getSystemService(NotificationManager::class.java) ?: return

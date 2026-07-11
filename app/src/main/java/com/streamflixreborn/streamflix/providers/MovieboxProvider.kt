@@ -1167,24 +1167,44 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
             //   des vrais flux (CDN hakunaymatata + cookies CloudFront). Matching STRICT : rien
             //   plutôt qu'un mauvais film.
             val isMovie = videoType is Video.Type.Movie
-            val (title, year) = when (videoType) {
+            // 2026-07-11 (user « MovieBox trouve les séries mais 0 serveur ») : aoneroom indexe
+            //   souvent les séries (dramas coréens, anime…) sous un AUTRE nom que le titre fr TMDB
+            //   (ex. Navillera → « Navillera - Like a Butterfly » / « 나빌레라 »). Avant on ne cherchait
+            //   qu'avec le titre fr → findSubjectId=null → 0 serveur. Maintenant on récupère TOUS les
+            //   titres (fr + original + alternative_titles) et on essaie chacun jusqu'à un match.
+            val titles = linkedSetOf<String>()
+            val year: Int?
+            when (videoType) {
                 is Video.Type.Movie -> {
-                    val det = com.streamflixreborn.streamflix.utils.TMDb3.Movies
-                        .details(movieId = tmdbId, language = "fr-FR")
-                    (det.title.takeIf { it.isNotBlank() } ?: det.originalTitle) to
-                        det.releaseDate?.take(4)?.toIntOrNull()
+                    val det = com.streamflixreborn.streamflix.utils.TMDb3.Movies.details(
+                        movieId = tmdbId, language = "fr-FR",
+                        appendToResponse = listOf(com.streamflixreborn.streamflix.utils.TMDb3.Params.AppendToResponse.Movie.ALTERNATIVE_TITLES),
+                    )
+                    year = det.releaseDate?.take(4)?.toIntOrNull()
+                    det.title.takeIf { it.isNotBlank() }?.let { titles.add(it) }
+                    det.originalTitle.takeIf { it.isNotBlank() }?.let { titles.add(it) }
+                    det.alternativeTitles?.all()?.mapNotNull { it.title?.takeIf { t -> t.isNotBlank() } }?.forEach { titles.add(it) }
                 }
                 is Video.Type.Episode -> {
-                    val det = com.streamflixreborn.streamflix.utils.TMDb3.TvSeries
-                        .details(seriesId = tmdbId, language = "fr-FR")
-                    (det.name.takeIf { it.isNotBlank() } ?: det.originalName) to
-                        det.firstAirDate?.take(4)?.toIntOrNull()
+                    val det = com.streamflixreborn.streamflix.utils.TMDb3.TvSeries.details(
+                        seriesId = tmdbId, language = "fr-FR",
+                        appendToResponse = listOf(com.streamflixreborn.streamflix.utils.TMDb3.Params.AppendToResponse.Tv.ALTERNATIVE_TITLES),
+                    )
+                    year = det.firstAirDate?.take(4)?.toIntOrNull()
+                    det.name.takeIf { it.isNotBlank() }?.let { titles.add(it) }
+                    det.originalName.takeIf { it.isNotBlank() }?.let { titles.add(it) }
+                    det.alternativeTitles?.all()?.mapNotNull { it.title?.takeIf { t -> t.isNotBlank() } }?.forEach { titles.add(it) }
                 }
             }
-            if (title.isBlank()) return emptyList()
-            val searchSid = com.streamflixreborn.streamflix.utils.AoneroomClient
-                .findSubjectId(title, year, isMovie)
-            Log.i(TAG, "backup tmdbId=$tmdbId title='$title' year=$year isMovie=$isMovie → findSubjectId=$searchSid")
+            if (titles.isEmpty()) return emptyList()
+            var searchSid: String? = null
+            var matchedTitle: String? = null
+            for (t in titles) {
+                searchSid = com.streamflixreborn.streamflix.utils.AoneroomClient.findSubjectId(t, year, isMovie)
+                if (searchSid != null) { matchedTitle = t; break }
+            }
+            val title = matchedTitle ?: titles.first()
+            Log.i(TAG, "backup tmdbId=$tmdbId titles=${titles.size} year=$year isMovie=$isMovie → findSubjectId=$searchSid (via '${matchedTitle ?: "-"}')")
             if (searchSid == null) return emptyList()
             val (se, ep) = when (videoType) {
                 is Video.Type.Episode -> videoType.season.number to videoType.number

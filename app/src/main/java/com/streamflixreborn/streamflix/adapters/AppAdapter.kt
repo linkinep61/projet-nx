@@ -602,6 +602,23 @@ class AppAdapter(
     override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
         super.onViewRecycled(holder)
 
+        // 2026-07-11 FIX crash « Canvas: trying to use a recycled bitmap » (vu Xiaomi/Android 15,
+        //   RecyclerView → ImageView → TransitionDrawable) : au recyclage d'une vue, on ANNULE la
+        //   requête Glide de ses jaquettes → coupe le crossfade en cours qui, sinon, pouvait dessiner
+        //   un bitmap déjà recyclé pendant un scroll rapide. Ciblé UNIQUEMENT sur les ImageView de
+        //   jaquette (par id) → jamais les icônes. findViewById est null-safe (no-op si l'id est
+        //   absent du layout, ex. CategoryViewHolder). C'est la pratique recommandée par Glide et ça
+        //   n'ajoute aucune latence : au re-bind la jaquette recharge depuis le cache mémoire/disque.
+        intArrayOf(
+            com.streamflixreborn.streamflix.R.id.iv_movie_poster,
+            com.streamflixreborn.streamflix.R.id.iv_tv_show_poster,
+            com.streamflixreborn.streamflix.R.id.iv_people_image,
+        ).forEach { id ->
+            holder.itemView.findViewById<android.widget.ImageView>(id)?.let { iv ->
+                runCatching { com.bumptech.glide.Glide.with(iv).clear(iv) }
+            }
+        }
+
         states[holder.layoutPosition] = when (holder) {
             is CategoryViewHolder -> {
                 holder.cleanup() // cancel pending handlers & unregister swiper callbacks

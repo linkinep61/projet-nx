@@ -88,7 +88,15 @@ class MazQuestExtractor : Extractor() {
          *  n'ont pas de source. Gère elle-même la rediscovery si le backend
          *  primaire échoue. Retourne `true` si l'API renvoie au moins 1 link. */
         suspend fun checkAvailable(tmdbId: String, season: Int, episode: Int): Boolean {
-            val client = com.streamflixreborn.streamflix.utils.NetworkClient.default
+            // 2026-07-11 (user : maz.quest mettait ~10,6 s avant un 504 → HANGDUMP
+            //   getServers >12s). Client à timeouts COURTS (5 s/appel) + plafond
+            //   global 8 s → ne bloque plus la liste de serveurs. Aucun serveur
+            //   valide perdu : si maz.quest est lent, on l'abandonne juste plus vite.
+            val client = com.streamflixreborn.streamflix.utils.NetworkClient.default.newBuilder()
+                .connectTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                .callTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
 
             suspend fun probe(backendBase: String): Boolean? {
                 val ssPad = "%02d".format(season)
@@ -111,13 +119,15 @@ class MazQuestExtractor : Extractor() {
                 }
             }
 
-            // 1ère tentative sur le backend en cache
-            probe(currentBackend())?.let { return it }
+            return kotlinx.coroutines.withTimeoutOrNull(8000L) {
+                // 1ère tentative sur le backend en cache
+                probe(currentBackend())?.let { return@withTimeoutOrNull it }
 
-            // Échec → rediscover puis retry
-            val moved = rediscover()
-            if (!moved) return false
-            return probe(currentBackend()) ?: false
+                // Échec → rediscover puis retry
+                val moved = rediscover()
+                if (!moved) return@withTimeoutOrNull false
+                probe(currentBackend()) ?: false
+            } ?: false
         }
 
         /** Tente de redécouvrir le backend en parsant maintv.js des frontends
