@@ -1,7 +1,11 @@
 #EXTM3U
-#EXTINF:-1 tvg-id="witv-chaines-live-4-bein-sport-1-fr-html" tvg-logo="https://witv.football/images/logo/bein-sports-1-logo.png" group-title="Sports" tvg-country="FR",Bein Sport 1 - Fr
-lumichat://witv-chaines-live-4-bein-sport-1-fr-html
+#EXTINF:-1 tvg-id="beIN-SPORT-2&source=list4" tvg-logo="http://photo-tmdb.com/stalker_portal/misc/logos/320/532.png?63315" group-title="Sports" tvg-country="FR",beIN SPORT 2
+lumichat://beIN-SPORT-2&source=list4
 #EXTINF:-1 tvg-id="witv-chaines-live-6-bein-sport-2-fr-html" tvg-logo="https://witv.football/images/logo/bein-sports-2-logo.png" group-title="Sports" tvg-country="FR",Bein Sport 2 - Fr
 lumichat://witv-chaines-live-6-bein-sport-2-fr-html
-#EXTINF:-1 tvg-id="witv-chaines-live-7-bein-sport-3-fr-html" tvg-logo="https://witv.football/images/logo/bein-sports-3-logo.png" group-title="Sports" tvg-country="FR",Bein Sport 3 - Fr
-lumichat://witv-chaines-live-7-bein-sport-3-fr-html
+#EXTINF:-1 tvg-id="beIN-SPORTS-3-FR&source=list8" tvg-logo="http://photo-tmdb.com/stalker_portal/misc/logos/320/533.png?99752" group-title="Sports" tvg-country="FR",beIN SPORT 3 FR
+lumichat://beIN-SPORTS-3-FR&source=list8
+#EXTINF:-1 tvg-id="beIN-SPORTS-MAX-10-FR&source=list8" tvg-logo="http://photo-tmdb.com/stalker_portal/misc/logos/320/6371.png?92235" group-title="Sports" tvg-country="FR",beIN SPORT MAX 10 FR
+lumichat://beIN-SPORTS-MAX-10-FR&source=list8
+#EXTINF:-1 tvg-id="500" tvg-logo="http://photo-tmdb.com/stalker_portal/misc/logos/320/6371.png?92235" group-title="Sports" tvg-country="FR",beIN SPORT MAX 10 France
+lumichat://500
