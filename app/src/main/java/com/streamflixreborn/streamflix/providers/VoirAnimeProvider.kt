@@ -18,11 +18,15 @@ import com.streamflixreborn.streamflix.utils.NetworkClient
 import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.TMDb3.original
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import retrofit2.Retrofit
@@ -30,7 +34,7 @@ import retrofit2.http.GET
 import retrofit2.http.Query
 import retrofit2.http.Url
 
-object VoirAnimeProvider : Provider, ProviderConfigUrl {
+object VoirAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProvider {
 
     override val name = "VoirAnime"
 
@@ -605,60 +609,20 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
                 priority.entries.firstOrNull { host.contains(it.key) }?.value ?: 50
             }
 
-            // 2026-05-05/06 : Cloudstream + Moviebox backups pour les animes
-            // (gros catalogue d'anime VOSTFR/VF). Cloudstream renvoie null si
-            // pas de match strict → pas de source vide affichée.
-            val showTitle = document.selectFirst("h1.entry-title")?.text()?.trim()
-                ?.replace(Regex("""\s*VOSTFR|\s*VF$|\s*\(\d{4}\)""", RegexOption.IGNORE_CASE), "")
-                ?.trim()
-
-            val cloudstreamBackup = if (!showTitle.isNullOrBlank()) {
-                try {
-                    val csVideoType: Video.Type = when (videoType) {
-                        is Video.Type.Movie -> Video.Type.Movie(
-                            id = "0", title = showTitle, releaseDate = videoType.releaseDate,
-                            poster = videoType.poster, imdbId = videoType.imdbId,
-                        )
-                        is Video.Type.Episode -> Video.Type.Episode(
-                            id = "0", number = videoType.number, title = videoType.title,
-                            poster = videoType.poster, overview = videoType.overview,
-                            tvShow = videoType.tvShow.copy(id = "0", title = showTitle),
-                            season = videoType.season,
-                        )
-                    }
-                    CloudstreamProvider.getServers("0", csVideoType)
-                        .also { if (it.isNotEmpty()) Log.d("VoirAnimeProvider", "+ Cloudstream: ${it.size}") }
-                } catch (_: Exception) { emptyList() }
-            } else emptyList()
-
-            val movieboxBackup = if (!showTitle.isNullOrBlank()) {
-                try {
-                    val type = if (videoType is Video.Type.Movie) 1 else 2
-                    MovieboxProvider.getMovieboxSourcesByTitle(
-                        showTitle, null, type,
-                        seasonNumber = if (videoType is Video.Type.Episode) videoType.season.number else null,
-                        episodeNumber = if (videoType is Video.Type.Episode) videoType.number else null,
-                    )
-                        .also { if (it.isNotEmpty()) Log.d("VoirAnimeProvider", "+ Moviebox: ${it.size}") }
-                } catch (_: Exception) { emptyList() }
-            } else emptyList()
-
-            // Papadustream backup en dernier (captcha CF)
-            val papaBackup = if (!showTitle.isNullOrBlank() && videoType is Video.Type.Episode) {
-                try {
-                    PapadustreamProvider.getPapaSourcesByTitle(
-                        title = showTitle,
-                        seasonNum = videoType.season.number,
-                        episodeNum = videoType.number,
-                    ).also { if (it.isNotEmpty()) Log.d("VoirAnimeProvider", "+ Papa: ${it.size}") }
-                } catch (_: Exception) { emptyList() }
-            } else emptyList()
-
-            sorted + cloudstreamBackup + movieboxBackup + papaBackup
+            // 2026-07-04 : backups inline DÉSACTIVÉS → registre central (BackupRegistry.fetchAll
+            //   dans PlayerViewModel via ProgressiveServersProvider).
+            sorted
         } catch (e: Exception) {
             Log.e("VoirAnimeProvider", "getServers error: ", e)
             emptyList()
         }
+    }
+
+    override fun getServersProgressive(id: String, videoType: Video.Type): Flow<List<Video.Server>> = channelFlow {
+        try {
+            val servers = withContext(Dispatchers.IO) { getServers(id, videoType) }
+            if (servers.isNotEmpty()) send(servers)
+        } catch (e: Exception) { Log.w("VoirAnime", "progressive native KO: ${e.message}") }
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
@@ -810,7 +774,11 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
 
     private fun parseSearchResults(document: Document): List<AppAdapter.Item> {
         return document.select(".c-tabs-item__content").mapNotNull { item ->
-            val link = item.selectFirst(".post-title a, h3 a, h4 a, a[href*=/anime/]")
+            // 2026-07-09 : priorité au lien TITRE (.post-title a / h3 a) qui porte le texte.
+            //   L'ancien sélecteur unique matchait la VIGNETTE (a[href*=/anime/] = <a> avec <img>)
+            //   en premier (DOM order) → text()="" → null → 0 résultats de recherche.
+            val link = item.selectFirst(".post-title a, h3 a, h4 a")
+                ?: item.selectFirst("a[href*=/anime/]")
                 ?: return@mapNotNull null
 
             val href = link.attr("href").takeIf { it.isNotBlank() } ?: return@mapNotNull null
@@ -820,7 +788,15 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl {
                 ?: href.trimEnd('/').substringAfterLast("/").takeIf { it.isNotBlank() }
                 ?: return@mapNotNull null
 
-            val title = link.text().trim().takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            // 2026-07-09 : si le lien est la vignette (text vide), chercher le titre :
+            //   1. attribut title= du lien (la vignette a title="Chainsmoker Cat")
+            //   2. .post-title dans l'item parent
+            //   3. h3/h4 dans l'item parent
+            val title = link.text().trim().takeIf { it.isNotBlank() }
+                ?: link.attr("title").trim().takeIf { it.isNotBlank() }
+                ?: item.selectFirst(".post-title")?.text()?.trim()?.takeIf { it.isNotBlank() }
+                ?: item.selectFirst("h3, h4")?.text()?.trim()?.takeIf { it.isNotBlank() }
+                ?: return@mapNotNull null
 
             val img = item.selectFirst("img")
             val rawPoster = img?.let {

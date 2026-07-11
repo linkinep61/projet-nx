@@ -7,6 +7,7 @@ import com.streamflixreborn.streamflix.utils.DnsResolver
 import com.streamflixreborn.streamflix.utils.retry
 import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
+import java.util.concurrent.TimeUnit
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
@@ -147,6 +148,9 @@ class VidsrcToExtractor : Extractor() {
         companion object {
             val client = OkHttpClient.Builder()
                 .dns(DnsResolver.doh)
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(15, TimeUnit.SECONDS)
+                .callTimeout(30, TimeUnit.SECONDS)
                 .build()
             fun build(baseUrl: String): Service {
                 val retrofit = Retrofit.Builder()

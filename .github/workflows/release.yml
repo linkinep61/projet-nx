@@ -54,27 +54,8 @@ jobs:
           echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError" >> gradle.properties
           echo "org.gradle.daemon=false" >> gradle.properties
 
-      # --- Default build (all layouts) ---
-      - name: Build Default APK
-        run: ./gradlew assembleRelease --stacktrace
-
-      - name: Sign Default APK
-        id: sign_apk
-        uses: ilharp/sign-android-release@v2
-        with:
-          releaseDir: app/build/outputs/apk/release
-          signingKey: ${{ secrets.KEYSTORE }}
-          keyAlias: ${{ secrets.SIGNING_KEY_ALIAS }}
-          keystorePassword: ${{ secrets.SIGNING_STORE_PASSWORD }}
-          keyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
-          buildToolsVersion: "34.0.0"
-
-      - name: Rename Default APK
-        run: |
-          cp "${{ steps.sign_apk.outputs.signedFile }}" "onyx-${{ github.ref_name }}.apk"
-
-      # --- Mobile build ---
-      - name: Set Mobile version
+      # --- 1. Mobile build ---
+      - name: Set Mobile layout
         run: echo APP_LAYOUT=mobile >> local.properties
 
       - name: Build Mobile APK
@@ -95,8 +76,8 @@ jobs:
         run: |
           cp "${{ steps.sign_apk_mobile.outputs.signedFile }}" "onyx-${{ github.ref_name }}-mobile.apk"
 
-      # --- TV build ---
-      - name: Set TV version
+      # --- 2. TV build ---
+      - name: Set TV layout
         run: |
           sed -i '/APP_LAYOUT/d' local.properties
           echo APP_LAYOUT=tv >> local.properties
@@ -121,6 +102,33 @@ jobs:
       - name: Rename TV APK
         run: |
           cp "${{ steps.sign_apk_tv.outputs.signedFile }}" "onyx-${{ github.ref_name }}-tv.apk"
+
+      # --- 3. Universal build (mobile + TV) ---
+      - name: Set Default layout (both)
+        run: |
+          sed -i '/APP_LAYOUT/d' local.properties
+          echo APP_LAYOUT=default >> local.properties
+
+      - name: Clean before Universal build
+        run: ./gradlew clean
+
+      - name: Build Universal APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Sign Universal APK
+        id: sign_apk
+        uses: ilharp/sign-android-release@v2
+        with:
+          releaseDir: app/build/outputs/apk/release
+          signingKey: ${{ secrets.KEYSTORE }}
+          keyAlias: ${{ secrets.SIGNING_KEY_ALIAS }}
+          keystorePassword: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          keyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+          buildToolsVersion: "34.0.0"
+
+      - name: Rename Universal APK
+        run: |
+          cp "${{ steps.sign_apk.outputs.signedFile }}" "onyx-${{ github.ref_name }}.apk"
 
       # --- Upload all APKs to the existing release ---
       - name: Upload APKs to Release

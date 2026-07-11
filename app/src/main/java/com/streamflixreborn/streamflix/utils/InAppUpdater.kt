@@ -119,6 +119,7 @@ object InAppUpdater {
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.MINUTES)
         .writeTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(6, TimeUnit.MINUTES)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()

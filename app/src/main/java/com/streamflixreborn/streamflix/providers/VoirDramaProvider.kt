@@ -345,12 +345,18 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
             val scored = candidates.map { dc ->
                 val dcNorm = normalize(dc.title)
                 val dcWords = dcNorm.split(" ").filter { it.length >= 3 }.toSet()
+                // 2026-07-03 (report correction backup, user "je préfère pas de serveur que
+                //   le mauvais film") : SIGNAL TITRE obligatoire. Un mono-mot (« Alone » ⊂
+                //   « Alone Together ») ne valide plus : exact OU tous les mots cible présents
+                //   AVEC ≥2 mots. Année/saison seules ne suffisent pas → score forcé à 0.
+                val exact = dcNorm == targetNorm
+                val wordsCovered = targetWords.size >= 2 && dcWords.containsAll(targetWords)
                 var score = 0
-                if (dcNorm == targetNorm) score += 100
-                if (dcWords.containsAll(targetWords)) score += 50
+                if (exact) score += 100
+                if (wordsCovered) score += 50
                 if (year != null && dc.title.contains("($year)")) score += 30
                 if (seasonNumber != null && dcNorm.contains("season $seasonNumber")) score += 30
-                Scored(dc, score)
+                Scored(dc, if (exact || wordsCovered) score else 0)
             }.filter { it.score > 0 }
                 .sortedByDescending { it.score }
 
@@ -888,8 +894,10 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
                         fetchVdDramacoolEnrich(ctx).filter { it.src !in ctx.nativeSrcs }
                     } ?: emptyList()
                 } else emptyList()
-                val cloudstreamBackup = fetchVdCloudstreamBackup(ctx, videoType)
-                val movieboxBackup = fetchVdMovieboxBackup(ctx, videoType)
+                // 2026-07-04 : backups inline (Cloudstream/Moviebox) DÉSACTIVÉS → registre central.
+                val disabled = com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED
+                val cloudstreamBackup = if (disabled) emptyList() else fetchVdCloudstreamBackup(ctx, videoType)
+                val movieboxBackup = if (disabled) emptyList() else fetchVdMovieboxBackup(ctx, videoType)
                 native + cloudstreamBackup + dcUnique + movieboxBackup
             }
         } catch (e: Exception) {
@@ -1055,9 +1063,11 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
                 val (native, ctx) = fetchVoirDramaNative(id, videoType)
                 if (native.isNotEmpty()) send(native)
                 if (!ctx.showTitle.isNullOrBlank()) {
-                    launch { try { val cs = fetchVdCloudstreamBackup(ctx, videoType); if (cs.isNotEmpty()) send(cs) } catch (e: Exception) { Log.w("VoirDramaProvider", "Progressive CS: ${e.message}") } }
+                    // 2026-07-04 : CS/Moviebox inline DÉSACTIVÉS → registre central. DramaCool enrich conservé (spécifique VoirDrama).
+                    val disabled = com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED
+                    if (!disabled) launch { try { val cs = fetchVdCloudstreamBackup(ctx, videoType); if (cs.isNotEmpty()) send(cs) } catch (e: Exception) { Log.w("VoirDramaProvider", "Progressive CS: ${e.message}") } }
                     launch { try { val dc = fetchVdDramacoolEnrich(ctx).filter { it.src !in ctx.nativeSrcs }; if (dc.isNotEmpty()) send(dc) } catch (e: Exception) { Log.w("VoirDramaProvider", "Progressive DCenrich: ${e.message}") } }
-                    launch { try { val mb = fetchVdMovieboxBackup(ctx, videoType); if (mb.isNotEmpty()) send(mb) } catch (e: Exception) { Log.w("VoirDramaProvider", "Progressive MB: ${e.message}") } }
+                    if (!disabled) launch { try { val mb = fetchVdMovieboxBackup(ctx, videoType); if (mb.isNotEmpty()) send(mb) } catch (e: Exception) { Log.w("VoirDramaProvider", "Progressive MB: ${e.message}") } }
                 }
             } catch (e: Exception) { Log.w("VoirDramaProvider", "Progressive native failed: ${e.message}") }
         }
@@ -1344,10 +1354,18 @@ object VoirDramaProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
                 val itemTitle = triple.second
                 val itemYear = triple.third
                 val itemNorm = normalize(itemTitle)
+                // 2026-07-07 : matching durci — contains exige length guard
+                // (min ≥ max/2) pour éviter « Ko » ⊂ « Taekondo ». Titres ≤3 chars
+                // normalisés → exact only (score 100 uniquement).
+                val shorter = minOf(itemNorm.length, targetNorm.length)
+                val longer  = maxOf(itemNorm.length, targetNorm.length)
+                val lenOk   = shorter >= longer / 2
+                val shortExactOnly = targetNorm.length <= 3
                 var score = when {
                     itemNorm == targetNorm -> 100
-                    itemNorm.startsWith("$targetNorm ") || targetNorm.startsWith("$itemNorm ") -> 80
-                    itemNorm.contains(targetNorm) || targetNorm.contains(itemNorm) -> 50
+                    shortExactOnly -> 0
+                    lenOk && (itemNorm.startsWith("$targetNorm ") || targetNorm.startsWith("$itemNorm ")) -> 80
+                    lenOk && (itemNorm.contains(targetNorm) || targetNorm.contains(itemNorm)) -> 50
                     else -> 0
                 }
                 if (score == 0) return@mapNotNull null

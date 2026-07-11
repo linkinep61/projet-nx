@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-07-06 : splash animé (logo qui avance/recule) pendant que les
+     pré-chauffages (CF, challenge /tv/*, warms providers) démarrent en fond. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <ImageView
+        android:id="@+id/splash_logo"
+        android:layout_width="240dp"
+        android:layout_height="240dp"
+        android:layout_gravity="center"
+        android:contentDescription="@null"
+        android:src="@mipmap/ic_launcher_foreground" />
+
+</FrameLayout>

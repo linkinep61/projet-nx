@@ -77,6 +77,28 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
      *  "Séries Récentes" / "Films Récents" / etc. for the same row. */
     private var homeJob: kotlinx.coroutines.Job? = null
 
+    companion object {
+        // 2026-07-04 (user "comment ça se fait que le home continue à charger alors qu'on est
+        //   déjà dans une vidéo ? à partir du moment où on est dans une vidéo il n'y a plus lieu
+        //   de charger un home") : ref GLOBALE du job d'enrichissement home en cours. L'enrichis-
+        //   sement (≈150 appels TMDB + scraping genres via le moteur WebJs) tournait ENCORE en
+        //   fond pendant la lecture et VOLAIT les ressources (WebView/CPU/réseau) au scrape natif
+        //   des serveurs → sur la TV low-RAM le natif sortait en ~15s au lieu de 2s. Le player
+        //   appelle pauseEnrichmentForPlayback() au démarrage de la lecture → ressources libérées.
+        @Volatile private var activeEnrichmentJob: kotlinx.coroutines.Job? = null
+
+        /** Annule l'enrichissement home en cours (appelé quand on entre dans le player). */
+        fun pauseEnrichmentForPlayback() {
+            activeEnrichmentJob?.let {
+                if (it.isActive) {
+                    it.cancel()
+                    android.util.Log.i("HomeViewModel", "Enrichissement home ANNULÉ (entrée player) — libère les ressources pour le scrape natif")
+                }
+            }
+            activeEnrichmentJob = null
+        }
+    }
+
     @OptIn(ExperimentalCoroutinesApi::class)
     val state: Flow<State> = combine(
         _state,
@@ -87,14 +109,16 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                 if (cache != null && cache.continueWatchingMovies.isNotEmpty()) {
                     emit(cache.continueWatchingMovies.map { it.toMovie() })
                 } else {
-                    emitAll(database.movieDao().getWatchingMovies())
+                    // 2026-07-09 : .catch → évite le crash « connection pool has been closed »
+                    //   quand la DB est fermée (changement de provider) pendant que ce flow tourne.
+                    emitAll(database.movieDao().getWatchingMovies().catch { emit(emptyList()) })
                 }
             }.flowOn(Dispatchers.IO),
             _userDataCache.transformLatest { cache ->
                 if (cache != null && cache.continueWatchingEpisodes.isNotEmpty()) {
                     emit(cache.continueWatchingEpisodes.map { it.toEpisode() })
                 } else {
-                    emitAll(database.episodeDao().getWatchingEpisodes())
+                    emitAll(database.episodeDao().getWatchingEpisodes().catch { emit(emptyList()) })
                 }
             }.flowOn(Dispatchers.IO),
             _userDataCache.transformLatest { cache ->
@@ -430,6 +454,7 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
             try {
                 getHomeInternal()
             } finally {
+                if (activeEnrichmentJob === homeJob) activeEnrichmentJob = null
                 // Reset uniquement si on est encore le "currently loading"
                 // — sinon un autre call concurrent a déjà repris.
                 if (currentlyLoadingProvider == newProviderKey) {
@@ -437,6 +462,8 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                 }
             }
         }
+        // 2026-07-04 : expose le job d'enrichissement pour que le player puisse l'annuler.
+        activeEnrichmentJob = homeJob
     }
 
     private suspend fun getHomeInternal() {
@@ -541,8 +568,15 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
         //   se rechargent. Le cache est déjà affiché (stale-while-revalidate), donc
         //   c'est invisible. ⚠ Le bypass est en mode léger (retry=1) pour ne pas
         //   créer de rafale qui ferait throttler l'IP par Cloudflare.
-        val needsFreshCfBypass = provider.name.contains("Anime", ignoreCase = true) ||
-            provider.name.contains("Dessin", ignoreCase = true) ||
+        // 2026-07-04 (user "tu sors tu reviens tu te retapes une minute de chargement alors que
+        //   le bypass est déjà réchauffé, c'est un gros bug") : DessinAnime RETIRÉ de cette liste.
+        //   Il forçait un getHome() complet (bypass + rechargement home 378 Ko = ~11s) à CHAQUE
+        //   ouverture → jamais de SKIP cache → rechargement visible à chaque retour. Ses jaquettes
+        //   sont des images TMDB (zéro CF), donc pas besoin de re-bypasser pour elles ; et le
+        //   cf_clearance est déjà pré-chauffé au boot + gardé au chaud. Résultat : re-entrée =
+        //   SKIP network = cache instantané.
+        val needsFreshCfBypass = (provider.name.contains("Anime", ignoreCase = true) &&
+                !provider.name.contains("Dessin", ignoreCase = true)) ||
             provider.name.contains("Wiflix", ignoreCase = true) ||
             provider.name.contains("Franime", ignoreCase = true) ||
             provider.name.contains("Manga", ignoreCase = true)
@@ -570,31 +604,45 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
             val categories = provider.getHome().toMutableList()
             Log.d("HomeBoot", "[${provider.name}] getHome() END +${System.currentTimeMillis() - t0}ms (categories=${categories.size})")
 
-            // Emit base categories immediately so the UI appears fast.
-            // Enrichment (20 extra requests) runs AFTER this first display.
-            // Tolérer une baisse de 3 catégories max (suppressions volontaires, A/B test…).
-            // Ne bloquer que les résultats VRAIMENT partiels (perte >= 4 cats = probable erreur réseau).
+            // 2026-07-04 : garde-fou PROPORTIONNEL + minimum absolu.
+            //   L'ancien seuil fixe (- 3 cats) bloquait TOUT quand le scrape
+            //   revenait avec 11 cats au lieu de 19 (gap = 8 > 3).
+            //   Nouveau : on accepte le résultat frais si :
+            //     (a) pas de cache existant, OU
+            //     (b) ≥ 3 catégories fraîches (résultat pas totalement vide), OU
+            //     (c) fraîches ≥ 40% du cache (baisse proportionnelle tolérable).
+            //   Bloquer QUE les vrais échecs (0-2 cats = erreur réseau pure).
             val shouldWriteCache = cachedCategories.isNullOrEmpty()
-                || categories.size >= cachedCategories.size - 3
+                || categories.size >= 3
+                || categories.size >= (cachedCategories.size * 2) / 5
+            val providerSupport = Provider.Companion.providers[provider]
+            val shouldEnrich = providerSupport?.enrichHome ?: true
+            val cacheAlreadyShown = !cachedCategories.isNullOrEmpty()
+
             if (shouldWriteCache) {
                 HomeCacheStore.write(appContext, provider, categories)
             } else {
                 Log.w("HomeBoot", "[${provider.name}] partial result (${categories.size} cats) < cache (${cachedCategories.size}) — NOT overwriting cache")
             }
+            // 2026-07-04 : ne PAS re-émettre le getHome brut si le cache était déjà
+            //   affiché ET que l'enrichissement va suivre. Avant, cette émission
+            //   intermédiaire faisait disparaître les catégories enrichment du cache
+            //   (Films Récents, Séries Populaires…) puis l'enrichissement les ramenait
+            //   ~20s plus tard → flickering des jaquettes "apparaître/disparaître/réapparaître".
+            //   Le cache reste visible, l'enrichissement émettra le résultat final.
             // 2026-06-28 (user "le home perd ses catégories 4 → 2") : si le
             //   re-fetch est partiel ET qu'on avait un cache émis, on PRÉSERVE
-            //   l'état actuel pour éviter le flicker / la perte de catégories
-            //   au profit d'un résultat dégradé.
-            if (shouldWriteCache) {
+            //   l'état actuel pour éviter le flicker / la perte de catégories.
+            if (shouldWriteCache && (!cacheAlreadyShown || !shouldEnrich)) {
                 _state.emit(State.SuccessLoading(categories))
-            } else {
+            } else if (!shouldWriteCache) {
                 Log.w("HomeBoot", "[${provider.name}] SKIP emit du résultat partiel — état actuel préservé")
+            } else {
+                Log.d("HomeBoot", "[${provider.name}] SKIP intermediate emit (cache shown, enrichment pending)")
             }
 
             // Enrich carousels in the background — deferred so it doesn't
             // compete with player init or channel loading.
-            val providerSupport = Provider.Companion.providers[provider]
-            val shouldEnrich = providerSupport?.enrichHome ?: true
             if (shouldEnrich) try {
                 // Short delay so the initial home screen renders first,
                 // then enrich with pages 1-5 of movies/series.
@@ -686,7 +734,9 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                     val filmNames = listOf("Films Récents", "Films Populaires", "Encore plus de Films", "Films à Découvrir")
                     val tvChunks = uniqueTvShows.chunked(20)
                     val movieChunks = uniqueMovies.chunked(20)
-                    val maxChunks = maxOf(tvChunks.size, movieChunks.size)
+                    // 2026-07-03 : cappé à 4 chunks max (= les 4 noms nommés).
+                    // Au-delà on obtenait "Films #5", "Séries #5"… inutile.
+                    val maxChunks = minOf(maxOf(tvChunks.size, movieChunks.size), 4)
 
                     for (i in 0 until maxChunks) {
                         if (i < movieChunks.size) {

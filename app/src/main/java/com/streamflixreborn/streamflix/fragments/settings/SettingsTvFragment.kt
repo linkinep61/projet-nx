@@ -337,6 +337,13 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             true
         }
 
+        // 2026-07-04 : refresh profond des providers VOD/anime (hors IPTV)
+        findPreference<Preference>("refresh_provider_caches")?.setOnPreferenceClickListener {
+            com.streamflixreborn.streamflix.utils.ProviderCacheRefresh.refreshNonIptv(requireContext())
+            Toast.makeText(requireContext(), "Providers rafraîchis — favoris et historique conservés", Toast.LENGTH_LONG).show()
+            true
+        }
+
         // 2026-06-10 (user "ajouter les playlists dans paramètres") : gestion
         //   des sources World TV (style Wiseplay).
         findPreference<Preference>("world_live_sources")?.setOnPreferenceClickListener {
@@ -385,6 +392,12 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         findPreference<androidx.preference.SeekBarPreference>("SIDEBAR_OPACITY")?.setOnPreferenceChangeListener { _, newValue ->
             val v = (newValue as? Int) ?: 100
             com.streamflixreborn.streamflix.utils.UserPreferences.sidebarOpacity = v
+            true
+        }
+        // 2026-07-09 : slider luminosité de TOUTE l'app (overlay global). Aperçu live.
+        findPreference<androidx.preference.SeekBarPreference>("APP_DIM")?.setOnPreferenceChangeListener { _, newValue ->
+            com.streamflixreborn.streamflix.utils.UserPreferences.appDim = (newValue as? Int) ?: 0
+            com.streamflixreborn.streamflix.utils.AppDimManager.reapply()
             true
         }
 

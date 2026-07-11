@@ -16,6 +16,8 @@ import com.streamflixreborn.streamflix.utils.TmdbUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -47,7 +49,7 @@ import java.util.concurrent.TimeUnit
  *
  * Domaine : papadustream.courses (mars 2026), auto-discovery sur autres TLDs.
  */
-object PapadustreamProvider : Provider, ProviderConfigUrl {
+object PapadustreamProvider : Provider, ProviderConfigUrl, ProgressiveServersProvider {
 
     override val name = "Papadustream"
     override val logo = "android.resource://${BuildConfig.APPLICATION_ID}/drawable/logo_papadustream"
@@ -66,6 +68,7 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
+        .callTimeout(45, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
 
@@ -631,7 +634,10 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             // Papa en dernier (12 sources mais nécessite captcha → friction).
             // User a explicitement demandé cet ordre pour optimiser l'UX.
             // Moviebox backup ajouté en parallèle si dispo (FR-only).
+            // 2026-07-04 : backups inline DÉSACTIVÉS → registre central (seul le natif Papa reste).
+            val backupsOff = com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED
             val cloudstreamServersD = async {
+                if (backupsOff) return@async emptyList<Video.Server>()
                 try {
                     val csId = when (videoType) {
                         is Video.Type.Movie -> effectiveId
@@ -643,10 +649,12 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
                 } catch (_: Exception) { emptyList() }
             }
             val movixServersD = async {
-                try { MovixProvider.getServersAsBackup(effectiveId, videoType) } catch (_: Exception) { emptyList() }
+                if (backupsOff) emptyList()
+                else try { MovixProvider.getServersAsBackup(effectiveId, videoType) } catch (_: Exception) { emptyList() }
             }
             val papaServersD = async { tryPapaByTmdbId(effectiveId, videoType) }
             val movieboxServersD = async {
+                if (backupsOff) return@async emptyList<Video.Server>()
                 try {
                     val tmdbIdInt = when (videoType) {
                         is Video.Type.Movie -> effectiveId.toIntOrNull()
@@ -658,7 +666,8 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             }
             // 2026-05-27 : scrape direct Wiflix (~2s, HTTP simple, 11-14 serveurs)
             val wiflixServersD = async {
-                try { MovixProvider.fetchWiflixDirectBackup(effectiveId, videoType) }
+                if (backupsOff) emptyList()
+                else try { MovixProvider.fetchWiflixDirectBackup(effectiveId, videoType) }
                 catch (_: Exception) { emptyList() }
             }
             val cloudstream = cloudstreamServersD.await()
@@ -742,8 +751,10 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
         val papaShowId = "${parts[0]}|${parts[1]}"
         val tmdbId = synchronized(tmdbCacheLock) { papaToTmdbShowId[papaShowId] }
 
+        // 2026-07-04 : backups inline DÉSACTIVÉS → registre central (natifs Papa seuls).
+        val backupsOff2 = com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED
         // Cloudstream backup #2 : démarre vite, MovieBox+ via /resource bcdn (no pre-roll)
-        val cloudstreamServers = if (tmdbId != null) {
+        val cloudstreamServers = if (tmdbId != null && !backupsOff2) {
             try {
                 val csEpisodeId = "$tmdbId:${parts[2]}:${parts[3]}"
                 CloudstreamProvider.getServers(csEpisodeId, videoType)
@@ -754,7 +765,7 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             }
         } else emptyList()
 
-        val movixServers = if (tmdbId != null) {
+        val movixServers = if (tmdbId != null && !backupsOff2) {
             try {
                 // Format Movix episode id : "<tmdbId>-s<S>e<E>"
                 val movixEpisodeId = "$tmdbId-s${parts[2]}e${parts[3]}"
@@ -770,7 +781,7 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
         }
 
         // Moviebox backup (FR-only) si on a un TMDB id mappé
-        val movieboxServers = if (tmdbId != null) {
+        val movieboxServers = if (tmdbId != null && !backupsOff2) {
             try {
                 MovieboxProvider.getMovieboxSourcesByTmdbId(tmdbId, videoType)
                     .also { Log.d(TAG, "+ Moviebox backup via TMDB id $tmdbId : ${it.size}") }
@@ -939,6 +950,11 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
         val targetNorm = normalizeForMatch(title)
             .replace(Regex("[^a-z0-9 ]"), " ").replace(Regex("\\s+"), " ").trim()
         val targetWords = targetNorm.split(" ").filter { it.length > 1 }.toSet()
+        // 2026-07-07 : titres très courts — si aucun mot significatif (>1 char) ou un seul
+        // mot ≤3 chars, containsAll est trop lâche (« up » matche « Shut Up »).
+        // Seul le match exact normalisé (score 100) passe.
+        val shortTitleExactOnly = targetWords.isEmpty()
+            || (targetWords.size == 1 && targetWords.first().length <= 3)
         var bestUrl: String? = null
         var bestScore = -1
         var bestTitle: String? = null
@@ -960,7 +976,12 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             else 0.0
             var score = when {
                 nNorm == targetNorm -> 100
-                targetWords.isNotEmpty() && nWords.containsAll(targetWords) && lenDiffPct <= 0.30 -> 90
+                // 2026-07-07 : titres courts → exact only (containsAll trop lâche)
+                shortTitleExactOnly -> 0
+                // 2026-07-03 (report correction backup) : « tous les mots cherchés présents »
+                //   = direction sûre → retrait du garde lenDiffPct (rejetait des fiches
+                //   décorées). L'autre sens garde le garde longueur.
+                targetWords.isNotEmpty() && nWords.containsAll(targetWords) -> 90
                 nWords.isNotEmpty() && targetWords.containsAll(nWords) && lenDiffPct <= 0.30 -> 80
                 else -> 0
             }
@@ -1037,6 +1058,13 @@ object PapadustreamProvider : Provider, ProviderConfigUrl {
             { qualityBonus(it) },
         )
         return vf.sortedWith(cmp) + vostfr.sortedWith(cmp) + vo.sortedWith(cmp)
+    }
+
+    override fun getServersProgressive(id: String, videoType: Video.Type): Flow<List<Video.Server>> = channelFlow {
+        try {
+            val servers = withContext(Dispatchers.IO) { getServers(id, videoType) }
+            if (servers.isNotEmpty()) send(servers)
+        } catch (e: Exception) { Log.w(TAG, "progressive native KO: ${e.message}") }
     }
 
     override suspend fun getVideo(server: Video.Server): Video {

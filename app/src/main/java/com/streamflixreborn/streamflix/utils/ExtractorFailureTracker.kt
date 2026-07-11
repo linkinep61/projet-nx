@@ -111,48 +111,13 @@ object ExtractorFailureTracker {
      */
     @Synchronized
     fun recordFailure(extractorName: String, errorType: String?, providerName: String?) {
-        if (extractorName.isBlank()) return
-        ensureFreshVersion()
-        val p = prefs()
-        val raw = p.getString(KEY_FAILURES, "{}") ?: "{}"
-        val root = try { JSONObject(raw) } catch (_: Exception) { JSONObject() }
-
-        // Récupère ou crée l'entrée pour cet extracteur (avec migration de
-        // l'ancien format Int → Object).
-        val entry = readOrInitEntry(root, extractorName)
-
-        val safeError = errorType?.takeIf { it.isNotBlank() } ?: "other"
-
-        // 2026-05-09 : "dead-content" → on log l'erreur dans la breakdown
-        // pour la visibilité (le user verra "Vidoza : (dead-content x5)" dans
-        // le rapport), MAIS on N'incrémente PAS le compteur principal.
-        // Raison : c'est pas l'extracteur qui foire, c'est juste l'URL qui
-        // est morte (provider indexe du contenu supprimé). Pénaliser
-        // l'extracteur dans le ranker serait injuste — il marche très bien
-        // sur d'autres URLs. Le ranker continuera à le proposer en haut.
-        val isDeadContent = safeError == "dead-content"
-        if (!isDeadContent) {
-            entry.put("count", entry.optInt("count", 0) + 1)
-        }
-
-        // Incrémente le sous-compteur d'erreur (même pour dead-content,
-        // pour la visibilité dans le rapport bug).
-        val errs = entry.optJSONObject("errors") ?: JSONObject().also { entry.put("errors", it) }
-        errs.put(safeError, errs.optInt(safeError, 0) + 1)
-
-        // Incrémente le sous-compteur de provider (si connu) — utile pour
-        // identifier QUEL provider indexe du contenu mort.
-        if (!providerName.isNullOrBlank()) {
-            val provs = entry.optJSONObject("providers") ?: JSONObject().also { entry.put("providers", it) }
-            provs.put(providerName, provs.optInt(providerName, 0) + 1)
-        }
-
-        root.put(extractorName, entry)
-        p.edit().putString(KEY_FAILURES, root.toString()).apply()
-        Log.d(
-            TAG,
-            "Failure recorded: $extractorName → count=${entry.optInt("count")} (err=$safeError, via=${providerName ?: "?"}, deadContent=$isDeadContent)",
-        )
+        // 2026-07-07 (user « y a pas de serveur qui doivent être marqués 7 jours et bloqué,
+        //   ça doit pas exister non plus ») : tracking PERSISTANT des échecs de serveur
+        //   DÉSACTIVÉ. On ne persiste plus aucun échec → aucun serveur n'est rétrogradé /
+        //   pénalisé au tri sur un échec passé (qui survivait au force-stop). Chaque session
+        //   repart propre. (Le disjoncteur IN-MÉMOIRE Extractor.serverHealth reste, lui, mais
+        //   il meurt au redémarrage — rien de persistant.)
+        return
     }
 
     /**
@@ -192,27 +157,19 @@ object ExtractorFailureTracker {
      * Retourne la liste des extracteurs en échec, avec leur breakdown
      * complète, triée par count décroissant.
      */
-    @Synchronized
+    // 2026-07-04 (perf TV) : lecture LOCK-FREE. AVANT @Synchronized → pendant qu'un
+    //   provider probe ~20 sources, recordFailure()/recordSuccess() (mêmes @Synchronized)
+    //   tenaient le verrou en rafale (parse+réécriture disque du JSON complet à chaque échec).
+    //   getFailures() (appelé par le tri du player) attendait DERRIÈRE toutes ces écritures →
+    //   orderByFrenchBuckets bloqué ~8-11s. Les lectures SharedPreferences.getString sont déjà
+    //   thread-safe et .apply() commit de façon atomique → une lecture non synchronisée voit
+    //   toujours une valeur complète (ancienne ou nouvelle, jamais partielle). On retire donc
+    //   le verrou : le tri ne se fait plus affamer. (Le parse JSON local reste en ms.)
     fun getFailures(): List<FailureEntry> {
-        ensureFreshVersion()
-        val raw = prefs().getString(KEY_FAILURES, "{}") ?: "{}"
-        val root = try { JSONObject(raw) } catch (_: Exception) { return emptyList() }
-
-        val out = mutableListOf<FailureEntry>()
-        val keys = root.keys()
-        while (keys.hasNext()) {
-            val name = keys.next()
-            val entry = readOrInitEntry(root, name)
-            val count = entry.optInt("count", 0)
-            if (count <= 0) continue
-            out += FailureEntry(
-                name = name,
-                count = count,
-                errors = jsonObjectToSortedPairs(entry.optJSONObject("errors")),
-                providers = jsonObjectToSortedPairs(entry.optJSONObject("providers")),
-            )
-        }
-        return out.sortedByDescending { it.count }
+        // 2026-07-07 (user « le tri se fait qu'avec la langue, les favoris et la qualité,
+        //   tout le reste on s'en fout ») : tracking persistant désactivé → aucune pénalité
+        //   de tri basée sur des échecs persistés (neutralise aussi les données déjà écrites).
+        return emptyList()
     }
 
     /** Convertit un JSONObject {key: int} en List<Pair<key, int>> trié décroissant. */

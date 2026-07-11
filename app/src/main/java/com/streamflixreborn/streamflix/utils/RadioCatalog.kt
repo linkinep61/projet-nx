@@ -1,13 +1,17 @@
 package com.streamflixreborn.streamflix.utils
 
 import android.util.Log
-import com.streamflixreborn.streamflix.providers.Dric4rTvProvider
-import com.streamflixreborn.streamflix.models.TvShow
+import com.streamflixreborn.streamflix.StreamFlixApp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
 
 /**
  * 2026-06-08 (user "à gauche du cœur tu vas mettre une petite radio. Dedans
@@ -32,6 +36,12 @@ object RadioCatalog {
     @Volatile private var lastLoad = 0L
     private const val CACHE_TTL_MS = 30 * 60 * 1000L  // 30 min
 
+    // 2026-07-10 : persistence disque — survit aux redémarrages app.
+    // Sur Chromecast, RadioBrowser échoue souvent (DNS/timeout) →
+    // sans persistence, chaque restart = 17 chaînes hardcodées.
+    private const val DISK_CACHE_FILE = "radio_catalog_cache.json"
+    @Volatile private var diskLoaded = false
+
     data class RadioStation(
         val id: String,
         val name: String,
@@ -40,8 +50,22 @@ object RadioCatalog {
     )
 
     /** Retourne la liste complète des radios (Dric4rTV + RadioBrowser FR).
-     *  Charge en parallèle au premier appel. Safe. */
+     *  Charge en parallèle au premier appel. Safe.
+     *  2026-07-10 : charge depuis le disque si le cache RAM est vide (restart app). */
     suspend fun list(): List<RadioStation> = withContext(Dispatchers.IO) {
+        // 2026-07-10 : au premier appel, charger le cache disque (survit aux restarts)
+        if (!diskLoaded) {
+            diskLoaded = true
+            val fromDisk = loadFromDisk()
+            if (fromDisk.isNotEmpty() && cache.isEmpty()) {
+                cache = fromDisk
+                lastLoad = System.currentTimeMillis() - CACHE_TTL_MS + 5 * 60 * 1000L
+                // ↑ on dit que le cache disque a été chargé il y a TTL-5min →
+                //   dans 5 min il sera stale et on re-fetche. Mais en attendant
+                //   l'utilisateur a ses ~2000 radios instantanément.
+                Log.d(TAG, "Loaded ${fromDisk.size} radios from DISK cache")
+            }
+        }
         val now = System.currentTimeMillis()
         if (cache.isNotEmpty() && now - lastLoad < CACHE_TTL_MS) {
             return@withContext cache
@@ -49,14 +73,16 @@ object RadioCatalog {
         try {
             val (dric, browser) = coroutineScope {
                 val a = async { loadDric4rTvRadios() }
-                val b = async { loadBrowserRadios() }
+                val b = async { loadBrowserRadiosProtected() }
                 a.await() to b.await()
             }
-            val all = mergeAndDedup(dric, browser)
+            val dricEnriched = enrichHardcodedWithLiveUrls(dric, browser)
+            val all = mergeAndDedup(dricEnriched, browser)
             if (all.isNotEmpty()) {
                 cache = all
                 lastLoad = now
                 Log.d(TAG, "Loaded ${all.size} radios (Dric=${dric.size}, Browser=${browser.size})")
+                if (browser.isNotEmpty()) saveToDisk(all)
             }
             all.ifEmpty { cache }
         } catch (t: Throwable) {
@@ -68,29 +94,48 @@ object RadioCatalog {
     /** 2026-06-08 (user "tu peux pas faire un truc pour que ça s'affiche en
      *  différé ? On a déjà les premières chaînes qui s'affichent direct,
      *  le reste vient au fur et à mesure") : chargement progressif :
-     *   1. Cache si frais → 1 emit final immédiat.
+     *   1. Cache (RAM ou disque) si frais → 1 emit final immédiat.
      *   2. Sinon : Dric4rTV (instant ~17 radios) → 1er emit.
      *      Puis RadioBrowser (~5-10s) → 2e emit avec toutes les radios.
+     *
+     *  2026-07-10 : ajouté cache disque au premier chargement + fetch
+     *  protégé NonCancellable (le dialog radio peut se fermer/rouvrir
+     *  pendant le fetch → la coroutine se faisait cancel avant d'avoir
+     *  essayé tous les miroirs → 17 chaînes seulement).
      *
      *  Retourne un Flow<List<RadioStation>> auquel le dialog peut s'abonner. */
     fun loadProgressive(): kotlinx.coroutines.flow.Flow<List<RadioStation>> =
         kotlinx.coroutines.flow.flow {
+            // 2026-07-10 : charger le cache disque si RAM vide (restart app)
+            if (!diskLoaded) {
+                diskLoaded = true
+                val fromDisk = loadFromDisk()
+                if (fromDisk.isNotEmpty() && cache.isEmpty()) {
+                    cache = fromDisk
+                    lastLoad = System.currentTimeMillis() - CACHE_TTL_MS + 5 * 60 * 1000L
+                    Log.d(TAG, "Progressive: loaded ${fromDisk.size} radios from DISK cache")
+                }
+            }
             val now = System.currentTimeMillis()
             if (cache.isNotEmpty() && now - lastLoad < CACHE_TTL_MS) {
                 emit(cache)
                 return@flow
             }
+            // 1er emit : hardcodées (+ cache disque si dispo) — INSTANT
             val dric = loadDric4rTvRadios()
             if (dric.isNotEmpty()) {
-                val firstPass = mergeAndDedup(dric, emptyList())
+                val firstPass = if (cache.size > dric.size) cache else mergeAndDedup(dric, emptyList())
                 emit(firstPass)
             }
-            val browser = loadBrowserRadios()
-            val full = mergeAndDedup(dric, browser)
+            // 2e emit : fetch RadioBrowser protégé contre l'annulation
+            val browser = loadBrowserRadiosProtected()
+            val dricEnriched = enrichHardcodedWithLiveUrls(dric, browser)
+            val full = mergeAndDedup(dricEnriched, browser)
             if (full.isNotEmpty()) {
                 cache = full
                 lastLoad = System.currentTimeMillis()
                 Log.d(TAG, "Progressive load complete: ${full.size} radios (Dric=${dric.size}, Browser=${browser.size})")
+                if (browser.isNotEmpty()) saveToDisk(full)
             }
             emit(full)
         }.flowOn(Dispatchers.IO)
@@ -102,9 +147,116 @@ object RadioCatalog {
     ): List<RadioStation> {
         val all = mutableListOf<RadioStation>()
         val seenNames = HashSet<String>()
-        dric.forEach { if (seenNames.add(it.name.lowercase().trim())) all.add(it) }
-        browser.forEach { if (seenNames.add(it.name.lowercase().trim())) all.add(it) }
+        dric.forEach { if (seenNames.add(normalizeName(it.name))) all.add(it) }
+        browser.forEach { if (seenNames.add(normalizeName(it.name))) all.add(it) }
         return all
+    }
+
+    /** 2026-07-04 (user "Radio Nova qui fonctionnait — on peut pas mettre les
+     *  17 radios au même endroit que les 5000 pour un rafraîchissement instantané") :
+     *  Pour chaque radio hardcodée, cherche dans RadioBrowser une entrée qui a
+     *  le MÊME nom (normalisé). Si trouvée → remplace `streamUrl` par la version
+     *  live de RadioBrowser (rafraîchie automatiquement toutes les 30 min).
+     *  Sinon → garde l'URL hardcodée en fallback (=radios locales absentes de
+     *  RadioBrowser : CanalB, Prun', Jet FM, ICI Loire-Océan, HitWest, etc.).
+     *
+     *  On garde le POSTER hardcodé (souvent meilleur que le favicon RadioBrowser
+     *  qui manque de résolution) et le NOM d'affichage hardcodé (curation).
+     *  Seule la URL de stream est remplacée. L'ID hardcodé aussi est préservé
+     *  (compat RadioFavoritesStore déjà saved par les users).
+     *
+     *  2026-07-04 v2 (user "aucune radio Nova qui fonctionne") : matching en
+     *  3 passes pour gérer les variantes (ex "radio Nova" hardcodée vs "Nova"
+     *  simple dans RadioBrowser, ou "FIP Groove" vs "FIP - Groove") :
+     *   1) match EXACT normalisé (le plus fiable)
+     *   2) match par ALIAS pré-définis (curation manuelle des noms connus)
+     *   3) match PARTIEL (l'un contient l'autre + longueur suffisante),
+     *      restreint aux entrées les plus populaires pour éviter les faux positifs
+     */
+    private fun enrichHardcodedWithLiveUrls(
+        hardcoded: List<RadioStation>,
+        browser: List<RadioStation>,
+    ): List<RadioStation> {
+        if (browser.isEmpty()) return hardcoded
+        // Index les radios browser par nom normalisé pour lookup O(1).
+        val browserByName = HashMap<String, RadioStation>(browser.size)
+        browser.forEach { browserByName.putIfAbsent(normalizeName(it.name), it) }
+        // Pour les fallbacks partiels (contains), on parcourt la liste triée par
+        // votes (RadioBrowser trie par votes desc dans fetchFrenchStations).
+        val browserOrdered = browser.filter { !it.streamUrl.isNullOrBlank() }
+        var enrichedCount = 0
+        val result = hardcoded.map { hc ->
+            val liveUrl = findLiveUrlFor(hc, browserByName, browserOrdered)
+            if (liveUrl != null && liveUrl != hc.streamUrl) {
+                enrichedCount++
+                hc.copy(streamUrl = liveUrl)
+            } else {
+                hc
+            }
+        }
+        if (enrichedCount > 0) {
+            Log.d(TAG, "Enrichi $enrichedCount/${hardcoded.size} radios curées avec URLs RadioBrowser live")
+        }
+        return result
+    }
+
+    /** 3 passes de matching pour trouver l'URL live d'une radio hardcodée. */
+    private fun findLiveUrlFor(
+        hc: RadioStation,
+        browserByName: Map<String, RadioStation>,
+        browserOrdered: List<RadioStation>,
+    ): String? {
+        val hcNorm = normalizeName(hc.name)
+        // 1) match exact normalisé
+        browserByName[hcNorm]?.streamUrl?.takeIf { it.isNotBlank() }?.let { return it }
+        // 2) alias curated : certains noms hardcodés matchent des noms RadioBrowser
+        //   spécifiques. Ex "radio Nova" (curation Dric4rTV) → "Nova" (RadioBrowser).
+        BROWSER_ALIASES[hcNorm]?.forEach { alias ->
+            browserByName[alias]?.streamUrl?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+        // 3) fallback partiel : cherche une radio browser dont le nom contient le
+        //   nom hardcodé (ou inversement). Restreint aux 300 radios les plus
+        //   populaires (browserOrdered est trié par votes desc) pour éviter les
+        //   faux positifs sur des micros-radios homonymes.
+        if (hcNorm.length < 4) return null  // "rtl2" est OK, "fip" trop court
+        val candidates = browserOrdered.take(300)
+        val bestMatch = candidates.firstOrNull { b ->
+            val bNorm = normalizeName(b.name)
+            (bNorm.length >= 3) && (bNorm.contains(hcNorm) || hcNorm.contains(bNorm))
+        }
+        return bestMatch?.streamUrl?.takeIf { it.isNotBlank() }
+    }
+
+    /** Alias pour les cas où le nom hardcodé (curation Dric4rTV) diffère du nom
+     *  utilisé dans RadioBrowser. Clé = nom hardcodé normalisé. Valeur = liste
+     *  de noms RadioBrowser normalisés à essayer. */
+    private val BROWSER_ALIASES: Map<String, List<String>> = mapOf(
+        "radionova" to listOf("nova", "novaradio", "novaparis"),
+        "rireetchansons" to listOf("rireetchansons", "rirechansons", "rireandchansons"),
+        "rtl2" to listOf("rtldeux", "rtl2fr"),
+        "virginradio" to listOf("virginradio", "virginradiofr", "virginradiofrance"),
+        "europe2" to listOf("europedeux", "europe2fr"),
+        "fipgroove" to listOf("fipgroove", "fipwebradiogroove", "fipwebgroove"),
+        "fipreggae" to listOf("fipreggae", "fipwebradioreggae"),
+        "fipnantes" to listOf("fipnantes", "fipwebradionantes"),
+        "abcdiscofunk" to listOf("abcdiscofunk", "abclove", "abclovers", "discofunk"),
+        "metropolys" to listOf("metropolys", "metropolysradio", "metropolys927"),
+        "hitwest" to listOf("hitwest", "hitwestfm"),
+        "djamradio" to listOf("djamradio", "djam"),
+    )
+
+    /** Normalise un nom de radio pour matching case-insensitive + espaces + accents.
+     *  Ex : "Radio Nova" == "radio nova" == "RADIONOVA".
+     *  2026-07-04 : ajouté pour l'enrichissement URL live des 17 hardcodées. */
+    private fun normalizeName(name: String): String {
+        return name.trim().lowercase()
+            .replace(Regex("[éèêë]"), "e")
+            .replace(Regex("[àâä]"), "a")
+            .replace(Regex("[îï]"), "i")
+            .replace(Regex("[ôö]"), "o")
+            .replace(Regex("[ûü]"), "u")
+            .replace(Regex("[ç]"), "c")
+            .replace(Regex("[^a-z0-9]+"), "")  // retire espaces + apostrophes + tirets
     }
 
     /**
@@ -163,9 +315,14 @@ object RadioCatalog {
         ),
         RadioStation(
             id = "livehub::dric4rtv::r4di0::radio_nova",
-            name = "radio Nova",
+            // 2026-07-04 (user "aucune radio Nova qui fonctionne") : renommé de
+            //   "radio Nova" en "Nova" pour matcher plus facilement l'entrée
+            //   principale de RadioBrowser. L'URL hardcodée (fallback) pointe
+            //   maintenant vers le flux Nova principal (pas Nova Dance qui était
+            //   une déclinaison — d'où le nom "nova-dance" dans l'ancienne URL).
+            name = "Nova",
             poster = "https://upload.wikimedia.org/wikipedia/fr/6/6a/Radio_Nova.png",
-            streamUrl = "http://nova-dance.ice.infomaniak.ch/nova-dance-256.aac",
+            streamUrl = "https://novazz.ice.infomaniak.ch/novazz-128.mp3",
         ),
         RadioStation(
             id = "livehub::dric4rtv::r4di0::rire_chansons",
@@ -244,18 +401,86 @@ object RadioCatalog {
      *  dossier Musique du TV Hub (perdues quand Dric4rTV a été retiré du hub). */
     fun hardcodedDricRadios(): List<RadioStation> = HARDCODED_DRIC4RTV_RADIOS
 
-    private suspend fun loadBrowserRadios(): List<RadioStation> {
-        return try {
-            RadioBrowserClient.fetchFrenchStations(5000).map { s ->
-                RadioStation(
-                    id = "radio::browser::${s.uuid}",
-                    name = s.name,
-                    poster = s.favicon,
-                    streamUrl = s.url,
-                )
+    /** 2026-07-10 : version protégée de loadBrowserRadios —
+     *  (1) NonCancellable pour que la coroutine finisse même si le collecteur
+     *      du Flow annule (dialog radio fermé/rouvert pendant le fetch),
+     *  (2) Retry 1× après 2s si le premier essai échoue (les 4 miroirs
+     *      peuvent échouer à cause du DNS AdGuard sur Chromecast). */
+    private suspend fun loadBrowserRadiosProtected(): List<RadioStation> {
+        return withContext(NonCancellable) {
+            for (attempt in 1..2) {
+                try {
+                    val stations = RadioBrowserClient.fetchFrenchStations().map { s ->
+                        RadioStation(
+                            id = "radio::browser::${s.uuid}",
+                            name = s.name,
+                            poster = s.favicon,
+                            streamUrl = s.url,
+                        )
+                    }
+                    if (stations.isNotEmpty()) {
+                        Log.d(TAG, "loadBrowserRadios OK (attempt $attempt): ${stations.size} stations")
+                        return@withContext stations
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "loadBrowserRadios attempt $attempt failed: ${t.message}")
+                }
+                if (attempt < 2) {
+                    Log.d(TAG, "loadBrowserRadios: retry in 2s...")
+                    delay(2000)
+                }
             }
+            Log.w(TAG, "loadBrowserRadios: all attempts failed, returning empty")
+            emptyList()
+        }
+    }
+
+    // ---- Persistence disque (2026-07-10) ----
+
+    /** Sauvegarde le cache complet dans un fichier JSON interne.
+     *  Format : [{id, name, poster, streamUrl}, ...]. ~200 Ko pour 2000 stations. */
+    private fun saveToDisk(stations: List<RadioStation>) {
+        try {
+            val ctx = StreamFlixApp.instance
+            val file = File(ctx.filesDir, DISK_CACHE_FILE)
+            val arr = JSONArray()
+            for (s in stations) {
+                val o = JSONObject()
+                o.put("id", s.id)
+                o.put("name", s.name)
+                if (s.poster != null) o.put("poster", s.poster)
+                if (s.streamUrl != null) o.put("streamUrl", s.streamUrl)
+                arr.put(o)
+            }
+            file.writeText(arr.toString())
+            Log.d(TAG, "Saved ${stations.size} radios to disk (${file.length() / 1024} KB)")
         } catch (t: Throwable) {
-            Log.w(TAG, "loadBrowserRadios failed: ${t.message}")
+            Log.w(TAG, "saveToDisk failed: ${t.message}")
+        }
+    }
+
+    /** Charge le cache depuis le fichier JSON. Retourne emptyList si absent/corrompu. */
+    private fun loadFromDisk(): List<RadioStation> {
+        return try {
+            val ctx = StreamFlixApp.instance
+            val file = File(ctx.filesDir, DISK_CACHE_FILE)
+            if (!file.exists()) return emptyList()
+            val arr = JSONArray(file.readText())
+            val out = ArrayList<RadioStation>(arr.length())
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val id = o.optString("id").takeIf { it.isNotBlank() } ?: continue
+                val name = o.optString("name").takeIf { it.isNotBlank() } ?: continue
+                out.add(RadioStation(
+                    id = id,
+                    name = name,
+                    poster = o.optString("poster").takeIf { it.isNotBlank() },
+                    streamUrl = o.optString("streamUrl").takeIf { it.isNotBlank() },
+                ))
+            }
+            out
+        } catch (t: Throwable) {
+            Log.w(TAG, "loadFromDisk failed: ${t.message}")
             emptyList()
         }
     }

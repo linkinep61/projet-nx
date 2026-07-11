@@ -2,6 +2,7 @@ package com.streamflixreborn.streamflix.extractors
 
 import android.annotation.SuppressLint
 import android.net.Uri
+import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -11,10 +12,13 @@ import android.webkit.WebViewClient
 import android.os.Message
 import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.models.Video
+import com.streamflixreborn.streamflix.utils.DnsResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import kotlin.coroutines.resume
 
 open class VidMoLyExtractor : Extractor() {
@@ -29,27 +33,99 @@ open class VidMoLyExtractor : Extractor() {
     private val context = StreamFlixApp.instance.applicationContext
 
     override suspend fun extract(link: String): Video {
-        // 2026-05-04 : vidmoly.biz a Cloudflare Turnstile (challenge auto-solve
-        // ~8s). vidmoly.to redirige TOUS les nouveaux visiteurs vers une page
-        // de pub (survey-smiles.com) au premier hit (302) — donc on ne peut
-        // pas l'utiliser comme fast-path. Verdict : on force .biz et on gère
-        // le challenge CF dans extractByIntercepting (timeout 45s + poll 1s).
         val target = if (link.contains("vidmoly"))
             link.replace(Regex("vidmoly\\.(to|me|net)"), "vidmoly.biz")
         else link
 
-        // 2026-05-09 v2 : timeout 45s → 12s → 25s.
-        //   - 45s = laissait des hangs visibles user
-        //   - 12s = trop court, certains CF challenges + WebView init prennent
-        //     15-20s sur device modeste
-        //   - 25s = compromis OK pour CF challenge (5-15s) + un peu de marge
+        // 2026-07-06 v3 : FAST-PATH OkHttp — le m3u8 est dans le HTML source brut
+        //   (script inline `player.setup({sources:[{file:"...m3u8..."}]})`), PAS besoin
+        //   de WebView si CF ne challenge pas. Sur Chromecast le WebView headless crash/
+        //   timeout en <300ms (coroutine cancelled + main thread busy). L'OkHttp avec
+        //   DoH et UA Chrome passe dans ~90% des cas. Fallback WebView seulement si CF.
+        val fastResult = try { extractViaOkHttp(target) } catch (e: Exception) {
+            Log.d("VidMoLyExtractor", "OkHttp fast-path failed: ${e.message?.take(100)}")
+            null
+        }
+        if (fastResult != null) {
+            Log.d("VidMoLyExtractor", "m3u8 FOUND via OkHttp fast-path (len=${fastResult.length})")
+            return buildVideo(fastResult, target)
+        }
+
+        // Fallback WebView (CF challenge, pub redirect, etc.)
+        Log.d("VidMoLyExtractor", "OkHttp failed → fallback WebView pour $target")
         val hlsUrl = try { extractByIntercepting(target, timeoutMs = 25_000L) }
             catch (e: Exception) {
-                throw Exception("VidMoLy: extraction failed for $link (${e.message})")
+                throw Exception("VidMoLy: extraction failed for $link (${e.message?.take(200)})")
             }
         if (hlsUrl != null) return buildVideo(hlsUrl, target)
 
         throw Exception("VidMoLy: Could not find HLS source in: $link")
+    }
+
+    /**
+     * 2026-07-06 : Fast-path OkHttp — GET la page embed, regex le m3u8 dans le HTML.
+     * Marche quand CF ne challenge pas (= majorité des cas). ~500ms au lieu de 25s.
+     * Retourne null si CF (403/503), redirect pub, ou m3u8 introuvable.
+     */
+    private suspend fun extractViaOkHttp(url: String): String? = withContext(Dispatchers.IO) {
+        val host = Uri.parse(url).host ?: "vidmoly.biz"
+        val client = OkHttpClient.Builder()
+            .dns(DnsResolver.doh)
+            .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(false)   // on veut détecter les redirections pub
+            .build()
+        val req = Request.Builder()
+            .url(url)
+            .header("User-Agent", ANDROID_CHROME_UA)
+            .header("Referer", "https://$host/")
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.5")
+            .get()
+            .build()
+        val resp = client.newCall(req).execute()
+        val code = resp.code
+        Log.d("VidMoLyExtractor", "OkHttp GET $url → $code")
+
+        // CF challenge ou redirection pub → on laisse le WebView gérer
+        if (code == 403 || code == 503 || code == 302 || code == 301) {
+            resp.close()
+            return@withContext null
+        }
+        if (code != 200) {
+            resp.close()
+            return@withContext null
+        }
+
+        val html = resp.body?.string() ?: return@withContext null
+        Log.d("VidMoLyExtractor", "OkHttp HTML received: ${html.length} chars")
+
+        // CF challenge dans le body ?
+        if (html.contains("challenges.cloudflare.com") ||
+            html.contains("Just a moment") ||
+            html.contains("cf-turnstile")) {
+            Log.d("VidMoLyExtractor", "OkHttp: CF challenge detected in body → fallback WebView")
+            return@withContext null
+        }
+
+        // Regex m3u8 — mêmes patterns que EXTRACT_M3U8_JS
+        val m3u8Regex = listOf(
+            Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]"""),
+            Regex("""file\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]"""),
+            Regex("""['"]([^'"]*\.m3u8[^'"]*)['"]"""),
+        )
+        for (regex in m3u8Regex) {
+            val match = regex.find(html)
+            if (match != null) {
+                val m3u8 = match.groupValues[1]
+                Log.d("VidMoLyExtractor", "OkHttp regex match: ${m3u8.take(80)}")
+                return@withContext m3u8
+            }
+        }
+
+        Log.d("VidMoLyExtractor", "OkHttp: no m3u8 found in HTML (${html.length} chars)")
+        null
     }
 
     private fun buildVideo(hlsUrl: String, pageUrl: String): Video {
@@ -195,8 +271,17 @@ open class VidMoLyExtractor : Extractor() {
 
                                 // Cas 3 : page normale, on cherche le m3u8
                                 if (resolved) return@evaluateJavascript
-                                android.util.Log.d("VidMoLyExtractor", "normal page → tryExtractWithRetry")
-                                tryExtractWithRetry(view, ::resolve)
+                                android.util.Log.d("VidMoLyExtractor", "normal page → forcePlay + pollForM3u8")
+                                // 2026-07-06 : Force JWPlayer à démarrer le m3u8.
+                                view.evaluateJavascript(FORCE_PLAY_JS, null)
+                                // 2026-07-06 v2 : Polling agressif (40×500ms=20s) qui
+                                // combine API JWPlayer + regex HTML. Sur Chromecast,
+                                // JWPlayer met >3s à s'initialiser dans le WebView
+                                // headless → les 3 retries de tryExtractWithRetry
+                                // rataient systématiquement. Le poll vérifie aussi
+                                // l'API jwplayer().getConfig().sources qui est remplie
+                                // dès que .setup() tourne, même sans autoplay.
+                                pollForM3u8(view, 0, ::resolve)
                             }
 
                             // Filet de sécurité : timeout après 30s sans m3u8 capturé.
@@ -237,32 +322,46 @@ open class VidMoLyExtractor : Extractor() {
             }
         }
 
-    /** Tente une extraction immédiate puis un retry à 3s puis 6s.
-     *  Permet à JWPlayer d'avoir le temps d'init même sur connexion lente. */
-    private fun tryExtractWithRetry(view: WebView, resolve: (String?) -> Unit) {
-        view.evaluateJavascript(EXTRACT_M3U8_JS) { result ->
-            val extracted = result?.trim()
-                ?.removeSurrounding("\"")
-                ?.takeIf { it != "null" && it.contains(".m3u8") }
-            if (extracted != null) {
-                resolve(extracted)
-                return@evaluateJavascript
+    /**
+     * 2026-07-06 v2 : Polling robuste pour extraire le m3u8.
+     * Combine l'API JWPlayer (getConfig().sources) et le scan regex HTML.
+     * Toutes les 500ms pendant max 20s (40 tentatives).
+     * Force play toutes les 2s pour relancer JWPlayer si idle.
+     * Le shouldInterceptRequest tourne en parallèle comme filet de sécurité.
+     */
+    private fun pollForM3u8(view: WebView, attempt: Int, resolve: (String?) -> Unit) {
+        if (attempt > 40) return // 40 × 500ms = 20s max
+        val delay = if (attempt == 0) 0L else 500L
+        view.postDelayed({
+            // Force play toutes les 4 tentatives (~2s) pour relancer JWPlayer
+            if (attempt > 0 && attempt % 4 == 0) {
+                view.evaluateJavascript(FORCE_PLAY_JS, null)
             }
-            view.postDelayed({
-                view.evaluateJavascript(EXTRACT_M3U8_JS) { r2 ->
-                    val e2 = r2?.trim()?.removeSurrounding("\"")
-                        ?.takeIf { it != "null" && it.contains(".m3u8") }
-                    if (e2 != null) resolve(e2)
-                    else view.postDelayed({
-                        view.evaluateJavascript(EXTRACT_M3U8_JS) { r3 ->
-                            val e3 = r3?.trim()?.removeSurrounding("\"")
-                                ?.takeIf { it != "null" && it.contains(".m3u8") }
-                            if (e3 != null) resolve(e3)
-                        }
-                    }, 3000)
+            // Diagnostic aux tentatives 0, 5, 10, 20, 40 pour comprendre l'état
+            if (attempt == 0 || attempt == 5 || attempt == 10 || attempt == 20 || attempt == 40) {
+                view.evaluateJavascript(DIAG_JS) { diag ->
+                    android.util.Log.d("VidMoLyExtractor", "poll #$attempt DIAG: ${diag?.take(300)}")
                 }
-            }, 3000)
-        }
+            }
+            // Plan B : au poll #2 (~1s), lancer le fetch XHR du HTML source brut.
+            //   Pas au #0 (la page vient de finir de charger, laissons les scripts s'exécuter).
+            //   Le résultat est stocké dans window.__vidmoly_raw_html pour les polls suivants.
+            if (attempt == 2) {
+                view.evaluateJavascript(FETCH_RAW_HTML_JS) { fetchResult ->
+                    android.util.Log.d("VidMoLyExtractor", "XHR raw HTML: ${fetchResult?.take(80)}")
+                }
+            }
+            view.evaluateJavascript(EXTRACT_M3U8_JS) { r ->
+                val extracted = r?.trim()?.removeSurrounding("\"")
+                    ?.takeIf { it != "null" && it.contains(".m3u8") }
+                if (extracted != null) {
+                    android.util.Log.d("VidMoLyExtractor", "poll #$attempt → m3u8 FOUND (len=${extracted.length})")
+                    resolve(extracted)
+                } else {
+                    pollForM3u8(view, attempt + 1, resolve)
+                }
+            }
+        }, delay)
     }
 
     /** Poll la page toutes les 1s pendant ~25s en attendant que le challenge
@@ -308,31 +407,111 @@ open class VidMoLyExtractor : Extractor() {
         )
 
         /**
-         * Synchronous JS to extract m3u8 from page DOM.
+         * 2026-07-06 v2 : Force JWPlayer à démarrer la lecture.
+         * Appel API + click bouton play + video.play() muted.
          */
-        private const val EXTRACT_M3U8_JS = """
-            (function() {
-                try {
-                    var scripts = document.querySelectorAll('script');
-                    for (var i = 0; i < scripts.length; i++) {
-                        var text = scripts[i].textContent;
-                        if (text && text.indexOf('m3u8') > -1) {
-                            var match = text.match(/sources\s*:\s*\[\s*\{\s*file\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]/);
-                            if (match) return match[1];
-                            match = text.match(/file\s*:\s*['"]([^'"]*\.m3u8[^'"]*)['"]/);
-                            if (match) return match[1];
-                            match = text.match(/['"]([^'"]*\.m3u8[^'"]*)['"]/);
-                            if (match) return match[1];
-                        }
-                    }
-                    var html = document.documentElement.innerHTML;
-                    var match = html.match(/['"]([^'"]*\.m3u8[^'"]*)['"]/);
-                    if (match) return match[1];
-                } catch(e) {
-                    return 'ERROR:' + e.message;
-                }
-                return null;
-            })();
-        """
+        private const val FORCE_PLAY_JS =
+            "(function(){try{" +
+            "if(typeof jwplayer==='function'){var p=jwplayer();if(p&&p.play)p.play();}" +
+            "var b=document.querySelector('.jw-icon-display,.jw-display-icon-container,.play-btn,.vjs-big-play-button,button[aria-label*=\"Play\"]');" +
+            "if(b)b.click();" +
+            "var v=document.querySelector('video');if(v){v.muted=true;v.play();}" +
+            "}catch(e){}})();"
+
+        /**
+         * Diagnostic JS : retourne un JSON compact décrivant l'état de la page
+         * pour comprendre pourquoi l'extraction échoue sur Chromecast.
+         */
+        private const val DIAG_JS =
+            "(function(){try{var d={};" +
+            "d.jw=(typeof jwplayer);" +                           // "function" ou "undefined"
+            "d.scripts=document.querySelectorAll('script').length;" + // combien de scripts
+            "var m3u8Count=0;var m3u8Script=-1;" +
+            "var ss=document.querySelectorAll('script');" +
+            "for(var i=0;i<ss.length;i++){" +
+            "if(ss[i].textContent&&ss[i].textContent.indexOf('m3u8')>-1){m3u8Count++;m3u8Script=i;}}" +
+            "d.m3u8Scripts=m3u8Count;" +                          // combien contiennent 'm3u8'
+            "d.m3u8Idx=m3u8Script;" +                             // index du dernier
+            "d.hasSetup=false;" +
+            "if(m3u8Script>=0){d.hasSetup=ss[m3u8Script].textContent.indexOf('setup')>-1;}" +
+            "d.video=document.querySelectorAll('video').length;" + // éléments <video>
+            "d.title=document.title.substring(0,40);" +
+            "d.url=location.hostname;" +
+            "if(typeof jwplayer==='function'){" +
+            "var p=jwplayer();" +
+            "d.jwState=p&&p.getState?p.getState():'noGetState';" +
+            "d.jwHasConfig=!!(p&&p.getConfig);" +
+            "if(p&&p.getConfig){var c=p.getConfig();d.jwSources=c&&c.sources?c.sources.length:0;}" +
+            "}else{d.jwState='N/A';}" +
+            "return JSON.stringify(d);" +
+            "}catch(e){return '{\"error\":\"'+e.message+'\"}';}})();"
+
+        /**
+         * 2026-07-06 v2 : Extraction m3u8 combinant l'API JWPlayer ET le scan
+         * regex des <script> tags. L'API JWPlayer est prioritaire car elle
+         * fonctionne même quand le m3u8 est chargé dynamiquement (pas dans le
+         * HTML source). Sur Chromecast headless, c'est souvent le seul chemin
+         * qui marche : le force-play ne déclenche pas de requête réseau, mais
+         * setup() a déjà mis la source dans la config.
+         */
+        private const val EXTRACT_M3U8_JS =
+            "(function(){try{" +
+            // Prio 1 : API JWPlayer getConfig().sources
+            "if(typeof jwplayer==='function'){" +
+            "var p=jwplayer();" +
+            "if(p&&p.getConfig){var cfg=p.getConfig();" +
+            "if(cfg&&cfg.sources){for(var i=0;i<cfg.sources.length;i++){" +
+            "var f=cfg.sources[i].file||'';" +
+            "if(f.indexOf('.m3u8')>-1)return f;}}}" +
+            // Prio 2 : getPlaylistItem().file / .sources
+            "if(p&&p.getPlaylistItem){var it=p.getPlaylistItem();" +
+            "if(it){if(it.file&&it.file.indexOf('.m3u8')>-1)return it.file;" +
+            "if(it.sources){for(var j=0;j<it.sources.length;j++){" +
+            "var g=it.sources[j].file||'';" +
+            "if(g.indexOf('.m3u8')>-1)return g;}}}}" +
+            "}" +
+            // Prio 3 : scan regex des <script> tags (textContent)
+            "var scripts=document.querySelectorAll('script');" +
+            "for(var i=0;i<scripts.length;i++){" +
+            "var text=scripts[i].textContent;" +
+            "if(text&&text.indexOf('m3u8')>-1){" +
+            "var m=text.match(/sources\\s*:\\s*\\[\\s*\\{\\s*file\\s*:\\s*['\"]([^'\"]*\\.m3u8[^'\"]*)['\"]/);" +
+            "if(m)return m[1];" +
+            "m=text.match(/file\\s*:\\s*['\"]([^'\"]*\\.m3u8[^'\"]*)['\"]/);" +
+            "if(m)return m[1];" +
+            "m=text.match(/['\"]([^'\"]*\\.m3u8[^'\"]*)['\"]/);" +
+            "if(m)return m[1];}}" +
+            // Prio 4 : innerHTML complet (couvre les scripts injectés dynamiquement)
+            "var html=document.documentElement.innerHTML;" +
+            "var m=html.match(/['\"]([^'\"]*\\.m3u8[^'\"]*)['\"]/);" +
+            "if(m)return m[1];" +
+            // Prio 5 : XHR synchrone de la page elle-même (bypass WebView rendering)
+            //   Sur Chromecast headless, le DOM peut ne pas contenir le m3u8 si les
+            //   scripts ne s'exécutent pas (CDN JWPlayer bloqué/lent). Un fetch XHR
+            //   de la même URL retourne le HTML source brut (avec le m3u8 en clair).
+            "if(window.__vidmoly_raw_html){" +
+            "var rr=window.__vidmoly_raw_html.match(/sources\\s*:\\s*\\[\\s*\\{\\s*file\\s*:\\s*['\"]([^'\"]*\\.m3u8[^'\"]*)['\"]/);" +
+            "if(rr)return rr[1];" +
+            "rr=window.__vidmoly_raw_html.match(/file\\s*:\\s*['\"]([^'\"]*\\.m3u8[^'\"]*)['\"]/);" +
+            "if(rr)return rr[1];}" +
+            "}catch(e){return 'ERROR:'+e.message;}" +
+            "return null;})();"
+
+        /**
+         * XHR synchrone qui récupère le HTML source brut de la page courante
+         * et le stocke dans window.__vidmoly_raw_html. Exécuté une seule fois
+         * au début du polling (attempt 0) comme plan B pour l'extraction.
+         */
+        private const val FETCH_RAW_HTML_JS =
+            "(function(){try{" +
+            "if(window.__vidmoly_raw_html)return 'already_fetched';" +
+            "var x=new XMLHttpRequest();" +
+            "x.open('GET',location.href,false);" +    // sync = bloquant mais petit
+            "x.send();" +
+            "if(x.status===200){" +
+            "window.__vidmoly_raw_html=x.responseText;" +
+            "return 'fetched_'+x.responseText.length;}" +
+            "return 'status_'+x.status;" +
+            "}catch(e){return 'error_'+e.message;}})()"
     }
 }

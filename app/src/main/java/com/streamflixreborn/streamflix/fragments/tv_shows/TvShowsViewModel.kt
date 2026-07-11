@@ -77,7 +77,7 @@ class TvShowsViewModel(database: AppDatabase) : ViewModel() {
         }
     }.flowOn(Dispatchers.IO)
 
-    private val typeFilterProviders = listOf("VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga")
+    private val typeFilterProviders = listOf("VoirDrama", "VoirAnime", "AnimeSama", "FrenchManga")
 
     private var page = 1
     private var languageFilter: String = when {

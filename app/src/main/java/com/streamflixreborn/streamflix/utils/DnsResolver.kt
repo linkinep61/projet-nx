@@ -40,16 +40,30 @@ object DnsResolver : Dns {
     private val sslContext = SSLContext.getInstance("TLS").apply { init(null, trustAllCerts, SecureRandom()) }
     private val trustManager = trustAllCerts[0] as X509TrustManager
 
-    private var client: OkHttpClient = OkHttpClient.Builder()
-        .readTimeout(30, TimeUnit.SECONDS)
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .sslSocketFactory(sslContext.socketFactory, trustManager)
-        .hostnameVerifier { _, _ -> true }
-        .addInterceptor(logging)
-        .build()
+    // 2026-07-06 (blocage démarrage ~2,5s) : construire ce client OkHttp SSL au CLASS-LOAD
+    //   de DnsResolver déclenchait le chargement de la classe okhttp3 `Platform`
+    //   (findAndroidPlatform → CertificateChainCleaner) sur le MAIN THREAD — via
+    //   StreamFlixApp.onCreate:307 → DnsResolver.<clinit> → OkHttpClient.Builder.sslSocketFactory.
+    //   Sur Chromecast ce chargement de classe prend ~2,5s → fige au démarrage.
+    //   FIX : LAZY. Le client se construit à la 1re résolution DNS (lookup), qui a lieu
+    //   pendant les appels réseau = HORS main thread. Le <clinit> redevient trivial.
+    private val client: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .readTimeout(30, TimeUnit.SECONDS)
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS)
+            .sslSocketFactory(sslContext.socketFactory, trustManager)
+            .hostnameVerifier { _, _ -> true }
+            .addInterceptor(logging)
+            .build()
+    }
 
     private var _url: String = UserPreferences.dohProviderUrl
-    private var _internalDoh: Dns = buildDoh(_url)
+    // 2026-07-06 : lazy aussi — buildDoh() touche `client` (OkHttp). S'il était construit
+    //   au <clinit>, il re-déclencherait le chargement Platform sur le main. Construit à la
+    //   1re résolution via currentDoh().
+    private var _internalDoh: Dns? = null
+    private fun currentDoh(): Dns = _internalDoh ?: buildDoh(_url).also { _internalDoh = it }
 
     override fun lookup(hostname: String): List<InetAddress> {
         // Check cache d'abord
@@ -63,7 +77,7 @@ object DnsResolver : Dns {
         val providerName = if (_url.isEmpty()) "SYSTEM" else _url
         Log.d(TAG, "Resolving host: $hostname using provider: $providerName")
         return try {
-            val addresses = _internalDoh.lookup(hostname)
+            val addresses = currentDoh().lookup(hostname)
             Log.d(TAG, "Resolved $hostname to: ${addresses.joinToString { it.hostAddress ?: "" }}")
             cache[hostname] = CachedAddr(addresses, now + CACHE_TTL_MS)
             addresses

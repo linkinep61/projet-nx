@@ -59,13 +59,13 @@ object NakiosProvider : Provider, ProviderConfigUrl {
     private const val STATUS_PAGE = "https://nakios.online"
 
     /** Default si la découverte échoue. Mis à jour par onChangeUrl(). */
-    override val defaultBaseUrl: String = "https://nakios.ink"
+    override val defaultBaseUrl: String = "https://nakios.store"
 
     /** Front URL courant (pour Origin/Referer). */
-    @Volatile private var currentFrontUrl: String = "https://nakios.ink"
+    @Volatile private var currentFrontUrl: String = "https://nakios.store"
 
-    /** API base courant (`https://api.nakios.ink` par défaut). */
-    @Volatile private var currentApiBase: String = "https://api.nakios.ink"
+    /** API base courant (`https://api.nakios.store` par défaut). */
+    @Volatile private var currentApiBase: String = "https://api.nakios.store"
 
     override val baseUrl: String
         get() = currentApiBase
@@ -75,6 +75,7 @@ object NakiosProvider : Provider, ProviderConfigUrl {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
+        .callTimeout(45, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
 
@@ -97,7 +98,7 @@ object NakiosProvider : Provider, ProviderConfigUrl {
      * la status page est mise à jour avant le reste.
      */
     override suspend fun onChangeUrl(forceRefresh: Boolean): String = changeUrlMutex.withLock {
-        if (!forceRefresh && currentApiBase != "https://api.nakios.ink") {
+        if (!forceRefresh && currentApiBase != "https://api.nakios.store") {
             // déjà découvert et différent du défaut → on garde
             return@withLock currentApiBase
         }
@@ -108,12 +109,37 @@ object NakiosProvider : Provider, ProviderConfigUrl {
                 ?: return@withLock currentApiBase
             val js = httpGetRaw("$STATUS_PAGE$jsPath") ?: return@withLock currentApiBase
             // Le JS contient https://nakios.<TLD> (le domaine officiel courant)
-            val officialFront = Regex("""https?://nakios\.[a-z]{2,8}""")
+            var officialFront = Regex("""https?://nakios\.[a-z]{2,8}""")
                 .findAll(js)
                 .map { it.value }
                 .filter { !it.contains("nakios.online", ignoreCase = true) }
                 .firstOrNull()
                 ?: return@withLock currentApiBase
+
+            // 2026-07-08 : le status page peut référencer un ancien domaine (ex nakios.ink)
+            //   qui redirige vers le nouveau (nakios.store). On suit la redirection pour
+            //   trouver le vrai domaine actuel. On construit un client non-redirect pour
+            //   capturer le Location header.
+            try {
+                val noRedirectClient = client.newBuilder().followRedirects(false).build()
+                val probeReq = Request.Builder()
+                    .url(officialFront)
+                    .header("User-Agent", USER_AGENT)
+                    .build()
+                noRedirectClient.newCall(probeReq).execute().use { probeResp ->
+                    if (probeResp.isRedirect) {
+                        val loc = probeResp.header("Location")
+                        if (loc != null) {
+                            val redirectDomain = Regex("""https?://nakios\.[a-z]{2,8}""").find(loc)?.value
+                            if (redirectDomain != null && !redirectDomain.contains("nakios.online")) {
+                                Log.d(TAG, "Domain redirect: $officialFront → $redirectDomain")
+                                officialFront = redirectDomain
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) { /* probe failed, keep officialFront as-is */ }
+
             currentFrontUrl = officialFront
             // L'API suit le pattern api.nakios.<TLD>
             val tld = officialFront.substringAfterLast('.')
@@ -159,7 +185,7 @@ object NakiosProvider : Provider, ProviderConfigUrl {
                     // 403/404 sur l'API → potentiellement un changement de domaine
                     if (retryWithRediscovery && (resp.code == 403 || resp.code == 404 || resp.code in 500..599)) {
                         val newBase = onChangeUrl(forceRefresh = true)
-                        if (newBase != currentApiBase || newBase != "https://api.nakios.ink") {
+                        if (newBase != currentApiBase || newBase != "https://api.nakios.store") {
                             // baseUrl a changé → retry une fois sans rediscover récursif
                             return@withContext apiGet(path, retryWithRediscovery = false)
                         }
@@ -579,6 +605,8 @@ object NakiosProvider : Provider, ProviderConfigUrl {
         }
 
         val moiflixDeferred = async {
+            // 2026-07-04 : backup inline DÉSACTIVÉ → registre central.
+            if (com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) return@async emptyList<Video.Server>()
             try {
                 when (videoType) {
                     is Video.Type.Movie -> {
@@ -616,6 +644,8 @@ object NakiosProvider : Provider, ProviderConfigUrl {
         // getVideo. Si Cloudflare bloque ou que les iframes sont JS-rendered,
         // ce backup retourne emptyList silencieusement (timeout 10s).
         val papadustreamDeferred = async {
+            // 2026-07-04 : backup inline DÉSACTIVÉ → registre central.
+            if (com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) return@async emptyList<Video.Server>()
             try {
                 when (videoType) {
                     is Video.Type.Movie -> {
@@ -774,7 +804,7 @@ object NakiosProvider : Provider, ProviderConfigUrl {
         }
         return Video.Server(
             id = "moiflix_${matchUrl.substringAfterLast("/")}",
-            name = "Moiflix [VF]",
+            name = "Moiflix",
             src = finalUrl,
         )
     }
@@ -1031,6 +1061,25 @@ object NakiosProvider : Provider, ProviderConfigUrl {
         }
     }
 
+    /** 2026-07-03 (report correction backup) : les sources Nakios sont parfois des URLs
+     *  directes sur des CDN protégés Cloudflare (ex cdn.drinkoflix.lol → 503). On récupère
+     *  un cf_clearance via WebViewResolver (headless) puis on passe le cookie + STEALTH_UA
+     *  à ExoPlayer. Si un cf_clearance est déjà en cache, on le réutilise. */
+    private suspend fun resolveCfClearance(url: String): String? {
+        return try {
+            val existing = android.webkit.CookieManager.getInstance().getCookie(url)
+            if (existing?.contains("cf_clearance") == true) return existing
+            val u = java.net.URL(url)
+            val root = "${u.protocol}://${u.host}/"
+            val ctx = com.streamflixreborn.streamflix.StreamFlixApp.currentActivity
+                ?: com.streamflixreborn.streamflix.StreamFlixApp.instance
+            val resolver = com.streamflixreborn.streamflix.utils.WebViewResolver(ctx)
+            try { resolver.get(root, silent = true) }
+            finally { try { resolver.cleanup() } catch (_: Throwable) {} }
+            android.webkit.CookieManager.getInstance().getCookie(url)
+        } catch (e: Exception) { Log.w(TAG, "resolveCfClearance failed for $url: ${e.message}"); null }
+    }
+
     override suspend fun getVideo(server: Video.Server): Video {
         // Si le src pointe sur une URL MP4/m3u8 directe → lecture directe.
         // Sinon (URL d'embed) → on tente de la résoudre via le sélecteur d'extracteurs.
@@ -1059,15 +1108,44 @@ object NakiosProvider : Provider, ProviderConfigUrl {
                 src.startsWith("$baseUrl/api/") -> androidx.media3.common.MimeTypes.APPLICATION_M3U8
                 else -> null
             }
-            Video(
-                source = src,
-                type = mimeType,
-                headers = mapOf(
-                    "Origin" to currentFrontUrl,
-                    "Referer" to "$currentFrontUrl/",
-                    "User-Agent" to USER_AGENT,
-                ),
-            )
+            // 2026-07-03 (report correction backup) : distinguer les URLs proxy Nakios
+            //   (api.nakios.* / /api/) des CDN DIRECTS (ex cdn.drinkoflix.lol), souvent
+            //   protégés Cloudflare → 503 avec les headers historiques. Pour ces CDN on
+            //   récupère un cf_clearance (WebViewResolver) + STEALTH_UA.
+            val isNakiosApi = src.startsWith("$baseUrl/api/") || src.contains("api.nakios.")
+            if (isNakiosApi) {
+                Video(
+                    source = src,
+                    type = mimeType,
+                    headers = mapOf(
+                        "Origin" to currentFrontUrl,
+                        "Referer" to "$currentFrontUrl/",
+                        "User-Agent" to USER_AGENT,
+                    ),
+                )
+            } else {
+                // 2026-07-09 : citron-edge.lol fait du JA3/TLS fingerprinting strict.
+                //   resolveCfClearance chargeait la racine CDN en WebView → timeout 13s
+                //   pour rien (la racine redirige vers Telegram, ce n'est PAS une page
+                //   CF challenge). Le vrai fix = Cronet côté player (needsCronet).
+                //   On ne fait PLUS de WebView CF bypass ici, on envoie juste le Referer
+                //   + STEALTH_UA ; Cronet (TLS Chrome) + Referer = 206.
+                //   Pour les AUTRES CDN (drinkoflix etc.), on tente quand même le cookie
+                //   cf_clearance existant (sans WebView bypass, comme WebflixProvider).
+                val isCitronEdge = src.contains("citron-edge", ignoreCase = true)
+                val cookie = if (isCitronEdge) null else {
+                    // Lecture cookie existant seulement, PAS de WebView bypass
+                    try {
+                        android.webkit.CookieManager.getInstance().getCookie(src)
+                            ?.takeIf { it.contains("cf_clearance") }
+                    } catch (_: Exception) { null }
+                }
+                val h = HashMap<String, String>()
+                h["User-Agent"] = com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA
+                h["Referer"] = "https://nakios.store/"
+                if (!cookie.isNullOrBlank()) h["Cookie"] = cookie
+                Video(source = src, type = mimeType, headers = h)
+            }
         } else {
             // Tente d'utiliser un extracteur connu (DoodLa, Voe, Filemoon, etc.)
             try {

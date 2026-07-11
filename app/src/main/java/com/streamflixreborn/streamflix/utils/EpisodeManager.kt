@@ -68,7 +68,36 @@ object EpisodeManager {
                 val tvShow = provider.getTvShow(tvShowId)
                 val season = tvShow.seasons.find { it.number == seasonNumber }
                 if (season != null) {
-                    val fetchedEpisodes = provider.getEpisodesBySeason(season.id)
+                    var fetchedEpisodes = provider.getEpisodesBySeason(season.id)
+                    // 2026-07-05 (testeur "AnimeSama : reprise via 'Continuer à regarder'
+                    //   après fermeture de l'appli → flèche épisode précédent ABSENTE, suivant
+                    //   inactif, pas de focus sur l'épisode courant ; le contournement = repasser
+                    //   par la fiche → VF → Saison 1") : pour AnimeSama, la saison renvoyée par
+                    //   getTvShow est un DOSSIER DE LANGUE (id "slug/@vostfr/…"), donc
+                    //   getEpisodesBySeason retourne des SOUS-SAISONS (id "@subfolder:", overview
+                    //   "@subfolder") au lieu des vrais épisodes. Cette liste de dossiers écrasait
+                    //   les bons épisodes → le numéro de l'épisode repris (ex 41) était introuvable
+                    //   → currentIndex restait 0 → hasPreviousEpisode()=false. Fix : si on détecte
+                    //   des dossiers, on dérive la VRAIE sous-saison depuis l'id de l'épisode repris
+                    //   ("slug/saison1/vf/41" → "slug/saison1/vf") et on re-fetch les vrais épisodes
+                    //   (mode saison directe → mêmes IDs que l'épisode stocké → match par ID OK).
+                    //   Ne se déclenche QUE pour le cas dossier (marqueur "@subfolder:" propre à
+                    //   AnimeSama) → zéro impact sur les autres providers.
+                    val looksLikeFolders = fetchedEpisodes.isNotEmpty() && fetchedEpisodes.all {
+                        it.id.startsWith("@subfolder:") || it.overview == "@subfolder"
+                    }
+                    if (looksLikeFolders) {
+                        val subSeasonId = type.id.substringBeforeLast("/", "")
+                        if (subSeasonId.isNotBlank() && subSeasonId != type.id) {
+                            fetchedEpisodes = runCatching {
+                                provider.getEpisodesBySeason(subSeasonId)
+                            }.getOrDefault(emptyList()).filterNot {
+                                it.id.startsWith("@subfolder:") || it.overview == "@subfolder"
+                            }
+                        } else {
+                            fetchedEpisodes = emptyList()
+                        }
+                    }
                     if (fetchedEpisodes.isNotEmpty()) {
                         fetchedEpisodes.forEach { episode ->
                             episode.tvShow = episode.tvShow ?: tvShow

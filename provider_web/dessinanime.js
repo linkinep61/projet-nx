@@ -3,15 +3,14 @@
  * Site : https://dessinanime.cc  (Next.js + Cloudflare)
  * S'exécute DANS une WebView sur le site → fetch same-origin + DOM + cookies CF.
  *
- * v3 (2026-06-27) — Catalogue COMPLET (port de DessinAnimeProvider Kotlin) :
- *   - getHome : fetch '/' + split en 9 catégories disjointes (Films populaires,
- *     Séries populaires, classiques, etc.), 15 items/rail
- *   - getMovies / getTvShows : pagination réelle via /catalogue?page=N
- *   - getTvShow : parse les VRAIES saisons (href="/tv/slug/N/1")
- *   - getEpisodesBySeason : parse les VRAIS épisodes (/tv/slug/seasonN/1 + href="/tv/slug/seasonN/M")
- *   - extractServers (v2 inchangé) : intercepte fetch/XHR pour capter
- *     extractor.nmlnode.cc/proxy/{hls,mp4}?token=... générées au clic des
- *     boutons hosts. Sans whitelist host.
+ * v5 (2026-07-04) — Home = VRAIES catégories du site (DOM hydraté) :
+ *   - getHome : parse les sections RÉELLES du home après hydratation Next.js
+ *     (En Tendance, Nouveaux Films, Mieux Notés, Top Français, Nouveaux Épisodes).
+ *     Carrousel + 5 rails. Fallback fetch si DOM pas hydraté.
+ *   - getMovies : parcourt les 372 pages catalogue (batches de 10×5), filtre
+ *     type=movie. Couvre l'intégralité du catalogue en ~8 pages de scroll.
+ *   - getTvShows : idem mais type=tv (plus abondant → batch plus petit).
+ *   - getTvShow / getEpisodesBySeason / extractServers : inchangés (v3).
  *
  * Contrat (window.__P) :
  *   getHome() -> [ {name, items:[item]} ]
@@ -35,8 +34,7 @@
     const r = await fetch(path, { headers: { 'Accept': 'application/json' } });
     return await r.json();
   }
-  // OPTIMISATION CRITIQUE : réduit taille images TMDB original → w342 (10× + léger).
-  // Avant : 1-1.7 MB / image → home charge 10-15s. Après : 50-100 KB / image → 1-2s.
+  // OPTIMISATION : réduit taille images TMDB original → w342 (10× + léger).
   function optimizeImgUrl(url) {
     if (!url) return url;
     return url.replace('/t/p/original/', '/t/p/w342/');
@@ -49,12 +47,8 @@
   }
 
   /**
-   * Parse les cartes du HOME ou /catalogue. Structure réelle SSR de dessinanime.cc :
-   *   <img alt="<title>" src="<poster>" ...>
-   *   ... <a href="/(movie|tv)/<slug>" ...>Titre</a>
-   *   (l'<a> ne CONTIENT PAS l'<img> — l'img est AVANT l'<a> dans le DOM)
-   * Le regex inversé (img → href) capture 48 cards sur le home (testé live).
-   * Rating + année ne sont PAS dans le SSR (= hydratés CSR), on les ignore.
+   * Parse les cartes depuis le HTML brut (SSR) — utilisé par le fallback getHome,
+   * getMovies, getTvShows. Regex inversé img→href.
    */
   function parseCards(html) {
     const re = /<img\b[^>]*\balt="([^"]*)"[^>]*\bsrc="([^"]+)"[^>]*>[\s\S]{0,1500}?<a[^>]+href="\/(movie|tv)\/([^"\/]+)"[^>]*>/g;
@@ -109,11 +103,7 @@
   }
 
   // ─── Détection langue + clic bouton langue (VF/VOSTFR/VO) ──────────────
-  // dessinanime.cc affiche en haut de la page film/série des boutons langue :
-  // "Synopsis | VF | VOSTFR | VO | VF (4)". Le clic sur l'un change les sources
-  // ET les saisons VF correspondantes. On filtre les <button> par texte exact.
   function findLangBtn(lang) {
-    // lang = "vf" / "vostfr" / "vo"
     const targets = lang === 'vf' ? ['VF', 'VF (1)', 'VF (2)', 'VF (3)', 'VF (4)']
                   : lang === 'vostfr' ? ['VOSTFR']
                   : lang === 'vo' ? ['VO'] : [];
@@ -126,7 +116,6 @@
   }
   async function clickLangIfNeeded(lang) {
     if (!lang) return;
-    // Poll jusqu'à 8s pour attendre l'hydratation Next.js des boutons langue
     let btn = null;
     for (let i = 0; i < 16; i++) {
       btn = findLangBtn(lang);
@@ -138,14 +127,10 @@
         ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(t => {
           btn.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
         });
-        // Laisse le temps au site de switcher les sources
         await new Promise(r => setTimeout(r, 1500));
       } catch (e) {}
     }
   }
-  // Détecte quelles langues sont disponibles (boutons VF/VOSTFR/VO visibles).
-  // Polling COURT (1.5s max) → pas de blocage Mutex WebView. Si pas hydraté =
-  // fallback empty (le Kotlin gérera "single lang").
   async function detectAvailableLanguages() {
     for (let i = 0; i < 3; i++) {
       const btns = [...document.querySelectorAll('button')];
@@ -176,96 +161,184 @@
     return [...document.querySelectorAll('button')].filter(isHostBtn);
   }
 
+  // ─── DOM Section Parser (v5) ────────────────────────────────────────────
+  // Parse les VRAIES sections du home hydraté Next.js.
+  // Structure DOM :
+  //   <div class="relative flex flex-col gap-2">   ← section container
+  //     <header class="flex items-end ...">
+  //       <p>EN TENDANCE</p>                        ← titre section ALL CAPS
+  //     </header>
+  //     <div> ... [role="group"] slides ...          ← items
+  //   </div>
+  // Chaque slide :
+  //   <div role="group">
+  //     <div><div><img alt="..." src="poster"></div>  ← poster
+  //           <div><a href="/movie|tv/slug">Title</a></div></div>
+  //   </div>
+
+  /**
+   * Trouve les sections du home par titre <p> ALL CAPS.
+   * Retourne [{title, container}] pour chaque section demandée.
+   */
+  function findDomSections(wantedTitles) {
+    const allPs = [...document.querySelectorAll('p')];
+    const usedPs = new Set();
+    const result = [];
+    for (const wanted of wantedTitles) {
+      const p = allPs.find(p => !usedPs.has(p) && p.textContent.trim() === wanted);
+      if (!p) continue;
+      usedPs.add(p);
+      // Remonte au container de la section
+      let container = null;
+      if (p.parentElement && p.parentElement.tagName === 'HEADER') {
+        container = p.parentElement.parentElement;
+      } else if (p.parentElement && p.parentElement.tagName === 'SECTION') {
+        container = p.parentElement;
+      }
+      if (!container) {
+        let el = p.parentElement;
+        for (let i = 0; i < 5; i++) {
+          if (!el) break;
+          const cards = el.querySelectorAll('a[href*="/movie/"], a[href*="/tv/"]');
+          if (cards.length >= 2 && cards.length <= 30) { container = el; break; }
+          el = el.parentElement;
+        }
+      }
+      if (container) result.push({ title: wanted, container: container });
+    }
+    return result;
+  }
+
+  /**
+   * Extrait les items d'un container de section.
+   * Cherche les slides [role="group"] (carousel) OU les <a> directs (grid).
+   */
+  function extractSectionItems(container, seenIds) {
+    const items = [];
+    // Stratégie 1 : slides carousel [role="group"]
+    const slides = container.querySelectorAll('[role="group"]');
+    if (slides.length >= 2) {
+      slides.forEach(function (slide) {
+        const a = slide.querySelector('a[href*="/movie/"], a[href*="/tv/"]');
+        if (!a) return;
+        const href = a.getAttribute('href') || '';
+        const m = href.match(/^\/(movie|tv)\/([^\/]+)/);
+        if (!m) return;
+        const id = m[1] + '/' + m[2];
+        if (seenIds.has(id)) return;
+        seenIds.add(id);
+        const img = slide.querySelector('img');
+        const poster = img ? (img.src || img.getAttribute('data-src') || '') : '';
+        const title = img ? (img.alt || '') : (a.textContent || '').trim();
+        items.push({
+          type: m[1],
+          id: id,
+          title: decode(title),
+          poster: optimizeImgUrl(poster),
+          banner: optimizeImgUrl(poster),
+        });
+      });
+      return items;
+    }
+    // Stratégie 2 : liens <a> directs (sections grid)
+    const links = container.querySelectorAll('a[href*="/movie/"], a[href*="/tv/"]');
+    links.forEach(function (a) {
+      const href = a.getAttribute('href') || '';
+      const m = href.match(/^\/(movie|tv)\/([^\/]+)/);
+      if (!m) return;
+      const id = m[1] + '/' + m[2];
+      if (seenIds.has(id)) return;
+      seenIds.add(id);
+      // Cherche l'image dans le parent (card)
+      const card = a.closest('[role="group"]') || a.closest('div.group') || a.parentElement?.parentElement;
+      const img = card ? card.querySelector('img') : null;
+      const poster = img ? (img.src || img.getAttribute('data-src') || '') : '';
+      const title = img ? (img.alt || '') : (a.textContent || '').trim();
+      items.push({
+        type: m[1],
+        id: id,
+        title: decode(title),
+        poster: optimizeImgUrl(poster),
+        banner: optimizeImgUrl(poster),
+      });
+    });
+    return items;
+  }
+
   const P = {
     /**
-     * Home : fetch '/' + 2 pages catalogue en parallèle → split en 9 catégories
-     * disjointes (= chaque item dans UNE seule catégorie). Calque le natif Kotlin.
+     * Home v5 : VRAIES catégories du site depuis le DOM hydraté.
+     * Sections parsées (dans l'ordre) :
+     *   1. EN TENDANCE → carrousel "À l'affiche"
+     *   2. NOUVEAUX AJOUTS (FILMS) → rail films
+     *   3. MIEUX NOTES → rail films
+     *   4. TOP FRANCAIS → rail séries
+     *   5. NOUVEAUX EPISODES → rail séries
+     * Fallback : fetch SSR + split artificiel si DOM pas hydraté.
      */
     async getHome() {
-      // STRATÉGIE 2026-06-28 v4.0 :
-      //  - ✖ supprime parseCards(document.documentElement.outerHTML) — POLLUTION :
-      //    quand le re-fetch tourne pendant que la WebView est sur une page
-      //    série/film, le DOM hydraté ajoute les items de CETTE page → résultat
-      //    instable (4 cats → 2 cats sur le 2e fetch). Stabilité > qté.
-      //  - ✔ fetch /  +  catalogue page 1..6 (= STABLE quelle que soit la nav).
-      //  - ✔ ajoute FEATURED ("À l'affiche") = carrousel en tête avec banner.
-      //  - ✔ MIN = 1 (= aucune catégorie perdue, même si elle a 1 item).
-      const [home, c1, c2, c3, c4, c5, c6] = await Promise.all([
-        getText('/').catch(() => ''),
-        getText('/catalogue?page=1').catch(() => ''),
-        getText('/catalogue?page=2').catch(() => ''),
-        getText('/catalogue?page=3').catch(() => ''),
-        getText('/catalogue?page=4').catch(() => ''),
-        getText('/catalogue?page=5').catch(() => ''),
-        getText('/catalogue?page=6').catch(() => ''),
-      ]);
-      // Combine en gardant l'ordre (home en 1er = priorité), dédup par id
-      // PAS de DOM hydraté → stabilité de l'output entre fetches successifs.
-      const allItems = [];
-      const seenIds = new Set();
-      [parseCards(home), parseCards(c1), parseCards(c2), parseCards(c3),
-       parseCards(c4), parseCards(c5), parseCards(c6)].forEach(arr => {
-        arr.forEach(it => { if (!seenIds.has(it.id)) { seenIds.add(it.id); allItems.push(it); } });
-      });
-      const films = allItems.filter(i => i.type === 'movie');
-      const tvs = allItems.filter(i => i.type === 'tv');
-
-      // FEATURED = 8 premiers items du home (mix films+séries) avec banner.
-      // Le code home Onyx sait afficher cette catégorie comme un carrousel.
-      const featured = [];
-      const featuredIds = new Set();
-      for (const it of allItems) {
-        if (featured.length >= 8) break;
-        if (!it.poster) continue;
-        featured.push(it);
-        featuredIds.add(it.id);
+      // Attendre l'hydratation Next.js (sections ALL CAPS dans des <p>)
+      const WANTED = [
+        'EN TENDANCE',
+        'NOUVEAUX AJOUTS (FILMS)',
+        'MIEUX NOTES',
+        'TOP FRANCAIS',
+        'NOUVEAUX EPISODES'
+      ];
+      let domSections = [];
+      for (let i = 0; i < 20; i++) { // 10s max
+        domSections = findDomSections(WANTED);
+        if (domSections.length >= 3) break;
+        await new Promise(function (r) { setTimeout(r, 500); });
       }
 
-      // Pick disjoint : pas de rating/year en SSR → split séquentiel
-      // (les 1ers items du HTML = les plus visibles = "populaires" implicite)
-      const usedFilms = new Set();
-      const usedShows = new Set();
-      const pick = (src, used, max) => {
-        const out = [];
-        for (const it of src) {
-          if (used.has(it.id)) continue;
-          used.add(it.id);
-          out.push(it);
-          if (out.length >= max) break;
+      // ── DOM hydraté : parse les vraies sections ──
+      if (domSections.length >= 3) {
+        const cats = [];
+        const seenIds = new Set();
+        const displayNames = {
+          'EN TENDANCE': 'À l\'affiche',
+          'NOUVEAUX AJOUTS (FILMS)': 'Nouveaux Films',
+          'MIEUX NOTES': 'Mieux Notés',
+          'TOP FRANCAIS': 'Top Français',
+          'NOUVEAUX EPISODES': 'Nouveaux Épisodes',
+        };
+        for (const sec of domSections) {
+          const items = extractSectionItems(sec.container, seenIds);
+          if (items.length < 1) continue;
+          cats.push({ name: displayNames[sec.title] || sec.title, items: items });
         }
-        return out;
-      };
+        // Si ≥3 catégories, on a un bon home
+        if (cats.length >= 3) return cats;
+      }
 
-      // Films : 4 tranches disjointes (12 chacune = plus de catégories remplies)
-      const topFilms = pick(films, usedFilms, 12);
-      const classicFilms = pick(films, usedFilms, 12);
-      const remainFilms1 = pick(films, usedFilms, 12);
-      const remainFilms2 = pick(films, usedFilms, 12);
-
-      // Séries : 4 tranches disjointes (12 chacune)
-      const topShows = pick(tvs, usedShows, 12);
-      const classicShows = pick(tvs, usedShows, 12);
-      const remainShows1 = pick(tvs, usedShows, 12);
-      const remainShows2 = pick(tvs, usedShows, 12);
-
-      // À découvrir = items restants non utilisés (mix films+tv)
-      const usedAll = new Set([...usedFilms, ...usedShows]);
-      const mixRemain = allItems.filter(it => !usedAll.has(it.id)).slice(0, 15);
-
-      // MIN abaissé à 1 → aucune catégorie ne disparaît.
-      const MIN = 1;
-      const cats = [];
-      if (featured.length >= 3) cats.push({ name: 'À l\'affiche', items: featured });
-      if (topFilms.length >= MIN) cats.push({ name: 'Films populaires', items: topFilms });
-      if (topShows.length >= MIN) cats.push({ name: 'Séries populaires', items: topShows });
-      if (classicFilms.length >= MIN) cats.push({ name: 'Films classiques', items: classicFilms });
-      if (classicShows.length >= MIN) cats.push({ name: 'Séries classiques', items: classicShows });
-      if (remainFilms1.length >= MIN) cats.push({ name: 'Films', items: remainFilms1 });
-      if (remainShows1.length >= MIN) cats.push({ name: 'Séries', items: remainShows1 });
-      if (remainFilms2.length >= MIN) cats.push({ name: 'Encore plus de films', items: remainFilms2 });
-      if (remainShows2.length >= MIN) cats.push({ name: 'Encore plus de séries', items: remainShows2 });
-      if (mixRemain.length >= MIN) cats.push({ name: 'À découvrir', items: mixRemain });
-      return cats;
+      // ── Fallback : fetch SSR (si hydratation échouée / WebView pas sur home) ──
+      var pages = await Promise.all([
+        getText('/').catch(function () { return ''; }),
+        getText('/catalogue?page=1').catch(function () { return ''; }),
+        getText('/catalogue?page=2').catch(function () { return ''; }),
+        getText('/catalogue?page=3').catch(function () { return ''; }),
+        getText('/catalogue?page=4').catch(function () { return ''; }),
+        getText('/catalogue?page=5').catch(function () { return ''; }),
+        getText('/catalogue?page=6').catch(function () { return ''; }),
+      ]);
+      var allItems = [];
+      var seenFb = new Set();
+      pages.forEach(function (html) {
+        parseCards(html).forEach(function (it) {
+          if (!seenFb.has(it.id)) { seenFb.add(it.id); allItems.push(it); }
+        });
+      });
+      var films = allItems.filter(function (i) { return i.type === 'movie'; });
+      var tvs = allItems.filter(function (i) { return i.type === 'tv'; });
+      var featured = allItems.slice(0, 8).filter(function (it) { return !!it.poster; });
+      var fbCats = [];
+      if (featured.length >= 3) fbCats.push({ name: 'À l\'affiche', items: featured });
+      if (films.length >= 1) fbCats.push({ name: 'Nouveaux Films', items: films.slice(0, 15) });
+      if (tvs.length >= 1) fbCats.push({ name: 'Top Séries', items: tvs.slice(0, 15) });
+      var remainMix = allItems.filter(function (it) { return !featured.includes(it); }).slice(0, 15);
+      if (remainMix.length >= 1) fbCats.push({ name: 'À découvrir', items: remainMix });
+      return fbCats;
     },
 
     async search(q, page) {
@@ -274,39 +347,58 @@
     },
 
     /**
-     * Pagination Films/Séries : fetch 5 pages /catalogue consécutives en parallèle
-     * (= ~25-35 items par page Onyx au lieu de ~5-7). Le user scrolle = page 2
-     * = pages catalogue 6-10, etc. Plus de défilement fluide.
+     * Pagination Films : parcourt les pages catalogue par batches de 10,
+     * jusqu'à 5 batches (= 50 pages catalogue par page app).
+     * Avec ~1.2 films/page catalogue, ça donne ~60 films par page app.
+     * Les 372 pages catalogue sont couvertes en ~8 pages de scroll.
      */
     async getMovies(page) {
-      const BATCH = 20;
-      const start = ((page || 1) - 1) * BATCH + 1;
-      const htmls = await Promise.all(
-        Array.from({ length: BATCH }, (_, i) => getText('/catalogue?page=' + (start + i)))
-      );
-      const items = [];
-      const seen = new Set();
-      htmls.forEach(html => {
-        parseCards(html).filter(i => i.type === 'movie').forEach(it => {
-          if (!seen.has(it.id)) { seen.add(it.id); items.push(it); }
+      var BATCH = 10;       // pages en parallèle par batch
+      var MAX_BATCHES = 5;  // batches max avant de rendre la main
+      var MIN_ITEMS = 20;   // objectif minimum de films
+      var start = ((page || 1) - 1) * BATCH * MAX_BATCHES + 1;
+      var items = [];
+      var seen = new Set();
+
+      for (var b = 0; b < MAX_BATCHES; b++) {
+        var batchStart = start + b * BATCH;
+        var htmls = await Promise.all(
+          Array.from({ length: BATCH }, function (_, i) {
+            return getText('/catalogue?page=' + (batchStart + i)).catch(function () { return ''; });
+          })
+        );
+        htmls.forEach(function (html) {
+          parseCards(html).filter(function (i) { return i.type === 'movie'; }).forEach(function (it) {
+            if (!seen.has(it.id)) { seen.add(it.id); items.push(it); }
+          });
         });
-      });
+        // Stop tôt si on a assez de films
+        if (items.length >= MIN_ITEMS) break;
+      }
       return items;
     },
 
     async getTvShows(page) {
-      const BATCH = 20;
-      const start = ((page || 1) - 1) * BATCH + 1;
-      const htmls = await Promise.all(
-        Array.from({ length: BATCH }, (_, i) => getText('/catalogue?page=' + (start + i)))
-      );
-      const items = [];
-      const seen = new Set();
-      htmls.forEach(html => {
-        parseCards(html).filter(i => i.type === 'tv').forEach(it => {
-          if (!seen.has(it.id)) { seen.add(it.id); items.push(it); }
+      var BATCH = 10;
+      var MAX_BATCHES = 3;  // TV shows plus abondants → 30 pages suffisent
+      var start = ((page || 1) - 1) * BATCH * MAX_BATCHES + 1;
+      var items = [];
+      var seen = new Set();
+
+      for (var b = 0; b < MAX_BATCHES; b++) {
+        var batchStart = start + b * BATCH;
+        var htmls = await Promise.all(
+          Array.from({ length: BATCH }, function (_, i) {
+            return getText('/catalogue?page=' + (batchStart + i)).catch(function () { return ''; });
+          })
+        );
+        htmls.forEach(function (html) {
+          parseCards(html).filter(function (i) { return i.type === 'tv'; }).forEach(function (it) {
+            if (!seen.has(it.id)) { seen.add(it.id); items.push(it); }
+          });
         });
-      });
+        if (items.length >= 20) break;
+      }
       return items;
     },
 
@@ -316,20 +408,12 @@
 
     /**
      * Détail série : og tags du SSR + saisons depuis le DOM hydraté.
-     * Le moteur Kotlin a navigué la WebView sur /<id>, donc on lit document.* directement.
-     * Polling 12s max pour attendre l'hydration Next.js des liens saison.
      */
     async getTvShow(id, lang) {
       const slug = id.replace(/^tv\//, '');
       const base = parseDetail(document.documentElement.outerHTML, id);
-      // Si langue passée → click le bouton langue avant de parser les saisons
-      // (Sur dessinanime.cc le clic VF/VOSTFR change la liste des saisons dispo.)
       if (lang) await clickLangIfNeeded(lang);
-      // detectAvailableLanguages RETIRÉ (v6) : le wrapper VF/VOSTFR a été
-      // abandonné côté Kotlin → cette détection ralentissait getTvShow de 8s
-      // pour rien (= timeout 20s pile au polling saisons cumulé).
       base.availableLanguages = [];
-      // Poll DOM jusqu'à 12s pour les liens saison "/tv/<slug>/<N>/1"
       const escSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const seasonHrefRe = new RegExp('^\\/tv\\/' + escSlug + '\\/(\\d+)\\/1$');
       let seasonNums = new Set();
@@ -343,7 +427,6 @@
         if (seasonNums.size > 0) break;
         await new Promise(r => setTimeout(r, 500));
       }
-      // Pour chaque saison, cherche son image associée dans le DOM (la card)
       const seasons = [...seasonNums].sort((a, b) => a - b).map(n => {
         const a = [...document.querySelectorAll('a[href]')].find(x => {
           const m = (x.getAttribute('href') || '').match(seasonHrefRe);
@@ -370,8 +453,6 @@
 
     /**
      * Liste les épisodes d'une saison via le DOM hydraté Next.js.
-     * Le moteur Kotlin a navigué la WebView sur /tv/<slug>/<seasonNum>/1, on lit le DOM.
-     * Polling 12s pour attendre l'hydratation de tous les épisodes (= sinon ~6 sur 12).
      */
     async getEpisodesBySeason(seasonId, lang) {
       const parts = seasonId.split('/');
@@ -380,9 +461,7 @@
       const seasonNum = parts[2];
       const escSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const epHrefRe = new RegExp('^\\/tv\\/' + escSlug + '\\/' + seasonNum + '\\/(\\d+)$');
-      // Si langue passée → click le bouton langue avant de lister épisodes
       if (lang) await clickLangIfNeeded(lang);
-      // Poll DOM jusqu'à 12s
       let bestCount = 0;
       let stableCycles = 0;
       for (let i = 0; i < 24; i++) {
@@ -394,7 +473,6 @@
         }
         if (found.size === bestCount) {
           stableCycles++;
-          // 2 cycles stables avec ≥ 5 épisodes → on s'arrête (chargement fini)
           if (stableCycles >= 2 && bestCount >= 5) break;
         } else {
           bestCount = found.size;
@@ -402,7 +480,6 @@
         }
         await new Promise(r => setTimeout(r, 500));
       }
-      // Lecture finale du DOM
       const links = [...document.querySelectorAll('a[href]')];
       const seen = new Set();
       const out = [];
@@ -412,10 +489,8 @@
         const epNum = parseInt(m[1], 10);
         if (seen.has(epNum)) continue;
         seen.add(epNum);
-        // Image (vignette épisode) : <img> dans le bloc <a> ou parent
         const img = a.querySelector('img') || a.parentElement?.querySelector('img');
         let poster = img ? (img.src || img.getAttribute('data-src')) : null;
-        // Titre : cherche un élément avec class title, sinon le texte du <a>
         let title = null;
         const titleEl = a.querySelector('[class*=title], h1, h2, h3, h4, h5') || a.parentElement?.querySelector('[class*=title], h1, h2, h3, h4, h5');
         if (titleEl) title = (titleEl.textContent || '').trim();
@@ -434,13 +509,9 @@
 
     /**
      * extractServers v2 — Intercepte fetch + XHR pour capter les URLs
-     * extractor.nmlnode.cc/proxy/{hls,mp4,dash}?token=... générées au clic des
-     * boutons hosts (hydrax/uqload/vidhide/sendvid/…). Trouve les boutons hosts
-     * dynamiquement sans whitelist.
+     * extractor.nmlnode.cc/proxy/{hls,mp4,dash}?token=...
      */
     async extractServers(lang) {
-      // Si langue passée → click le bouton langue AVANT le scan des hosts.
-      // Le site renouvelle les tokens nmlnode selon la langue choisie.
       if (lang) await clickLangIfNeeded(lang);
       const captured = [];
       const seenToken = new Set();
@@ -467,7 +538,6 @@
         return origOpen.apply(this, arguments);
       };
 
-      // Attente boutons hosts (Next.js hydration jusqu'à 12s)
       let btns = [];
       for (let i = 0; i < 24; i++) {
         btns = findHostBtns();
@@ -475,7 +545,6 @@
         await new Promise(r => setTimeout(r, 500));
       }
 
-      // Click + capture par bouton
       const counts = {};
       const out = [];
       for (const btn of btns) {

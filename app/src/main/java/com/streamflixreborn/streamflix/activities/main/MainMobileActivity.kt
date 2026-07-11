@@ -426,7 +426,7 @@ class MainMobileActivity : FragmentActivity() {
         val supportsTvShows = Provider.supportsTvShows(provider)
         val isIptv = provider is com.streamflixreborn.streamflix.providers.IptvProvider
         val animeOnlyProviders = setOf(
-            "VoirDrama", "VoirAnime", "FrenchAnime", "AnimeSama", "FrenchManga",
+            "VoirDrama", "VoirAnime", "AnimeSama", "FrenchManga",
         )
         val isAnimeOnly = provider.name in animeOnlyProviders
 

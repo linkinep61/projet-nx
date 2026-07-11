@@ -53,15 +53,26 @@ open class MoiflixExtractor : Extractor() {
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
     override suspend fun extract(link: String): Video {
-        val hlsUrl = extractByIntercepting(link)
-            ?: throw Exception("Moiflix: Could not find HLS source in $link")
-        // L'URL master peut être .m3u8 (cas générique) OU xs1.php?data=XXX
-        // (cas xtremestream — content-type text/plain mais body HLS valide).
-        // On force le MIME type APPLICATION_M3U8 pour que ExoPlayer utilise
-        // HlsMediaSource direct, sans tomber dans l'auto-detect par extension
-        // qui rate sur PlayerTvFragment.
+        val rawUrl = extractByIntercepting(link)
+            ?: throw Exception("Moiflix: Could not find video source in $link")
+
+        // MP4 direct (emmmmbed → Rumble CDN) : préfixe "mp4::"
+        if (rawUrl.startsWith("mp4::")) {
+            val mp4Url = rawUrl.removePrefix("mp4::")
+            return Video(
+                source = mp4Url,
+                type = androidx.media3.common.MimeTypes.VIDEO_MP4,
+                headers = mapOf(
+                    "Referer" to "https://emmmmbed.com/",
+                    "Origin" to "https://emmmmbed.com",
+                    "User-Agent" to ANDROID_CHROME_UA,
+                )
+            )
+        }
+
+        // HLS (xtremestream) : .m3u8 ou xs1.php?data=XXX
         return Video(
-            source = hlsUrl,
+            source = rawUrl,
             type = androidx.media3.common.MimeTypes.APPLICATION_M3U8,
             headers = mapOf(
                 "Referer" to "https://lecteur1.xtremestream.xyz/",
@@ -109,9 +120,13 @@ open class MoiflixExtractor : Extractor() {
                         }
 
                         @android.webkit.JavascriptInterface
+                        fun onMp4(url: String) {
+                            android.util.Log.d("MoiflixExtractor", "MP4 RESOLVED (via bridge): $url")
+                            resolve("mp4::$url")
+                        }
+
+                        @android.webkit.JavascriptInterface
                         fun onUnsupported(provider: String) {
-                            // Non-xtremestream provider (emmmmbed, etc.) — bloqué par CF
-                            // Turnstile. On échoue fast (1s) plutôt que d'attendre 50s.
                             android.util.Log.w("MoiflixExtractor", "Unsupported provider, abandon: $provider")
                             resolve(null)
                         }
@@ -164,13 +179,15 @@ open class MoiflixExtractor : Extractor() {
                                 reqUrl.contains("xs1.php?data=") && !reqUrl.contains("q=")
                             if (isM3u8Ext || isXtremeMaster) {
                                 android.util.Log.d("MoiflixExtractor", "m3u8 INTERCEPTED: $reqUrl")
-                                // 2026-05-04 BUG FIX : ne pas utiliser view.post() —
-                                // le Main thread peut être occupé par les retries du
-                                // player iframe (qui boucle sur "manifestLoadError" car
-                                // on bloque sa réponse), repoussant le resolve au-delà
-                                // du timeout de 30s. cont.resume est thread-safe via
-                                // suspendCancellableCoroutine, donc on l'appelle direct.
                                 resolve(reqUrl)
+                                return WebResourceResponse("text/plain", "utf-8", null)
+                            }
+
+                            // Capture MP4 direct (emmmmbed → Rumble CDN)
+                            val isMp4 = reqUrl.contains(".mp4") && host.contains("rumble.cloud")
+                            if (isMp4) {
+                                android.util.Log.d("MoiflixExtractor", "MP4 INTERCEPTED: $reqUrl")
+                                resolve("mp4::$reqUrl")
                                 return WebResourceResponse("text/plain", "utf-8", null)
                             }
 
@@ -236,8 +253,10 @@ open class MoiflixExtractor : Extractor() {
             "moiflix.org",
             "xtremestream.xyz",
             "xtremestream.com",
-            "emmmmbed.com", // alternative provider utilisé par moiflix (CF challenge)
+            "moiflix.fans", // domaine actif principal
+            "emmmmbed.com", // alternative provider — sert MP4 via Rumble CDN
             "embed.com",
+            "rumble.cloud", // CDN vidéo d'emmmmbed (MP4 direct)
             "papadustream.dad", // matomo tracker, harmless mais peut être nécessaire pour pas casser le JS
             "challenges.cloudflare.com",
             "ajax.googleapis.com",
@@ -318,11 +337,54 @@ open class MoiflixExtractor : Extractor() {
                             return;
                         }
 
-                        // Autres providers (emmmmbed, etc.) — bloqués par CF Turnstile
-                        // dans WebView (about:srcdoc + CSP nonce + WebGPU absent +
-                        // Private Access Token absent). Pas faisable sans solveur
-                        // captcha externe. On échoue fast pour que ExoPlayer puisse
-                        // basculer rapidement vers un autre server.
+                        // emmmmbed.com : injecter l'iframe dans le DOM → WebView
+                        // charge la page → <video src="...mp4"> direct (Rumble CDN).
+                        // On poll le <video> src depuis l'iframe chargée.
+                        var emmmmbedMatch = resp.match(/src=["']([^"']*emmmmbed\.com[^"']*)["']/);
+                        if (emmmmbedMatch) {
+                            var embedUrl = emmmmbedMatch[1];
+                            if (B && B.log) B.log('emmmmbed detected: ' + embedUrl);
+                            var player = document.getElementById('player');
+                            if (!player) { player = document.body; }
+                            player.innerHTML = '<iframe id="_mfx_embed" src="' + embedUrl
+                                + '" style="width:100%;height:100%;border:0" '
+                                + 'allow="autoplay;encrypted-media" allowfullscreen></iframe>';
+                            // Poll l'iframe pour trouver <video src>
+                            var pollCount = 0;
+                            var pollInterval = setInterval(function(){
+                                pollCount++;
+                                try {
+                                    var iframe = document.getElementById('_mfx_embed');
+                                    if (iframe && iframe.contentDocument) {
+                                        var vid = iframe.contentDocument.querySelector('video[src]');
+                                        if (vid && vid.src && vid.src.indexOf('http') === 0) {
+                                            clearInterval(pollInterval);
+                                            if (B && B.log) B.log('video src found: ' + vid.src.substring(0,80));
+                                            if (B && B.onMp4) B.onMp4(vid.src);
+                                            return;
+                                        }
+                                        // Aussi checker <source> tag
+                                        var source = iframe.contentDocument.querySelector('video source[src]');
+                                        if (source && source.src && source.src.indexOf('http') === 0) {
+                                            clearInterval(pollInterval);
+                                            if (B && B.log) B.log('source src found: ' + source.src.substring(0,80));
+                                            if (B && B.onMp4) B.onMp4(source.src);
+                                            return;
+                                        }
+                                    }
+                                } catch(e) {
+                                    // cross-origin — on attend l'interception réseau
+                                    if (pollCount === 1 && B && B.log) B.log('iframe cross-origin, relying on intercept');
+                                }
+                                if (pollCount > 100) { // ~50s
+                                    clearInterval(pollInterval);
+                                    if (B && B.log) B.log('emmmmbed poll timeout');
+                                }
+                            }, 500);
+                            return;
+                        }
+
+                        // Autres providers inconnus — on échoue fast
                         var anyIframe = resp.match(/src=["']([^"']+)["']/);
                         var providerHost = 'unknown';
                         if (anyIframe) {

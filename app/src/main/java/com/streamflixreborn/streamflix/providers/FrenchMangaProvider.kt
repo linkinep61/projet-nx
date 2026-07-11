@@ -17,8 +17,12 @@ import com.streamflixreborn.streamflix.utils.NetworkClient
 import com.streamflixreborn.streamflix.utils.TMDb3
 import com.streamflixreborn.streamflix.utils.TMDb3.original
 import com.streamflixreborn.streamflix.utils.UserPreferences
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import okhttp3.ResponseBody
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -35,7 +39,7 @@ import retrofit2.http.Query
 import retrofit2.http.Url
 import kotlin.math.round
 
-object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
+object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, ProgressiveServersProvider {
     override val name = "FrenchManga"
 
     override val defaultBaseUrl: String = "https://w16.french-manga.net/"
@@ -647,50 +651,16 @@ object FrenchMangaProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
             reliabilityOrder[serviceName] ?: defaultReliability
         })
 
-        // 2026-05-05/06 : Cloudstream + Moviebox backups pour les animes/mangas FR.
-        val title = id.substringBefore("/").substringBefore("@").replace("-", " ").trim()
+        // 2026-07-04 : backups inline DÉSACTIVÉS → registre central (BackupRegistry.fetchAll
+        //   dans PlayerViewModel via ProgressiveServersProvider).
+        return sorted
+    }
 
-        val cloudstreamBackup = if (title.isNotBlank()) {
-            try {
-                val csVideoType: Video.Type = when (videoType) {
-                    is Video.Type.Movie -> Video.Type.Movie(
-                        id = "0", title = title, releaseDate = videoType.releaseDate,
-                        poster = videoType.poster, imdbId = videoType.imdbId,
-                    )
-                    is Video.Type.Episode -> Video.Type.Episode(
-                        id = "0", number = videoType.number, title = videoType.title,
-                        poster = videoType.poster, overview = videoType.overview,
-                        tvShow = videoType.tvShow.copy(id = "0", title = title),
-                        season = videoType.season,
-                    )
-                }
-                CloudstreamProvider.getServers("0", csVideoType)
-            } catch (_: Exception) { emptyList() }
-        } else emptyList()
-
-        val movieboxBackup = if (title.isNotBlank()) {
-            try {
-                val type = if (videoType is Video.Type.Movie) 1 else 2
-                MovieboxProvider.getMovieboxSourcesByTitle(
-                    title, null, type,
-                    seasonNumber = if (videoType is Video.Type.Episode) videoType.season.number else null,
-                    episodeNumber = if (videoType is Video.Type.Episode) videoType.number else null,
-                )
-            } catch (_: Exception) { emptyList() }
-        } else emptyList()
-
-        // Papadustream backup en dernier (captcha CF)
-        val papaBackup = if (title.isNotBlank() && videoType is Video.Type.Episode) {
-            try {
-                PapadustreamProvider.getPapaSourcesByTitle(
-                    title = title,
-                    seasonNum = videoType.season.number,
-                    episodeNum = videoType.number,
-                )
-            } catch (_: Exception) { emptyList() }
-        } else emptyList()
-
-        return sorted + cloudstreamBackup + movieboxBackup + papaBackup
+    override fun getServersProgressive(id: String, videoType: Video.Type): Flow<List<Video.Server>> = channelFlow {
+        try {
+            val servers = withContext(Dispatchers.IO) { getServers(id, videoType) }
+            if (servers.isNotEmpty()) send(servers)
+        } catch (e: Exception) { Log.w("FrenchManga", "progressive native KO: ${e.message}") }
     }
 
     override suspend fun getVideo(server: Video.Server): Video {

@@ -49,6 +49,7 @@ class NetuExtractor : Extractor() {
         .followSslRedirects(true)
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
+        .callTimeout(45, TimeUnit.SECONDS)
         .build()
 
     companion object {
@@ -147,6 +148,7 @@ class NetuExtractor : Extractor() {
             .followSslRedirects(true)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
+            .callTimeout(30, TimeUnit.SECONDS)
             .build()
 
         val m3u8Content = proxyClient.newCall(request).execute().use { response ->

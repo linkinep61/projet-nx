@@ -106,29 +106,35 @@ interface Provider {
             FrembedProvider to ProviderSupport(movies = true, tvShows = true),
             aploufProvider to ProviderSupport(movies = true, tvShows = false),
             // « ensuite les autres » (Films/Séries) :
-            // Papadustream — séries-only (DLE CMS), sources via PapadustreamExtractor.
-            PapadustreamProvider to ProviderSupport(movies = false, tvShows = true),
+            // 2026-07-10 (user "Papadustream V1 : supprime-la complètement, provider + backup,
+            //   mais surtout PAS PapadustreamV2") : Papadustream V1 (site à reCAPTCHA) RETIRÉ.
+            //   Son backup était déjà mort (emit commenté + exclu de la boucle générique).
+            //   PapadustreamV2Provider (sans captcha) reste, en backup, INCHANGÉ.
+            // PapadustreamProvider to ProviderSupport(movies = false, tvShows = true),
             VoirDramaProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
-            // Moviebox (themoviebox.org/aoneroom) — niche K-Dramas/animes/films VF.
-            MovieboxProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
+            // 2026-07-10 (user "on transforme Moviebox en backup principal et on supprime le
+            //   provider navigable") : Moviebox N'EST PLUS un provider navigable. Il sert
+            //   UNIQUEMENT de backup (BackupRegistry.emit("Moviebox"), par tmdbId, FR only).
+            //   Le code MovieboxProvider + AoneroomClient restent utilisés par le registre.
+            // MovieboxProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             // NetMirror — Netflix/Prime/Hotstar/Disney+ via net52.cc mirror.
             // Catalogue TMDB + CatalogFilter, streams via NewTV API.
             NetMirrorProvider to ProviderSupport(movies = true, tvShows = true, enrichHome = false),
             // ─── Anime (onglet Animés) — ordre interne inchangé ───
             AnimeSamaProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             FrenchMangaProvider to ProviderSupport(movies = false, tvShows = true, group = ProviderGroup.ANIME),
+            // 2026-07-03 (user "FrenchAnime est revenu en natif, supprime-le en web") :
+            //   FrenchAnime repasse en provider NATIF (Kotlin) → plus AUCUNE WebView
+            //   FrenchAnime. Le WebJsProvider FrenchAnime (french-anime.com + frenchanime.js)
+            //   est retiré.
             FrenchAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
-            // 2026-06-28 : ancien DessinAnimeProvider Kotlin MASQUÉ — remplacé par
-            //   le WebJsProvider ci-dessous (même site, logique hébergée sur GitHub,
-            //   éditable sans rebuild).
-            // DessinAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
-            WebJsProvider(
-                name = "DessinAnime",
-                baseUrl = "https://dessinanime.cc",
-                jsUrl = "https://raw.githubusercontent.com/linkinep61/projet-nx/main/provider_web/dessinanime.js",
-                logo = "android.resource://${com.streamflixreborn.streamflix.BuildConfig.APPLICATION_ID}/drawable/logo_dessinanime",
-                language = "fr",
-            ) to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
+            // 2026-07-04 (décision user "on est arrivé en natif, on n'a pas besoin du provider web") :
+            //   DessinAnime repasse en provider NATIF (DessinAnimeProvider.kt). Le natif gère le
+            //   challenge CF via WebViewResolver (bypass + cookie cf_clearance partagé) et attend le
+            //   marker d'hydratation ("$slug/1/1") pour les saisons — plus robuste que le WebJS.
+            //   getMovies/getTvShows filtrent via /catalogue?mediaType=MOVIE|TV → 12 items propres/page
+            //   (avant : /catalogue mélangé → ~5 films/page = "6 films sur 375 pages").
+            DessinAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             FranimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME),
             VoirAnimeProvider to ProviderSupport(movies = true, tvShows = true, group = ProviderGroup.ANIME, enrichHome = false),
             // 2026-05-21 : AnimeSite SUPPRIMÉ du provider list (user). SendvidExtractor reste dispo pour les autres.

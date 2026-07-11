@@ -6,6 +6,7 @@ import com.streamflixreborn.streamflix.utils.AesHelper
 import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import retrofit2.Retrofit
+import java.util.concurrent.TimeUnit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Header
@@ -111,6 +112,9 @@ open class ChillxExtractor : Extractor() {
         companion object {
             fun build(baseUrl: String): Service {
                 val client = OkHttpClient.Builder()
+                    .connectTimeout(15, TimeUnit.SECONDS)
+                    .readTimeout(15, TimeUnit.SECONDS)
+                    .callTimeout(30, TimeUnit.SECONDS)
                     .build()
 
                 val retrofit = Retrofit.Builder()

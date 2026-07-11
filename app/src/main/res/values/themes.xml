@@ -1,5 +1,13 @@
 <resources>
 
+    <!-- 2026-07-06 : thème du splash animé (SplashActivity). Noir plein écran,
+         sans barre — indépendant du thème choisi par l'user. -->
+    <style name="SplashLaunch" parent="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+    </style>
+
     <style name="AppTheme.Mobile" parent="Theme.AppCompat">
         <item name="windowActionBar">false</item>
         <item name="windowNoTitle">true</item>

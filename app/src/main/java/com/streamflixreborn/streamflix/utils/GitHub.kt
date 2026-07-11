@@ -88,6 +88,9 @@ object GitHub {
         companion object {
             fun build(): ApiService {
                 val client = OkHttpClient.Builder()
+                    .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                    .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                     .addInterceptor { chain ->
                         val request = chain.request().newBuilder()
                             .addHeader("Authorization", "Bearer $token")
@@ -115,6 +118,9 @@ object GitHub {
              */
             fun buildPublic(): ApiService {
                 val client = OkHttpClient.Builder()
+                    .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                    .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                     .addInterceptor { chain ->
                         val request = chain.request().newBuilder()
                             .addHeader("Accept", "application/vnd.github+json")

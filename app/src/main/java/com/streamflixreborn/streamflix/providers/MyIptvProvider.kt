@@ -267,6 +267,7 @@ object MyIptvProvider : Provider, IptvProvider {
         OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(45, TimeUnit.SECONDS)
+            .callTimeout(90, TimeUnit.SECONDS)
             .followRedirects(false)
             .followSslRedirects(false)
             .sslSocketFactory(sslCtx.socketFactory, trustAll[0] as javax.net.ssl.X509TrustManager)

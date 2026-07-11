@@ -110,6 +110,10 @@ open class StreamWishExtractor : Extractor() {
         "https://streamwish.live",
         "https://streamwish.me",
         "https://hgcloud.to",
+        // 2026-07-09 (user « FROM S2E2 sur Wiflix : hanerix pas lu ») : hanerix.com = clone
+        //   StreamWish (page /e/<id> → JS packé jwplayer → m3u8 sur CDN premilkyway.com).
+        //   Vérifié en direct : JsUnpacker + la regex file/hls captent le m3u8 → alias suffit.
+        "https://hanerix.com",
         // 2026-05-16 : smoothpre.com retiré — SmoothpreExtractor dédié plus fiable
         // (pas de WebView-redirect, regex JWPlayer direct cf VidHide pattern).
     )

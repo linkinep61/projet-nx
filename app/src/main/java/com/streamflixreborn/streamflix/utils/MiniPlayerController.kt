@@ -906,6 +906,17 @@ object MiniPlayerController {
                         // BUFFERING_WATCHDOG_MS, force-failover. ExoPlayer can otherwise hang
                         // on a stream that returns headers but no segments.
                         armBufferingWatchdog()
+                    } else if (!iptvCurrentStreamHasWorked) {
+                        // 2026-07-05 (user "le mini lecteur reste bloqué sur le premier flux OLA
+                        //   venu, il fait pas le tri / le switch") : pour une chaîne live IPTV qui
+                        //   n'a JAMAIS atteint READY (= tuning initial), un flux muet (connecte,
+                        //   0 image, pas d'onPlayerError) restait bloqué à l'infini — le watchdog
+                        //   était réservé au non-live. On l'arme AUSSI ici, mais UNIQUEMENT tant
+                        //   que ça n'a jamais lu → dès le 1er READY on ne l'arme plus (pas de
+                        //   boucle "tryNextServer toutes les 15s" en cours de lecture ; on garde
+                        //   JUMELAGE/sticky comme avant). effectiveWatchdogMs = 6s si plusieurs
+                        //   serveurs (switch rapide), 15s si un seul (laisse démarrer).
+                        armBufferingWatchdog()
                     }
                     // 2026-06-16 (audit 3 agents) : armLiveBufferingRecovery DESACTIVE.
                     //   Le grand TV n'execute le seek+prepare 12s EN BUFFERING
@@ -1309,6 +1320,7 @@ object MiniPlayerController {
             val client = okhttp3.OkHttpClient.Builder()
                 .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
             while (kotlinx.coroutines.currentCoroutineContext().isActive) {
                 try {
@@ -1655,6 +1667,7 @@ object MiniPlayerController {
             .hostnameVerifier { _, _ -> true }
             .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             // 2026-06-12 (user "Vavoo sert la pub VYPN même avec MediaHubMX/2") :
@@ -2012,8 +2025,9 @@ object MiniPlayerController {
         val channelName = currentChannelName ?: channelId
         val channelPoster = currentChannelPoster
 
-        // Cut le mini-player (= comme HomeTvFragment.navigateToFullPlayer).
-        stopAsync()
+        // 2026-07-05 : flag pour transfert seamless (= comme HomeTvFragment.navigateToFullPlayer).
+        // On ne stopAsync() PLUS — le fullscreen fragment récupère le player vivant via transferPlayer().
+        transitioningToFullscreen = true
 
         val videoType = com.streamflixreborn.streamflix.models.Video.Type.Episode(
             id = channelId, number = 1, title = channelName, poster = channelPoster,

@@ -24,7 +24,9 @@ class VoeExtractor : Extractor() {
         "https://charlestoughrace.com", "https://timmaybealready.com",
         // 2026-06-02 : domaines Voe rotating supplémentaires découverts via FS proxy
         "https://maryspecialwatch.com", "https://rebeccacostthousand.com",
-        "https://bryantenunder.com"
+        "https://bryantenunder.com",
+        // 2026-07-06 : domaines VOE courts (< 12 chars) non captés par rotatingDomain regex
+        "https://vvide0.com", "https://playmogo.com"
         // PAS d'alias "kokoflix.lol" — c'est un proxy multi-host (osaka_go.php
         //   = Voe, grandline_go.php = Netu, etc.). On matche seulement le
         //   pattern OSAKA via rotatingDomain ci-dessous. Sinon Netu se fait
@@ -64,6 +66,7 @@ class VoeExtractor : Extractor() {
                         val client = okhttp3.OkHttpClient.Builder()
                             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
                             .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                            .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
                             .followRedirects(true)
                             .build()
                         val req = okhttp3.Request.Builder()

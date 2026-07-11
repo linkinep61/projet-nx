@@ -76,8 +76,10 @@ object NetworkClient {
         }
     }
 
-    /** Shared connection pool — enlarged for IPTV zapping (keep CDN connections warm) */
-    private val sharedConnectionPool = ConnectionPool(
+    /** Shared connection pool — enlarged for IPTV zapping (keep CDN connections warm).
+     *  2026-07-07 : rendu INTERNAL (était private) pour que nuclearCachePurge puisse
+     *  évicter les connexions mortes/bloquées qui empoisonnent le pool. */
+    internal val sharedConnectionPool = ConnectionPool(
         maxIdleConnections = 20,
         keepAliveDuration = 5,
         timeUnit = TimeUnit.MINUTES
@@ -110,6 +112,17 @@ object NetworkClient {
         val builder = OkHttpClient.Builder()
             .cache(httpCache)
             .connectionPool(sharedConnectionPool)
+            // 2026-07-04 (user "un serveur qui arrive en 0,5s doit s'afficher en 0,5s ; il y a
+            //   un blocage — et c'est pareil sur TOUS les providers") : la limite OkHttp par
+            //   défaut = 5 requêtes simultanées PAR HOST. À l'ouverture d'un film, la HOME
+            //   inonde le host du provider (scrape genres + vérif jaquettes checkimg.php) →
+            //   les 5 slots sont pris → la requête getServers du player ATTEND ~11s dans la
+            //   file. En montant à 24/host, le fetch natif passe tout de suite sans queue.
+            //   maxRequests global monté à 128 en cohérence. Vaut pour default/systemDns/etc.
+            .dispatcher(okhttp3.Dispatcher().apply {
+                maxRequests = 128
+                maxRequestsPerHost = 24
+            })
             // 2026-06-19 v37 RETIRÉ : networkInterceptor qui court-circuitait
             //   proceed() pour bloquer hetzner crashait OTF (IllegalStateException
             //   "must call proceed() exactly once"). Network interceptors DOIVENT
@@ -185,6 +198,14 @@ object NetworkClient {
             .cookieJar(cookieJar)
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
+            // 2026-07-07 : callTimeout = plafond ABSOLU par appel HTTP (DNS+connect+
+            //   TLS+request+response body). Sans ça, un serveur qui envoie 1 byte/29s
+            //   ne déclenche JAMAIS le readTimeout (30s par segment) → le thread reste
+            //   bloqué indéfiniment dans execute() → la coroutine ne peut pas annuler
+            //   → le flux serveur fige pour TOUJOURS (cf blocage Chromecast persistant).
+            //   Avec callTimeout, OkHttp programme un watchdog qui Call.cancel() au
+            //   niveau socket après 30s → IOException immédiate → le thread se libère.
+            .callTimeout(30, TimeUnit.SECONDS)
             .dns(dns)
 
         // Modern and compatible TLS configuration

@@ -155,10 +155,14 @@ fun optimizeArtworkUrl(url: String?, targetWidthPx: Int): String? {
         //   (1080p+ sur grande TV) — net mais bien plus léger que /original/.
         //   Les appelants existants (poster 400→w342, banner carte 800→w780)
         //   restent inchangés.
+        // 2026-07-04 (user "réduire la qualité des jaquettes du home, c'est déjà suffisant sur la
+        //   TV, pour aller plus vite et qu'elles apparaissent uniformément") : les cartes de grille
+        //   (targetWidthPx=400) passent de w342 à w185 (~2× plus léger → chargement plus rapide +
+        //   moins de RAM sur la Chromecast). Bannière/carrousel (≥600) inchangés.
         val size = when {
             targetWidthPx >= 1000 -> "w1280"
             targetWidthPx >= 600 -> "w780"
-            targetWidthPx >= 280 -> "w342"
+            targetWidthPx >= 460 -> "w342"
             else -> "w185"
         }
         return url.replace(Regex("/t/p/(?:w\\d+|original)/"), "/t/p/$size/")
@@ -234,13 +238,21 @@ private fun ImageView.loadRecoverableArtwork(
         var base = Glide.with(this).load(optimizedUrl).let { req ->
             if (memoryOptions != null) req.apply(memoryOptions) else req
         }
-        // 2026-06-30 : pour les hosts CF, la signature inclut le compteur de
-        //   bypass → après chaque bypass réussi, Glide voit une signature
-        //   différente → cache miss → vrai appel réseau (l'IP est "chaude").
+        // 2026-07-04 : RETIRÉ le cfBypassGeneration signature global.
+        //   L'ancien code invalidait le cache Glide de TOUTES les jaquettes CF
+        //   à chaque bypass réussi → flash gris massif (toutes les images
+        //   refetchées en même temps = "disparaître puis réapparaître").
+        //   Maintenant : on garde le cache disque Glide intact. Si une image
+        //   est un 403 stale, Glide la décode en erreur → onLoadFailed → retry
+        //   avec NONE cache strategy (déjà en place lignes ci-dessous) → re-fetch.
+        //   Le flash se limite aux rares images réellement stale, pas à toutes.
+        //   En plus, quand la vue a déjà une image chargée (rebind RecyclerView),
+        //   on l'utilise comme placeholder → transition douce au lieu du gris.
         if (!isRetry && !optimizedUrl.isNullOrBlank() && isCfProtectedHost(optimizedUrl)) {
-            base = base.signature(
-                com.bumptech.glide.signature.ObjectKey("cfgen-${WebViewResolver.cfBypassGeneration}")
-            )
+            val existing = this.drawable
+            if (existing != null && existing.intrinsicWidth > 1 && existing.intrinsicHeight > 1) {
+                base = base.placeholder(existing)
+            }
         }
         if (isRetry) {
             base = base.skipMemoryCache(true)

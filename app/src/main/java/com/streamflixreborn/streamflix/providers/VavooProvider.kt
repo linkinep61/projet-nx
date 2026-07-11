@@ -145,6 +145,7 @@ object VavooProvider : Provider, IptvProvider {
             }
             connectTimeout(15, TimeUnit.SECONDS)
             readTimeout(15, TimeUnit.SECONDS)
+            callTimeout(45, TimeUnit.SECONDS)
         }.build()
     }
 

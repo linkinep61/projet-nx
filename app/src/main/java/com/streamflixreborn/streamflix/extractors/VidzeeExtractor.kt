@@ -6,6 +6,7 @@ import com.streamflixreborn.streamflix.models.Video
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 import java.security.MessageDigest
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -21,7 +22,11 @@ class VidzeeExtractor : Extractor() {
     private val coreApi = "https://core.vidzee.wtf"
     private val staticPass = "4f2a9c7d1e8b3a6f0d5c2e9a7b1f4d8c"
 
-    private val client = OkHttpClient.Builder().build()
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(30, TimeUnit.SECONDS)
+        .build()
 
     data class ServerConfig(
         val name: String,

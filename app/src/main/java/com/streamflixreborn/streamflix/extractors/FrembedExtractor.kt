@@ -124,6 +124,7 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
                 val apiClient = OkHttpClient.Builder()
                     .readTimeout(30, TimeUnit.SECONDS)
                     .connectTimeout(30, TimeUnit.SECONDS)
+                    .callTimeout(45, TimeUnit.SECONDS)
                     .followRedirects(true)
                     .followSslRedirects(true)
                     .addNetworkInterceptor { chain ->
@@ -158,6 +159,7 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
                 val resolverClient = OkHttpClient.Builder()
                     .readTimeout(30, TimeUnit.SECONDS)
                     .connectTimeout(30, TimeUnit.SECONDS)
+                    .callTimeout(45, TimeUnit.SECONDS)
                     .followRedirects(false)
                     .followSslRedirects(false)
                     .addNetworkInterceptor { chain ->

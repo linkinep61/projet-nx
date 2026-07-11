@@ -15,7 +15,14 @@ object CacheUtils {
     fun clearAppCache(context: Context) {
         Log.d(TAG, "Inizio pulizia cache completa...")
         try {
-            context.cacheDir?.deleteRecursively()
+            // 2026-07-04 : vérifier isDirectory AVANT deleteRecursively.
+            // Sans ça, FileTreeWalk crashe avec AssertionError "rootDir must be
+            // verified to be directory beforehand" si le dossier n'existe pas
+            // ou a été supprimé entre-temps (ex: onTrimMemory concurrent).
+            val cacheDir = context.cacheDir
+            if (cacheDir != null && cacheDir.isDirectory) {
+                cacheDir.deleteRecursively()
+            }
             Log.d(TAG, "Cache interna eliminata.")
         } catch (e: Exception) {
             Log.e(TAG, "Errore eliminazione cache interna: ${e.message}")

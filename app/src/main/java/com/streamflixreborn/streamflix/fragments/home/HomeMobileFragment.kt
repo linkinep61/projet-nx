@@ -74,6 +74,17 @@ class HomeMobileFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        // Garde : si aucun provider sélectionné (cold start, restauration fragment),
+        // revenir au picker au lieu de crasher sur AppDatabase.getInstance().
+        if (com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider == null) {
+            Log.w("HomeMobileFragment", "currentProvider is null — navigating back to providers")
+            try {
+                androidx.navigation.fragment.NavHostFragment.findNavController(this)
+                    .navigate(R.id.providers)
+            } catch (_: Exception) {}
+            return
+        }
+
         // v91 : ne PAS forcer le scroll en haut ici (sinon retour depuis un detail
         //   remonte tout en haut). shouldScrollToTop reste a sa valeur (true au 1er
         //   load via le defaut du champ ; remis a true uniquement sur provider/filtre).
@@ -235,8 +246,10 @@ class HomeMobileFragment : Fragment() {
         if (MiniPlayerController.onIptvChannelClick == null) {
             MiniPlayerController.onIptvChannelClick = { tvShow ->
                 if (tvShow.id == MiniPlayerController.currentChannelId) {
-                    Log.d("HomeMobile", "Same channel, stopping mini player for fullscreen (onResume): ${tvShow.title}")
-                    MiniPlayerController.stopAsync()
+                    // 2026-07-05 : garder le player vivant pour le transfer seamless
+                    Log.d("HomeMobile", "Same channel, transition to fullscreen (keep player alive, onResume): ${tvShow.title}")
+                    MiniPlayerController.transitioningToFullscreen = true
+                    if (_binding != null) { binding.miniPlayerView.player = null }
                     false
                 } else {
                     Log.d("HomeMobile", "Mini player intercept (onResume): ${tvShow.title}")
@@ -330,8 +343,13 @@ class HomeMobileFragment : Fragment() {
                 try { binding.miniPlayerContainer.visibility = View.GONE } catch (_: Exception) {}
                 false  // false = pas intercepté → flux nav classique → PlayerMobileFragment → OtfPlayerActivity
             } else if (tvShow.id == MiniPlayerController.currentChannelId) {
-                Log.d("HomeMobile", "Same channel, stopping mini player for fullscreen: ${tvShow.title}")
-                MiniPlayerController.stopAsync()
+                // 2026-07-05 : NE PAS appeler stopAsync() ici — ça détruit le player
+                //   avant que PlayerMobileFragment.transferPlayer() ne puisse le récupérer.
+                //   Même pattern que navigateToFullPlayer() : on met le flag de transition
+                //   et on détache la surface, le player reste VIVANT pour le transfer.
+                Log.d("HomeMobile", "Same channel, transition to fullscreen (keep player alive): ${tvShow.title}")
+                MiniPlayerController.transitioningToFullscreen = true
+                if (_binding != null) { binding.miniPlayerView.player = null }
                 false
             } else {
                 Log.d("HomeMobile", "Mini player intercept: ${tvShow.title} (${tvShow.id})")
@@ -511,7 +529,9 @@ class HomeMobileFragment : Fragment() {
         if (MiniPlayerController.onIptvChannelClick == null) {
             MiniPlayerController.onIptvChannelClick = { tvShow ->
                 if (tvShow.id == MiniPlayerController.currentChannelId) {
-                    MiniPlayerController.stopAsync()
+                    // 2026-07-05 : même fix que ci-dessus — garder le player vivant
+                    MiniPlayerController.transitioningToFullscreen = true
+                    if (_binding != null) { binding.miniPlayerView.player = null }
                     false
                 } else {
                     MiniPlayerController.playChannel(tvShow.id, tvShow.title, tvShow.poster)
@@ -577,9 +597,11 @@ class HomeMobileFragment : Fragment() {
         val channelName = MiniPlayerController.currentChannelName ?: channelId
         val channelPoster = MiniPlayerController.currentChannelPoster
 
-        // Release the ExoPlayer so the full player can create its own,
-        // but keep the channel info so we can restart on return.
-        MiniPlayerController.releasePlayerKeepState()
+        // Flag for transfer — PlayerMobileFragment.onViewCreated will steal the player
+        // (même logique que HomeTvFragment : on NE release PAS le player ici,
+        //  on le laisse vivant pour que le fullscreen le récupère sans coupure)
+        MiniPlayerController.transitioningToFullscreen = true
+        if (_binding != null) { binding.miniPlayerView.player = null }
 
         val videoType = Video.Type.Episode(
             id = channelId,
@@ -717,15 +739,20 @@ class HomeMobileFragment : Fragment() {
             val ctxRef = requireContext()
             android.widget.Toast.makeText(ctxRef,
                 "Actualisation du home…", android.widget.Toast.LENGTH_SHORT).show()
-            viewLifecycleOwner.lifecycleScope.launch {
+            // 2026-07-04 : TOUT en Dispatchers.IO. Avant = Dispatchers.Main (lifecycleScope
+            //   par défaut) → forceRefreshReplay + onChangeUrl faisaient du réseau sur le
+            //   main thread → ANR → crash (user "le bouton refresh gèle puis crashe").
+            viewLifecycleOwner.lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                 if (isTvHub) {
                     val n = try {
                         com.streamflixreborn.streamflix.providers.LiveTvHubProvider
                             .forceRefreshReplay()
                     } catch (_: Throwable) { 0 }
-                    android.widget.Toast.makeText(ctxRef,
-                        "TV Hub : $n catégories chargées",
-                        android.widget.Toast.LENGTH_SHORT).show()
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        android.widget.Toast.makeText(ctxRef,
+                            "TV Hub : $n catégories chargées",
+                            android.widget.Toast.LENGTH_SHORT).show()
+                    }
                 }
                 com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.let { p ->
                     try { com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(ctxRef, p) }

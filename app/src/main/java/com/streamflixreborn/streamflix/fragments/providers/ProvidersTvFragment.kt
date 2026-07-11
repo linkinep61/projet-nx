@@ -101,6 +101,37 @@ class ProvidersTvFragment : Fragment() {
             true
         }
 
+        // 2026-07-05 (user "à côté du cœur à droite pour éteindre l'app") :
+        //   1. Nuclear cache purge (caches HTTP, cookies CF, home, extracteurs, DNS)
+        //   2. Toast de confirmation
+        //   3. Force-kill du process (= comme "Forcer l'arrêt" dans les paramètres)
+        binding.btnPowerOff.setOnClickListener {
+            try {
+                com.streamflixreborn.streamflix.utils.ProviderCacheRefresh
+                    .nuclearCachePurge(requireContext())
+            } catch (_: Throwable) {}
+            android.widget.Toast.makeText(
+                requireContext(),
+                "Cache vidé — arrêt de l'application",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+            // 2026-07-09 (fix « chez certains l'app se relance au lieu de s'éteindre ») :
+            //   AVANT = juste killProcess(myPid()) → le process meurt mais la TÂCHE (activité) reste
+            //   enregistrée « vivante » côté ActivityManager → Android croit à un CRASH et RELANCE
+            //   l'activité du dessus pour restaurer la tâche (comportement dépendant de la ROM/launcher
+            //   → « certaines personnes »). Fix : finir + RETIRER la tâche d'abord (= l'user QUITTE
+            //   volontairement), PUIS kill dur pour vider la RAM. Plus de tâche fantôme à relancer.
+            val act = requireActivity()
+            binding.btnPowerOff.postDelayed({
+                try { act.finishAndRemoveTask() } catch (_: Throwable) {}
+                try { act.finishAffinity() } catch (_: Throwable) {}
+                binding.btnPowerOff.postDelayed({
+                    android.os.Process.killProcess(android.os.Process.myPid())
+                    kotlin.system.exitProcess(0)
+                }, 300L)
+            }, 500L)
+        }
+
         // 2026-05-12 : bouton "Changer de profil" symétrique du mobile.
         // Clear le profil actif + relance ProfilePickerTvActivity en task neuve.
         binding.btnProvidersProfileSwitch.setOnClickListener {

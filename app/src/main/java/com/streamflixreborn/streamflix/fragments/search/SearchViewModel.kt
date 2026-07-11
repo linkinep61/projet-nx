@@ -157,6 +157,26 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
     // 2026-05-18 : binary partition IPTV vs non-IPTV — quand on est sur un
     //   provider IPTV, on cherche QUE dans les IPTV ; sinon, dans tout le reste
     //   (FILMS_SERIES + ANIME mélangés). Aucun mélange entre IPTV et film/série.
+    /** 2026-07-02 : filtre GÉNÉRIQUE de la recherche globale (tous providers). Garde les
+     *  résultats dont le TITRE commence par la requête ; sinon ceux qui la contiennent ;
+     *  sinon tout (au cas où le match est sur le titre original). Élimine le "bazar". */
+    private fun strictNameFilter(
+        items: List<com.streamflixreborn.streamflix.adapters.AppAdapter.Item>,
+        query: String
+    ): List<com.streamflixreborn.streamflix.adapters.AppAdapter.Item> {
+        val nq = query.lowercase().replace(Regex("[^a-z0-9]"), "")
+        if (nq.length < 2) return items
+        fun norm(it: com.streamflixreborn.streamflix.adapters.AppAdapter.Item): String = (when (it) {
+            is Movie -> it.title
+            is TvShow -> it.title
+            else -> ""
+        }).lowercase().replace(Regex("[^a-z0-9]"), "")
+        val starts = items.filter { norm(it).startsWith(nq) }
+        if (starts.isNotEmpty()) return starts
+        val contains = items.filter { norm(it).contains(nq) }
+        return if (contains.isNotEmpty()) contains else items
+    }
+
     fun searchGlobal(query: String, currentLanguage: String, group: Provider.Companion.ProviderGroup? = null) = viewModelScope.launch(Dispatchers.IO) {
         _state.emit(State.GlobalSearching)
 
@@ -193,7 +213,7 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
         targetProviders.forEachIndexed { index, provider ->
             launch {
                 try {
-                    val results = ParentalControlUtils.filterItems(provider.search(query).onEach { item ->
+                    val rawResults = ParentalControlUtils.filterItems(provider.search(query).onEach { item ->
                         // ========= ¡AQUÍ ESTÁ LA MAGIA! =========
                         // Le ponemos el sello a cada resultado
                         when (item) {
@@ -202,6 +222,11 @@ class SearchViewModel(database: AppDatabase) : ViewModel() {
                         }
                         // =======================================
                     })
+                    // 2026-07-02 (user "recherche globale trop de bazar, plus stricte") :
+                    //   filtre GÉNÉRIQUE par NOM sur chaque provider — garde les titres qui
+                    //   COMMENCENT par la requête (sinon ceux qui la contiennent). Élimine
+                    //   les faux positifs (Spider-Man Far From Home… pour "from").
+                    val results = strictNameFilter(rawResults, query)
                     mutableResults[index] = ProviderResult(provider, ProviderResult.State.Success(results))
                 } catch (e: Exception) {
                     Log.e("SearchViewModel", "searchGlobal for ${provider.name}: ", e)

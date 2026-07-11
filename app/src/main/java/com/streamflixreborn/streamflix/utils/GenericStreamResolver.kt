@@ -42,6 +42,7 @@ object GenericStreamResolver {
             .followSslRedirects(false)
             .connectTimeout(6, TimeUnit.SECONDS)
             .readTimeout(8, TimeUnit.SECONDS)
+            .callTimeout(30, TimeUnit.SECONDS)
             .build()
     }
 

@@ -250,9 +250,15 @@ class HomeTvFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
+        // 2026-07-04 (user "à froid le film met 12s à s'ouvrir, l'app est en crise mémoire :
+        //   heap 214MB, GC de 2s en boucle") : quand on entre dans le player, on MET GLIDE EN
+        //   PAUSE. Sinon la home (derrière) continue à décoder ses jaquettes (TMDB + flemmix)
+        //   → allocation massive → GC thrashing sur la Chromecast low-RAM → le scrape natif des
+        //   serveurs est affamé (parse Jsoup à 8s au lieu de 0,4s). Repris dans onResume.
+        try { com.bumptech.glide.Glide.with(this).pauseAllRequestsRecursive() } catch (_: Throwable) {}
         if (MiniPlayerController.transitioningToFullscreen) {
             // Skip ALL ExoPlayer/PlayerView ops — stopAsync handles deferred release
-            Log.d("HomeTv", "onPause: skipping cleanup (transitioning to fullscreen)")
+            Log.d("HomeTv", "onPause: Glide EN PAUSE + skipping cleanup (transitioning to fullscreen)")
             return
         }
         // Keep the mini player running — only detach the surface
@@ -265,6 +271,8 @@ class HomeTvFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
+        // 2026-07-04 : reprise Glide (mis en pause à l'entrée du player pour libérer la RAM).
+        try { com.bumptech.glide.Glide.with(this).resumeRequestsRecursive() } catch (_: Throwable) {}
         if (_binding == null) return
 
         // 2026-06-29 RESTAURÉ depuis APK v1.7.226 : luminosité carrousel/fond TV.

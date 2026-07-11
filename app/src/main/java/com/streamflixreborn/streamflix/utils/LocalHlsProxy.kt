@@ -88,6 +88,7 @@ object LocalHlsProxy {
             .hostnameVerifier { _, _ -> true }
             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             .cookieJar(cookieJar)

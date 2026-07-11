@@ -67,6 +67,14 @@ abstract class Extractor {
                 .followSslRedirects(true)
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
+                // 2026-07-07 : callTimeout = plafond ABSOLU par appel HTTP complet.
+                //   Sans ça, un Call bloqué dans execute() ne se libère JAMAIS (le
+                //   readTimeout est par-segment, pas par-appel). Résultat : les threads
+                //   de BackupRegistry restent bloqués, le flux serveur fige, le timeout
+                //   coroutine (45s) ne peut pas interrompre le thread natif → blocage
+                //   permanent sur Chromecast. callTimeout programme un watchdog OkHttp
+                //   qui Call.cancel() au niveau socket → IOException → thread libéré.
+                .callTimeout(30, TimeUnit.SECONDS)
                 .apply { httpCache?.let { cache(it) } }
                 .addInterceptor { chain ->
                     val request = chain.request().newBuilder()
@@ -125,6 +133,7 @@ abstract class Extractor {
         }
 
         private val extractors = listOf(
+            OnRegardeOuExtractor(),
             RabbitstreamExtractor(),
             RabbitstreamExtractor.MegacloudExtractor(),
             RabbitstreamExtractor.DokicloudExtractor(),
@@ -234,6 +243,9 @@ abstract class Extractor {
             KakaflixExtractor(),
             NetuExtractor(),
             SeekPlaysExtractor(),
+            // 2026-07-09 : nouveau domaine + chiffrement de SeekStreaming (seekplayer.vip/.me)
+            //   → extraction via WebView (leur JS déchiffre, on capte le m3u8).
+            SeekPlayerExtractor(),
             XshotcokExtractor(),
             DarkiboxExtractor(),
             Up4StreamExtractor(),
@@ -277,6 +289,26 @@ abstract class Extractor {
         private const val EXTRACTION_TTL_MS = 10L * 60L * 1000L
         private data class CachedExtraction(val video: Video, val expiresAtMillis: Long)
         private val extractionCache = ConcurrentHashMap<String, CachedExtraction>()
+
+        /** 2026-07-04 : vide le cache d'extraction global + health tracking.
+         *  Appelé par ProviderCacheRefresh. Le serverHealth reset évite qu'un
+         *  serveur marqué "broken" sur un titre précédent reste bloqué à tort.
+         *  2026-07-07 : AJOUT éviction du cache DISQUE HTTP (20MB à
+         *  cacheDir/extractor-http). Ce cache était JAMAIS vidé — des réponses
+         *  HTTP erreur cachées sur disque bloquaient TOUS les appels suivants
+         *  (notamment CloudstreamProvider qui hérite de sharedClient via
+         *  newBuilder()). Seul le clear-data manuel l'effaçait. */
+        fun clearAllCache() {
+            extractionCache.clear()
+            serverHealth.clear()
+            // Éviction du cache disque OkHttp de l'extracteur
+            runCatching {
+                httpCache?.evictAll()
+                android.util.Log.d("Extractor", "Extractor HTTP disk cache evicted (extractor-http)")
+            }.onFailure {
+                android.util.Log.w("Extractor", "Extractor HTTP disk cache evict failed: ${it.message}")
+            }
+        }
 
         /**
          * Lecture NON-DESTRUCTIVE du cache d'extraction.
@@ -558,6 +590,18 @@ abstract class Extractor {
             return url.replace(host, redirectTo)
         }
 
+        /** 2026-07-01 : certains providers (UnJourUnFilm) encodent l'URL d'embed en
+         *  base64 (ex "aHR0cHM6..." = "https://..."). On la décode ici pour que le
+         *  routage trouve le bon extracteur (sinon "No extractors found"). Si ce n'est
+         *  pas du base64 valide décodant en http, on renvoie le lien d'origine. */
+        private fun decodeBase64Link(link: String): String {
+            if (link.startsWith("http", ignoreCase = true)) return link
+            return try {
+                val decoded = String(android.util.Base64.decode(link.trim(), android.util.Base64.DEFAULT))
+                if (decoded.startsWith("http", ignoreCase = true)) decoded else link
+            } catch (_: Exception) { link }
+        }
+
         suspend fun extract(link: String, server: Video.Server? = null): Video {
             Log.d("Extractor", "extract() called with link=$link server=${server?.name}")
 
@@ -573,7 +617,7 @@ abstract class Extractor {
             // 2026-05-21 : Appliquer les redirections de domaine mémorisées
             // (un domaine mort qui a déjà été résolu vers un alias vivant).
             // Ceci évite de re-tenter le domaine mort à chaque extraction.
-            var finalLink = applyDomainRedirect(link)
+            var finalLink = applyDomainRedirect(decodeBase64Link(link))
 
             // 1. RISOLUZIONE BRIDGE UNIVERSALE (StreamHG/Sync/Cuevana)
             // Facciamo questo PRIMA di cercare l'estrattore perché il link bridge (es. mysync.mov)
@@ -851,8 +895,46 @@ abstract class Extractor {
          * Identify the extractor/service name for a given URL.
          * Returns the extractor name (e.g. "Filemoon", "Vidara", "Rpmvid") or null if unknown.
          */
+        // 2026-07-04 (user "à froid le film met 8s, c'est pareil tous providers") : identify
+        //   ServiceName était appelé ~80× par ouverture (map + dedup + comparateur de tri), et
+        //   CHAQUE appel COMPILAIT des regex par extracteur (ligne baseName) + itérait tous les
+        //   extracteurs 3×. Sous la contention CPU du démarrage à froid → 7,6s. On MÉMOÏSE
+        //   (cache url→nom) : appelé une seule fois par URL unique. Regex en constantes (compilées
+        //   une fois). Vaut pour TOUS les providers (tous trient via identifyServiceName).
+        private val URL_PREFIX_REGEX = Regex("^(https?://)?(www\\.)?")
+        private val BASE_NAME_REGEX = Regex("^(https?://)?(www\\.)?(.*?)(\\.[a-z]+)")
+        private val serviceNameCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+        // 2026-07-04 : table host→nom construite UNE fois. identifyServiceName tente
+        //   d'abord un lookup O(1) par host exact (cas courant : uqload.is, vidara.to…) avant
+        //   de retomber sur l'itération complète des extracteurs (domaines rotatifs, prefix).
+        // 2026-07-05 : EAGER init (plus de `by lazy(SYNCHRONIZED)`). Le lazy lock bloquait 5s+
+        //   sur Chromecast quand un thread IO commençait l'init pendant que le CPU était affamé
+        //   par les backups HTTP → tous les callers (y compris le tri serveurs) bloqués sur le
+        //   verrou. L'init est légère (~1ms, juste des strings) → pas de raison de la différer.
+        private val hostToName: Map<String, String> = run {
+            val m = HashMap<String, String>()
+            for (e in extractors) {
+                hostKey(e.mainUrl)?.let { m.putIfAbsent(it, e.name) }
+                for (a in e.aliasUrls) hostKey(a)?.let { m.putIfAbsent(it, e.name) }
+            }
+            m
+        }
+        private fun hostKey(url: String): String? =
+            url.lowercase().replace(URL_PREFIX_REGEX, "").substringBefore("/").takeIf { it.isNotBlank() }
+
         fun identifyServiceName(url: String): String? {
-            val urlRegex = Regex("^(https?://)?(www\\.)?")
+            if (url.isBlank()) return null
+            serviceNameCache[url]?.let { return it.ifEmpty { null } }
+            // Fast path O(1) : host exact
+            val host = url.lowercase().replace(URL_PREFIX_REGEX, "").substringBefore("/")
+            val result = hostToName[host] ?: identifyServiceNameUncached(url)
+            serviceNameCache[url] = result ?: ""
+            return result
+        }
+
+        private fun identifyServiceNameUncached(url: String): String? {
+            val urlRegex = URL_PREFIX_REGEX
             val compareUrl = url.lowercase().replace(urlRegex, "")
 
             for (extractor in extractors) {
@@ -882,7 +964,7 @@ abstract class Extractor {
             }
             // Fallback: match base domain name without TLD
             for (extractor in extractors) {
-                val baseName = extractor.mainUrl.replace(Regex("^(https?://)?(www\\.)?(.*?)(\\.[a-z]+)"), "$3")
+                val baseName = extractor.mainUrl.replace(BASE_NAME_REGEX, "$3")
                 if (compareUrl.startsWith(baseName)) {
                     return extractor.name
                 }

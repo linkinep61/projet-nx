@@ -134,6 +134,59 @@ class StreamFlixApp : Application() {
         super.onCreate()
         instance = this
 
+        // 2026-07-07 v2 : WIPE INCONDITIONNEL de app_webview/ à CHAQUE cold start.
+        //   Avant : le wipe ne se faisait que quand le flag WEBVIEW_DEEP_WIPE_PENDING
+        //   était armé par nuclearCachePurge. MAIS la purge ne se déclenche QUE si le
+        //   flux serveur timeout (45s) → or les threads OkHttp bloqués dans execute()
+        //   empêchaient le timeout de JAMAIS se déclencher → le flag n'était JAMAIS armé
+        //   → le wipe n'avait JAMAIS lieu → blocage permanent, seul clear-data débloquait.
+        //   Solution : wiper à CHAQUE boot, AVANT toute création de WebView. Le warmUp
+        //   WebJS (CF pré-chauffe) tourne APRÈS onCreate → il écrit dans un app_webview/
+        //   propre. Pas de perte de warm-up (il re-roulera), gain = zéro état CF corrompu.
+        //   Coût : ~0ms (juste un deleteRecursively sur un dossier souvent petit).
+        try {
+            // Consommer le flag si armé (compat avec l'ancien chemin)
+            val spWipe = androidx.preference.PreferenceManager.getDefaultSharedPreferences(this)
+            if (spWipe.getBoolean(
+                    com.streamflixreborn.streamflix.utils.ProviderCacheRefresh.WEBVIEW_DEEP_WIPE_PENDING,
+                    false
+                )
+            ) {
+                spWipe.edit().putBoolean(
+                    com.streamflixreborn.streamflix.utils.ProviderCacheRefresh.WEBVIEW_DEEP_WIPE_PENDING,
+                    false
+                ).apply()
+            }
+            // Wipe INCONDITIONNEL
+            val wvDir = java.io.File(applicationInfo.dataDir, "app_webview")
+            val okWipe = runCatching { if (wvDir.exists()) wvDir.deleteRecursively() else true }
+                .getOrDefault(false)
+            runCatching { java.io.File(cacheDir, "WebView").deleteRecursively() }
+            // Éviction des connection pools au boot (connexions idle mortes du process
+            //   précédent, si le process a été keep-alive au lieu de killed par le système)
+            runCatching { com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool.evictAll() }
+        } catch (_: Throwable) {}
+
+        // 2026-07-05 : watchdog ANR (diagnostic DessinAnime) — logge la pile du thread
+        //   principal dans le logcat s'il gèle >4s (l'OPPO bloque /data/anr). Inoffensif.
+        com.streamflixreborn.streamflix.utils.AnrWatchdog.start()
+
+        // 2026-07-07 (user « autant télécharger tous les CI au démarrage, ça évite que ça cherche
+        //   pour rien ») : précharge la liste OLA des cids FR VALIDÉS (nx-data live-cids.json) en
+        //   fond. 1 fetch léger vers raw.githubusercontent, isolé (pas de WebView, pas de handshake
+        //   portail, n'impacte aucun autre provider). À l'ouverture d'OLA, la liste est déjà en
+        //   mémoire → Phase 3 ingère direct les cids validés au lieu de scanner à l'aveugle.
+        // 2026-07-07 FIX CRASH BOOT : NE PAS toucher OlaTvProvider sur le main thread au boot —
+        //   son <clinit> construit un OkHttpClient avec .dns(DnsResolver.doh), pas prêt si tôt →
+        //   ExceptionInInitializerError = crash au lancement. On déporte sur IO, APRÈS un délai
+        //   (DnsResolver stabilisé), sous try/catch (un throw d'init est rattrapé, jamais fatal).
+        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                kotlinx.coroutines.delay(8_000L)
+                com.streamflixreborn.streamflix.providers.OlaTvProvider.prefetchLiveCidsAtBoot()
+            } catch (_: Throwable) {}
+        }
+
         // 2026-06-09 (user "VIDZY y a plus ces sous-titres embarqués d'origine
         //   comme avant") : MIGRATION ONE-SHOT. Si la pref SERVER_AUTO_
         //   SUBTITLES_DISABLED a été persistée à `true` (default historique),
@@ -152,25 +205,140 @@ class StreamFlixApp : Application() {
             }
         } catch (_: Throwable) {}
 
-        // 2026-06-03 : eager-load de l'index IPTV (seed Firebase + cache user).
-        //   Avant : chargé uniquement quand l'user ouvrait OLA TV (lazy).
-        //   Maintenant : chargé au démarrage de l'app, sur un thread BG pour
-        //   ne pas bloquer le main. Comme ça quand OLA TV s'ouvre, les
-        //   fast-tracks sont déjà en mémoire → chaînes démarrent direct.
-        Thread {
+        // 2026-07-05 (user "rien d'IPTV ne doit se charger au boot de la Chromecast, seulement à
+        //   l'ouverture du provider") : l'eager-load de l'index IPTV au démarrage est RETIRÉ. Il
+        //   est REDONDANT — OlaTvProvider appelle déjà LocalIptvChannelIndex.loadLocalCache() à son
+        //   ouverture (le chargement est idempotent + rapide ~5ms). Donc l'index se charge quand on
+        //   ouvre OLA TV, pas au boot → moins de travail au démarrage de l'app.
+
+        // 2026-07-03 : pre-warm RÉTABLI pour les WebJsProviders (CF challenge
+        //   au boot = jaquettes + home instantanés). Séquentiel (1 par 1),
+        //   background (Main thread coroutine), skip low-RAM (Chromecast).
+        // 2026-07-07 (user « un film qui marchait se bloque juste après avoir relancé l'app ») :
+        //   ne pré-chauffer les WebJS QUE si le provider actif en est un. Ce warm utilise le
+        //   WebView CF + l'OkHttp PARTAGÉS ; lancé quand l'user est sur Cloudstream/Movix, il
+        //   entre en contention avec le getServers du film en cours → hang → « serveurs bloqués ».
+        run {
+            val activeIsWebJs = try {
+                com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider is
+                    com.streamflixreborn.streamflix.providers.WebJsProvider
+            } catch (_: Throwable) { false }
+            if (activeIsWebJs)
+                com.streamflixreborn.streamflix.providers.WebJsProvider.warmUpAll()
+        }
+
+        // 2026-07-04 : DessinAnime repassé NATIF → pré-chauffage du challenge /tv/* au BOOT
+        //   (les pages /tv/* ont un Turnstile SÉPARÉ de /catalogue). Skip low-RAM comme
+        //   WebJsProvider : sur Chromecast, un warm WebView au boot = ANR → il se fera à
+        //   l'OUVERTURE DU PROVIDER (getHome) et au CLIC (getTvShow, bloquant garanti). Sur
+        //   mobile (RAM large) : /tv/* prêt dès le boot.
+        if (Runtime.getRuntime().maxMemory() >= 200L * 1024 * 1024) {
+            // Mobile (RAM large) : pré-chauffage COMPLET (base CF + challenge /tv/*).
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    kotlinx.coroutines.delay(25_000L)
+                    // 2026-07-07 (user « un film qui marchait se bloque juste après avoir relancé
+                    //   l'app ») : ne warm QUE si DessinAnime est le provider ACTIF. Ce warm-up
+                    //   utilise le WebView CF partagé ; lancé quand l'user est sur Cloudstream/Movix,
+                    //   il entre en contention avec le getServers du film en cours → hang → blocage.
+                    val activeIsDessin = try {
+                        com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider is
+                            com.streamflixreborn.streamflix.providers.DessinAnimeProvider
+                    } catch (_: Throwable) { false }
+                    if (activeIsDessin)
+                        com.streamflixreborn.streamflix.providers.DessinAnimeProvider.warmUpAll()
+                } catch (_: Throwable) {}
+            }
+        } else {
+            // 2026-07-05 (user "l'ouverture de DessinAnime est trop longue sur la TV") : sur la
+            //   Chromecast (low-RAM) on active un pré-chauffage LÉGER au boot = juste le cookie CF
+            //   (warmUpCf → clearanceOnly, s'arrête dès le cf_clearance, SANS rendre le home lourd
+            //   qui causait les ANR). Délai 35s pour laisser le boot UI se stabiliser d'abord.
+            //   Résultat : à la 1ère ouverture de DessinAnime, le bypass CF est déjà fait → home
+            //   bien plus rapide (reste le fetch catalogue). Le challenge /tv/* se fait à l'ouverture.
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    // 2026-07-05 : 35s → 12s. À 35s l'user ouvrait DessinAnime AVANT que le cookie
+                    //   CF ne soit posé → bypass à froid ~8s. 12s laisse le boot UI se dessiner tout
+                    //   en posant le cookie assez tôt.
+                    kotlinx.coroutines.delay(12_000L)
+                    // 2026-07-06 (user « le bypass c'est au clic sur une jaquette → pour préchauffer
+                    //   il faut imiter le clic d'une jaquette au démarrage ») : AVANT, sur Chromecast
+                    //   on ne faisait que warmUpCf() (cookie CF de base) car un warm WebView de fiche
+                    //   au boot causait un ANR. CET ANR EST CORRIGÉ (fix WebViewResolver analysisExecutor
+                    //   hors main thread, 2026-07-06). On active donc warmUpAll() = warmUpCf +
+                    //   startDetailWarm : ça résout AUSSI le Turnstile des pages détail /tv/* au boot
+                    //   (= imite l'ouverture d'une fiche) → au 1er clic sur une jaquette, le challenge
+                    //   est déjà résolu, ouverture quasi instantanée. Tourne en fond (IO), après 12s
+                    //   pour laisser le home se dessiner d'abord.
+                    // 2026-07-07 (user « un film qui marchait se bloque juste après avoir relancé
+                    //   l'app ») : ne warm QUE si DessinAnime est le provider ACTIF. Sinon ce warm
+                    //   monopolise le WebView CF partagé et bloque le getServers du film en cours
+                    //   sur Cloudstream/Movix (contention WebView → hang → « serveurs bloqués »).
+                    val activeIsDessin = try {
+                        com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider is
+                            com.streamflixreborn.streamflix.providers.DessinAnimeProvider
+                    } catch (_: Throwable) { false }
+                    if (activeIsDessin)
+                        com.streamflixreborn.streamflix.providers.DessinAnimeProvider.warmUpAll()
+                } catch (_: Throwable) {}
+            }
+        }
+
+        // 2026-07-10 (user "scrape la liste directement au démarrage, même méthode que les autres") :
+        //   PRÉ-CHAUFFE de la LISTE du dossier « Stream4Free CF (test) » au boot — même schéma que
+        //   les warm-ups CF (WebJs/DessinAnime), DÉCALÉ après eux (contention WebView). L'app passe le
+        //   CF via le WebView-bypass + scrape la liste des chaînes EN DIRECT sur stream4free.tv, puis
+        //   met en cache (fetchStream4CfCategoriesLive). Résultat : à l'ouverture du dossier, liste
+        //   FRAÎCHE et INSTANTANÉE (plus d'attente de 15s), sans dépendre de git (git = filet si échec).
+        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                com.streamflixreborn.streamflix.utils.LocalIptvChannelIndex.loadLocalCache()
+                kotlinx.coroutines.delay(40_000L)
+                // 2026-07-10 (user « il doit être branché avec les autres CF ») : d'abord on CHAUFFE le
+                //   cf_clearance de stream4free.tv (comme WebJs/DessinAnime), pour que la résolution des
+                //   chaînes NON pré-chargées passe le CF sans partir à froid. Les chaînes pré-chargées
+                //   (BAKED_RESOLVED) n'en ont pas besoin (lecture directe data-stream.top sans CF).
+                com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.warmUp()
+                com.streamflixreborn.streamflix.providers.LiveTvHubProvider.fetchStream4CfCategoriesLive()
             } catch (_: Throwable) {}
-        }.start()
+        }
 
-        // 2026-06-28 v5 (user "avant c'était instantané") : pre-warm SUPPRIMÉ.
-        //   Il ajoutait de la latence visible (44s !) au lieu d'optimiser.
-        //   Revert à l'archi initiale : pas de warmUp, cache HomeBoot via getHome au click.
+        // 2026-07-06 (user « tant qu'on est sur le home DessinAnime, re-simuler un clic jaquette
+        //   de temps en temps pour garder le captcha résolu, un truc pas gourmand ») : keep-alive
+        //   périodique. Gardé pour ne rien faire SAUF quand DessinAnime est le provider actif, et
+        //   même là keepAliveIfActive() ne re-warm que si le cf_clearance vieillit/expire (sinon
+        //   simple check cookie = quasi zéro coût). → au clic sur une jaquette, jamais de captcha.
+        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            while (true) {
+                try {
+                    kotlinx.coroutines.delay(8L * 60L * 1000L) // toutes les 8 min
+                    val onDessinAnime = try {
+                        com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider is
+                            com.streamflixreborn.streamflix.providers.DessinAnimeProvider
+                    } catch (_: Throwable) { false }
+                    if (onDessinAnime) {
+                        com.streamflixreborn.streamflix.providers.DessinAnimeProvider.keepAliveIfActive()
+                    }
+                } catch (_: Throwable) {}
+            }
+        }
 
-        // 2026-05-18 : UncaughtExceptionHandler — sauvegarde le stack trace
-        //   dans last_crash.txt (lu par CrashActivity + buildBugReport).
-        //   Sans ça, le fichier n'était jamais écrit, donc le rapport bug
-        //   ne pouvait pas inclure la cause d'un crash récent.
+        // 2026-07-03 (user "jaquettes FrenchAnime grises au démarrage, pas de préchauffage
+        //   CF ; en revenant elles chargent") : FrenchAnime est repassé NATIF ; ses posters
+        //   sont hébergés sur french-anime.com (Cloudflare). On pré-résout son challenge CF
+        //   au boot → cf_clearance prêt AVANT que Glide demande les jaquettes → posters dès
+        //   la 1re ouverture. S'exécute AUSSI sur TV (le bypass est une WebView TRANSITOIRE,
+        //   créée puis détruite → aucune WebView persistante, contrairement au warmup WebJS).
+        // 2026-07-03 : préchauffage CF FrenchAnime au boot RETIRÉ. Le bypass CF tourne dans
+        //   une WebView sur le thread principal ; sur le CPU faible de la Chromecast il gelait
+        //   l'UI (ANR + restart en boucle, "Skipped 419 frames"). Les jaquettes CF se chargent
+        //   à la 1re navigation (bypass à la demande). Fix propre des posters = passer par TMDB
+        //   (zéro CF) plutôt que les images french-anime.com — à faire séparément.
+
+        // 2026-07-07 : UncaughtExceptionHandler — sauvegarde le stack trace
+        //   dans last_crash.txt ET lance CrashActivity (process :crash séparé)
+        //   pour afficher le rapport + permettre l'envoi sur GitHub Issues.
+        //   CrashActivity tourne dans :crash → survit au kill du process principal.
         try {
             val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
             Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
@@ -181,16 +349,40 @@ class StreamFlixApp : Application() {
                     sw.append("Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} (Android ${android.os.Build.VERSION.RELEASE})\n")
                     sw.append("App: v${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})\n\n")
                     throwable.printStackTrace(java.io.PrintWriter(sw))
-                    val crashFile = java.io.File(getExternalFilesDir(null), "last_crash.txt")
-                    crashFile.writeText(sw.toString())
-                } catch (_: Throwable) {
+                    val crashText = sw.toString()
+
+                    // Sauvegarde fichier (backup pour relecture ultérieure)
                     try {
-                        val sw = java.io.StringWriter()
-                        throwable.printStackTrace(java.io.PrintWriter(sw))
-                        java.io.File(cacheDir, "last_crash.txt").writeText(sw.toString())
+                        java.io.File(getExternalFilesDir(null), "last_crash.txt").writeText(crashText)
+                    } catch (_: Throwable) {
+                        try {
+                            java.io.File(cacheDir, "last_crash.txt").writeText(crashText)
+                        } catch (_: Throwable) {}
+                    }
+
+                    // Lancer CrashActivity dans le process :crash
+                    val intent = android.content.Intent(this@StreamFlixApp, CrashActivity::class.java).apply {
+                        putExtra(CrashActivity.EXTRA_CRASH, crashText)
+                        addFlags(
+                            android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                            android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK
+                        )
+                    }
+                    startActivity(intent)
+                } catch (_: Throwable) {
+                    // Si même le lancement de CrashActivity échoue, fallback
+                    try {
+                        val sw2 = java.io.StringWriter()
+                        throwable.printStackTrace(java.io.PrintWriter(sw2))
+                        java.io.File(cacheDir, "last_crash.txt").writeText(sw2.toString())
                     } catch (_: Throwable) {}
+                    previousHandler?.uncaughtException(thread, throwable)
+                    return@setDefaultUncaughtExceptionHandler
                 }
-                previousHandler?.uncaughtException(thread, throwable)
+
+                // Tuer le process principal (CrashActivity vit dans :crash)
+                android.os.Process.killProcess(android.os.Process.myPid())
+                kotlin.system.exitProcess(1)
             }
         } catch (_: Throwable) {}
 
@@ -212,7 +404,12 @@ class StreamFlixApp : Application() {
         // Track current foreground Activity for WebView dialogs
         // + compteur d'activités visibles pour détecter le background (Home TV)
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
-            override fun onActivityResumed(activity: Activity) { currentActivity = activity }
+            override fun onActivityResumed(activity: Activity) {
+                currentActivity = activity
+                // 2026-07-09 : applique la luminosité globale de l'app (overlay noir)
+                //   à chaque activité qui revient au premier plan.
+                com.streamflixreborn.streamflix.utils.AppDimManager.apply(activity)
+            }
             override fun onActivityPaused(activity: Activity) { if (currentActivity == activity) currentActivity = null }
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
             override fun onActivityStarted(activity: Activity) {
@@ -310,6 +507,11 @@ class StreamFlixApp : Application() {
         // 2026-06-18 (user "ça met du temps à charger Le replay") : pré-charge
         //   le M3U replay en background dès le cold start. Cache disque +
         //   RAM → ouverture du TV Hub instantanée à partir du 2e lancement.
+        // 2026-07-06 : ces installContext (TF1/M6/Bfm/Otf/LiveTvHub) DOIVENT rester sur le
+        //   main thread / synchrones — les déporter en fond cassait le démarrage de TF1
+        //   (TF1Auth lisait son Context avant que la coroutine de fond l'ait posé). On les
+        //   remet sur main. (Le blocage démarrage OtfTvService→OkHttp sera traité autrement,
+        //   ex. client OkHttp lazy, sans toucher au timing des installContext.)
         try {
             com.streamflixreborn.streamflix.providers.LiveTvHubProvider
                 .installReplayDiskCache(cacheDir)
@@ -363,17 +565,35 @@ class StreamFlixApp : Application() {
             Log.w("StreamFlixApp", "Replay cache init exception: ${e.message}")
         }
 
-        // 2026-05-31 : Google Cast — init CastContext pour la découverte Chromecast
-        try {
-            com.google.android.gms.cast.framework.CastContext.getSharedInstance(
-                this, java.util.concurrent.Executors.newSingleThreadExecutor()
-            ).addOnSuccessListener {
-                Log.d("StreamFlixApp", "CastContext initialized OK")
-            }.addOnFailureListener {
-                Log.w("StreamFlixApp", "CastContext init failed: ${it.message}")
-            }
-        } catch (e: Throwable) {
-            Log.w("StreamFlixApp", "CastContext init exception: ${e.message}")
+        // 2026-05-31 : Google Cast — init CastContext pour la découverte Chromecast.
+        // 2026-07-06 (blocage démarrage ~2,5s) : CastContext.getSharedInstance initialise
+        //   synchronement le MediaRouter (GlobalMediaRouter.start → scan des providers),
+        //   qui DOIT tourner sur le main thread (contrainte du SDK) et prend ~2,5s sur
+        //   Chromecast → figeait le cold start. On la DIFFÈRE de 6s : le home s'affiche
+        //   d'abord, puis la découverte Cast s'initialise (main libre au moment critique).
+        // 2026-07-06 : sur un device TV/leanback (Chromecast, box Android TV), l'app tourne
+        //   DÉJÀ sur le récepteur Cast → être ÉMETTEUR Cast (CastContext) n'y sert à rien et
+        //   ne fait que payer le scan MediaRouter (~2,5s). On SAUTE l'init Cast sur TV.
+        //   Sur mobile, on la garde mais différée (le sender est utile pour caster vers une TV).
+        val isTvDevice = try {
+            packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
+        } catch (_: Throwable) { false }
+        if (!isTvDevice) {
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                try {
+                    com.google.android.gms.cast.framework.CastContext.getSharedInstance(
+                        this, java.util.concurrent.Executors.newSingleThreadExecutor()
+                    ).addOnSuccessListener {
+                        Log.d("StreamFlixApp", "CastContext initialized OK (deferred)")
+                    }.addOnFailureListener {
+                        Log.w("StreamFlixApp", "CastContext init failed: ${it.message}")
+                    }
+                } catch (e: Throwable) {
+                    Log.w("StreamFlixApp", "CastContext init exception: ${e.message}")
+                }
+            }, 6000L)
+        } else {
+            Log.d("StreamFlixApp", "CastContext init SKIPPED (TV/leanback device — pas d'émetteur Cast)")
         }
 
         // 2026-05-12 : setup ProfileStore (multi-utilisateur Netflix-style).

@@ -169,6 +169,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     private data class CachedServers(val servers: List<Video.Server>, val expiresAtMs: Long)
     private val serversCache = ConcurrentHashMap<String, CachedServers>()
 
+    /** 2026-07-04 : vide les caches en mémoire. Appelé par ProviderCacheRefresh. */
+    fun clearCaches() {
+        endpointHealth.clear()
+        serversCache.clear()
+    }
+
     private fun serversCacheKey(videoType: Video.Type): String = when (videoType) {
         is Video.Type.Movie -> "movie:${videoType.id}"
         is Video.Type.Episode -> "tv:${videoType.tvShow.id}:s${videoType.season.number}:e${videoType.number}"
@@ -519,7 +525,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         }
         return Video.Server(
             id = "moiflix_${matchUrl.substringAfterLast("/")}",
-            name = "Moiflix [VF]",
+            name = "Moiflix",
             src = finalUrl,
         )
     }
@@ -587,7 +593,10 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
 
     data class LinksMovieData(
         val id: String?,
-        val links: List<String>?
+        // 2026-07-09 : l'API Movix a changé — `links` mélange désormais des chaînes ET des
+        //   objets (ex {"url":"…","quality":"…"}). List<String> throw sur les objets → tout
+        //   l'endpoint perdu. On parse en JsonElement et on extrait l'URL via movixLinkUrl().
+        val links: List<com.google.gson.JsonElement>?
     )
 
     data class LinksMovieResponse(
@@ -601,7 +610,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         val series_id: String?,
         val season_number: Int?,
         val episode_number: Int?,
-        val links: List<String>?
+        val links: List<com.google.gson.JsonElement>?
     )
 
     data class LinksTvResponse(
@@ -856,6 +865,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         val client = OkHttpClient.Builder()
             .readTimeout(15, TimeUnit.SECONDS)
             .connectTimeout(15, TimeUnit.SECONDS)
+            .callTimeout(30, TimeUnit.SECONDS)
             .dns(DnsResolver.doh)
             .build()
 
@@ -1424,7 +1434,8 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
 
         val servers = mutableListOf<Video.Server>()
         servers.addAll(fetchNativeMovixServers(id, videoType))
-        if (!skipBackupsForBackupCall) {
+        // 2026-07-04 : backups inline DÉSACTIVÉS → registre central.
+        if (!skipBackupsForBackupCall && !com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) {
             servers.addAll(fetchMovixBackups(id, videoType))
             // 2026-05-28 : Wiflix + FrenchStream DIRECT scrape en complément
             try { servers.addAll(fetchWiflixDirectBackup(id, videoType)) }
@@ -1483,7 +1494,36 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
      * seriesDl, mazQuest, yflix, moiflix…). Extrait de getServers pour pouvoir
      * être émis EN PREMIER par getServersProgressive (avant les backups).
      */
-    private suspend fun fetchNativeMovixServers(id: String, videoType: Video.Type): List<Video.Server> {
+    // 2026-07-07 (user « affichage instantané, chaque endpoint dès qu'il répond, plus d'awaitAll
+    //   qui attend le plus lent ») : onPartial (optionnel) → chaque sous-source émet son lot DÈS
+    //   qu'elle a répondu, au lieu d'attendre TOUTES les sous-sources. Non fourni (getServers
+    //   classique) = comportement inchangé (retour du lot complet).
+    /**
+     * 2026-07-09 : garde pour l'endpoint fstream (FrenchStream via API Movix).
+     * L'API fait du matching par titre CÔTÉ SERVEUR — trop imprécis pour les
+     * titres courts (1 mot sig. : "FROM" → "From Dusk Till Dawn", "OZ" → n'importe
+     * quoi). Pour ces titres, on SKIP fstream et FrenchStream arrive via la boucle
+     * générique BackupRegistry (titleMatches STRICT, aucun faux positif).
+     * Seuil ≤ 1 sigWord : "FROM" = 1 (from), "Stranger Things" = 2 (stranger,things) → OK.
+     */
+    private fun isTitleTooShortForFstream(title: String): Boolean {
+        val sigWords = java.text.Normalizer.normalize(title, java.text.Normalizer.Form.NFD)
+            .replace(Regex("[^a-zA-Z0-9 ]"), " ")
+            .lowercase()
+            .split(Regex("\\s+"))
+            .filter { it.length >= 3 && it !in FSTREAM_STOPWORDS }
+        return sigWords.size <= 1
+    }
+    private val FSTREAM_STOPWORDS = setOf(
+        "le", "la", "les", "un", "une", "des", "du", "de", "et", "the", "and", "of",
+        "a", "an", "to", "in", "on", "for", "saison", "season"
+    )
+
+    private suspend fun fetchNativeMovixServers(
+        id: String,
+        videoType: Video.Type,
+        onPartial: (suspend (List<Video.Server>) -> Unit)? = null,
+    ): List<Video.Server> {
         val servers = mutableListOf<Video.Server>()
 
         when (videoType) {
@@ -1493,8 +1533,26 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
 
                 // Parallel fetch all 5 API sources (timeout 4s + circuit breaker)
                 val allResults = coroutineScope {
+                    // 2026-07-09 : tmdbMovieDetailsDeferred DOIT être déclaré AVANT
+                    //   fstreamDeferred car ce dernier l'await() pour la garde titre.
+                    val tmdbMovieDetailsDeferred = async {
+                        val tmdbIdInt = tmdbId.toIntOrNull() ?: return@async null
+                        try { tmdbService.getMovieDetails(tmdbIdInt, TMDB_API_KEY) }
+                        catch (_: Exception) { null }
+                    }
                     val fstreamDeferred = async {
                         runEndpoint("fstream-movie") {
+                            // 2026-07-09 : GARDE TITRE — l'API Movix fait du scraping FrenchStream
+                            //   CÔTÉ SERVEUR dont le matching est mauvais pour les titres courts
+                            //   (ex: "FROM" → "From Dusk Till Dawn" = faux contenu). Si le titre
+                            //   a ≤ 1 mot significatif, on SKIP fstream (trop de faux positifs).
+                            //   FrenchStream passe alors par BackupRegistry (boucle générique avec
+                            //   titleMatches STRICT qui filtre correctement).
+                            val movieTitle = tmdbMovieDetailsDeferred.await()?.title
+                            if (movieTitle != null && isTitleTooShortForFstream(movieTitle)) {
+                                Log.d("MovixProvider", "fstream-movie SKIP: titre '$movieTitle' trop court (faux positifs FrenchStream)")
+                                return@runEndpoint emptyList()
+                            }
                             val fstream = movixServiceInstance.getFstreamMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
                             if (fstream.success == true) {
@@ -1504,9 +1562,6 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                         if (url.isBlank()) return@forEach
                                         val displayLang = formatLang(lang)
                                         val quality = player.quality?.takeIf { it.isNotBlank() } ?: "HD"
-                                        // 2026-06-02 : préférer le vrai extracteur deviné depuis l'URL.
-                                        //   L'API Movix mislabel parfois (ex: claim "Voe" mais URL kokoflix.lol=Doodstream).
-                                        //   Sans ça l'user clique "FS · Voe" → lance DoodStream → fail trompeur.
                                         val urlBasedName = guessPlayerName(url)
                                         val apiClaimedName = player.player?.takeIf { it.isNotBlank() } ?: ""
                                         val playerName = when {
@@ -1527,10 +1582,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                             val links = movixServiceInstance.getLinksMovie(tmdbId)
                             val list = mutableListOf<Video.Server>()
                             if (links.success == true) {
-                                links.data?.links?.forEachIndexed { index, url ->
-                                    if (url.isNotBlank()) {
+                                links.data?.links?.forEachIndexed { index, el ->
+                                    val url = movixLinkUrl(el)
+                                    if (!url.isNullOrBlank()) {
                                         val playerName = guessPlayerName(url)
-                                        list.add(Video.Server(id = "links-$index", name = "$playerName (Link ${index + 1})", src = url))
+                                        list.add(Video.Server(id = "links-$index", name = "$playerName", src = url))
                                     }
                                 }
                             }
@@ -1538,6 +1594,9 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                         }
                     }
 
+                    // 2026-07-07 : GARDÉ — le Wiflix de Movix passe par api.movix.date/api/wiflix
+                    //   (scrapé CÔTÉ SERVEUR = zéro captcha CF pour l'app). C'est NOTRE backup Wiflix
+                    //   direct (WiflixProvider, bypass CF avec captcha à chaque fois) qu'on retire.
                     val wiflixDeferred = async {
                         runEndpoint("wiflix-movie") {
                             val wiflix = movixServiceInstance.getWiflixMovie(tmdbId)
@@ -1611,13 +1670,8 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     }
 
                     // 2026-05-11 : Yflix + Moiflix partagent la même lookup TMDB
-                    // (title+year). Avant : 2 appels TMDB séparés. Maintenant : 1
-                    // appel partagé via async commun → gain ~150-300ms.
-                    val tmdbMovieDetailsDeferred = async {
-                        val tmdbIdInt = tmdbId.toIntOrNull() ?: return@async null
-                        try { tmdbService.getMovieDetails(tmdbIdInt, TMDB_API_KEY) }
-                        catch (_: Exception) { null }
-                    }
+                    // (title+year). tmdbMovieDetailsDeferred est déclaré en haut du
+                    // coroutineScope (avant fstreamDeferred qui en dépend).
                     val yflixDeferred = async {
                         runEndpoint("yflix-movie") {
                             val movie = tmdbMovieDetailsDeferred.await() ?: return@runEndpoint emptyList()
@@ -1639,7 +1693,14 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     // 2026-05-11 : ROLLBACK lien VoirDrama-Movix. Le user veut garder
                     // les providers séparés pour bien voir quelle source produit quel
                     // serveur. VoirDrama reste accessible en standalone.
-                    awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, videasyDeferred, yflixDeferred, moiflixDeferred)
+                    // 2026-07-07 : on await CHAQUE deferred et on émet son lot dès qu'il est prêt
+                    //   (onPartial) au lieu d'attendre le plus lent (awaitAll). Retourne pareil.
+                    // 2026-07-09 : fstream REMIS — le user préfère avoir les serveurs FS même si
+                    //   le matching Movix API est parfois imprécis (ex: "FROM" → "From Dusk Till Dawn").
+                    //   Mieux vaut quelques serveurs en trop que zéro FrenchStream.
+                    listOf(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, videasyDeferred, yflixDeferred, moiflixDeferred)
+                        .map { d -> async { val r = d.await(); if (r.isNotEmpty() && onPartial != null) onPartial(r); r } }
+                        .awaitAll()
                 }
 
                 allResults.forEach { servers.addAll(it) }
@@ -1655,6 +1716,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                 val allResults = coroutineScope {
                     val fstreamDeferred = async {
                         runEndpoint("fstream-tv") {
+                            // 2026-07-09 : GARDE TITRE (même que bloc movie) — titre court → skip fstream.
+                            val showTitle = videoType.tvShow.title
+                            if (showTitle != null && isTitleTooShortForFstream(showTitle)) {
+                                Log.d("MovixProvider", "fstream-tv SKIP: titre '$showTitle' trop court (faux positifs FrenchStream)")
+                                return@runEndpoint emptyList()
+                            }
                             val fstream = movixServiceInstance.getFstreamTv(tmdbId, seasonNum)
                             val list = mutableListOf<Video.Server>()
                             fstream.episodes?.get(episodeNum.toString())?.languages?.forEach { (lang, players) ->
@@ -1676,10 +1743,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                             val links = movixServiceInstance.getLinksTv(tmdbId, seasonNum, episodeNum)
                             val list = mutableListOf<Video.Server>()
                             links.data?.forEach { item ->
-                                item.links?.forEachIndexed { index, url ->
-                                    if (url.isNotBlank()) {
+                                item.links?.forEachIndexed { index, el ->
+                                    val url = movixLinkUrl(el)
+                                    if (!url.isNullOrBlank()) {
                                         val playerName = guessPlayerName(url)
-                                        list.add(Video.Server(id = "links-tv-$index", name = "$playerName (Link ${index + 1})", src = url))
+                                        list.add(Video.Server(id = "links-tv-$index", name = "$playerName", src = url))
                                     }
                                 }
                             }
@@ -1859,18 +1927,16 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     // 2026-05-11 : ROLLBACK lien VoirDrama-Movix. Le user veut garder
                     // les providers séparés pour bien voir quelle source produit quel
                     // serveur. VoirDrama reste accessible en standalone.
-                    awaitAll(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, seriesDlDeferred, videasyDeferred, mazQuestDeferred, yflixDeferred, moiflixDeferred)
+                    // 2026-07-07 : émission progressive par endpoint (voir bloc film).
+                    // 2026-07-09 : fstream REMIS (user veut les serveurs FS même si matching imparfait).
+                    listOf(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, seriesDlDeferred, videasyDeferred, mazQuestDeferred, yflixDeferred, moiflixDeferred)
+                        .map { d -> async { val r = d.await(); if (r.isNotEmpty() && onPartial != null) onPartial(r); r } }
+                        .awaitAll()
                 }
 
                 allResults.forEach { servers.addAll(it) }
             }
         }
-        // 2026-06-21 v2 (user "FrenchStream n'est plus là maintenant") :
-        //   REVERT du strip fstream-* total — sans backup direct fiable, on
-        //   privait l'user de TOUTES les sources FS. On garde les fstream-*
-        //   (= certains shows ont des mappings corrects). Pour les shows mal
-        //   mappés (= "FROM"), l'user a toujours les WIflix/CPasMal/TMDb +
-        //   FS direct backup en parallèle. Pas idéal mais mieux que vide.
         return servers
     }
 
@@ -2504,18 +2570,17 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
                         normalizeTitle(itemTitle) == normQuery
                     }
                 } else {
-                    // Matching d'origine INCHANGE pour les queries non
-                    // saisonnees (= contains permissif + fallback firstOrNull).
+                    // 2026-07-07 : matching strict via BackupRegistry.titleMatches
+                    // (remplace contains permissif + fallback firstOrNull qui prenait
+                    // n'importe quel 1er résultat = faux film).
                     typed.firstOrNull { item ->
                         val itemTitle = when (item) {
                             is Movie -> item.title
                             is TvShow -> item.title
                             else -> ""
                         }
-                        val normItem = normalizeTitle(itemTitle)
-                        val normQuery = normalizeTitle(query)
-                        normItem.contains(normQuery) || normQuery.contains(normItem)
-                    } ?: typed.firstOrNull()
+                        com.streamflixreborn.streamflix.utils.BackupRegistry.titleMatches(itemTitle, query)
+                    }
                 }
 
                 if (match == null) {
@@ -2688,9 +2753,10 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
 
         launch {
             try {
-                val native = fetchNativeMovixServers(id, videoType)
-                Log.w("MovixProvider", "[NATIF_ONLY] fetchNativeMovix retourne ${native.size} sources")
-                if (native.isNotEmpty()) emitDeduped(native)
+                // 2026-07-07 : chaque endpoint Movix émet DÈS qu'il répond (onPartial → emitDeduped),
+                //   plus d'attente du plus lent. Le lot complet n'est plus ré-émis (déjà envoyé).
+                val native = fetchNativeMovixServers(id, videoType) { batch -> emitDeduped(batch) }
+                Log.w("MovixProvider", "[NATIF_PROGRESSIF] Movix a émis ${native.size} sources au fil de l'eau")
             } catch (e: Exception) {
                 Log.w("MovixProvider", "Progressive native failed: ${e.message}")
             }
@@ -2706,7 +2772,8 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
         //   shows). Le scraping live de FrenchStream est l'unique source
         //   fiable pour avoir les VRAIS Vidzy/Uqload/Voe/Netu. Sans lui,
         //   l'user n'a aucune source FS correcte pour les shows mal mappés.
-        if (!skipBackupsForBackupCall) {
+        // 2026-07-04 : backups inline DÉSACTIVÉS → registre central.
+        if (!skipBackupsForBackupCall && !com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) {
             launch {
                 try {
                     val wf = fetchWiflixDirectBackup(id, videoType)
@@ -2896,6 +2963,33 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
      * Ex: "https://filemoon.sx/e/abc123" -> "Filemoon"
      *     "https://streamtape.com/e/xyz" -> "Streamtape"
      */
+    // 2026-07-09 : extrait l'URL d'une entrée `links` Movix, qu'elle soit une chaîne
+    //   (ancien format) ou un objet (nouveau format {"url":…} / {"link":…} / etc.). Pour un
+    //   objet sans champ url explicite, on prend le 1er membre string qui ressemble à une URL.
+    private fun movixLinkUrl(el: com.google.gson.JsonElement?): String? {
+        if (el == null || el.isJsonNull) return null
+        try {
+            if (el.isJsonPrimitive && el.asJsonPrimitive.isString) {
+                return el.asString.takeIf { it.startsWith("http") }
+            }
+            if (el.isJsonObject) {
+                val obj = el.asJsonObject
+                for (k in listOf("url", "link", "src", "file", "source", "embed", "player")) {
+                    val v = obj.get(k)
+                    if (v != null && v.isJsonPrimitive && v.asJsonPrimitive.isString) {
+                        val s = v.asString
+                        if (s.startsWith("http")) return s
+                    }
+                }
+                // Aucun champ nommé → 1er membre string http
+                for ((_, v) in obj.entrySet()) {
+                    if (v.isJsonPrimitive && v.asJsonPrimitive.isString && v.asString.startsWith("http")) return v.asString
+                }
+            }
+        } catch (_: Exception) {}
+        return null
+    }
+
     private fun guessPlayerName(url: String): String {
         // Try the accurate extractor-based detection first
         Extractor.identifyServiceName(url)?.let { return it }
@@ -3088,6 +3182,7 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
                     .followSslRedirects(true)
                     .connectTimeout(10, TimeUnit.SECONDS)
                     .readTimeout(10, TimeUnit.SECONDS)
+                    .callTimeout(30, TimeUnit.SECONDS)
                     .build()
                 val request = okhttp3.Request.Builder()
                     .url(url)
@@ -3354,6 +3449,7 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
         val client = OkHttpClient.Builder()
             .readTimeout(30, TimeUnit.SECONDS)
             .connectTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS)
             .dns(DnsResolver.doh)
             .addInterceptor { chain ->
                 val request = chain.request().newBuilder()
@@ -3383,6 +3479,7 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
         val client = OkHttpClient.Builder()
             .readTimeout(30, TimeUnit.SECONDS)
             .connectTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS)
             .dns(DnsResolver.doh)
             .build()
 

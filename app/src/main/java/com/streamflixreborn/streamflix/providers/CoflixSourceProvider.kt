@@ -44,6 +44,9 @@ object CoflixSourceProvider {
 
     /** Liste des miroirs connus du site. On essaie dans l'ordre jusqu'à un 200. */
     private val MIRRORS = listOf(
+        // 2026-07-04 (sync avec coflix.js web) : le JS pointe coflix.trade, absent du pool
+        //   natif → ajouté en tête pour rester à jour avec le domaine actif du site.
+        "https://coflix.trade",
         "https://coflix.cymru",
         "https://coflix.date",
         "https://coflix.click",

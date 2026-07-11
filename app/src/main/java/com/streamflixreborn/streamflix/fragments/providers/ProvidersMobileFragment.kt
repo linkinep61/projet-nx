@@ -159,8 +159,11 @@ class ProvidersMobileFragment : Fragment() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        // 2026-07-04 : garde null-safe — le binding peut être null si le fragment
+        // a été détruit avant que onConfigurationChanged soit dispatché.
+        val b = _binding ?: return
         val spanCount = if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) 4 else 2
-        val rv = binding.rvProviders
+        val rv = b.rvProviders
         (rv.layoutManager as? GridLayoutManager)?.let { lm ->
             lm.spanCount = spanCount
             // Force a full re-measure: changing spanCount alone doesn't ask

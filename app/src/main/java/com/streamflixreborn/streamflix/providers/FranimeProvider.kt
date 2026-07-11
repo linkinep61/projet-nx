@@ -17,6 +17,8 @@ import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.NetworkClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -56,7 +58,7 @@ import java.util.concurrent.TimeUnit
  *  - Episode  = "<anime_id>/<season>/<ep>" ex: "8147/1/1"
  *  - Server   = "<episodeId>|<lang>|<idx>" ex: "8147/1/1|vo|0"
  */
-object FranimeProvider : Provider {
+object FranimeProvider : Provider, ProgressiveServersProvider {
 
     override val name = "FRAnime"
     override val baseUrl = "https://franime.fr/"
@@ -65,6 +67,7 @@ object FranimeProvider : Provider {
     override val language = "fr"
 
     private const val TAG = "FRAnime"
+
     private const val API_BASE = "https://api.franime.fr/"
     private const val USER_AGENT =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -456,6 +459,8 @@ object FranimeProvider : Provider {
         val saisons = anime.optJSONArray("saisons") ?: JSONArray()
         // Fiche détail = HD (affiche original ~1 MB), c'est OK car 1 seul fetch.
         val poster = anime.bestPosterFull()
+        val title = anime.bestTitle()
+
         val seasons = (0 until saisons.length()).map { i ->
             val s = saisons.optJSONObject(i)
             val sNum = i + 1
@@ -471,7 +476,7 @@ object FranimeProvider : Provider {
 
         return TvShow(
             id = id,
-            title = anime.bestTitle(),
+            title = title,
             poster = poster,
             banner = anime.bestBanner() ?: poster,
             overview = anime.bestOverview(),
@@ -605,6 +610,13 @@ object FranimeProvider : Provider {
         }
         Log.d(TAG, "getServers($id) → ${servers.size} servers (slug=$slug)")
         return servers
+    }
+
+    override fun getServersProgressive(id: String, videoType: Video.Type): Flow<List<Video.Server>> = channelFlow {
+        try {
+            val servers = withContext(Dispatchers.IO) { getServers(id, videoType) }
+            if (servers.isNotEmpty()) send(servers)
+        } catch (e: Exception) { Log.w(TAG, "progressive native KO: ${e.message}") }
     }
 
     override suspend fun getVideo(server: Video.Server): Video {

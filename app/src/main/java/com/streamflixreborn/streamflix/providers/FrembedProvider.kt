@@ -422,14 +422,24 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
         val (tvShowId, seasonNumber) = seasonId.split("/")
         val episodes : List<Episode> = try {
-            service.getApiListEp(tvShowId).firstOrNull { it.sa.toString() == seasonNumber }.let { season ->
-                season?.episodes?.map { ep ->
+            service.getApiListEp(tvShowId).firstOrNull { it.sa.toString() == seasonNumber }?.let { season ->
+                // Jaquettes TMDB (stills) par numéro d'épisode
+                val tmdbStills: Map<Int, String?> = try {
+                    com.streamflixreborn.streamflix.utils.TMDb3.TvSeasons.details(
+                        seriesId = tvShowId.toInt(),
+                        seasonNumber = seasonNumber.toInt(),
+                        language = "fr-FR"
+                    ).episodes?.associate { it.episodeNumber to it.stillPath?.w500 } ?: emptyMap()
+                } catch (_: Exception) { emptyMap() }
+
+                season.episodes.map { ep ->
                     Episode(id = ep.id.toString(),
                         number = ep.epi,
-                        title = ep.title ?: ("Episode "+ep.epi)
+                        title = ep.title ?: ("Episode "+ep.epi),
+                        poster = tmdbStills[ep.epi],
                     )
-                } ?: listOf()
-            }
+                }
+            } ?: listOf()
         } catch (e: Exception) {
             listOf()
         }
@@ -550,7 +560,8 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
     /** 2026-06-13 (user "désactiver tous les backups Frembed pour test
      *  natif" → "réactive les backup") : backups Movix + Cloudstream
      *  ré-activés après validation que le natif marche. */
-    private val ENABLE_BACKUPS: Boolean = true
+    // 2026-07-04 : backups inline désactivés → tout passe par le registre central.
+    private val ENABLE_BACKUPS: Boolean = !com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED
 
     override fun getServersProgressive(
         id: String, videoType: Video.Type,
@@ -632,6 +643,7 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
                 .followSslRedirects(false)
                 .connectTimeout(10, TimeUnit.SECONDS)
                 .readTimeout(10, TimeUnit.SECONDS)
+                .callTimeout(30, TimeUnit.SECONDS)
                 .dns(DnsResolver.doh)
                 .build()
 
@@ -672,6 +684,7 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
             private val client = OkHttpClient.Builder()
                 .readTimeout(30, TimeUnit.SECONDS)
                 .connectTimeout(30, TimeUnit.SECONDS)
+                .callTimeout(45, TimeUnit.SECONDS)
                 .dns(DnsResolver.doh)
                 .build()
 

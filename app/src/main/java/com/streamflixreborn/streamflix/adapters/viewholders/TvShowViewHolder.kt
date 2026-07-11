@@ -153,32 +153,59 @@ class TvShowViewHolder(
         if (tvShow.id.startsWith("livehub::replay::")) {
             val isFav = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore
                 .isFavorite(tvShow.id)
-            val option = if (isFav) "★ Retirer des favoris" else "★ Ajouter aux favoris"
+            // 2026-07-04 (user "peux-tu ajouter le contrôle parental sur les
+            //   différentes catégories du TV hub — long-press sur un dossier
+            //   Replay TF1+ → proposition de mettre le contrôle parental, pour
+            //   chaque dossier") : détecte si l'item est un DOSSIER de replay
+            //   (racine sans ::show::/::program/) et propose une option de
+            //   verrouillage/déverrouillage par PIN.
+            val folderKey = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                .folderKeyFromId(tvShow.id)
+            val isFolderRoot = folderKey != null && !tvShow.id.contains("::show::") &&
+                !tvShow.id.contains("::program/") && !tvShow.id.contains("::category::")
+            val isFolderLocked = isFolderRoot &&
+                com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                    .isLocked(context, folderKey!!)
+            val favOption = if (isFav) "★ Retirer des favoris" else "★ Ajouter aux favoris"
+            val lockOption = when {
+                !isFolderRoot -> null
+                isFolderLocked -> "🔓 Retirer le contrôle parental"
+                else -> "🔒 Contrôle parental (verrouiller)"
+            }
+            val options = listOfNotNull(favOption, lockOption).toTypedArray()
             androidx.appcompat.app.AlertDialog.Builder(context)
                 .setTitle(tvShow.title)
-                .setItems(arrayOf(option)) { _, _ ->
-                    // 2026-06-20 (user "le film Titanic est traité comme une
-                    //   série et ouvre une page synopsis") : préserver isMovie
-                    //   depuis le tvShow (= valeur correcte du M3U tvg-type),
-                    //   sinon Titanic perd son isMovie=true et le clic ouvre
-                    //   la synopsis au lieu du player.
-                    val nowFav = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore
-                        .toggle(tvShow.id, tvShow.title, tvShow.poster, tvShow.banner,
-                            isMovie = tvShow.isMovie)
-                    val msg = if (nowFav) "Ajouté aux favoris" else "Retiré des favoris"
-                    Toast.makeText(context, "${tvShow.title} — $msg", Toast.LENGTH_SHORT).show()
-                    // Invalide le cache TV Hub + refresh home pour que la
-                    //   section "Favoris Replay" se mette à jour immédiatement.
-                    try {
-                        val current = UserPreferences.currentProvider
-                        if (current != null) {
-                            (current as? com.streamflixreborn.streamflix.providers.LiveTvHubProvider)
-                                ?.clearHomeCache()
-                            com.streamflixreborn.streamflix.utils.HomeCacheStore
-                                .clear(context, current)
-                            UserPreferences.currentProvider = current
-                        }
-                    } catch (_: Throwable) { }
+                .setItems(options) { _, which ->
+                    val label = options[which]
+                    if (label.startsWith("★")) {
+                        // 2026-06-20 (user "le film Titanic est traité comme une
+                        //   série et ouvre une page synopsis") : préserver isMovie
+                        //   depuis le tvShow (= valeur correcte du M3U tvg-type),
+                        //   sinon Titanic perd son isMovie=true et le clic ouvre
+                        //   la synopsis au lieu du player.
+                        val nowFav = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore
+                            .toggle(tvShow.id, tvShow.title, tvShow.poster, tvShow.banner,
+                                isMovie = tvShow.isMovie)
+                        val msg = if (nowFav) "Ajouté aux favoris" else "Retiré des favoris"
+                        Toast.makeText(context, "${tvShow.title} — $msg", Toast.LENGTH_SHORT).show()
+                        // Invalide le cache TV Hub + refresh home pour que la
+                        //   section "Favoris Replay" se mette à jour immédiatement.
+                        try {
+                            val current = UserPreferences.currentProvider
+                            if (current != null) {
+                                (current as? com.streamflixreborn.streamflix.providers.LiveTvHubProvider)
+                                    ?.clearHomeCache()
+                                com.streamflixreborn.streamflix.utils.HomeCacheStore
+                                    .clear(context, current)
+                                UserPreferences.currentProvider = current
+                            }
+                        } catch (_: Throwable) { }
+                    } else if (label.startsWith("🔒") || label.startsWith("🔓")) {
+                        // Contrôle parental : ajout/retrait du verrou par PIN.
+                        // Réutilise PinDialog (partagé avec ProviderLockStore) →
+                        // même PIN pour tout, moins de friction UX.
+                        handleFolderLockToggle(folderKey!!, isFolderLocked)
+                    }
                 }
                 .show()
             return true
@@ -196,16 +223,35 @@ class TvShowViewHolder(
         val isFavorite = isStoreFavorite || hasServerFavorites
         val isBanned = com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedChannels.isBanned(tvShow.id)
 
-        val options = arrayOf(
+        // 2026-07-04 (user "sur les dossiers du TV Hub y a toujours pas le code
+        //   parental — le but c'est pas de verrouiller le provider, c'est de
+        //   verrouiller un DOSSIER") : détecte si l'item est un dossier TV Hub
+        //   (livehub::folder::stream4, livehub::folder::musique, etc.) et
+        //   propose l'option de contrôle parental dans le même menu que favoris/bannir.
+        val genericFolderKey = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+            .folderKeyFromId(tvShow.id)
+        val isGenericFolder = genericFolderKey != null && tvShow.id.startsWith("livehub::folder::")
+        val isGenericFolderLocked = isGenericFolder &&
+            com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                .isLocked(context, genericFolderKey!!)
+        val folderLockOption = when {
+            !isGenericFolder -> null
+            isGenericFolderLocked -> "🔓 Retirer le contrôle parental"
+            else -> "🔒 Contrôle parental (verrouiller)"
+        }
+
+        val options = listOfNotNull(
             if (isFavorite) "★ Retirer des favoris" else "★ Ajouter aux favoris",
             if (isBanned) "✕ Débannir cette chaîne" else "✕ Bannir cette chaîne",
-        )
+            folderLockOption,
+        ).toTypedArray()
 
         androidx.appcompat.app.AlertDialog.Builder(context)
             .setTitle(tvShow.title)
             .setItems(options) { _, which ->
-                when (which) {
-                    0 -> {
+                val label = options[which]
+                when {
+                    label.startsWith("★") -> {
                         if (isFavorite) {
                             // Retirer des 2 stores : ★ channel-fav + ❤ server-favs.
                             // Sinon un seul ❤ resté actif laisse la chaîne dans le Hub.
@@ -222,10 +268,15 @@ class TvShowViewHolder(
                             Toast.makeText(context, "${tvShow.title} — Ajouté aux favoris", Toast.LENGTH_SHORT).show()
                         }
                     }
-                    1 -> {
+                    label.startsWith("✕") -> {
                         val nowBanned = com.streamflixreborn.streamflix.fragments.player.settings.IptvBannedChannels.toggle(tvShow.id)
                         val msg = if (nowBanned) "Bannie (cachée du catalogue)" else "Réactivée"
                         Toast.makeText(context, "${tvShow.title} — $msg", Toast.LENGTH_SHORT).show()
+                    }
+                    label.startsWith("🔒") || label.startsWith("🔓") -> {
+                        // Contrôle parental sur dossier générique du TV Hub.
+                        handleFolderLockToggle(genericFolderKey!!, isGenericFolderLocked)
+                        return@setItems
                     }
                 }
                 // 2026-06-08 (user "les chaînes bannies se mettent enfoncées
@@ -250,6 +301,42 @@ class TvShowViewHolder(
             }
             .show()
         return true
+    }
+
+    /** 2026-07-04 (user "contrôle parental sur les dossiers TV Hub") :
+     *  ajoute/retire le verrou parental d'un dossier via PinDialog.
+     *  - Si le dossier n'a AUCUN PIN encore : PinDialog fera un SETUP (créer PIN).
+     *  - Sinon : PinDialog fera un VERIFY (saisie PIN existant).
+     *  - Sur succès → toggleLock, message de confirmation, invalidation du cache
+     *    home pour que l'icône 🔒 apparaisse/disparaisse immédiatement.
+     */
+    private fun handleFolderLockToggle(folderKey: String, wasLocked: Boolean) {
+        val prettyLabel = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+            .folderLabel(folderKey)
+        val title = if (wasLocked) "Retirer le contrôle parental" else "Activer le contrôle parental"
+        com.streamflixreborn.streamflix.ui.PinDialog.showAuth(
+            context = context,
+            title = title,
+            onSuccess = {
+                val nowLocked = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                    .toggleLock(context, folderKey)
+                val msg = if (nowLocked) "🔒 $prettyLabel verrouillé"
+                          else "🔓 $prettyLabel déverrouillé"
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                // Refresh home pour que l'icône 🔒 apparaisse/disparaisse.
+                try {
+                    val current = UserPreferences.currentProvider
+                    if (current != null) {
+                        (current as? com.streamflixreborn.streamflix.providers.LiveTvHubProvider)
+                            ?.clearHomeCache()
+                        com.streamflixreborn.streamflix.utils.HomeCacheStore
+                            .clear(context, current)
+                        UserPreferences.currentProvider = current
+                    }
+                } catch (_: Throwable) { }
+            },
+            onCancel = null,
+        )
     }
 
     /** 2026-05-13 (user "on peut peut être garder le carré c'est peut être pas
@@ -761,6 +848,40 @@ class TvShowViewHolder(
 
     private fun displayMobileItem(binding: ItemTvShowMobileBinding) {
         binding.root.setOnClickListener {
+            // 2026-07-04 (user "contrôle parental sur les dossiers TV Hub") :
+            //   CHECK verrou parental AVANT toute navigation. Si le dossier est
+            //   verrouillé ET pas débloqué pour la session courante → dialog PIN
+            //   qui unlock temporairement (30 min). L'unlock permanent se fait
+            //   au long-press (menu contextuel).
+            run {
+                val folderKey = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                    .folderKeyFromId(tvShow.id)
+                if (folderKey != null &&
+                    !com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                        .isAccessible(context, folderKey)
+                ) {
+                    val label = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                        .folderLabel(folderKey)
+                    com.streamflixreborn.streamflix.ui.PinDialog.showAuth(
+                        context = context,
+                        title = "🔒 $label — Code parental",
+                        onSuccess = {
+                            com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                                .unlockForSession(folderKey)
+                            // Re-clique automatiquement pour ouvrir le dossier
+                            // maintenant qu'il est débloqué session.
+                            binding.root.performClick()
+                        },
+                        onCancel = null,
+                    )
+                    return@setOnClickListener
+                }
+                // Refresh timestamp si déjà débloqué session (glisse la fenêtre 30 min).
+                if (folderKey != null) {
+                    com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
+                        .touchSessionUnlock(folderKey)
+                }
+            }
             // 2026-06-19 (user "fais un dossier pour eux ils cliquent et dedans
             //   il y a OTF qui apparaît") : card dossier TV Hub → ouvre dialog
             //   au lieu d'aller au player.

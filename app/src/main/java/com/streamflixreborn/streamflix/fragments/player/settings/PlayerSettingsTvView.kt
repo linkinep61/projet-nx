@@ -61,6 +61,20 @@ class PlayerSettingsTvView @JvmOverloads constructor(
     var onBrightnessChanged: ((Int) -> Unit)? = null
 
     init {
+        // 2026-07-05 : SafeLinearLayoutManager — catch IndexOutOfBoundsException pendant
+        //   le layout si la liste de serveurs change (progressive, background) entre le
+        //   notify et le prochain layout pass. Évite le crash "Inconsistency detected.
+        //   Invalid view holder adapter position" sur Chromecast (serveurs arrivent en
+        //   rafale, le layout est plus lent que sur mobile).
+        binding.rvSettings.layoutManager = object : androidx.recyclerview.widget.LinearLayoutManager(context) {
+            override fun onLayoutChildren(recycler: RecyclerView.Recycler?, state: RecyclerView.State?) {
+                try {
+                    super.onLayoutChildren(recycler, state)
+                } catch (e: IndexOutOfBoundsException) {
+                    android.util.Log.w("PlayerSettingsTV", "RecyclerView inconsistency caught (safe): ${e.message}")
+                }
+            }
+        }
         binding.rvSettings.addItemDecoration(SpacingItemDecoration(6.dp(context)))
         binding.btnSettingsDownloads.setOnClickListener {
             hide()
@@ -222,6 +236,75 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             else -> settingsAdapter
         }
         binding.rvSettings.requestFocus()
+
+        // 2026-06-29 (user "sur la page serveurs TV, focus auto pour switcher facilement
+        //   tant qu'aucun film ne joue") : le requestFocus() ci-dessus sur le RecyclerView
+        //   délègue au 1er item si dispo, mais SEULEMENT si l'item est déjà mesuré/layout.
+        //   Sur Chromecast (plus lent), l'adapter vient d'être bind → items pas encore là
+        //   → le focus reste sur le container et le user doit appuyer flèche BAS pour
+        //   entrer dans la liste. Fix : on force le focus sur le premier enfant après
+        //   layout via post() (garanti que RecyclerView aura poussé les ViewHolders).
+        //   Gate : uniquement TANT QUE le player n'a PAS commencé à jouer — quand le film
+        //   est en cours, la fermeture auto du panneau se charge du reste (comportement
+        //   habituel via loading fini → binding.settings.hide()).
+        if (setting == Setting.SERVERS) {
+            focusFirstServerIfNotStarted()
+        }
+    }
+
+    /** 2026-06-29 : force le focus D-pad sur le 1er serveur de la liste
+     *  tant que le player n'a pas encore commencé la lecture (utile aux
+     *  changements rapides de serveur au clavier direction TV). */
+    private fun focusFirstServerIfNotStarted() {
+        if (hasPlayerStartedPlayback()) return
+        // Ne pas voler le focus si l'utilisateur est déjà sur un item de la liste.
+        if (binding.rvSettings.hasFocus()) {
+            val focused = binding.rvSettings.findFocus()
+            if (focused != null && focused !== binding.rvSettings) return
+        }
+        restoreServerFocus(previousIndex = 0, count = Settings.Server.list.size)
+    }
+
+    /** 2026-06-29 v2 : renvoie l'index de l'item Serveur qui a actuellement
+     *  le focus, ou -1 si aucun item de la liste n'a le focus. */
+    private fun getFocusedServerAdapterPosition(): Int {
+        val focused = binding.rvSettings.findFocus() ?: return -1
+        if (focused === binding.rvSettings) return -1
+        return runCatching { binding.rvSettings.getChildAdapterPosition(focused) }
+            .getOrDefault(-1)
+    }
+
+    /** 2026-06-29 v2 : restaure le focus D-pad sur un item de la liste Serveurs
+     *  après une notif RecyclerView. Si `previousIndex` >= 0, tente de revenir
+     *  sur cet index (clamé à count-1) ; sinon focus sur le 1er item.
+     *  Deux `post{}` chaînés pour laisser RecyclerView terminer le layout
+     *  et pousser les ViewHolders avant le requestFocus. */
+    private fun restoreServerFocus(previousIndex: Int, count: Int) {
+        if (count <= 0) return
+        val target = if (previousIndex in 0 until count) previousIndex else 0
+        binding.rvSettings.post {
+            binding.rvSettings.scrollToPosition(target)
+            binding.rvSettings.post {
+                val vh = binding.rvSettings.findViewHolderForAdapterPosition(target)
+                val itemView = vh?.itemView
+                if (itemView != null && itemView.isFocusable) {
+                    itemView.requestFocus()
+                } else {
+                    // Fallback : premier enfant physique du RecyclerView.
+                    binding.rvSettings.getChildAt(0)?.requestFocus()
+                }
+            }
+        }
+    }
+
+    /** True si le player a déjà lu un peu de contenu (=> ne pas voler le focus). */
+    private fun hasPlayerStartedPlayback(): Boolean {
+        val p = player ?: return false
+        return try {
+            val pos = p.currentPosition
+            val dur = p.duration
+            pos > 20_000L || (dur > 0 && pos > (dur * 0.005))
+        } catch (_: Throwable) { false }
     }
 
     override fun onServerListUpdated() {
@@ -237,21 +320,58 @@ class PlayerSettingsTvView @JvmOverloads constructor(
         // notifyDataSetChanged + requestFocus(root) en post() loupait
         // souvent → focus partait vers un autre View en background.
         val count = Settings.Server.list.size
-        // 2026-05-21 (user "l'affichage reste bloqué si on fait pas retour") :
-        // si le NOMBRE de serveurs a changé (affichage progressif : nouveaux
-        // serveurs qui arrivent), il FAUT un notifyDataSetChanged complet —
-        // sinon le RecyclerView ne sait pas qu'il y a de nouvelles lignes et
-        // elles n'apparaissent qu'après un "retour". Le refresh partiel "select"
-        // (qui préserve le focus) n'est gardé que quand le compte est inchangé.
-        if (count != lastServerListCount) {
-            lastServerListCount = count
-            serversAdapter.notifyDataSetChanged()
-        } else if (count == 0) {
-            serversAdapter.notifyDataSetChanged()
-        } else {
-            serversAdapter.notifyItemRangeChanged(0, count, "select")
+        val previousCount = lastServerListCount
+
+        // 2026-06-29 v2 (user "le focus n'est pas resté sur serveurs quand nouveaux
+        //   serveurs arrivent → refais-le tenir jusqu'à l'ouverture du Player") :
+        //   1) Mémoriser l'index qui a le focus AVANT la notif (au cas où on doit
+        //      restaurer manuellement après un reset).
+        //   2) Préférer `notifyItemRangeInserted` sur `notifyDataSetChanged` quand
+        //      des serveurs sont AJOUTÉS à la fin (cas ProgressiveServers) → les
+        //      ViewHolders existants ne sont PAS recréés → focus D-pad préservé
+        //      naturellement.
+        //   3) `notifyDataSetChanged` réservé aux vraies remises à zéro (0 items ou
+        //      décrément), où on restaurera le focus manuellement.
+        val focusedIndexBefore = getFocusedServerAdapterPosition()
+
+        // 2026-07-05 : SÉCURISÉ — notifyDataSetChanged() au lieu de notifyItemRangeInserted.
+        //   AVANT : notifyItemRangeInserted(previousCount, count - previousCount) → crash
+        //   IndexOutOfBoundsException "Inconsistency detected. Invalid view holder adapter
+        //   position" sur Chromecast quand Settings.Server.list est muté par les coroutines
+        //   background (progressive servers) ENTRE le moment où on lit .size et le moment
+        //   où RecyclerView valide les positions au prochain layout pass. Le Chromecast est
+        //   plus lent → la fenêtre de race condition est plus large.
+        //   notifyDataSetChanged() est TOUJOURS safe (invalide tout, re-layout complet).
+        //   Le coût perf est négligeable (liste de ~20-50 serveurs, pas 1000).
+        //   Le focus D-pad est restauré manuellement ci-dessous (restoreServerFocus).
+        try {
+            when {
+                count != previousCount -> {
+                    serversAdapter.notifyDataSetChanged()
+                    lastServerListCount = count
+                }
+                count == 0 -> serversAdapter.notifyDataSetChanged()
+                else -> serversAdapter.notifyItemRangeChanged(0, count, "select")
+            }
+            settingsAdapter.notifyDataSetChanged()
+        } catch (e: Exception) {
+            // Dernier filet : si malgré tout une inconsistency passe (list mutée pendant
+            // le notifyDataSetChanged lui-même), on log et on force un reset complet.
+            android.util.Log.w("PlayerSettingsTV", "refreshServerList notify error (safe): ${e.message}")
+            try {
+                serversAdapter.notifyDataSetChanged()
+                settingsAdapter.notifyDataSetChanged()
+            } catch (_: Exception) { /* ignore */ }
         }
-        settingsAdapter.notifyDataSetChanged()
+
+        // 2026-06-29 v2 : garantie du focus sur la liste Serveurs TANT QUE le
+        //   player n'a pas encore rendu une frame de contenu — quand le film
+        //   commence, le panneau se ferme (binding.settings.hide() ligne 672
+        //   côté PlayerTvFragment sur loading fini) donc la gate protège des
+        //   moments intermédiaires.
+        if (currentSettings == Setting.SERVERS && count > 0 && !hasPlayerStartedPlayback()) {
+            restoreServerFocus(focusedIndexBefore, count)
+        }
     }
 
     fun refreshChannelVariantList() {
@@ -307,10 +427,13 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             )
 
         override fun onBindViewHolder(holder: SettingViewHolder, position: Int) {
-            holder.displaySettings(items[position])
+            // 2026-07-05 : guard — la liste (Settings.Server.list) est mutable et peut
+            //   être raccourcie par un autre thread entre getItemCount() et onBind.
+            val item = items.getOrNull(position) ?: return
+            holder.displaySettings(item)
         }
 
-        override fun getItemCount() = items.size
+        override fun getItemCount(): Int = try { items.size } catch (_: Exception) { 0 }
     }
 
     private class SettingViewHolder(
@@ -1060,6 +1183,8 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                             if (nowFav) 0xFFFF4444.toInt() else 0xFF808080.toInt()
                         )
                         binding.ivSettingFavorite.tag = if (nowFav) "fav" else "not_fav"
+                        // 2026-07-08 : déclenche le re-tri complet (favoris en tête)
+                        settingsView.onServerFavoriteToggled?.invoke(item)
                         settingsView.refreshServerList()
                     }
                     // D-pad : right row → favorite

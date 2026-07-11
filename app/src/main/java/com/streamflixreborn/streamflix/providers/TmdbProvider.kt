@@ -44,7 +44,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
-class TmdbProvider(override val language: String) : Provider {
+class TmdbProvider(override val language: String) : Provider, ProgressiveServersProvider {
     override val baseUrl: String
         get() = ""
 
@@ -829,17 +829,25 @@ class TmdbProvider(override val language: String) : Provider {
                     val nItem = itemTitle.lowercase().replace(Regex("[^a-z0-9]"), "")
                     val nTarget = target.lowercase().replace(Regex("[^a-z0-9]"), "")
                     if (nItem == nTarget) return true
-                    if (nItem.contains(nTarget) || nTarget.contains(nItem)) {
-                        if (Math.abs(nItem.length - nTarget.length) <= 5) return true
-                    }
+                    // 2026-07-07 : titres ≤3 chars normalisés → exact only (fini « ko » ⊂ « taeko »)
+                    if (minOf(nItem.length, nTarget.length) <= 3) return false
+                    // contains avec length guard proportionnel (min ≥ max/2)
+                    val shorter = minOf(nItem.length, nTarget.length)
+                    val longer  = maxOf(nItem.length, nTarget.length)
+                    if (shorter >= longer / 2 && (nItem.contains(nTarget) || nTarget.contains(nItem))) return true
                     val cleanWords: (String) -> Set<String> = { s ->
                         s.lowercase().replace(Regex("[^a-z0-9 ]"), " ").split(Regex("\\s+")).filter { it.length > 2 }.toSet()
                     }
                     val nItemWords = cleanWords(itemTitle)
                     val nTargetWords = cleanWords(target)
                     if (nItemWords.isEmpty() || nTargetWords.isEmpty()) return false
-                    if (nTargetWords.size == 1) return nItemWords.contains(nTargetWords.first())
-                    return nItemWords.containsAll(nTargetWords) || nTargetWords.containsAll(nItemWords)
+                    // mono-mot : exiger que le mot soit AUSSI dans l'item ET que l'item ait ≤2 mots
+                    // (évite « seul » ⊂ « seul au monde »)
+                    if (nTargetWords.size == 1) return nItemWords.size <= 2 && nItemWords.contains(nTargetWords.first())
+                    // multi-mots : exiger couverture ≥60% dans au moins un sens
+                    val fwdCoverage = nTargetWords.count { it in nItemWords }.toDouble() / nTargetWords.size
+                    val revCoverage = nItemWords.count { it in nTargetWords }.toDouble() / nItemWords.size
+                    return fwdCoverage >= 0.6 || revCoverage >= 0.6
                 }
 
                 // Providers FR + Extracteurs directs - tout en parallèle
@@ -1077,6 +1085,26 @@ class TmdbProvider(override val language: String) : Provider {
 
         Log.i("StreamFlixES", "[SERVERS LIST] -> Found ${finalServers.size} servers: ${finalServers.joinToString { it.name }}")
         return finalServers.distinctBy { it.id }
+    }
+
+    // 2026-07-10 (user "le provider TMDB en direct ne reçoit plus aucune source — reconnecte-le
+    //   aux backups") : TMDB n'implémentait PAS ProgressiveServersProvider → dans PlayerViewModel
+    //   il tombait dans le chemin classique `getServers` SANS le merge du registre central
+    //   (BackupRegistry) → aucun backup (Movix/Cloudstream/Moviebox/Frembed…). En l'implémentant,
+    //   collectProgressiveServers fusionne le natif ci-dessous AVEC le registre (par tmdbId, l'id
+    //   TMDB étant numérique) → TMDB récupère de nouveau toutes les sources.
+    override fun getServersProgressive(
+        id: String, videoType: Video.Type,
+    ): kotlinx.coroutines.flow.Flow<List<Video.Server>> = kotlinx.coroutines.flow.channelFlow {
+        try {
+            val servers = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                getServers(id, videoType)
+            }
+            if (servers.isNotEmpty()) send(servers)
+        } catch (e: Exception) {
+            Log.w("TmdbProvider", "getServersProgressive natif KO: ${e.message}")
+            // On n'émet rien → le registre central prend le relais (backups).
+        }
     }
 
     override suspend fun getVideo(server: Video.Server): Video {

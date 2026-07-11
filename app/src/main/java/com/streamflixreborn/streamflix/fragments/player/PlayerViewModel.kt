@@ -17,6 +17,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -46,6 +51,11 @@ class PlayerViewModel(
     private val _additionalServer = MutableSharedFlow<Video.Server>(extraBufferCapacity = 100)
     val additionalServer: SharedFlow<Video.Server> = _additionalServer
     private var additionalServerJob: Job? = null
+    // 2026-07-04 : job unique pour getServers — cancel le précédent si une nouvelle
+    //   navigation déclenche un rechargement (double setupNav, playEpisode, reload).
+    //   Sans ça, deux collectProgressiveServers tournent en parallèle et se marchent
+    //   dessus : le 2e émet LoadingServers qui écrase le SuccessLoadingServers du 1er.
+    private var serverJob: Job? = null
 
     // 2026-05-21 (user "affiche au fur et à mesure" + "trier VF/VOSTFR/VO") :
     //   mise à jour PROGRESSIVE de la liste de serveurs pour les providers
@@ -74,6 +84,11 @@ class PlayerViewModel(
     // le fragment peut attendre le prochain lot au lieu de déclarer forfait.
     @Volatile var progressiveStillCollecting: Boolean = false
         private set
+
+    // 2026-07-05 : auto-recovery — si 0 serveur après tous les retries,
+    //   on fait un nuclearCachePurge() et on retente UNE SEULE FOIS.
+    //   Le flag empêche les boucles infinies (= au plus 1 purge par session player).
+    @Volatile private var nuclearPurgeAttempted: Boolean = false
 
     // ─── 2026-05-09 : tracking session pour FilmHealthTracker ─────────────
     // Compte les échecs dead-content dans cette session de player. Sert au
@@ -233,7 +248,11 @@ class PlayerViewModel(
      */
     private fun preExtractTopServersInBackground(servers: List<Video.Server>) {
         preExtractJob?.cancel()
-        qualityProbeJob?.cancel()
+        // 2026-07-03 : NE PLUS cancel qualityProbeJob ici — le probe est idempotent
+        // et re-snapshotte allKnownServers à chaque passe. Le cancel provoquait un
+        // 2e cycle complet (25s + passe 1 + passe 2) quand les serveurs progressifs
+        // arrivaient → 4 passes au lieu de 3. Sans cancel, probeServerQualities()
+        // appelé depuis le progressif voit le job actif et skip (L520).
         if (servers.isEmpty()) return
         // v69 + v74 (user "FRAnime galère à chaque serveur") :
         //   FranimeSession utilise un mutex global (WebView single-thread).
@@ -248,65 +267,13 @@ class PlayerViewModel(
             providerName.contains("Franime", ignoreCase = true)
         val effectiveTopN = if (usesFranimeSession) 1 else PRE_EXTRACT_TOP_N
         val toExtract = servers.take(effectiveTopN)
-        // 2026-05-12 : skip IPTV — chaînes live, pas pertinent
-        val providerNameForHead = UserPreferences.currentProvider?.name.orEmpty()
-        val isIptvProvider = providerNameForHead in setOf(
-            "WiTv", "OlaTv", "VegetaTv", "Vavoo", "LiveTvHub", "SportLive"
-        )
+        // 2026-07-06 (user « on avait nettoyé les logiques de classification de serveurs
+        //   inutiles ») : SUPPRIMÉ le SCAN HEAD background qui pingait chaque embed en HEAD
+        //   pour marquer le serveur « suspect/orange » (UNSURE). Classification coûteuse
+        //   (~13 requêtes HEAD par ouverture) et peu fiable (faux négatifs) → retirée. Seul
+        //   un vrai onPlayerError marque désormais un serveur. On garde uniquement la
+        //   pré-extraction du top N ci-dessous.
         preExtractJob = viewModelScope.launch(Dispatchers.IO) {
-            // 2026-05-12 : SCAN HEAD léger sur TOUS les servers en background.
-            // Pas d'extraction (pas de WebView, pas de JS), juste HEAD HTTP sur
-            // server.src (URL embed). HEAD 404/410/connect-refused → server mort
-            // → flagged broken → tri pousse en bas, fallback skip.
-            // Servers déjà inclus dans le top N (toExtract) sont skipped — l'extract
-            // les couvre déjà avec HEAD post-extraction (plus précis car teste l'URL
-            // de stream final).
-            // Coût : ~13 HEAD requests × ~200-500ms ≈ 2-3s en parallèle.
-            if (!isIptvProvider) {
-                val toScan = servers.drop(toExtract.size)
-                toScan.forEach { srv ->
-                    launch {
-                        val embedUrl = srv.src
-                        if (!embedUrl.startsWith("http", ignoreCase = true)) return@launch
-                        if (embedUrl.startsWith("data:")) return@launch
-                        try {
-                            val alive = withTimeoutOrNull(2_500L) {
-                                val client = okhttp3.OkHttpClient.Builder()
-                                    .connectTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
-                                    .readTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
-                                    .followRedirects(true)
-                                    .build()
-                                val req = okhttp3.Request.Builder().url(embedUrl).head().build()
-                                client.newCall(req).execute().use { resp ->
-                                    // 4xx (sauf 405 Method Not Allowed) → mort
-                                    // 405 = serveur n'accepte pas HEAD mais peut servir GET
-                                    val code = resp.code
-                                    code != 405 && (code in 200..399 || code == 403)
-                                }
-                            } ?: false
-                            if (!alive) {
-                                com.streamflixreborn.streamflix.extractors.Extractor
-                                    .recordFailureExternal(srv.name, "embed-head-failed")
-                                // 2026-05-21 : scanné mais suspect → ORANGE (UNSURE) pour CE
-                                //   titre. Pas rouge : un HEAD KO n'est pas un vrai échec de
-                                //   lecture (faux négatifs possibles). Le rouge reste réservé
-                                //   à un onPlayerError réel. En phase 2, on retentera ces
-                                //   oranges/blancs (pas les rouges).
-                                com.streamflixreborn.streamflix.utils.TitleServerStatus.record(
-                                    srv.id,
-                                    com.streamflixreborn.streamflix.utils.ExtractorRanker.ServerStatus.UNSURE,
-                                )
-                                Log.d("PlayerViewModel", "Background HEAD-scan: ${srv.name} → embed suspect (orange ce titre)")
-                            }
-                        } catch (_: kotlinx.coroutines.CancellationException) {
-                            // ignore
-                        } catch (_: Exception) {
-                            // ignore — un échec réseau ne flag pas
-                        }
-                    }
-                }
-            }
-
             val jobs = mutableListOf<Job>()
             toExtract.forEachIndexed { idx, server ->
                 jobs += launch {
@@ -344,7 +311,7 @@ class PlayerViewModel(
                                     val q = if (isHls) {
                                         probeHlsQuality(extractedUrl, result.headers)
                                     } else null
-                                    val finalQ = q ?: inferQualityFromUrl(extractedUrl)
+                                    val finalQ = q ?: inferQualityFromText(extractedUrl) ?: inferQualityFromText(server.name)
                                     if (finalQ != null) {
                                         server.quality = finalQ
                                         _qualityUpdated.emit(Unit)
@@ -357,74 +324,18 @@ class PlayerViewModel(
                                 }
                             }
 
-                            // 2026-05-12 : validation HEAD du stream après extraction.
-                            // Si le serveur de stream final est 404/410/timeout, on
-                            // l'écarte AVANT qu'ExoPlayer perde 15s à constater l'échec.
-                            // Skip pour data: URIs (Vidoza/Filemoon master.m3u8 inline),
-                            // skip pour les hosts WebView-only (LuluVdo).
-                            val streamUrl = result.source
-                            // 2026-05-12 : skip HEAD pour IPTV — les chaînes live ont
-                            // des URLs avec tokens dynamiques qui rejettent souvent les
-                            // HEAD requests, et le user n'a pas un grand nombre de fallbacks
-                            // (typiquement 1-2 par chaîne), donc l'optim apporte rien.
-                            val providerName = UserPreferences.currentProvider?.name.orEmpty()
-                            val isIptv = providerName in setOf(
-                                "WiTv", "OlaTv", "VegetaTv", "Vavoo", "LiveTvHub", "SportLive"
+                            // 2026-07-07 (user « vire tout ce qui est un gain sauf si ça casse
+                            //   de l'important ») : HEAD-check + flag-broken SUPPRIMÉS. Ils
+                            //   pré-pingaient chaque stream en HEAD (avec une liste d'exceptions
+                            //   qui gonflait : uqload/abyssa/ironbubble/luluvdo…), marquaient le
+                            //   serveur « broken », et une 2ᵉ passe le ré-extrayait pour le
+                            //   dé-flaguer. Redondant avec l'auto-switch onPlayerError, et le pick
+                            //   ne skip plus les « broken » de toute façon. On garde juste la mise
+                            //   en cache de l'extraction (clic instantané) + le probe qualité.
+                            Log.d(
+                                "PlayerViewModel",
+                                "Pre-extract OK [$idx] ${server.name} → cached in ${durationMs}ms",
                             )
-                            val needsHeadCheck = !isIptv &&
-                                streamUrl.startsWith("http", ignoreCase = true) &&
-                                !streamUrl.startsWith("data:") &&
-                                !streamUrl.contains("luluvdo", ignoreCase = true) &&
-                                !streamUrl.contains("cfglobalcdn", ignoreCase = true) &&
-                                // 2026-05-19 v85f : Uqload (strm*.uqload.is) refuse HEAD
-                                //   categoriquement (403) meme avec les bons headers, mais
-                                //   le GET marche. Skip sinon pre-extract flag tous les
-                                //   serveurs Uqload broken alors qu'ils fonctionnent.
-                                !streamUrl.contains("uqload", ignoreCase = true) &&
-                                // 2026-05-19 v85f : Hydrax (hls.abyssa.cc / abysscdn) —
-                                //   meme probleme, HEAD souvent refuse alors que GET passe.
-                                !streamUrl.contains("abyssa", ignoreCase = true) &&
-                                !streamUrl.contains("abysscdn", ignoreCase = true)
-                            val headOk = if (!needsHeadCheck) true else {
-                                runCatching {
-                                    withTimeoutOrNull(3_000L) {
-                                        val client = okhttp3.OkHttpClient.Builder()
-                                            .connectTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
-                                            .readTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
-                                            .followRedirects(true)
-                                            .build()
-                                        val req = okhttp3.Request.Builder()
-                                            .url(streamUrl)
-                                            .head()
-                                            .apply {
-                                                result.headers?.forEach { (k, v) -> header(k, v) }
-                                            }
-                                            .build()
-                                        client.newCall(req).execute().use { resp -> resp.isSuccessful }
-                                    } ?: false
-                                }.getOrDefault(false)
-                            }
-                            if (!headOk) {
-                                // 2026-05-12 : HEAD échoué → flag broken (Option A user).
-                                // Le tri va pousser ce server en bas de liste donc
-                                // l'user n'attend pas dessus. Mais HEAD peut mentir
-                                // (CDN refuse HEAD mais GET marche) → la 2nde passe
-                                // (kickée plus loin) ré-extrait SANS HEAD et un-flag
-                                // si la vraie extraction passe.
-                                com.streamflixreborn.streamflix.extractors.Extractor
-                                    .invalidateCache(server.src)
-                                com.streamflixreborn.streamflix.extractors.Extractor
-                                    .recordFailureExternal(server.name, "head-failed")
-                                Log.d(
-                                    "PlayerViewModel",
-                                    "Pre-extract HEAD-fail [$idx] ${server.name} after ${durationMs}ms → flagged broken (2nd pass will retry)",
-                                )
-                            } else {
-                                Log.d(
-                                    "PlayerViewModel",
-                                    "Pre-extract OK [$idx] ${server.name} → cached in ${durationMs}ms",
-                                )
-                            }
                         } else {
                             Log.d(
                                 "PlayerViewModel",
@@ -438,55 +349,17 @@ class PlayerViewModel(
                         // Échec silencieux — pas grave, fallback au clic.
                         Log.d(
                             "PlayerViewModel",
-                            "Pre-extract skip [$idx] ${server.name}: ${e.message?.take(80)}",
+                            "Pre-extract skip [$idx] ${server.name}: ${e.message?.take(200)}",
                         )
                     }
                 }
             }
 
-            // 2026-05-12 : 2nde passe DOUCE après que la 1re finit.
-            // But : récupérer les CDN qui mentent sur HEAD (refus HEAD mais GET OK).
-            // Couvre maintenant TOUS les servers flaggés broken (pas seulement les
-            // TOP N pre-extract). Comme ça si le background HEAD scan flag à tort
-            // une URL embed légitime, on récupère.
-            // Limite concurrence à 4 pour éviter de saturer (les broken sont jusqu'à
-            // 13-15 dans une liste de 17).
+            // 2026-07-07 : 2ᵉ passe SUPPRIMÉE (elle ne servait qu'à dé-flaguer les serveurs
+            //   marqués broken par le HEAD-check — lui-même supprimé). La pré-extraction du
+            //   top N ci-dessus suffit (cache = clic instantané) ; un échec réel de lecture
+            //   est géré par l'auto-switch onPlayerError.
             jobs.joinAll()
-            launch {
-                kotlinx.coroutines.delay(5_000L)  // laisse l'user voir la liste
-                val sem = kotlinx.coroutines.sync.Semaphore(4)
-                servers.forEachIndexed { idx, server ->
-                    launch {
-                        sem.acquire()
-                        try {
-                            val extractorName = server.name
-                            val isStillBroken = com.streamflixreborn.streamflix.extractors.Extractor
-                                .brokenServerNames()
-                                .any { extractorName.uppercase().contains(it.uppercase()) }
-                            if (!isStillBroken) return@launch
-                            val result = withTimeoutOrNull(15_000L) {
-                                com.streamflixreborn.streamflix.extractors.Extractor
-                                    .extract(server.src, server)
-                            }
-                            if (result != null && result.source.isNotBlank()) {
-                                // Extraction OK sans HEAD → faux positif HEAD → un-flag.
-                                com.streamflixreborn.streamflix.extractors.Extractor
-                                    .recordSuccessExternal(extractorName)
-                                Log.d(
-                                    "PlayerViewModel",
-                                    "2nd-pass RECOVERED [$idx] $extractorName → un-flagged broken",
-                                )
-                            }
-                        } catch (_: kotlinx.coroutines.CancellationException) {
-                            // ignore
-                        } catch (_: Exception) {
-                            // reste broken, ok.
-                        } finally {
-                            sem.release()
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -523,99 +396,56 @@ class PlayerViewModel(
         }
 
         qualityProbeJob = viewModelScope.launch(Dispatchers.IO) {
-            // ═══════════════════════════════════════════════════════════
-            //  PASSE 1 — T+25s : cache peek sur tous les serveurs connus
-            // ═══════════════════════════════════════════════════════════
-            Log.w("QualityProbe", "Passe 1 : attente 25s pour laisser les serveurs arriver...")
-            delay(25_000L)
-
-            // Snapshot des serveurs connus à cet instant (peut avoir grossi via progressif)
-            val pass1Servers = allKnownServers.toList()
-            val preExtractCount = pass1Servers.count { it.quality != null }
-            Log.w("QualityProbe", "Passe 1 démarrage : ${pass1Servers.size} serveurs connus, $preExtractCount déjà probés par pre-extract")
-
-            val pass1Remaining = pass1Servers.filter { it.quality == null }
-            if (pass1Remaining.isNotEmpty()) {
-                val semaphore1 = kotlinx.coroutines.sync.Semaphore(4)
-                val jobs1 = pass1Remaining.map { server ->
-                    launch {
-                        semaphore1.acquire()
-                        try {
-                            if (server.src.contains("papadustream", ignoreCase = true) ||
-                                server.src.contains("#xf=")) return@launch
-
-                            // Passe 1 = aperçu léger (lecture du cache d'extraction
-                            //   uniquement). Le tri complet de TOUS les serveurs par
-                            //   qualité se fait en Passe 2 (extraction active à T+90s).
-                            val video = com.streamflixreborn.streamflix.extractors.Extractor
-                                .peekCachedVideo(server.src) ?: return@launch
-                            probeAndAssignQuality(server, video, "passe1")
-                        } catch (e: Exception) {
-                            Log.w("QualityProbe", "Passe 1 erreur ${server.name}: ${e.message?.take(60)}")
-                        } finally {
-                            semaphore1.release()
-                        }
-                    }
+            // 2026-07-04 : UNE seule boucle avec marquage `treated`. Chaque serveur traité 1 fois.
+            // 2026-07-06 : ATTENDRE que preExtractJob finisse AVANT de boucler.
+            //   Sibnet (et d'autres) étaient extraits 2× en parallèle : la pre-extract lançait
+            //   l'extraction avec 15s timeout, et le probe (après 4s) trouvait le cache vide
+            //   → relançait une DEUXIÈME extraction identique. En attendant que preExtract finisse,
+            //   le cache est garanti rempli → peekCachedVideo hit → zéro double extraction.
+            preExtractJob?.join()   // attend la fin de la pré-extraction (cache rempli)
+            val treated = java.util.Collections.synchronizedSet(HashSet<String>())
+            var idleRounds = 0
+            while (isActive) {
+                // Skip serveurs déjà traités OU qui ont déjà une qualité (assignée par nom)
+                val batch = allKnownServers.filter { it.src.isNotBlank() && it.src !in treated && it.quality == null }
+                if (batch.isEmpty()) {
+                    // Rien de neuf : si le progressif a fini de collecter, on s'arrête après 2 tours.
+                    if (!progressiveStillCollecting && ++idleRounds >= 2) break
+                    delay(3_000L)
+                    continue
                 }
-                jobs1.joinAll()
-            }
-            val afterPass1 = allKnownServers.count { it.quality != null }
-            Log.w("QualityProbe", "Passe 1 terminée : $afterPass1/${allKnownServers.size} détectés")
-
-            // ═══════════════════════════════════════════════════════════
-            //  PASSE 2 — T+120s : extraction ACTIVE des serveurs restants
-            // ═══════════════════════════════════════════════════════════
-            // 2026-06-30 (user "il attend 25s puis il enchaîne") : PAS de délai
-            //   supplémentaire — la Passe 2 (extraction active de tous les serveurs
-            //   restants) enchaîne DIRECTEMENT après la Passe 1. Seule attente = 25s
-            //   au démarrage (à partir du 1er serveur).
-            Log.w("QualityProbe", "Passe 2 : enchaînement direct (extraction active)...")
-
-            // Re-snapshot (peut encore avoir grossi)
-            val pass2Servers = allKnownServers.toList()
-            val pass2Remaining = pass2Servers.filter { it.quality == null }
-            Log.w("QualityProbe", "Passe 2 démarrage : ${pass2Remaining.size}/${pass2Servers.size} sans qualité")
-
-            if (pass2Remaining.isNotEmpty()) {
-                val semaphore2 = kotlinx.coroutines.sync.Semaphore(4)
-                val jobs2 = pass2Remaining.map { server ->
+                idleRounds = 0
+                val sem = kotlinx.coroutines.sync.Semaphore(4)
+                batch.map { server ->
                     launch {
-                        semaphore2.acquire()
+                        sem.acquire()
                         try {
+                            treated.add(server.src)   // MARQUÉ traité (une seule tentative par serveur)
+                            // Captcha (Papadustream) : non probable → marqué mais pas extrait.
                             if (server.src.contains("papadustream", ignoreCase = true) ||
                                 server.src.contains("#xf=")) return@launch
-
-                            // 1) Essayer le cache d'abord (rapide)
-                            var video = com.streamflixreborn.streamflix.extractors.Extractor
-                                .peekCachedVideo(server.src)
-
-                            // 2) Si pas en cache → extraction active
-                            if (video == null) {
-                                video = try {
-                                    kotlinx.coroutines.withTimeoutOrNull(10_000L) {
-                                        com.streamflixreborn.streamflix.extractors.Extractor
-                                            .extract(server.src, server)
-                                    }
-                                } catch (_: Exception) { null }
-
-                                if (video == null || video.source.isBlank()) {
-                                    Log.w("QualityProbe", "Passe 2: ${server.name} → extraction failed")
-                                    return@launch
+                            // 2026-07-04 : 3 sources de Video (du plus rapide au plus lent) :
+                            //   1) server.video (si le serveur a déjà été joué)
+                            //   2) cache Extractor (si pré-extrait)
+                            //   3) extraction fraîche (10s max)
+                            val video = server.video
+                                ?: com.streamflixreborn.streamflix.extractors.Extractor
+                                    .peekCachedVideo(server.src)
+                                ?: kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+                                    com.streamflixreborn.streamflix.extractors.Extractor.extract(server.src, server)
                                 }
+                            if (video != null && video.source.isNotBlank()) {
+                                probeAndAssignQuality(server, video, "probe")
                             }
-
-                            probeAndAssignQuality(server, video, "passe2")
                         } catch (e: Exception) {
-                            Log.w("QualityProbe", "Passe 2 erreur ${server.name}: ${e.message?.take(60)}")
-                        } finally {
-                            semaphore2.release()
-                        }
+                            Log.w("QualityProbe", "probe ${server.name}: ${e.message?.take(60)}")
+                        } finally { sem.release() }
                     }
-                }
-                jobs2.joinAll()
+                }.joinAll()
+                Log.w("QualityProbe", "qualité : traités ${treated.size}/${allKnownServers.size}")
             }
             val total = allKnownServers.count { it.quality != null }
-            Log.w("QualityProbe", "Probe terminé — $total/${allKnownServers.size} détectés")
+            Log.w("QualityProbe", "Probe terminé — $total/${allKnownServers.size} qualités détectées")
         }
     }
 
@@ -640,7 +470,9 @@ class PlayerViewModel(
             Log.w("QualityProbe", "$tag: ${server.name} → $quality")
             true
         } else {
-            val inferred = inferQualityFromUrl(videoUrl)
+            // 2026-07-04 : fallback URL → nom du serveur. Les sources RSC (nmlnode)
+            //   ont des URLs base64 sans résolution, mais le NOM contient "1080p" etc.
+            val inferred = inferQualityFromText(videoUrl) ?: inferQualityFromText(server.name)
             if (inferred != null) {
                 server.quality = inferred
                 Log.w("QualityProbe", "$tag: ${server.name} → $inferred (inferred)")
@@ -691,7 +523,7 @@ class PlayerViewModel(
         val nonVf = list.filter { !isVfServer(it) }
         val merged = vfSorted + nonVf
         allKnownServers = merged
-        _serversReordered.emit(merged)
+        _serversReordered.emit(collapseIdenticalServers(merged))
     }
 
     /**
@@ -782,8 +614,10 @@ class PlayerViewModel(
     }
 
     /** Inférence de qualité depuis l'URL (fallback si le GET m3u8 échoue). */
-    private fun inferQualityFromUrl(url: String): String? {
-        val lower = url.lowercase()
+    /** Infère la qualité depuis n'importe quel texte (URL, nom de serveur, label).
+     *  Cherche les patterns de résolution courants. */
+    private fun inferQualityFromText(text: String): String? {
+        val lower = text.lowercase()
         return when {
             lower.contains("2160") || lower.contains("4k") || lower.contains("uhd") -> "4K"
             lower.contains("1440") -> "1440p"
@@ -801,19 +635,96 @@ class PlayerViewModel(
          *  reste safe sur Chromecast (~4 WebView max ≈ 600MB RAM).
          *  2026-05-12 : passé de 3→4 (user request, latency Tahiti élevée). */
         private const val PRE_EXTRACT_TOP_N = 4
+
+        // 2026-07-05 : executor partagé pour orderByFrenchBuckets — isole l'appel du
+        //   pool IO des coroutines et fournit un vrai timeout thread-based. Avant, on
+        //   créait un newSingleThreadExecutor() par appel handleBatch (pool-7…pool-19+
+        //   dans les logs = thread leak). Un CachedThreadPool avec daemon threads :
+        //   - réutilise les threads entre appels successifs (≤60s idle)
+        //   - daemon=true → ne retient pas le process si le ViewModel fuit
+        //   - partagé par TOUTES les instances PlayerViewModel (companion)
+        private val ofbExecutor: java.util.concurrent.ExecutorService by lazy {
+            java.util.concurrent.Executors.newCachedThreadPool { r ->
+                Thread(r, "ofb-worker").apply { isDaemon = true }
+            }
+        }
     }
 
-    private fun getServers(videoType: Video.Type, id: String) = viewModelScope.launch(Dispatchers.IO) {
+    private fun getServers(videoType: Video.Type, id: String) {
+        // 2026-07-04 : CANCEL le job précédent avant d'en lancer un nouveau.
+        // Évite que 2 collectProgressiveServers tournent en parallèle (double setupNav,
+        // playEpisode rapide, reloadServersAfterBypass). Le cancel() est safe : le try/catch
+        // dans collectProgressiveServers attrape CancellationException.
+        serverJob?.cancel()
+        serverJob = viewModelScope.launch(Dispatchers.IO) {
         Log.d("PlayerViewModel", "Inizio ricerca server per ID: $id")
         lastVideoType = videoType
         lastId = id
+        // 2026-07-07 (fix probable blocage aplouf/non-progressif) : mettre l'enrichment
+        //   (scraping du home) en pause AUSSI ici — pas seulement dans le chemin progressif.
+        //   Sinon l'enrichment tient le mutex du service du provider et getServers hangue.
+        com.streamflixreborn.streamflix.fragments.home.HomeViewModel.pauseEnrichmentForPlayback()
+        // 2026-07-07 DIAGNOSTIC : si getServers n'a pas rendu la main en 12s (= HANG), on
+        //   dumpe les piles de tous les threads app/OkHttp/coroutines dans le logcat pour
+        //   voir EXACTEMENT où ça coince (mutex ? HTTP sans timeout ? autre ?).
+        run {
+            val selfJob = coroutineContext[kotlinx.coroutines.Job]
+            viewModelScope.launch(Dispatchers.IO) {
+                delay(12_000L)
+                if (selfJob?.isActive == true) {
+                    Log.e("HANGDUMP", "getServers >12s SANS FIN pour id=$id — DUMP THREADS ↓")
+                    Thread.getAllStackTraces().forEach { (t, st) ->
+                        val relevant = st.any { it.className.contains("streamflixreborn") } ||
+                            t.name.contains("DefaultDispatcher") || t.name.contains("OkHttp")
+                        if (relevant && st.isNotEmpty()) {
+                            Log.e("HANGDUMP", "── THREAD '${t.name}' [${t.state}]")
+                            st.take(12).forEach { Log.e("HANGDUMP", "      at $it") }
+                        }
+                    }
+                    Log.e("HANGDUMP", "── FIN DUMP")
+                }
+            }
+        }
         // 2026-05-21 : statut serveurs PAR TITRE — posé tôt pour que le scan HEAD de
         //   fond (preExtract) enregistre ses "scannés/suspects" sur le bon titre.
         com.streamflixreborn.streamflix.utils.TitleServerStatus.setCurrentTitle(id)
         _state.emit(State.LoadingServers)
         try {
-            val provider = UserPreferences.currentProvider ?: return@launch
+            val provider = UserPreferences.currentProvider ?: run {
+                // 2026-07-05 DIAG : ce return silencieux laissait le spinner infini.
+                //   Log le nom stocké pour diagnostiquer POURQUOI c'est null.
+                val storedName = try {
+                    val profileId = com.streamflixreborn.streamflix.utils.ProfileManager.currentProfileIdOrDefault()
+                    val prefs = com.streamflixreborn.streamflix.StreamFlixApp.instance
+                        .getSharedPreferences("${com.streamflixreborn.streamflix.StreamFlixApp.instance.packageName}.preferences", android.content.Context.MODE_PRIVATE)
+                    prefs.getString("CURRENT_PROVIDER_$profileId", "(absent)") ?: "(null)"
+                } catch (e: Exception) { "(erreur: ${e.message})" }
+                Log.e("ServDiag", "!! currentProvider=NULL (storedName='$storedName') → spinner infini. Video=$id")
+                _state.emit(State.FailedLoadingServers(Exception("Provider non sélectionné. Retournez à l'accueil et choisissez un provider.")))
+                return@launch
+            }
             Log.d("ServDiag", "path provider=${provider.name} progressive=${provider is com.streamflixreborn.streamflix.providers.ProgressiveServersProvider}")
+
+            // 2026-07-07 (FIX BLOCAGE GÉNÉRIQUE TOUS PROVIDERS) : le pool de connexions
+            //   OkHttp est PARTAGÉ par tous les providers VOD (NetworkClient.sharedConnectionPool
+            //   + Extractor.sharedClient). Un provider lourd en WebView/CF (DessinAnime) laisse
+            //   des connexions MORTES/half-open dans le pool. Le provider SUIVANT (aplouf, Wiflix,
+            //   n'importe lequel) réutilise une de ces connexions mortes → socketRead HANGUE
+            //   jusqu'au callTimeout (45s) → « ça mouline » sur TOUS les providers. C'est
+            //   exactement le repro « je vais sur DessinAnime, tout bloque, puis aplouf bloque ».
+            //   FIX : à CHAQUE ouverture VOD, on ÉVICTE les connexions idle des pools partagés
+            //   AVANT de charger les serveurs → le provider courant part sur des connexions
+            //   fraîches, il n'hérite jamais des sockets morts du provider précédent.
+            //   evictAll() ne ferme QUE les connexions idle (les actives ne sont pas touchées),
+            //   coût quasi nul. IPTV EXCLU (le pool y garde les connexions CDN chaudes pour le
+            //   zapping — on n'y touche pas, cf règle « IPTV on touche à rien »).
+            if (provider !is IptvProvider) {
+                runCatching {
+                    com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool.evictAll()
+                    com.streamflixreborn.streamflix.extractors.Extractor.sharedClient.connectionPool.evictAll()
+                    Log.d("ServDiag", "pools évictés avant chargement (isolation inter-providers)")
+                }
+            }
 
             // 2026-05-21 : si le provider sait streamer ses serveurs au fur et à
             //   mesure, on prend le chemin progressif (1er lot affiché tout de
@@ -835,21 +746,40 @@ class PlayerViewModel(
                 }
             }
 
-            // 2026-05-09 : auto-retry sur empty servers — gère les transient
-            // (timeout backend AnimeSama, parsing race, upstream Sibnet/VidMoLy
-            // en glitch momentané). 3 tentatives total avec backoff 0/2/5s :
-            // si la 1ère retourne du contenu, on continue direct (zéro délai
-            // ajouté). Si vide, on retry à 2s puis 5s. La majorité des
-            // transient se résolvent à la 1ère retry. Coût pire cas : ~7s
-            // d'attente AVANT de jeter l'erreur, mais SEULEMENT dans les cas
-            // où on aurait failed sans nous.
-            val rawServers = fetchServersWithRetry(provider, id, videoType)
+            // 2026-07-07 (FIX BLOCAGE GÉNÉRIQUE) : le chemin non-progressif (aplouf + tous
+            //   les providers TmdbProvider) n'avait AUCUN plafond de temps autour de
+            //   fetchServersWithRetry → un getServers coincé dans un execute() OkHttp (connexion
+            //   morte) pouvait bloquer 45s × retries SANS que l'écran ne se débloque jamais.
+            //   On cape à 35s pour les NON-IPTV : si dépassé → traité comme 0 serveur → la
+            //   recovery existante (nuclearCachePurge + retry ci-dessous) prend le relais et
+            //   l'écran ne reste plus figé indéfiniment. IPTV EXCLU (serveurs via
+            //   additionalServersFlow, getServers peut légitimement rendre vide, pas de cap).
+            val rawServers = if (provider is IptvProvider) {
+                fetchServersWithRetry(provider, id, videoType)
+            } else {
+                kotlinx.coroutines.withTimeoutOrNull(35_000L) {
+                    fetchServersWithRetry(provider, id, videoType)
+                } ?: run {
+                    Log.w("ServDiag", "!! fetchServersWithRetry (non-prog) > 35s → traité comme 0 serveur (recovery)")
+                    emptyList()
+                }
+            }
             if (rawServers.isEmpty()) {
                 // Pour IPTV : les serveurs arrivent via additionalServersFlow
                 // (onglet Chaîne), pas via getServers. Ne pas lancer d'exception.
                 if (provider is IptvProvider) {
                     Log.d("PlayerViewModel", "IPTV: 0 serveurs sync, émission via additionalServers (Chaîne tab)")
                     _state.emit(State.SuccessLoadingServers(emptyList()))
+                    return@launch
+                }
+                // 2026-07-05 : AUTO-RECOVERY (chemin non-progressif)
+                if (!nuclearPurgeAttempted) {
+                    nuclearPurgeAttempted = true
+                    val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext
+                    Log.w("ServDiag", "!! 0 serveur (non-prog) après retries → NUCLEAR CACHE PURGE + retry")
+                    com.streamflixreborn.streamflix.utils.ProviderCacheRefresh.nuclearCachePurge(ctx)
+                    kotlinx.coroutines.delay(500)
+                    getServers(videoType, id)
                     return@launch
                 }
                 throw Exception("Aucune source disponible pour ce contenu sur ${provider.name}. Essayez un autre provider ou réessayez plus tard.")
@@ -863,6 +793,8 @@ class PlayerViewModel(
             // par le sort hardcodé qu'on remplace ici.
             val servers = com.streamflixreborn.streamflix.utils.ExtractorRanker
                 .rankServers(rawServers)
+            // 2026-07-04 : qualité IMMÉDIATE depuis le nom du serveur (avant affichage)
+            for (srv in servers) { if (srv.quality == null) srv.quality = inferQualityFromText(srv.name) }
 
             Log.i("StreamFlixES", "[SERVERS LIST] -> Provider: ${provider.name}")
             Log.i("StreamFlixES", "[SERVERS LIST] -> Found ${servers.size} servers: ${servers.joinToString { it.name }}")
@@ -883,28 +815,12 @@ class PlayerViewModel(
             //   "Premium (VF - HD)"                       → core "PREMIUM"
             //   "Cloudstream [1080p MP4]"                 → core "CLOUDSTREAM"
             // Si le core d'un broken == core d'un candidate → même extracteur → broken.
-            fun extractorCore(name: String): String {
-                val stripped = name.substringAfter(" — ").substringAfter(" · ").trim()
-                return stripped
-                    .substringBefore(" - ")
-                    .substringBefore(" (")
-                    .substringBefore(" [")
-                    .trim()
-                    .uppercase()
-            }
-            val brokenCores = com.streamflixreborn.streamflix.extractors.Extractor.brokenServerNames()
-                .map { extractorCore(it) }
-                .filter { it.isNotBlank() }
-                .toSet()
-            fun isBroken(serverName: String): Boolean {
-                if (brokenCores.isEmpty()) return false
-                return extractorCore(serverName) in brokenCores
-            }
-            val sortedServers = servers.sortedBy { srv -> if (isBroken(srv.name)) 1 else 0 }
-            val brokenCount = sortedServers.count { isBroken(it.name) }
-            if (brokenCount > 0) {
-                Log.d("PlayerViewModel", "Pushed $brokenCount broken servers to bottom (cores=$brokenCores)")
-            }
+            // 2026-07-07 (user « le tri se fait QUE avec la langue, les favoris et la qualité,
+            //   tout le reste on s'en fout ; si un tri peut interférer et bouffer de la mémoire,
+            //   on vire ») : SUPPRIMÉ le tri « broken » (brokenServerNames() itérait toute la map
+            //   serverHealth). La liste garde son ordre langue/qualité/favoris. Un serveur qui
+            //   foire est géré par l'auto-switch onPlayerError, PAS par un pré-tri.
+            val sortedServers = servers
 
             // 2026-05-24 : reprise de lecture — si on a un serveur qui a marché
             // la dernière fois pour ce contenu, on le met en premier (auto-play dessus).
@@ -921,7 +837,7 @@ class PlayerViewModel(
             }
 
             Log.d("PlayerViewModel", "Ricerca server completata: ${finalServers.size} server trovati")
-            _state.emit(State.SuccessLoadingServers(finalServers))
+            _state.emit(State.SuccessLoadingServers(collapseIdenticalServers(finalServers)))
 
             // 2026-05-09 : pré-extraction parallèle des 3 premiers serveurs en
             // background. Le but : quand l'user clique "Watch", l'URL m3u8 est
@@ -946,6 +862,7 @@ class PlayerViewModel(
             Log.e("PlayerViewModel", "Errore ricerca server: ", e)
             _state.emit(State.FailedLoadingServers(e))
         }
+        }
     }
 
     /**
@@ -963,9 +880,25 @@ class PlayerViewModel(
     ) {
         val accumulated = mutableListOf<Video.Server>()
         val seenIds = HashSet<String>()
+        // 2026-07-07 : dedup par URL embed + langue — élimine les doublons entre
+        //   serveurs NATIFS du provider courant et serveurs BACKUP du registre.
+        //   Ex : Movix natif retourne "wiflix-fr-0" (Wiflix·Upbolt VF) avec la même
+        //   embed URL que "bkreg::Wiflix::xyz" (Wiflix dans la boucle générique).
+        //   Le dedup par id ne les attrape pas → doublon visible dans le picker.
+        //   Ce Set filtre par langue+URL normalisée (host+path, sans token/signature).
+        val seenSrcKeys = HashSet<String>()
         var firstEmitted = false
+        // 2026-07-07 : découplage AFFICHAGE / AUTO-PLAY. firstEmitted = « affiché » ;
+        //   autoPlayEmitted = « lecture auto autorisée » (VF présent, ou 12s écoulées).
+        var autoPlayEmitted = false
         progressiveStillCollecting = true
         Log.d("ServDiag", "PROG enter id=$id")
+        // 2026-07-04 : REMIS. L'enrichissement home (scrape flemmix genres + jaquettes TMDB)
+        //   INONDE le réseau/CF pendant qu'on est déjà dans le player → il ÉTOUFFE le scrape
+        //   natif des serveurs (mesuré : natif à 15s au lieu de 2s, log plein de requêtes
+        //   flemmix "36167-marsupilami" / "serie-en-streaming" pendant l'ouverture Punisher).
+        //   L'annulation stoppe ce flood. Elle N'ÉMET aucun état → ne touche pas la navigation.
+        com.streamflixreborn.streamflix.fragments.home.HomeViewModel.pauseEnrichmentForPlayback()
         // 2026-06-03 (user "patch qui attend qui est vraiment du FR. Si y a pas
         //   on se rabat sur VOSTFR/VO. Sur tous les providers SAUF anime") :
         //   si le 1er lot ne contient que VOSTFR/VO, on attend max FR_GRACE_MS
@@ -977,7 +910,23 @@ class PlayerViewModel(
             providerName.contains("Manga", ignoreCase = true) ||
             providerName.equals("Franime", ignoreCase = true) ||
             providerName.equals("DessinAnime", ignoreCase = true)
-        val FR_GRACE_MS: Long = if (isAnimeProvider) 0L else 6_000L
+        // 2026-06-03 (user "patch qui attend qui est vraiment du FR. Si y a pas on se rabat
+        //   sur VOSTFR/VO. Sur tous les providers SAUF anime") : si le 1er lot ne contient que
+        //   VOSTFR/VO, on attend max FR_GRACE_MS qu'un VRAI FR arrive avant l'auto-play.
+        //   2026-07-04 : REMIS après un essai à 0 qui lançait du VO d'entrée (user "il lance du
+        //   VO en arrivant, le filtre fallait le garder le VF"). Le vrai fix de la lenteur =
+        //   head-start natif + providers WebView en 2ᵉ vague (contention WebView), PAS la grâce.
+        // 2026-07-07 (user « une carence de 12s : si rien, ça démarre sur le 1er serveur venu ») :
+        //   6s → 12s. Ne bloque QUE l'auto-play (pas l'affichage), donc on peut être patient.
+        // 2026-07-07 (user « DessinAnime auto-play sur du VOSTFR, il faut attendre le FR ») :
+        //   DessinAnime est VF-dub SANS dossier de langue et ses backups sont MIXTES
+        //   (FrenchStream VF/VFQ, Wiflix, 1Jour1Film…). Contrairement à AnimeSama/FrenchManga/
+        //   etc. où l'user CHOISIT la langue (→ grâce 0), ici il faut la GRÂCE FR : attendre un
+        //   VF avant l'auto-play, fallback VOSTFR seulement s'il n'y a que ça. La grâce n'attend
+        //   PAS si un VF arrive vite (elle démarre dessus dès qu'il arrive) ; elle ne bloque
+        //   l'auto-play que tant qu'il n'y a QUE du VOSTFR, jusqu'au fallback 12s.
+        val isDessinAnimeProvider = providerName.equals("DessinAnime", ignoreCase = true)
+        val FR_GRACE_MS: Long = if (isAnimeProvider && !isDessinAnimeProvider) 0L else 12_000L
         val gracePeriodStartedAt = mutableListOf<Long>()  // wrapper pour val mutable
         fun isVf(s: Video.Server): Boolean {
             val n = s.name.lowercase()
@@ -989,52 +938,251 @@ class PlayerViewModel(
             return true
         }
         try {
-            provider.getServersProgressive(id, videoType).collect { batch ->
+            // 2026-07-04 (reconnexion registre central) : on MERGE le flow natif du provider
+            //   avec le REGISTRE central de backups → les serveurs natifs (rapides) arrivent
+            //   EN PREMIER, les backups arrivent en progressif au fil de l'eau, tous dans la
+            //   MÊME logique d'accumulation/tri/émission. Aucun serveur rapide n'est bloqué par
+            //   un backup lent (émission dès qu'un lot arrive). tmdbId si l'id est numérique
+            //   (backups par id : Movix/Cloudstream/Nakios/Webflix/Embed), sinon backups par
+            //   TITRE seuls (matching STRICT). exclude = le provider courant (pas de doublon).
+            val tmdbForBackup = id.takeIf { it.isNotBlank() && it.all { c -> c.isDigit() } }
+            val backupFlow = com.streamflixreborn.streamflix.utils.BackupRegistry.fetchAll(
+                tmdbId = tmdbForBackup,
+                videoType = videoType,
+                exclude = setOf(providerName),
+                titleHint = com.streamflixreborn.streamflix.utils.BackupRegistry.titleFromId(id),
+                isAnimeProvider = isAnimeProvider,
+            )
+            // 2026-07-04 : porte de démarrage des backups (registre). Ouverte APRÈS le 1er
+            //   tri natif (fait device au repos) → le natif s'affiche vite, PUIS le registre
+            //   démarre. Sinon le registre (~20 sources //) saturait la TV et affamait le tri
+            //   orderByFrenchBuckets du 1er lot (mesuré 11s au lieu de <100ms).
+            val backupGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            // handler PARTAGÉ (lot natif OU backup) : filtre/accumule/tri par langue/émet
+            //   avec la grâce FR (attend un VF avant l'auto-play, sinon fallback VOSTFR/VO).
+            suspend fun handleBatch(batch: List<Video.Server>) {
+                val _tHB = System.currentTimeMillis()
                 Log.d("ServDiag", "PROG batch reçu size=${batch.size} firstEmitted=$firstEmitted")
+                try {
                 val fresh = batch.filter { it.id.isNotBlank() && seenIds.add(it.id) }
-                if (fresh.isEmpty()) return@collect
+                    // 2026-07-07 : 2nd filtre par URL embed normalisée + bucket langue.
+                    //   Élimine les doublons cross-source (natif Movix wiflix-fr-0 vs
+                    //   bkreg::Wiflix::id — même embed URL, ids différents). Les serveurs
+                    //   sans src (src vide = résolveur par id) passent toujours.
+                    .filter { srv ->
+                        if (srv.src.isBlank()) return@filter true
+                        val n = srv.name.lowercase()
+                        val lang = when {
+                            n.contains("vostfr") || n.contains("vost") || n.contains("sous-titr") -> "vostfr"
+                            Regex("""(^|[^a-z])vo([^a-z]|$)""").containsMatchIn(n) ||
+                                n.contains(Regex("""\b(raw|eng|english|jap|vosa)\b""")) -> "vo"
+                            else -> "vf"
+                        }
+                        val normUrl = srv.src.substringBefore("#").trim()
+                            .substringBefore("?").trimEnd('/').lowercase()
+                        seenSrcKeys.add("$lang|$normUrl")
+                    }
+                if (fresh.isEmpty()) {
+                    // 2026-07-04 DIAG : logger POURQUOI c'est vide
+                    val blankIds = batch.count { it.id.isBlank() }
+                    val dupes = batch.size - blankIds - fresh.size
+                    Log.w("ServDiag", "PROG fresh=VIDE! batch=${batch.size} blankIds=$blankIds dupes=$dupes seenIds=${seenIds.size}")
+                    if (batch.isNotEmpty()) Log.w("ServDiag", "PROG 1er server id='${batch[0].id}' name='${batch[0].name}'")
+                    return
+                }
+                Log.d("ServDiag", "PROG fresh=${fresh.size} ids=${fresh.joinToString(",") { it.id.take(20) }}")
+                // 2026-07-04 (user "à chaque arrivée de source il est censé la contrôler
+                //   et afficher la qualité si c'est possible") : détection IMMÉDIATE de la
+                //   qualité depuis le NOM du serveur. Pas besoin d'attendre le probe/extract.
+                //   Ex : "Hydrax 1080p" → quality="1080p" posé AVANT affichage dans le picker.
+                for (srv in fresh) {
+                    if (srv.quality == null) srv.quality = inferQualityFromText(srv.name)
+                }
                 accumulated.addAll(fresh)
-                val ordered = orderByFrenchBuckets(accumulated)
+                Log.d("ServDiag", "PROG avant orderByFrenchBuckets accumulated=${accumulated.size}")
+                // 2026-07-05 : timeout RÉEL (thread Java, pas coopératif) pour empêcher
+                //   orderByFrenchBuckets de bloquer indéfiniment. Le bug : parfois
+                //   orderByFrenchBuckets ne retourne JAMAIS (thread disparaît). Comme
+                //   withTimeoutOrNull est coopératif, il ne peut pas interrompre du code
+                //   bloquant → le spinner tourne indéfiniment. Avec un executor + future.get(5s),
+                //   on a un vrai deadline. Si ça bloque → fallback unsorted → l'user a ses serveurs.
+                val accSnapshot = accumulated.toList() // snapshot immuable pour le thread
+                val ordered: List<Video.Server> = try {
+                    // 2026-07-05 : executor PARTAGÉ (companion ofbExecutor) au lieu de
+                    //   créer/détruire un newSingleThreadExecutor par appel (thread leak).
+                    val future = ofbExecutor.submit(java.util.concurrent.Callable { orderByFrenchBuckets(accSnapshot) })
+                    future.get(5, java.util.concurrent.TimeUnit.SECONDS)
+                } catch (e: java.util.concurrent.TimeoutException) {
+                    Log.e("ServDiag", "!! PROG orderByFrenchBuckets TIMEOUT 5s !! accumulated=${accumulated.size} — fallback unsorted")
+                    accSnapshot // fallback : serveurs non triés
+                } catch (e: java.util.concurrent.ExecutionException) {
+                    Log.e("ServDiag", "!! PROG orderByFrenchBuckets ERREUR: ${e.cause?.message}", e.cause)
+                    accSnapshot
+                } catch (e: Exception) {
+                    Log.e("ServDiag", "!! PROG orderByFrenchBuckets EXCEPTION: ${e.message}", e)
+                    accSnapshot
+                }
+                Log.i("ServDiagT", "PROG orderByFrenchBuckets(${accumulated.size}) fait en ${System.currentTimeMillis()-_tHB}ms")
+                // 2026-07-04 : le 1er tri natif est fait (device au repos) → on OUVRE la porte
+                //   du registre. Les backups démarrent maintenant, sans avoir affamé ce tri.
+                if (!backupGate.isCompleted) {
+                    Log.i("ServDiag", "PROG backupGate ouvert après traitement 1er lot natif")
+                    backupGate.complete(Unit)
+                }
                 if (ordered.isEmpty()) {
-                    // Lot reçu mais 0 serveurs après tri/dedup — on attend le prochain
                     Log.d("ServDiag", "PROG lot reçu mais ordered=0, on attend le suivant")
-                    return@collect
+                    return
                 }
                 if (!firstEmitted) {
-                    val hasFr = ordered.any { isVf(it) }
-                    if (!hasFr) {
-                        // Pas encore de VRAI FR — démarre/check grace period
-                        if (gracePeriodStartedAt.isEmpty()) {
-                            gracePeriodStartedAt.add(System.currentTimeMillis())
-                            Log.i("ServDiag", "PROG NO FR yet, waiting up to ${FR_GRACE_MS}ms for a VF source")
-                            return@collect
-                        }
-                        val elapsed = System.currentTimeMillis() - gracePeriodStartedAt[0]
-                        if (elapsed < FR_GRACE_MS) {
-                            Log.d("ServDiag", "PROG still no FR (${elapsed}ms / ${FR_GRACE_MS}ms), keep waiting")
-                            return@collect
-                        }
-                        Log.w("ServDiag", "PROG FR grace EXPIRED (${elapsed}ms) — fallback on VOSTFR/VO")
-                    } else if (gracePeriodStartedAt.isNotEmpty()) {
-                        val elapsed = System.currentTimeMillis() - gracePeriodStartedAt[0]
-                        Log.i("ServDiag", "PROG FR ARRIVED after ${elapsed}ms grace — auto-play sur VF")
-                    }
                     firstEmitted = true
-                    // 2026-05-24 : reprise de lecture — prioriser le dernier serveur
+                    val hasFr = ordered.any { isVf(it) }
+                    // 2026-07-09 : DÉLAI DE STABILISATION avant auto-play. On AFFICHE les serveurs
+                    //   immédiatement (autoPlay=false) pour que le user les voie, MAIS on ne lance
+                    //   PAS l'auto-play tout de suite. On attend STABILIZE_MS (4s) pour laisser
+                    //   d'autres lots arriver et les faux matchs se faire évincer. Après ce délai,
+                    //   on émet autoPlay=true avec la liste STABILISÉE (allKnownServers courante).
+                    //   Combine avec la grâce FR : si pas de VF au 1er lot, on attend aussi le VF
+                    //   (jusqu'à FR_GRACE_MS). L'auto-play part au max(STABILIZE_MS, grâce VF).
+                    // 2026-07-09 (user « au moins 3 ou 4 secondes de débattement avant de lancer ») :
+                    //   1.5s → 4s. Les mauvais serveurs arrivent et disparaissent dans ce délai ;
+                    //   l'auto-play ne lance que sur une liste stabilisée.
+                    val STABILIZE_MS = 4000L
+                    // 2026-07-07 (user « affichage instantané ; la grâce ne bloque QUE le player ;
+                    //   si rien au bout de 12s → 1er serveur venu ») : on AFFICHE tout de suite.
+                    //   auto-play retardé par le délai de stabilisation.
+                    autoPlayEmitted = false  // JAMAIS d'auto-play immédiat sur le 1er lot
+                    if (gracePeriodStartedAt.isEmpty()) {
+                        gracePeriodStartedAt.add(System.currentTimeMillis())
+                        viewModelScope.launch {
+                            // Attendre la stabilisation (4s) — les faux serveurs ont le temps
+                            //   d'être évincés et les bons d'arriver.
+                            kotlinx.coroutines.delay(STABILIZE_MS)
+                            // Puis appliquer la grâce FR si pas de VF
+                            val hasVfNow = allKnownServers.any { isVf(it) }
+                            if (!hasVfNow && FR_GRACE_MS > STABILIZE_MS) {
+                                // Pas de VF → attendre le reste de la grâce FR
+                                kotlinx.coroutines.delay(FR_GRACE_MS - STABILIZE_MS)
+                            }
+                            if (!autoPlayEmitted) {
+                                autoPlayEmitted = true
+                                val reason = if (allKnownServers.any { isVf(it) }) "VF trouvé" else "timeout ${FR_GRACE_MS}ms"
+                                Log.i("ServDiag", "PROG auto-play débloqué après stabilisation ($reason) → ${allKnownServers.size} serveurs")
+                                _state.emit(State.SuccessLoadingServers(collapseIdenticalServers(allKnownServers), autoPlay = true))
+                            }
+                        }
+                    }
                     val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext
                     val lastSrvId = com.streamflixreborn.streamflix.utils.LastWorkingServer.get(ctx, id)
                     val finalOrdered = if (lastSrvId != null && ordered.any { it.id == lastSrvId }) {
                         val last = ordered.first { it.id == lastSrvId }
                         listOf(last) + ordered.filter { it.id != lastSrvId }
                     } else ordered
-                    Log.i("StreamFlixES", "[SERVERS PROGRESSIVE] 1er lot affiché : ${finalOrdered.size} serveurs")
-                    _state.emit(State.SuccessLoadingServers(finalOrdered))
+                    val collapsed = collapseIdenticalServers(finalOrdered)
+                    Log.i("StreamFlixES", "[SERVERS PROGRESSIVE] 1er lot AFFICHÉ : ${finalOrdered.size} serveurs (autoPlay=false, stabilisation ${STABILIZE_MS}ms)")
+                    _state.emit(State.SuccessLoadingServers(collapsed, autoPlay = false))
                     preExtractTopServersInBackground(finalOrdered)
-                    probeServerQualities(finalOrdered)
+                    allKnownServers = finalOrdered
                 } else {
-                    Log.d("PlayerViewModel", "[SERVERS PROGRESSIVE] +${fresh.size} → ${ordered.size} (ré-ordonné par langue)")
                     allKnownServers = ordered
-                    _serversReordered.emit(ordered)
+                    // 2026-07-09 : l'auto-play est géré par le timer de stabilisation (1.5s).
+                    //   Un VF qui arrive dans un lot suivant PENDANT la stabilisation sera pris
+                    //   en compte quand le timer expire (il lit allKnownServers à ce moment).
+                    //   On ne force PLUS l'auto-play immédiat ici — le timer s'en charge.
+                    Log.d("PlayerViewModel", "[SERVERS PROGRESSIVE] +${fresh.size} → ${ordered.size} (ré-ordonné)")
+                    _serversReordered.emit(collapseIdenticalServers(ordered))
+                }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    Log.w("ServDiag", "PROG handleBatch ANNULÉ (coroutine cancel) : ${e.message}")
+                    throw e  // re-throw pour respecter le contrat coroutine
+                } catch (e: Exception) {
+                    Log.e("ServDiag", "PROG handleBatch EXCEPTION INATTENDUE : ${e.message}", e)
+                    // Ne pas re-throw → on continue à collecter les lots suivants
+                } catch (e: Throwable) {
+                    // 2026-07-05 : attraper les Error (StackOverflow, OOM) qui échappent
+                    //   à catch(Exception). Sans ça, une Error dans orderByFrenchBuckets
+                    //   tue le thread silencieusement → spinner infini.
+                    Log.e("ServDiag", "PROG handleBatch ERROR FATAL (Throwable) : ${e.javaClass.simpleName}: ${e.message}", e)
+                    // Ne pas re-throw → on continue
+                }
+            }
+
+            // 2026-07-04 (user "les backups ne doivent PAS empêcher les natifs de se charger" +
+            //   "arrivée des natifs = départ des backups ; sinon au bout de 10s les backups
+            //   démarrent quand même" + "en moyenne les natifs mettent quelques secondes s'ils
+            //   sont pas freinés") : PORTE de démarrage des backups.
+            //   Le natif charge et s'AFFICHE d'abord (tri device au repos), PUIS la porte
+            //   s'ouvre (dans handleBatch, après le 1er tri natif) → le registre démarre.
+            //   Filet : si le natif est muet, la porte s'ouvre au bout de 10s.
+            //   merge() → handleBatch sérialisé (aucune mutation concurrente des collections).
+            val _tNat = System.currentTimeMillis()
+            val nativeFlow = provider.getServersProgressive(id, videoType)
+                .onEach { Log.i("ServDiagT", "NATIVE flow a ÉMIS size=${it.size} à ${System.currentTimeMillis()-_tNat}ms") }
+                // 2026-07-04 (user "Cloudstream met 20s") : si le natif FINIT sans rien émettre
+                //   (ex Cloudstream search API down → 0 serveur), on OUVRE la porte des backups
+                //   TOUT DE SUITE au lieu d'attendre le timeout de 20s. Sinon un provider dont le
+                //   natif rend 0 vite faisait quand même patienter 20s avant les backups.
+                .onCompletion {
+                    if (!backupGate.isCompleted) {
+                        Log.i("ServDiag", "PROG backupGate ouvert par FIN du flux natif")
+                        backupGate.complete(Unit)
+                    }
+                }
+                // 2026-07-04 : forcer l'exécution du flow natif sur IO — sinon
+                //   withContext(IO) dans channelFlow reprend sur Main (viewModelScope),
+                //   et si le main-thread est occupé (Glide/UI), l'émission est retardée
+                //   de 10+ secondes voire indéfiniment.
+                .flowOn(kotlinx.coroutines.Dispatchers.IO)
+            // 2026-07-04 : PORTE RESTAURÉE (user "en enlevant le blocage 10s, Wiflix ne s'est pas
+            //   chargé"). Les natifs WebJS (Wiflix) tournent dans le MÊME WebView que les backups
+            //   WebView-lourds → sans porte, les backups démarrent à t=0 et entrent en CONTENTION
+            //   sur le WebView avec le natif Wiflix → le natif ne se charge plus. La porte ouvre
+            //   les backups après le 1er tri natif (instantané pour les providers à natif rapide)
+            //   OU à la fin du flux natif OU au bout de 12s (filet si natif muet). 20s→12s pour
+            //   réduire l'attente sur les natifs vraiment lents sans casser la protection Wiflix.
+            //   2026-07-04 : la porte NE S'APPLIQUE QU'AUX WebJsProvider (contention WebView).
+            //   Les providers natifs Kotlin (FrenchAnime, Papadustream, FrenchManga, Franime,
+            //   VoirAnime, AnimeSama, etc.) démarrent les backups IMMÉDIATEMENT en parallèle.
+            val isWebJsProvider = provider is com.streamflixreborn.streamflix.providers.WebJsProvider
+            // 2026-07-07 (user « on met les backups en PRIORITÉ sur DessinAnime ») :
+            //   DessinAnime a un natif WebView CF LENT et souvent en échec (challenge
+            //   Cloudflare 12-45s). Le gater derrière ce natif retenait les backups
+            //   (mesuré : « backupGate ouvert par FIN du flux natif » = les backups
+            //   attendaient le timeout 45s du WebView). → On NE GATE PAS DessinAnime :
+            //   ses backups partent à t=0 comme un provider natif Kotlin. Les autres
+            //   WebJS gardent la gate anti-famine, mais cap réduit 12s→4s (les serveurs
+            //   ne doivent jamais rester bloqués si le natif est muet/coincé sur CF).
+            val isDessinAnime = com.streamflixreborn.streamflix.utils.UserPreferences
+                .currentProvider?.name?.equals("DessinAnime", ignoreCase = true) ?: false
+            val gatedBackupFlow = if (isWebJsProvider && !isDessinAnime) {
+                backupFlow.onStart {
+                    val opened = kotlinx.coroutines.withTimeoutOrNull(4_000L) { backupGate.await() }
+                    if (opened == null) Log.i("ServDiag", "PROG backupGate ouvert par TIMEOUT 4s (natif muet)")
+                }
+            } else {
+                Log.i("ServDiag", "PROG ${if (isDessinAnime) "DessinAnime → backups PRIORITAIRES" else "provider natif Kotlin"} → backups IMMÉDIATS (pas de gate)")
+                backupFlow // pas de porte → backups démarrent à t=0
+            }
+            // 2026-07-04 TEST (user "désactive le pack serveur, on teste avec QUE les natifs
+            //   Wiflix") : si false, on collecte UNIQUEMENT le flux natif (aucun registre, aucun
+            //   merge, aucune porte) → isole si le trou de 15s vient du merge/registre ou du natif.
+            val REGISTRY_BACKUPS_ENABLED = true
+            // 2026-07-04 (user "le player ne doit pas se couper tant que les serveurs
+            //   n'ont pas fini d'arriver, timeout 2 min minimum") : on laisse le merge
+            //   tourner jusqu'à ce que TOUS les flows soient terminés, avec un plafond
+            //   absolu de 2 minutes. Aucun serveur lent n'est coupé prématurément.
+            // 2026-07-05 v2 (user "2 min ça bloque l'écran, c'est trop" + "45") : 120s → 45s.
+            //   Avec le nuclearCachePurge automatique, un cache empoisonné se vide
+            //   au 1er 0-serveur → pas besoin d'attendre longtemps. 45s suffit pour
+            //   les sources lentes sans bloquer l'écran inutilement.
+            val COLLECT_TIMEOUT_MS = 120_000L
+            if (REGISTRY_BACKUPS_ENABLED) {
+                kotlinx.coroutines.withTimeoutOrNull(COLLECT_TIMEOUT_MS) {
+                    kotlinx.coroutines.flow.merge(nativeFlow, gatedBackupFlow).collect { handleBatch(it) }
+                } ?: Log.w("ServDiag", "PROG collecte stoppée après ${COLLECT_TIMEOUT_MS/1000}s (plafond atteint)")
+            } else {
+                Log.i("ServDiag", "PROG TEST natifs-seuls (registre désactivé)")
+                kotlinx.coroutines.withTimeoutOrNull(COLLECT_TIMEOUT_MS) {
+                    nativeFlow.collect { handleBatch(it) }
                 }
             }
         } catch (e: Exception) {
@@ -1046,8 +1194,29 @@ class PlayerViewModel(
             Log.w("PlayerViewModel", "Progressive: échec avant 1er lot, fallback batch : ${e.message}")
         }
         progressiveStillCollecting = false
+        // 2026-07-06 (user « QualityProbe seulement quand plus aucun serveur n'arrive ») :
+        //   la collecte est TERMINÉE ici (merge fini OU plafond 45s). On lance le probe
+        //   MAINTENANT sur la liste COMPLÈTE — fini la contention CPU/réseau avec
+        //   l'extraction de lecture pendant le lancement de l'épisode. Le probe reste
+        //   fonctionnel (qualités détectées), juste décalé après l'arrivée des serveurs.
+        if (firstEmitted) {
+            probeServerQualities(allKnownServers)
+        }
         if (!firstEmitted) {
-            // Aucun lot émis → fallback sur le chemin batch (avec retry).
+            // 2026-07-05 v2 (user "au premier coup 0 serveur tu vides directement") :
+            //   purge IMMÉDIATE dès que le flux progressif n'a rien donné — AVANT le
+            //   fallback batch. Le cache OkHttp / cookies CF empoisonnés bloquent
+            //   probablement les serveurs ; les vider MAINTENANT donne au fallback batch
+            //   une chance de marcher avec un cache propre. Et même si ça ne marche pas,
+            //   le PROCHAIN lancement partira sur un cache vierge.
+            if (!nuclearPurgeAttempted) {
+                nuclearPurgeAttempted = true
+                val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext
+                Log.w("ServDiag", "!! 0 serveur progressif → NUCLEAR CACHE PURGE immédiate")
+                com.streamflixreborn.streamflix.utils.ProviderCacheRefresh.nuclearCachePurge(ctx)
+                kotlinx.coroutines.delay(300)
+            }
+            // Fallback batch AVEC cache propre maintenant
             val raw = try {
                 fetchServersWithRetry(provider as com.streamflixreborn.streamflix.providers.Provider, id, videoType)
             } catch (e: Exception) {
@@ -1060,7 +1229,7 @@ class PlayerViewModel(
                 return
             }
             val ordered = orderByFrenchBuckets(raw)
-            _state.emit(State.SuccessLoadingServers(ordered))
+            _state.emit(State.SuccessLoadingServers(collapseIdenticalServers(ordered)))
             preExtractTopServersInBackground(ordered)
             probeServerQualities(ordered)
         }
@@ -1071,44 +1240,209 @@ class PlayerViewModel(
      * l'intérieur de chaque bucket, l'ordre de fiabilité d'ExtractorRanker.
      * sortedBy est stable → la fiabilité est préservée comme axe secondaire.
      */
+    // 2026-07-04 : classifie la langue d'un serveur depuis son nom
+    private fun serverLang(s: Video.Server): String {
+        val n = s.name.lowercase()
+        return when {
+            n.contains("vostfr") || n.contains("sous-titr") -> "vostfr"
+            Regex("""(?i)\b(vf|vff|vfq|vfi)\b""").containsMatchIn(n)
+                || n.contains("(vf)") -> "vf"
+            Regex("""(^|[^a-z])vo([^a-z]|$)""").containsMatchIn(n)
+                || n.contains(Regex("\\b(raw|eng|english|spa|ita|german|deu|jap)\\b")) -> "vo"
+            else -> "unknown"
+        }
+    }
+
     private fun orderByFrenchBuckets(list: List<Video.Server>): List<Video.Server> {
+        val _t = System.currentTimeMillis()
+        Log.d("OFB", "ENTER size=${list.size} thread=${Thread.currentThread().name}")
         val ranked = try {
             com.streamflixreborn.streamflix.utils.ExtractorRanker.rankServers(list)
-        } catch (_: Exception) { list }
+        } catch (e: Exception) { Log.w("OFB", "rankServers ERR: ${e.message}"); list
+        } catch (e: Throwable) { Log.e("OFB", "rankServers FATAL: ${e.message}", e); list }
+        Log.d("OFB", "A rankDone ${System.currentTimeMillis()-_t}ms ranked=${ranked.size}")
+        Log.i("ServDiagT", "  rankServers(${list.size}) = ${System.currentTimeMillis()-_t}ms")
         val voRegex = Regex("""(^|[^a-z])vo([^a-z]|$)""")
-        // Regex pour détecter une mention FR/VF/multi dans le nom du serveur
         val frRegex = Regex("""(?i)\b(vf|vff|vfq|vfi|fr|french|français|francais|multi|vostfr|vost)\b""")
-        fun bucket(s: Video.Server): Int {
-            val n = s.name.lowercase()
-            return when {
-                n.contains("vostfr") || n.contains("sous-titr") -> 1
-                // 2026-05-22 : VO/étrangères enterrées massivement — ne doivent
-                // JAMAIS passer avant une source FR même lente.
-                voRegex.containsMatchIn(n) ||
-                    n.contains(Regex("\\b(raw|eng|english|spa|ita|german|deu|jap)\\b")) -> 999
-                else -> 0
+
+        // 2026-07-04 : détecter la langue de l'épisode courant
+        // Priorité 1 : l'ID porte la langue (AnimeSama slug/saison1/vf/3, FrenchManga @vf…)
+        Log.d("OFB", "B langOf lastId=${lastId?.take(40)}")
+        var curLang = lastId?.let {
+            com.streamflixreborn.streamflix.utils.MultiLangDetector.langOf(it)
+        }
+        Log.d("OFB", "C langOf=$curLang")
+        // Priorité 2 : déduction depuis les serveurs NATIFS (= pas backup bkreg::)
+        // si tous les natifs sont homogènes en langue explicite.
+        // 2026-07-09 : NE PAS déduire curLang="vo". Quand le natif est VO (ex anime
+        //   japonais via NetMirror), ça ne signifie PAS que l'épisode est "VO" — juste
+        //   que le provider natif n'a que la VO. Le user veut les alternatives VF/VOSTFR.
+        //   Garder curLang=null → comportement par défaut VF > VOSTFR > VO (FR en tête).
+        // 2026-07-09 : RESTREINT aux providers ANIME uniquement. Sur un provider mixte
+        //   (Movix, 1Jour1Film, Wiflix…) les serveurs natifs VOSTFR ne signifient PAS que
+        //   l'épisode EST VOSTFR — les VF arrivent via backups. Déduire curLang=vostfr
+        //   masquait les VF. La déduction ne sert QUE pour les providers anime où un
+        //   épisode est SOIT VF SOIT VOSTFR (AnimeSama, FrenchAnime, FrenchManga…).
+        if (curLang == null) {
+            val currentProv = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider
+            val isAnimeGroup = currentProv != null &&
+                com.streamflixreborn.streamflix.providers.Provider.getGroup(currentProv) ==
+                    com.streamflixreborn.streamflix.providers.Provider.Companion.ProviderGroup.ANIME
+            if (isAnimeGroup) {
+                val nativeServers = ranked.filter { !it.id.startsWith("bkreg::") }
+                if (nativeServers.isNotEmpty()) {
+                    val nativeLangs = nativeServers.map { serverLang(it) }.filter { it != "unknown" }.toSet()
+                    if (nativeLangs.size == 1 && nativeLangs.first() != "vo") {
+                        curLang = nativeLangs.first()
+                        Log.d("LangSort", "curLang déduit des serveurs natifs (provider ANIME): $curLang")
+                    } else if (nativeLangs.size == 1) {
+                        Log.d("LangSort", "natifs homogènes VO → curLang reste null (pas de masquage FR)")
+                    }
+                }
+            } else {
+                Log.d("LangSort", "provider non-ANIME → pas de déduction curLang par serveurs natifs")
             }
         }
-        // 2026-05-22 : quand le filtre catalogue est "Monde — tout", on RETIRE
-        // les serveurs sans mention VF/FR/multi (l'user ne veut pas les voir du
-        // tout, pas juste les enterrer). Garde les non-taggés (= assumés VF par
-        // les providers classiques) et les multi.
+        Log.d("OFB", "D curLang=$curLang")
+
+        // 2026-07-08 : lire les favoris UNE SEULE FOIS pour donner bucket -1
+        //   aux serveurs cœur → toujours en tête, quelle que soit la langue.
+        Log.d("OFB", "E avant currentProvider")
         val providerName = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name
+        Log.d("OFB", "F currentProvider=$providerName")
+        val favorites = if (!providerName.isNullOrEmpty())
+            com.streamflixreborn.streamflix.utils.ExtractorToggleStore.getFavorites(providerName) else emptySet()
+        Log.d("OFB", "F2 favorites=${favorites.size} ${favorites.take(3)}")
+
+        fun isFav(s: Video.Server): Boolean {
+            if (favorites.isEmpty()) return false
+            val extName = (com.streamflixreborn.streamflix.utils.ExtractorRanker.resolveExtractorName(s)
+                ?: s.name).lowercase()
+            return extName in favorites
+        }
+
+        fun bucket(s: Video.Server): Int {
+            // 2026-07-08 (user "les cœurs ne sont même pas classés dans le VOD") :
+            // Un serveur cœur = TOUJOURS en tête, peu importe la langue.
+            if (isFav(s)) return -1
+
+            val lang = serverLang(s)
+            return if (curLang != null) {
+                // Tri orienté par la langue de l'épisode
+                when {
+                    lang == curLang  -> 0   // langue de l'épisode = tête
+                    lang == "unknown"-> 1   // pas de tag = neutre, en bas mais visible
+                    lang == "vo"     -> 999 // VO = enterré
+                    else             -> 2   // langue opposée explicite (VF sur épisode VOSTFR ou inverse)
+                }
+            } else {
+                // Pas de langue détectable → comportement classique VF > VOSTFR > VO
+                when (lang) {
+                    "vostfr" -> 1
+                    "vo"     -> 999
+                    else     -> 0  // vf ou unknown = tête
+                }
+            }
+        }
         val hideVo = providerName != null &&
             com.streamflixreborn.streamflix.utils.CatalogFilter.isSupported(providerName) &&
             com.streamflixreborn.streamflix.utils.CatalogFilter.get(providerName) ==
                 com.streamflixreborn.streamflix.utils.CatalogFilter.Mode.POPULAR_INTL
         val filtered = if (hideVo) {
             ranked.filter { s ->
-                val n = s.name.lowercase()
                 val b = bucket(s)
-                // Garder : bucket 0 (VF/non-taggé) ou bucket 1 (VOSTFR)
-                // Virer : bucket 999 (VO explicite) SAUF si le nom contient quand même
-                // une mention FR/multi (ex: "Movix — Doodstream [VO] (multi)")
-                b < 999 || frRegex.containsMatchIn(n)
+                b < 999 || frRegex.containsMatchIn(s.name)
             }
         } else ranked
-        return filtered.sortedBy { bucket(it) }
+
+        Log.d("OFB", "G avant sort filtered=${filtered.size}")
+        Log.i("ServDiagT", "  avant sort à ${System.currentTimeMillis()-_t}ms (curLang=$curLang hideVo=$hideVo)")
+        val sorted = filtered.sortedBy { bucket(it) }
+        Log.d("OFB", "H sorted=${sorted.size} ${System.currentTimeMillis()-_t}ms → RETURN")
+
+        // 2026-07-04 : MASQUAGE langue opposée + VO sur épisode à langue explicite
+        // On GARDE bucket 0 (langue épisode) + bucket 1 (inconnu, non marqué).
+        // On MASQUE bucket 2 (langue opposée explicite) + 999 (VO).
+        // Les inconnus sont affichés EN DERNIER — jamais perdus.
+        // FILET : si le masquage vide la liste → on garde tout (la personne
+        // aura quand même ses serveurs, même dans la mauvaise langue).
+        // 2026-07-09 : JAMAIS masquer sur curLang="vo". Quand le natif est VO,
+        //   le masquage tuait TOUS les VF/VOSTFR (AnimeSama, FrenchManga…).
+        //   Le masquage ne sert QUE pour VF↔VOSTFR (épisode VF → cacher VOSTFR
+        //   et vice versa). VO = pas de masquage, tri par défaut suffit.
+        if (curLang != null && curLang != "vo") {
+            val kept = sorted.filter { bucket(it) <= 1 }
+            if (kept.isNotEmpty()) {
+                Log.d("LangSort", "curLang=$curLang : ${sorted.size} → ${kept.size} serveurs (masqué ${sorted.size - kept.size} opposé/VO)")
+                return kept
+            }
+            Log.d("LangSort", "curLang=$curLang : masquage aurait vidé la liste → on garde tout")
+        }
+
+        return sorted
+    }
+
+    /**
+     * 2026-07-08 (user "les cœurs ne sont même pas classés dans le VOD") :
+     * Re-trie les serveurs courants et ré-émet serversReordered.
+     * Appelé depuis le Fragment quand l'user toggle un cœur VOD.
+     */
+    fun resortServers() {
+        val current = allKnownServers
+        if (current.isEmpty()) return
+        viewModelScope.launch(Dispatchers.Default) {
+            val reordered = orderByFrenchBuckets(current)
+            _serversReordered.emit(collapseIdenticalServers(reordered))
+            Log.d("OFB", "resortServers: re-trié ${current.size} serveurs (favori toggle)")
+        }
+    }
+
+    /**
+     * 2026-07-04 : Fusionne les serveurs identiques (même URL source) en un
+     * seul item avec indicateur ×N dans le nom. Quand 6 backup providers
+     * trouvent le même lien Uqload, l'user voit "Uqload (VF) ×6" au lieu
+     * de 6 lignes identiques.
+     *
+     * Appliquée UNIQUEMENT côté émission UI — allKnownServers reste non-fusionné
+     * pour que le probe qualité puisse muter .quality sur les objets originaux.
+     *
+     * Préserve l'ordre d'entrée (le 1er exemplaire de chaque src gagne).
+     */
+    private fun collapseIdenticalServers(servers: List<Video.Server>): List<Video.Server> {
+        if (servers.size <= 1) return servers
+        // LinkedHashMap pour garder l'ordre d'insertion (= ordre tri langue)
+        val groups = LinkedHashMap<String, MutableList<Video.Server>>()
+        for (s in servers) {
+            val key = s.src.ifBlank { "__empty_${s.id}" } // src vide = pas fusionnable
+            groups.getOrPut(key) { mutableListOf() }.add(s)
+        }
+        // Si aucun doublon → shortcut (pas d'allocation)
+        if (groups.size == servers.size) return servers
+        val result = mutableListOf<Video.Server>()
+        for ((_, group) in groups) {
+            val base = group.first()
+            if (group.size == 1) {
+                result.add(base)
+            } else {
+                // Fusionne les mirrors de tous les doublons
+                val allMirrors = group.flatMap { it.mirrors }.distinct()
+                // Prend la meilleure qualité déjà probée dans le groupe
+                val bestQuality = group.mapNotNull { it.quality }.firstOrNull()
+                val bestVideo = group.mapNotNull { it.video }.firstOrNull()
+                val merged = Video.Server(
+                    id = base.id,
+                    name = "${base.name} ×${group.size}",
+                    src = base.src,
+                    mirrors = allMirrors,
+                )
+                merged.quality = bestQuality ?: base.quality
+                merged.video = bestVideo ?: base.video
+                result.add(merged)
+                Log.d("ServerMerge", "Fusionné ${group.size} serveurs identiques → ${merged.name}")
+            }
+        }
+        Log.d("ServerMerge", "Collapse: ${servers.size} → ${result.size} serveurs")
+        return result
     }
 
     // 2026-05-16 (user "ça charge à l'infini sans savoir si serveur OK") :
@@ -1148,7 +1482,11 @@ class PlayerViewModel(
             // timeout, l'extraction throw → FailedLoadingVideo → fallback.
             val provider = UserPreferences.currentProvider ?: return@launch
             val video = kotlinx.coroutines.withTimeoutOrNull(60_000L) {
-                provider.getVideo(server)
+                // 2026-07-04 (registre central) : un serveur backup (id `bkreg::…`) se lit via
+                //   le registre, qui ré-aiguille vers le getVideo de la source d'origine.
+                if (server.id.startsWith(com.streamflixreborn.streamflix.utils.BackupRegistry.PREFIX))
+                    com.streamflixreborn.streamflix.utils.BackupRegistry.getVideo(server)
+                else provider.getVideo(server)
             } ?: throw Exception("Extraction timeout (60s) — server unresponsive")
             if (video.source.isEmpty()) throw Exception("No source found")
 
@@ -1168,6 +1506,21 @@ class PlayerViewModel(
             }
 
             Log.d("PlayerViewModel", "Estrazione video completata con successo")
+            // 2026-07-04 (user "le serveur en lecture n'a même pas la qualité marquée") :
+            //   dès qu'un getVideo réussit, on marque la qualité sur le serveur.
+            //   Pas de probe HLS ici (ralentirait le démarrage de lecture), juste
+            //   l'inférence rapide depuis l'URL extraite + nom du serveur.
+            // Stocker le Video sur le serveur → le probe qualité peut le relire
+            // sans re-extraire (server.video lu AVANT Extractor.extract dans la boucle probe).
+            server.video = video
+            if (server.quality == null) {
+                val q = inferQualityFromText(video.source) ?: inferQualityFromText(server.name)
+                if (q != null) {
+                    server.quality = q
+                    _qualityUpdated.emit(Unit)
+                    Log.w("QualityProbe", "getVideo: ${server.name} → $q (immédiat)")
+                }
+            }
             // 2026-05-09 : tracking session pour FilmHealthTracker.
             // Une réussite = on retire la marque "vide" si elle existait
             // (le film marche maintenant) et on flag pour ne pas marquer.
@@ -1363,7 +1716,11 @@ class PlayerViewModel(
 
     sealed class State {
         data object LoadingServers : State()
-        data class SuccessLoadingServers(val servers: List<Video.Server>) : State()
+        // 2026-07-07 (user « les serveurs s'affichent INSTANTANÉMENT ; la grâce ne bloque QUE le
+        //   player, pas l'affichage ; si rien au bout de 12s, démarre sur le 1er serveur venu ») :
+        //   autoPlay=false → affiche les serveurs mais NE lance PAS la lecture auto (attend un VF).
+        //   Un 2ᵉ emit autoPlay=true débloque l'auto-play (VF arrivé, ou 12s écoulées).
+        data class SuccessLoadingServers(val servers: List<Video.Server>, val autoPlay: Boolean = true) : State()
         data class FailedLoadingServers(val error: Exception) : State()
         data class LoadingVideo(val server: Video.Server) : State()
         data class SuccessLoadingVideo(val video: Video, val server: Video.Server) : State()

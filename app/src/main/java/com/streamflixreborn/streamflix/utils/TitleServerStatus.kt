@@ -50,4 +50,22 @@ object TitleServerStatus {
         if (titleKey.isBlank() || serverId.isBlank()) return null
         return byTitle[titleKey]?.get(serverId)
     }
+
+    /**
+     * 2026-07-04 (user "en cas d'échec faut une 2e passe au lieu que le player se ferme en
+     *   disant y a pas de serveur ; il descend en bas et croit qu'il n'y a plus rien alors
+     *   qu'on en recharge plein au-dessus") : efface les marques DEAD du titre courant pour
+     *   autoriser UNE nouvelle passe complète sur tous les serveurs (dont ceux arrivés/
+     *   reclassés entre-temps). On GARDE les VERIFIED (inutile de les re-tester).
+     */
+    fun clearDeadForCurrentTitle(titleKey: String = currentTitleKey) {
+        if (titleKey.isBlank()) return
+        byTitle[titleKey]?.entries?.removeAll { it.value == ExtractorRanker.ServerStatus.DEAD }
+    }
+
+    /** 2026-07-04 : purge complète (tous les titres). Appelé par le bouton
+     *  refresh global pour débloquer les serveurs marqués dead/unsure. */
+    fun clearAll() {
+        byTitle.clear()
+    }
 }

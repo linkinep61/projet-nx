@@ -120,6 +120,20 @@
                 android:title="Gérer les sources"
                 android:summary="Activer/désactiver les extracteurs vidéo, mettre en favori" />
 
+            <Preference
+                android:key="refresh_provider_caches"
+                android:title="Rafraîchir les caches des providers"
+                android:summary="Remet les providers à neuf (caches serveurs, extraction, home). Garde vos favoris et « continuer à regarder ». N'affecte pas les chaînes IPTV." />
+
+            <!-- 2026-07-10 (user "désactiver les backups un par un") : chaque source cochée = active. -->
+            <MultiSelectListPreference
+                android:key="ENABLED_BACKUPS"
+                android:title="Backups actifs"
+                android:summary="Décochez une source pour la désactiver (en cas de problème)"
+                android:entries="@array/backup_source_labels"
+                android:entryValues="@array/backup_source_keys"
+                android:defaultValue="@array/backup_source_keys" />
+
         </PreferenceCategory>
 
         <PreferenceCategory
@@ -394,6 +408,15 @@
                 android:title="Luminosité du carrousel"
                 android:summary="Assombrit uniquement le carrousel du home (utile la nuit)"
                 android:max="100"
+                android:defaultValue="0" />
+
+            <!-- 2026-07-09 (user "un bouton pour réduire la luminosité de l'application
+                 entière, comme le slider du carrousel") : assombrit TOUTE l'app. -->
+            <SeekBarPreference
+                android:key="APP_DIM"
+                android:title="Luminosité de l'application"
+                android:summary="Assombrit toute l'application (utile la nuit)"
+                android:max="90"
                 android:defaultValue="0" />
 
             <!-- 2026-06-09 : fond d'écran personnalisé. -->

@@ -80,13 +80,14 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
     // 2026-06-09 : UA dynamique = celui du WebView Android pour que les
     //   cookies cf_clearance obtenus dans la WebView soient acceptés par
     //   OkHttp (Cloudflare lie le cookie au User-Agent).
-    private val UA: String by lazy {
-        try {
-            android.webkit.WebSettings.getDefaultUserAgent(StreamFlixApp.instance)
-        } catch (_: Throwable) {
-            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
-        }
-    }
+    // 2026-07-04 (user "une fois le bypass fait, il doit PARTAGER les cookies à tout ; DessinAnime
+    //   doit faire exactement comme Wiflix/FrenchAnime") : l'UA OkHttp DOIT être le MÊME que celui
+    //   de la WebView de bypass (STEALTH_UA). Le cf_clearance est LIÉ à l'UA qui a résolu le
+    //   Turnstile ; avec l'UA par défaut du device (≠ STEALTH_UA), OkHttp envoyait le cookie avec
+    //   le mauvais UA → CF le rejetait → 403 → re-bypass WebView à CHAQUE page. En alignant l'UA,
+    //   OkHttp passe avec le cookie partagé (cookieJar commun) → plus de re-bypass = synopsis rapide.
+    private val UA: String
+        get() = com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA
 
     // 2026-06-09 : CookieJar partagé avec WebView (NetworkClient.cookieJar
     //   proxie vers WebKit CookieManager). Quand l'user complète le Cloudflare
@@ -98,6 +99,7 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
         OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS)
             .dns(DnsResolver.doh)
             .followRedirects(true)
             .followSslRedirects(true)
@@ -124,10 +126,39 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
     // 2026-06-22 : flag CF — après le 1er bypass visible réussi, on bascule
     //   en WebView silent (le cookie cf_clearance est valide ~30 min).
     @Volatile private var cfBypassDone = false
+    // 2026-07-04 (user "à l'ouverture du Home il devrait OBLIGATOIREMENT vérifier qu'un bypass est
+    //   disponible ; on a 30 min de cache mémoire ce qui crée un bug quand y a plus de bypass") :
+    //   cfBypassDone restait à true APRÈS l'expiration du cookie cf_clearance (~30 min) → ensureCfBypass
+    //   faisait return immédiat, la WebView silent retombait sur un challenge, chaque page du home
+    //   faisait son propre bypass lent → getHome global timeout → home partiel (2-3 catégories).
+    //   FIX : on horodate le bypass + on vérifie la présence RÉELLE du cookie. Si périmé (>25 min) OU
+    //   cookie absent → on force un re-bypass UNE fois avant de charger le home (cookie frais partagé
+    //   à toutes les requêtes OkHttp via le cookieJar commun).
+    @Volatile private var cfBypassTs = 0L
+    private const val CF_CLEARANCE_TTL_MS = 25 * 60 * 1000L // 25 min (< 30 min de validité CF)
+
+    private fun markBypassFresh() {
+        cfBypassDone = true
+        cfBypassTs = System.currentTimeMillis()
+    }
+
+    /**
+     * true UNIQUEMENT si le cookie cf_clearance a DISPARU.
+     * 2026-07-04 (user "les cookies ne doivent pas s'effacer comme ça, seulement à la demande
+     *   du site s'il propose un nouveau challenge") : on NE périme PLUS le bypass sur un timer.
+     *   Tant que le cookie est là, on le garde. Si le site redemande un challenge, httpGet le
+     *   détecte (page challenge / 403) et relance le WebView à ce moment-là — pas avant.
+     */
+    private fun isBypassStale(): Boolean {
+        return try {
+            val c = android.webkit.CookieManager.getInstance().getCookie(baseUrl)
+            c == null || !c.contains("cf_clearance")
+        } catch (_: Throwable) { false }
+    }
 
     // 2026-06-23 : cache items catalogue PARSÉS (survit entre getMovies et
     //   getTvShows pour éviter le double-fetch des mêmes pages catalogue).
-    private val catalogItemsCache = java.util.concurrent.ConcurrentHashMap<Int, Pair<Long, List<AppAdapter.Item>>>()
+    private val catalogItemsCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<AppAdapter.Item>>>()
     private const val CATALOG_ITEMS_TTL_MS = 5 * 60 * 1000L
 
     fun resetState() {
@@ -144,7 +175,23 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
     //   Si pas fait, la PREMIÈRE entrée montre la WebView visible, les
     //   autres suspendent sur le mutex et re-check cfBypassDone → skip.
     private suspend fun ensureCfBypass() {
+        // 2026-07-04 : si le bypass est marqué "fait" mais périmé (>25 min) ou le cookie a disparu,
+        //   on le REDÉCLENCHE. Sans ça, le home rouvre avec un cookie mort → challenges en cascade.
+        if (cfBypassDone && isBypassStale()) {
+            Log.d(TAG, "ensureCfBypass → cf_clearance périmé/absent, re-bypass forcé")
+            cfBypassDone = false
+        }
         if (cfBypassDone) return
+        // 2026-07-05 (user "le home met 30s à froid alors qu'on préchauffe au boot") : resetState()
+        //   remet cfBypassDone=false à l'ouverture du provider → ensureCfBypass refaisait un bypass
+        //   WebView (~8s) ALORS QUE le cookie cf_clearance (pré-chauffé au boot, ou d'une session
+        //   précédente) est encore VALIDE. FIX : si le cookie est présent, on considère le bypass
+        //   fait SANS relancer la WebView → ouverture du home bien plus rapide.
+        if (!isBypassStale()) {
+            markBypassFresh()
+            Log.d(TAG, "ensureCfBypass → cookie cf_clearance déjà valide → skip WebView (rapide)")
+            return
+        }
         withContext(Dispatchers.IO) {
             webViewMutex.withLock {
                 // Re-check après acquisition du lock — un autre coroutine
@@ -167,7 +214,7 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                             val isChallenge = challengeKeywords.any { body.contains(it, ignoreCase = true) }
                             if (!isChallenge && body.length > 500) {
                                 Log.d(TAG, "ensureCfBypass → OkHttp OK (pas de CF), bypass inutile")
-                                cfBypassDone = true
+                                markBypassFresh()
                                 pageCachePut("$baseUrl/", body)
                                 return@withLock
                             }
@@ -175,20 +222,23 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                     }
                 } catch (_: Exception) {}
 
-                // CF actif → WebView VISIBLE (user résout Turnstile 1 fois)
-                Log.d(TAG, "ensureCfBypass → WebView visible sur $baseUrl")
+                // 2026-07-04 (user "le home est gelé une minute alors que le bypass est chaud ;
+                //   c'est le bypass qui recharge 379 Ko sur le thread principal et bloque l'UI") :
+                //   bypass en mode LÉGER (clearanceOnly) → on s'arrête au cf_clearance SANS charger
+                //   la home lourde. ~4s de challenge au lieu de ~11s de home → jank bien plus court,
+                //   plus de gel d'une minute. La home est fetchée par getHome quand nécessaire (et
+                //   servie depuis le cache 30 min la plupart du temps).
+                Log.d(TAG, "ensureCfBypass → WebView LÉGER (clearanceOnly) sur $baseUrl")
                 try {
                     val ctx = StreamFlixApp.currentActivity ?: StreamFlixApp.instance
                     val resolver = WebViewResolver(ctx)
                     try {
-                        val html = resolver.get(baseUrl, silent = false)
-                        if (html.length > 500) {
-                            val isChallenge = challengeKeywords.any { html.contains(it, ignoreCase = true) }
-                            if (!isChallenge || html.length > 50_000) {
-                                cfBypassDone = true
-                                pageCachePut("$baseUrl/", html)
-                                Log.d(TAG, "ensureCfBypass → OK (${html.length} chars)")
-                            }
+                        val html = resolver.get(baseUrl, silent = false, clearanceOnly = true)
+                        val gotClearance = html.contains("clearance warmed") ||
+                            (android.webkit.CookieManager.getInstance().getCookie(baseUrl)?.contains("cf_clearance") == true)
+                        if (gotClearance) {
+                            markBypassFresh()
+                            Log.d(TAG, "ensureCfBypass → clearance OK (léger)")
                         }
                     } finally {
                         try { resolver.cleanup() } catch (_: Throwable) {}
@@ -202,6 +252,129 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
 
     /** No-op — CF bypass automatique par httpGet si nécessaire. */
     fun prefetchCfBypassIfNeeded() {}
+
+    /**
+     * 2026-07-04 (user "il faut préchauffer le bypass à l'ouverture de l'app, comme Wiflix ;
+     *   dans un navigateur on ouvre 3 challenges CF en même temps sans problème, c'est juste
+     *   des pages") : pré-résout le cf_clearance au boot (WebView TRANSITOIRE, détruite après).
+     *   On s'arrête DÈS que le cookie cf_clearance est posé — on ne charge PAS toute la home
+     *   lourde → léger en CPU (page de challenge uniquement), pas d'ANR comme l'ancien préchauffage
+     *   qui attendait le rendu complet. Idempotent : si déjà fait, no-op.
+     */
+    suspend fun warmUpCf() {
+        if (cfBypassDone && !isBypassStale()) return
+        withContext(Dispatchers.IO) {
+            webViewMutex.withLock {
+                if (cfBypassDone && !isBypassStale()) return@withLock
+                try {
+                    val ctx = StreamFlixApp.currentActivity ?: StreamFlixApp.instance
+                    val resolver = WebViewResolver(ctx)
+                    try {
+                        // clearanceOnly=true → s'arrête au cf_clearance, ne charge pas la home lourde.
+                        val html = resolver.get(baseUrl, silent = true, clearanceOnly = true)
+                        val ok = html.contains("clearance warmed") ||
+                            android.webkit.CookieManager.getInstance().getCookie(baseUrl)?.contains("cf_clearance") == true
+                        if (ok) {
+                            markBypassFresh()
+                            Log.d(TAG, "warmUpCf → cf_clearance pré-chauffé au boot")
+                        }
+                    } finally {
+                        try { resolver.cleanup() } catch (_: Throwable) {}
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "warmUpCf failed: ${e.message}")
+                }
+            }
+        }
+    }
+
+    // 2026-07-04 (user "les séries n'ont pas de saisons") : les pages /tv/* de dessinanime.cc
+    //   ont un challenge Cloudflare Turnstile SÉPARÉ de /catalogue — le cf_clearance de base ne
+    //   le couvre PAS. En silencieux, getTvShow (marker gate 12s) ne résout pas ce challenge À
+    //   FROID → le fetch RSC reste en 403 → dossier série vide + fallback visible annulé par le
+    //   ViewModel ("Job was cancelled"). FIX (comme le WebJS le faisait) : pré-résoudre le
+    //   challenge /tv/* EN FOND (jusqu'à 30s, reload auto) pendant que l'user parcourt le home.
+    //   Une fois le cf_clearance /tv/* posé (cookie domaine, persiste), getTvShow passe en <12s.
+    @Volatile private var detailWarmed = false
+    private val warmScope = kotlinx.coroutines.CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+    @Volatile private var warmJob: kotlinx.coroutines.Deferred<Boolean>? = null
+
+    /** Résout (UNE fois) le challenge Turnstile SÉPARÉ des pages détail tv. Tourne dans warmScope
+     *  (indépendant du viewModelScope → SURVIT à l'annulation d'un getTvShow : le prochain clic
+     *  est déjà prêt). Partagé entre appelants (dédup via warmJob). silent + reload auto ≤30s. */
+    private fun startDetailWarm(tvSlug: String): kotlinx.coroutines.Deferred<Boolean> {
+        warmJob?.let { if (it.isActive) return it }
+        val job = warmScope.async {
+            try {
+                webViewMutex.withLock {
+                    if (detailWarmed) return@withLock true
+                    val ctx = StreamFlixApp.currentActivity ?: StreamFlixApp.instance
+                    val resolver = WebViewResolver(ctx)
+                    try {
+                        val html = resolver.get("$baseUrl/tv/$tvSlug", silent = true)
+                        val ok = html.length > 5000 &&
+                            android.webkit.CookieManager.getInstance().getCookie(baseUrl)?.contains("cf_clearance") == true
+                        if (ok) { detailWarmed = true; Log.d(TAG, "detailWarm → /tv/* clearance OK (via $tvSlug)") }
+                        else Log.w(TAG, "detailWarm → /tv/* KO (len=${html.length})")
+                        ok
+                    } finally { try { resolver.cleanup() } catch (_: Throwable) {} }
+                }
+            } catch (e: Exception) { Log.w(TAG, "detailWarm KO: ${e.message}"); false }
+        }
+        warmJob = job
+        return job
+    }
+
+    /** Fire-and-forget : boot + ouverture du provider (getHome). Ne bloque rien. */
+    fun warmDetailChallengeAsync(tvSlug: String) {
+        if (!detailWarmed && tvSlug.isNotBlank()) startDetailWarm(tvSlug)
+    }
+
+    /** BLOQUANT : appelé au clic sur une série → GARANTIT que le challenge détail tv est résolu
+     *  avant le fetch RSC (sinon 1ère série = dossier vide). Si le warm tourne déjà, on l'attend. */
+    private suspend fun ensureDetailWarmed(tvSlug: String) {
+        if (detailWarmed || tvSlug.isBlank()) return
+        try { startDetailWarm(tvSlug).await() } catch (_: Exception) {}
+    }
+
+    /** Pré-chauffage complet au BOOT (base + détail tv). Récupère un slug série du catalogue puis
+     *  résout le challenge détail. Idempotent. */
+    suspend fun warmUpAll() {
+        try {
+            warmUpCf()
+            if (detailWarmed) return
+            val items = fetchCatalogPage(1, "TV")
+            val slug = items.filterIsInstance<TvShow>().firstOrNull()?.id?.removePrefix("tv::")
+            if (!slug.isNullOrBlank()) startDetailWarm(slug)
+        } catch (e: Exception) { Log.w(TAG, "warmUpAll failed: ${e.message}") }
+    }
+
+    // 2026-07-06 (user « tant qu'on est sur le home DessinAnime, simuler un clic jaquette de
+    //   temps en temps pour garder le captcha résolu, un truc pas gourmand ») : keep-alive.
+    //   Appelé PÉRIODIQUEMENT par StreamFlixApp UNIQUEMENT quand DessinAnime est le provider
+    //   actif. Ne fait RIEN si le clearance est encore frais (< seuil) ET la fiche déjà chaude
+    //   (donc pas gourmand : simple check de cookie/horodatage la plupart du temps). Sinon il
+    //   re-simule l'ouverture d'une fiche (startDetailWarm) pour rafraîchir le cf_clearance AVANT
+    //   qu'il n'expire → au clic suivant, jamais de captcha à re-résoudre.
+    private val KEEPALIVE_REFRESH_MS = 20 * 60 * 1000L  // rafraîchit à 20 min (< ~30 min de validité CF)
+
+    suspend fun keepAliveIfActive() {
+        val ageMs = System.currentTimeMillis() - cfBypassTs
+        val cookieGone = isBypassStale()
+        // Frais + fiche déjà chaude + pas trop vieux → rien à faire (léger).
+        if (!cookieGone && detailWarmed && ageMs < KEEPALIVE_REFRESH_MS) return
+        try {
+            if (cookieGone) cfBypassDone = false
+            warmUpCf()
+            // Force une NOUVELLE simulation de clic fiche pour garder /tv/* frais.
+            detailWarmed = false
+            warmJob = null
+            val items = try { fetchCatalogPage(1, "TV") } catch (_: Exception) { emptyList() }
+            val slug = items.filterIsInstance<TvShow>().firstOrNull()?.id?.removePrefix("tv::")
+            if (!slug.isNullOrBlank()) startDetailWarm(slug).await()
+            Log.d(TAG, "keepAlive → re-simulation clic fiche (cf_clearance rafraîchi, age=${ageMs/1000}s)")
+        } catch (e: Exception) { Log.w(TAG, "keepAlive failed: ${e.message}") }
+    }
 
     // ── Poster URL cleaner ─────────────────────────────────────────────
     //   dessinanime.cc sert les posters via /_next/image?url=<TMDB_ENCODED>
@@ -239,7 +412,11 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
     //   de limite → le cache grossissait indéfiniment en navigation.
     private data class CachedHtml(val html: String, val ts: Long)
     private val pageCache = java.util.concurrent.ConcurrentHashMap<String, CachedHtml>()
-    private const val PAGE_CACHE_MAX = 5
+    // 2026-07-04 (user "le temps d'ouverture de la synopsis DessinAnime ; il doit réutiliser le
+    //   cache une fois la jaquette chargée") : 5 → 30. Avec 5, ouvrir une série (page série + pages
+    //   épisodes = 2-3 slots) évinçait vite → réouverture = re-fetch + re-bypass CF Turnstile (~10s).
+    //   Avec 30, les synopsis déjà vus restent en cache (TTL détail 2h) → réouverture instantanée.
+    private const val PAGE_CACHE_MAX = 30
     private const val CACHE_TTL_MS = 5 * 60 * 1000L        // 5 min (home, catalogue)
     private const val CACHE_TTL_DETAIL_MS = 2 * 60 * 60 * 1000L // 2h (film, série)
 
@@ -260,19 +437,31 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
      * Pattern identique à Wiflix tryOkHttp / FrenchAnime safeGetDoc.
      * PAS de Accept-Encoding manuel → OkHttp gère la décompression auto.
      */
-    private suspend fun httpGet(url: String): String? = withContext(Dispatchers.IO) {
+    private suspend fun httpGet(url: String, contentMarker: String? = null, rscFetchUrl: String? = null, markerTimeoutMs: Long = 12_000L): String? = withContext(Dispatchers.IO) {
         // 1) Cache RAM (= avant le semaphore, hit = 0 latence)
+        //   2026-07-04 : si un marqueur est requis (page player) on n'accepte le cache
+        //   QUE s'il contient déjà le marqueur — évite la COLLISION de cache où
+        //   getEpisodesBySeason a mis en cache /tv/slug/1/1 SANS les sources du lecteur,
+        //   puis fetchNativeServers(ep1) réutilisait cette page incomplète = 0 serveur.
+        // 2026-07-04 : clé de cache DISTINCTE pour le fetch RSC — sinon le RSC (sources)
+        //   et la page HTML (liste d'épisodes) se marcheraient dessus sous la même URL
+        //   (getEpisodesBySeason récupérerait les sources au lieu des épisodes, et vice-versa).
+        val cacheKey = if (rscFetchUrl != null) "$url##rsc" else url
         val ttl = if (url.contains("/movie/") || url.contains("/tv/")) CACHE_TTL_DETAIL_MS else CACHE_TTL_MS
-        pageCache[url]?.let { cached ->
-            if (System.currentTimeMillis() - cached.ts < ttl) return@withContext cached.html
+        pageCache[cacheKey]?.let { cached ->
+            if (System.currentTimeMillis() - cached.ts < ttl &&
+                (contentMarker == null || cached.html.contains(contentMarker))) return@withContext cached.html
         }
         // 2026-06-23 : Semaphore(3) pour limiter les fetches parallèles (= évite
         //   CF rate-limit qui faisait tomber les requêtes synopsis en 403).
         networkSemaphore.withPermit {
 
         // 2) OkHttp direct (sans Accept-Encoding → auto décompression gzip)
+        //   2026-07-04 : en mode RSC (page player) on saute OkHttp (l'épisode renvoie 403
+        //   à OkHttp de toute façon → le fetch RSC se fait DANS le WebView, seul contexte
+        //   qui passe CF). Évite ~1s de 403 inutile.
         val isApi = url.contains("/api/")
-        try {
+        if (rscFetchUrl == null) try {
             val req = Request.Builder()
                 .url(url)
                 .header("User-Agent", UA)
@@ -285,9 +474,14 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                 if (resp.isSuccessful) {
                     val body = resp.body?.string() ?: ""
                     val isChallenge = challengeKeywords.any { body.contains(it, ignoreCase = true) }
-                    if (!isChallenge && body.length > 200) {
+                    // 2026-07-04 : si un marqueur est requis (page player) et absent du body
+                    //   OkHttp → on NE l'accepte PAS (SSR partiel sans les sources) et on
+                    //   bascule sur le WebView qui attend le chunk streamé.
+                    val markerOk = contentMarker == null || body.contains(contentMarker) ||
+                        body.contains(contentMarker.replace("\"", "\\\""))
+                    if (!isChallenge && markerOk && body.length > 200) {
                         Log.d(TAG, "httpGet OK $url (${body.length} chars)")
-                        pageCachePut(url, body)
+                        pageCachePut(cacheKey, body)
                         return@withContext body
                     }
                     if (isChallenge) Log.d(TAG, "CF challenge sur $url → WebView fallback")
@@ -322,7 +516,7 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                     } else {
                         val ctx = StreamFlixApp.currentActivity ?: StreamFlixApp.instance
                         val resolver = WebViewResolver(ctx)
-                        try { resolver.get(url, silent = false) } finally {
+                        try { resolver.get(url, silent = false, contentMarker = contentMarker, rscFetchUrl = rscFetchUrl, markerTimeoutMs = markerTimeoutMs) } finally {
                             try { resolver.cleanup() } catch (_: Throwable) {}
                         }
                     }
@@ -331,8 +525,8 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                     val isChallenge = challengeKeywords.any { html.contains(it, ignoreCase = true) }
                     if (!isChallenge || html.length > 50_000) {
                         Log.d(TAG, "httpGet WebView visible OK $url (${html.length} chars) — cfBypassDone=true")
-                        cfBypassDone = true
-                        pageCachePut(url, html)
+                        markBypassFresh()
+                        pageCachePut(cacheKey, html)
                         return@withContext html
                     }
                 }
@@ -354,7 +548,7 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                                 val isCf = challengeKeywords.any { body.contains(it, ignoreCase = true) }
                                 if (!isCf && body.length > 200) {
                                     Log.d(TAG, "httpGet retry OkHttp OK $url (${body.length} chars)")
-                                    pageCachePut(url, body)
+                                    pageCachePut(cacheKey, body)
                                     return@withContext body
                                 }
                             }
@@ -370,36 +564,63 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                 val html = webViewMutex.withLock {
                     val ctx = StreamFlixApp.currentActivity ?: StreamFlixApp.instance
                     val resolver = WebViewResolver(ctx)
-                    try { resolver.get(url, silent = true) } finally {
+                    try { resolver.get(url, silent = true, contentMarker = contentMarker, rscFetchUrl = rscFetchUrl, markerTimeoutMs = markerTimeoutMs) } finally {
                         try { resolver.cleanup() } catch (_: Throwable) {}
                     }
                 }
                 if (html.length > 500) {
                     val isChallenge = challengeKeywords.any { html.contains(it, ignoreCase = true) }
-                    if (!isChallenge || html.length > 50_000) {
-                        Log.d(TAG, "httpGet WebView silent OK $url (${html.length} chars)")
-                        pageCachePut(url, html)
+                    // 2026-07-04 (user "on avait un home instantané mais pas de jaquettes dans
+                    //   le menu synopsis") : sur Chromecast, l'hydratation React de /tv/<slug>
+                    //   peut dépasser les 12s de poll du WebViewResolver → l'HTML retourné est
+                    //   un SHELL sans les liens de saisons (marker absent). Ancien code : on
+                    //   l'acceptait comme succès → seasons = emptyList() → menu synopsis vide.
+                    //   Fix : on ré-vérifie le marker à la sortie ; si absent, on tombe sur le
+                    //   fallback WebView visible qui poll plus longtemps + laisse au réseau/CPU
+                    //   Chromecast le temps de finir l'hydratation.
+                    val markerOk = contentMarker == null ||
+                        html.contains(contentMarker) ||
+                        html.contains(contentMarker.replace("\"", "\\\""))
+                    if ((!isChallenge && markerOk) || html.length > 50_000) {
+                        Log.d(TAG, "httpGet WebView silent OK $url (${html.length} chars, markerOk=$markerOk)")
+                        pageCachePut(cacheKey, html)
                         return@withContext html
+                    }
+                    if (!markerOk) {
+                        Log.w(TAG, "httpGet WebView silent $url — marker '$contentMarker' ABSENT → fallback visible")
                     }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "httpGet WebView silent $url failed: ${e.message}")
             }
 
-            // 4) Dernier recours — WebView visible (cookie expiré ?)
+            // 4) Dernier recours — WebView visible (cookie expiré ? shell sans hydratation ?)
             if (UserPreferences.currentProvider?.name == "DessinAnime") {
                 try {
                     val html = webViewMutex.withLock {
                         val ctx = StreamFlixApp.currentActivity ?: StreamFlixApp.instance
                         val resolver = WebViewResolver(ctx)
-                        try { resolver.get(url, silent = false) } finally {
+                        try { resolver.get(url, silent = false, contentMarker = contentMarker, rscFetchUrl = rscFetchUrl, markerTimeoutMs = markerTimeoutMs) } finally {
                             try { resolver.cleanup() } catch (_: Throwable) {}
                         }
                     }
                     if (html.length > 500) {
-                        Log.d(TAG, "httpGet WebView visible OK $url (${html.length} chars)")
-                        cfBypassDone = true
-                        pageCachePut(url, html)
+                        // 2026-07-04 : même check marker sur le fallback visible — évite le
+                        //   cas où l'user résout un CF dialog mais l'hydratation n'a pas fini
+                        //   (=on aurait toujours pas les saisons).
+                        val markerOk = contentMarker == null ||
+                            html.contains(contentMarker) ||
+                            html.contains(contentMarker.replace("\"", "\\\""))
+                        if (markerOk || html.length > 50_000) {
+                            Log.d(TAG, "httpGet WebView visible OK $url (${html.length} chars, markerOk=$markerOk)")
+                            markBypassFresh()
+                            pageCachePut(cacheKey, html)
+                            return@withContext html
+                        }
+                        Log.w(TAG, "httpGet WebView visible $url — marker '$contentMarker' ABSENT après visible → renvoie quand même (best-effort, seasons peuvent être vides)")
+                        // Best-effort : on renvoie le HTML — les parseurs downstream feront
+                        // ce qu'ils peuvent. Mieux que null qui casse la fiche entière.
+                        pageCachePut(cacheKey, html)
                         return@withContext html
                     }
                 } catch (e: Exception) {
@@ -411,6 +632,42 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
         Log.w(TAG, "httpGet ÉCHEC total $url")
         null
         } // end networkSemaphore.withPermit
+    }
+
+    /**
+     * 2026-07-04 : fetch RSC via OkHttp DIRECT (header RSC:1). Le WebView est trop instable sur
+     *   les pages détail tv (CSP connect-src 'none' bloque le fetch interne + re-challenge par
+     *   WebView fraîche + hydratation >12s sur Chromecast). Une fois le cf_clearance détail posé (detailWarm)
+     *   et l'UA OkHttp aligné sur STEALTH_UA (cookie lié à l'UA), OkHttp peut récupérer le RSC
+     *   server-rendered (~98 Ko, saisons/épisodes en clair). Réponse = null si 403/challenge → le
+     *   caller retombe sur le WebView. La clé de succès : le RSC contient le marker demandé.
+     */
+    private suspend fun okHttpRsc(url: String, marker: String): String? = withContext(Dispatchers.IO) {
+        networkSemaphore.withPermit {
+            try {
+                val req = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", UA)
+                    .header("RSC", "1")
+                    .header("Accept", "text/x-component,*/*;q=0.9")
+                    .header("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
+                    .header("Referer", baseUrl)
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string() ?: ""
+                        if (body.contains(marker)) {
+                            Log.d(TAG, "okHttpRsc OK $url (${body.length} chars, marker présent)")
+                            return@withContext body
+                        }
+                        Log.d(TAG, "okHttpRsc $url → 200 mais marker '$marker' absent (${body.length} chars)")
+                    } else {
+                        Log.d(TAG, "okHttpRsc $url → ${resp.code} (fallback WebView)")
+                    }
+                }
+            } catch (e: Exception) { Log.w(TAG, "okHttpRsc KO $url: ${e.message}") }
+            null
+        }
     }
 
     // ── Parsing helpers ────────────────────────────────────────────────
@@ -519,6 +776,22 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
             }
             out.add(item)
         }
+        // 2026-07-04 : flux RSC (home/catalogue via header RSC:1) — les items sont des OBJETS
+        //   {"slug":…,"mediaType":"MOVIE|TV","title":…,"posterPath":…} SANS href="/tv/…" (le href
+        //   y est en clé JSON "href":"…", pas en attribut HTML). ITEM_HREF_REGEX ne les voit donc
+        //   pas. On itère les objets RSC directement (ordre du flux) → parseHomeItems marche AUSSI
+        //   sur les réponses RSC légères (104 Ko) que sur les pages HTML lourdes (378 Ko).
+        if (out.isEmpty() || html.contains("\"mediaType\"")) {
+            val un = if (html.length < 800_000) html.replace("\\\"", "\"") else html
+            for (m in RSC_SLUG_REGEX.findAll(un)) {
+                try {
+                    val o = JSONObject(m.value)
+                    val slug = o.optString("slug").ifBlank { continue }
+                    if (!seen.add(slug)) continue
+                    jsonToItem(o)?.let { out.add(it) }
+                } catch (_: Exception) {}
+            }
+        }
         return out
     }
 
@@ -528,177 +801,180 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
      *  2026-06-23 : cache ITEMS PARSÉS (pas juste le HTML) pour que
      *  getMovies(page=4) et getTvShows(page=4) ne refetchent pas
      *  les mêmes pages catalogue. Divise par 2 les appels WebView. */
-    private suspend fun fetchCatalogPage(page: Int): List<AppAdapter.Item> {
+    //   2026-07-04 (user "je trouve que 6 films sur 375 pages") : le catalogue MÉLANGÉ
+    //   (/catalogue?page=N) ne rend que ~5 films par page → l'onglet Films semblait quasi vide.
+    //   Le site expose un filtre mediaType (vérifié en direct : /catalogue?mediaType=MOVIE&page=N
+    //   = 12 films PROPRES/page, pages distinctes, ~375 pages de contenu). On l'utilise pour
+    //   getMovies (MOVIE) et getTvShows (TV) → 12 items du bon type par page.
+    private suspend fun fetchCatalogPage(page: Int, mediaType: String? = null): List<AppAdapter.Item> {
+        val cacheKey = (mediaType ?: "ALL") + ":" + page
         // Cache items parsés (survit entre getMovies ↔ getTvShows)
-        catalogItemsCache[page]?.let { (ts, items) ->
+        catalogItemsCache[cacheKey]?.let { (ts, items) ->
             if (System.currentTimeMillis() - ts < CATALOG_ITEMS_TTL_MS) {
-                Log.d(TAG, "fetchCatalogPage($page) → cache hit (${items.size} items)")
+                Log.d(TAG, "fetchCatalogPage($cacheKey) → cache hit (${items.size} items)")
                 return items
             }
         }
-        val html = httpGet("$baseUrl/catalogue?page=$page") ?: return emptyList()
+        val url = if (mediaType != null) "$baseUrl/catalogue?mediaType=$mediaType&page=$page"
+                  else "$baseUrl/catalogue?page=$page"
+        val html = httpGet(url) ?: return emptyList()
         val items = parseHomeItems(html)
-        catalogItemsCache[page] = System.currentTimeMillis() to items
-        Log.d(TAG, "fetchCatalogPage($page) → fetched (${items.size} items, mis en cache)")
+        catalogItemsCache[cacheKey] = System.currentTimeMillis() to items
+        Log.d(TAG, "fetchCatalogPage($cacheKey) → fetched (${items.size} items, mis en cache)")
         return items
     }
 
-    override suspend fun getHome(): List<Category> = kotlinx.coroutines.coroutineScope {
-        // 2026-06-23 (user "pas de bypass pas de contenu") : gate CF bypass
-        //   AVANT tout contenu. Si pas de CF → no-op instantané.
-        ensureCfBypass()
-        // 2026-06-09 : ne fetch QUE la page d'accueil (1 fetch WebView ≈ 6s).
-        val homeItems = parseHomeItems(httpGet("$baseUrl/") ?: "")
-        val homeFilms = homeItems.filterIsInstance<Movie>()
-        val homeTvs = homeItems.filterIsInstance<TvShow>()
+    // 2026-07-04 v2 (user "les catégories du home ne sont pas les vraies du site — je veux
+    //   En Tendance, Top Français, Nouveaux Épisodes, Nouveaux Films, Mieux Notés") :
+    //   on parse les VRAIES sections du SSR HTML au lieu de découper en chunks artificiels.
+    //   Le SSR contient 5 <header><p>SECTION</p></header> avec ~12 items chacune.
+    //   Regex flexible qui capture aussi les hrefs épisode (/tv/slug/3/9).
+    private val SECTION_HEADER_REGEX = Regex("""<header[^>]*>\s*<p[^>]*>([^<]+)</p>""")
+    private val SECTION_ITEM_REGEX = Regex("""<img\b[^>]*\balt="([^"]*)"[^>]*\bsrc="([^"]+)"[\s\S]{0,800}?href="\/(movie|tv)\/([^"\/]+)""")
 
+    // 2026-07-09 : getHome 100% TMDB — ZÉRO CF, ZÉRO scraping, chargement INSTANTANÉ.
+    //   Le site DessinAnime a 363+ pages d'animation sur TMDB. On utilise Discover (genre
+    //   Animation=16) + Trending pour peupler le home. Le CF bypass tourne EN FOND (warmUpCf)
+    //   pour être prêt quand le user cliquera sur un titre (= getServers, seul endroit CF).
+    override suspend fun getHome(): List<Category> = coroutineScope {
+        // Lancer le préchauffage CF en fond (non bloquant) pour les futurs getServers
+        launch(Dispatchers.IO) {
+            try { warmUpCf() } catch (_: Exception) {}
+        }
+
+        val animGenreMovie = TMDb3.Params.WithBuilder(TMDb3.Genre.Movie.ANIMATION)
+        val animGenreTv = TMDb3.Params.WithBuilder(TMDb3.Genre.Tv.ANIMATION)
         val categories = mutableListOf<Category>()
 
-        // 2026-06-22 (mémoire) : ZÉRO DUPLICATION entre catégories.
-        //   Avant : un même film apparaissait dans "Films", "Films récents",
-        //   "Films les mieux notés", "À découvrir", "Top général", etc.
-        //   = ×6 ViewHolders Glide pour le MÊME poster → pression bitmap.
-        //   Maintenant : chaque item n'apparaît que dans UNE SEULE catégorie.
-        //   On SPLIT en tranches disjointes pour avoir ≥15 catégories.
-        val currentYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
-
-        // ── Films : split en 4 tranches disjointes ──
-        val usedFilmIds = mutableSetOf<String>()
-        fun pickFilms(source: List<Movie>, max: Int): List<Movie> {
-            val picked = source.filter { usedFilmIds.add(it.id) }.take(max)
-            return picked
-        }
-        // 2026-06-23 (user "y'a vraiment pas assez de contenu par catégorie") :
-        //   8 → 15 items par rail. recentFilms supprimé (= doublon visuel avec
-        //   "Films" car ils proviennent de la même source).
-        val topFilms = pickFilms(homeFilms.sortedByDescending { it.rating ?: 0.0 }
-            .filter { (it.rating ?: 0.0) >= 6.5 }, 15)
-        val classicFilms = pickFilms(homeFilms.filter { m ->
-            val y = m.released?.get(java.util.Calendar.YEAR) ?: 0; y in 1900..(currentYear - 3)
-        }, 15)
-        val remainFilms1 = pickFilms(homeFilms, 15)
-        val remainFilms2 = pickFilms(homeFilms, 15)
-
-        // ── Séries : split en 4 tranches disjointes ──
-        val usedShowIds = mutableSetOf<String>()
-        fun pickShows(source: List<TvShow>, max: Int): List<TvShow> {
-            val picked = source.filter { usedShowIds.add(it.id) }.take(max)
-            return picked
-        }
-        // 2026-06-23 : 8 → 15 par rail (idem films). recentShows supprimé.
-        val topShows = pickShows(homeTvs.sortedByDescending { it.rating ?: 0.0 }
-            .filter { (it.rating ?: 0.0) >= 6.5 }, 15)
-        val classicShows = pickShows(homeTvs.filter { s ->
-            val y = s.released?.get(java.util.Calendar.YEAR) ?: 0; y in 1900..(currentYear - 3)
-        }, 15)
-        val remainShows1 = pickShows(homeTvs, 15)
-        val remainShows2 = pickShows(homeTvs, 15)
-
-        // ── Assemblage des catégories (zéro duplication, ≥10 cat) ──
-        // 2026-06-23 (user) : SUPPRIMÉ : "Films récents" (= doublon visuel de
-        //   "Films"), "Séries récentes" (idem), "Sélection films",
-        //   "Tout le catalogue" (= placeholder inutile).
-        if (topFilms.isNotEmpty()) categories.add(Category(name = "Films populaires", list = topFilms))
-        if (topShows.isNotEmpty()) categories.add(Category(name = "Séries populaires", list = topShows))
-        if (classicFilms.isNotEmpty()) categories.add(Category(name = "Films classiques", list = classicFilms))
-        if (classicShows.isNotEmpty()) categories.add(Category(name = "Séries classiques", list = classicShows))
-        if (remainFilms1.isNotEmpty()) categories.add(Category(name = "Films", list = remainFilms1))
-        if (remainShows1.isNotEmpty()) categories.add(Category(name = "Séries", list = remainShows1))
-        if (remainFilms2.isNotEmpty()) categories.add(Category(name = "Encore plus de films", list = remainFilms2))
-        if (remainShows2.isNotEmpty()) categories.add(Category(name = "Encore plus de séries", list = remainShows2))
-        // Top mixte (items restants non utilisés)
-        val usedAll = usedFilmIds + usedShowIds
-        val mixRemain = homeItems.filter { item ->
-            val id = when (item) { is Movie -> item.id; is TvShow -> item.id; else -> "" }
-            id.isNotEmpty() && id !in usedAll
-        }.take(15)
-        if (mixRemain.isNotEmpty()) categories.add(Category(name = "À découvrir", list = mixRemain))
-        // 2026-06-23 : SUPPRIMÉ "Sélection séries" (= re-tri d'items déjà dans
-        //   "Séries populaires") et "Derniers ajouts" (= items sans vérif doublon).
-        //   Réduit les doublons visibles sur le home.
-
-        // 2026-06-22 (mémoire) : carrousel ALLÉGÉ — 4 items max (au lieu de 10).
-        //   Chaque item du carrousel = 1 backdrop w500 en RAM (~60 KB décodé).
-        //   4 items = ~0.6 MB. TMDB enrichissement cappé à 2s.
-        val featuredSource = homeItems
-            .filter { it is Movie || it is TvShow }
-            .take(4)
-        if (featuredSource.isNotEmpty() && UserPreferences.enableTmdb) {
-            val featured = featuredSource.map { item ->
+        try {
+            // ── FEATURED (carrousel) : Tendances animation de la semaine ──
+            val trending = TMDb3.Trending.all(TMDb3.Params.TimeWindow.WEEK, language = "fr-FR")
+            val trendingAnim = trending.results.filter { item ->
                 when (item) {
-                    is Movie -> Movie(id = item.id, title = item.title, banner = item.poster, poster = item.poster)
-                    is TvShow -> TvShow(id = item.id, title = item.title, banner = item.poster, poster = item.poster)
-                    else -> item
+                    is TMDb3.Movie -> 16 in item.genresIds
+                    is TMDb3.Tv -> 16 in item.genresIds
+                    else -> false
+                }
+            }.take(12)
+            if (trendingAnim.isNotEmpty()) {
+                val featured = trendingAnim.take(6).map { it.toAppItem(banner = true) }
+                categories.add(Category(name = Category.FEATURED, list = featured))
+                if (trendingAnim.size > 6) {
+                    categories.add(Category(name = "En Tendance", list = trendingAnim.drop(6).map { it.toAppItem() }))
                 }
             }
-            kotlinx.coroutines.withTimeoutOrNull(2_000L) {
-            featured.map { item ->
-                async(Dispatchers.IO) {
-                    try {
-                        val title = when (item) {
-                            is Movie -> item.title
-                            is TvShow -> item.title
-                            else -> return@async
-                        }
-                        val norm = TitleNormalizer.cleanForTmdbSearch(title)
-                        val searchQuery = norm.ifBlank { title }
-                        if (searchQuery.length < 2) return@async
-                        val results = TMDb3.Search.multi(searchQuery, language = "fr-FR")
-                        // Matching strict : type + titre similaire
-                        val match = results.results.firstOrNull { r ->
-                            when {
-                                item is TvShow && r is TMDb3.Tv && r.backdropPath != null -> {
-                                    val t = r.name?.trim() ?: ""
-                                    t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
-                                }
-                                item is Movie && r is TMDb3.Movie && r.backdropPath != null -> {
-                                    val t = r.title?.trim() ?: ""
-                                    t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
-                                }
-                                // Fallback : accepter n'importe quel type anime si titre match
-                                r is TMDb3.Tv && r.backdropPath != null -> {
-                                    val t = r.name?.trim() ?: ""
-                                    t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
-                                }
-                                r is TMDb3.Movie && r.backdropPath != null -> {
-                                    val t = r.title?.trim() ?: ""
-                                    t.equals(searchQuery, true) || t.contains(searchQuery, true) || searchQuery.contains(t, true)
-                                }
-                                else -> false
-                            }
-                        }
-                        val backdrop = when (match) {
-                            is TMDb3.Movie -> match.backdropPath?.original
-                            is TMDb3.Tv -> match.backdropPath?.original
-                            else -> null
-                        }
-                        if (backdrop != null) when (item) {
-                            is Movie -> item.banner = backdrop
-                            is TvShow -> item.banner = backdrop
-                        }
-                    } catch (_: Exception) {}
-                }
-            }.awaitAll()
+
+            // ── Films Populaires ──
+            val popMovies = TMDb3.Discover.movie(
+                withGenres = animGenreMovie,
+                language = "fr-FR",
+                sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
+                page = 1,
+            )
+            if (popMovies.results.isNotEmpty()) {
+                categories.add(Category(name = "Films Populaires", list = popMovies.results.take(20).map { it.toAppMovie() }))
             }
-            // Ne garder que les items avec backdrop TMDb HD (min 5 sinon liste complète)
-            val carouselItems = featured.filter { item ->
-                val b = when (item) { is Movie -> item.banner; is TvShow -> item.banner; else -> null }
-                b != null && b.contains("/t/p/")
+
+            // ── Séries Populaires ──
+            val popTv = TMDb3.Discover.tv(
+                withGenres = animGenreTv,
+                language = "fr-FR",
+                sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
+                page = 1,
+            )
+            if (popTv.results.isNotEmpty()) {
+                categories.add(Category(name = "Séries Populaires", list = popTv.results.take(20).map { it.toAppTvShow() }))
             }
-            val finalCarousel = if (carouselItems.size >= 5) carouselItems else featured
-            if (finalCarousel.isNotEmpty()) {
-                categories.add(0, Category(name = Category.FEATURED, list = finalCarousel))
+
+            // ── Mieux Notés (films animation avec ≥100 votes) ──
+            val topRated = TMDb3.Discover.movie(
+                withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Movie.ANIMATION),
+                language = "fr-FR",
+                sortBy = TMDb3.Params.SortBy.Movie.VOTE_AVERAGE_DESC,
+                voteCount = TMDb3.Params.Range(gte = 100),
+                page = 1,
+            )
+            if (topRated.results.isNotEmpty()) {
+                categories.add(Category(name = "Mieux Notés", list = topRated.results.take(20).map { it.toAppMovie() }))
             }
+
+            // ── Nouveautés Films ──
+            val newMovies = TMDb3.Discover.movie(
+                withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Movie.ANIMATION),
+                language = "fr-FR",
+                sortBy = TMDb3.Params.SortBy.Movie.PRIMARY_RELEASE_DATE_DESC,
+                voteCount = TMDb3.Params.Range(gte = 5),
+                page = 1,
+            )
+            if (newMovies.results.isNotEmpty()) {
+                categories.add(Category(name = "Nouveaux Films", list = newMovies.results.take(20).map { it.toAppMovie() }))
+            }
+
+            // ── Nouveautés Séries ──
+            val newTv = TMDb3.Discover.tv(
+                withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Tv.ANIMATION),
+                language = "fr-FR",
+                sortBy = TMDb3.Params.SortBy.Tv.FIRST_AIR_DATE_DESC,
+                voteCount = TMDb3.Params.Range(gte = 5),
+                page = 1,
+            )
+            if (newTv.results.isNotEmpty()) {
+                categories.add(Category(name = "Nouvelles Séries", list = newTv.results.take(20).map { it.toAppTvShow() }))
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "getHome TMDB failed: ${e.message}")
         }
 
-        Log.d(TAG, "getHome → ${categories.size} categories, ${homeItems.size} items (0 duplication)")
+        Log.d(TAG, "getHome → ${categories.size} categories (100% TMDB, zéro CF)")
         categories
     }
 
+    // ── Helpers conversion TMDB → modèles app ──────────────────────────
+    private fun TMDb3.Movie.toAppMovie(): Movie {
+        val poster = this.posterPath?.let { "https://image.tmdb.org/t/p/w342$it" }
+        val banner = this.backdropPath?.let { "https://image.tmdb.org/t/p/w1280$it" }
+        return Movie(
+            id = "movie::tmdb::${this.id}",
+            title = this.title,
+            poster = poster,
+            banner = banner,
+            released = this.releaseDate?.take(4),
+            rating = this.voteAverage.takeIf { it > 0 }?.toDouble(),
+        )
+    }
+
+    private fun TMDb3.Tv.toAppTvShow(): TvShow {
+        val poster = this.posterPath?.let { "https://image.tmdb.org/t/p/w342$it" }
+        val banner = this.backdropPath?.let { "https://image.tmdb.org/t/p/w1280$it" }
+        return TvShow(
+            id = "tv::tmdb::${this.id}",
+            title = this.name,
+            poster = poster,
+            banner = banner,
+            released = this.firstAirDate?.take(4),
+            rating = this.voteAverage.takeIf { it > 0 }?.toDouble(),
+        )
+    }
+
+    private fun TMDb3.MultiItem.toAppItem(banner: Boolean = false): AppAdapter.Item = when (this) {
+        is TMDb3.Movie -> {
+            val p = this.posterPath?.let { "https://image.tmdb.org/t/p/w342$it" }
+            val b = if (banner) (this.backdropPath?.let { "https://image.tmdb.org/t/p/w1280$it" } ?: p) else null
+            Movie(id = "movie::tmdb::${this.id}", title = this.title, poster = p, banner = b,
+                released = this.releaseDate?.take(4), rating = this.voteAverage.takeIf { it > 0 }?.toDouble())
+        }
+        is TMDb3.Tv -> {
+            val p = this.posterPath?.let { "https://image.tmdb.org/t/p/w342$it" }
+            val b = if (banner) (this.backdropPath?.let { "https://image.tmdb.org/t/p/w1280$it" } ?: p) else null
+            TvShow(id = "tv::tmdb::${this.id}", title = this.name, poster = p, banner = b,
+                released = this.firstAirDate?.take(4), rating = this.voteAverage.takeIf { it > 0 }?.toDouble())
+        }
+        else -> Movie(id = "unknown", title = "?")
+    }
+
+    // 2026-07-09 : search 100% TMDB (genre Animation, fr-FR) — ZÉRO CF.
+    //   Résultats instantanés. Le site n'est plus interrogé pour la recherche.
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> = withContext(Dispatchers.IO) {
-        ensureCfBypass() // 2026-06-23 : pas de contenu tant que le bypass n'est pas fait
-        // Empty query : expose genre picker (peu de genres exposés par le site,
-        //   on retourne juste les sections home en attendant de mapper /api/categories).
         if (query.isBlank()) {
             if (page > 1) return@withContext emptyList()
             return@withContext listOf(
@@ -707,21 +983,22 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                 Genre(id = "tv", name = "Séries"),
             )
         }
-        // API search — pas de pagination native, on retourne tout.
         if (page > 1) return@withContext emptyList()
-        val url = "$baseUrl/api/search?q=${java.net.URLEncoder.encode(query, "UTF-8")}"
-        val body = httpGet(url) ?: return@withContext emptyList()
         try {
-            val arr = JSONArray(body)
-            val results = mutableListOf<AppAdapter.Item>()
-            for (i in 0 until arr.length()) {
-                val item = jsonToItem(arr.optJSONObject(i) ?: continue) ?: continue
-                results.add(item)
-            }
-            Log.d(TAG, "search('$query') → ${results.size} results")
-            results
+            val tmdbResults = TMDb3.Search.multi(query, language = "fr-FR")
+            val items = tmdbResults.results
+                .filter { item ->
+                    when (item) {
+                        is TMDb3.Movie -> 16 in item.genresIds  // Animation
+                        is TMDb3.Tv -> 16 in item.genresIds
+                        else -> false
+                    }
+                }
+                .map { it.toAppItem() }
+            Log.d(TAG, "search('$query') → ${items.size} results (TMDB animation)")
+            items
         } catch (e: Exception) {
-            Log.w(TAG, "search parse failed: ${e.message}")
+            Log.w(TAG, "search TMDB failed: ${e.message}")
             emptyList()
         }
     }
@@ -740,24 +1017,40 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
     //   les récupère du cache items (~0s). Total = ~4s au lieu de ~12s.
     private val PAGES_PER_USER_PAGE = 2
 
-    override suspend fun getMovies(page: Int): List<Movie> = kotlinx.coroutines.coroutineScope {
-        ensureCfBypass() // 2026-06-23 : pas de contenu tant que le bypass n'est pas fait
-        val start = (page - 1) * PAGES_PER_USER_PAGE + 1
-        val end = start + PAGES_PER_USER_PAGE - 1
-        val pages = (start..end).map { p -> async { fetchCatalogPage(p) } }.map { it.await() }
-        val movies = pages.flatten().filterIsInstance<Movie>().distinctBy { it.id }
-        Log.d(TAG, "getMovies(page=$page) fetched catalog $start..$end -> ${movies.size} movies")
-        movies
+    // 2026-07-09 : catalogue 100% TMDB Discover (genre Animation, fr-FR) — ZÉRO CF.
+    //   TMDB a 363+ pages d'animation. Pagination native TMDB (20 items/page).
+    override suspend fun getMovies(page: Int): List<Movie> = withContext(Dispatchers.IO) {
+        try {
+            val result = TMDb3.Discover.movie(
+                withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Movie.ANIMATION),
+                language = "fr-FR",
+                sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
+                page = page,
+            )
+            val movies = result.results.map { it.toAppMovie() }
+            Log.d(TAG, "getMovies(page=$page) → ${movies.size} movies (TMDB Discover)")
+            movies
+        } catch (e: Exception) {
+            Log.w(TAG, "getMovies TMDB failed: ${e.message}")
+            emptyList()
+        }
     }
 
-    override suspend fun getTvShows(page: Int): List<TvShow> = kotlinx.coroutines.coroutineScope {
-        ensureCfBypass() // 2026-06-23 : pas de contenu tant que le bypass n'est pas fait
-        val start = (page - 1) * PAGES_PER_USER_PAGE + 1
-        val end = start + PAGES_PER_USER_PAGE - 1
-        val pages = (start..end).map { p -> async { fetchCatalogPage(p) } }.map { it.await() }
-        val shows = pages.flatten().filterIsInstance<TvShow>().distinctBy { it.id }
-        Log.d(TAG, "getTvShows(page=$page) fetched catalog $start..$end -> ${shows.size} shows")
-        shows
+    override suspend fun getTvShows(page: Int): List<TvShow> = withContext(Dispatchers.IO) {
+        try {
+            val result = TMDb3.Discover.tv(
+                withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Tv.ANIMATION),
+                language = "fr-FR",
+                sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
+                page = page,
+            )
+            val shows = result.results.map { it.toAppTvShow() }
+            Log.d(TAG, "getTvShows(page=$page) → ${shows.size} shows (TMDB Discover)")
+            shows
+        } catch (e: Exception) {
+            Log.w(TAG, "getTvShows TMDB failed: ${e.message}")
+            emptyList()
+        }
     }
 
     /** Extrait slug + type depuis id "movie::SLUG" ou "tv::SLUG". */
@@ -768,129 +1061,235 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
         return parts[0] to parts[1]
     }
 
+    // 2026-07-09 : getMovie 100% TMDB — ZÉRO CF. Si l'ID est movie::tmdb::ID, on
+    //   appelle Movies.details directement. Si c'est un ancien slug (movie::SLUG),
+    //   on extrait le tmdbId du slug (format "<tmdbId>-<titre>") et on fait pareil.
     override suspend fun getMovie(id: String): Movie = withContext(Dispatchers.IO) {
+        val tmdbId = extractTmdbId(id)
+        if (tmdbId != null) {
+            try {
+                val detail = TMDb3.Movies.details(tmdbId, language = "fr-FR")
+                val poster = detail.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
+                val banner = detail.backdropPath?.let { "https://image.tmdb.org/t/p/w1280$it" }
+                Log.d(TAG, "getMovie($id) → TMDB detail '${detail.title}' (tmdbId=$tmdbId)")
+                return@withContext Movie(
+                    id = id,
+                    title = detail.title,
+                    overview = detail.overview,
+                    poster = poster,
+                    banner = banner,
+                    released = detail.releaseDate?.take(4),
+                    rating = detail.voteAverage.takeIf { it > 0 }?.toDouble(),
+                    runtime = detail.runtime,
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "getMovie TMDB failed (tmdbId=$tmdbId): ${e.message}")
+            }
+        }
+        // Fallback : ancien slug sans tmdbId extractible
         val (type, slug) = parseInternalId(id) ?: return@withContext Movie(id = id, title = id)
         if (type != "movie") return@withContext Movie(id = id, title = slug)
-        val html = httpGet("$baseUrl/movie/$slug")
-        val title = html?.let { Regex("""<h1[^>]*>([^<]+)</h1>""").find(it)?.groupValues?.get(1)?.trim() }
-            ?: slug.replace(Regex("^\\d+-"), "").replace("-", " ").replaceFirstChar { it.uppercase() }
-        val overview = html?.let {
-            Regex("""<p[^>]*>([^<]{80,})</p>""").find(it)?.groupValues?.get(1)?.trim()
-        }
-        val poster = cleanPosterUrl(html?.let {
-            Regex("""<meta property="og:image" content="([^"]+)"""").find(it)?.groupValues?.get(1)
-        })
-        val year = html?.let { Regex("""\b(19|20)\d{2}\b""").find(it)?.value }
-        Movie(id = id, title = title, overview = overview, poster = poster, released = year)
+        val titleFromSlug = slug.replace(Regex("^\\d+-"), "").replace("-", " ").replaceFirstChar { it.uppercase() }
+        Movie(id = id, title = titleFromSlug)
     }
 
+    /** Extrait le tmdbId depuis un ID DessinAnime (movie::tmdb::123 ou movie::123-slug ou tv::tmdb::456). */
+    private fun extractTmdbId(id: String): Int? {
+        val parts = id.split("::")
+        // Format nouveau : movie::tmdb::123 ou tv::tmdb::123
+        if (parts.size >= 3 && parts[1] == "tmdb") {
+            return parts[2].toIntOrNull()
+        }
+        // Format ancien : movie::123-slug ou tv::123-slug (le slug commence par le tmdbId)
+        if (parts.size >= 2) {
+            return parts[1].substringBefore("-").toIntOrNull()
+        }
+        return null
+    }
+
+    /**
+     * 2026-07-09 : Résout un slug DessinAnime depuis un ID (nouveau tmdb:: ou ancien slug).
+     * Pour les IDs tmdb:: : recherche le titre sur /api/search du site pour trouver le slug.
+     * Pour les anciens IDs (movie::slug) : extrait le slug directement.
+     * Retourne null si impossible (slug introuvable → les backups prendront le relais).
+     */
+    private suspend fun resolveSlugFromId(id: String, title: String): String? {
+        val parts = id.split("::")
+        // Format nouveau tmdb:: → rechercher le titre sur le site
+        if (parts.size >= 3 && parts[1] == "tmdb") {
+            val tmdbId = parts[2].toIntOrNull()
+            if (title.isBlank()) {
+                Log.w(TAG, "resolveSlugFromId: titre vide pour id=$id")
+                return null
+            }
+            // Recherche sur le site DessinAnime pour trouver le slug correspondant
+            try {
+                val searchUrl = "$baseUrl/api/search?q=${java.net.URLEncoder.encode(title, "UTF-8")}"
+                val body = httpGet(searchUrl)
+                if (body != null) {
+                    val arr = JSONArray(body)
+                    // Chercher le meilleur match : tmdbId direct ou titre exact
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        val slug = obj.optString("slug").takeIf { it.isNotBlank() } ?: continue
+                        // Le slug DessinAnime commence par le tmdbId (ex: "269149-zootopie")
+                        val slugTmdb = slug.substringBefore("-").toIntOrNull()
+                        if (slugTmdb != null && slugTmdb == tmdbId) {
+                            Log.d(TAG, "resolveSlugFromId: tmdb::$tmdbId → slug='$slug' (tmdbId match)")
+                            return slug
+                        }
+                    }
+                    // Fallback : premier résultat dont le titre matche
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        val slug = obj.optString("slug").takeIf { it.isNotBlank() } ?: continue
+                        val candidateTitle = obj.optString("title")
+                        if (candidateTitle.equals(title, ignoreCase = true)) {
+                            Log.d(TAG, "resolveSlugFromId: tmdb::$tmdbId → slug='$slug' (titre match)")
+                            return slug
+                        }
+                    }
+                    // Dernier fallback : premier résultat tout court
+                    val firstSlug = arr.optJSONObject(0)?.optString("slug")?.takeIf { it.isNotBlank() }
+                    if (firstSlug != null) {
+                        Log.d(TAG, "resolveSlugFromId: tmdb::$tmdbId → slug='$firstSlug' (1er résultat)")
+                        return firstSlug
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "resolveSlugFromId search KO: ${e.message}")
+            }
+            Log.w(TAG, "resolveSlugFromId: aucun slug trouvé pour '$title' (tmdb::$tmdbId)")
+            return null
+        }
+        // Format ancien : movie::slug ou tv::slug::sN::eM → extraire le slug
+        return parseInternalId(id)?.second
+            ?: parts.getOrNull(1)
+    }
+
+    // 2026-07-09 : getTvShow 100% TMDB — ZÉRO CF. Saisons incluses dans TvSeries.details.
+    //   Gère movie::tmdb::ID, tv::tmdb::ID et les anciens slugs tv::123-slug.
     override suspend fun getTvShow(id: String): TvShow = withContext(Dispatchers.IO) {
+        val tmdbId = extractTmdbId(id)
+        if (tmdbId != null) {
+            try {
+                val detail = TMDb3.TvSeries.details(tmdbId, language = "fr-FR")
+                val poster = detail.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
+                val banner = detail.backdropPath?.let { "https://image.tmdb.org/t/p/w1280$it" }
+                // Construire les saisons depuis la liste TMDB (exclure Saison 0 = Specials si vide)
+                val seasons = detail.seasons
+                    .filter { it.seasonNumber > 0 || (it.episodeCount ?: 0) > 0 }
+                    .map { s ->
+                        val sPoster = s.posterPath?.let { "https://image.tmdb.org/t/p/w342$it" } ?: poster
+                        Season(
+                            id = "tv::tmdb::${tmdbId}::s${s.seasonNumber}",
+                            number = s.seasonNumber,
+                            title = s.name.ifBlank { "Saison ${s.seasonNumber}" },
+                            poster = sPoster,
+                        )
+                    }
+                Log.d(TAG, "getTvShow($id) → TMDB '${detail.name}', ${seasons.size} saisons (tmdbId=$tmdbId)")
+                return@withContext TvShow(
+                    id = id,
+                    title = detail.name,
+                    overview = detail.overview,
+                    poster = poster,
+                    banner = banner,
+                    released = detail.firstAirDate?.take(4),
+                    rating = detail.voteAverage.takeIf { it > 0 }?.toDouble(),
+                    seasons = seasons,
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "getTvShow TMDB failed (tmdbId=$tmdbId): ${e.message}")
+            }
+        }
+        // Fallback : ancien slug sans tmdbId extractible
         val (type, slug) = parseInternalId(id) ?: return@withContext TvShow(id = id, title = id)
         if (type != "tv") return@withContext TvShow(id = id, title = slug)
-        val html = httpGet("$baseUrl/tv/$slug")
-        val title = html?.let { Regex("""<h1[^>]*>([^<]+)</h1>""").find(it)?.groupValues?.get(1)?.trim() }
-            ?: slug.replace(Regex("^\\d+-"), "").replace("-", " ").replaceFirstChar { it.uppercase() }
-        val overview = html?.let {
-            Regex("""<p[^>]*>([^<]{80,})</p>""").find(it)?.groupValues?.get(1)?.trim()
-        }
-        val poster = cleanPosterUrl(html?.let {
-            Regex("""<meta property="og:image" content="([^"]+)"""").find(it)?.groupValues?.get(1)
-        })
-        val year = html?.let { Regex("""\b(19|20)\d{2}\b""").find(it)?.value }
-        // 2026-05-20 : parsing LÉGER par regex (PAS de Jsoup.parse sur 355 Ko).
-        //   L'enrichment "Continuer à regarder" du home appelle getTvShow +
-        //   getEpisodesBySeason en parallèle pour TOUS les shows ; un Jsoup
-        //   full-doc x N saturait la Chromecast (384 Mo) → ANR. Le regex
-        //   extrait quand même l'image propre de chaque saison (fallback poster).
-        val seasons = if (html != null) {
-            val nums = Regex("""href="/tv/${Regex.escape(slug)}/(\d+)/1"""")
-                .findAll(html).mapNotNull { it.groupValues[1].toIntOrNull() }
-                .filter { it > 0 }.toSet().sorted()
-            val imgByNum = HashMap<Int, String>()
-            Regex("""href="/tv/${Regex.escape(slug)}/(\d+)/1"[\s\S]{0,350}?<img\b[^>]*?\bsrc="([^"]+)"""")
-                .findAll(html).forEach { m ->
-                    val n = m.groupValues[1].toIntOrNull() ?: return@forEach
-                    if (!imgByNum.containsKey(n)) imgByNum[n] = m.groupValues[2]
-                }
-            nums.map { n ->
-                val raw = imgByNum[n] ?: ""
-                val img = when {
-                    raw.isBlank() -> poster
-                    raw.startsWith("http") -> raw
-                    raw.startsWith("//") -> "https:$raw"
-                    raw.startsWith("/") -> "$baseUrl$raw"
-                    else -> raw
-                }
-                Season(id = "tv::$slug::s$n", number = n, title = "Saison $n", poster = cleanPosterUrl(img))
-            }
-        } else emptyList<Season>()
-        if (seasons.isNotEmpty()) Log.d(TAG, "getTvShow: ${seasons.size} saisons — ex poster=${seasons.first().poster?.take(110)}")
-        TvShow(id = id, title = title, overview = overview, poster = poster, released = year, seasons = seasons)
+        val titleFromSlug = slug.replace(Regex("^\\d+-"), "").replace("-", " ").replaceFirstChar { it.uppercase() }
+        TvShow(id = id, title = titleFromSlug)
     }
 
+    // 2026-07-09 : getEpisodesBySeason 100% TMDB — ZÉRO CF.
+    //   Format seasonId : tv::tmdb::123::s2 (nouveau) ou tv::slug::s2 (ancien).
+    //   TvSeasons.details retourne épisodes + stills + noms en 1 appel (~1 Ko).
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> = withContext(Dispatchers.IO) {
-        // Format : tv::<slug>::sN
         val parts = seasonId.split("::")
-        if (parts.size != 3 || parts[0] != "tv") return@withContext emptyList()
-        val slug = parts[1]
-        val seasonNum = parts[2].removePrefix("s").toIntOrNull() ?: return@withContext emptyList()
-        val html = httpGet("$baseUrl/tv/$slug/$seasonNum/1") ?: return@withContext emptyList()
-        // 2026-05-20 : parsing LÉGER regex (PAS de Jsoup full-doc → évite l'ANR
-        //   quand l'enrichment home appelle getEpisodesBySeason en parallèle).
-        //   Chaque carte = <a href="/tv/slug/season/ep">…<img alt="titre" src="img">.
-        val epData = LinkedHashMap<Int, Pair<String?, String?>>()  // num -> (alt, src)
-        Regex("""href="/tv/${Regex.escape(slug)}/$seasonNum/(\d+)"[\s\S]{0,500}?<img\b([^>]*)>""")
-            .findAll(html).forEach { m ->
-                val n = m.groupValues[1].toIntOrNull() ?: return@forEach
-                if (n <= 0 || epData.containsKey(n)) return@forEach
-                val attrs = m.groupValues[2]
-                val src = Regex("""\bsrc="([^"]+)"""").find(attrs)?.groupValues?.get(1)
-                val alt = Regex("""\balt="([^"]*)"""").find(attrs)?.groupValues?.get(1)
-                epData[n] = alt to src
+        // Nouveau format : tv::tmdb::123::s2 (4 parts)
+        // Ancien format  : tv::slug::s2 (3 parts)
+        val seasonNumStr = parts.lastOrNull()?.removePrefix("s") ?: return@withContext emptyList()
+        val seasonNum = seasonNumStr.toIntOrNull() ?: return@withContext emptyList()
+
+        // Extraire le tmdbId
+        val tmdbId: Int? = if (parts.size >= 4 && parts[1] == "tmdb") {
+            parts[2].toIntOrNull()
+        } else if (parts.size >= 3) {
+            // Ancien slug : tv::123-slug::s2
+            parts[1].substringBefore("-").toIntOrNull()
+        } else null
+
+        if (tmdbId == null) {
+            Log.w(TAG, "getEpisodesBySeason: impossible d'extraire tmdbId de '$seasonId'")
+            return@withContext emptyList()
+        }
+
+        try {
+            val seasonDetail = TMDb3.TvSeasons.details(tmdbId, seasonNum, language = "fr-FR")
+            val tmdbEps = seasonDetail.episodes ?: emptyList()
+            val episodes = tmdbEps.map { ep ->
+                val still = ep.stillPath?.let { "https://image.tmdb.org/t/p/w300$it" }
+                val epTitle = ep.name?.takeIf { it.isNotBlank() } ?: "Épisode ${ep.episodeNumber}"
+                // L'ID épisode suit le format de la saison : tv::tmdb::123::s2::e5
+                val idPrefix = if (parts.size >= 4 && parts[1] == "tmdb") "tv::tmdb::$tmdbId" else "tv::${parts[1]}"
+                Episode(
+                    id = "$idPrefix::s$seasonNum::e${ep.episodeNumber}",
+                    number = ep.episodeNumber,
+                    title = epTitle,
+                    poster = still,
+                )
             }
-        // Garantir TOUS les épisodes même sans image trouvée
-        Regex("""href="/tv/${Regex.escape(slug)}/$seasonNum/(\d+)"""").findAll(html).forEach { m ->
-            val n = m.groupValues[1].toIntOrNull() ?: return@forEach
-            if (n > 0 && !epData.containsKey(n)) epData[n] = null to null
+            Log.d(TAG, "getEpisodesBySeason($seasonId) → ${episodes.size} eps TMDB (tmdbId=$tmdbId, s$seasonNum)")
+            episodes
+        } catch (e: Exception) {
+            Log.w(TAG, "getEpisodesBySeason TMDB failed (tmdbId=$tmdbId, s$seasonNum): ${e.message}")
+            emptyList()
         }
-        val episodes = epData.entries.sortedBy { it.key }.map { (n, data) ->
-            val (alt, rawSrc) = data
-            val imgUrl = when {
-                rawSrc.isNullOrBlank() -> null
-                rawSrc.startsWith("http") -> rawSrc
-                rawSrc.startsWith("//") -> "https:$rawSrc"
-                rawSrc.startsWith("/") -> "$baseUrl$rawSrc"
-                else -> rawSrc
-            }
-            val altTitle = alt?.trim()
-                ?.takeIf { it.isNotBlank() && !it.equals("episode", true) && !it.startsWith("Épisode", true) }
-            Episode(
-                id = "tv::$slug::s$seasonNum::e$n",
-                number = n,
-                title = altTitle ?: "Épisode $n",
-                poster = cleanPosterUrl(imgUrl),
-            )
-        }
-        if (episodes.isNotEmpty()) {
-            Log.d(TAG, "getEpisodesBySeason: ${episodes.size} eps — ex: '${episodes.first().title}' poster=${episodes.first().poster?.take(110)}")
-        }
-        episodes
     }
 
+    // 2026-07-09 : getGenre via TMDB Discover (genre Animation) — ZÉRO CF.
     override suspend fun getGenre(id: String, page: Int): Genre = withContext(Dispatchers.IO) {
         if (page > 1) return@withContext Genre(id = id, name = id, shows = emptyList())
-        val html = httpGet("$baseUrl/") ?: return@withContext Genre(id = id, name = id, shows = emptyList())
-        val all = parseHomeItems(html)
-        val filtered: List<com.streamflixreborn.streamflix.models.Show> = when (id) {
-            "movies" -> all.filterIsInstance<Movie>()
-            "tv" -> all.filterIsInstance<TvShow>()
-            else -> all.mapNotNull { it as? com.streamflixreborn.streamflix.models.Show }
+        try {
+            val shows: List<com.streamflixreborn.streamflix.models.Show> = when (id) {
+                "movies" -> TMDb3.Discover.movie(
+                    withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Movie.ANIMATION),
+                    language = "fr-FR", sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC, page = 1,
+                ).results.take(20).map { it.toAppMovie() }
+                "tv" -> TMDb3.Discover.tv(
+                    withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Tv.ANIMATION),
+                    language = "fr-FR", sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC, page = 1,
+                ).results.take(20).map { it.toAppTvShow() }
+                else -> {
+                    val movies = TMDb3.Discover.movie(
+                        withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Movie.ANIMATION),
+                        language = "fr-FR", sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC, page = 1,
+                    ).results.take(10).map { it.toAppMovie() }
+                    val tvShows = TMDb3.Discover.tv(
+                        withGenres = TMDb3.Params.WithBuilder(TMDb3.Genre.Tv.ANIMATION),
+                        language = "fr-FR", sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC, page = 1,
+                    ).results.take(10).map { it.toAppTvShow() }
+                    movies + tvShows
+                }
+            }
+            Genre(id = id, name = when (id) {
+                "movies" -> "Films"
+                "tv" -> "Séries"
+                else -> "Tout"
+            }, shows = shows)
+        } catch (e: Exception) {
+            Log.w(TAG, "getGenre TMDB failed: ${e.message}")
+            Genre(id = id, name = id, shows = emptyList())
         }
-        Genre(id = id, name = when (id) {
-            "movies" -> "Films"
-            "tv" -> "Séries"
-            else -> "Tout"
-        }, shows = filtered)
     }
 
     override suspend fun getPeople(id: String, page: Int): People = People(id = id, name = id)
@@ -905,6 +1304,9 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
     //       sans ses propres backups. Préfixe "asbackup__" → délégué à AnimeSama.
     //   Garde anti-récursion : Cloudstream/AnimeSama appelés ici ne rappellent
     //   jamais DessinAnime, et AnimeSama tourne avec skipBackupsForBackupCall=true.
+    // 2026-07-09 : getServers gère les IDs TMDB (movie::tmdb::123, tv::tmdb::123::s2::e5).
+    //   Pour les serveurs natifs, on recherche le titre sur le site via /api/search pour
+    //   trouver le slug, puis on utilise fetchNativeServers avec le slug. CF bypass ICI seulement.
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> = withContext(Dispatchers.IO) {
         val native = try {
             fetchNativeServers(id, videoType)
@@ -912,8 +1314,10 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
             Log.w(TAG, "native servers KO: ${e.message}"); emptyList()
         }
 
-        // Backups TOUJOURS lancés (même si natifs présents) — l'ancien early-return
-        // coupait les backups dès qu'un seul serveur natif existait.
+        // Backups TOUJOURS lancés (même si natifs présents)
+
+        // 2026-07-04 : backups inline DÉSACTIVÉS → registre central.
+        if (com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) return@withContext native
 
         val title = when (videoType) {
             is Video.Type.Movie -> videoType.title
@@ -921,12 +1325,8 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
         }.trim()
         if (title.isBlank()) return@withContext native
 
-        // Extraire le tmdbId du slug DessinAnime (ex: "movie::269149-zootopie" → "269149")
-        // pour que les backups Cloudstream/Nakios/Movix cherchent par tmdbId direct.
-        val tmdbId = id.split("::").getOrNull(1)
-            ?.substringBefore("-")
-            ?.takeIf { it.all(Char::isDigit) && it.length >= 2 }
-            ?: "0"
+        // Extraire le tmdbId — fonctionne avec movie::tmdb::123 ET movie::123-slug
+        val tmdbId = extractTmdbId(id)?.toString() ?: "0"
         Log.d(TAG, "backups: title='$title', tmdbId=$tmdbId (from id=$id)")
 
         val backups = try {
@@ -970,16 +1370,10 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                         fetchWiflixBackup(title, videoType)
                     } catch (e: Exception) { Log.w(TAG, "WF backup KO: ${e.message}"); emptyList() }
                 }
-                // Backup #4 : NetMirror (Netflix/Prime/Disney+ mirrors)
-                val nmD = async {
-                    try {
-                        (kotlinx.coroutines.withTimeoutOrNull(12_000L) {
-                            NetMirrorProvider.getServers(tmdbId, videoType)
-                        } ?: emptyList()).map {
-                            it.copy(id = "nmbackup__${it.id}", name = "NM · ${it.name}")
-                        }
-                    } catch (e: Exception) { Log.w(TAG, "NM backup KO: ${e.message}"); emptyList() }
-                }
+                // Backup #4 : NetMirror — DÉSACTIVÉ (2026-07-08, user : « on retire NetMirror des
+                //   autres backups »). NetMirror exige un challenge Turnstile visible qui ne doit
+                //   apparaître QUE quand NetMirror est le provider choisi, jamais en backup ici.
+                val nmD = async { emptyList<Video.Server>() }
                 // 2026-06-09 v2 : retiré FS/MX/MB (doublons — déjà dans CS).
                 csD.await() + asD.await() + wfD.await() + nmD.await()
             }
@@ -1016,14 +1410,13 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
         }
         // Si pas de titre on s'arrête après le natif.
         if (title.isBlank()) { nativeJob.join(); return@channelFlow }
+        // 2026-07-04 : backups inline DÉSACTIVÉS → registre central.
+        if (com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) { nativeJob.join(); return@channelFlow }
 
-        // Extraire le tmdbId du slug DessinAnime pour les backups
-        val tmdbId = id.split("::").getOrNull(1)
-            ?.substringBefore("-")
-            ?.takeIf { it.all(Char::isDigit) && it.length >= 2 }
-            ?: "0"
+        // 2026-07-09 : extractTmdbId gère les 2 formats (tmdb:: et ancien slug)
+        val tmdbId = extractTmdbId(id)?.toString() ?: "0"
 
-        // VideoType pour Cloudstream (tmdbId extrait du slug)
+        // VideoType pour Cloudstream (tmdbId extrait)
         val csType: Video.Type = when (videoType) {
             is Video.Type.Movie -> Video.Type.Movie(
                 id = tmdbId, title = title, releaseDate = videoType.releaseDate,
@@ -1062,15 +1455,9 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                 if (servers.isNotEmpty()) send(servers)
             } catch (e: Exception) { Log.w(TAG, "progressive WF backup KO: ${e.message}") }
         }
-        // Backup #4 : NetMirror
-        val nmJob = launch(Dispatchers.IO) {
-            try {
-                val servers = (kotlinx.coroutines.withTimeoutOrNull(12_000L) {
-                    NetMirrorProvider.getServers(tmdbId, videoType)
-                } ?: emptyList()).map { it.copy(id = "nmbackup__${it.id}", name = "NM · ${it.name}") }.dedup()
-                if (servers.isNotEmpty()) send(servers)
-            } catch (e: Exception) { Log.w(TAG, "progressive NM backup KO: ${e.message}") }
-        }
+        // Backup #4 : NetMirror — DÉSACTIVÉ (2026-07-08, user : « on retire NetMirror des autres
+        //   backups » — son challenge Turnstile ne doit apparaître que si NetMirror est choisi).
+        val nmJob = launch(Dispatchers.IO) { /* NetMirror backup désactivé */ }
         // 2026-06-09 v3 : re-ajout FS/MX/MB avec déduplication par URL.
         val fsJob = launch(Dispatchers.IO) {
             try {
@@ -1276,28 +1663,158 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
      *   en cas d'échec (pas d'exception) pour que les backups prennent le relais.
      */
     private suspend fun fetchNativeServers(id: String, videoType: Video.Type): List<Video.Server> = withContext(Dispatchers.IO) {
-        // Pour Movie : id = "movie::<slug>" → fetch /movie/<slug>
-        // Pour Episode : id reçu = celui de l'épisode "tv::<slug>::sN::eM"
+        // 2026-07-09 : bypass CF AVANT le fetch RSC — c'est le SEUL endroit qui touche au site.
+        ensureCfBypass()
+        // 2026-07-09 : résolution de l'URL de la page. Si l'ID est tmdb:: (nouveau format),
+        //   on recherche le titre sur le site pour trouver le slug natif.
         val pageUrl: String = when (videoType) {
             is Video.Type.Movie -> {
-                val (type, slug) = parseInternalId(id) ?: return@withContext emptyList()
-                if (type != "movie") return@withContext emptyList()
+                val slug = resolveSlugFromId(id, videoType.title) ?: return@withContext emptyList()
                 "$baseUrl/movie/$slug"
             }
             is Video.Type.Episode -> {
-                // L'id peut être de l'épisode ou du show ; on cherche le slug
-                // depuis le videoType qui contient la séquence saison/épisode.
-                val slug = parseInternalId(id)?.second
-                    ?: id.split("::").getOrNull(1)
-                    ?: return@withContext emptyList()
+                val title = videoType.tvShow.title
+                val slug = resolveSlugFromId(id, title) ?: return@withContext emptyList()
                 val s = videoType.season.number
                 val e = videoType.number
                 "$baseUrl/tv/$slug/$s/$e"
             }
         }
         Log.d(TAG, "getServers fetch $pageUrl")
-        val html = httpGet(pageUrl) ?: return@withContext emptyList()
+        // 2026-07-04 : récupération des sources du player via fetch `RSC:1` DANS le WebView
+        //   (contexte navigateur → passe CF, là où OkHttp reçoit 403 et où l'hydratation
+        //   complète de la page est trop lourde/lente sur TV). Réponse ~184 Ko contenant
+        //   directement les tokens extractor.nmlnode.cc. Marqueur = structure des sources.
+        // 2026-07-06 : le site est passé au format "players":[{"host","url"}] (uqload/hydrax…).
+        //   L'ancien marqueur "sources":[{"type" n'existe PLUS → le WebView pollait ~60× dans le
+        //   vide (markerOk=false) puis « No iframe found » = 0 serveur. On attend le NOUVEAU
+        //   marqueur (fallback sur l'ancien pour compat si une vieille page traîne en cache).
+        val html = httpGet(
+            pageUrl,
+            contentMarker = "\"players\":[{\"host\"",
+            rscFetchUrl = pageUrl,
+        ) ?: httpGet(
+            pageUrl,
+            contentMarker = "\"sources\":[{\"type\"",
+            rscFetchUrl = pageUrl,
+        ) ?: return@withContext emptyList()
 
+        // ── 2026-07-06 : NOUVEAU format du site — "players":[{"host":"...","url":"..."}] ──
+        //   Le lecteur liste directement les embeds (hydrax→abysscdn.com, uqload→uqload.is…).
+        //   Chaque url est un embed jouable par les extracteurs in-app (getVideo route par domaine).
+        run {
+            val h = if (html.contains("\\\"players\\\"")) html.replace("\\\"", "\"") else html
+            val marker = "\"players\":[{\"host\""
+            val idx = h.indexOf(marker)
+            if (idx < 0) return@run
+            val arrStart = h.indexOf('[', idx)
+            if (arrStart < 0) return@run
+            var depth = 0
+            var arrEnd = -1
+            for (i in arrStart until minOf(h.length, arrStart + 20000)) {
+                when (h[i]) {
+                    '[' -> depth++
+                    ']' -> { depth--; if (depth == 0) { arrEnd = i + 1; break } }
+                }
+            }
+            if (arrEnd < 0) return@run
+            val arr = try { JSONArray(h.substring(arrStart, arrEnd)) } catch (_: Exception) { return@run }
+            val servers = mutableListOf<Video.Server>()
+            val seen = HashSet<String>()
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val host = o.optString("host").ifBlank { "lecteur" }
+                val url = o.optString("url")
+                if (url.startsWith("http") && seen.add(url)) {
+                    servers.add(Video.Server(id = url, name = host.replaceFirstChar { it.uppercase() }, src = url))
+                }
+            }
+            if (servers.isNotEmpty()) {
+                Log.d(TAG, "getServers players[]: ${servers.size} embeds (${servers.joinToString { it.name }})")
+                return@withContext servers
+            }
+        }
+
+        // 2026-07-04 : NOUVEAU format RSC — sources directes nmlnode
+        // Le payload RSC contient \"title\":\"S1E1\",\"sources\":[{\"type\":\"mp4\",
+        //   \"host\":\"hydrax\",...,\"sources\":[{\"label\":\"1080p\",
+        //   \"source\":\"https://extractor.nmlnode.cc/proxy/mp4?token=...\"}]}]
+        // Les URLs nmlnode sont directement jouables par ExoPlayer (court-circuit getVideo).
+        run {
+            // 2026-07-04 : le HTML peut être ÉCHAPPÉ (OkHttp, RSC brut : \"sources\") ou
+            //   DÉJÀ DÉSÉCHAPPÉ (WebView : le resolver remplace \" par "). On NORMALISE en
+            //   déséchappant, puis on cherche des marqueurs NON échappés. Sans ça, sur une
+            //   page WebView (SEUL chemin possible : l'épisode renvoie 403 en OkHttp), les
+            //   marqueurs échappés n'étaient JAMAIS trouvés → 0 serveur natif (le bug série).
+            val h = if (html.contains("\\\"sources\\\"")) html.replace("\\\"", "\"") else html
+            // Ancre directement sur le tableau de sources du lecteur : "sources":[{"type"
+            val srcMarker = "\"sources\":[{\"type\""
+            val srcIdx = h.indexOf(srcMarker)
+            if (srcIdx < 0) return@run
+
+            val arrStart = srcIdx + srcMarker.indexOf("[") // pointe sur [
+            var depth = 0
+            var arrEnd = -1
+            for (i in arrStart until minOf(h.length, arrStart + 50000)) {
+                when (h[i]) {
+                    '[' -> depth++
+                    ']' -> { depth--; if (depth == 0) { arrEnd = i + 1; break } }
+                }
+            }
+            if (arrEnd < 0) return@run
+
+            val raw = h.substring(arrStart, arrEnd)
+            val arr = try { JSONArray(raw) } catch (_: Exception) { return@run }
+            if (arr.length() == 0) return@run
+
+            val rscServers = mutableListOf<Video.Server>()
+            // 2026-07-04 (user "pourquoi autant de fois le même serveur") : le tableau sources du
+            //   site répète souvent le même host/qualité (miroirs). On DÉDUPLIQUE par URL src ET
+            //   par (host+label) → une seule entrée "Hydrax 1080p", "Hydrax 720p", etc.
+            val seenSrc = HashSet<String>()
+            val seenName = HashSet<String>()
+            for (i in 0 until arr.length()) {
+                val group = arr.optJSONObject(i) ?: continue
+                val host = group.optString("host", "lecteur")
+                val hostName = host.replaceFirstChar { it.uppercase() }
+                val type = group.optString("type")
+                val sources = group.optJSONArray("sources")
+
+                if (sources != null && sources.length() > 0) {
+                    if (type == "m3u8") {
+                        // HLS adaptatif — 1 serveur par host (qualité auto)
+                        val src = sources.optJSONObject(0)?.optString("source")
+                        if (!src.isNullOrBlank() && seenSrc.add(src) && seenName.add(hostName)) {
+                            rscServers.add(Video.Server(id = src, name = hostName, src = src))
+                        }
+                    } else {
+                        // MP4 — plusieurs qualités, meilleure en premier
+                        val sorted = (0 until sources.length())
+                            .mapNotNull { j -> sources.optJSONObject(j) }
+                            .sortedByDescending { it.optString("label").filter(Char::isDigit).toIntOrNull() ?: 0 }
+                        for (s in sorted) {
+                            val src = s.optString("source")
+                            val label = s.optString("label")
+                            val name = "$hostName $label"
+                            if (src.isNotBlank() && seenSrc.add(src) && seenName.add(name)) {
+                                rscServers.add(Video.Server(id = src, name = name, src = src))
+                            }
+                        }
+                    }
+                }
+                // Iframe en fallback (traité par les extracteurs in-app)
+                val iframeUrl = group.optString("iframe_url")
+                if (iframeUrl.isNotBlank() && iframeUrl.startsWith("http") && seenSrc.add(iframeUrl) && seenName.add("$hostName (embed)")) {
+                    rscServers.add(Video.Server(id = iframeUrl, name = "$hostName (embed)", src = iframeUrl))
+                }
+            }
+            if (rscServers.isNotEmpty()) {
+                Log.d(TAG, "getServers RSC sources: ${rscServers.size} direct sources (nmlnode+iframe)")
+                return@withContext rscServers
+            }
+        }
+
+        // ── Ancien format RSC (embedId/iframeTemplate) — fallback ──
         // v85d 2026-05-19 (user "il trouve qu'un serveur par source alors qu'il
         //   devrait y en avoir plusieurs") : la page est Next.js + RSC. Le HTML
         //   rendu a un seul <iframe> par défaut, mais le payload RSC sérialisé
@@ -1382,6 +1899,17 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
         }
     }
     override suspend fun getVideo(server: Video.Server): Video {
+        // 2026-07-04 : nmlnode proxy URLs → lecture directe (pas d'extracteur)
+        if (server.src.contains("extractor.nmlnode.cc/proxy/")) {
+            return Video(
+                source = server.src,
+                headers = mapOf(
+                    "Referer" to "$baseUrl/",
+                    "Origin" to baseUrl,
+                    "User-Agent" to UA,
+                ),
+            )
+        }
         // Backups : on délègue au provider d'origine (qui sait extraire/headers).
         if (server.id.startsWith("csbackup__")) {
             return CloudstreamProvider.getVideo(server.copy(id = server.id.removePrefix("csbackup__")))

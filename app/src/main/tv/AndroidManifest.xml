@@ -154,6 +154,15 @@
                 android:resource="@xml/provider_paths" />
         </provider>
 
+        <!-- 2026-07-07 : Ecran crash — process séparé, survit au kill du main -->
+        <activity
+            android:name=".CrashActivity"
+            android:process=":crash"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+
     </application>
 
 </manifest>

@@ -46,6 +46,7 @@ object TF1Resolver {
         OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(12, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS)
             .build()
     }
 
@@ -63,14 +64,12 @@ object TF1Resolver {
                 Log.w(TAG, "Detected non-JWT TF1 token (len=${tok.length}, parts=${tok.split(".").size}). Clearing.")
                 com.streamflixreborn.streamflix.utils.TF1Auth.clearToken(ctx.applicationContext)
             }
-            // 2026-06-18 v18 : refresh auto au boot — si JWT proche
-            //   expiration (< 30 min), refresh silencieux via WebView headless.
-            try {
-                com.streamflixreborn.streamflix.utils.TF1JwtRefresher
-                    .refreshIfNeeded(ctx.applicationContext)
-            } catch (e: Throwable) {
-                Log.w(TAG, "JWT refresh at boot failed: ${e.message}")
-            }
+            // 2026-07-05 (user "rien ne doit tourner au boot de la Chromecast, seulement au
+            //   démarrage du provider concerné") : le refresh JWT TF1 au boot est RETIRÉ — il
+            //   lançait une WebView tf1.fr (~9s) au démarrage, concurrente du warm DessinAnime.
+            //   Il est REDONDANT : resolveVideoId() appelle déjà refreshIfNeeded à la demande
+            //   (quand on lit une vidéo TF1). Donc TF1+ aura son JWT frais au moment utile, sans
+            //   rien faire au boot.
         }
     }
 

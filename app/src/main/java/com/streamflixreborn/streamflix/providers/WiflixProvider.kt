@@ -76,7 +76,17 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     //   n'apparaissait plus sur les fiches Cloudstream. Nouveau lien
     //   principal officiel = flemmix.city (badge "Lien principal" / "Domaine
     //   actif - Utilisez toujours ce lien" sur le portail).
-    override val defaultBaseUrl: String = "https://flemmix.city/"
+    // 2026-07-07 (user "wiflix backup ne suit plus dans les autres groupes, sa
+    //   recherche est morte" + "moins de VOE") : flemmix.city n'est PLUS listé
+    //   sur ww1.wiflix-adresses.fun (mort), flemmix.fast est passé "Ancien domaine
+    //   principal - bloqué". Nouveau LIEN PRINCIPAL officiel = flemmix.gold (badge
+    //   "Domaine actif - Utilisez toujours ce lien", vérifié vivant + sert le vrai
+    //   template flemmixnew). L'app restait coincée sur flemmix.city (pas dans
+    //   knownBlockedDomains → pas de force-refresh) → recherche Wiflix vide → plus
+    //   de backup Wiflix + moins de serveurs VOE (Wiflix en fournit beaucoup).
+    // 2026-07-09 : flemmix.gold MORT (redirige vers neufneuf.space →
+    //   "Redirection sécurisée vers flemmix.garden"). Nouveau domaine actif.
+    override val defaultBaseUrl: String = "https://flemmix.garden/"
     // Liste des domaines morts/bloqués connus. Si le cache PROVIDER_URL est sur
     // un de ceux-ci, on force un refresh au prochain initializeService() au lieu
     // de rester coincé dessus à vie. Mettre à jour quand le portail évolue.
@@ -84,6 +94,10 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         "flemmix.win", "flemmix.prof", "flemmix.irish", "flemmix.wales",
         "flemmix.vip", "flemmix.casa", "wiflix.re", "wiflix.eu", "wiflix.org",
         "flemmix.farm", "flemmix.team",
+        // 2026-07-07 : morts/bloqués selon ww1.wiflix-adresses.fun (flemmix.city
+        //   n'est plus listé du tout ; flemmix.fast + flemmix.cafe = "bloqués").
+        //   Les mettre ici force un refresh du cache PROVIDER_URL coincé dessus.
+        "flemmix.city", "flemmix.fast", "flemmix.cafe", "flemmix.gold",
     )
     override val baseUrl: String = defaultBaseUrl
         get() {
@@ -137,7 +151,12 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     //   = burst → CF rate-limit kick in. Maintenant : Semaphore(3) limite à
     //   3 requêtes simultanées max = pas de burst → CF content. Petit délai
     //   au prix d'une latence légèrement plus longue mais zéro ban.
-    private val networkSemaphore = Semaphore(3)
+    // 2026-07-04 (user "à froid le film met 10s, à chaud 2s ; c'est pareil tous providers") :
+    //   3 → 8. Ce semaphore SÉRIALISE les accès réseau/CF de CE provider. À froid, la HOME
+    //   (scrape des 5-6 genres via getDocument) tenait les 3 permits → le getServers du PLAYER
+    //   attendait 6-7s un permit libre = tout le retard. En montant à 8, le player passe sans
+    //   attendre la home. (Reste borné pour ne pas burst CF.)
+    private val networkSemaphore = Semaphore(8)
 
     // Cooldown si on détecte un Error 1015 dans la réponse → on attend 15 min
     //   avant de retenter, sinon on aggrave le ban CF.
@@ -657,39 +676,44 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             categories.add(Category(name = Category.FEATURED, list = finalCarousel))
         }
 
-        // Retirer du TOP les items déjà dans le carousel pour éviter les doublons
-        val featuredIds = finalCarousel.map { when (it) { is TvShow -> it.id; is Movie -> it.id; else -> "" } }.toSet()
-        // 2026-06-23 (user "incrémenter notre TOP Série + une autre TOP Film") :
-        //   on utilise topSeriesAll / topFilmsAll (= block home + page listing
-        //   complet, dédupliqué) → ~25-30 items par section au lieu de 6-10.
-        categories.add(Category(name = "TOP Séries", list = topSeriesAll.filter { it.id !in featuredIds }))
-        categories.add(Category(name = "TOP Films", list = topFilmsAll.filter { (it as? Movie)?.id !in featuredIds }))
+        // 2026-07-04 : DÉDUP GLOBALE inter-catégories — un film n'apparaît QUE dans
+        //   sa 1ère catégorie (ordre : FEATURED > TOP Séries > TOP Films > Films
+        //   Anciens > genres). Corrige "5× Pitch Black dans Action/Thriller/SF/…".
+        val seenHome = mutableSetOf<String>()
+        fun itemId(it: AppAdapter.Item): String = when(it) { is TvShow -> it.id; is Movie -> it.id; else -> "" }
+        // Ajouter les ids du carousel dans seenHome
+        finalCarousel.forEach { seenHome.add(itemId(it)) }
+
+        val topSeriesFiltered = topSeriesAll.filter { seenHome.add(it.id) }
+        categories.add(Category(name = "TOP Séries", list = topSeriesFiltered))
+
+        val topFilmsFiltered = topFilmsAll.filter { seenHome.add(itemId(it)) }
+        categories.add(Category(name = "TOP Films", list = topFilmsFiltered))
 
         // 2026-06-23 (user "supprimes les 2 premières catégories Derniers films
         //   ajoutés / Dernières séries ajoutées = doublons des TOP enrichis") :
         //   on les vire car le contenu est maintenant dans TOP Séries / TOP Films.
 
-        categories.add(
-            Category(
-                name = "Films Anciens",
-                list = document.select("div.block-main").getOrNull(2)?.select("div.mov")?.mapNotNull {
-                    val id = it.selectFirst("a.mov-t")
-                        ?.attr("href")?.substringAfterLast("/")
-                        ?.takeIf { id -> id.isNotBlank() } ?: return@mapNotNull null
-                    Movie(
-                        id = id,
-                        title = it.selectFirst("a.mov-t")?.ownText()?.trim() ?: return@mapNotNull null,
-                        poster = it.selectFirst("img")
-                            ?.attr("src")?.let { src -> baseUrl + src },
-                    )
-                } ?: emptyList(),
+        val filmsAnciens = document.select("div.block-main").getOrNull(2)?.select("div.mov")?.mapNotNull {
+            val id = it.selectFirst("a.mov-t")
+                ?.attr("href")?.substringAfterLast("/")
+                ?.takeIf { id -> id.isNotBlank() } ?: return@mapNotNull null
+            Movie(
+                id = id,
+                title = it.selectFirst("a.mov-t")?.ownText()?.trim() ?: return@mapNotNull null,
+                poster = it.selectFirst("img")
+                    ?.attr("src")?.let { src -> baseUrl + src },
             )
-        )
+        }?.filter { seenHome.add(it.id) } ?: emptyList()
+        if (filmsAnciens.isNotEmpty()) {
+            categories.add(Category(name = "Films Anciens", list = filmsAnciens))
+        }
 
-        // Genres populaires (avec posters)
+        // Genres populaires (avec posters) — dédup via seenHome
         fun addGenreCategory(label: String, items: List<Movie>) {
-            if (items.isNotEmpty()) {
-                categories.add(Category(name = label, list = items))
+            val unique = items.filter { seenHome.add(it.id) }
+            if (unique.isNotEmpty()) {
+                categories.add(Category(name = label, list = unique))
             }
         }
         addGenreCategory("Action",         actionD.await())
@@ -723,8 +747,9 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                     }
                 }
 
-                if (shows.isNotEmpty()) {
-                    categories.add(Category(name = headerText, list = shows))
+                val uniqueShows = shows.filter { seenHome.add(itemId(it)) }
+                if (uniqueShows.isNotEmpty()) {
+                    categories.add(Category(name = headerText, list = uniqueShows))
                 }
             }
         }
@@ -775,16 +800,68 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             return genres
         }
 
-        if (page > 1 && !hasMore) return emptyList()
+        // 2026-07-04 : MOTEUR TMDB — la recherche native flemmix est bloquée
+        //   par CloudFlare (POST search → bot shield → résultats aléatoires).
+        //   On utilise TMDb3.Search.multi comme moteur PRINCIPAL :
+        //   - Rapide, fiable, zéro CF
+        //   - Retourne un id TMDB numérique → le downstream le gère déjà
+        //     (resolveTmdbMovieDetail/TvShowDetail par id direct, getServers
+        //      délègue à searchServersByTitle pour trouver les vrais serveurs)
+        //   - Posters TMDB haute qualité
+        //   POST-FILTRE : TMDB Search.multi est très large (matche sur titres
+        //   alternatifs, mots-clés, synonymes dans TOUTES les langues). On filtre
+        //   les résultats : le query doit apparaître comme MOT (word boundary)
+        //   dans le titre FR OU le titre original. Ex : "one" matche "One Piece"
+        //   mais PAS "Lone Star" (substring, pas word boundary).
+        return try {
+            val tmdbResults = TMDb3.Search.multi(
+                query = query,
+                language = "fr-FR",
+                page = page,
+            )
+            hasMore = page < tmdbResults.totalPages
 
-        // 2026-06-13 : ROLLBACK du silent=false sur search (testé : provoquait
-        //   une page blanche bloquée — le WebView poll 79 fois pendant 25s avec
-        //   Challenge:false Content:false Clearance:false. Le bot shield de
-        //   flemmix.city refuse TOUT WebView Android (= fingerprint TLS/JA3
-        //   distingue Chrome desktop d'Android Chromium). Search definitivement
-        //   morte côté app, le palliatif = cache URL via la home (cf
-        //   WiflixUrlCache populate). On garde l'ancienne logique silencieuse
-        //   pour ne pas bloquer l'UI.
+            // Regex word-boundary : \bquery → "one" matche "One Piece", "One-Punch Man"
+            // mais PAS "Lone" (le L avant empêche le word boundary).
+            val qRegex = Regex("\\b${Regex.escape(query.trim())}", RegexOption.IGNORE_CASE)
+
+            tmdbResults.results.mapNotNull { item ->
+                when (item) {
+                    is TMDb3.Movie -> {
+                        val titleMatch = qRegex.containsMatchIn(item.title)
+                                || qRegex.containsMatchIn(item.originalTitle)
+                        if (!titleMatch) return@mapNotNull null
+                        Movie(
+                            id = item.id.toString(),
+                            title = item.title,
+                            poster = item.posterPath?.w500,
+                        )
+                    }
+                    is TMDb3.Tv -> {
+                        val titleMatch = qRegex.containsMatchIn(item.name)
+                                || qRegex.containsMatchIn(item.originalName)
+                        if (!titleMatch) return@mapNotNull null
+                        TvShow(
+                            id = item.id.toString(),
+                            title = item.name,
+                            poster = item.posterPath?.w500,
+                        )
+                    }
+                    else -> null // skip Person results
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "TMDB search failed, fallback natif", e)
+            hasMore = false
+            searchNative(query, page)
+        }
+    }
+
+    /**
+     * 2026-07-04 : ancien moteur de recherche natif flemmix, gardé en FALLBACK
+     * si TMDB est injoignable. Bloqué par CF la plupart du temps.
+     */
+    private suspend fun searchNative(query: String, page: Int): List<AppAdapter.Item> {
         val searchUrl = "${baseUrl}index.php?do=search&subaction=search&story=$query&search_start=$page&result_from=${1 + 20 * (page - 1)}"
         val document = try {
             val doc = service.search(
@@ -797,22 +874,6 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             getDocument(searchUrl)
         }
 
-        document.selectFirst("div.berrors")?.text()?.let { resultText ->
-            val totalResults = resultText.substringAfter("trouvé ")
-                .substringBefore(" réponses").toIntOrNull() ?: 0
-            val currentRange = resultText.substringAfter("Résultats de la requête ")
-                .substringBefore(")").split(" - ")
-            val receivedItems = currentRange.getOrNull(1)?.toIntOrNull() ?: 0
-
-            hasMore = receivedItems < totalResults
-        }
-
-        // 2026-06-13 (user "il a trouvé plein de choses tout sauf la série") :
-        //   la page search retourne 30 div.mov dont les 10 PREMIERS sont des
-        //   films aleatoires en "recommandations" (= div.no-results-rec /
-        //   div.floaters affichee meme quand il y a des resultats search). On
-        //   exclut les div.mov descendants de ces 2 containers → on garde
-        //   uniquement les vrais resultats search en-dessous.
         val results = document.select("div.mov")
             .filter { el ->
                 el.parents().none { p ->
@@ -968,6 +1029,14 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     }
 
     override suspend fun getMovie(id: String): Movie {
+        // 2026-07-09 : si id purement numérique (= TMDB, vient de search TMDB),
+        // construire la fiche via TMDB directement (zéro CF, zéro scraping flemmix).
+        // Un slug flemmix contient toujours des lettres ("36373-supergirl-2026.html").
+        if (id.all { it.isDigit() }) {
+            val tmdbMovie = com.streamflixreborn.streamflix.utils.TmdbUtils.getMovieById(id.toInt(), "fr-FR")
+            if (tmdbMovie != null) return tmdbMovie
+            // fallback : tenter quand même le scraping (ne marchera probablement pas)
+        }
         initializeService()
         val url = "${baseUrl}film-en-streaming/$id"
         val document = if (cloudflareActive) {
@@ -979,6 +1048,18 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 getDocument(url)
             } else doc
         } catch (e: Exception) { getDocument(url) }
+
+        // 2026-07-03 (user "il manque les jaquettes des acteurs sur les fiches Wiflix") :
+        //   le cast vient du scraping flemmix (noms seuls, aucune photo). On récupère les
+        //   PORTRAITS via les crédits TMDB (getMovie par titre+année) et on les attache par
+        //   correspondance de nom. On GARDE l'id/nom scrapés → le clic acteur reste le flux
+        //   Wiflix qui fonctionne. Pas de match → silhouette (inchangé).
+        val castTitleTmdb = document.selectFirst("header.full-title h1")?.text()?.trim().orEmpty()
+        val castYearTmdb = Regex("(19|20)\\d{2}").find(id)?.value?.toIntOrNull()
+        val tmdbCastPhotos: Map<String, String?> = runCatching {
+            com.streamflixreborn.streamflix.utils.TmdbUtils.getMovie(castTitleTmdb, castYearTmdb, "fr-FR")
+                ?.cast?.associate { normPersonName(it.name) to it.image }
+        }.getOrNull().orEmpty()
 
         val movie = Movie(
             id = id,
@@ -1046,6 +1127,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                     People(
                         id = it.attr("href").substringBeforeLast("/").substringAfterLast("/"),
                         name = it.text(),
+                        image = tmdbCastPhotos[normPersonName(it.text())],
                     )
                 }
                 ?: emptyList(),
@@ -1091,6 +1173,15 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     }
 
     override suspend fun getTvShow(id: String): TvShow {
+        // 2026-07-09 : si id purement numérique (= TMDB, vient de search TMDB),
+        // construire la fiche via TMDB directement (zéro CF). Un slug flemmix
+        // contient toujours des lettres ("12345-from-saison-2.html").
+        // TMDB renvoie TOUTES les saisons (mieux que flemmix qui en a une par page).
+        // Le seasonId sera "tmdbId-seasonNum" → getEpisodesBySeason le gère.
+        if (id.all { it.isDigit() }) {
+            val tmdbShow = com.streamflixreborn.streamflix.utils.TmdbUtils.getTvShowById(id.toInt(), "fr-FR")
+            if (tmdbShow != null) return tmdbShow
+        }
         initializeService()
         val url = "${baseUrl}serie-en-streaming/$id"
         val document = if (cloudflareActive) {
@@ -1106,6 +1197,15 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             ?.text()
             ?: ""
         val seasonNumber = title.substringAfter("Saison ").trim().toIntOrNull() ?: 0
+        // 2026-07-03 (user "jaquettes acteurs manquantes") : photos du cast via crédits TMDB
+        //   (getTvShow par titre sans "Saison N"), attachées par nom. id/nom scrapés gardés.
+        val castShowTitleTmdb = title.substringBefore("Saison").trim().ifBlank { title }
+        val castYearTmdbTv = Regex("(19|20)\\d{2}").find(id)?.value?.toIntOrNull()
+        val tmdbCastPhotos: Map<String, String?> = runCatching {
+            com.streamflixreborn.streamflix.utils.TmdbUtils.getTvShow(castShowTitleTmdb, castYearTmdbTv, "fr-FR")
+                ?.cast?.associate { normPersonName(it.name) to it.image }
+        }.getOrNull().orEmpty()
+
         val tvShow = TvShow(
             id = id,
             title = title,
@@ -1173,6 +1273,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                     People(
                         id = it.attr("href").substringBeforeLast("/").substringAfterLast("/"),
                         name = it.text(),
+                        image = tmdbCastPhotos[normPersonName(it.text())],
                     )
                 }
                 ?: emptyList(),
@@ -1219,6 +1320,17 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     }
 
     override suspend fun getEpisodesBySeason(seasonId: String): List<Episode> {
+        // 2026-07-09 : si le seasonId est au format TMDB "tmdbId-seasonNum"
+        // (pas de "/" = pas un slug flemmix), résoudre via TMDB directement.
+        if (!seasonId.contains("/")) {
+            val parts = seasonId.split("-")
+            val tmdbId = parts.getOrNull(0)
+            val seasonNum = parts.getOrNull(1)?.toIntOrNull()
+            if (tmdbId != null && seasonNum != null) {
+                return com.streamflixreborn.streamflix.utils.TmdbUtils
+                    .getEpisodesBySeason(tmdbId, seasonNum, "fr-FR")
+            }
+        }
         initializeService()
         val (tvShowId, className) = seasonId.split("/")
 
@@ -1296,7 +1408,52 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         return genre
     }
 
+    /** Normalise un nom d'acteur pour matcher scraping flemmix ↔ crédits TMDB
+     *  (minuscules, sans accents ni ponctuation). */
+    private fun normPersonName(s: String): String =
+        java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "")
+            .lowercase().replace(Regex("[^a-z0-9]"), "")
+
     override suspend fun getPeople(id: String, page: Int): People {
+        // 2026-07-09 : si id purement numérique (= TMDB, vient de reco/cast TMDB),
+        // résoudre la filmographie via TMDB People.details (zéro CF).
+        if (id.all { it.isDigit() }) {
+            try {
+                val person = TMDb3.People.details(
+                    personId = id.toInt(),
+                    appendToResponse = listOfNotNull(
+                        if (page > 1) null else TMDb3.Params.AppendToResponse.Person.COMBINED_CREDITS,
+                    ),
+                    language = "fr-FR"
+                )
+                return People(
+                    id = person.id.toString(),
+                    name = person.name,
+                    image = person.profilePath?.w500,
+                    biography = person.biography,
+                    placeOfBirth = person.placeOfBirth,
+                    birthday = person.birthday,
+                    deathday = person.deathday,
+                    filmography = person.combinedCredits?.cast?.mapNotNull { multi ->
+                        when (multi) {
+                            is TMDb3.Movie -> Movie(
+                                id = multi.id.toString(),
+                                title = multi.title,
+                                poster = multi.posterPath?.w500,
+                            )
+                            is TMDb3.Tv -> TvShow(
+                                id = multi.id.toString(),
+                                title = multi.name,
+                                poster = multi.posterPath?.w500,
+                            )
+                            else -> null
+                        }
+                    }?.distinctBy { when (it) { is Movie -> it.id; is TvShow -> it.id; else -> it } }
+                     ?: listOf(),
+                )
+            } catch (_: Exception) { /* fallback scraping ci-dessous */ }
+        }
         initializeService()
         val document = try {
             val doc = service.getPeople(id, page)
@@ -1348,11 +1505,165 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         return people
     }
 
+    // 2026-07-07 : re-implémentation de searchServersByTitle (perdu au restore 08:43).
+    // Quand le backup envoie un id TMDB numérique (pas un slug Wiflix), on
+    // résout via : TMDB titre → recherche NATIVE flemmix → slug → getServers(slug/tab).
+    private suspend fun searchServersByTitle(
+        tmdbId: String,
+        videoType: Video.Type,
+    ): List<Video.Server> {
+        // 2026-07-09 : pour les épisodes, l'id passé peut être celui de l'ÉPISODE
+        // TMDB (pas de la série). On extrait l'id de la SÉRIE depuis videoType.tvShow.id
+        // et le titre depuis videoType.tvShow.title (déjà peuplé par getTvShow TMDB).
+        val title: String?
+        if (videoType is Video.Type.Episode) {
+            // Priorité : titre déjà dans le videoType (évite un appel TMDB)
+            title = videoType.tvShow.title.takeIf { it.isNotBlank() }
+                ?: try {
+                    val showId = videoType.tvShow.id.toIntOrNull() ?: tmdbId.substringBefore("/").toIntOrNull()
+                    if (showId != null) TMDb3.TvSeries.details(showId, language = "fr-FR").name else null
+                } catch (e: Exception) {
+                    Log.w("Wiflix", "searchServersByTitle TMDB lookup failed: ${e.message?.take(100)}")
+                    null
+                }
+        } else {
+            val intId = tmdbId.substringBefore("/").toIntOrNull()
+            if (intId == null) {
+                Log.w("Wiflix", "searchServersByTitle($tmdbId) → pas un entier, skip")
+                return emptyList()
+            }
+            title = try {
+                TMDb3.Movies.details(intId, language = "fr-FR").title
+            } catch (e: Exception) {
+                Log.w("Wiflix", "searchServersByTitle TMDB lookup failed: ${e.message?.take(100)}")
+                null
+            }
+        }
+        if (title.isNullOrBlank()) {
+            Log.w("Wiflix", "searchServersByTitle($tmdbId) → titre TMDB vide")
+            return emptyList()
+        }
+        Log.d("Wiflix", "searchServersByTitle($tmdbId) titre='$title'")
+
+        // 2. Recherche NATIVE flemmix (POST search). CF → fallback getDocument.
+        val searchDoc = try {
+            val doc = service.search(title)
+            if (isCloudflareChallenge(doc)) {
+                getDocument("${baseUrl}index.php?do=search&subaction=search&story=${java.net.URLEncoder.encode(title, "UTF-8")}")
+            } else doc
+        } catch (e: Exception) {
+            try {
+                getDocument("${baseUrl}index.php?do=search&subaction=search&story=${java.net.URLEncoder.encode(title, "UTF-8")}")
+            } catch (e2: Exception) {
+                Log.w("Wiflix", "searchServersByTitle search failed: ${e2.message?.take(100)}")
+                return emptyList()
+            }
+        }
+
+        // 3. Trouver le résultat qui matche le titre
+        //    2026-07-09 (audit strict) : + GATE ANNÉE pour les films. Le slug Wiflix porte
+        //    souvent l'année (ex « 36373-supergirl-2026.html ») → on rejette un remake homonyme
+        //    (« Dune 1984 » ≠ « Dune 2021 »). Ne gate QUE si l'année cible est connue ET qu'une
+        //    année est trouvée dans le lien. Séries : pas de gate (année peu fiable).
+        val targetYear = (videoType as? Video.Type.Movie)?.releaseDate?.take(4)?.toIntOrNull()
+        val targetSeason = (videoType as? Video.Type.Episode)?.season?.number
+        val resultLinks = searchDoc.select("div.mov a[href], div.short-item a[href], article a[href]")
+        // Candidats qui matchent le TITRE (+ gate année pour les films).
+        val titleMatched = resultLinks.filter { a ->
+            val linkTitle = a.selectFirst("span.title1, h3, .title")?.text()
+                ?: a.attr("title").ifBlank { null }
+                ?: a.text()
+            if (!com.streamflixreborn.streamflix.utils.BackupRegistry.titleMatches(linkTitle, title)) return@filter false
+            if (videoType is Video.Type.Movie && targetYear != null) {
+                val href = a.attr("href")
+                val candYear = Regex("(19|20)\\d{2}").findAll(href).map { it.value.toInt() }.lastOrNull()
+                if (candYear != null && kotlin.math.abs(candYear - targetYear) > 1) return@filter false
+            }
+            true
+        }
+        // 2026-07-09 (user « FROM S2E2 : Wiflix absent ») — CIBLAGE SAISON. Wiflix indexe CHAQUE
+        //   saison comme une entrée distincte (slug « …-saison-N.html »). Le fallback prenait la
+        //   1ʳᵉ entrée titre (ex « from-2022-saison-4 » pour une demande S2) → mauvaise saison →
+        //   0 serveur. On prend la saison DEMANDÉE ; sinon un slug SANS numéro de saison (série
+        //   entière) ; JAMAIS une autre saison (mieux vaut 0 serveur que le mauvais épisode).
+        val matchedHref = if (targetSeason != null && targetSeason > 0) {
+            (titleMatched.firstOrNull { it.attr("href").contains("saison-$targetSeason", ignoreCase = true) }
+                ?: titleMatched.firstOrNull { !Regex("(?i)saison-?\\d+").containsMatchIn(it.attr("href")) }
+                )?.attr("href")
+        } else {
+            titleMatched.firstOrNull()?.attr("href")
+        }
+
+        if (matchedHref.isNullOrBlank()) {
+            Log.w("Wiflix", "searchServersByTitle('$title') → 0 résultat natif")
+            return emptyList()
+        }
+        val slug = matchedHref.substringAfterLast("/").takeIf { it.isNotBlank() }
+            ?: return emptyList()
+        Log.d("Wiflix", "searchServersByTitle('$title') → slug=$slug")
+
+        // 4. Résoudre l'épisode ou le film
+        if (videoType is Video.Type.Movie) {
+            return try { getServers(slug, videoType) } catch (e: Exception) {
+                Log.w("Wiflix", "searchServersByTitle getServers(movie/$slug) failed: ${e.message?.take(100)}")
+                emptyList()
+            }
+        }
+
+        // Episode : ouvrir la page série, trouver les tabs VF/VOSTFR, extraire
+        val showDoc = try {
+            val doc = service.getTvShow(slug)
+            if (isCloudflareChallenge(doc)) getDocument("${baseUrl}serie-en-streaming/$slug") else doc
+        } catch (e: Exception) {
+            try { getDocument("${baseUrl}serie-en-streaming/$slug") }
+            catch (_: Exception) { return emptyList() }
+        }
+        // 2026-07-09 (user « FROM S2E2 : Wiflix absent → 0 serveur ») — STRUCTURE RÉELLE des
+        //   séries Wiflix (vérifiée en direct) : les serveurs sont dans UN bloc PAR ÉPISODE et
+        //   PAR LANGUE : div.ep<N>vf (VF) / div.ep<N>vs (VOSTFR). L'ancien blocvostfr/blocfr
+        //   n'existe plus sur les pages saison → le fallback tombait sur 0 et repartait en film.
+        //   On construit donc les blocs à partir du NUMÉRO D'ÉPISODE demandé.
+        val epNum = (videoType as? Video.Type.Episode)?.number
+        val tabs = mutableListOf<String>()
+        if (epNum != null) {
+            for (rel in listOf("ep${epNum}vf", "ep${epNum}vs")) {
+                if (showDoc.select("div.$rel a").isNotEmpty()) tabs.add(rel)
+            }
+        }
+        // Fallback ANCIEN format (blocvostfr/blocfr) si la page n'a pas les blocs par épisode.
+        if (tabs.isEmpty()) {
+            if (showDoc.select("div.blocvostfr a").isNotEmpty()) tabs.add("blocvostfr")
+            if (showDoc.select("div.blocfr a").isNotEmpty()) tabs.add("blocfr")
+        }
+        if (tabs.isEmpty()) {
+            // Dernier recours : format film (tabs-sel) réutilisé par certaines séries.
+            return try { getServers(slug, Video.Type.Movie(id = slug, title = title, releaseDate = "", poster = "", imdbId = null)) } catch (_: Exception) { emptyList() }
+        }
+        val allServers = mutableListOf<Video.Server>()
+        for (tab in tabs) {
+            val tabServers = try { getServers("$slug/$tab", videoType) } catch (_: Exception) { emptyList() }
+            allServers.addAll(tabServers)
+        }
+        Log.d("Wiflix", "searchServersByTitle('$title') S${(videoType as? Video.Type.Episode)?.season?.number}E$epNum → ${allServers.size} serveurs (tabs=$tabs)")
+        return allServers
+    }
+
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> {
+        val _tGS = System.currentTimeMillis()
+        Log.i("ServDiagT", "GETSERVERS entrée")
         initializeService()
+        Log.i("ServDiagT", "GETSERVERS après initializeService à ${System.currentTimeMillis()-_tGS}ms")
         val servers = when (videoType) {
             is Video.Type.Episode -> {
-                val (tvShowId, rel) = id.split("/")
+                // 2026-07-07 : garde contre ids TMDB numériques sans "/" (crash
+                // IndexOutOfBoundsException: Index: 1, Size: 1). Quand le backup
+                // passe un id TMDB pur, on délègue à searchServersByTitle.
+                val parts = id.split("/")
+                if (parts.size < 2) {
+                    Log.w("Wiflix", "getServers($id) → id sans '/' (TMDB numérique?), tentative recherche par titre")
+                    return searchServersByTitle(id, videoType)
+                }
+                val (tvShowId, rel) = parts
 
                 val document = try {
                     val doc = service.getTvShow(tvShowId)
@@ -1394,10 +1705,17 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             }
 
             is Video.Type.Movie -> {
+                // 2026-07-07 : id TMDB numérique → searchServersByTitle
+                if (id.matches(Regex("^\\d+$"))) {
+                    Log.w("Wiflix", "getServers(movie $id) → TMDB numérique, tentative recherche par titre")
+                    return searchServersByTitle(id, videoType)
+                }
                 val document = try {
                     val doc = service.getMovie(id)
+                    Log.i("ServDiagT", "GETSERVERS service.getMovie fini à ${System.currentTimeMillis()-_tGS}ms (challenge=${isCloudflareChallenge(doc)})")
                     if (isCloudflareChallenge(doc)) getDocument("${baseUrl}film-en-streaming/$id") else doc
                 } catch (e: Exception) { getDocument("${baseUrl}film-en-streaming/$id") }
+                Log.i("ServDiagT", "GETSERVERS document prêt à ${System.currentTimeMillis()-_tGS}ms")
 
                 document.select("div.tabs-sel a").
                     filter { ignoreSource(it.text().trim() ) == false }.
@@ -1434,11 +1752,13 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             }
         }
 
+        Log.i("ServDiagT", "GETSERVERS servers parsés (${servers.size}) à ${System.currentTimeMillis()-_tGS}ms")
         // Remove duplicate servers (same service on different domains)
         val unique = deduplicateServers(servers)
+        Log.i("ServDiagT", "GETSERVERS dedup fait à ${System.currentTimeMillis()-_tGS}ms")
 
         // Sort: VF/FR first, then by service reliability, VOSTFR last
-        return unique.sortedWith(compareBy<Video.Server> { server ->
+        val _sorted = unique.sortedWith(compareBy<Video.Server> { server ->
             val name = server.name.uppercase()
             when {
                 name.contains("VFF") || name.contains("TRUEFRENCH") -> 0
@@ -1460,6 +1780,8 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 else -> 5
             }
         })
+        Log.i("ServDiagT", "GETSERVERS sort fait à ${System.currentTimeMillis()-_tGS}ms")
+        return _sorted
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -1738,6 +2060,12 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             if (forceRefresh) {
                 Log.w("WiflixProvider",
                     "Cache sur domaine bloqué ($cachedUrl) → force refresh")
+                // 2026-07-07 : on VIDE le cache bloqué AVANT onChangeUrl. Sinon, si le
+                //   scraping du portail échoue (CF challenge sur le portail = cas connu),
+                //   le catch garde l'ancien cache mort et le getter baseUrl continue de
+                //   renvoyer le domaine bloqué → provider cassé à vie. En vidant, le getter
+                //   retombe sur defaultBaseUrl (flemmix.gold) même si le scrape échoue.
+                UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_URL, "")
             }
             Log.w("WiflixProvider", "[H_CHECK] avant onChangeUrl, baseUrl=$baseUrl")
             onChangeUrl(forceRefresh = forceRefresh)

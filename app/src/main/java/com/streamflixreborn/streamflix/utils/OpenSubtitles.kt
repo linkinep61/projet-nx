@@ -178,7 +178,11 @@ object OpenSubtitles {
     private interface Service {
         companion object {
             fun build(): Service {
-                val client = OkHttpClient.Builder().build()
+                val client = OkHttpClient.Builder()
+                    .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                    .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                    .build()
                 val retrofit = Retrofit.Builder()
                     .baseUrl(BASE_URL)
                     .client(client)

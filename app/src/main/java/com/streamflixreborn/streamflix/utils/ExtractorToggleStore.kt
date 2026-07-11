@@ -24,6 +24,13 @@ object ExtractorToggleStore {
     private const val PREF_KEY_DISABLED = "disabled_extractors"
     private const val PREF_FAV_PREFIX = "fav_"
 
+    // 2026-07-04 (user "WAAW1.TV : ça ouvre un player en écran noir avec l'IP en filigrane +
+    //   captcha, c'est trop chiant ; désactive l'extracteur dédié à cette source") :
+    //   extracteurs FORCÉS désactivés en dur. "netu" = NetuExtractor (waaw1.tv / netu.tv /
+    //   hqq.tv / waaw.*), source dédiée qui ne sert rien d'autre → filtrée hors du picker par
+    //   rankServers. Retirer "netu" de ce set pour la réactiver.
+    private val FORCE_DISABLED = setOf("netu")
+
     /** Bonus score pour un extracteur favori sur le provider actuel.
      *  Valeur très élevée pour supplanter TOUT le tri automatique :
      *  un cœur = toujours en premier, quoi qu'il arrive. */
@@ -36,7 +43,8 @@ object ExtractorToggleStore {
 
     /** Retourne le Set des noms d'extracteurs désactivés (lowercase). */
     fun getDisabled(): Set<String> {
-        return prefs().getStringSet(PREF_KEY_DISABLED, emptySet()) ?: emptySet()
+        // + FORCE_DISABLED : extracteurs désactivés en dur (WAAW/Netu) — toujours filtrés.
+        return (prefs().getStringSet(PREF_KEY_DISABLED, emptySet()) ?: emptySet()) + FORCE_DISABLED
     }
 
     /** Met à jour l'ensemble complet des extracteurs désactivés. */

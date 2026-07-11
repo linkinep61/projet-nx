@@ -93,6 +93,20 @@ object UserPreferences {
         get() = if (::prefs.isInitialized) prefs.getBoolean(KEY_ALWAYS_EXTERNAL_PLAYER, false) else false
         set(value) { if (::prefs.isInitialized) prefs.edit().putBoolean(KEY_ALWAYS_EXTERNAL_PLAYER, value).apply() }
 
+    // 2026-07-10 (user "pouvoir désactiver les backups UN PAR UN, pas tous d'un coup") :
+    //   MultiSelectListPreference « ENABLED_BACKUPS » = ensemble des sources COCHÉES (= actives).
+    //   - jamais configuré (null) → TOUTES actives (défaut).
+    //   - une source hors de la liste connue (BACKUP_SOURCE_KEYS) → toujours active (on ne
+    //     désactive QUE ce que l'utilisateur a explicitement décoché).
+    private const val KEY_ENABLED_BACKUPS = "ENABLED_BACKUPS"
+
+    fun isBackupSourceEnabled(source: String): Boolean {
+        if (!::prefs.isInitialized) return true
+        val enabled = prefs.getStringSet(KEY_ENABLED_BACKUPS, null) ?: return true
+        if (source !in com.streamflixreborn.streamflix.utils.BackupRegistry.BACKUP_SOURCE_KEYS) return true
+        return source in enabled
+    }
+
     /** Package du lecteur externe mémorisé (ex. org.videolan.vlc). null = aucun. */
     var externalPlayerPackage: String?
         get() = if (::prefs.isInitialized) prefs.getString(KEY_EXTERNAL_PLAYER_PACKAGE, null) else null
@@ -912,9 +926,21 @@ object UserPreferences {
             Key.CAROUSEL_DIM.setInt(value.coerceIn(0, 100))
         }
 
+    // 2026-07-09 (user "dans Apparence, un bouton pour réduire la luminosité de
+    //   l'application ENTIÈRE, comme le slider Luminosité du carrousel") :
+    //   appDim = opacité 0-90 d'un overlay noir posé sur le decorView de CHAQUE
+    //   activité (via AppDimManager). 0 = normal, 90 = très sombre. Capé à 90 pour
+    //   ne jamais rendre l'écran totalement noir.
+    var appDim: Int
+        get() = Key.APP_DIM.getInt() ?: 0
+        set(value) {
+            Key.APP_DIM.setInt(value.coerceIn(0, 90))
+        }
+
     private enum class Key {
         PLAYER_DIM,
         CAROUSEL_DIM,
+        APP_DIM,
         APP_LAYOUT,
         CURRENT_LANGUAGE,
         CURRENT_PROVIDER,

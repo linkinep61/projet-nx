@@ -26,6 +26,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import com.streamflixreborn.streamflix.utils.NetworkClient
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
@@ -68,6 +69,12 @@ open class WebJsProvider(
     private val jsUrl: String,
     override val logo: String,
     override val language: String,
+    // 2026-07-04 : si true, on NE navigue PAS vers les pages détail (fiche/saison/épisode) —
+    //   on garde le WebView sur baseUrl et le JS récupère les données par fetch RSC depuis ce
+    //   contexte. Nécessaire pour dessinanime.cc : naviguer vers une page détail y déclenche un
+    //   challenge Cloudflare (shell 27 Ko) qui empoisonne le contexte → tous les fetch RSC 403.
+    //   Depuis baseUrl (déjà validé CF), les fetch passent (200). Le path détail est passé au JS.
+    private val detailViaFetch: Boolean = false,
 ) : Provider, ProgressiveServersProvider {
 
     private val TAG = "WebJsProvider[$name]"
@@ -81,6 +88,36 @@ open class WebJsProvider(
 
     // Mutex pour éviter double navigate concurrent (= warmUp + getHome se chevauchent)
     private val navMutex = kotlinx.coroutines.sync.Mutex()
+
+    // 2026-07-03 (opti TV, user "on garde les providers web") : on garde les WebJS providers
+    //   MAIS sur low-RAM (Chromecast) chaque WebView vivante coûte ~30MB de mémoire GPU
+    //   (meminfo : 2 WebViews = 53MB Graphics à plat) → le heap sature → GC de 3s → gel.
+    //   FIX : sur low-RAM, on DÉTRUIT la WebView après un délai d'inactivité (idle = 0
+    //   WebView). Recréée à la demande (nav relancée). Rien n'est déconnecté. Mobile : inchangé.
+    private val lowRam = Runtime.getRuntime().maxMemory() < 200L * 1024 * 1024
+    @Volatile private var releaseScheduled: Runnable? = null
+
+    /** Programme la destruction de la WebView après 15s d'inactivité (low-RAM only).
+     *  Reprogrammé à chaque nav ; annulé dès réutilisation. Garde anti-crash : si une nav
+     *  ou des appels JS sont en cours (navMutex verrouillé / pending non vide), on reporte. */
+    private fun scheduleWebViewRelease() {
+        if (!lowRam) return
+        main.post {
+            releaseScheduled?.let { main.removeCallbacks(it) }
+            val r = Runnable {
+                releaseScheduled = null
+                if (navMutex.isLocked || pending.isNotEmpty()) { scheduleWebViewRelease(); return@Runnable }
+                webView?.let { wv ->
+                    try { wv.stopLoading(); wv.loadUrl("about:blank"); wv.destroy() } catch (_: Throwable) {}
+                }
+                webView = null
+                currentUrl = ""
+                android.util.Log.i(TAG, "WebView libérée (idle, low-RAM): $name")
+            }
+            releaseScheduled = r
+            main.postDelayed(r, 15_000)
+        }
+    }
 
     companion object {
         // 2026-06-27 (REPAIR_HANDOFF #5) : coupe tout l'audio/vidéo de la WebView
@@ -99,21 +136,60 @@ open class WebJsProvider(
          * ne clique le provider. Résultat : ouverture instantanée du provider.
          */
         fun warmUpAll() {
+            // 2026-07-03 (opti TV) : sur low-RAM (Chromecast), NE PAS préchauffer — sinon on
+            //   tient des WebViews chaudes dès le boot (meminfo Chromecast : ~2-3 WebViews =
+            //   50-96MB de mémoire GPU) qui saturent le heap → GC de 3s → gel + serveurs en
+            //   bloc. Les providers WebJS navigueront à la demande. Mobile (RAM large) : inchangé.
+            if (Runtime.getRuntime().maxMemory() < 200L * 1024 * 1024) {
+                android.util.Log.i("WebJsProvider", "warmUpAll SKIP (low-RAM : pas de préchauffage WebView)")
+                return
+            }
             kotlinx.coroutines.GlobalScope.launch(Dispatchers.Main) {
                 try {
+                    // 2026-07-04 v4 (user "le préchauffage doit se faire AU BOOT ET à l'ouverture
+                    //   du provider") : DessinAnime réactivé au boot. Mitigation ANR sur Chromecast :
+                    //   delay initial 20s (au lieu de 10s) laisse l'app démarrer complètement (UI
+                    //   dessinée, focus posé, cache home lu, providers register), PUIS on attend
+                    //   que le main looper soit idle avant de lancer le premier warmUp = on ne
+                    //   marche pas sur les toes du user qui navigue. Yield 5s entre providers.
+                    kotlinx.coroutines.delay(20_000L)
+                    awaitMainIdle()
                     val webJsProviders = Provider.providers.keys.filterIsInstance<WebJsProvider>()
                     for (p in webJsProviders) {
-                        // 1 par 1 (pas en parallèle pour limiter la conso RAM WebView)
                         try {
                             android.util.Log.i("WebJsProvider", "warmUp START: ${p.name}")
                             p.warmUp()
+                            // Persist cookies immédiatement → survit à un ANR/restart ultérieur.
+                            try { android.webkit.CookieManager.getInstance().flush() } catch (_: Throwable) {}
                             android.util.Log.i("WebJsProvider", "warmUp DONE: ${p.name}")
                         } catch (e: Exception) {
                             android.util.Log.w("WebJsProvider", "warmUp ${p.name} failed: ${e.message}")
                         }
+                        // Yield 5s + attendre idle → laisse main thread traiter events D-pad
+                        // (évite l'accumulation input timeouts si 5-6 providers warmup à la suite).
+                        kotlinx.coroutines.delay(5_000L)
+                        awaitMainIdle()
                     }
                 } catch (_: Exception) {}
             }
+        }
+
+        /** 2026-07-04 v4 : suspend jusqu'à ce que le main looper soit idle
+         *  (aucune tâche en queue). Ainsi le warmUp WebView ne collide pas
+         *  avec les touches D-pad de l'user OU les animations en cours.
+         *  Timeout 5s pour ne pas bloquer indéfiniment sur Chromecast si le
+         *  main thread est constamment busy. */
+        private suspend fun awaitMainIdle() {
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(5_000L) {
+                    val d = kotlinx.coroutines.CompletableDeferred<Unit>()
+                    android.os.Looper.getMainLooper().queue.addIdleHandler {
+                        if (!d.isCompleted) d.complete(Unit)
+                        false // one-shot
+                    }
+                    d.await()
+                }
+            } catch (_: Throwable) {}
         }
     }
 
@@ -127,25 +203,59 @@ open class WebJsProvider(
             val cats = getHome()
             // ÉCRIT le cache HomeBoot disque MAINTENANT → quand l'user clique
             // le provider, cache read +5ms (categories=N) → SKIP network → INSTANT.
-            try {
-                com.streamflixreborn.streamflix.utils.HomeCacheStore.write(
-                    StreamFlixApp.instance, this, cats
-                )
-                android.util.Log.i(TAG, "warmUp: HomeBoot cache écrit (${cats.size} catégories)")
-            } catch (e: Exception) {
-                android.util.Log.w(TAG, "warmUp HomeBoot cache write failed: ${e.message}")
+            // 2026-07-03 : ne PAS écraser un bon cache avec 0 catégories (CF fail TV).
+            if (cats.isNotEmpty()) {
+                try {
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.write(
+                        StreamFlixApp.instance, this, cats
+                    )
+                    android.util.Log.i(TAG, "warmUp: HomeBoot cache écrit (${cats.size} catégories)")
+                } catch (e: Exception) {
+                    android.util.Log.w(TAG, "warmUp HomeBoot cache write failed: ${e.message}")
+                }
+            } else {
+                android.util.Log.w(TAG, "warmUp: HomeBoot cache SKIP (0 catégories, garde le cache existant)")
             }
             // 2026-06-28 v4 : pre-load Glide RETIRÉ. Il bloquait le thread (44s !)
             // et le cache Glide n'était jamais hit pour cause de mismatch interne.
             // Le RecyclerView téléchargera les images au load normal (= pas pire).
             android.util.Log.i(TAG, "warmUp: pre-load Glide skipped (caused UI freeze)")
+            // 2026-07-04 (user "pré-chauffe le challenge /tv/* au boot en ouvrant une fiche ;
+            //   une fois résolu tout fonctionne bien") : sur les providers detailViaFetch
+            //   (DessinAnime), les pages /tv/* ont un challenge CF SÉPARÉ du home. On en
+            //   pré-résout UNE au boot (fiche du 1er item) → la clearance /tv/* est établie →
+            //   toutes les fiches s'ouvrent instantanément ensuite (plus d'attente ~15s).
+            if (detailViaFetch && cats.isNotEmpty()) {
+                val firstDetailId = cats.asSequence()
+                    .flatMap { it.list.asSequence() }
+                    .mapNotNull { item ->
+                        when (item) {
+                            is com.streamflixreborn.streamflix.models.TvShow -> item.id
+                            is com.streamflixreborn.streamflix.models.Movie -> item.id
+                            else -> null
+                        }
+                    }
+                    .firstOrNull { it.startsWith("tv/") || it.startsWith("movie/") }
+                if (firstDetailId != null) {
+                    try {
+                        navigate(baseUrl.trimEnd('/') + "/" + firstDetailId.trimStart('/'), waitFullContent = true)
+                        android.util.Log.i(TAG, "warmUp: challenge /tv/* pré-résolu ($firstDetailId)")
+                    } catch (e: Exception) {
+                        android.util.Log.w(TAG, "warmUp prewarm détail KO: ${e.message}")
+                    }
+                }
+            }
         } catch (e: Exception) {
             android.util.Log.w(TAG, "warmUp pre-load failed: ${e.message}")
         }
     }
 
+    // 2026-07-04 : aligné sur le pattern Wiflix/FrenchAnime — utilise
+    // NetworkClient.default (cookie jar partagé CookieManager ↔ WebView ↔ Glide,
+    // DoH, pool connexions, UA par défaut). Avant = OkHttpClient isolé (pas de
+    // cookies, pas de DoH).
     private val http by lazy {
-        OkHttpClient.Builder()
+        NetworkClient.default.newBuilder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
             .build()
@@ -171,6 +281,8 @@ open class WebJsProvider(
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun ensureWebViewOnMain(): WebView {
+        // Toute réutilisation de la WebView annule sa destruction programmée (low-RAM).
+        releaseScheduled?.let { main.removeCallbacks(it); releaseScheduled = null }
         webView?.let { return it }
         val ctx = StreamFlixApp.instance.applicationContext
         val wv = WebView(ctx)
@@ -181,13 +293,24 @@ open class WebJsProvider(
             //   besoin de lancer la lecture ; on évite tout autoplay audio/vidéo
             //   dans la WebView headless (+ muteAllMedia ci-dessous en renfort).
             mediaPlaybackRequiresUserGesture = true
-            userAgentString = android.webkit.WebSettings.getDefaultUserAgent(ctx)
+            // 2026-07-03 : UA stealth (Pixel) — cohérent avec STEALTH_JS
+            //   pour passer CF Turnstile sans challenge (surtout sur TV).
+            com.streamflixreborn.streamflix.utils.WebViewResolver.initStealthUa(ctx)
+            userAgentString = com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA
+                ?: android.webkit.WebSettings.getDefaultUserAgent(ctx)
             // Cache mode = DEFAULT (= comportement browser normal). LOAD_CACHE_ELSE_NETWORK
             // causait des timeouts sur les pages série jamais visitées (= rien en cache).
             cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
         }
         wv.addJavascriptInterface(Bridge(), "AndroidJsBridge")
         wv.webViewClient = WebViewClient()
+        // 2026-07-04 : forwarde les console.log du JS provider dans le logcat (diagnostic).
+        wv.webChromeClient = object : android.webkit.WebChromeClient() {
+            override fun onConsoleMessage(cm: android.webkit.ConsoleMessage): Boolean {
+                android.util.Log.i(TAG, "JS> ${cm.message()}")
+                return true
+            }
+        }
         webView = wv
         return wv
     }
@@ -195,14 +318,22 @@ open class WebJsProvider(
     /** Charge [url] dans la WebView et attend la fin du chargement (DOM prêt).
      *  Mutex : si warmUp + getHome se chevauchent, le 2e attend que le 1er
      *  finisse au lieu de lancer un loadUrl concurrent. */
-    private suspend fun navigate(url: String, settleMs: Long = 300) {
+    private suspend fun navigate(url: String, settleMs: Long = 300, waitFullContent: Boolean = false) {
         navMutex.lock()
         try {
-            if (currentUrl == url) return  // déjà au bon endroit
+            if (currentUrl == url && !waitFullContent) return  // déjà au bon endroit
             val done = CompletableDeferred<Unit>()
             main.post {
                 val wv = ensureWebViewOnMain()
                 wv.webViewClient = object : WebViewClient() {
+                    override fun onPageStarted(view: WebView?, u: String?, favicon: android.graphics.Bitmap?) {
+                        super.onPageStarted(view, u, favicon)
+                        // 2026-07-03 : STEALTH_JS au document-start AVANT les scripts CF
+                        //   Turnstile — spoof webdriver/chrome/plugins/WebGL/deviceMemory
+                        //   pour que la WebView primaire passe CF sans challenge.
+                        view?.evaluateJavascript(
+                            com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_JS, null)
+                    }
                     override fun onPageFinished(view: WebView?, u: String?) {
                         currentUrl = u ?: url
                         if (!done.isCompleted) done.complete(Unit)
@@ -212,10 +343,55 @@ open class WebJsProvider(
             }
             withTimeoutOrNull(25_000) { done.await() }
             kotlinx.coroutines.delay(settleMs) // laisser hydrater le SSR/CSR
+            // 2026-07-04 : sur les pages détail (dessinanime /tv/*), CF sert un SHELL de challenge
+            //   Turnstile (~27 Ko) au lieu du contenu. On POLLE jusqu'à ce que la vraie page soit
+            //   chargée (Turnstile auto-résolu grâce à STEALTH_JS), avec un reload-après-clearance
+            //   comme le bypass natif WebViewResolver. Sinon le JS lit un shell → 0 saison.
+            if (waitFullContent) waitForRealContent()
             injectJs()
         } finally {
             navMutex.unlock()
+            // Low-RAM : (re)programme la libération de la WebView après inactivité.
+            scheduleWebViewRelease()
         }
+    }
+
+    /** Lit l'innerHTML courant de la WebView (chaîne JS échappée — on ne veut que sa taille
+     *  et détecter le shell de challenge, pas le contenu exact). */
+    private suspend fun evalInnerHtml(): String {
+        val d = CompletableDeferred<String>()
+        main.post {
+            val wv = webView
+            if (wv == null) { d.complete(""); return@post }
+            wv.evaluateJavascript("document.documentElement.innerHTML") { r -> if (!d.isCompleted) d.complete(r ?: "") }
+        }
+        return withTimeoutOrNull(4_000) { d.await() } ?: ""
+    }
+
+    /** Poll jusqu'à ce que la page ne soit plus un SHELL de challenge Cloudflare (Turnstile).
+     *  Réinjecte STEALTH_JS + reload-après-clearance (comme WebViewResolver). ~18s max. */
+    private suspend fun waitForRealContent() {
+        var reloaded = false
+        for (i in 0 until 30) {
+            val html = evalInnerHtml()
+            // 2026-07-04 : NE PAS se fier à "challenges.cloudflare.com"/"cf-turnstile" — la VRAIE
+            //   page dessinanime les référence dans ses scripts CF (faux positif). Le seul vrai
+            //   marqueur d'interstitiel = le titre "Just a moment" sur une page PETITE. Sinon,
+            //   une page volumineuse = contenu réel chargé.
+            val isInterstitial = html.length < 45_000 && html.contains("Just a moment", true)
+            if (!isInterstitial && html.length > 55_000) {
+                android.util.Log.i(TAG, "waitForRealContent OK (poll $i, len=${html.length})")
+                return
+            }
+            // Après ~3s, reload une fois : le cf_clearance vient d'être posé → la page servira
+            //   le contenu au lieu du shell.
+            if (i == 6 && !reloaded) {
+                reloaded = true
+                main.post { try { webView?.reload() } catch (_: Throwable) {} }
+            }
+            kotlinx.coroutines.delay(600)
+        }
+        android.util.Log.w(TAG, "waitForRealContent : shell persistant après ~18s")
     }
 
     private suspend fun injectJs() {
@@ -299,6 +475,27 @@ open class WebJsProvider(
 
     // ─────────────── Provider API ───────────────
     override suspend fun getHome(): List<Category> {
+        // 2026-07-03 (user "DessinAnime recharge à chaque retour, comme s'il n'y avait pas
+        //   de cache") : le warmup écrivait le cache home, mais il est SKIPPÉ sur low-RAM/TV
+        //   → jamais de cache → re-fetch WebView à chaque ouverture. On lit/écrit ici le cache
+        //   disque directement (comme Wiflix/FrenchAnime). Cache frais (<30 min) → retour
+        //   INSTANTANÉ. Sinon fetch + réécriture (fin de fonction).
+        run {
+            val ctx = StreamFlixApp.instance
+            val cached = com.streamflixreborn.streamflix.utils.HomeCacheStore.read(ctx, this)
+            val age = com.streamflixreborn.streamflix.utils.HomeCacheStore.ageMs(ctx, this) ?: Long.MAX_VALUE
+            // 2026-07-04 (user "le cache DessinAnime ne doit se vider que à la fermeture
+            //   ou au refresh bouton") : TTL 12h pour DessinAnime (le warmUp boot rafraîchit
+            //   de toute façon), 30 min pour les autres WebJS.
+            val ttl = if (name.contains("DessinAnime", ignoreCase = true)) 12L * 60 * 60 * 1000L else 30L * 60 * 1000L
+            if (!cached.isNullOrEmpty() && age < ttl) {
+                // 2026-07-04 v2 : même en cache-hit, on trigger le prewarm du challenge
+                //   /tv/* pour que le premier clic user sur une fiche soit instantané.
+                //   Fallback essentiel du warmUp boot qui ANR sur Chromecast.
+                try { schedulePrewarmDetailChallenge(cached) } catch (_: Throwable) {}
+                return cached
+            }
+        }
         // Pas de retry — 1 seul fetch rapide. Si <8 cats, c'est le BG refresh
         // de HomeViewModel qui rattrapera silencieusement à la prochaine ouverture.
         val json = call("getHome")
@@ -325,7 +522,85 @@ open class WebJsProvider(
             val catName = if (isFeatured) Category.FEATURED else rawName
             if (items.isNotEmpty()) out.add(Category(name = catName, list = items))
         }
+        // 2026-07-04 : écrit le cache disque du home — GARDE : ne pas écraser un
+        // cache riche avec un résultat partiel (hydratation incomplète / CF dégradé).
+        if (out.isNotEmpty()) {
+            try {
+                val prevCached = com.streamflixreborn.streamflix.utils.HomeCacheStore.read(StreamFlixApp.instance, this)
+                if (prevCached.isNullOrEmpty() || out.size >= prevCached.size - 1) {
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.write(StreamFlixApp.instance, this, out)
+                }
+            } catch (_: Exception) {}
+        }
+        // 2026-07-04 v2 (user "les cookies du menu synopsis doivent charger à
+        //   L'OUVERTURE DU PROVIDER, pas juste au boot ; simule un clic jaquette
+        //   pour déclencher le challenge CF qui débloque les saisons") :
+        //   après avoir servi le home au user, on lance en background un navigate
+        //   vers /tv/<slug> (comme si l'user avait cliqué la première jaquette).
+        //   Ça résout le challenge CF /tv/* et persiste cf_clearance dans le
+        //   CookieManager → premier clic user sur une fiche = INSTANTANÉ.
+        //   Fallback CRITIQUE du warmUpAll boot qui ANR sur Chromecast (voir logs
+        //   2026-07-04 20:39:29 : ANR 1s après warmUp START DessinAnime).
+        try { schedulePrewarmDetailChallenge(out) } catch (_: Throwable) {}
         return out
+    }
+
+    /** 2026-07-04 : à l'ouverture du provider, simule un click sur la 1ère
+     *  jaquette du home → charge la page /tv/<slug> ou /movie/<slug> → passe
+     *  le challenge Cloudflare Turnstile → persiste cf_clearance dans le
+     *  CookieManager. Le premier vrai clic user sur une fiche sera instantané.
+     *
+     *  Skips :
+     *  - Provider pas detailViaFetch (= autre chose que DessinAnime pour l'instant)
+     *  - cf_clearance déjà présent (challenge déjà passé lors du warmUp boot ou
+     *    d'une session précédente)
+     *  - Aucun item /tv/ ou /movie/ dans le home
+     *
+     *  Delay 3s : laisse le RecyclerView du home s'afficher avant de saturer
+     *  le main thread avec la WebView (limite les ANR Chromecast). */
+    private fun schedulePrewarmDetailChallenge(cats: List<Category>) {
+        if (!detailViaFetch) return
+        if (cats.isEmpty()) return
+        // Cookie clearance déjà présent → skip (pas besoin de re-provoquer le challenge).
+        val existingCookies = try {
+            android.webkit.CookieManager.getInstance().getCookie(baseUrl)
+        } catch (_: Throwable) { null }
+        if (existingCookies?.contains("cf_clearance") == true) {
+            android.util.Log.i(TAG, "prewarmDetail SKIP (cf_clearance déjà en CookieManager)")
+            return
+        }
+        val firstDetailId = cats.asSequence()
+            .flatMap { it.list.asSequence() }
+            .mapNotNull { item ->
+                when (item) {
+                    is com.streamflixreborn.streamflix.models.TvShow -> item.id
+                    is com.streamflixreborn.streamflix.models.Movie -> item.id
+                    else -> null
+                }
+            }
+            .firstOrNull { it.startsWith("tv/") || it.startsWith("movie/") }
+        if (firstDetailId == null) {
+            android.util.Log.i(TAG, "prewarmDetail SKIP (aucun tv/ ou movie/ dans le home)")
+            return
+        }
+        // Lancement en background sur main dispatcher (WebView doit être main thread).
+        // GlobalScope OK : c'est un préchauffage best-effort, pas rattaché à un ViewModel.
+        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            try {
+                // Laisser le home s'afficher fluidement avant de saturer le main thread.
+                kotlinx.coroutines.delay(3_000L)
+                android.util.Log.i(TAG, "prewarmDetail START ($firstDetailId)")
+                navigate(
+                    baseUrl.trimEnd('/') + "/" + firstDetailId.trimStart('/'),
+                    waitFullContent = true
+                )
+                // Persist immédiat : si l'app crash ou ANR après, les cookies sont sauvés.
+                try { android.webkit.CookieManager.getInstance().flush() } catch (_: Throwable) {}
+                android.util.Log.i(TAG, "prewarmDetail DONE (cf_clearance persisté)")
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "prewarmDetail KO: ${e.message}")
+            }
+        }
     }
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> =
@@ -355,7 +630,7 @@ open class WebJsProvider(
         val rawId = id.substringBefore("@")
         val lang = id.substringAfter("@", "").takeIf { it.isNotBlank() }
         val pageUrl = baseUrl.trimEnd('/') + "/" + rawId.trimStart('/')
-        navigate(pageUrl)
+        navigate(pageUrl, waitFullContent = detailViaFetch)
         val langArg = if (lang != null) q(lang) else "null"
         val json = call("getTvShow", q(rawId), langArg, timeoutMs = 20_000)
         val o = try { JSONObject(json) } catch (_: Exception) { null }
@@ -389,7 +664,7 @@ open class WebJsProvider(
         val rawSeasonId = seasonId.substringBefore("@")
         val lang = seasonId.substringAfter("@", "").takeIf { it.isNotBlank() }
         val pageUrl = baseUrl.trimEnd('/') + "/" + rawSeasonId.trimStart('/') + "/1"
-        navigate(pageUrl)
+        navigate(pageUrl, waitFullContent = detailViaFetch)
         val langArg = if (lang != null) q(lang) else "null"
         val json = call("getEpisodesBySeason", q(rawSeasonId), langArg, timeoutMs = 20_000)
         if (json.isBlank() || json == "null") return emptyList()
@@ -435,12 +710,18 @@ open class WebJsProvider(
     override fun getServersProgressive(id: String, videoType: Video.Type): Flow<List<Video.Server>> =
         channelFlow {
             android.util.Log.i(TAG, "PROGRESSIVE START id=$id")
-            // 2026-06-28 (user "vraiment un gros problème de serveur") : DROP des
-            // sources WebJS nmlnode car injouables / pas de VF. On garde uniquement
-            // le backup natif DessinAnime (= cascade CS/AS/WF/NM/FS) + cross-backup
-            // anime (AnimeSama/Franime/etc) qui donnent du contenu vraiment FR.
-            //
-            // (Ancien launch fetchWebJsServers SUPPRIMÉ — sources nmlnode dropped)
+            // 1) Sources NATIVES WebJS (extractServers du JS hébergé).
+            // 2026-07-03 : RÉTABLI — le user veut les serveurs natifs du site
+            //   + les backups cross-provider en complément.
+            launch {
+                try {
+                    val natives = withTimeoutOrNull(20_000) { fetchWebJsServers(id) } ?: emptyList()
+                    android.util.Log.i(TAG, "progressive: WebJS natives → ${natives.size} servers")
+                    if (natives.isNotEmpty()) send(natives)
+                } catch (e: Exception) {
+                    android.util.Log.w(TAG, "progressive: fetchWebJsServers failed: ${e.message}")
+                }
+            }
 
             // 2bis) BACKUPS CROSS-PROVIDER par recherche titre (groupe ANIME) :
             // AnimeSama, FrenchAnime, VoirAnime, FrenchManga, Franime, etc. — chacun
@@ -449,16 +730,25 @@ open class WebJsProvider(
             // 2bis-bis) APPEL DIRECT AnimeSama par titre (= la méthode CORRECTE
             // pour récupérer les sources AnimeSama, identique à ce que la cascade
             // DessinAnime fait en interne). Renvoie vidmoly/sendvid/etc.
-            launch {
+            if (!com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) launch {
                 try {
                     val title = extractTitleHint(id)
+                    val slugTitle = extractSlugTitle(id)
                     if (title.length >= 3) {
                         val asProvider = Provider.providers.keys.firstOrNull { it.name == "AnimeSama" }
                         if (asProvider is AnimeSamaProvider) {
                             android.util.Log.i(TAG, "DIRECT AS: getAnimeSamaSourcesByTitle('$title') START")
-                            val srvs = withTimeoutOrNull(15_000) {
+                            var srvs = withTimeoutOrNull(15_000) {
                                 asProvider.getAnimeSamaSourcesByTitle(title, videoType)
                             } ?: emptyList()
+                            // 2026-07-03 : si le titre JS complet ne matche pas (sous-titre
+                            //   d'arc type "Ryomen Sukuna"), retente avec le slug canonique.
+                            if (srvs.isEmpty() && slugTitle.length >= 3 && !slugTitle.equals(title, ignoreCase = true)) {
+                                android.util.Log.i(TAG, "DIRECT AS: retry with slugTitle='$slugTitle'")
+                                srvs = withTimeoutOrNull(15_000) {
+                                    asProvider.getAnimeSamaSourcesByTitle(slugTitle, videoType)
+                                } ?: emptyList()
+                            }
                             android.util.Log.i(TAG, "DIRECT AS: → ${srvs.size} sources")
                             if (srvs.isNotEmpty()) {
                                 val wrapped = srvs.map { srv ->
@@ -478,13 +768,21 @@ open class WebJsProvider(
                 }
             }
 
-            launch {
+            // 2026-07-04 (user "les backups ne doivent PAS empêcher les natifs de se charger") :
+            //   XBACKUP inline DÉSACTIVÉ → le registre central gère TOUS les backups. Ces
+            //   recherches par titre (dont FrenchAnime/VoirAnime en bypass WebView) monopolisaient
+            //   la WebView unique et retardaient le scrape natif extractServers de ~9s sur TV.
+            if (!com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) launch {
                 android.util.Log.i(TAG, "XBACKUP launch START id=$id")
                 val title = try { extractTitleHint(id) } catch (e: Exception) {
                     android.util.Log.w(TAG, "XBACKUP extractTitleHint exception: ${e.message}")
                     ""
                 }
-                android.util.Log.i(TAG, "XBACKUP title='$title' (len=${title.length})")
+                // 2026-07-03 : titre canonique du slug (ex "jujutsu kaisen") pour
+                //   rattraper les sous-titres d'arc (ex "Jujutsu Kaisen Ryomen Sukuna")
+                //   qui ne matchent dans aucun provider.
+                val slugTitle = extractSlugTitle(id)
+                android.util.Log.i(TAG, "XBACKUP title='$title' slugTitle='$slugTitle' (len=${title.length})")
                 if (title.length >= 3) {
                     // 2026-06-28 (user "tu dois faire en sorte qu'on ait vraiment tous les
                     //   backups possibles et imaginables pour Dessin animé à part les backups
@@ -521,10 +819,20 @@ open class WebJsProvider(
                         launch {
                             android.util.Log.d(TAG, "XBACKUP[${p.name}] search('$title') START")
                             try {
-                                val matches = withTimeoutOrNull(10_000) { p.search(title, 1) }
+                                var matches = withTimeoutOrNull(10_000) { p.search(title, 1) }
                                 if (matches == null) { android.util.Log.w(TAG, "XBACKUP[${p.name}] search TIMEOUT"); return@launch }
                                 android.util.Log.d(TAG, "XBACKUP[${p.name}] search → ${matches.size} matches")
-                                val match = matches.firstOrNull { it is Movie || it is TvShow }
+                                var match = matches.firstOrNull { it is Movie || it is TvShow }
+                                // 2026-07-03 : retry avec le titre slug canonique si le titre
+                                //   JS complet ne matche pas (sous-titre d'arc en trop).
+                                if (match == null && slugTitle.length >= 3 && !slugTitle.equals(title, ignoreCase = true)) {
+                                    android.util.Log.d(TAG, "XBACKUP[${p.name}] retry with slugTitle='$slugTitle'")
+                                    matches = withTimeoutOrNull(10_000) { p.search(slugTitle, 1) }
+                                    if (matches != null) {
+                                        android.util.Log.d(TAG, "XBACKUP[${p.name}] slug search → ${matches.size} matches")
+                                        match = matches.firstOrNull { it is Movie || it is TvShow }
+                                    }
+                                }
                                 if (match == null) { android.util.Log.w(TAG, "XBACKUP[${p.name}] NO match Movie/TvShow"); return@launch }
                                 android.util.Log.d(TAG, "XBACKUP[${p.name}] match id=${(match as? TvShow)?.id ?: (match as? Movie)?.id}")
 
@@ -578,7 +886,9 @@ open class WebJsProvider(
             //   globalement — c'était un flag persistant qui bloquait Wiflix dans
             //   DessinAnime natif même quand utilisé normalement. Le filtre par
             //   nom srv.name plus bas suffit pour le scope WebJsProvider.
-            val backup = findNativeBackupProvider()
+            // 2026-07-04 : backup natif inline DÉSACTIVÉ → registre central.
+            val backup = if (com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) null
+                         else findNativeBackupProvider()
             android.util.Log.i(TAG, "progressive: backup search → ${backup?.name ?: "NULL"} (baseUrl=$baseUrl)")
             if (backup != null) {
                 launch {
@@ -642,7 +952,7 @@ open class WebJsProvider(
         val rawId = id.substringBefore("@")
         val lang = id.substringAfter("@", "").takeIf { it.isNotBlank() }
         val pageUrl = baseUrl.trimEnd('/') + "/" + rawId.trimStart('/')
-        navigate(pageUrl)
+        navigate(pageUrl, waitFullContent = detailViaFetch)
         // Passe la langue au JS qui cliquera le bouton AVANT de récupérer les hosts
         val langArg = if (lang != null) q(lang) else "null"
         val json = call("extractServers", langArg, timeoutMs = 15_000)
@@ -666,6 +976,17 @@ open class WebJsProvider(
      * (getMovie/getTvShow → title) ; fallback = slug de l'id (= "movie/1327819-jumpers"
      * → "jumpers"). Le slug enlève le préfixe numérique TMDB + remplace les tirets.
      */
+    /** Titre court issu du slug URL — titre canonique sans sous-titre d'arc.
+     *  Ex: "tv/95479-jujutsu-kaisen/1/1" → "jujutsu kaisen". */
+    private fun extractSlugTitle(id: String): String {
+        val slugPart = id.removePrefix("movie/").removePrefix("tv/").substringBefore("/")
+        return slugPart
+            .replace(Regex("^\\d+-"), "")           // retire préfixe TMDB ID
+            .replace(Regex("-(20\\d{2}|19\\d{2})$"), "") // retire année finale
+            .replace("-", " ")
+            .trim()
+    }
+
     private suspend fun extractTitleHint(id: String): String {
         // 1. Tente via JS (titre propre)
         try {
@@ -680,13 +1001,8 @@ open class WebJsProvider(
                 if (title.length >= 3) return title
             }
         } catch (_: Exception) {}
-        // 2. Fallback : extrait du slug, début de l'id (movie/<slug> ou tv/<slug>/season/ep)
-        val slugPart = id.removePrefix("movie/").removePrefix("tv/").substringBefore("/")
-        return slugPart
-            .replace(Regex("^\\d+-"), "")           // retire préfixe TMDB ID
-            .replace(Regex("-(20\\d{2}|19\\d{2})$"), "") // retire année finale
-            .replace("-", " ")
-            .trim()
+        // 2. Fallback : extrait du slug
+        return extractSlugTitle(id)
     }
 
     /** Convertit un id WebJS au format natif provider.
@@ -773,13 +1089,19 @@ open class WebJsProvider(
                 Regex("""\.(m3u8|mpd)(\?|$)""").containsMatchIn(src) ||
                 (Regex("""\.mp4(\?|$)""").containsMatchIn(src) && !src.contains("/embed"))
         if (isDirectStream) {
-            val headers = mapOf(
+            // 2026-07-04 : STEALTH_UA (Chrome 131, même que WebView/Glide)
+            // + injection cookie CookieManager (cf_clearance, etc.) — aligné
+            // sur le pattern Wiflix/FrenchAnime pour la diffusion.
+            val cookieStr = try {
+                android.webkit.CookieManager.getInstance().getCookie(baseUrl)
+            } catch (_: Exception) { null }
+            val hdrs = mutableMapOf(
                 "Referer" to baseUrl.trimEnd('/') + "/",
                 "Origin" to baseUrl.trimEnd('/'),
-                "User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 " +
-                        "(KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36",
+                "User-Agent" to com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA,
             )
-            return Video(source = src, headers = headers)
+            if (!cookieStr.isNullOrBlank()) hdrs["Cookie"] = cookieStr
+            return Video(source = src, headers = hdrs)
         }
         // Sinon : délègue aux Extractors IN-APP (uqload/hydrax/sendvid…) — robuste.
         return Extractor.extract(server.src)
