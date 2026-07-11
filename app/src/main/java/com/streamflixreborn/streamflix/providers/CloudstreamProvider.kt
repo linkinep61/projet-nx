@@ -819,29 +819,48 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
 
     /** Construit une catégorie TMDB Discover Movie filtrée par plateforme de streaming
      *  (région FR). Retourne une liste vide si l'appel échoue. */
+    // 2026-07-11 (user « supprime les dessins animés, on a déjà des providers anime »):
+    //   exclut le genre TMDB Animation (16). 2 pages → ~15-20 items/catégorie après filtre.
+    private fun TMDb3.Movie.notAnim(): Boolean = 16 !in genresIds
+    private fun TMDb3.Tv.notAnim(): Boolean = 16 !in genresIds
+
     private suspend fun discoverMoviesOnProvider(
         watchProviderId: Int, mapMovie: (TMDb3.Movie) -> Movie,
-    ): List<Movie> = runCatching {
-        TMDb3.Discover.movie(
-            page = 1, language = language, region = "FR",
-            watchRegion = "FR",
+    ): List<Movie> = runCatching { coroutineScope {
+        val p1 = async { TMDb3.Discover.movie(
+            page = 1, language = language, region = "FR", watchRegion = "FR",
             sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
             withWatchProviders = TMDb3.Params.WithBuilder(watchProviderId),
             withOriginalLanguage = csOriginalLanguageBuilder(),
-        ).results.filter { it.posterPath != null }.map(mapMovie)
-    }.getOrDefault(emptyList())
+        ).results }
+        val p2 = async { runCatching { TMDb3.Discover.movie(
+            page = 2, language = language, region = "FR", watchRegion = "FR",
+            sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
+            withWatchProviders = TMDb3.Params.WithBuilder(watchProviderId),
+            withOriginalLanguage = csOriginalLanguageBuilder(),
+        ).results }.getOrDefault(emptyList()) }
+        (p1.await() + p2.await()).distinctBy { it.id }
+            .filter { it.posterPath != null && it.notAnim() }.take(20).map(mapMovie)
+    } }.getOrDefault(emptyList())
 
     private suspend fun discoverTvOnProvider(
         watchProviderId: Int, mapTv: (TMDb3.Tv) -> TvShow,
-    ): List<TvShow> = runCatching {
-        TMDb3.Discover.tv(
-            page = 1, language = language,
-            watchRegion = "FR",
+    ): List<TvShow> = runCatching { coroutineScope {
+        val p1 = async { TMDb3.Discover.tv(
+            page = 1, language = language, watchRegion = "FR",
             sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
             withWatchProviders = TMDb3.Params.WithBuilder(watchProviderId),
             withOriginalLanguage = csOriginalLanguageBuilder(),
-        ).results.filter { it.posterPath != null }.map(mapTv)
-    }.getOrDefault(emptyList())
+        ).results }
+        val p2 = async { runCatching { TMDb3.Discover.tv(
+            page = 2, language = language, watchRegion = "FR",
+            sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
+            withWatchProviders = TMDb3.Params.WithBuilder(watchProviderId),
+            withOriginalLanguage = csOriginalLanguageBuilder(),
+        ).results }.getOrDefault(emptyList()) }
+        (p1.await() + p2.await()).distinctBy { it.id }
+            .filter { it.posterPath != null && it.notAnim() }.take(20).map(mapTv)
+    } }.getOrDefault(emptyList())
 
     /** 2026-05-20 — langue d'origine TMDB à appliquer selon le filtre catalogue
      *  choisi par l'utilisateur (bouton filtre du home). null = pas de filtre de
@@ -1093,13 +1112,13 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
 
         val sections = mutableListOf<Category>()
         val featured = trendingD.await()
-            .filter { it.posterPath != null }
+            .filter { it.posterPath != null && it.notAnim() }
             .take(10).mapNotNull { it.toAppItem() }
         if (featured.isNotEmpty()) sections.add(Category(name = Category.FEATURED, list = featured))
 
         // Nouveautés FR (films + séries séparés, pas de section mixte doublon)
-        val newMovies = newMoviesD.await().filter { it.posterPath != null }.map(mapMovie)
-        val newTv = newTvD.await().filter { it.posterPath != null }.map(mapTv)
+        val newMovies = newMoviesD.await().filter { it.posterPath != null && it.notAnim() }.map(mapMovie)
+        val newTv = newTvD.await().filter { it.posterPath != null && it.notAnim() }.map(mapTv)
         if (newMovies.isNotEmpty()) sections.add(Category(name = "Nouveaux films", list = newMovies))
         if (newTv.isNotEmpty()) sections.add(Category(name = "Nouvelles séries", list = newTv))
 
@@ -1119,17 +1138,17 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         addPlatformRow("Sur OCS",            ocsMoviesD.await(),       emptyList())
         addPlatformRow("Sur Max",            maxMoviesD.await(),       emptyList())
 
-        // 3) Catégories de fond (toutes plateformes)
-        val popularTv = popularTvD.await().filter { it.posterPath != null }.map(mapTv)
+        // 3) Catégories de fond (toutes plateformes) — anime exclu
+        val popularTv = popularTvD.await().filter { it.posterPath != null && it.notAnim() }.map(mapTv)
         if (popularTv.isNotEmpty()) sections.add(Category(name = "Séries populaires", list = popularTv))
 
-        val topTv = topTvD.await().filter { it.posterPath != null }.map(mapTv)
+        val topTv = topTvD.await().filter { it.posterPath != null && it.notAnim() }.map(mapTv)
         if (topTv.isNotEmpty()) sections.add(Category(name = "Séries les mieux notées", list = topTv))
 
-        val popularMovies = popularMoviesD.await().filter { it.posterPath != null }.map(mapMovie)
+        val popularMovies = popularMoviesD.await().filter { it.posterPath != null && it.notAnim() }.map(mapMovie)
         if (popularMovies.isNotEmpty()) sections.add(Category(name = "Films populaires", list = popularMovies))
 
-        val topMovies = topMoviesD.await().filter { it.posterPath != null }.map(mapMovie)
+        val topMovies = topMoviesD.await().filter { it.posterPath != null && it.notAnim() }.map(mapMovie)
         if (topMovies.isNotEmpty()) sections.add(Category(name = "Films les mieux notés", list = topMovies))
 
         Log.d(TAG, "getHome Cloudstream : ${sections.size} sections — featured=${featured.size}, nouveauxFilms=${newMovies.size}, nouvellesSeries=${newTv.size}")
@@ -1916,11 +1935,36 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                     }
                 }
                 if (!queryTitle.isBlank()) {
-                    subjectId = findSubjectId(queryTitle, year)
+                    // 2026-07-11 (user « pareil sur Cloudstream ») : aoneroom indexe souvent les
+                    //   séries (dramas coréens, anime…) sous un AUTRE nom que le titre fr TMDB
+                    //   (ex. Navillera → « Navillera - Like a Butterfly » / « 나빌레라 »). On essaie
+                    //   donc TOUS les titres (fr + original + alternative_titles) jusqu'à un match,
+                    //   au lieu du seul titre fr → récupère des serveurs là où on avait 0.
+                    val titles = linkedSetOf(queryTitle)
+                    tmdbId?.toIntOrNull()?.let { tid ->
+                        runCatching {
+                            if (videoType is Video.Type.Movie) {
+                                val d = TMDb3.Movies.details(movieId = tid, language = language,
+                                    appendToResponse = listOf(TMDb3.Params.AppendToResponse.Movie.ALTERNATIVE_TITLES))
+                                d.originalTitle.takeIf { it.isNotBlank() }?.let { titles.add(it) }
+                                d.alternativeTitles?.all()?.mapNotNull { it.title?.takeIf { t -> t.isNotBlank() } }?.forEach { titles.add(it) }
+                            } else {
+                                val d = TMDb3.TvSeries.details(seriesId = tid, language = language,
+                                    appendToResponse = listOf(TMDb3.Params.AppendToResponse.Tv.ALTERNATIVE_TITLES))
+                                d.originalName.takeIf { it.isNotBlank() }?.let { titles.add(it) }
+                                d.alternativeTitles?.all()?.mapNotNull { it.title?.takeIf { t -> t.isNotBlank() } }?.forEach { titles.add(it) }
+                            }
+                        }
+                    }
+                    var matched = queryTitle
+                    for (t in titles) {
+                        subjectId = findSubjectId(t, year)
+                        if (!subjectId.isNullOrBlank()) { matched = t; break }
+                    }
                     if (subjectId.isNullOrBlank()) {
-                        Log.d(TAG, "getServers : pas de subjectId Cloudstream pour '$queryTitle' ($year) — fallback Nakios si TMDB id dispo")
+                        Log.d(TAG, "getServers : pas de subjectId Cloudstream pour '$queryTitle' ($year) [${titles.size} titres testés] — fallback Nakios si TMDB id dispo")
                     } else {
-                        Log.d(TAG, "getServers TMDB→Cloudstream : '$queryTitle' ($year) → sid=$subjectId, se=$se ep=$ep")
+                        Log.d(TAG, "getServers TMDB→Cloudstream : '$matched' ($year) → sid=$subjectId, se=$se ep=$ep")
                     }
                 } else {
                     Log.d(TAG, "getServers : titre vide pour $id")

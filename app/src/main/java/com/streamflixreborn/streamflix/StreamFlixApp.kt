@@ -167,9 +167,12 @@ class StreamFlixApp : Application() {
             runCatching { com.streamflixreborn.streamflix.utils.NetworkClient.sharedConnectionPool.evictAll() }
         } catch (_: Throwable) {}
 
-        // 2026-07-05 : watchdog ANR (diagnostic DessinAnime) — logge la pile du thread
-        //   principal dans le logcat s'il gèle >4s (l'OPPO bloque /data/anr). Inoffensif.
-        com.streamflixreborn.streamflix.utils.AnrWatchdog.start()
+        // 2026-07-11 (user « désactiver ANR pour éviter d'envoyer des rapports
+        //   pour rien ») : watchdog ANR complètement coupé. Le rapport fatal
+        //   (CrashActivity/GitHub) était déjà disabled depuis le 07/07, mais le
+        //   thread daemon continuait de tourner (log + fichier anr_stacks.txt).
+        //   Seuls les vrais crashs (UncaughtExceptionHandler) déclenchent un rapport.
+        // com.streamflixreborn.streamflix.utils.AnrWatchdog.start()
 
         // 2026-07-07 (user « autant télécharger tous les CI au démarrage, ça évite que ça cherche
         //   pour rien ») : précharge la liste OLA des cids FR VALIDÉS (nx-data live-cids.json) en
@@ -335,10 +338,13 @@ class StreamFlixApp : Application() {
         //   à la 1re navigation (bypass à la demande). Fix propre des posters = passer par TMDB
         //   (zéro CF) plutôt que les images french-anime.com — à faire séparément.
 
-        // 2026-07-07 : UncaughtExceptionHandler — sauvegarde le stack trace
-        //   dans last_crash.txt ET lance CrashActivity (process :crash séparé)
-        //   pour afficher le rapport + permettre l'envoi sur GitHub Issues.
-        //   CrashActivity tourne dans :crash → survit au kill du process principal.
+        // 2026-07-11 (user « désactive aussi les crashs, on garde ça que pour
+        //   les versions test ») : UncaughtExceptionHandler + CrashActivity
+        //   désactivés en release/debug normal. Le handler interceptait les crashs,
+        //   affichait CrashActivity (écran de rapport) et envoyait sur GitHub.
+        //   Désormais Android gère les crashs normalement (dialog système standard).
+        //   Pour réactiver en version test : décommenter le bloc ci-dessous.
+        /*
         try {
             val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
             Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
@@ -385,6 +391,7 @@ class StreamFlixApp : Application() {
                 kotlin.system.exitProcess(1)
             }
         } catch (_: Throwable) {}
+        */
 
         // 2026-05-17 (user "ça peut faire cracher l'application au démarrage
         //   sinon") : clear le cache DVR au démarrage de l'app. Évite d'hériter

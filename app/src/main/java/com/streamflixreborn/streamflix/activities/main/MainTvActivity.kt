@@ -805,6 +805,9 @@ class MainTvActivity : FragmentActivity() {
         // sur le ProfilePicker (Netflix-style).
         if (isFinishing) {
             com.streamflixreborn.streamflix.utils.ProfileStore.clearLastActiveTimestamp()
+            // 2026-07-11 (user "quand on ferme l'app la radio ne se quitte pas") :
+            // stopper le mini-player + le service radio foreground.
+            try { com.streamflixreborn.streamflix.utils.MiniPlayerController.stop() } catch (_: Throwable) {}
         }
         super.onDestroy()
     }

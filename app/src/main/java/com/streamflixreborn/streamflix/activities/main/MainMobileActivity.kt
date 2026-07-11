@@ -236,6 +236,29 @@ class MainMobileActivity : FragmentActivity() {
             }
         }
 
+        // 2026-07-11 FIX crash restauration (Samsung SM-S901B / Android 16 — IllegalStateException
+        //   "Current provider is not set" @ AppDatabase.getInstance, via MovieMobileFragment) :
+        //   PARITÉ avec MainTvActivity (garde présente là-bas depuis 2026-05-12, oubliée côté mobile).
+        //   Quand Android tue le process puis restaure la pile de fragments sauvegardée (fiche
+        //   film/série…) alors que currentProvider est null (au cold start il est wipé pour afficher
+        //   le picker), le fragment restauré appelle AppDatabase.getInstance() dès onViewCreated →
+        //   exception → crash. Si provider null et qu'on n'est pas déjà sur le picker, on redirige
+        //   vers providers (start destination) AVANT que le fragment fautif ne s'instancie.
+        if (UserPreferences.currentProvider == null) {
+            val dest = navController.currentDestination?.id
+            if (dest != null && dest != R.id.providers) {
+                runCatching {
+                    navController.navigate(
+                        R.id.providers,
+                        null,
+                        androidx.navigation.NavOptions.Builder()
+                            .setPopUpTo(navController.graph.startDestinationId, inclusive = false)
+                            .build(),
+                    )
+                }
+            }
+        }
+
         viewModel.checkUpdate()
 
         binding.bnvMain.setupWithNavController(navController)
@@ -376,6 +399,11 @@ class MainMobileActivity : FragmentActivity() {
         // sur le ProfilePicker au prochain lancement (Netflix-style).
         if (isFinishing) {
             com.streamflixreborn.streamflix.utils.ProfileStore.clearLastActiveTimestamp()
+            // 2026-07-11 (user "quand on ferme l'app la radio ne se quitte pas") :
+            // stopper le mini-player + le service radio foreground quand l'user
+            // ferme l'app intentionnellement (back/swipe). Sans ça, le foreground
+            // service survit et l'audio continue en arrière-plan.
+            try { com.streamflixreborn.streamflix.utils.MiniPlayerController.stop() } catch (_: Throwable) {}
         }
         dismissUpdateDialog()
         _binding = null
