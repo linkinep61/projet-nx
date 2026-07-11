@@ -1012,11 +1012,13 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                 categories.add(Category(name = "Tendances du jour", list = tendancesJour))
             }
 
-            // Tendances (semaine)
+            // Tendances (semaine) — 2 pages : après retrait des doublons vs « Tendances du
+            //   jour », il reste assez d'items uniques pour remplir la rangée.
             runCatching {
-                val week = tmdbService.getTrendingWeek(apiKey = TMDB_API_KEY)
-                val weekItems = week.results?.filter { notAnim(it.genre_ids) }
-                    ?.mapNotNull { trendItem(it) } ?: emptyList()
+                val w1 = tmdbService.getTrendingWeek(apiKey = TMDB_API_KEY, page = 1).results ?: emptyList()
+                val w2 = runCatching { tmdbService.getTrendingWeek(apiKey = TMDB_API_KEY, page = 2).results }.getOrNull() ?: emptyList()
+                val weekItems = (w1 + w2).distinctBy { it.id }.filter { notAnim(it.genre_ids) }
+                    .mapNotNull { trendItem(it) }
                 if (weekItems.isNotEmpty()) categories.add(Category(name = "Tendances", list = weekItems))
             }
 
@@ -1068,25 +1070,29 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                 add(java.util.Calendar.MONTH, -18)
             }.time)
 
-            // Séries récentes
+            // Séries récentes (2 pages → reste rempli après retrait des doublons)
             runCatching {
-                val rec = tmdbService.discoverTvShows(
-                    apiKey = TMDB_API_KEY, page = 1, sortBy = "first_air_date.desc",
+                suspend fun recTvPage(p: Int) = tmdbService.discoverTvShows(
+                    apiKey = TMDB_API_KEY, page = p, sortBy = "first_air_date.desc",
                     voteCountGte = 30, firstAirDateGte = sinceStr, firstAirDateLte = todayStr,
                     withOriginalLanguage = langFilter, withoutGenres = "16",
-                )
-                val items = rec.results?.map { tv(it) } ?: emptyList()
+                ).results ?: emptyList()
+                val r1 = recTvPage(1)
+                val r2 = runCatching { recTvPage(2) }.getOrNull() ?: emptyList()
+                val items = (r1 + r2).distinctBy { it.id }.map { tv(it) }
                 if (items.isNotEmpty()) categories.add(Category(name = "Séries récentes", list = items))
             }
 
-            // Films récents
+            // Films récents (2 pages)
             runCatching {
-                val rec = tmdbService.discoverMovies(
-                    apiKey = TMDB_API_KEY, page = 1, sortBy = "primary_release_date.desc",
+                suspend fun recMoviePage(p: Int) = tmdbService.discoverMovies(
+                    apiKey = TMDB_API_KEY, page = p, sortBy = "primary_release_date.desc",
                     voteCountGte = 30, primaryReleaseDateGte = sinceStr, primaryReleaseDateLte = todayStr,
                     withOriginalLanguage = langFilter, withoutGenres = "16",
-                )
-                val items = rec.results?.mapNotNull { m -> m.title?.takeIf { it.isNotBlank() }?.let { mv(m) } } ?: emptyList()
+                ).results ?: emptyList()
+                val r1 = recMoviePage(1)
+                val r2 = runCatching { recMoviePage(2) }.getOrNull() ?: emptyList()
+                val items = (r1 + r2).distinctBy { it.id }.mapNotNull { m -> m.title?.takeIf { it.isNotBlank() }?.let { mv(m) } }
                 if (items.isNotEmpty()) categories.add(Category(name = "Films récents", list = items))
             }
 
@@ -1135,29 +1141,42 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             Log.e("MovixProvider", "Error loading home: ${e.message}")
         }
 
-        // 2026-07-11 (user « respecte les endpoints du site » + « pas de doublons ») :
-        //   dédup UNIQUEMENT entre rangées de GENRES (évite le même blockbuster dans
-        //   Action+Aventure+SF). Les rangées signature (Tendances jour/semaine, Populaires,
-        //   Sagas, Récents) restent INTACTES = contenu exact des endpoints movix.chat
-        //   (le site ne déduplique pas ses rangées trending → on les recopie fidèlement).
+        // 2026-07-11 (user « un antidoublon sur les catégories ») : ANTI-DOUBLON GLOBAL.
+        //   Un même film n'apparaît qu'une fois. Les rangées de RÉFÉRENCE (Tendances jour/
+        //   semaine, Sagas, Récents) restent PLEINES (contenu exact des endpoints du site)
+        //   mais « consomment » leurs films ; « Films populaires » + toutes les rangées de
+        //   GENRE sont filtrées contre tout ce qui précède → plus de blockbuster répété
+        //   dans Populaires + Action + Aventure + Tendances. FEATURED (héros) exempt.
+        //   Les 2 rangées Tendances jour/semaine se recouvrent par nature (comme le site).
         run {
-            val genreRowNames = setOf(
-                "Aventure", "Fantastique", "Animation", "Drame", "Action",
-                "Comédie", "Thriller", "Crime", "Science-Fiction", "Horreur",
+            fun keyOf(item: AppAdapter.Item): String? = when (item) {
+                is com.streamflixreborn.streamflix.models.Movie -> "m:${item.id}"
+                is com.streamflixreborn.streamflix.models.TvShow -> "s:${item.id}"
+                else -> null
+            }
+            // Seules ces 2 rangées restent 100% pleines : Tendances du jour (référence
+            //   trending) + Sagas (respectées). TOUT le reste (Tendances semaine, Récents,
+            //   Populaires, genres) est filtré contre ce qui précède → aucune jaquette en double.
+            val keepFullButConsume = setOf(
+                "Tendances du jour", "Les sagas incontournables",
             )
             val seen = HashSet<String>()
             val deduped = mutableListOf<Category>()
             for (cat in categories) {
-                if (cat.name !in genreRowNames) { deduped.add(cat); continue }
-                val kept = cat.list.filter { item ->
-                    val key = when (item) {
-                        is com.streamflixreborn.streamflix.models.Movie -> "m:${item.id}"
-                        is com.streamflixreborn.streamflix.models.TvShow -> "s:${item.id}"
-                        else -> return@filter true
+                when {
+                    cat.name == Category.FEATURED -> deduped.add(cat) // héros : ni filtre ni consommation
+                    cat.name in keepFullButConsume -> {
+                        cat.list.forEach { keyOf(it)?.let(seen::add) }
+                        deduped.add(cat)
                     }
-                    seen.add(key)
+                    else -> {
+                        val kept = cat.list.filter { item ->
+                            val key = keyOf(item) ?: return@filter true
+                            seen.add(key)
+                        }
+                        if (kept.isNotEmpty()) deduped.add(cat.copy(list = kept.take(20)))
+                    }
                 }
-                if (kept.isNotEmpty()) deduped.add(cat.copy(list = kept.take(20)))
             }
             categories.clear()
             categories.addAll(deduped)
@@ -3445,7 +3464,8 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
         @GET("trending/all/week")
         suspend fun getTrendingWeek(
             @Query("api_key") apiKey: String,
-            @Query("language") language: String = "fr-FR"
+            @Query("language") language: String = "fr-FR",
+            @Query("page") page: Int = 1
         ): TmdbPageResult<TmdbTrendingItem>
 
         @GET("collection/{id}")
