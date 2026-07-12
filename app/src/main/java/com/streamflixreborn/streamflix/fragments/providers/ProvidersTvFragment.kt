@@ -101,6 +101,20 @@ class ProvidersTvFragment : Fragment() {
             true
         }
 
+        // 2026-07-11 (user "à droite du cœur, un bouton pour changer de fond facilement") :
+        //   ouvre direct la galerie Wallhaven.
+        binding.btnWallpaper.setOnClickListener {
+            try {
+                startActivity(android.content.Intent(
+                    requireContext(),
+                    com.streamflixreborn.streamflix.activities.WallhavenGalleryActivity::class.java
+                ))
+            } catch (e: Throwable) {
+                android.widget.Toast.makeText(requireContext(),
+                    "Galerie indisponible : ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+
         // 2026-07-05 (user "à côté du cœur à droite pour éteindre l'app") :
         //   1. Nuclear cache purge (caches HTTP, cookies CF, home, extracteurs, DNS)
         //   2. Toast de confirmation

@@ -2434,6 +2434,10 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         val favorites = if (providerName.isNotEmpty()) store.getFavorites(providerName).toMutableSet() else mutableSetOf()
 
         val listView = android.widget.ListView(requireContext())
+        // TV D-pad : sans ça la ListView sélectionne la rangée entière et le center déclenche
+        //   l'item-click (absent) au lieu de descendre le focus sur la CheckBox → impossible de
+        //   cocher/décocher à la télécommande (au tactile ça marchait car on tape direct dessus).
+        listView.itemsCanFocus = true
         val adapter = ExtractorToggleAdapter(requireContext(), allNames, disabled, favorites, providerName)
         listView.adapter = adapter
 

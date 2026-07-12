@@ -1159,13 +1159,13 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                 binding.ivSettingBan.nextFocusRightId = View.NO_ID
             } else if (item is Settings.Server) {
                 // VOD server — cœur favori par provider (ExtractorToggleStore)
+                // 2026-07-11 : clé LANGUE-AWARE ("vidmoly:vf" ≠ "vidmoly:vostfr")
+                //   pour ne pas contaminer le VOSTFR quand on heart le VF.
                 binding.root.alpha = 1.0f
                 val providerName = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name ?: ""
-                val extName = (com.streamflixreborn.streamflix.utils.ExtractorRanker.resolveExtractorName(
-                    com.streamflixreborn.streamflix.models.Video.Server(id = item.id, name = item.name)
-                ) ?: item.name).lowercase()
+                val favKey = com.streamflixreborn.streamflix.utils.ExtractorRanker.favKeyFor(item.name)
                 if (providerName.isNotEmpty()) {
-                    val isFav = com.streamflixreborn.streamflix.utils.ExtractorToggleStore.isFavorite(extName, providerName)
+                    val isFav = com.streamflixreborn.streamflix.utils.ExtractorToggleStore.isFavorite(favKey, providerName)
                     binding.ivSettingFavorite.visibility = View.VISIBLE
                     binding.ivSettingFavorite.setImageResource(
                         if (isFav) R.drawable.ic_favorite_enable else R.drawable.ic_favorite_disable
@@ -1175,7 +1175,7 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     )
                     binding.ivSettingFavorite.tag = if (isFav) "fav" else "not_fav"
                     binding.ivSettingFavorite.setOnClickListener {
-                        val nowFav = com.streamflixreborn.streamflix.utils.ExtractorToggleStore.toggleFavorite(extName, providerName)
+                        val nowFav = com.streamflixreborn.streamflix.utils.ExtractorToggleStore.toggleFavorite(favKey, providerName)
                         binding.ivSettingFavorite.setImageResource(
                             if (nowFav) R.drawable.ic_favorite_enable else R.drawable.ic_favorite_disable
                         )

@@ -1149,12 +1149,12 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
                             return slug
                         }
                     }
-                    // Dernier fallback : premier résultat tout court
-                    val firstSlug = arr.optJSONObject(0)?.optString("slug")?.takeIf { it.isNotBlank() }
-                    if (firstSlug != null) {
-                        Log.d(TAG, "resolveSlugFromId: tmdb::$tmdbId → slug='$firstSlug' (1er résultat)")
-                        return firstSlug
-                    }
+                    // 2026-07-11 (bug « Ren » = faux film) : le « premier résultat tout court »
+                    //   était DANGEREUX — si le titre n'existe pas sur le site (ex Chainsmoker Cat),
+                    //   la recherche renvoyait « Chainsaw Man » → on allait chercher SES serveurs
+                    //   = mauvais film. Mieux vaut 0 serveur natif que le mauvais film.
+                    // SUPPRIMÉ : on ne prend JAMAIS le 1er résultat aveuglément.
+                    Log.d(TAG, "resolveSlugFromId: tmdb::$tmdbId → aucun match slug parmi ${arr.length()} résultats pour '$title'")
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "resolveSlugFromId search KO: ${e.message}")

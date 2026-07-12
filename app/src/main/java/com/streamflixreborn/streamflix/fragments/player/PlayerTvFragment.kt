@@ -295,6 +295,11 @@ class PlayerTvFragment : Fragment() {
     // lecture" (super-buffer 15s, no swap).
     private var vodCurrentStreamHasWorked = false
     private var vodStickyRetryCount = 0
+
+    // 2026-07-11 : freeze detection → proposition lecteur externe.
+    //   Évite de re-proposer si déjà proposé pendant cette session player.
+    private var didProposeExternalThisSession = false
+
     // 2026-05-21 (user "baisse auto seulement si ça bufferise" + "remonte tout seul
     //   quand c'est stable") : plafond de résolution adaptatif piloté par les
     //   rebufferings (mode Auto/VOD uniquement). Cf AdaptiveQualityGovernor.
@@ -1976,6 +1981,9 @@ class PlayerTvFragment : Fragment() {
     }
 
 
+        /** Compteur anti-boucle infinie pour le retry post-layout. */
+        private var scalePostRetries = 0
+
         private fun updatePlayerScale() {
             val videoSurfaceView = binding.pvPlayer.videoSurfaceView
             val playerResize = UserPreferences.playerResize
@@ -1984,6 +1992,18 @@ class PlayerTvFragment : Fragment() {
             binding.pvPlayer.resizeMode = playerResize.resizeMode
 
             videoSurfaceView?.apply {
+                // 2026-07-11 : si la surface n'est pas encore posée (width/height=0),
+                //   poster pour après le layout. Sinon le pivot est (0,0) et le scale
+                //   part du coin haut-gauche au lieu du centre → visuellement cassé.
+                if (width == 0 || height == 0) {
+                    if (scalePostRetries < 5) {
+                        scalePostRetries++
+                        post { updatePlayerScale() }
+                    }
+                    return
+                }
+                scalePostRetries = 0
+
                 translationX = 0f
                 translationY = 0f
                 pivotX = width / 2f
@@ -4481,6 +4501,16 @@ class PlayerTvFragment : Fragment() {
             shouldPlay: Boolean = true,
         ) {
             currentVideo = video
+
+            // 2026-07-11 : si le mode « toujours lecteur externe » est actif,
+            //   on lance directement le lecteur externe sans passer par ExoPlayer.
+            if (UserPreferences.alwaysUseExternalPlayer && !didProposeExternalThisSession) {
+                didProposeExternalThisSession = true // 1 seule fois par session
+                Log.d("PlayerTvFragment", "alwaysUseExternalPlayer=true → launch external player")
+                launchExternalPlayer()
+                return
+            }
+
             // 2026-05-21 : statut serveurs PAR TITRE (couleurs picker liées à ce contenu).
             com.streamflixreborn.streamflix.utils.TitleServerStatus.setCurrentTitle(args.id)
             // Reset IPTV stickiness when the user (or auto-failover) selects a NEW server.
@@ -5116,7 +5146,15 @@ class PlayerTvFragment : Fragment() {
                                             com.streamflixreborn.streamflix.extractors.Extractor
                                                 .recordFailureExternal(server.name, "pre-ready-freeze")
                                         }
-                                        if (nextServer != null) viewModel.getVideo(nextServer)
+                                        if (nextServer != null) {
+                                            viewModel.getVideo(nextServer)
+                                        } else {
+                                            // 2026-07-11 : plus de serveur à essayer → proposer lecteur externe
+                                            Log.w("PlayerNetwork", "Pre-READY freeze, no more servers → propose external player")
+                                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                                proposeExternalPlayer("Aucun serveur n'a pu lire cette vidéo")
+                                            }
+                                        }
                                     }
                                 } else {
                                     // 2026-06-09 : 15s → 25s post-READY (cohérent avec
@@ -5168,7 +5206,10 @@ class PlayerTvFragment : Fragment() {
                                                 Log.w("PlayerNetwork", "→ auto-switching to ${nextServer.name}")
                                                 viewModel.getVideo(nextServer)
                                             } else {
-                                                Log.e("PlayerNetwork", "→ no more servers to try")
+                                                Log.e("PlayerNetwork", "→ no more servers to try → propose external player")
+                                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                                    proposeExternalPlayer("La vidéo a figé et il n'y a plus d'autre serveur")
+                                                }
                                             }
                                         }
                                     }
@@ -5597,8 +5638,9 @@ class PlayerTvFragment : Fragment() {
                                     Log.d("PlayerNetwork", "Codec unsupported → next server: ${nextServer.name}")
                                     viewModel.getVideo(nextServer)
                                 } else if (!tryNextChannelVariant(server)) {
-                                    Log.w("PlayerNetwork", "Codec unsupported et aucune source alternative — stop")
+                                    Log.w("PlayerNetwork", "Codec unsupported et aucune source alternative → propose external player")
                                     try { player.stop() } catch (_: Exception) {}
+                                    proposeExternalPlayer("Codec vidéo ($codecLabel) non supporté par cet appareil")
                                 }
                             }
                         }
@@ -5607,7 +5649,11 @@ class PlayerTvFragment : Fragment() {
 
                 override fun onVideoSizeChanged(videoSize: VideoSize) {
                     super.onVideoSizeChanged(videoSize)
-                    updatePlayerScale()
+                    // 2026-07-11 : post pour laisser le layout interne d'ExoPlayer
+                    //   (AspectRatioFrameLayout) se recalculer AVANT qu'on applique
+                    //   notre scale/resizeMode. Sans ça, pivotX/Y peut être faux
+                    //   (width=0 avant layout) et le scale est écrasé par le re-layout.
+                    binding.pvPlayer.post { updatePlayerScale() }
                 }
 
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -5768,8 +5814,9 @@ class PlayerTvFragment : Fragment() {
                                 Log.d("PlayerNetwork", "Codec unsupported → next server: ${nextServer.name}")
                                 viewModel.getVideo(nextServer)
                             } else if (!tryNextChannelVariant(server)) {
-                                Log.w("PlayerNetwork", "Codec unsupported et aucune source alternative — stop")
+                                Log.w("PlayerNetwork", "Codec unsupported (onPlayerError) et aucune source alternative → propose external player")
                                 try { player.stop() } catch (_: Exception) {}
+                                proposeExternalPlayer("Format/codec non supporté par cet appareil")
                             }
                         }
                         return
@@ -5825,7 +5872,8 @@ class PlayerTvFragment : Fragment() {
                             Log.w("PlayerNetwork", "Connection timeout on ${server.name}, auto-switching to ${nextServer.name}")
                             viewModel.getVideo(nextServer)
                         } else if (!tryNextChannelVariant(server)) {
-                            Log.e("PlayerNetwork", "Connection timeout on ${server.name}, no more servers or variants to try")
+                            Log.e("PlayerNetwork", "Connection timeout on ${server.name}, no more servers → propose external player")
+                            proposeExternalPlayer("Connexion impossible — aucun serveur alternatif")
                         }
                         return
                     }
@@ -6199,20 +6247,27 @@ class PlayerTvFragment : Fragment() {
             // 2026-07-10 : zoom « collant » — on applique d'abord le dernier zoom manuel GLOBAL (suit
             //   d'une vidéo à l'autre), sinon le zoom par serveur (ex: Sibnet). Reste tant qu'il n'est
             //   pas modifié/reset. (Sur TV, updatePlayerScale/onVideoSizeChanged le réapplique aussi.)
-            try {
-                val saved = com.streamflixreborn.streamflix.utils.ZoomPrefsStore.load(
-                    com.streamflixreborn.streamflix.utils.ZoomPrefsStore.LAST_KEY
-                ) ?: com.streamflixreborn.streamflix.utils.ZoomPrefsStore.extractKey(server, video.source)
-                    ?.let { com.streamflixreborn.streamflix.utils.ZoomPrefsStore.load(it) }
-                if (saved != null) {
-                    binding.pvPlayer.videoSurfaceView?.let { vv ->
-                        vv.scaleX = saved.first
-                        vv.scaleY = saved.second
-                        Log.d("PlayerTvFragment", "Zoom collant appliqué: scaleX=${saved.first}, scaleY=${saved.second}")
+            // 2026-07-11 : post pour appliquer APRÈS le layout initial — le resizeMode + zoom
+            //   collant sont ré-appliqués correctement même si PlayerView reset son aspect ratio
+            //   quand le player vient d'être assigné.
+            binding.pvPlayer.post {
+                try {
+                    // D'abord ré-appliquer le resizeMode (peut avoir été écrasé par setPlayer)
+                    binding.pvPlayer.resizeMode = UserPreferences.playerResize.resizeMode
+                    val saved = com.streamflixreborn.streamflix.utils.ZoomPrefsStore.load(
+                        com.streamflixreborn.streamflix.utils.ZoomPrefsStore.LAST_KEY
+                    ) ?: com.streamflixreborn.streamflix.utils.ZoomPrefsStore.extractKey(server, video.source)
+                        ?.let { com.streamflixreborn.streamflix.utils.ZoomPrefsStore.load(it) }
+                    if (saved != null) {
+                        binding.pvPlayer.videoSurfaceView?.let { vv ->
+                            vv.scaleX = saved.first
+                            vv.scaleY = saved.second
+                            Log.d("PlayerTvFragment", "Zoom collant appliqué: scaleX=${saved.first}, scaleY=${saved.second}")
+                        }
                     }
+                } catch (e: Exception) {
+                    Log.w("PlayerTvFragment", "Zoom auto-apply failed: ${e.message}")
                 }
-            } catch (e: Exception) {
-                Log.w("PlayerTvFragment", "Zoom auto-apply failed: ${e.message}")
             }
 
             // 2026-05-17 v4 (user "sauts de phase dans la vidéo") : revert
@@ -6395,6 +6450,52 @@ class PlayerTvFragment : Fragment() {
                 startActivity(android.content.Intent.createChooser(intent, getString(R.string.player_external_player_title)))
             } catch (e: Throwable) {
                 Toast.makeText(requireContext(), getString(R.string.player_external_player_error_video), Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        /** 2026-07-11 : quand ExoPlayer fige et qu'il n'y a plus de serveur, propose
+         *  à l'utilisateur de lancer la vidéo dans un lecteur externe (VLC/MX Player).
+         *  Option « Toujours » = active le mode permanent (UserPreferences.alwaysUseExternalPlayer).
+         *  @param reason texte court décrivant la cause (affiché en sous-titre du dialog). */
+        private fun proposeExternalPlayer(reason: String) {
+            if (didProposeExternalThisSession) return
+            didProposeExternalThisSession = true
+            val source = currentVideo?.source
+                ?: try { player.currentMediaItem?.localConfiguration?.uri?.toString() } catch (_: Throwable) { null }
+            if (source.isNullOrBlank()) return
+            try {
+                val ctx = requireContext()
+                try { player.pause() } catch (_: Throwable) {}
+                val items = arrayOf("Cette fois", "Toujours", "Non")
+                androidx.appcompat.app.AlertDialog.Builder(ctx)
+                    .setTitle("La vidéo semble figée")
+                    .setMessage("$reason\n\nLancer dans un lecteur externe ?")
+                    .setItems(items) { _, which ->
+                        when (which) {
+                            0 -> { // Cette fois
+                                launchExternalPlayer()
+                            }
+                            1 -> { // Toujours
+                                UserPreferences.alwaysUseExternalPlayer = true
+                                launchExternalPlayer()
+                                try {
+                                    Toast.makeText(ctx,
+                                        "Le lecteur externe sera utilisé par défaut",
+                                        Toast.LENGTH_SHORT).show()
+                                } catch (_: Exception) {}
+                            }
+                            2 -> { // Non
+                                try { player.play() } catch (_: Throwable) {}
+                            }
+                        }
+                    }
+                    .setCancelable(true)
+                    .setOnCancelListener {
+                        try { player.play() } catch (_: Throwable) {}
+                    }
+                    .show()
+            } catch (e: Exception) {
+                Log.w("PlayerTvFragment", "proposeExternalPlayer dialog failed: ${e.message}")
             }
         }
 
@@ -7484,10 +7585,21 @@ class PlayerTvFragment : Fragment() {
                     .build()
             }
 
+            // 2026-07-11 (user « Uqload peine à se lancer sur TV ») : sur les masters HLS
+            //   multi-variantes (ex Uqload `_,l,n,.urlset/master.m3u8` = variante légère `l` +
+            //   normale `n`), ExoPlayer choisit la 1ʳᵉ variante selon son estimation de bande
+            //   passante initiale. Par défaut celle-ci est haute → il tente la lourde d'emblée →
+            //   démarrage lent/saccadé sur le Chromecast (device faible). On force une estimation
+            //   INITIALE BASSE (≈700 Kbps) → il démarre sur la variante légère (lancement rapide)
+            //   puis l'adaptatif remonte tout seul en quelques segments. Ne CAPE PAS la qualité max.
+            val startLowBandwidthMeter = androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.Builder(requireContext())
+                .setInitialBitrateEstimate(700_000L)
+                .build()
             val builtPlayer = baseBuilder
                 .setMediaSourceFactory(mediaSourceFactory)
                 .setLoadControl(loadControl)
                 .setTrackSelector(trackSelector)
+                .setBandwidthMeter(startLowBandwidthMeter)
                 .build()
             // 2026-05-17 v56 (user "retours en arrière de 40s pendant flux chargé") :
             //   PreloadConfiguration 30s = backup pré-bufferise 30s de contenu OLDER

@@ -26,7 +26,9 @@ object CatalogFilter {
         POPULAR_INTL("popular_intl", "Monde — FR", null),
         ORIGIN_FR("origin_fr", "Productions françaises", "fr"),
         US_EN("us_en", "Anglophone / US-UK", "en"),
-        ANIME_JA("anime_ja", "Anime / Japon", "ja"),
+        // 2026-07-11 (user) : « Anime / Japon » retiré — on a enlevé tout le contenu animé de
+        //   Movix ET Cloudstream, donc ce filtre ne renvoyait plus rien de cohérent. Un ancien
+        //   choix "anime_ja" sauvegardé retombe automatiquement sur DEFAULT via fromPref().
         KO("ko", "Coréen (K-drama)", "ko"),
         ES("es", "Espagnol / hispanique", "es"),
         HI("hi", "Indien / Bollywood", "hi"),

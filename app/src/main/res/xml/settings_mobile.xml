@@ -497,7 +497,7 @@
             <Preference
                 android:key="WALLPAPER_CLEAR"
                 android:title="Retirer le fond personnalisé"
-                android:summary="Revient au fond par défaut de l'application"
+                android:summary="Revient au fond noir par défaut"
                 app:iconSpaceReserved="false" />
 
             <ListPreference

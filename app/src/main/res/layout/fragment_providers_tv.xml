@@ -11,7 +11,7 @@
         android:layout_width="0dp"
         android:layout_height="0dp"
         android:scaleType="centerCrop"
-        android:src="@drawable/bg_wallpaper_tv"
+        android:src="@drawable/bg_app_black"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
@@ -97,6 +97,27 @@
         app:layout_constraintTop_toTopOf="@id/btn_global_favorites"
         tools:ignore="UseAppTint" />
 
+    <!-- 2026-07-11 (user "à droite du cœur, un bouton pour changer de fond d'écran") :
+         bouton wallpaper → ouvre la galerie Wallhaven. -->
+    <ImageView
+        android:id="@+id/btn_wallpaper"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_marginStart="16dp"
+        android:padding="10dp"
+        android:src="@drawable/ic_wallpaper"
+        android:tint="#FFFFFF"
+        android:focusable="true"
+        android:focusableInTouchMode="false"
+        android:contentDescription="Changer le fond d'écran"
+        android:background="@drawable/bg_tv_button_focus"
+        android:nextFocusLeft="@id/btn_global_favorites"
+        android:nextFocusRight="@id/btn_power_off"
+        app:layout_constraintBottom_toBottomOf="@id/btn_global_favorites"
+        app:layout_constraintStart_toEndOf="@id/btn_global_favorites"
+        app:layout_constraintTop_toTopOf="@id/btn_global_favorites"
+        tools:ignore="UseAppTint" />
+
     <!-- 2026-07-05 (user "à côté du cœur à droite pour éteindre l'app") :
          bouton power-off = nuclearCachePurge + Process.killProcess. -->
     <ImageView
@@ -111,9 +132,9 @@
         android:focusableInTouchMode="false"
         android:contentDescription="Éteindre"
         android:background="@drawable/bg_tv_button_focus"
-        android:nextFocusLeft="@id/btn_global_favorites"
+        android:nextFocusLeft="@id/btn_wallpaper"
         app:layout_constraintBottom_toBottomOf="@id/btn_global_favorites"
-        app:layout_constraintStart_toEndOf="@id/btn_global_favorites"
+        app:layout_constraintStart_toEndOf="@id/btn_wallpaper"
         app:layout_constraintTop_toTopOf="@id/btn_global_favorites"
         tools:ignore="UseAppTint" />
 

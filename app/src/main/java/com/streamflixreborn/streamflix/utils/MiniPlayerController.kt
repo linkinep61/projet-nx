@@ -569,6 +569,18 @@ object MiniPlayerController {
             }
         }
         override fun onPlayerError(error: PlaybackException) {
+            // 2026-07-11 : RADIO — fallback multi-flux. Si le flux radio courant échoue et
+            //   qu'il reste des URLs de secours (stations homonymes fusionnées / sources
+            //   Famelack multiples), on bascule sur la suivante au lieu de fail. Placé EN
+            //   TÊTE car la radio n'utilise pas le système de générations IPTV.
+            val radioId = currentChannelId
+            if (radioId != null && isRadioChannel(radioId) && radioFallbackUrls.isNotEmpty()) {
+                val nextUrl = radioFallbackUrls.first()
+                val remaining = radioFallbackUrls.drop(1)
+                Log.w(TAG, "Radio stream KO → bascule fallback (${remaining.size} restant): ${error.message}")
+                playRadioDirect(radioId, currentChannelName ?: "", currentChannelPoster, nextUrl, remaining)
+                return
+            }
             // 2026-06-22 (user "changement rapide → erreur bloquante") :
             //   si le media qui a causé l'erreur appartient à une ancienne
             //   génération (= chaîne déjà abandonnée par un playChannel plus
@@ -1881,7 +1893,7 @@ object MiniPlayerController {
                 val next = list[target]
                 val url = next.streamUrl
                 if (!url.isNullOrBlank()) {
-                    playRadioDirect(next.id, next.name, next.poster, url)
+                    playRadioDirect(next.id, next.name, next.poster, url, next.fallbackUrls)
                 } else {
                     // Pas d'URL directe (= Dric4rTV) : déléguer au flow normal.
                     playChannel(next.id, next.name, next.poster)
@@ -1942,8 +1954,16 @@ object MiniPlayerController {
         }
     }
 
-    fun playRadioDirect(channelId: String, channelName: String, channelPoster: String?, streamUrl: String) {
-        Log.d(TAG, "playRadioDirect: $channelName ($channelId) → $streamUrl")
+    // 2026-07-11 : flux de secours de la radio courante (stations homonymes fusionnées
+    //   + sources multiples Famelack). Consommés un par un par onPlayerError.
+    @Volatile private var radioFallbackUrls: List<String> = emptyList()
+
+    fun playRadioDirect(
+        channelId: String, channelName: String, channelPoster: String?, streamUrl: String,
+        fallbackUrls: List<String> = emptyList(),
+    ) {
+        Log.d(TAG, "playRadioDirect: $channelName ($channelId) → $streamUrl (${fallbackUrls.size} fallback)")
+        radioFallbackUrls = fallbackUrls
         // 2026-06-09 : keep-alive foreground pour audio écran éteint.
         startRadioForegroundService(channelName, "Radio")
         // 2026-06-09 : retenir le provider d'origine pour pouvoir masquer

@@ -47,6 +47,12 @@ object RadioCatalog {
         val name: String,
         val poster: String?,
         val streamUrl: String? = null,  // URL directe pour les stations RadioBrowser
+        // 2026-07-11 (user « fusionner les radios du même nom : si une marche pas,
+        //   l'autre prend le relais ») : flux de SECOURS. Alimenté par (a) les URLs
+        //   multiples d'une station Famelack (sources.streams[]) et (b) la fusion des
+        //   stations homonymes (Dric4rTV/RadioBrowser/Famelack). RadioPlaybackService
+        //   bascule dessus si le flux principal échoue.
+        val fallbackUrls: List<String> = emptyList(),
     )
 
     /** Retourne la liste complète des radios (Dric4rTV + RadioBrowser FR).
@@ -71,17 +77,18 @@ object RadioCatalog {
             return@withContext cache
         }
         try {
-            val (dric, browser) = coroutineScope {
+            val (dric, browser, famelack) = coroutineScope {
                 val a = async { loadDric4rTvRadios() }
                 val b = async { loadBrowserRadiosProtected() }
-                a.await() to b.await()
+                val c = async { loadFamelackRadios() }
+                Triple(a.await(), b.await(), c.await())
             }
             val dricEnriched = enrichHardcodedWithLiveUrls(dric, browser)
-            val all = mergeAndDedup(dricEnriched, browser)
+            val all = mergeAndDedup(dricEnriched, browser, famelack)
             if (all.isNotEmpty()) {
                 cache = all
                 lastLoad = now
-                Log.d(TAG, "Loaded ${all.size} radios (Dric=${dric.size}, Browser=${browser.size})")
+                Log.d(TAG, "Loaded ${all.size} radios (Dric=${dric.size}, Browser=${browser.size}, Famelack=${famelack.size})")
                 if (browser.isNotEmpty()) saveToDisk(all)
             }
             all.ifEmpty { cache }
@@ -127,10 +134,11 @@ object RadioCatalog {
                 val firstPass = if (cache.size > dric.size) cache else mergeAndDedup(dric, emptyList())
                 emit(firstPass)
             }
-            // 2e emit : fetch RadioBrowser protégé contre l'annulation
+            // 2e emit : fetch RadioBrowser + Famelack protégé contre l'annulation
             val browser = loadBrowserRadiosProtected()
+            val famelack = loadFamelackRadios()
             val dricEnriched = enrichHardcodedWithLiveUrls(dric, browser)
-            val full = mergeAndDedup(dricEnriched, browser)
+            val full = mergeAndDedup(dricEnriched, browser, famelack)
             if (full.isNotEmpty()) {
                 cache = full
                 lastLoad = System.currentTimeMillis()
@@ -140,16 +148,83 @@ object RadioCatalog {
             emit(full)
         }.flowOn(Dispatchers.IO)
 
-    /** Merge + dedup (par nom lowercase trim). Dric4rTV d'abord (curated). */
-    private fun mergeAndDedup(
-        dric: List<RadioStation>,
-        browser: List<RadioStation>,
-    ): List<RadioStation> {
-        val all = mutableListOf<RadioStation>()
-        val seenNames = HashSet<String>()
-        dric.forEach { if (seenNames.add(normalizeName(it.name))) all.add(it) }
-        browser.forEach { if (seenNames.add(normalizeName(it.name))) all.add(it) }
-        return all
+    /** Merge + dedup par nom normalisé. La 1re source d'un nom = station PRIMAIRE
+     *  (streamUrl + poster gardés). Les stations HOMONYMES suivantes ne sont PAS
+     *  jetées : leurs URLs viennent grossir `fallbackUrls` du primaire → si le flux
+     *  principal échoue, RadioPlaybackService bascule dessus. Ordre des sources =
+     *  priorité (Dric4rTV curated d'abord, puis RadioBrowser, puis Famelack). */
+    private fun mergeAndDedup(vararg lists: List<RadioStation>): List<RadioStation> {
+        val byName = LinkedHashMap<String, RadioStation>()
+        for (list in lists) {
+            for (st in list) {
+                val key = normalizeName(st.name)
+                if (key.isBlank()) continue
+                val existing = byName[key]
+                if (existing == null) {
+                    byName[key] = st
+                } else {
+                    // fusionner : URLs de la station homonyme → fallback du primaire
+                    val incoming = buildList {
+                        st.streamUrl?.takeIf { it.isNotBlank() }?.let { add(it) }
+                        addAll(st.fallbackUrls)
+                    }
+                    val merged = existing.fallbackUrls.toMutableList()
+                    for (u in incoming) if (u.isNotBlank() && u != existing.streamUrl && u !in merged) merged.add(u)
+                    // primaire sans streamUrl mais homonyme en a un → on le promeut
+                    if (existing.streamUrl.isNullOrBlank() && incoming.isNotEmpty()) {
+                        byName[key] = existing.copy(streamUrl = incoming.first(), fallbackUrls = merged.drop(1))
+                    } else {
+                        byName[key] = existing.copy(fallbackUrls = merged)
+                    }
+                }
+            }
+        }
+        return byName.values.toList()
+    }
+
+    /** 2026-07-11 — 3e source : Famelack (repo GitHub public famelack/famelack-data).
+     *  JSON gzippé, ~1463 stations FR. Chaque station a plusieurs flux
+     *  (`sources.streams[]`) → 1er = principal, le reste en fallback. On saute les
+     *  `isGeoBlocked` (injouables hors FR). Aucun auth, aucune clé. */
+    private const val FAMELACK_RADIO_URL =
+        "https://raw.githubusercontent.com/famelack/famelack-data/main/radio/compressed/countries/fr.json"
+
+    private suspend fun loadFamelackRadios(): List<RadioStation> = withContext(Dispatchers.IO) {
+        try {
+            val conn = (java.net.URL(FAMELACK_RADIO_URL).openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = 8000; readTimeout = 12000
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+            }
+            if (conn.responseCode != 200) { Log.d(TAG, "Famelack HTTP ${conn.responseCode}"); return@withContext emptyList() }
+            val json = java.util.zip.GZIPInputStream(conn.inputStream).bufferedReader().use { it.readText() }
+            val arr = JSONArray(json)
+            val out = ArrayList<RadioStation>(arr.length())
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                if (o.optBoolean("isGeoBlocked", false)) continue
+                val name = o.optString("name").takeIf { it.isNotBlank() } ?: continue
+                val streamsJson = o.optJSONObject("sources")?.optJSONArray("streams") ?: continue
+                val streams = ArrayList<String>(streamsJson.length())
+                for (j in 0 until streamsJson.length()) {
+                    streamsJson.optString(j).takeIf { it.startsWith("http") }?.let { if (it !in streams) streams.add(it) }
+                }
+                if (streams.isEmpty()) continue
+                val nano = o.optString("nanoid").ifBlank { normalizeName(name) }
+                out.add(
+                    RadioStation(
+                        id = "radio::famelack::$nano",
+                        name = name,
+                        poster = null,
+                        streamUrl = streams.first(),
+                        fallbackUrls = streams.drop(1),
+                    )
+                )
+            }
+            Log.d(TAG, "Famelack: ${out.size} radios FR chargées")
+            out
+        } catch (t: Throwable) {
+            Log.w(TAG, "Famelack radios failed: ${t.message}"); emptyList()
+        }
     }
 
     /** 2026-07-04 (user "Radio Nova qui fonctionnait — on peut pas mettre les
@@ -450,6 +525,7 @@ object RadioCatalog {
                 o.put("name", s.name)
                 if (s.poster != null) o.put("poster", s.poster)
                 if (s.streamUrl != null) o.put("streamUrl", s.streamUrl)
+                if (s.fallbackUrls.isNotEmpty()) o.put("fallbackUrls", JSONArray(s.fallbackUrls))
                 arr.put(o)
             }
             file.writeText(arr.toString())
@@ -471,11 +547,15 @@ object RadioCatalog {
                 val o = arr.optJSONObject(i) ?: continue
                 val id = o.optString("id").takeIf { it.isNotBlank() } ?: continue
                 val name = o.optString("name").takeIf { it.isNotBlank() } ?: continue
+                val fb = o.optJSONArray("fallbackUrls")?.let { fa ->
+                    (0 until fa.length()).mapNotNull { fa.optString(it).takeIf { s -> s.isNotBlank() } }
+                } ?: emptyList()
                 out.add(RadioStation(
                     id = id,
                     name = name,
                     poster = o.optString("poster").takeIf { it.isNotBlank() },
                     streamUrl = o.optString("streamUrl").takeIf { it.isNotBlank() },
+                    fallbackUrls = fb,
                 ))
             }
             out

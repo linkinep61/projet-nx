@@ -47,16 +47,19 @@ android {
         applicationId "com.streamfr.app"
         minSdk 23
         targetSdk 35
-        versionCode 10930
-        versionName "1.7.230"
+        versionCode 10931
+        versionName "1.7.231"
 
-        // 2026-05-11 : RESTAURATION x86 (32-bit) — abandonné en v19 par erreur.
-        // Certains émulateurs (Genymotion, AVD images anciennes) et surtout les
-        // TV Sharp Aquos avec CPU Intel Atom utilisent x86 32-bit. Sans cet ABI
-        // l'install échoue ("APK incompatible") sur ces devices. Le surcoût est
-        // ~8 MB sur l'APK final mais c'est nécessaire pour la compat large.
+        // ABI pilotée par la propriété ABI_TARGET (local.properties, posée par la CI).
+        //   APK par défaut = ARM (armeabi-v7a + arm64-v8a).
+        //   ABI_TARGET=x86 → APK dédié émulateurs / TV Intel Atom (x86 + x86_64).
         ndk {
-            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+            def abiTarget = properties.getProperty("ABI_TARGET") ?: "arm"
+            if (abiTarget == "x86") {
+                abiFilters 'x86', 'x86_64'
+            } else {
+                abiFilters 'armeabi-v7a', 'arm64-v8a'
+            }
         }
 
         buildConfigField "String", "APP_LAYOUT", "\"${properties.getProperty("APP_LAYOUT")}\""
@@ -215,7 +218,8 @@ dependencies {
     implementation platform('com.google.firebase:firebase-bom:34.13.0')
     implementation 'com.google.firebase:firebase-firestore'
     implementation("org.java-websocket:Java-WebSocket:1.5.3")
-    
+
+
 }
 
 ksp {

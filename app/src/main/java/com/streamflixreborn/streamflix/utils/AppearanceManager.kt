@@ -118,12 +118,9 @@ object AppearanceManager {
                         .diskCacheStrategy(DiskCacheStrategy.AUTOMATIC)
                         .into(ivHomeBg)
                 } else {
-                    // Restore le wallpaper par défaut
-                    val defaultBgId = ctx.resources.getIdentifier(
-                        if (isTvLayout(ctx)) "bg_wallpaper_tv" else "bg_wallpaper_mobile",
-                        "drawable", ctx.packageName
-                    )
-                    if (defaultBgId != 0) ivHomeBg.setImageResource(defaultBgId)
+                    // 2026-07-11 (user "on supprime notre fond d'écran, fond noir tout simplement") :
+                    //   plus de JPG bundle → fond noir uni quand aucun wallpaper perso n'est choisi.
+                    ivHomeBg.setImageResource(com.streamflixreborn.streamflix.R.drawable.bg_app_black)
                 }
             } catch (e: Throwable) {
                 Log.w(TAG, "Failed to apply wallpaper to iv_home_background: ${e.message}")

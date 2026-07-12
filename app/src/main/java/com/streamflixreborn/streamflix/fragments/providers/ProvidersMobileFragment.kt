@@ -81,6 +81,20 @@ class ProvidersMobileFragment : Fragment() {
             findNavController().navigate(R.id.global_favorites)
         }
 
+        // 2026-07-11 (user "à droite du cœur, un bouton pour changer de fond facilement
+        //   au lieu d'aller dans les paramètres") : ouvre direct la galerie Wallhaven.
+        binding.ivWallpaper.setOnClickListener {
+            try {
+                startActivity(android.content.Intent(
+                    requireContext(),
+                    com.streamflixreborn.streamflix.activities.WallhavenGalleryActivity::class.java
+                ))
+            } catch (e: Throwable) {
+                android.widget.Toast.makeText(requireContext(),
+                    "Galerie indisponible : ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+
         // 2026-06-08 (user "à gauche du cœur tu vas mettre une petite radio") :
         //   bouton radio → dialog liste 17 radios Dric4rTV. Au clic, démarre
         //   le mini-bar audio sans naviguer.
