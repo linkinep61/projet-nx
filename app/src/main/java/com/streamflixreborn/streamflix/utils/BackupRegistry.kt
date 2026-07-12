@@ -5,6 +5,8 @@ import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.providers.CloudstreamProvider
 import com.streamflixreborn.streamflix.providers.CoflixSourceProvider
 import com.streamflixreborn.streamflix.providers.CoflixWikiProvider
+import com.streamflixreborn.streamflix.providers.CpasmieuxProvider
+import com.streamflixreborn.streamflix.providers.CpasmalProvider
 import com.streamflixreborn.streamflix.providers.MovieboxProvider
 import com.streamflixreborn.streamflix.providers.MovixProvider
 import com.streamflixreborn.streamflix.providers.NakiosProvider
@@ -642,6 +644,33 @@ object BackupRegistry {
                 if (titleTry.isBlank()) continue
                 result = if (key.isMovie) CoflixWikiProvider.getMovieSources(titleTry, key.year)
                           else CoflixWikiProvider.getEpisodeSources(titleTry, key.year, key.season, key.episode)
+                if (result.isNotEmpty()) break
+            }
+            result
+        } }
+        // 2026-07-11 : Cpasmieux (site DataLife FR streaming, VF/VOSTFR). Matching STRICT
+        //   titre+année (film ↔ série discriminés par le « - s N e E » du titre de résultat).
+        //   Serveurs data-url délégués aux extracteurs existants (Uqload/Filemoon/Dood/Vidzy/
+        //   VOE/FSVID). Essaie tous les titres connus (alt TMDB inclus).
+        launch { emit("Cpasmieux") {
+            var result = emptyList<Video.Server>()
+            for (titleTry in knownTitles) {
+                if (titleTry.isBlank()) continue
+                result = if (key.isMovie) CpasmieuxProvider.getMovieSources(titleTry, key.year)
+                          else CpasmieuxProvider.getEpisodeSources(titleTry, key.year, key.season, key.episode)
+                if (result.isNotEmpty()) break
+            }
+            result
+        } }
+        // 2026-07-11 : Cpasmal (cpasmal.rip, DataLife FR). CF bloque le POST search en XHR (403)
+        //   mais laisse passer la NAVIGATION → httpSearch envoie des headers de navigation
+        //   (Sec-Fetch-Mode: navigate + pas de X-Requested-With). Serveurs via getxfield (XHR OK).
+        launch { emit("Cpasmal") {
+            var result = emptyList<Video.Server>()
+            for (titleTry in knownTitles) {
+                if (titleTry.isBlank()) continue
+                result = if (key.isMovie) CpasmalProvider.getMovieSources(titleTry, key.year)
+                          else CpasmalProvider.getEpisodeSources(titleTry, key.year, key.season, key.episode)
                 if (result.isNotEmpty()) break
             }
             result

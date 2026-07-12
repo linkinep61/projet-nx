@@ -93,6 +93,17 @@ object UserPreferences {
         get() = if (::prefs.isInitialized) prefs.getBoolean(KEY_ALWAYS_EXTERNAL_PLAYER, false) else false
         set(value) { if (::prefs.isInitialized) prefs.edit().putBoolean(KEY_ALWAYS_EXTERNAL_PLAYER, value).apply() }
 
+    // 2026-07-11 (user "sur émulateur x86 elle prend la version téléphone alors que le mieux
+    //   c'est la TV → il faut un choix") : override manuel de l'interface. Le dispatcher
+    //   (SplashActivity) le respecte AVANT l'auto-détection leanback. "auto" = détection device.
+    const val UI_MODE_AUTO = "auto"
+    const val UI_MODE_MOBILE = "mobile"
+    const val UI_MODE_TV = "tv"
+    private const val KEY_UI_MODE_OVERRIDE = "ui_mode_override"
+    var uiModeOverride: String
+        get() = if (::prefs.isInitialized) prefs.getString(KEY_UI_MODE_OVERRIDE, UI_MODE_AUTO) ?: UI_MODE_AUTO else UI_MODE_AUTO
+        set(value) { if (::prefs.isInitialized) prefs.edit().putString(KEY_UI_MODE_OVERRIDE, value).apply() }
+
     // 2026-07-10 (user "pouvoir désactiver les backups UN PAR UN, pas tous d'un coup") :
     //   MultiSelectListPreference « ENABLED_BACKUPS » = ensemble des sources COCHÉES (= actives).
     //   - jamais configuré (null) → TOUTES actives (défaut).

@@ -11,7 +11,7 @@
         android:layout_width="0dp"
         android:layout_height="0dp"
         android:scaleType="centerCrop"
-        android:src="@drawable/bg_wallpaper_mobile"
+        android:src="@drawable/bg_app_black"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
@@ -57,11 +57,12 @@
         app:layout_constraintTop_toTopOf="@id/iv_downloads" />
 
     <!-- 2026-05-20 : cœur favoris global, centré à la place du titre "Fournisseur" -->
+    <!-- 2026-07-11 : boutons uniformisés (44dp / padding 10dp) pour une zone de clic cohérente. -->
     <ImageView
         android:id="@+id/iv_global_favorites"
-        android:layout_width="42dp"
-        android:layout_height="42dp"
-        android:padding="4dp"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:padding="10dp"
         android:src="@drawable/ic_favorite_enable"
         android:tint="#E50914"
         android:background="?attr/selectableItemBackgroundBorderless"
@@ -77,16 +78,33 @@
          mini-bar audio. -->
     <ImageView
         android:id="@+id/iv_radio"
-        android:layout_width="40dp"
-        android:layout_height="40dp"
-        android:layout_marginEnd="16dp"
-        android:padding="4dp"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:layout_marginEnd="8dp"
+        android:padding="10dp"
         android:src="@drawable/ic_radio"
         android:tint="#FFFFFF"
         android:background="?attr/selectableItemBackgroundBorderless"
         android:contentDescription="Radio"
         app:layout_constraintBottom_toBottomOf="@id/iv_global_favorites"
         app:layout_constraintEnd_toStartOf="@id/iv_global_favorites"
+        app:layout_constraintTop_toTopOf="@id/iv_global_favorites"
+        tools:ignore="HardcodedText,UseAppTint" />
+
+    <!-- 2026-07-11 (user "à droite du cœur, un bouton pour changer de fond d'écran") :
+         bouton wallpaper → ouvre direct la galerie Wallhaven en ligne. -->
+    <ImageView
+        android:id="@+id/iv_wallpaper"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:layout_marginStart="8dp"
+        android:padding="10dp"
+        android:src="@drawable/ic_wallpaper"
+        android:tint="#FFFFFF"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="Changer le fond d'écran"
+        app:layout_constraintBottom_toBottomOf="@id/iv_global_favorites"
+        app:layout_constraintStart_toEndOf="@id/iv_global_favorites"
         app:layout_constraintTop_toTopOf="@id/iv_global_favorites"
         tools:ignore="HardcodedText,UseAppTint" />
 

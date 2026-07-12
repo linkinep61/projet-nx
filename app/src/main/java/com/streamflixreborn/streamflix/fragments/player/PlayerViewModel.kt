@@ -1316,9 +1316,9 @@ class PlayerViewModel(
 
         fun isFav(s: Video.Server): Boolean {
             if (favorites.isEmpty()) return false
-            val extName = (com.streamflixreborn.streamflix.utils.ExtractorRanker.resolveExtractorName(s)
-                ?: s.name).lowercase()
-            return extName in favorites
+            // 2026-07-11 : clé LANGUE-AWARE ("vidmoly:vf" ≠ "vidmoly:vostfr")
+            val fk = com.streamflixreborn.streamflix.utils.ExtractorRanker.favKeyFor(s)
+            return fk in favorites
         }
 
         fun bucket(s: Video.Server): Int {

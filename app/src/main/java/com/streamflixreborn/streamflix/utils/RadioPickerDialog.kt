@@ -211,7 +211,7 @@ object RadioPickerDialog {
                 try {
                     mp.initPlayer(ctx)
                     if (r.streamUrl != null) {
-                        mp.playRadioDirect(r.id, r.name, r.poster, r.streamUrl)
+                        mp.playRadioDirect(r.id, r.name, r.poster, r.streamUrl, r.fallbackUrls)
                     } else {
                         mp.playChannel(r.id, r.name, r.poster)
                     }

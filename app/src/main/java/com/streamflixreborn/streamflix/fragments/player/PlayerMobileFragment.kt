@@ -433,6 +433,9 @@ class PlayerMobileFragment : Fragment() {
     // "petite coupure pendant lecture" (swap rapide) vs "n'a jamais démarré"
     // (sticky, l'user veut choisir manuellement).
     private var vodCurrentStreamHasWorked = false
+    // 2026-07-11 : freeze detection → proposition lecteur externe.
+    private var didProposeExternalThisSession = false
+
     // 2026-05-28 : compteur de retries STICKY sur erreurs "transitoires" (non-dead).
     // Si on re-prepare 3× de suite sans jamais atteindre STATE_READY, le serveur
     // est mort en pratique — swap au suivant au lieu de boucler indéfiniment.
@@ -625,6 +628,44 @@ class PlayerMobileFragment : Fragment() {
             }
             .setNegativeButton("Annuler", null)
             .show()
+    }
+
+    /** 2026-07-11 : quand ExoPlayer fige et qu'il n'y a plus de serveur, propose
+     *  à l'utilisateur de lancer la vidéo dans un lecteur externe (VLC/MX Player).
+     *  @param reason texte court décrivant la cause. */
+    private fun proposeExternalPlayer(reason: String) {
+        if (didProposeExternalThisSession) return
+        didProposeExternalThisSession = true
+        val video = currentVideo ?: return
+        try {
+            val ctx = requireContext()
+            try { player.pause() } catch (_: Throwable) {}
+            val items = arrayOf("Cette fois", "Toujours", "Non")
+            androidx.appcompat.app.AlertDialog.Builder(ctx)
+                .setTitle("La vidéo semble figée")
+                .setMessage("$reason\n\nLancer dans un lecteur externe ?")
+                .setItems(items) { _, which ->
+                    when (which) {
+                        0 -> { // Cette fois
+                            doExternalLaunch(video, directPackage = UserPreferences.externalPlayerPackage)
+                        }
+                        1 -> { // Toujours
+                            pendingExternalDefault = true
+                            doExternalLaunch(video, directPackage = null)
+                        }
+                        2 -> { // Non
+                            try { player.play() } catch (_: Throwable) {}
+                        }
+                    }
+                }
+                .setCancelable(true)
+                .setOnCancelListener {
+                    try { player.play() } catch (_: Throwable) {}
+                }
+                .show()
+        } catch (e: Exception) {
+            Log.w("PlayerMobileFragment", "proposeExternalPlayer dialog failed: ${e.message}")
+        }
     }
 
     private val pickLocalSubtitle = registerForActivityResult(
@@ -4216,6 +4257,17 @@ class PlayerMobileFragment : Fragment() {
 
     private fun displayVideo(video: Video, server: Video.Server) {
         currentVideo = video
+
+        // 2026-07-11 : si le mode « toujours lecteur externe » est actif,
+        //   on lance directement le lecteur externe sans passer par ExoPlayer.
+        if (UserPreferences.alwaysUseExternalPlayer && !didAutoLaunchExternal) {
+            didAutoLaunchExternal = true // 1 seule fois par session
+            Log.d("PlayerMobileFragment", "alwaysUseExternalPlayer=true → launch external player")
+            val pkg = UserPreferences.externalPlayerPackage
+            doExternalLaunch(video, directPackage = pkg)
+            return
+        }
+
         // 2026-06-03 (user "ça déclenche pas la Chromecast") : pre-set la pending
         //   video dans CastHelper dès qu'on commence à jouer une vidéo. Si l'user
         //   clique le bouton Cast et sélectionne la Chromecast → le listener
@@ -4793,8 +4845,9 @@ class PlayerMobileFragment : Fragment() {
                             Log.d("PlayerNetwork", "Codec unsupported → next server: ${nextServer.name}")
                             viewModel.getVideo(nextServer)
                         } else if (!tryNextChannelVariant(server)) {
-                            Log.w("PlayerNetwork", "Codec unsupported et aucune source alternative — stop")
+                            Log.w("PlayerNetwork", "Codec unsupported et aucune source alternative → propose external player")
                             try { player.stop() } catch (_: Exception) {}
+                            proposeExternalPlayer("Codec vidéo ($codecLabel) non supporté par cet appareil")
                         }
                     }
                 }
@@ -4869,7 +4922,19 @@ class PlayerMobileFragment : Fragment() {
                                                 Log.w("PlayerNetwork", "Progressive backup arrived → trying ${candidate.name}")
                                                 servers = newList
                                                 viewModel.getVideo(candidate)
+                                            } else {
+                                                // 2026-07-11 : backups arrivés mais aucun candidat → propose lecteur externe
+                                                Log.w("PlayerNetwork", "Pre-READY freeze, progressive done but no candidate → propose external player")
+                                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                                    proposeExternalPlayer("Aucun serveur n'a pu lire cette vidéo")
+                                                }
                                             }
+                                        }
+                                    } else {
+                                        // 2026-07-11 : plus aucun serveur → propose lecteur externe
+                                        Log.w("PlayerNetwork", "Pre-READY freeze, no more servers → propose external player")
+                                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                            proposeExternalPlayer("Aucun serveur n'a pu lire cette vidéo")
                                         }
                                     }
                                 }
@@ -4918,7 +4983,10 @@ class PlayerMobileFragment : Fragment() {
                                                 }
                                             }
                                         } else {
-                                            Log.e("PlayerNetwork", "→ no more servers to try")
+                                            Log.e("PlayerNetwork", "→ no more servers to try → propose external player")
+                                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                                proposeExternalPlayer("La vidéo a figé et il n'y a plus d'autre serveur")
+                                            }
                                         }
                                     }
                                 }
@@ -5246,8 +5314,9 @@ class PlayerMobileFragment : Fragment() {
                             Log.d("PlayerNetwork", "Codec unsupported → next server: ${nextServer.name}")
                             viewModel.getVideo(nextServer)
                         } else if (!tryNextChannelVariant(server)) {
-                            Log.w("PlayerNetwork", "Codec unsupported et aucune source alternative — stop")
+                            Log.w("PlayerNetwork", "Codec unsupported (onPlayerError) et aucune source alternative → propose external player")
                             try { player.stop() } catch (_: Exception) {}
+                            proposeExternalPlayer("Format/codec non supporté par cet appareil")
                         }
                     }
                     return
@@ -5321,7 +5390,8 @@ class PlayerMobileFragment : Fragment() {
                         Log.w("PlayerNetwork", "Connection timeout on ${server.name}, auto-switching to ${nextServer.name}")
                         viewModel.getVideo(nextServer)
                     } else if (!tryNextChannelVariant(server)) {
-                        Log.e("PlayerNetwork", "Connection timeout on ${server.name}, no more servers or variants to try")
+                        Log.e("PlayerNetwork", "Connection timeout on ${server.name}, no more servers → propose external player")
+                        proposeExternalPlayer("Connexion impossible — aucun serveur alternatif")
                     }
                     return
                 }

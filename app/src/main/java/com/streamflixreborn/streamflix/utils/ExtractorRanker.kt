@@ -382,9 +382,11 @@ object ExtractorRanker {
 
         // Cœur : SEULEMENT si l'user a défini des favoris (sinon on NE résout PAS le nom
         //   d'extracteur = coûteux : identifyServiceName boucle sur tous les extracteurs).
+        // 2026-07-11 : clé LANGUE-AWARE ("vidmoly:vf" ≠ "vidmoly:vostfr") pour ne pas
+        //   contaminer le VOSTFR quand on heart le VF.
         if (favorites.isNotEmpty()) {
-            val extName = (resolveExtractorName(server) ?: server.name).lowercase()
-            if (extName in favorites) return ExtractorToggleStore.FAVORITE_BONUS + computeQualityBonus(qualityStr)
+            val fk = favKeyFor(server)
+            if (fk in favorites) return ExtractorToggleStore.FAVORITE_BONUS + computeQualityBonus(qualityStr)
         }
 
         // Papadustream natif (captcha Cloudflare Turnstile) → dernier recours (check de nom, gratuit).
@@ -427,6 +429,39 @@ object ExtractorRanker {
         }
         // Pas de mention de qualité ou 480p/SD → pas de bonus
         return 0
+    }
+
+    // ─── 2026-07-11 : clé favori LANGUE-AWARE ──────────────────────────
+    // Avant, les favoris étaient stockés par nom d'extracteur seul ("vidmoly")
+    // → heartVF contaminait VOSTFR (même extracteur). Maintenant la clé =
+    // "extracteur:langue" (ex "vidmoly:vf", "vidmoly:vostfr").
+
+    /** Détecte la langue d'un serveur depuis son nom : "vf", "vostfr", "vo" ou "unknown". */
+    fun serverLangBucket(serverName: String): String {
+        val n = serverName.lowercase()
+        return when {
+            n.contains("vostfr") || n.contains("sous-titr") -> "vostfr"
+            Regex("""\b(vf|vff|vfq|vfi)\b""").containsMatchIn(n)
+                || n.contains("(vf)") -> "vf"
+            Regex("""(^|[^a-z])vo([^a-z]|${'$'})""").containsMatchIn(n)
+                || n.contains(Regex("\\b(raw|eng|english|spa|ita|german|deu|jap)\\b")) -> "vo"
+            else -> "unknown"
+        }
+    }
+
+    /** Construit la clé favori langue-aware pour un serveur. */
+    fun favKeyFor(server: Video.Server): String {
+        val extName = (resolveExtractorName(server) ?: server.name).lowercase()
+        val lang = serverLangBucket(server.name)
+        return "$extName:$lang"
+    }
+
+    /** Construit la clé favori langue-aware depuis un nom de serveur. */
+    fun favKeyFor(serverName: String): String {
+        val extName = (resolveExtractorName(Video.Server(id = "", name = serverName))
+            ?: serverName).lowercase()
+        val lang = serverLangBucket(serverName)
+        return "$extName:$lang"
     }
 
     /**

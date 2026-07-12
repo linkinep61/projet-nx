@@ -58,6 +58,16 @@ class PlayerGestureHelper(
      */
     var isLocked: Boolean = false
 
+    /**
+     * 2026-07-11 : callback pour toggler le controller en mode VLC.
+     * Le GestureDetector interne consomme les taps avant que PlayerView.onTouchEvent
+     * ne puisse appeler toggleControllerVisibility(). Ce callback est appelé sur
+     * onSingleTapConfirmed (= tap confirmé, pas un double-tap) et permet au fragment
+     * de show/hide le controller explicitement.
+     * Null = désactivé (mode ExoPlayer normal).
+     */
+    var vlcTapCallback: (() -> Unit)? = null
+
     init {
         maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
 
@@ -115,6 +125,18 @@ class PlayerGestureHelper(
                 return true
             }
             
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                // 2026-07-11 : en mode VLC, le controller ne toggle pas via
+                // PlayerView.onTouchEvent (le GestureDetector consomme les taps).
+                // On le fait ici explicitement sur tap confirmé (pas double-tap).
+                val cb = vlcTapCallback
+                if (cb != null) {
+                    cb.invoke()
+                    return true
+                }
+                return false
+            }
+
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 // 2026-06-21 (user "sur mobile quand on double-clic à gauche
                 //   ou à droite, ça active retour 10s / avant 10s") :

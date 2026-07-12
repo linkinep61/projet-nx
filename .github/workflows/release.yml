@@ -54,15 +54,19 @@ jobs:
           echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError" >> gradle.properties
           echo "org.gradle.daemon=false" >> gradle.properties
 
-      # --- 1. Mobile build ---
-      - name: Set Mobile layout
-        run: echo APP_LAYOUT=mobile >> local.properties
+      # --- 1. Universal build (mobile + TV), ARM ---
+      # Remplace l'ancien APK mobile-only (redondant : l'universel embarque déjà les
+      # deux lanceurs et route vers l'UI mobile ou TV selon l'appareil). ARM seul.
+      - name: Set Universal layout (ARM)
+        run: |
+          echo APP_LAYOUT=default >> local.properties
+          echo ABI_TARGET=arm >> local.properties
 
-      - name: Build Mobile APK
+      - name: Build Universal APK
         run: ./gradlew assembleRelease --stacktrace
 
-      - name: Sign Mobile APK
-        id: sign_apk_mobile
+      - name: Sign Universal APK
+        id: sign_apk_universal
         uses: ilharp/sign-android-release@v2
         with:
           releaseDir: app/build/outputs/apk/release
@@ -72,15 +76,16 @@ jobs:
           keyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
           buildToolsVersion: "34.0.0"
 
-      - name: Rename Mobile APK
+      - name: Rename Universal APK
         run: |
-          cp "${{ steps.sign_apk_mobile.outputs.signedFile }}" "onyx-${{ github.ref_name }}-mobile.apk"
+          cp "${{ steps.sign_apk_universal.outputs.signedFile }}" "onyx-${{ github.ref_name }}.apk"
 
       # --- 2. TV build ---
       - name: Set TV layout
         run: |
-          sed -i '/APP_LAYOUT/d' local.properties
+          sed -i '/APP_LAYOUT/d;/ABI_TARGET/d' local.properties
           echo APP_LAYOUT=tv >> local.properties
+          echo ABI_TARGET=arm >> local.properties
 
       - name: Clean before TV build
         run: ./gradlew clean
@@ -103,20 +108,23 @@ jobs:
         run: |
           cp "${{ steps.sign_apk_tv.outputs.signedFile }}" "onyx-${{ github.ref_name }}-tv.apk"
 
-      # --- 3. Universal build (mobile + TV) ---
-      - name: Set Default layout (both)
+      # --- 3. x86 build (universel mobile + TV, ABI x86/x86_64) ---
+      # APK générique (même dispatcher que l'universel ARM → route mobile ou TV selon
+      # l'appareil), mais compilé pour x86/x86_64 : émulateurs & TV Intel Atom. Étiqueté -x86.
+      - name: Set x86 layout (universal + x86)
         run: |
-          sed -i '/APP_LAYOUT/d' local.properties
+          sed -i '/APP_LAYOUT/d;/ABI_TARGET/d' local.properties
           echo APP_LAYOUT=default >> local.properties
+          echo ABI_TARGET=x86 >> local.properties
 
-      - name: Clean before Universal build
+      - name: Clean before x86 build
         run: ./gradlew clean
 
-      - name: Build Universal APK
+      - name: Build x86 APK
         run: ./gradlew assembleRelease --stacktrace
 
-      - name: Sign Universal APK
-        id: sign_apk
+      - name: Sign x86 APK
+        id: sign_apk_x86
         uses: ilharp/sign-android-release@v2
         with:
           releaseDir: app/build/outputs/apk/release
@@ -126,9 +134,9 @@ jobs:
           keyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
           buildToolsVersion: "34.0.0"
 
-      - name: Rename Universal APK
+      - name: Rename x86 APK
         run: |
-          cp "${{ steps.sign_apk.outputs.signedFile }}" "onyx-${{ github.ref_name }}.apk"
+          cp "${{ steps.sign_apk_x86.outputs.signedFile }}" "onyx-${{ github.ref_name }}-x86.apk"
 
       # --- Upload all APKs to the existing release ---
       - name: Upload APKs to Release
@@ -136,5 +144,5 @@ jobs:
         with:
           files: |
             onyx-${{ github.ref_name }}.apk
-            onyx-${{ github.ref_name }}-mobile.apk
             onyx-${{ github.ref_name }}-tv.apk
+            onyx-${{ github.ref_name }}-x86.apk
