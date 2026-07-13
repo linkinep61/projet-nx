@@ -384,6 +384,8 @@ class PlayerTvFragment : Fragment() {
     private var nextEpisodePrefetchTargetId: String? = null
     private var nextEpisodePrefetchJob: Job? = null
     private var nextEpisodeOverlayDismissed = false
+    // 2026-07-12 : coupe la recherche de serveurs de secours après lecture stable (anti-charge fond).
+    private var stopSearchJob: Job? = null
 
     // 2026-05-12 : flag set in attachTransferredPlayer. Quand on vient du mini-player
     // (taper sur la mini pour passer en grand), le player est déjà en train de jouer
@@ -392,6 +394,11 @@ class PlayerTvFragment : Fragment() {
     // position de lecture en cours. Sans ce flag, mini→grand donne un grand player
     // qui se ré-initialise → metadata duration 0:05 → ENDED state → écran noir.
     private var attachedFromMiniPlayer = false
+    // 2026-07-11 : true si la case "toujours utiliser ce lecteur" était cochée
+    //   au moment de lancer le sélecteur → on mémorise le lecteur choisi + on
+    //   active le mode "toujours externe".
+    private var pendingExternalDefault = false
+
     private val chooserReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
@@ -404,10 +411,20 @@ class PlayerTvFragment : Fragment() {
                     @Suppress("DEPRECATION")
                     intent?.getParcelableExtra(Intent.EXTRA_CHOSEN_COMPONENT)
                 }
-                Log.i(
-                    "ExternalPlayer",
-                    "TV - App selezionata: ${clickedComponent?.packageName ?: "Sconosciuta"}"
-                )
+                val pkg = clickedComponent?.packageName
+                Log.i("ExternalPlayer", "TV - App selezionata: ${pkg ?: "Sconosciuta"}")
+                // Mémorise toujours le dernier lecteur externe choisi.
+                if (!pkg.isNullOrBlank()) {
+                    UserPreferences.externalPlayerPackage = pkg
+                    if (pendingExternalDefault) {
+                        UserPreferences.alwaysUseExternalPlayer = true
+                        try {
+                            Toast.makeText(context,
+                                "Ce lecteur sera utilisé par défaut", Toast.LENGTH_SHORT).show()
+                        } catch (_: Exception) {}
+                    }
+                }
+                pendingExternalDefault = false
             }
         }
     }
@@ -698,6 +715,15 @@ class PlayerTvFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+
+        // 2026-07-12 (user « au moment où on fait play (film) / on clique un épisode (série), rien
+        //   d'autre ne doit tourner en arrière-plan à part la recherche de serveurs ») : on MET EN
+        //   PAUSE le Glide au niveau ACTIVITÉ (couvre la grille du home ET la fiche synopsis, toutes
+        //   deux chargées via Glide.with(imageView.context)=activité). Avant, 179 jaquettes
+        //   continuaient à se télécharger/décoder 16s après le clic → CPU de la Chromecast saturé →
+        //   recherches serveurs de 5s → 35s. Ici c'est le PLAYER (= le play), donc la fiche synopsis
+        //   a déjà chargé ses images casting/reco AVANT — on ne les coupe pas. Repris en onDestroyView.
+        try { com.bumptech.glide.Glide.with(requireActivity()).pauseAllRequestsRecursive() } catch (_: Throwable) {}
 
         // 2026-06-21 (user "panel reste ouvert quand on change d'épisode") :
         //   Si le flag statique est set (= click sur épisode dans panel),
@@ -1757,6 +1783,9 @@ class PlayerTvFragment : Fragment() {
 
         override fun onDestroyView() {
             super.onDestroyView()
+            // 2026-07-12 : on quitte le player (retour au home/fiche) → on relance le chargement
+            //   des jaquettes mis en pause à l'entrée (cf. onViewCreated).
+            try { com.bumptech.glide.Glide.with(requireActivity()).resumeRequestsRecursive() } catch (_: Throwable) {}
             hideWebViewOverlay()
             // 2026-06-09 : release sub overlay externe pour éviter leak.
             try { externalSubOverlay?.release() } catch (_: Throwable) {}
@@ -2145,8 +2174,16 @@ class PlayerTvFragment : Fragment() {
 
             updatePlayerHeader()
 
-            // Hide external player button on TV — Projectivy Launcher intercepts ACTION_VIEW intents
-            binding.pvPlayer.controller.binding.btnExoExternalPlayer.visibility = View.GONE
+            // 2026-07-11 : lecteur externe TV — si un par-défaut est déjà choisi, lance
+            //   directement ; sinon affiche le dialog avec checkbox "Définir par défaut".
+            binding.pvPlayer.controller.binding.btnExoExternalPlayer.setOnClickListener {
+                val pkg = UserPreferences.externalPlayerPackage
+                if (UserPreferences.alwaysUseExternalPlayer && !pkg.isNullOrBlank()) {
+                    launchExternalPlayer(directPackage = pkg)
+                } else {
+                    promptExternalThenLaunch()
+                }
+            }
 
             // 2026-06-20 : exo_replay retiré du centre TV (remplacé par exo_rew/-10s).
 
@@ -2168,6 +2205,14 @@ class PlayerTvFragment : Fragment() {
                 val isVodEpisodeCtx = !isIptvCtx && args.videoType is com.streamflixreborn.streamflix.models.Video.Type.Episode
                 binding.pvPlayer.controller.binding.btnExoChannelList.visibility =
                     if (isIptvCtx || isVodEpisodeCtx) View.VISIBLE else View.GONE
+                // 2026-07-12 (nav One Piece) : HAUT depuis Lecture/Pause → icône saisons/épisodes
+                //   quand elle est présente (sinon → bouton Serveur, défaut). Le BAS depuis cette
+                //   icône revient sur Lecture/Pause (déjà câblé dans le layout : nextFocusDown).
+                binding.pvPlayer.controller.binding.exoPlayPause.nextFocusUpId =
+                    if (isIptvCtx || isVodEpisodeCtx)
+                        binding.pvPlayer.controller.binding.btnExoChannelList.id
+                    else
+                        binding.pvPlayer.controller.binding.btnExoServer.id
                 // 2026-06-23 (user "pour IPTV c'est l'icône TV, pour VOD c'est la liste épisodes") :
                 binding.pvPlayer.controller.binding.btnExoChannelList.setImageResource(
                     if (isIptvCtx) R.drawable.ic_live_tv else R.drawable.ic_channel_list
@@ -4503,11 +4548,12 @@ class PlayerTvFragment : Fragment() {
             currentVideo = video
 
             // 2026-07-11 : si le mode « toujours lecteur externe » est actif,
-            //   on lance directement le lecteur externe sans passer par ExoPlayer.
+            //   on lance directement le lecteur externe mémorisé sans passer par ExoPlayer.
             if (UserPreferences.alwaysUseExternalPlayer && !didProposeExternalThisSession) {
                 didProposeExternalThisSession = true // 1 seule fois par session
-                Log.d("PlayerTvFragment", "alwaysUseExternalPlayer=true → launch external player")
-                launchExternalPlayer()
+                val pkg = UserPreferences.externalPlayerPackage
+                Log.d("PlayerTvFragment", "alwaysUseExternalPlayer=true → launch external player ($pkg)")
+                launchExternalPlayer(directPackage = pkg)
                 return
             }
 
@@ -4966,10 +5012,9 @@ class PlayerTvFragment : Fragment() {
                 Log.w("PlayerTvFragment", "External sub overlay failed: ${t.message}")
             }
 
-            // Hide external player button on TV to prevent Projectivy Launcher
-            // (or any other launcher) from intercepting the ACTION_VIEW intent
-            // and overlaying on top of our built-in ExoPlayer.
-            binding.pvPlayer.controller.binding.btnExoExternalPlayer.visibility = View.GONE
+            // 2026-07-11 : bouton lecteur externe visible sur TV (était masqué,
+            //   maintenant l'utilisateur peut choisir VLC/MX etc. + définir par défaut).
+            binding.pvPlayer.controller.binding.btnExoExternalPlayer.visibility = View.VISIBLE
 
             // Remove previous listener (if any) to avoid leaks across displayVideo() retries.
             activePlayerListener?.let { try { player.removeListener(it) } catch (_: Exception) {} }
@@ -5662,8 +5707,29 @@ class PlayerTvFragment : Fragment() {
 
                     if (isPlaying) {
                         startProgressHandler()
+                        // 2026-07-12 (user « une fois qu'un film joue, arrêter ce qui charge en
+                        //   fond ») : après ~10s de lecture STABLE, on coupe la recherche de
+                        //   serveurs de secours (BackupRegistry + WebView CF lourdes) qui traîne →
+                        //   libère CPU/réseau/RAM sur la TV. Re-planifié à chaque reprise ; annulé
+                        //   si la lecture s'interrompt (buffering).
+                        // 2026-07-12 (user « la coupure de recherche à 10s fait louper trop de
+                        //   serveurs, laisse le timeout comme avant ») : on NE coupe PLUS la
+                        //   recherche de serveurs de secours (stopBackgroundServerSearch RETIRÉ).
+                        //   On GARDE seulement la libération RAM des registres IPTV pendant la VOD
+                        //   (ça ne touche pas la recherche de serveurs du provider VOD courant).
+                        stopSearchJob?.cancel()
+                        stopSearchJob = viewLifecycleOwner.lifecycleScope.launch {
+                            kotlinx.coroutines.delay(10_000L)
+                            if (player.isPlaying && !isIptvChannelContext()) {
+                                try {
+                                    com.streamflixreborn.streamflix.providers.OlaTvProvider.releaseMemory()
+                                    com.streamflixreborn.streamflix.providers.VegetaTvProvider.releaseMemory()
+                                } catch (_: Throwable) {}
+                            }
+                        }
                     } else {
                         stopProgressHandler()
+                        stopSearchJob?.cancel()
                     }
 
                     // 2026-05-09 : pas de watchdog onIsPlayingChanged custom — un
@@ -6415,15 +6481,24 @@ class PlayerTvFragment : Fragment() {
                         UserPreferences.playerResize = newResize
                         updatePlayerScale()
                     }
-                    2 -> { dialog.dismiss(); launchExternalPlayer() }
+                    2 -> {
+                        dialog.dismiss()
+                        val pkg = UserPreferences.externalPlayerPackage
+                        if (UserPreferences.alwaysUseExternalPlayer && !pkg.isNullOrBlank()) {
+                            launchExternalPlayer(directPackage = pkg)
+                        } else {
+                            promptExternalThenLaunch()
+                        }
+                    }
                 }
             }
         }
 
         /** 2026-06-29 (user "un lecteur externe style VLC sur la TV, qu'ils aient le
          *  choix") : lance la vidéo courante dans un lecteur externe (VLC/MX…) via
-         *  un Intent ACTION_VIEW + chooser, avec l'URL du flux et les headers. */
-        private fun launchExternalPlayer() {
+         *  un Intent ACTION_VIEW + chooser, avec l'URL du flux et les headers.
+         *  @param directPackage si non-null, lance DIRECTEMENT ce lecteur (pas de sélecteur). */
+        private fun launchExternalPlayer(directPackage: String? = null) {
             // 2026-06-29 (user "lecteur externe TV : 'Vidéo non encore chargée'") :
             //   currentVideo peut être null sur certains flux (ex. chaîne IPTV
             //   transférée du mini-player où displayVideo() est sauté → currentVideo
@@ -6447,10 +6522,114 @@ class PlayerTvFragment : Fragment() {
                         putExtra("headers", h.flatMap { listOf(it.key, it.value) }.toTypedArray())
                     }
                 }
-                startActivity(android.content.Intent.createChooser(intent, getString(R.string.player_external_player_title)))
+                // 2026-07-11 : lancement direct si un lecteur par défaut est mémorisé.
+                if (!directPackage.isNullOrBlank()) {
+                    try {
+                        intent.setPackage(directPackage)
+                        startActivity(intent)
+                        return
+                    } catch (e: Exception) {
+                        Log.w("ExternalPlayer", "TV - Lecteur direct $directPackage indispo (${e.message}) — sélecteur")
+                        intent.setPackage(null)
+                    }
+                }
+                val receiverIntent = android.content.Intent("ACTION_PLAYER_CHOSEN_TV").apply {
+                    setPackage(requireContext().packageName)
+                }
+                val pendingIntent = android.app.PendingIntent.getBroadcast(
+                    requireContext(), 0, receiverIntent,
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_MUTABLE
+                )
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                    startActivity(android.content.Intent.createChooser(
+                        intent, getString(R.string.player_external_player_title), pendingIntent.intentSender))
+                } else {
+                    startActivity(android.content.Intent.createChooser(intent, getString(R.string.player_external_player_title)))
+                }
             } catch (e: Throwable) {
                 Toast.makeText(requireContext(), getString(R.string.player_external_player_error_video), Toast.LENGTH_SHORT).show()
             }
+        }
+
+        /** 2026-07-11 : dialog CUSTOM qui liste les lecteurs externes installés +
+         *  case à cocher « Définir par défaut » EN BAS du même dialog.
+         *  Compatible D-pad / télécommande TV (isFocusable sur tous les éléments). */
+        private fun promptExternalThenLaunch() {
+            val ctx = requireContext()
+            val pm = ctx.packageManager
+            val probeIntent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                setDataAndType(android.net.Uri.parse("content://video"), "video/*")
+            }
+            val resolvedApps = pm.queryIntentActivities(probeIntent, 0)
+                .filter { it.activityInfo.packageName != ctx.packageName }
+                .distinctBy { it.activityInfo.packageName }
+                .sortedBy { it.loadLabel(pm).toString().lowercase() }
+            if (resolvedApps.isEmpty()) {
+                Toast.makeText(ctx, "Aucun lecteur externe installé", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val labels = resolvedApps.map { it.loadLabel(pm).toString() }.toTypedArray()
+            val icons = resolvedApps.map { it.loadIcon(pm) }
+
+            val adapter = object : android.widget.ArrayAdapter<String>(ctx, android.R.layout.select_dialog_item, android.R.id.text1, labels) {
+                override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View {
+                    val v = super.getView(position, convertView, parent)
+                    val tv = v.findViewById<android.widget.TextView>(android.R.id.text1)
+                    val iconSize = (48 * resources.displayMetrics.density).toInt()
+                    val icon = icons[position]
+                    icon.setBounds(0, 0, iconSize, iconSize)
+                    tv.setCompoundDrawables(icon, null, null, null)
+                    tv.compoundDrawablePadding = (16 * resources.displayMetrics.density).toInt()
+                    tv.setPadding((20 * resources.displayMetrics.density).toInt(), (16 * resources.displayMetrics.density).toInt(),
+                        (20 * resources.displayMetrics.density).toInt(), (16 * resources.displayMetrics.density).toInt())
+                    // Grossir le texte pour la TV (lisibilité à distance)
+                    tv.textSize = 18f
+                    v.isFocusable = true
+                    v.isFocusableInTouchMode = true
+                    return v
+                }
+            }
+
+            val container = android.widget.LinearLayout(ctx).apply {
+                orientation = android.widget.LinearLayout.VERTICAL
+            }
+            val cb = android.widget.CheckBox(ctx).apply {
+                text = "Définir par défaut"
+                isChecked = UserPreferences.alwaysUseExternalPlayer
+                isFocusable = true
+                isFocusableInTouchMode = true
+                textSize = 16f
+                val pad = (20 * resources.displayMetrics.density).toInt()
+                setPadding(pad, pad / 2, pad, pad / 2)
+            }
+            val listView = android.widget.ListView(ctx).apply {
+                this.adapter = adapter
+                dividerHeight = 0
+                isFocusable = true
+                isFocusableInTouchMode = true
+            }
+            container.addView(cb)
+            container.addView(listView)
+
+            val dialog = androidx.appcompat.app.AlertDialog.Builder(ctx)
+                .setTitle("Lecteur externe")
+                .setView(container)
+                .setNegativeButton("Annuler", null)
+                .create()
+
+            listView.setOnItemClickListener { _, _, position, _ ->
+                val pkg = resolvedApps[position].activityInfo.packageName
+                UserPreferences.externalPlayerPackage = pkg
+                if (cb.isChecked) {
+                    UserPreferences.alwaysUseExternalPlayer = true
+                    try { Toast.makeText(ctx, "${labels[position]} défini par défaut", Toast.LENGTH_SHORT).show() } catch (_: Exception) {}
+                } else {
+                    UserPreferences.alwaysUseExternalPlayer = false
+                }
+                dialog.dismiss()
+                launchExternalPlayer(directPackage = pkg)
+            }
+            dialog.show()
         }
 
         /** 2026-07-11 : quand ExoPlayer fige et qu'il n'y a plus de serveur, propose
@@ -6473,16 +6652,10 @@ class PlayerTvFragment : Fragment() {
                     .setItems(items) { _, which ->
                         when (which) {
                             0 -> { // Cette fois
-                                launchExternalPlayer()
+                                launchExternalPlayer(directPackage = UserPreferences.externalPlayerPackage)
                             }
-                            1 -> { // Toujours
-                                UserPreferences.alwaysUseExternalPlayer = true
-                                launchExternalPlayer()
-                                try {
-                                    Toast.makeText(ctx,
-                                        "Le lecteur externe sera utilisé par défaut",
-                                        Toast.LENGTH_SHORT).show()
-                                } catch (_: Exception) {}
+                            1 -> { // Toujours — ouvre le dialog custom avec checkbox cochée
+                                promptExternalThenLaunch()
                             }
                             2 -> { // Non
                                 try { player.play() } catch (_: Throwable) {}
@@ -7430,15 +7603,22 @@ class PlayerTvFragment : Fragment() {
                 )
                 btnSkipIntro.startAnimation(fadeIn)
                 btnSkipIntro.isVisible = true
-                // 2026-06-19 v35 (user "quand on fait droite ça veut pas aller
-                //   à passer l'intro, ça avance dans l'épisode") : quand
-                //   skip-intro visible, RIGHT depuis les contrôles centraux
-                //   amène DIRECTEMENT au bouton skip-intro au lieu de
-                //   btn_custom_next (= skip episode).
+                // 2026-07-12 (nav One Piece) : « Passer l'intro » est désormais sur l'axe VERTICAL,
+                //   entre Lecture/Pause et la barre de progression. BAS depuis les contrôles
+                //   centraux → skip-intro ; BAS depuis skip-intro → barre. HAUT depuis la barre →
+                //   skip-intro ; HAUT depuis skip-intro → Lecture/Pause. GAUCHE/DROITE restent le
+                //   seek (-10s/+10s) puis épisode précédent/suivant — on ne touche plus l'horizontal.
                 val skipId = btnSkipIntro.id
-                controllerBinding.exoPlayPause.nextFocusRightId = skipId
-                controllerBinding.btnCustomNext.nextFocusRightId = skipId
-                controllerBinding.exoSettings.nextFocusRightId = skipId
+                controllerBinding.exoPlayPause.nextFocusDownId = skipId
+                controllerBinding.exoRew.nextFocusDownId = skipId
+                controllerBinding.exoFfwd.nextFocusDownId = skipId
+                controllerBinding.btnCustomPrev.nextFocusDownId = skipId
+                controllerBinding.btnCustomNext.nextFocusDownId = skipId
+                controllerBinding.exoProgress.nextFocusUpId = skipId
+                btnSkipIntro.nextFocusUpId = controllerBinding.exoPlayPause.id
+                btnSkipIntro.nextFocusDownId = controllerBinding.exoProgress.id
+                btnSkipIntro.nextFocusLeftId = skipId
+                btnSkipIntro.nextFocusRightId = skipId
                 if (binding.layoutNextEpisodeOverlay.isVisible) {
                     updateNextEpisodeOverlayFocusBindings(true)
                 }
@@ -7449,10 +7629,14 @@ class PlayerTvFragment : Fragment() {
                 )
                 btnSkipIntro.startAnimation(fadeOut)
                 btnSkipIntro.isGone = true
-                // Restaure nav D-pad normale quand skip-intro disparaît.
-                controllerBinding.exoPlayPause.nextFocusRightId = controllerBinding.btnCustomNext.id
-                controllerBinding.btnCustomNext.nextFocusRightId = controllerBinding.exoSettings.id
-                controllerBinding.exoSettings.nextFocusRightId = controllerBinding.exoSettings.id
+                // Restaure la nav verticale normale (bas → barre, barre haut → play) quand
+                //   skip-intro disparaît.
+                controllerBinding.exoPlayPause.nextFocusDownId = R.id.exo_progress
+                controllerBinding.exoRew.nextFocusDownId = R.id.exo_progress
+                controllerBinding.exoFfwd.nextFocusDownId = R.id.exo_progress
+                controllerBinding.btnCustomPrev.nextFocusDownId = R.id.exo_progress
+                controllerBinding.btnCustomNext.nextFocusDownId = R.id.exo_progress
+                controllerBinding.exoProgress.nextFocusUpId = controllerBinding.exoPlayPause.id
                 if (binding.layoutNextEpisodeOverlay.isVisible) {
                     updateNextEpisodeOverlayFocusBindings(true)
                 }

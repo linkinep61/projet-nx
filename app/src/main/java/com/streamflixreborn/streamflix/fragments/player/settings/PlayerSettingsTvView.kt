@@ -176,6 +176,8 @@ class PlayerSettingsTvView @JvmOverloads constructor(
     }
 
     private fun displaySettings(setting: Setting) {
+        // Reset le verrouillage focus quand on quitte/entre dans le panneau serveurs.
+        if (setting != Setting.SERVERS) focusedServerId = null
         currentSettings = setting
 
         if (setting == Setting.SUBTITLES) {
@@ -312,38 +314,24 @@ class PlayerSettingsTvView @JvmOverloads constructor(
     }
 
     private var lastServerListCount = -1
+    // 2026-07-12 (user "le focus de la télécommande reste sur un serveur tant qu'on
+    //   n'a pas fait retour, sauf la première fois où la vidéo s'auto-play") :
+    //   On sauvegarde l'ID du serveur focusé (pas l'index, car la liste se reconstruit
+    //   et les positions changent). Après chaque notifyDataSetChanged, on retrouve le
+    //   même serveur par son ID et on y remet le focus. L'auto-play initial met le
+    //   focus sur le serveur sélectionné, puis on verrouille.
+    private var focusedServerId: String? = null
+
     fun refreshServerList() {
-        // 2026-05-17 (user "le Focus ne reste pas sur serveur" sur Chromecast) :
-        // notifyItemChanged au lieu de notifyDataSetChanged → ne re-bind que
-        // les items (pas recréation ViewHolder) → le focus D-pad reste sur
-        // l'item sélectionné. Sur Chromecast plus lent que mobile, le full
-        // notifyDataSetChanged + requestFocus(root) en post() loupait
-        // souvent → focus partait vers un autre View en background.
         val count = Settings.Server.list.size
         val previousCount = lastServerListCount
 
-        // 2026-06-29 v2 (user "le focus n'est pas resté sur serveurs quand nouveaux
-        //   serveurs arrivent → refais-le tenir jusqu'à l'ouverture du Player") :
-        //   1) Mémoriser l'index qui a le focus AVANT la notif (au cas où on doit
-        //      restaurer manuellement après un reset).
-        //   2) Préférer `notifyItemRangeInserted` sur `notifyDataSetChanged` quand
-        //      des serveurs sont AJOUTÉS à la fin (cas ProgressiveServers) → les
-        //      ViewHolders existants ne sont PAS recréés → focus D-pad préservé
-        //      naturellement.
-        //   3) `notifyDataSetChanged` réservé aux vraies remises à zéro (0 items ou
-        //      décrément), où on restaurera le focus manuellement.
-        val focusedIndexBefore = getFocusedServerAdapterPosition()
+        // Sauver l'ID du serveur actuellement focusé AVANT la notification.
+        val focusedIdx = getFocusedServerAdapterPosition()
+        if (focusedIdx in 0 until Settings.Server.list.size) {
+            focusedServerId = Settings.Server.list.getOrNull(focusedIdx)?.id
+        }
 
-        // 2026-07-05 : SÉCURISÉ — notifyDataSetChanged() au lieu de notifyItemRangeInserted.
-        //   AVANT : notifyItemRangeInserted(previousCount, count - previousCount) → crash
-        //   IndexOutOfBoundsException "Inconsistency detected. Invalid view holder adapter
-        //   position" sur Chromecast quand Settings.Server.list est muté par les coroutines
-        //   background (progressive servers) ENTRE le moment où on lit .size et le moment
-        //   où RecyclerView valide les positions au prochain layout pass. Le Chromecast est
-        //   plus lent → la fenêtre de race condition est plus large.
-        //   notifyDataSetChanged() est TOUJOURS safe (invalide tout, re-layout complet).
-        //   Le coût perf est négligeable (liste de ~20-50 serveurs, pas 1000).
-        //   Le focus D-pad est restauré manuellement ci-dessous (restoreServerFocus).
         try {
             when {
                 count != previousCount -> {
@@ -355,8 +343,6 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             }
             settingsAdapter.notifyDataSetChanged()
         } catch (e: Exception) {
-            // Dernier filet : si malgré tout une inconsistency passe (list mutée pendant
-            // le notifyDataSetChanged lui-même), on log et on force un reset complet.
             android.util.Log.w("PlayerSettingsTV", "refreshServerList notify error (safe): ${e.message}")
             try {
                 serversAdapter.notifyDataSetChanged()
@@ -364,13 +350,24 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             } catch (_: Exception) { /* ignore */ }
         }
 
-        // 2026-06-29 v2 : garantie du focus sur la liste Serveurs TANT QUE le
-        //   player n'a pas encore rendu une frame de contenu — quand le film
-        //   commence, le panneau se ferme (binding.settings.hide() ligne 672
-        //   côté PlayerTvFragment sur loading fini) donc la gate protège des
-        //   moments intermédiaires.
-        if (currentSettings == Setting.SERVERS && count > 0 && !hasPlayerStartedPlayback()) {
-            restoreServerFocus(focusedIndexBefore, count)
+        // Restaurer le focus sur le MÊME serveur (par ID) après la mise à jour.
+        if (currentSettings == Setting.SERVERS && count > 0) {
+            val savedId = focusedServerId
+            if (savedId != null) {
+                // L'user avait un serveur focusé → on le retrouve par son ID.
+                val newIdx = Settings.Server.list.indexOfFirst { it.id == savedId }
+                if (newIdx >= 0) {
+                    restoreServerFocus(newIdx, count)
+                }
+                // Si le serveur a disparu de la liste (rare), on ne bouge pas le focus.
+            } else if (!hasPlayerStartedPlayback()) {
+                // Pas encore de focus user + pas encore d'auto-play :
+                //   focus sur le serveur sélectionné (auto-play) ou le 1er.
+                val selectedIdx = Settings.Server.list.indexOfFirst { it.isSelected }
+                restoreServerFocus(if (selectedIdx >= 0) selectedIdx else 0, count)
+            }
+            // Après auto-play, si l'user n'a encore jamais focusé un serveur ET le player
+            // a démarré → on ne vole PAS le focus (le panneau va se fermer).
         }
     }
 

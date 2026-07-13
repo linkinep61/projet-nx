@@ -255,6 +255,10 @@ class HomeTvFragment : Fragment() {
         //   PAUSE. Sinon la home (derrière) continue à décoder ses jaquettes (TMDB + flemmix)
         //   → allocation massive → GC thrashing sur la Chromecast low-RAM → le scrape natif des
         //   serveurs est affamé (parse Jsoup à 8s au lieu de 0,4s). Repris dans onResume.
+        // 2026-07-12 : la pause Glide EFFECTIVE (niveau activité, couvre la grille) est faite dans
+        //   le PLAYER (à l'entrée de la vidéo), PAS ici — sinon elle couperait aussi les jaquettes
+        //   casting / recommandations de la fiche synopsis (même manager d'activité). Ici on garde
+        //   juste la pause fragment historique (inoffensive).
         try { com.bumptech.glide.Glide.with(this).pauseAllRequestsRecursive() } catch (_: Throwable) {}
         if (MiniPlayerController.transitioningToFullscreen) {
             // Skip ALL ExoPlayer/PlayerView ops — stopAsync handles deferred release
@@ -271,7 +275,7 @@ class HomeTvFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        // 2026-07-04 : reprise Glide (mis en pause à l'entrée du player pour libérer la RAM).
+        // 2026-07-04 : reprise Glide (pause fragment historique).
         try { com.bumptech.glide.Glide.with(this).resumeRequestsRecursive() } catch (_: Throwable) {}
         if (_binding == null) return
 

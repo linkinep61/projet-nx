@@ -47,8 +47,8 @@ android {
         applicationId "com.streamfr.app"
         minSdk 23
         targetSdk 35
-        versionCode 10931
-        versionName "1.7.231"
+        versionCode 10932
+        versionName "1.7.232"
 
         // ABI pilotée par la propriété ABI_TARGET (local.properties, posée par la CI).
         //   APK par défaut = ARM (armeabi-v7a + arm64-v8a).

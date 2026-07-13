@@ -33,6 +33,14 @@ class StreamFlixApp : Application() {
         var currentActivity: Activity? = null
             private set
 
+        /**
+         * 2026-07-12 : Security init (Conscrypt + IsrgRootTrust + IptvTlsHelper +
+         *   mergedKeyStore) déportée sur Dispatchers.IO pour libérer le main thread
+         *   au boot (~3.5s sur Chromecast ARM). NetworkClient.buildClient() await
+         *   ce deferred avant la 1re connexion TLS → zéro race condition.
+         */
+        val securityReady = kotlinx.coroutines.CompletableDeferred<Unit>()
+
         /** Compteur d'activités visibles — quand il tombe à 0, l'app
          *  est en background (Home TV, switch app, etc.). */
         @Volatile
@@ -230,81 +238,16 @@ class StreamFlixApp : Application() {
                 com.streamflixreborn.streamflix.providers.WebJsProvider.warmUpAll()
         }
 
-        // 2026-07-04 : DessinAnime repassé NATIF → pré-chauffage du challenge /tv/* au BOOT
-        //   (les pages /tv/* ont un Turnstile SÉPARÉ de /catalogue). Skip low-RAM comme
-        //   WebJsProvider : sur Chromecast, un warm WebView au boot = ANR → il se fera à
-        //   l'OUVERTURE DU PROVIDER (getHome) et au CLIC (getTvShow, bloquant garanti). Sur
-        //   mobile (RAM large) : /tv/* prêt dès le boot.
-        if (Runtime.getRuntime().maxMemory() >= 200L * 1024 * 1024) {
-            // Mobile (RAM large) : pré-chauffage COMPLET (base CF + challenge /tv/*).
-            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                try {
-                    kotlinx.coroutines.delay(25_000L)
-                    // 2026-07-07 (user « un film qui marchait se bloque juste après avoir relancé
-                    //   l'app ») : ne warm QUE si DessinAnime est le provider ACTIF. Ce warm-up
-                    //   utilise le WebView CF partagé ; lancé quand l'user est sur Cloudstream/Movix,
-                    //   il entre en contention avec le getServers du film en cours → hang → blocage.
-                    val activeIsDessin = try {
-                        com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider is
-                            com.streamflixreborn.streamflix.providers.DessinAnimeProvider
-                    } catch (_: Throwable) { false }
-                    if (activeIsDessin)
-                        com.streamflixreborn.streamflix.providers.DessinAnimeProvider.warmUpAll()
-                } catch (_: Throwable) {}
-            }
-        } else {
-            // 2026-07-05 (user "l'ouverture de DessinAnime est trop longue sur la TV") : sur la
-            //   Chromecast (low-RAM) on active un pré-chauffage LÉGER au boot = juste le cookie CF
-            //   (warmUpCf → clearanceOnly, s'arrête dès le cf_clearance, SANS rendre le home lourd
-            //   qui causait les ANR). Délai 35s pour laisser le boot UI se stabiliser d'abord.
-            //   Résultat : à la 1ère ouverture de DessinAnime, le bypass CF est déjà fait → home
-            //   bien plus rapide (reste le fetch catalogue). Le challenge /tv/* se fait à l'ouverture.
-            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                try {
-                    // 2026-07-05 : 35s → 12s. À 35s l'user ouvrait DessinAnime AVANT que le cookie
-                    //   CF ne soit posé → bypass à froid ~8s. 12s laisse le boot UI se dessiner tout
-                    //   en posant le cookie assez tôt.
-                    kotlinx.coroutines.delay(12_000L)
-                    // 2026-07-06 (user « le bypass c'est au clic sur une jaquette → pour préchauffer
-                    //   il faut imiter le clic d'une jaquette au démarrage ») : AVANT, sur Chromecast
-                    //   on ne faisait que warmUpCf() (cookie CF de base) car un warm WebView de fiche
-                    //   au boot causait un ANR. CET ANR EST CORRIGÉ (fix WebViewResolver analysisExecutor
-                    //   hors main thread, 2026-07-06). On active donc warmUpAll() = warmUpCf +
-                    //   startDetailWarm : ça résout AUSSI le Turnstile des pages détail /tv/* au boot
-                    //   (= imite l'ouverture d'une fiche) → au 1er clic sur une jaquette, le challenge
-                    //   est déjà résolu, ouverture quasi instantanée. Tourne en fond (IO), après 12s
-                    //   pour laisser le home se dessiner d'abord.
-                    // 2026-07-07 (user « un film qui marchait se bloque juste après avoir relancé
-                    //   l'app ») : ne warm QUE si DessinAnime est le provider ACTIF. Sinon ce warm
-                    //   monopolise le WebView CF partagé et bloque le getServers du film en cours
-                    //   sur Cloudstream/Movix (contention WebView → hang → « serveurs bloqués »).
-                    val activeIsDessin = try {
-                        com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider is
-                            com.streamflixreborn.streamflix.providers.DessinAnimeProvider
-                    } catch (_: Throwable) { false }
-                    if (activeIsDessin)
-                        com.streamflixreborn.streamflix.providers.DessinAnimeProvider.warmUpAll()
-                } catch (_: Throwable) {}
-            }
-        }
+        // 2026-07-12 : DessinAnime warm-up au boot RETIRÉ. Le home DessinAnime est 100%
+        //   TMDB (zéro CF) et getHome() lance warmUpCf() en background non-bloquant quand
+        //   l'user OUVRE le provider. Les backups (Cloudstream/Movix/AnimeSama) alimentent
+        //   les serveurs → pas besoin du CF bypass prêt dès le boot. Économise ~12-25s de
+        //   WebView/Chromium init + RAM sur Chromecast + contention WebView éliminée.
 
-        // 2026-07-10 (user "scrape la liste directement au démarrage, même méthode que les autres") :
-        //   PRÉ-CHAUFFE de la LISTE du dossier « Stream4Free CF (test) » au boot — même schéma que
-        //   les warm-ups CF (WebJs/DessinAnime), DÉCALÉ après eux (contention WebView). L'app passe le
-        //   CF via le WebView-bypass + scrape la liste des chaînes EN DIRECT sur stream4free.tv, puis
-        //   met en cache (fetchStream4CfCategoriesLive). Résultat : à l'ouverture du dossier, liste
-        //   FRAÎCHE et INSTANTANÉE (plus d'attente de 15s), sans dépendre de git (git = filet si échec).
-        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                kotlinx.coroutines.delay(40_000L)
-                // 2026-07-10 (user « il doit être branché avec les autres CF ») : d'abord on CHAUFFE le
-                //   cf_clearance de stream4free.tv (comme WebJs/DessinAnime), pour que la résolution des
-                //   chaînes NON pré-chargées passe le CF sans partir à froid. Les chaînes pré-chargées
-                //   (BAKED_RESOLVED) n'en ont pas besoin (lecture directe data-stream.top sans CF).
-                com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.warmUp()
-                com.streamflixreborn.streamflix.providers.LiveTvHubProvider.fetchStream4CfCategoriesLive()
-            } catch (_: Throwable) {}
-        }
+        // 2026-07-12 : Stream4Free CF warm-up au boot RETIRÉ. Le scrape LIVE + CF bypass se
+        //   font à l'ouverture du dossier (LiveHubFolderDialog → fetchStream4CfCategoriesLive).
+        //   Fallback BAKED (53 chaînes EN DUR dans l'APK) = dossier jamais vide, zéro attente.
+        //   Économise une WebView + moteur Chromium au boot (lourd sur Chromecast 2 Go).
 
         // 2026-07-06 (user « tant qu'on est sur le home DessinAnime, re-simuler un clic jaquette
         //   de temps en temps pour garder le captcha résolu, un truc pas gourmand ») : keep-alive
@@ -337,6 +280,10 @@ class StreamFlixApp : Application() {
         //   l'UI (ANR + restart en boucle, "Skipped 419 frames"). Les jaquettes CF se chargent
         //   à la 1re navigation (bypass à la demande). Fix propre des posters = passer par TMDB
         //   (zéro CF) plutôt que les images french-anime.com — à faire séparément.
+
+        // 2026-07-12 : préchauffage CF proactif ABANDONNÉ (échouait sur ce réseau, cf_clearance
+        //   effacé → inutile). On revient au comportement d'avant : CF résolu À LA DEMANDE, et les
+        //   backups CF passent en 2ᵉ vague (après les backups sans CF), sauf Wiflix (boucle générique).
 
         // 2026-07-11 (user « désactive aussi les crashs, on garde ça que pour
         //   les versions test ») : UncaughtExceptionHandler + CrashActivity
@@ -436,30 +383,36 @@ class StreamFlixApp : Application() {
             override fun onActivityDestroyed(activity: Activity) { if (currentActivity == activity) currentActivity = null }
         })
 
-        // 0. Initialize Conscrypt for modern SSL on old Android.
-        // 2026-05-12 : wrap try-catch — sur certains firmwares custom (Sharp Aquos
-        // TVE19A Android 11 confirmé), Conscrypt.newProvider() peut throw et
-        // crasher l'app au démarrage. Si Conscrypt échoue, on tombe sur le SSL
-        // système (suffisant Android 11+).
-        try {
-            Security.insertProviderAt(Conscrypt.newProvider(), 1)
-        } catch (e: Throwable) {
-            Log.e("StreamFlixApp", "Conscrypt init failed (using system SSL): ${e.message}")
-        }
-
-        // 1. Install ISRG Root X1 globally for Let's Encrypt. On Android < 7 (API 24)
-        // network_security_config.xml is not supported so the certificate must be injected manually.
-        try {
-            IsrgRootTrustProvider.install()
-        } catch (e: Throwable) {
-            Log.e("StreamFlixApp", "IsrgRootTrustProvider failed: ${e.message}")
-        }
-
-        // 1b. trust-all SSLSocketFactory pour les hosts IPTV.
-        try {
-            IptvTlsHelper.install()
-        } catch (e: Throwable) {
-            Log.e("StreamFlixApp", "IptvTlsHelper failed: ${e.message}")
+        // 0-1b. Security init (Conscrypt + ISRG Root + IPTV TLS) sur BACKGROUND THREAD.
+        // 2026-07-12 : déportée de main → IO. Sur Chromecast ARM, Conscrypt.newProvider()
+        //   charge libconscrypt_jni.so + 288 JNI methods = ~2.6s, puis mergedKeyStore
+        //   fusionne 137 certs = ~0.9s → total ~3.5s de main thread LIBÉRÉ.
+        //   NetworkClient.buildClient() (lazy) await securityReady avant la 1re connexion
+        //   TLS → zéro race condition. Les appels réseau au boot sont tous sur IO avec
+        //   des délais (OLA 8s, Vavoo 0.5s) → security sera prête bien avant.
+        applicationScope.launch(Dispatchers.IO) {
+            try {
+                Security.insertProviderAt(Conscrypt.newProvider(), 1)
+            } catch (e: Throwable) {
+                Log.e("StreamFlixApp", "Conscrypt init failed (using system SSL): ${e.message}")
+            }
+            try {
+                IsrgRootTrustProvider.install()
+            } catch (e: Throwable) {
+                Log.e("StreamFlixApp", "IsrgRootTrustProvider failed: ${e.message}")
+            }
+            try {
+                IptvTlsHelper.install()
+            } catch (e: Throwable) {
+                Log.e("StreamFlixApp", "IptvTlsHelper failed: ${e.message}")
+            }
+            // Force-build le merged KeyStore (137 certs, ~0.9s) hors main thread
+            try {
+                @Suppress("UNUSED_EXPRESSION")
+                IsrgRootTrustProvider.mergedKeyStore
+            } catch (_: Throwable) {}
+            securityReady.complete(Unit)
+            Log.d("StreamFlixApp", "Security init DONE on IO thread (Conscrypt + ISRG + TLS)")
         }
 
         // 2. Inizializzazione preferenze.

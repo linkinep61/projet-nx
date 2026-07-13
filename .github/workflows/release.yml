@@ -47,12 +47,12 @@ jobs:
       - name: Make Gradle executable
         run: chmod +x ./gradlew
 
-      # Increase JVM heap for R8/D8 dexing (prevents OOM on 3rd build)
+      # Increase JVM heap for R8/D8 dexing (prevents OOM on 3rd build).
+      # Le daemon Gradle reste actif entre les 3 builds pour réutiliser la JVM chaude.
       - name: Configure Gradle JVM memory
         run: |
           echo "" >> gradle.properties
           echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError" >> gradle.properties
-          echo "org.gradle.daemon=false" >> gradle.properties
 
       # --- 1. Universal build (mobile + TV), ARM ---
       # Remplace l'ancien APK mobile-only (redondant : l'universel embarque déjà les
@@ -78,7 +78,7 @@ jobs:
 
       - name: Rename Universal APK
         run: |
-          cp "${{ steps.sign_apk_universal.outputs.signedFile }}" "onyx-${{ github.ref_name }}.apk"
+          cp "${{ steps.sign_apk_universal.outputs.signedFile }}" "onyx-${{ github.ref_name }}-mobile-tv.apk"
 
       # --- 2. TV build ---
       - name: Set TV layout
@@ -87,11 +87,13 @@ jobs:
           echo APP_LAYOUT=tv >> local.properties
           echo ABI_TARGET=arm >> local.properties
 
-      - name: Clean before TV build
-        run: ./gradlew clean
+      # Nettoyage ciblé : supprime les outputs/manifestes/libs natifs mais
+      # GARDE les classes compilées (identiques entre les 3 variantes).
+      - name: Partial clean before TV build
+        run: rm -rf app/build/outputs app/build/intermediates/merged_manifests app/build/intermediates/packaged_manifests app/build/intermediates/stripped_native_libs app/build/intermediates/merged_native_libs
 
       - name: Build TV APK
-        run: ./gradlew assembleRelease --stacktrace
+        run: ./gradlew assembleRelease --stacktrace --no-configuration-cache
 
       - name: Sign TV APK
         id: sign_apk_tv
@@ -117,11 +119,11 @@ jobs:
           echo APP_LAYOUT=default >> local.properties
           echo ABI_TARGET=x86 >> local.properties
 
-      - name: Clean before x86 build
-        run: ./gradlew clean
+      - name: Partial clean before x86 build
+        run: rm -rf app/build/outputs app/build/intermediates/merged_manifests app/build/intermediates/packaged_manifests app/build/intermediates/stripped_native_libs app/build/intermediates/merged_native_libs
 
       - name: Build x86 APK
-        run: ./gradlew assembleRelease --stacktrace
+        run: ./gradlew assembleRelease --stacktrace --no-configuration-cache
 
       - name: Sign x86 APK
         id: sign_apk_x86
@@ -143,6 +145,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            onyx-${{ github.ref_name }}.apk
+            onyx-${{ github.ref_name }}-mobile-tv.apk
             onyx-${{ github.ref_name }}-tv.apk
             onyx-${{ github.ref_name }}-x86.apk

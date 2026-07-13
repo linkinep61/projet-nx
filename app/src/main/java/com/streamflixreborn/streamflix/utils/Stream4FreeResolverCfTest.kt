@@ -113,6 +113,23 @@ object Stream4FreeResolverCfTest {
     /** Préfixe DÉDIÉ au dossier de test CF (séparé du dossier Stream4Free d'origine). */
     fun isCfUrl(url: String): Boolean = url.startsWith("stream4cf://")
 
+    /** Proxy une URL image via DuckDuckGo image proxy → contourne le CF 403 sur stream4free.tv.
+     *  weserv.nl renvoyait 404 (CF le bloque côté serveur). DDG passe. */
+    private fun proxyLogo(url: String): String {
+        if (url.isBlank() || !url.startsWith("http")) return url
+        val clean = url.replace("//images/", "/images/")  // fix double slash
+        val encoded = java.net.URLEncoder.encode(clean, "UTF-8")
+        return "https://external-content.duckduckgo.com/iu/?u=$encoded&f=1"
+    }
+
+    /** Remplace tous les tvg-logo stream4free par des URLs proxifiées weserv.nl (BAKED). */
+    private val LOGO_RE = Regex("""tvg-logo="(https?://www\.stream4free\.tv/[^"]+)"""")
+    val BAKED_CHANNELS_M3U_PROXIED: String by lazy {
+        LOGO_RE.replace(BAKED_CHANNELS_M3U) { mr ->
+            "tvg-logo=\"${proxyLogo(mr.groupValues[1])}\""
+        }
+    }
+
     /**
      * 2026-07-10 — LISTE EN DUR des 53 chaînes Stream4Free (slugs + logos), source unique de la
      *   LISTE (indépendante du CF/git : le dossier est TOUJOURS peuplé au boot, instantané). Le CF
@@ -340,7 +357,7 @@ stream4cf://public-senat
             //   au boot → la chaîne cliquée ne peut plus se résoudre → « ça démarre plus » (user). 15s =
             //   le build qui marchait : si le scrape rate, on retombe sur la liste en dur (dossier peuplé)
             //   et chaque chaîne se résout au clic sans contention.
-            try { resolver.get(url = "$BASE_URL/", silent = true, markerTimeoutMs = 15_000L) }
+            try { resolver.get(url = "$BASE_URL/tv-live-france", silent = true, markerTimeoutMs = 15_000L) }
             finally { try { resolver.cleanup() } catch (_: Throwable) {} }
         }.onFailure { Log.w(TAG, "scrapeChannelsM3u WebView KO: ${it.message}") }.getOrDefault("")
         if (html.isBlank()) return@withContext ""
@@ -360,10 +377,13 @@ stream4cf://public-senat
             val slug = m.groupValues[1].lowercase()
             if (slug in bad) continue
             var logo = m.groupValues[2].trim()
-            // Les entrées de MENU/catégories utilisent /images/megamenu/ → ce ne sont PAS des chaînes.
+            // Les entrées de MENU/navigation utilisent /images/megamenu/ ou /images/menu/ → PAS des chaînes.
+            // Seules les vraies chaînes (grille) utilisent /images/avatars/.
             if (logo.contains("/megamenu/", ignoreCase = true)) continue
+            if (logo.contains("/images/menu/", ignoreCase = true)) continue
             if (!seen.add(slug)) continue
             if (logo.startsWith("/")) logo = "$BASE_URL$logo"
+            logo = proxyLogo(logo)  // proxy weserv.nl → contourne CF 403
             val name = (m.groupValues.getOrNull(4)?.takeIf { it.isNotBlank() }
                 ?: m.groupValues.getOrNull(3))?.trim().orEmpty().ifBlank { slug }
             val logoAttr = if (logo.startsWith("http")) " tvg-logo=\"$logo\"" else ""

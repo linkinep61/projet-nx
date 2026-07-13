@@ -609,25 +609,78 @@ class PlayerMobileFragment : Fragment() {
         }
     }
 
-    /** Affiche une petite case "toujours utiliser ce lecteur" puis ouvre le
-     *  sélecteur. Si cochée + lecteur choisi → mode "toujours externe" activé. */
+    /** 2026-07-11 : dialog CUSTOM qui liste les lecteurs externes installés +
+     *  case à cocher « Définir par défaut » EN BAS du même dialog (pas de
+     *  chooser système séparé). Au clic sur un lecteur → lance-le, et si la
+     *  case est cochée → mémorise le package + active le mode toujours externe. */
     private fun promptExternalThenLaunch(video: Video) {
-        val cb = android.widget.CheckBox(requireContext()).apply {
-            text = "Toujours utiliser ce lecteur (ne plus passer par le lecteur interne)"
-            isChecked = UserPreferences.alwaysUseExternalPlayer
-            val pad = (16 * resources.displayMetrics.density).toInt()
-            setPadding(pad, pad, pad, pad)
+        val ctx = requireContext()
+        val pm = ctx.packageManager
+        val probeIntent = Intent(Intent.ACTION_VIEW).apply { setDataAndType(android.net.Uri.parse("content://video"), "video/*") }
+        val resolvedApps = pm.queryIntentActivities(probeIntent, 0)
+            .filter { it.activityInfo.packageName != ctx.packageName }
+            .distinctBy { it.activityInfo.packageName }
+            .sortedBy { it.loadLabel(pm).toString().lowercase() }
+        if (resolvedApps.isEmpty()) {
+            Toast.makeText(ctx, "Aucun lecteur externe installé", Toast.LENGTH_SHORT).show()
+            return
         }
-        androidx.appcompat.app.AlertDialog.Builder(requireContext())
-            .setTitle("Lecteur externe")
-            .setView(cb)
-            .setPositiveButton("Lancer") { _, _ ->
-                pendingExternalDefault = cb.isChecked
-                if (!cb.isChecked) UserPreferences.alwaysUseExternalPlayer = false
-                doExternalLaunch(video, directPackage = null)
+        val labels = resolvedApps.map { it.loadLabel(pm).toString() }.toTypedArray()
+        val icons = resolvedApps.map { it.loadIcon(pm) }
+
+        // Adapter custom avec icônes
+        val adapter = object : android.widget.ArrayAdapter<String>(ctx, android.R.layout.select_dialog_item, android.R.id.text1, labels) {
+            override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View {
+                val v = super.getView(position, convertView, parent)
+                val tv = v.findViewById<android.widget.TextView>(android.R.id.text1)
+                val iconSize = (40 * resources.displayMetrics.density).toInt()
+                val icon = icons[position]
+                icon.setBounds(0, 0, iconSize, iconSize)
+                tv.setCompoundDrawables(icon, null, null, null)
+                tv.compoundDrawablePadding = (12 * resources.displayMetrics.density).toInt()
+                tv.setPadding((16 * resources.displayMetrics.density).toInt(), (12 * resources.displayMetrics.density).toInt(),
+                    (16 * resources.displayMetrics.density).toInt(), (12 * resources.displayMetrics.density).toInt())
+                return v
             }
+        }
+
+        // Layout : CheckBox EN HAUT (toujours visible) + ListView en dessous
+        val container = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        val cb = android.widget.CheckBox(ctx).apply {
+            text = "Définir par défaut"
+            isChecked = UserPreferences.alwaysUseExternalPlayer
+            isFocusable = true
+            val pad = (16 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad / 2, pad, pad / 2)
+        }
+        val listView = android.widget.ListView(ctx).apply {
+            this.adapter = adapter
+            dividerHeight = 0
+        }
+        container.addView(cb)
+        container.addView(listView)
+
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(ctx)
+            .setTitle("Lecteur externe")
+            .setView(container)
             .setNegativeButton("Annuler", null)
-            .show()
+            .create()
+
+        listView.setOnItemClickListener { _, _, position, _ ->
+            val pkg = resolvedApps[position].activityInfo.packageName
+            UserPreferences.externalPlayerPackage = pkg
+            if (cb.isChecked) {
+                UserPreferences.alwaysUseExternalPlayer = true
+                try { Toast.makeText(ctx, "${labels[position]} défini par défaut", Toast.LENGTH_SHORT).show() } catch (_: Exception) {}
+            } else {
+                UserPreferences.alwaysUseExternalPlayer = false
+            }
+            dialog.dismiss()
+            doExternalLaunch(video, directPackage = pkg)
+        }
+        dialog.show()
     }
 
     /** 2026-07-11 : quand ExoPlayer fige et qu'il n'y a plus de serveur, propose
@@ -649,9 +702,8 @@ class PlayerMobileFragment : Fragment() {
                         0 -> { // Cette fois
                             doExternalLaunch(video, directPackage = UserPreferences.externalPlayerPackage)
                         }
-                        1 -> { // Toujours
-                            pendingExternalDefault = true
-                            doExternalLaunch(video, directPackage = null)
+                        1 -> { // Toujours — ouvre le dialog custom avec la liste des lecteurs
+                            promptExternalThenLaunch(video)
                         }
                         2 -> { // Non
                             try { player.play() } catch (_: Throwable) {}
@@ -776,6 +828,11 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+
+        // 2026-07-12 (user, cf. PlayerTvFragment) : au play, on met en pause le chargement des
+        //   jaquettes (niveau activité) → le CPU/réseau va à la recherche de serveurs. Repris en
+        //   onDestroyView. La fiche synopsis a déjà chargé ses images avant le play.
+        try { com.bumptech.glide.Glide.with(requireActivity()).pauseAllRequestsRecursive() } catch (_: Throwable) {}
 
         // 2026-06-21 (user "panel reste ouvert quand on change d'épisode") :
         //   Si le flag statique est set, on réouvre le panel après ~600ms
@@ -1765,6 +1822,8 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        // 2026-07-12 : retour au home/fiche → reprise du chargement des jaquettes (pause au play).
+        try { com.bumptech.glide.Glide.with(requireActivity()).resumeRequestsRecursive() } catch (_: Throwable) {}
         hideWebViewOverlay()
 
         // 2026-06-02 : clear le picker quand on quitte le player. Sinon
@@ -4703,81 +4762,14 @@ class PlayerMobileFragment : Fragment() {
             usingWebView = false
         }
 
+        // 2026-07-11 : lecteur externe — si un par-défaut est déjà choisi, lance
+        //   directement ; sinon affiche le dialog avec checkbox "Définir par défaut".
         binding.pvPlayer.controller.binding.btnExoExternalPlayer.setOnClickListener {
-            isIgnoringPip = true
-            
-            val videoTitle = when (val type = args.videoType) {
-                is Video.Type.Movie -> type.title
-                is Video.Type.Episode -> "${type.tvShow.title} • S${type.season.number} E${type.number}"
-            }
-            
-            var sourceUri: Uri
-            val mimeType = "video/*"
-            
-            val initialSource = video.source
-
-            if (initialSource.startsWith("data:application/vnd.apple.mpegurl;base64,")) {
-                val playlistContent = decodeBase64Uri(initialSource)
-                val extractedUrl = if (playlistContent != null) extractUrlFromPlaylist(playlistContent) else null
-                
-                if (extractedUrl != null) {
-                    sourceUri = extractedUrl.toUri()
-                    Log.i("ExternalPlayer", "Link reale estratto: $sourceUri")
-                } else {
-                    try {
-                        val file = File(requireContext().cacheDir, "stream.m3u8")
-                        FileOutputStream(file).use { it.write(playlistContent?.toByteArray() ?: ByteArray(0)) }
-                        sourceUri = FileProvider.getUriForFile(requireContext(), "${requireContext().packageName}.provider", file)
-                    } catch (ignored: Exception) {
-                        sourceUri = initialSource.toUri()
-                    }
-                }
+            val pkg = UserPreferences.externalPlayerPackage
+            if (UserPreferences.alwaysUseExternalPlayer && !pkg.isNullOrBlank()) {
+                doExternalLaunch(video, directPackage = pkg)
             } else {
-                sourceUri = initialSource.toUri()
-            }
-
-            Log.i("ExternalPlayer", "Avvio intent con URI: $sourceUri e MIME: $mimeType")
-
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(sourceUri, mimeType)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                
-                putExtra("title", videoTitle)
-                putExtra("position", player.currentPosition.toInt())
-                putExtra("return_result", true)
-                
-                putExtra("extra_headers", video.headers?.map { "${it.key}: ${it.value}" }?.toTypedArray())
-                
-                if (video.headers != null) {
-                    val headersArray = video.headers.flatMap { listOf(it.key, it.value) }.toTypedArray()
-                    putExtra("headers", headersArray)
-                }
-            }
-
-            try {
-                val receiverIntent = Intent("ACTION_PLAYER_CHOSEN").apply {
-                    setPackage(requireContext().packageName)
-                }
-                
-                val pendingIntent = PendingIntent.getBroadcast(
-                    requireContext(), 0, receiverIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
-                )
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
-                    startActivity(
-                        Intent.createChooser(
-                            intent,
-                            getString(R.string.player_external_player_title),
-                            pendingIntent.intentSender
-                        )
-                    )
-                } else {
-                    startActivity(Intent.createChooser(intent, getString(R.string.player_external_player_title)))
-                }
-            } catch (e: Exception) {
-                Log.e("ExternalPlayer", "Errore selettore app", e)
-                startActivity(Intent.createChooser(intent, getString(R.string.player_external_player_title)))
+                promptExternalThenLaunch(video)
             }
         }
         // Detach previous listener (if any) before adding the new one — otherwise each

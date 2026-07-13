@@ -624,10 +624,14 @@ class MainTvActivity : FragmentActivity() {
 
         var previousDestinationId: Int? = null
         navController.addOnDestinationChangedListener { _, destination, _ ->
-            // Clear Glide memory cache when switching between main tabs to free memory
-            if (previousDestinationId != null && previousDestinationId != destination.id) {
-                CacheUtils.clearMemoryCache(this)
-            }
+            // 2026-07-12 (user « que les jaquettes soient là c'est pas un problème, mais qu'elles
+            //   continuent de se télécharger, si ») : on NE VIDE PLUS le cache image à chaque
+            //   changement d'onglet. Avant, chaque tab switch appelait clearMemoryCache → toutes les
+            //   jaquettes visibles étaient purgées puis RE-TÉLÉCHARGÉES/RE-DÉCODÉES (363 images
+            //   observées) → pic d'allocation (heap 40→151MB) + CPU saturé → les serveurs VOD
+            //   arrivaient lentement. Le cache mémoire Glide est borné (LRU) et s'auto-évince ; le
+            //   garder évite les re-téléchargements inutiles. (Clear conservé seulement sur pression
+            //   mémoire système via onTrimMemory ailleurs.)
             previousDestinationId = destination.id
 
             binding.navMain.headerView?.apply {
@@ -807,7 +811,13 @@ class MainTvActivity : FragmentActivity() {
             com.streamflixreborn.streamflix.utils.ProfileStore.clearLastActiveTimestamp()
             // 2026-07-11 (user "quand on ferme l'app la radio ne se quitte pas") :
             // stopper le mini-player + le service radio foreground.
-            try { com.streamflixreborn.streamflix.utils.MiniPlayerController.stop() } catch (_: Throwable) {}
+            // 2026-07-12 : SAUF pendant un switch de provider (ProviderViewHolder
+            //   pose isProviderSwitching=true avant finish()) — la radio doit
+            //   survivre au changement de provider.
+            if (!com.streamflixreborn.streamflix.utils.MiniPlayerController.isProviderSwitching) {
+                try { com.streamflixreborn.streamflix.utils.MiniPlayerController.stop() } catch (_: Throwable) {}
+            }
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.isProviderSwitching = false
         }
         super.onDestroy()
     }

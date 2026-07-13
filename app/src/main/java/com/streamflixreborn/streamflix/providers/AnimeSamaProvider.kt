@@ -1227,9 +1227,16 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             val folders = langSeasonFolders[bestLang] ?: langSeasonFolders.values.firstOrNull() ?: mutableListOf()
             for ((idx, folder) in folders.withIndex()) {
                 val seasonId = if (folder.path.isEmpty()) "$slug/$bestLang" else "$slug/${folder.path}/$bestLang"
+                // 2026-07-12 : numéroter par le LABEL (ex "Saison 3" → 3), PAS par la position.
+                //   AnimeSama split parfois une saison en parties (Saison 2 Partie 1 / Partie 2)
+                //   → la numérotation positionnelle décale toutes les saisons suivantes
+                //   (Saison 3 se retrouvait en position 4, introuvable pour les backups TMDB).
+                val labelNum = Regex("""(?i)saison\s*(\d+)""").find(folder.label)
+                    ?.groupValues?.get(1)?.toIntOrNull()
+                val seasonNumber = labelNum ?: (idx + 1)
                 seasons.add(Season(
                     id = seasonId,
-                    number = idx + 1,
+                    number = seasonNumber,
                     title = folder.label,
                     poster = animePoster,
                 ))
@@ -1627,14 +1634,11 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                         val show = items.filterIsInstance<TvShow>().firstOrNull { matches(it.title) }
                             ?: return emptyList()
                         Log.d(TAG, "[backup] AnimeSama show match: ${show.title} (${show.id})")
-                        val full = kotlinx.coroutines.withTimeoutOrNull(9_000L) { getTvShow(show.id) }
-                            ?: return emptyList()
-                        val season = full.seasons.firstOrNull { it.number == videoType.season.number }
-                            ?: full.seasons.firstOrNull() ?: return emptyList()
-                        val eps = kotlinx.coroutines.withTimeoutOrNull(9_000L) { getEpisodesBySeason(season.id) }
-                            ?: return emptyList()
-                        val ep = eps.firstOrNull { it.number == videoType.number } ?: return emptyList()
-                        getServers(ep.id, videoType)
+                        // 2026-07-12 : déléguer à CrossProviderResolver qui gère wrappers langue
+                        //   (VOSTFR/VF), numérotation label, fallback titre — au lieu de la logique
+                        //   manuelle cassée qui prenait full.seasons.firstOrNull() (= mauvaise saison).
+                        com.streamflixreborn.streamflix.utils.CrossProviderResolver
+                            .resolveAndFetchServers(this, show, videoType, timeoutMs = 25_000)
                     }
                 }
             } finally {

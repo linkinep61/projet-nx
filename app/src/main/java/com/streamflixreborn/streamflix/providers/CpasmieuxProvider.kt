@@ -81,7 +81,7 @@ object CpasmieuxProvider {
                 ?.takeIf { !it.equals(title, true) }
                 ?.let { Log.d(TAG, "Cpasmieux fallback FR TMDB: '$title' -> '$it'"); searchBest(it, year, wantSeries = false) }
             ?: return emptyList()
-        return extractServers("$BASE${m.path}")
+        return extractServers("$BASE${m.path}", wantYear = year)
     }
 
     /** Résout le titre FR d'un film/série via TMDB (pont EN→FR pour les sites FR). */
@@ -165,9 +165,23 @@ object CpasmieuxProvider {
 
     // ── Extraction des serveurs (data-url) ────────────────────────────────────
     private val DATA_URL = Regex("""data-url=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+    // 2026-07-12 : « Date de sortie: 2016 » sur la page film → pour rejeter un même-titre d'année
+    //   différente (ex : « L'Odyssée » 2016 alors qu'on cherche celui de 2026).
+    private val RELEASE_YEAR = Regex("""Date de sortie\s*:?\s*((?:19|20)\d\d)""", RegexOption.IGNORE_CASE)
 
-    private suspend fun extractServers(pageUrl: String): List<Video.Server> {
+    private suspend fun extractServers(pageUrl: String, wantYear: Int? = null): List<Video.Server> {
         val html = httpGet(pageUrl) ?: return emptyList()
+        // 2026-07-12 (user « des serveurs cpasmieux apparaissent alors que le film n'y est pas ») :
+        //   le slug n'a pas toujours l'année → le matching titre seul acceptait un MAUVAIS film de
+        //   même titre (année différente). On lit « Date de sortie » sur la page et on REJETTE si
+        //   l'écart d'année est > 1 (donc pas le bon film).
+        if (wantYear != null) {
+            val pageYear = RELEASE_YEAR.find(html)?.groupValues?.get(1)?.toIntOrNull()
+            if (pageYear != null && kotlin.math.abs(pageYear - wantYear) > 1) {
+                Log.d(TAG, "Cpasmieux: année page=$pageYear ≠ demandée=$wantYear → rejet (mauvais film) $pageUrl")
+                return emptyList()
+            }
+        }
         val seen = HashSet<String>()
         val out = mutableListOf<Video.Server>()
         for (m in DATA_URL.findAll(html)) {

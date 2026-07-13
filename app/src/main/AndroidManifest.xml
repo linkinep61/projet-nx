@@ -202,13 +202,6 @@
             android:theme="@style/AppTheme.Mobile" />
 
         <activity
-            android:name=".activities.tools.WebViewPlayerActivity"
-            android:exported="false"
-            android:hardwareAccelerated="true"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:theme="@style/Theme.AppCompat.NoActionBar" />
-
-        <activity
             android:name=".activities.tools.NetMirrorWebPlayerActivity"
             android:exported="false"
             android:hardwareAccelerated="true"

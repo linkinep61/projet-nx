@@ -60,7 +60,16 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProv
     override val language = "fr"
     override val changeUrlMutex = Mutex()
 
-    private var service = FrenchAnimeService.build()
+    // 2026-07-12 : LAZY — l'init eager de FrenchAnimeService.build() tirait
+    //   NetworkClient.default → buildClient() au <clinit> de cet objet, SUR LE
+    //   MAIN THREAD (via Provider.providers class-loading). Sur Chromecast = +688ms
+    //   de fige au boot. Backing field _service + getter lazy = construit au 1er
+    //   appel réseau (hors main thread). onChangeUrl réassigne via _service.
+    @Volatile private var _service: FrenchAnimeService? = null
+    private val service: FrenchAnimeService
+        get() = _service ?: synchronized(this) {
+            _service ?: FrenchAnimeService.build().also { _service = it }
+        }
 
     // 2026-06-21 (user "french-anime a maintenant le même captcha que Wiflix,
     //   il faut mettre la même chose pour lui") : Cloudflare bypass via
@@ -1270,7 +1279,7 @@ object FrenchAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProv
 
     override suspend fun onChangeUrl(forceRefresh: Boolean): String {
         changeUrlMutex.withLock {
-            service = FrenchAnimeService.build()
+            _service = FrenchAnimeService.build()
         }
         return baseUrl
     }

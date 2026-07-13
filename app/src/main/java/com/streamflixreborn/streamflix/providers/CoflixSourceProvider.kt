@@ -44,12 +44,9 @@ object CoflixSourceProvider {
 
     /** Liste des miroirs connus du site. On essaie dans l'ordre jusqu'à un 200. */
     private val MIRRORS = listOf(
-        // 2026-07-04 (sync avec coflix.js web) : le JS pointe coflix.trade, absent du pool
-        //   natif → ajouté en tête pour rester à jour avec le domaine actif du site.
-        "https://coflix.trade",
-        "https://coflix.cymru",
-        "https://coflix.date",
-        "https://coflix.click",
+        // 2026-07-12 : coflix.boston = site ACTIF (WordPress, WP REST API).
+        //   Les anciens domaines (trade/cymru/date/click) redirigent vers Telegram.
+        "https://coflix.boston",
     )
 
     @Volatile private var lastWorkingMirror: String = MIRRORS.first()
@@ -129,7 +126,7 @@ object CoflixSourceProvider {
                 ?.takeIf { !it.equals(title, ignoreCase = true) }
                 ?.let { Log.d(TAG, "Coflix fallback FR title TMDB: '$title' -> '$it'"); searchBest(it, year, type = "movies") }
             ?: return emptyList()
-        return extractFromCoflixPage(match.url, label = "Coflix")
+        return extractFromCoflixPage(match.url, label = "Coflix Boston")
     }
 
     /**
@@ -163,7 +160,7 @@ object CoflixSourceProvider {
             .trim()
         if (serieSlug.isBlank()) return emptyList()
         val episodeUrl = "${urlBase(match.url)}/episode/$serieSlug-${seasonNumber}x${episodeNumber}/"
-        return extractFromCoflixPage(episodeUrl, label = "Coflix")
+        return extractFromCoflixPage(episodeUrl, label = "Coflix Boston")
     }
 
     private fun urlBase(url: String): String {
@@ -184,38 +181,34 @@ object CoflixSourceProvider {
             return null
         }
         val encoded = URLEncoder.encode(cleanTitle, "UTF-8")
-        // 2026-06-02 : on essaie d'abord le miroir DECOUVERT via coflix.blog
-        // (toujours a jour), puis lastWorkingMirror, puis le pool statique.
-        val discovered = CoflixMirrorDiscovery.discover()
+        // 2026-07-12 : coflix.boston = WordPress, utilise WP REST API pour la recherche.
+        //   L'ancien suggest.php n'existe plus (HTTP 500).
         val mirrors = buildList {
-            if (discovered != null) add(discovered)
             if (lastWorkingMirror !in this) add(lastWorkingMirror)
             MIRRORS.forEach { if (it !in this) add(it) }
         }
+        // 1) WP REST API search (coflix.boston)
         for (mirror in mirrors) {
-            val url = "$mirror/suggest.php?query=$encoded"
+            val url = "$mirror/wp-json/wp/v2/search?search=$encoded&type=post&per_page=20"
             val body = httpGet(url) ?: continue
             lastWorkingMirror = mirror
-            pickBest(body, cleanTitle, year, type)?.let { return it }
+            pickBestWpApi(body, cleanTitle, year, type)?.let { return it }
         }
-        // 2026-06-02 : fallback slug-direct.
-        // /suggest.php est souvent rate-limited (HTTP 429) — Coflix protege son API
-        // anti-DDoS. La page film elle, /film/<slug>/, n'est PAS rate-limited.
-        // → on construit l'URL directement a partir du titre slugifie. Validation
-        // par la presence d'une iframe lecteurvideo dans la page.
+        // 2) Fallback slug-direct : on construit l'URL à partir du titre slugifié.
+        //    Validation par la présence de cfServers ou lecteurvideo dans la page.
         val slug = slugify(cleanTitle)
         if (slug.isNotBlank()) {
             val pathSegment = if (type == "movies") "film" else "serie"
             for (mirror in mirrors) {
                 val directUrl = "$mirror/$pathSegment/$slug/"
                 val body = httpGet(directUrl) ?: continue
-                if (body.contains("lecteurvideo")) {
+                if (body.contains("cfServers") || body.contains("lecteurvideo")) {
                     lastWorkingMirror = mirror
                     Log.d(TAG, "Coflix slug-direct fallback: '$cleanTitle' → $directUrl")
                     return CoflixMatch(cleanTitle, directUrl, year?.toString())
                 }
             }
-            Log.d(TAG, "Coflix slug-direct fallback: aucun mirror n'a /$pathSegment/$slug/ avec iframe valide")
+            Log.d(TAG, "Coflix slug-direct fallback: aucun mirror n'a /$pathSegment/$slug/")
         }
         return null
     }
@@ -249,25 +242,31 @@ object CoflixSourceProvider {
             .replace(Regex("[^a-z0-9]+"), "-")
             .trim('-')
 
-    /** Parse le JSON suggest et pioche le meilleur match. */
-    private fun pickBest(json: String, query: String, year: Int?, type: String): CoflixMatch? {
+    /**
+     * 2026-07-12 : Parse le JSON WP REST API search et pioche le meilleur match.
+     * Résultats = [{id, title, url, type, subtype}] où subtype = "movies"|"series"|"animes"|"doramas".
+     */
+    private fun pickBestWpApi(json: String, query: String, year: Int?, type: String): CoflixMatch? {
         return try {
             val arr = JSONArray(json)
             val candidates = mutableListOf<Pair<CoflixMatch, Int>>()
-            // 2026-05-05 v2 : matching strict — pas de substring lâche.
-            // Avant : "Mercredi" matchait "Mercredi, folle journée" (substring 40).
-            // Maintenant : exige match exact OU word-for-word + longueur similaire.
+            // WP REST API subtype mapping : "movies" pour films, "series" pour séries
+            val wantedSubtype = if (type == "movies") "movies" else "series"
             val queryNorm = TitleNormalizer.stripUnicodeArtifacts(query).lowercase()
                 .replace(Regex("[^a-z0-9 ]"), " ").replace(Regex("\\s+"), " ").trim()
             val queryWords = queryNorm.split(" ").filter { it.length > 1 }.toSet()
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
-                val pt = obj.optString("post_type")
-                if (pt != type) continue
+                val subtype = obj.optString("subtype")
+                // Accepter "animes" comme série aussi
+                if (subtype != wantedSubtype && !(wantedSubtype == "series" && subtype == "animes")) continue
                 val title = obj.optString("title")
                 val rawUrl = obj.optString("url")
                 if (title.isBlank() || rawUrl.isBlank()) continue
-                val y = obj.optString("year").takeIf { it.isNotBlank() }
+                // WP REST API ne renvoie pas l'année — on extrait du slug si possible
+                val slugYear = Regex("""(\d{4})""").find(
+                    rawUrl.substringAfterLast("/").substringBeforeLast("/")
+                )?.groupValues?.get(1)
                 val titleNorm = TitleNormalizer.stripUnicodeArtifacts(title).lowercase()
                     .replace(Regex("[^a-z0-9 ]"), " ").replace(Regex("\\s+"), " ").trim()
                 val titleWords = titleNorm.split(" ").filter { it.length > 1 }.toSet()
@@ -281,54 +280,89 @@ object CoflixSourceProvider {
                     titleWords.isNotEmpty() && queryWords.containsAll(titleWords) && lenDiffPct <= 0.30 -> 80
                     else -> 0
                 }
-                if (year != null && y == year.toString()) score += 30
-                else if (year != null && y != null && y.toIntOrNull() != null &&
-                    kotlin.math.abs(y.toInt() - year) > 2) score -= 50  // pénalise gros écart d'année
-                if (score >= 90) candidates.add(CoflixMatch(title, rawUrl, y) to score)
+                if (year != null && slugYear == year.toString()) score += 30
+                else if (year != null && slugYear != null && slugYear.toIntOrNull() != null &&
+                    kotlin.math.abs(slugYear.toInt() - year) > 2) score -= 50
+                if (score >= 80) candidates.add(CoflixMatch(title, rawUrl, slugYear) to score)
             }
-            // Seuil 90 strict — sinon Coflix ne propose rien (better silent than wrong)
             val best = candidates.maxByOrNull { it.second }
             if (best == null) {
-                Log.d(TAG, "Coflix '$query' (year=$year type=$type) : pas de match fiable")
+                Log.d(TAG, "Coflix WP '$query' (year=$year type=$type) : pas de match")
             } else {
-                Log.d(TAG, "Coflix '$query' → '${best.first.title}' year=${best.first.year} score=${best.second}")
+                Log.d(TAG, "Coflix WP '$query' → '${best.first.title}' score=${best.second}")
             }
             best?.first
         } catch (e: Exception) {
-            Log.d(TAG, "pickBest parse failed: ${e.message}")
+            Log.d(TAG, "pickBestWpApi failed: ${e.message}")
             null
         }
     }
 
     /**
-     * Fetch une page Coflix (film ou épisode), trouve l'iframe lecteurvideo,
-     * fetch l'embed, extrait toutes les onclick base64, décode, et renvoie
-     * la liste des Video.Server.
+     * Fetch une page Coflix (film ou épisode), extrait les serveurs vidéo.
+     *
+     * 2026-07-12 : supporte DEUX formats :
+     *   (a) Nouveau (coflix.boston WordPress) : inline JS `var cfServers = [{nombre, embed_url, idioma}]`
+     *       + `var cfPlayerToken = "..."`. L'iframe lecteurvideo = embed_url + "&t=" + token.
+     *   (b) Ancien (legacy) : iframe lecteurvideo directement dans le HTML de la page.
+     *
+     * Dans les deux cas, l'embed lecteurvideo contient des onclick showVideo base64.
      */
     private suspend fun extractFromCoflixPage(coflixPageUrl: String, label: String): List<Video.Server> {
         val pageHtml = httpGet(coflixPageUrl) ?: return emptyList()
-        // Extrait l'URL de l'iframe (généralement lecteurvideo.com/embed.php)
-        val iframeUrl = Regex("""<iframe[^>]*src="([^"]+lecteurvideo[^"]+)"""").find(pageHtml)
-            ?.groupValues?.get(1)
-            ?: Regex("""<iframe[^>]*src="(https?://[^"]+)"""").find(pageHtml)?.groupValues?.get(1)
-            ?: return emptyList()
-        // 2026-06-02 : passe la coflixPageUrl en Referer pour que lecteurvideo.com
-        // ne renvoie pas 403/520 (CF anti-hotlink).
-        val embedHtml = httpGet(iframeUrl, customReferer = coflixPageUrl) ?: return emptyList()
-        // Extrait les `onclick="showVideo('<base64>', '...')"` patterns
-        val regex = Regex("""onclick="showVideo\('([^']+)',\s*'[^']*'\)"""")
+        // ── (a) Nouveau format WordPress : cfServers inline ──────────────────
+        val embedUrls = mutableListOf<String>()
+        val cfServersMatch = Regex("""var\s+cfServers\s*=\s*(\[.*?]);""", RegexOption.DOT_MATCHES_ALL)
+            .find(pageHtml)
+        val cfTokenMatch = Regex("""var\s+cfPlayerToken\s*=\s*"([^"]+)"""").find(pageHtml)
+        if (cfServersMatch != null) {
+            val token = cfTokenMatch?.groupValues?.get(1) ?: ""
+            try {
+                val arr = JSONArray(cfServersMatch.groupValues[1])
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    var embedUrl = obj.optString("embed_url")
+                    if (embedUrl.isBlank()) continue
+                    // Ajouter le token comme paramètre &t=
+                    if (token.isNotBlank()) {
+                        embedUrl += (if (embedUrl.contains("?")) "&" else "?") + "t=$token"
+                    }
+                    embedUrls.add(embedUrl)
+                }
+                Log.d(TAG, "cfServers inline: ${embedUrls.size} embeds, token=${token.length} chars")
+            } catch (e: Exception) {
+                Log.d(TAG, "cfServers parse failed: ${e.message}")
+            }
+        }
+        // ── (b) Fallback ancien format : iframe dans le HTML ─────────────────
+        if (embedUrls.isEmpty()) {
+            val iframeUrl = Regex("""<iframe[^>]*src="([^"]+lecteurvideo[^"]+)"""").find(pageHtml)
+                ?.groupValues?.get(1)
+                ?: Regex("""<iframe[^>]*src="(https?://[^"]+)"""").find(pageHtml)?.groupValues?.get(1)
+            if (iframeUrl != null) embedUrls.add(iframeUrl)
+        }
+        if (embedUrls.isEmpty()) return emptyList()
+        // ── Fetch chaque embed lecteurvideo et extraire les showVideo base64 ──
         val results = mutableListOf<Video.Server>()
-        for (m in regex.findAll(embedHtml)) {
-            val b64 = m.groupValues[1]
-            val decoded = runCatching { String(Base64.getDecoder().decode(b64)) }.getOrNull() ?: continue
-            if (decoded.isBlank() || !decoded.startsWith("http")) continue
-            val hosterName = guessHosterName(decoded)
-            val server = Video.Server(
-                id = "coflix_${results.size}",
-                name = "$label · $hosterName",
-                src = decoded,
-            )
-            results.add(server)
+        for (embedUrl in embedUrls) {
+            val embedHtml = httpGet(embedUrl, customReferer = coflixPageUrl) ?: continue
+            val regex = Regex("""onclick="showVideo\('([^']+)',\s*'[^']*'\)"""")
+            for (m in regex.findAll(embedHtml)) {
+                val b64 = m.groupValues[1]
+                val decoded = runCatching { String(Base64.getDecoder().decode(b64)) }.getOrNull() ?: continue
+                if (decoded.isBlank() || !decoded.startsWith("http")) continue
+                // 2026-07-13 : Streamhg = EarnVids derrière Cloudflare Turnstile qui ne
+                //   s'auto-résout QUE dans une WebView rendue à l'écran (échec garanti en
+                //   headless depuis l'IP courante). Inutile de le lister NI de tenter
+                //   l'extraction → on le saute (le film a déjà ~13 autres serveurs).
+                if (decoded.contains("streamhg", ignoreCase = true)) continue
+                val hosterName = guessHosterName(decoded)
+                results.add(Video.Server(
+                    id = "coflix_${results.size}",
+                    name = "$label · $hosterName",
+                    src = decoded,
+                ))
+            }
         }
         Log.d(TAG, "extractFromCoflixPage($coflixPageUrl) → ${results.size} sources")
         return results

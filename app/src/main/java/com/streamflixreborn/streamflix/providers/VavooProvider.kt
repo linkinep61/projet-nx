@@ -52,10 +52,8 @@ object VavooProvider : Provider, IptvProvider {
     override val language = "fr"
 
     private const val TAG = "VavooProvider"
-    private const val VAVOO_UA = "VAVOO/2.6"
     private const val MEDIAHUBMX_UA = "MediaHubMX/2"
     private const val CLIENT_VERSION = "3.0.2"
-    private const val APP_VERSION = "3.1.8"
 
     // ───────── API domains (fallback chain) ─────────
     // 2026-05-28 : miroir préféré en premier (choix user dans Paramètres),
@@ -868,9 +866,7 @@ object VavooProvider : Provider, IptvProvider {
                 // affichait le placeholder ui-avatars renvoyé par l'API Vavoo
                 // au lieu du vrai logo Canal+ que j'avais mappé.
                 val curatedLogo = logoUrlFor(name)
-                val logo = curatedLogo.ifBlank {
-                    rawLogo.ifBlank { fallbackLogoUrl(name) }
-                }
+                val logo = curatedLogo.ifBlank { rawLogo }
 
                 channels.add(VavooChannel(
                     id = id,
@@ -918,8 +914,6 @@ object VavooProvider : Provider, IptvProvider {
      *
      *  Public car appelé depuis TvShowViewHolder.setPoster() (branche IPTV). */
     fun fallbackLogoUrlFor(channelName: String): String = uiAvatarFallback(channelName)
-
-    private fun fallbackLogoUrl(channelName: String): String = ""
 
     private fun uiAvatarFallback(name: String): String {
         // Couleur par catégorie devinée (Sport vert, Cinéma violet, etc.) →

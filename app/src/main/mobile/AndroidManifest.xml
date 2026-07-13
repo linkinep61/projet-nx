@@ -139,13 +139,6 @@
             android:excludeFromRecents="true"
             android:theme="@style/AppTheme.Mobile" />
 
-        <activity
-            android:name=".activities.tools.WebViewPlayerActivity"
-            android:exported="false"
-            android:hardwareAccelerated="true"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:theme="@style/Theme.AppCompat.NoActionBar" />
-
         <!-- 2026-06-18 (user "la face de connexion pour M6 et TF1") -->
         <activity
             android:name=".activities.LoginWebViewActivity"

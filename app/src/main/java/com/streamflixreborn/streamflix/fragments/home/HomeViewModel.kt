@@ -319,7 +319,24 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                         )
                     })
 
-                State.SuccessLoading(categories)
+                // 2026-07-12 (user « pour tous les providers qui ont TMDB, ne pas afficher les
+                //   films pas encore sortis ») : TMDB Tendances/Populaires incluent des films
+                //   ANNONCÉS (ex : « The Odyssey » de Nolan, 2026) → aucun serveur ne peut les lire.
+                //   On retire GLOBALEMENT les FILMS à date de sortie FUTURE (les séries et les
+                //   items sans date connue sont gardés ; Continue/Favoris = choix user, intouchés).
+                val nowMs = System.currentTimeMillis()
+                fun isReleasedMovie(item: AppAdapter.Item): Boolean {
+                    if (item !is Movie) return true
+                    val cal = item.released ?: return true  // date inconnue → on garde
+                    return cal.timeInMillis <= nowMs         // sorti = date passée
+                }
+                val categoriesReleased = categories.map { c ->
+                    if (c.name == Category.CONTINUE_WATCHING || c.name == Category.FAVORITE_MOVIES ||
+                        c.name == Category.FAVORITE_TV_SHOWS) c
+                    else c.copy(list = c.list.filter { isReleasedMovie(it) })
+                }
+
+                State.SuccessLoading(categoriesReleased)
             }
 
             else -> state

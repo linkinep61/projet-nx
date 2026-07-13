@@ -67,6 +67,7 @@ object BackupRegistry {
         "Moviebox" to "Moviebox",
         "Nakios" to "Nakios",
         "Webflix" to "Webflix",
+        "Coflix Boston" to "Coflix Boston",
         "CoflixWiki" to "CoflixWiki",
         "AniCloud" to "AniCloud (animes)",
         "Papadustream V2" to "Papadustream V2",
@@ -95,7 +96,7 @@ object BackupRegistry {
     //   Papadustream) restent NON bridées. Sur mobile : permits=16 → comportement INCHANGÉ.
     private val LOW_RAM = Runtime.getRuntime().maxMemory() < 200L * 1024 * 1024
     private val HEAVY_SOURCES = setOf(
-        "CoflixWiki", "Nakios", "Moiflix", "DessinAnime", "FrenchAnime", "Wiflix", "Dramacool"
+        "Coflix Boston", "CoflixWiki", "Nakios", "Moiflix", "DessinAnime", "FrenchAnime", "Wiflix", "Dramacool"
     )
     private val heavyGate = Semaphore(if (LOW_RAM) 2 else 16)
 
@@ -104,10 +105,31 @@ object BackupRegistry {
     //   → mutex 12s par backup → sérialise tout → timeout 45s → 0 serveurs).
     //   L'app marchait très bien sans.
 
-    // 2026-07-08 (user "remets tout dans la liste normale") : WEBVIEW_HEAVY_PROVIDERS
-    //   et la 2ᵉ vague CF SUPPRIMÉS. Tous les providers backup passent dans la même
-    //   boucle sans délai spécial. Ceux qui sont désactivés restent commentés.
-    // (ancien WEBVIEW_HEAVY_PROVIDERS : FrenchAnime, VoirAnime, FrenchManga, Franime, VoirDrama, DessinAnime)
+    // 2026-07-12 (user « on fait comme avant : les backups CF passent en dernier, après tous les
+    //   backups qui n'en ont pas, SAUF Wiflix qui reste dans la boucle générique ») : 2ᵉ vague CF
+    //   RESTAURÉE. Les providers CF/WebView-lourds sont retardés de CF_SECOND_WAVE_MS → les backups
+    //   sans CF (rapides) remontent leurs serveurs en PREMIER, les CF arrivent après. Wiflix N'EST
+    //   PAS dans le set → il part en 1ʳᵉ vague (jamais retardé).
+    // 2026-07-12 v2 : la 2ᵉ vague ne concerne QUE les providers CF orientés FILMS (qui ne tournent
+    //   que pour les films). Les providers ANIME (FrenchAnime, VoirAnime, FrenchManga, Franime,
+    //   VoirDrama, DessinAnime) NE SONT PLUS retardés : pour un anime ce sont EUX les serveurs
+    //   utiles → les retarder de 5s repoussait inutilement l'affichage.
+    private val WEBVIEW_HEAVY_PROVIDERS = setOf(
+        "Cpasmal", "Cpasmieux", "aplouf", "FrenchStream", "Papadustream", "1Jour1Film"
+    )
+    private const val CF_SECOND_WAVE_MS = 5000L
+
+    // 2026-07-12 (user « les providers films/séries n'ont pas beaucoup de manga côté série et font
+    //   des mauvais matchs ; on les garde SEULEMENT pour les films → ça réduit les CF et le bazar
+    //   sur les séries ») : ces backups (orientés films) ne sont interrogés QUE pour les FILMS.
+    //   Pour les séries/épisodes, on les SAUTE → moins de CF, moins de faux matchs. Les séries
+    //   restent couvertes par les providers anime + Wiflix + les backups sans CF (Moviebox, Movix,
+    //   Frembed, Nakios, CoflixWiki…).
+    private val FILM_ONLY_PROVIDERS = setOf(
+        "Cpasmal", "Cpasmieux", "aplouf", "Papadustream", "Papadustream V2", "FrenchStream", "1Jour1Film",
+        // 2026-07-12 (user « Moviebox ramène la mauvaise saison sur les séries ») : films uniquement.
+        "Moviebox"
+    )
 
     // ═══════════════════════════════════════════════════════════════════════
     //  POINT D'ENTRÉE HÉBERGÉ — backups web ajoutables SANS rebuild (2026-07-02)
@@ -288,6 +310,22 @@ object BackupRegistry {
         if (isMovie) {
             val cy = yearIn(candidateTitle)
             if (cy != null && targetYear != null && kotlin.math.abs(cy - targetYear) > 1) return false
+        }
+        // 2026-07-13 (user « la série "H" : du moment que ça matche H + l'année, ça doit passer ») :
+        //   un titre connu ULTRA-COURT (1-2 caractères, ex « H ») est rejeté par titleMatches (il
+        //   exige l'exact → « H - Saison 1 VF » ≠ « h »). On l'accepte SI le token exact apparaît
+        //   ISOLÉ dans le candidat ET que l'année du candidat colle (±1). L'année = discriminant.
+        //   (Si le site ne met pas l'année dans le titre → pas d'année à comparer → on retombe sur
+        //   le matching normal ; seuls les providers par ID TMDB trouvent alors.)
+        val shortKnown = knownTitles.firstOrNull { t ->
+            t.trim().replace(Regex("[^a-zA-Z0-9]"), "").length in 1..2
+        }
+        if (shortKnown != null && targetYear != null) {
+            val cy = yearIn(candidateTitle)
+            val token = shortKnown.trim().lowercase()
+            val tokenIsolated = Regex("(?i)(?<![a-z0-9])" + Regex.escape(token) + "(?![a-z0-9])")
+                .containsMatchIn(candidateTitle)
+            if (tokenIsolated && cy != null && kotlin.math.abs(cy - targetYear) <= 1) return true
         }
         return knownTitles.any { it.isNotBlank() && titleMatches(candidateTitle, it) && titleMatches(it, candidateTitle) }
     }
@@ -538,6 +576,13 @@ object BackupRegistry {
         //   (ex: film "Apple" sur un anime "Chainsmoker Cat"). Fonctionne QUEL QUE
         //   SOIT le provider natif (NetMirror, AnimeSama, etc.).
         var isAnimeContent = false
+        // 2026-07-12 (user « les providers dessins animés n'ont AUCUN film → pour un film non-anime
+        //   on peut les sauter ; l'inverse n'est pas vrai car les providers films ont parfois des
+        //   dessins animés ») : filtre À SENS UNIQUE. Si TMDB confirme que le contenu N'EST PAS de
+        //   l'animation (genre 16 absent, genres non vides), on saute les providers spécialisés
+        //   anime/dessins animés (ils n'auront jamais un film live-action) → ~5s de recherche en
+        //   moins. On ne fait JAMAIS l'inverse.
+        var notAnimationConfirmed = false
         if (!resolvedTmdbId.isNullOrBlank()) {
             try {
                 val idInt = resolvedTmdbId.toIntOrNull()
@@ -560,6 +605,8 @@ object BackupRegistry {
                             ?.forEach { knownTitles.add(it) }
                         // Détection anime : langue originale japonaise
                         if (d.originalLanguage == "ja") isAnimeContent = true
+                        // Confirmé PAS de l'animation : genres connus ET genre 16 (Animation) absent
+                        if (d.genres.isNotEmpty() && d.genres.none { it.id == 16 }) notAnimationConfirmed = true
                     } else {
                         val d = TMDb3.TvSeries.details(
                             seriesId = idInt,
@@ -576,6 +623,7 @@ object BackupRegistry {
                             ?.forEach { knownTitles.add(it) }
                         // Détection anime : langue originale japonaise
                         if (d.originalLanguage == "ja") isAnimeContent = true
+                        if (d.genres.isNotEmpty() && d.genres.none { it.id == 16 }) notAnimationConfirmed = true
                     }
                 }
             } catch (e: Exception) {
@@ -626,12 +674,19 @@ object BackupRegistry {
 
         // ── Sources FEUILLES (pas de sous-backup → aucune récursion) ──────────────
         // 2026-07-06 : backups films/séries — SKIP sur provider anime (P3).
-        // 2026-07-08 : ancien Coflix DÉSACTIVÉ (tous les domaines redirigent vers page de dons Telegram).
-        // Remplacé par CoflixWiki (coflix.wiki, site refondu, API différente).
-        // if (!isAnimeProvider) launch { emit("Coflix") {
-        //     if (key.isMovie) CoflixSourceProvider.getMovieSources(key.title, key.year)
-        //     else CoflixSourceProvider.getEpisodeSources(key.title, key.year, key.season, key.episode)
-        // } }
+        // 2026-07-12 : Coflix RÉACTIVÉ — coflix.boston est en ligne (WordPress, WP REST API).
+        //   CoflixSourceProvider mis à jour pour le nouveau format (cfServers inline + WP search).
+        //   Essaie tous les titres connus (alt TMDB inclus) comme CoflixWiki.
+        launch { emit("Coflix Boston") {
+            var result = emptyList<Video.Server>()
+            for (titleTry in knownTitles) {
+                if (titleTry.isBlank()) continue
+                result = if (key.isMovie) CoflixSourceProvider.getMovieSources(titleTry, key.year)
+                          else CoflixSourceProvider.getEpisodeSources(titleTry, key.year, key.season, key.episode)
+                if (result.isNotEmpty()) break
+            }
+            result
+        } }
         // 2026-07-08 : CoflixWiki essaie TOUS les titres connus (TMDB alt inclus) car
         //   le site peut indexer sous un titre régional différent (ex: « Bêêêêtective Privé »
         //   au lieu de « Les Moutons détectives »).
@@ -652,7 +707,7 @@ object BackupRegistry {
         //   titre+année (film ↔ série discriminés par le « - s N e E » du titre de résultat).
         //   Serveurs data-url délégués aux extracteurs existants (Uqload/Filemoon/Dood/Vidzy/
         //   VOE/FSVID). Essaie tous les titres connus (alt TMDB inclus).
-        launch { emit("Cpasmieux") {
+        if (key.isMovie) launch { kotlinx.coroutines.delay(CF_SECOND_WAVE_MS); emit("Cpasmieux") {  // CF → 2ᵉ vague, FILMS uniquement
             var result = emptyList<Video.Server>()
             for (titleTry in knownTitles) {
                 if (titleTry.isBlank()) continue
@@ -665,7 +720,7 @@ object BackupRegistry {
         // 2026-07-11 : Cpasmal (cpasmal.rip, DataLife FR). CF bloque le POST search en XHR (403)
         //   mais laisse passer la NAVIGATION → httpSearch envoie des headers de navigation
         //   (Sec-Fetch-Mode: navigate + pas de X-Requested-With). Serveurs via getxfield (XHR OK).
-        launch { emit("Cpasmal") {
+        if (key.isMovie) launch { kotlinx.coroutines.delay(CF_SECOND_WAVE_MS); emit("Cpasmal") {  // CF → 2ᵉ vague, FILMS uniquement
             var result = emptyList<Video.Server>()
             for (titleTry in knownTitles) {
                 if (titleTry.isBlank()) continue
@@ -773,7 +828,7 @@ object BackupRegistry {
             //   Identité par id (findSubjectId matche titre+année STRICT côté aoneroom) →
             //   zéro faux positif. Flux réels (CDN hakunaymatata + cookies CloudFront),
             //   lus via MovieboxExtractor (court-circuit direct). Films + séries/épisodes.
-            launch { emit("Moviebox") {
+            if (key.isMovie) launch { emit("Moviebox") {  // 2026-07-12 : FILMS uniquement (mauvaise saison sur les séries)
                 val tmdbInt = resolvedTmdbId.toIntOrNull()
                 if (tmdbInt == null) emptyList() else {
                     val tmdbVt: Video.Type = if (key.isMovie) {
@@ -1033,9 +1088,19 @@ object BackupRegistry {
             // 2026-07-08 : Cloudstream RETIRÉ du set dedicated — il utilise l'API MovieBox+
             //   (aoneroom.com), PAS la même API que Movix. Ses serveurs NE sont PAS des doublons.
             //   Le remettre dans la boucle générique (recherche par titre via findSubjectId).
-            val dedicated = setOf("CoflixWiki", "Moviebox", "Nakios", "Movix", "Frembed")
+            val dedicated = setOf("CoflixWiki", "Coflix Boston", "Moviebox", "Nakios", "Movix", "Frembed")
+            // 2026-07-12 (user) : providers SPÉCIALISÉS anime/dessins animés qui n'hébergent AUCUN
+            //   film live-action → à sauter quand le contenu est confirmé non-animation. DessinAnime
+            //   EXCLU de cette liste (user « dessin animé lui doit recevoir tout » = contenu mixte).
+            val animeOnlyProviders = setOf("AnimeSama", "VoirAnime", "FrenchManga", "FrenchAnime", "FRAnime", "Franime")
+            val skipAnimeOnly = notAnimationConfirmed && !isAnimeContent
+            if (skipAnimeOnly) Log.i(TAG, "fetchAll contenu NON-animation confirmé (genre 16 absent) → skip providers anime-only")
             Provider.providers.keys
                 .filter { p ->
+                    // 2026-07-12 : providers orientés FILMS → sautés pour les séries/épisodes.
+                    !(!key.isMovie && p.name in FILM_ONLY_PROVIDERS) &&
+                    // Filtre à sens unique : non-animation → on saute les providers anime purs.
+                    !(skipAnimeOnly && p.name in animeOnlyProviders) &&
                     p.name !in exclude && p.name !in dedicated &&
                         // 2026-07-09 (user « remets aplouf dans les backups ») : aplouf RÉACTIVÉ
                         //   comme source de backup (recherche par titre via la boucle générique).
@@ -1064,8 +1129,13 @@ object BackupRegistry {
                         //   bloquer les providers film = perte massive de serveurs (3 au lieu de 20+).
                 }
                 .forEach { p ->
-                    // 2026-07-08 : plus de 2ᵉ vague CF, tous les backups partent ensemble.
+                    // 2026-07-12 : 2ᵉ vague CF restaurée. Les providers CF/WebView-lourds (WEBVIEW_HEAVY,
+                    //   Wiflix EXCLU) attendent CF_SECOND_WAVE_MS avant de chercher → les backups sans CF
+                    //   passent en premier.
                     launch {
+                        if (p.name in WEBVIEW_HEAVY_PROVIDERS) {
+                            kotlinx.coroutines.delay(CF_SECOND_WAVE_MS)
+                        }
                         emit(p.name) {
                         // 2026-07-09 : DIAGNOSTIC complet pour chaque provider de la boucle générique.
                         //   Log le résultat de chaque étape (search, type, matching, resolve, servers)
@@ -1184,7 +1254,7 @@ object BackupRegistry {
         } }
         // ── PapadustreamV2 (NATIF, par TITRE strict) — nouvelle version du site (films+séries).
         // 2026-07-08 : essaie tous les titres connus (alt TMDB inclus).
-        if (key.title.length >= 2) launch { emit("Papadustream V2") {
+        if (key.title.length >= 2 && key.isMovie) launch { kotlinx.coroutines.delay(CF_SECOND_WAVE_MS); emit("Papadustream V2") {  // CF → 2ᵉ vague, FILMS uniquement
             var result = emptyList<Video.Server>()
             for (titleTry in knownTitles) {
                 if (titleTry.isBlank()) continue

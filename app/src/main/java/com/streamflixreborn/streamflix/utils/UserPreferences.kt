@@ -110,11 +110,39 @@ object UserPreferences {
     //   - une source hors de la liste connue (BACKUP_SOURCE_KEYS) → toujours active (on ne
     //     désactive QUE ce que l'utilisateur a explicitement décoché).
     private const val KEY_ENABLED_BACKUPS = "ENABLED_BACKUPS"
+    // 2026-07-12 : compteur de migration. Quand on ajoute une nouvelle source de backup
+    //   (ex: Coflix Boston), on bump ce compteur → la 1ère vérification ajoute les sources
+    //   manquantes au set sauvé. L'user peut ensuite les désactiver dans les Paramètres.
+    private const val KEY_BACKUP_MIGRATION_V = "BACKUP_MIGRATION_V"
+    private const val CUR_BACKUP_MIGRATION = 2 // bump quand on ajoute de nouvelles sources
+
+    // 2026-07-13 (user "une option au-dessus de Gérer les sources pour activer/désactiver les
+    //   backups — ça permet de tester si les sources natives du provider sont encore valables") :
+    //   MASTER switch. Décoché → AUCUN backup (seuls les serveurs natifs du provider s'affichent).
+    private const val KEY_BACKUPS_ENABLED = "pref_backups_enabled"
+    val backupsEnabled: Boolean
+        get() = if (::prefs.isInitialized) prefs.getBoolean(KEY_BACKUPS_ENABLED, true) else true
 
     fun isBackupSourceEnabled(source: String): Boolean {
         if (!::prefs.isInitialized) return true
+        // Master switch OFF → tous les backups désactivés (test des serveurs natifs seuls).
+        if (!prefs.getBoolean(KEY_BACKUPS_ENABLED, true)) return false
         val enabled = prefs.getStringSet(KEY_ENABLED_BACKUPS, null) ?: return true
         if (source !in com.streamflixreborn.streamflix.utils.BackupRegistry.BACKUP_SOURCE_KEYS) return true
+        // Migration : si de nouvelles sources ont été ajoutées depuis la dernière config,
+        //   les ajouter automatiquement au set enabled (1 fois par version).
+        val migV = prefs.getInt(KEY_BACKUP_MIGRATION_V, 1)
+        if (migV < CUR_BACKUP_MIGRATION) {
+            val expanded = enabled.toMutableSet()
+            com.streamflixreborn.streamflix.utils.BackupRegistry.BACKUP_SOURCE_KEYS.forEach {
+                if (it !in expanded) expanded.add(it)
+            }
+            prefs.edit()
+                .putStringSet(KEY_ENABLED_BACKUPS, expanded)
+                .putInt(KEY_BACKUP_MIGRATION_V, CUR_BACKUP_MIGRATION)
+                .apply()
+            return source in expanded
+        }
         return source in enabled
     }
 
@@ -239,14 +267,44 @@ object UserPreferences {
             //   (.tsv + .classif3) reste pour permettre une réouverture
             //   rapide. Évite que des chaînes d'une session précédente
             //   réapparaissent quand on retourne sur Mon IPTV plus tard.
-            try {
-                val previous = currentProvider
-                val previousIsMyIptv = previous is com.streamflixreborn.streamflix.providers.MyIptvProvider
-                val nextIsMyIptv = value is com.streamflixreborn.streamflix.providers.MyIptvProvider
-                if (previousIsMyIptv && !nextIsMyIptv) {
-                    com.streamflixreborn.streamflix.providers.MyIptvProvider.clearCache()
+            // 2026-07-12 : lire currentProvider (le getter) force le chargement de
+            //   Provider.providers → 15+ class-inits → 2.7s sur Chromecast ARM.
+            //   Quand value=null (cold start boot), on SAUTE la lecture : null n'est
+            //   pas MyIptv, donc le cleanup est inutile. Provider.providers sera chargé
+            //   plus tard (1er accès home) quand le main thread est libre → zéro fige.
+            if (value != null) {
+                try {
+                    val previous = currentProvider
+                    val previousIsMyIptv = previous is com.streamflixreborn.streamflix.providers.MyIptvProvider
+                    val nextIsMyIptv = value is com.streamflixreborn.streamflix.providers.MyIptvProvider
+                    if (previousIsMyIptv && !nextIsMyIptv) {
+                        com.streamflixreborn.streamflix.providers.MyIptvProvider.clearCache()
+                    }
+                } catch (_: Throwable) {}
+                // 2026-07-12 (user « sur une VOD le serveur met du temps, un truc monopolise la
+                //   mémoire ») : DÈS le changement de provider (bien AVANT la lecture), on suspend
+                //   les scans IPTV OLA/Vegeta s'ils ne sont PAS la cible. Avant, releaseMemory ne
+                //   se déclenchait qu'après 10s de lecture → le probe IPTV (m3u de 30000 chaînes)
+                //   saturait encore la RAM pendant la recherche des serveurs VOD.
+                //   2026-07-12 v2 (user « l'interface est bloquée ») : EN ARRIÈRE-PLAN. Référencer
+                //   les objets OLA/Vegeta force leur <clinit> (lourd, ~2-3s à froid sur Chromecast) ;
+                //   sur le thread principal ça figeait l'UI. Un thread daemon l'évite. On ne le fait
+                //   QUE si l'IPTV a réellement été chargé cette session (évite l'init inutile à froid).
+                val nextIsOla = value is com.streamflixreborn.streamflix.providers.OlaTvProvider
+                val nextIsVegeta = value is com.streamflixreborn.streamflix.providers.VegetaTvProvider
+                if (!nextIsOla || !nextIsVegeta) {
+                    kotlin.concurrent.thread(isDaemon = true, name = "iptv-release") {
+                        try {
+                            if (!nextIsOla && com.streamflixreborn.streamflix.providers.OlaTvProvider.wasEverLoaded()) {
+                                com.streamflixreborn.streamflix.providers.OlaTvProvider.releaseMemory()
+                            }
+                            if (!nextIsVegeta && com.streamflixreborn.streamflix.providers.VegetaTvProvider.wasEverLoaded()) {
+                                com.streamflixreborn.streamflix.providers.VegetaTvProvider.releaseMemory()
+                            }
+                        } catch (_: Throwable) {}
+                    }
                 }
-            } catch (_: Throwable) {}
+            }
             // CRITICO: Resetta l'istanza del database prima di cambiare provider
             // per forzare la creazione di un nuovo database file corretto.
             AppDatabase.resetInstance()
@@ -376,16 +434,19 @@ object UserPreferences {
     // éviter que les écrans mettre en veille tous les 5 minutes") : flag global
     // pour garder l'écran allumé pendant l'utilisation de l'app (navigation
     // home / picker / catalogue / etc.). N'affecte PAS la lecture vidéo
-    // (le player gère son propre FLAG_KEEP_SCREEN_ON). Default OFF pour ne pas
-    // drainer la batterie sur mobile par surprise.
+    // 2026-07-12 (user « les télés s'éteignent toutes seules au bout d'un moment ») : défaut
+    //   passé à ON. Garde l'écran allumé dans toute l'app (évite la mise en veille TV pendant
+    //   la navigation / entre deux épisodes). Reste désactivable dans les réglages.
     var keepScreenOnApp: Boolean
-        get() = Key.KEEP_SCREEN_ON_APP.getBoolean() ?: false
+        get() = Key.KEEP_SCREEN_ON_APP.getBoolean() ?: true
         set(value) {
             Key.KEEP_SCREEN_ON_APP.setBoolean(value)
         }
 
+    // 2026-07-12 : défaut ON aussi — garde l'écran allumé quand la lecture est EN PAUSE (sinon la
+    //   TV s'éteint si on met en pause un moment).
     var keepScreenOnWhenPaused: Boolean
-        get() = Key.KEEP_SCREEN_ON_WHEN_PAUSED.getBoolean() ?: false
+        get() = Key.KEEP_SCREEN_ON_WHEN_PAUSED.getBoolean() ?: true
         set(value) {
             Key.KEEP_SCREEN_ON_WHEN_PAUSED.setBoolean(value)
         }

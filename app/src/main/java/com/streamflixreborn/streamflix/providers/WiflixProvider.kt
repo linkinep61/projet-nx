@@ -1784,136 +1784,14 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         return _sorted
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // 2026-05-27 : Backups Movix + Cloudstream (user "ajoute wiflix et
-    //   frenchstream en backup pour tous les providers"). Wiflix = scraper
-    //   natif, pas de tmdbId → résolution TMDB par titre/année. Pattern
-    //   identique à FrenchStreamProvider.
-    // ─────────────────────────────────────────────────────────────────────
-
-    /** Résout le tmdbId via TMDB par titre (nécessaire pour les backups).
-     *  2026-06-03 (user "j'ai changé carrément de film et c'est encore ce
-     *  film là qui revient") : validation STRICTE. Avant : on acceptait
-     *  n'importe quel résultat TMDB → un mauvais match (ex: "Intouchables"
-     *  → un Marvel) faisait que le backup Movix renvoyait les serveurs d'un
-     *  film qui n'a rien à voir → un VOE Marvel dans le picker Intouchables.
-     *  Maintenant : on compare le titre TMDB et l'année avec le titre Wiflix
-     *  d'origine ; si la similarité est insuffisante ou l'écart d'année ≥3
-     *  ans → on retourne null = pas de backup (mieux que faux backup). */
-    private suspend fun resolveWiflixTmdbId(videoType: Video.Type): Int? = runCatching {
-        val title = when (videoType) {
-            is Video.Type.Movie -> videoType.title
-            is Video.Type.Episode -> videoType.tvShow.title
-        }
-        val cleanTitle = TitleNormalizer.cleanForTmdbSearch(title).ifBlank { title }
-        val year = when (videoType) {
-            is Video.Type.Movie -> videoType.releaseDate.takeIf { it.isNotBlank() }?.take(4)?.toIntOrNull()
-            is Video.Type.Episode -> videoType.tvShow.releaseDate?.take(4)?.toIntOrNull()
-        }
-        val tmdbItem: Any? = when (videoType) {
-            is Video.Type.Movie -> TmdbUtils.getMovie(cleanTitle, year, "fr-FR")
-            is Video.Type.Episode -> TmdbUtils.getTvShow(cleanTitle, year, "fr-FR")
-        }
-        // Extraire titre/année du résultat TMDB pour validation.
-        //   Movie.released / TvShow.released = Calendar? (pas String), donc on
-        //   passe par Calendar.YEAR pour récupérer l'année.
-        val (tmdbTitle, tmdbYear, tmdbId) = when (tmdbItem) {
-            is Movie -> Triple(
-                tmdbItem.title,
-                tmdbItem.released?.get(java.util.Calendar.YEAR),
-                tmdbItem.id.toIntOrNull(),
-            )
-            is TvShow -> Triple(
-                tmdbItem.title,
-                tmdbItem.released?.get(java.util.Calendar.YEAR),
-                tmdbItem.id.toIntOrNull(),
-            )
-            else -> Triple("", null, null)
-        }
-        if (tmdbId == null) return@runCatching null
-        // ── Validation titre (similarité normalisée) ────────────────────
-        fun normalize(s: String) = s.lowercase()
-            .replace(Regex("[^a-z0-9 ]"), " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-        val aNorm = normalize(cleanTitle)
-        val bNorm = normalize(tmdbTitle)
-        if (aNorm.isBlank() || bNorm.isBlank()) {
-            Log.w("Wiflix", "Backup TMDB validation: titre vide (a='$aNorm' b='$bNorm') → drop")
-            return@runCatching null
-        }
-        // Similarité simple : tokens partagés / max(tokens). Seuil 0.6 = ≥60%
-        //   des tokens du titre Wiflix doivent être dans le titre TMDB.
-        val aTokens = aNorm.split(" ").filter { it.length > 1 }.toSet()
-        val bTokens = bNorm.split(" ").filter { it.length > 1 }.toSet()
-        if (aTokens.isEmpty() || bTokens.isEmpty()) {
-            Log.w("Wiflix", "Backup TMDB validation: tokens vides → drop")
-            return@runCatching null
-        }
-        val shared = aTokens.intersect(bTokens).size
-        val ratio = shared.toDouble() / maxOf(aTokens.size, bTokens.size)
-        if (ratio < 0.6) {
-            Log.w("Wiflix", "Backup TMDB validation: titre mismatch '$cleanTitle' ≠ '$tmdbTitle' (ratio=$ratio) → drop")
-            return@runCatching null
-        }
-        // ── Validation année (±3 ans max) ──────────────────────────────
-        if (year != null && tmdbYear != null) {
-            val diff = kotlin.math.abs(year - tmdbYear)
-            if (diff >= 3) {
-                Log.w("Wiflix", "Backup TMDB validation: année mismatch $year vs $tmdbYear (diff=$diff) → drop")
-                return@runCatching null
-            }
-        }
-        Log.d("Wiflix", "Backup TMDB validation OK : '$cleanTitle' → tmdbId=$tmdbId ('$tmdbTitle' $tmdbYear)")
-        tmdbId
-    }.getOrNull()
-
-    private suspend fun fetchWiflixMovixBackup(tmdbId: Int, videoType: Video.Type): List<Video.Server> = runCatching {
-        val movixVideoType = if (videoType is Video.Type.Episode)
-            videoType.copy(tvShow = videoType.tvShow.copy(id = "$tmdbId"))
-        else videoType
-        val movixId = when (videoType) {
-            is Video.Type.Movie -> "$tmdbId"
-            is Video.Type.Episode -> "$tmdbId-s${videoType.season.number}e${videoType.number}"
-        }
-        MovixProvider.getServersAsBackup(movixId, movixVideoType)
-            // Filtrer les sources wiflix de Movix (on les a déjà en natif)
-            .filter { srv -> !srv.id.startsWith("wiflix-") }
-            // 2026-06-03 (user "1 VOE qui s'est mélangé par un film que j'avais
-            //   regardé avant") : tagger visuellement les backups Movix pour que
-            //   l'user distingue les serveurs natifs Wiflix (fiables, garantis
-            //   sur CE film) des backups Movix (résolus par titre/année TMDB,
-            //   risque de fausse association si matching imprécis). Avant : pas
-            //   de préfixe → un VOE backup d'un autre film ressemblait à un VOE
-            //   natif Wiflix → confusion. Pattern identique au backup CS.
-            .map { srv -> srv.copy(id = "movix_backup__${srv.id}", name = "Movix — ${srv.name}") }
-    }.getOrNull().orEmpty()
-
-    private suspend fun fetchWiflixCloudstreamBackup(tmdbId: Int, videoType: Video.Type): List<Video.Server> = runCatching {
-        val csId = when (videoType) {
-            is Video.Type.Movie -> "$tmdbId"
-            is Video.Type.Episode -> "$tmdbId:${videoType.season.number}:${videoType.number}"
-        }
-        val csVideoType = if (videoType is Video.Type.Episode)
-            videoType.copy(tvShow = videoType.tvShow.copy(id = "$tmdbId"))
-        else videoType
-        CloudstreamProvider.getServers(csId, csVideoType)
-            .map { srv -> srv.copy(id = "cs_backup__${srv.id}", name = "Cloudstream — ${srv.name}") }
-    }.getOrNull().orEmpty()
-
     override fun getServersProgressive(
         id: String, videoType: Video.Type,
     ): Flow<List<Video.Server>> = channelFlow {
         initializeService()
         // 2026-06-03 (user "il devrait y avoir QUE des serveurs normal qui
-        //   arrive normalement") : backups Movix/Cloudstream DÉSACTIVÉS. Ils
-        //   créaient des faux positifs (ex: VOE Marvel apparaissant dans le
-        //   picker Intouchables à cause d'un mauvais match TMDB par titre).
+        //   arrive normalement") : backups Movix/Cloudstream DÉSACTIVÉS.
         //   On garde uniquement le scrape natif Wiflix qui est fiable (ID
-        //   newsid → page Wiflix → embeds réels du bon film). Les helpers
-        //   fetchWiflixMovixBackup / fetchWiflixCloudstreamBackup /
-        //   resolveWiflixTmdbId restent dans le fichier au cas où on veut
-        //   les ré-activer plus tard (avec un matching TMDB durci).
+        //   newsid → page Wiflix → embeds réels du bon film).
         launch {
             try {
                 val native = getServers(id, videoType)
@@ -1923,20 +1801,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
-        // Délégation backups
-        if (server.id.startsWith("movix_backup__")) {
-            val original = server.copy(id = server.id.removePrefix("movix_backup__"))
-            return try { MovixProvider.getVideo(original) }
-            catch (e: Exception) { Log.w("Wiflix", "Movix getVideo failed: ${e.message}"); Video(source = original.src) }
-        }
-        if (server.id.startsWith("cs_backup__")) {
-            val original = server.copy(id = server.id.removePrefix("cs_backup__"))
-            return try { CloudstreamProvider.getVideo(original) }
-            catch (e: Exception) { Log.w("Wiflix", "CS getVideo failed: ${e.message}"); Video(source = original.src) }
-        }
-
         val video = Extractor.extract(server.src)
-
         return video
     }
 

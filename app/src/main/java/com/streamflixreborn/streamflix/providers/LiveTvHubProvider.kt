@@ -51,22 +51,6 @@ object LiveTvHubProvider : Provider, IptvProvider {
     private const val TAG = "LiveTvHubProvider"
     private const val CHROME_UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
-    /**
-     * 2026-06-14 (user "donc maintenant tu peux retirer la source du TV hub
-     * c'est plus gênant") : flag pour réactiver l'injection des sections
-     * Dric4rTV dans le TvHub. Désactivé par défaut car :
-     *  - Les 17 radios sont hardcodées dans RadioCatalog.HARDCODED_DRIC4RTV_RADIOS
-     *    (URLs CDN directes radiofrance/infomaniak/RTL/etc.).
-     *  - Les chaînes TV intéressantes (178) sont sur le data.m3u Codeberg,
-     *    accessibles via le provider World Live (MyIptvProvider URL externe).
-     *  - 23 "Live & DJ set" droppées (= .mp4 statiques freebox Dric, pas live).
-     *
-     * Le code Dric4rTvProvider.kt reste en place pour compat des anciens
-     * favoris cœur (IDs `livehub::dric4rtv::*`) : getServers/getVideo
-     * continuent à fonctionner si un favori est cliqué depuis le cœur.
-     */
-    private const val DRIC4RTV_IN_HUB = false
-
     private val _additionalServersFlow = MutableSharedFlow<Video.Server>()
     override val additionalServersFlow: SharedFlow<Video.Server> = _additionalServersFlow.asSharedFlow()
 
@@ -301,38 +285,6 @@ object LiveTvHubProvider : Provider, IptvProvider {
     // `livehub::freeshot::` au cas où des users ont des favoris stockés. Le code
     // de rendering itère sur liste vide donc rien ne s'affiche, propre.
     private val freeshotChannels: List<FreeshotChannel> = emptyList()
-
-    private fun freeshotToTvShow(c: FreeshotChannel): TvShow {
-        // Réutilise les logos officiels via la même map que les autres providers,
-        // sinon fallback avatar avec initiales.
-        val logoKey = when {
-            c.slug == "tf1" -> "tf1"
-            c.slug == "france-2" -> "france2"
-            c.slug == "france-3" -> "france3"
-            c.slug == "france-4" -> "france4"
-            c.slug == "france-5" -> "france5"
-            c.slug == "m6" -> "m6"
-            c.slug == "bfmtv" -> "bfmtv"
-            c.slug == "bfm-business" -> "bfmbusiness"
-            c.slug == "cnews" -> "cnews"
-            c.slug == "france-info" -> "franceinfo"
-            c.slug == "france-24" -> "france24"
-            c.slug == "canal-fr" -> "canal"
-            c.slug == "canal-docs-fr" -> "canalcinema"
-            else -> null
-        }
-        val logoUrl = logoKey?.let { manualLogoMap[it] }
-            ?: "https://ui-avatars.com/api/?name=${java.net.URLEncoder.encode(c.displayName.take(3), "UTF-8")}&background=0EA5E9&color=fff&size=128&bold=true&format=png"
-        return TvShow(
-            id = "livehub::freeshot::${c.id}::${c.slug}",
-            title = c.displayName,
-            overview = "Chaîne TV — diffusée via freeshot.live.",
-            quality = "Live",
-            poster = logoUrl,
-            banner = logoUrl,
-            providerName = name,
-        )
-    }
 
     private fun bonusToTvShow(c: BonusChannel): TvShow {
         val logoUrl = c.logoKey?.let { manualLogoMap[it] }
@@ -573,105 +525,20 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // 2026-06-22 : Canal+ bonus OTF RETIRÉ (ne fonctionne plus).
         // 2026-05-31 : Canal+ Live section RETIRÉE (chaînes ne fonctionnent pas)
 
-        // 2026-05-15 : 48 chaînes freeshot.live (TF1, M6, BFM*, CANAL+ FR/DOCS,
-        // DAZN, Eurosport, France 2-5, L'Equipe Live, CNews, etc.) merged dans
-        // les catégories existantes.
-        val freeshotBanned = { id: String -> bonusBanned(id) }
-        val freeshotByCat = freeshotChannels
-            .filterNot { freeshotBanned("livehub::freeshot::${it.id}::${it.slug}") }
-            .groupBy { it.category }
-        for ((cat, list) in freeshotByCat) {
-            val tvShows = list.map { freeshotToTvShow(it) }
-            val existingIdx = sections.indexOfFirst { it.name == cat }
-            if (existingIdx >= 0) {
-                sections[existingIdx] = Category(
-                    name = cat,
-                    list = sections[existingIdx].list + tvShows,
-                )
-            } else {
-                sections.add(Category(name = cat, list = tvShows))
-            }
-        }
+        // 2026-05-15 : freeshot.live chaînes retirées (freeshotChannels = emptyList,
+        //   Cloudflare bloque toutes les 48 chaînes). Favoris anciens via getServers/getVideo.
 
         } catch (e: Exception) {
             Log.w(TAG, "Bonus/freeshot sections failed: ${e.message}")
         }
 
-        // 2026-05-31 : OTF TV — chaînes dynamiques depuis l'API OTF.
-        // 2026-06-04 : timeout 8s → 4s (couplé au cache négatif 60s dans
-        //   OtfTvService) pour ne pas faire patienter quand OTF est down.
-        val otfService = com.streamflixreborn.streamflix.utils.OtfTvService
-        // 2026-06-19 v36 (user "chargement infini après refresh TV Hub") :
-        //   OtfTvService a déclenché un OutOfMemoryError dans le buffer
-        //   OkHttp cache → catch (Exception) ne le rattrape pas (= Error,
-        //   pas Exception) → le worker crash sans cancel le withTimeoutOrNull
-        //   → getHome bloqué infiniment. Fix : catch Throwable.
-        val tOtf = System.currentTimeMillis()
-        // 2026-06-20 (user "à chaque refresh TV Hub OTF arrive vide, obligé
-        //   de recharger manuellement") : timeout 4s → 10s pour donner plus
-        //   de marge sur connexions lentes / API lente.
-        val otfChannelsFromApi = try {
-            kotlinx.coroutines.withTimeoutOrNull(10_000L) {
-                otfService.fetchChannels()
-            } ?: emptyList()
-        } catch (t: Throwable) {
-            Log.w(TAG, "OTF fetch failed (caught Throwable: ${t.javaClass.simpleName}: ${t.message})")
-            // 2026-06-19 v36 : marque OTF comme failed pour éviter retry
-            //   immédiat à chaque refresh home (= cooldown 60s).
-            try { otfService.markFailure() } catch (_: Throwable) {}
-            emptyList()
-        }
-        Log.d(TAG, "getHome: OTF fetched in ${System.currentTimeMillis() - tOtf}ms (${otfChannelsFromApi.size} channels)")
-
-        val selectedGroup = otfService.selectedGroup.ifBlank { "France" }
-        val otfFiltered = otfChannelsFromApi.filter { it.group == selectedGroup }
-
-        // normalizedKey = ID unique par chaîne (catId est l'ID du GROUPE, pas de la chaîne)
-        val seen = HashSet<String>()
-        val otfShows = otfFiltered.filter { seen.add(it.normalizedKey) }
-            .mapNotNull { ch ->
-                val id = "livehub::otf::${ch.normalizedKey}"
-                // 2026-06-08 : skip si bannie
-                if (com.streamflixreborn.streamflix.fragments.player.settings
-                        .IptvBannedChannels.isBanned(id)) return@mapNotNull null
-                TvShow(id = id, title = ch.name).apply {
-                    providerName = "TV Hub"
-                    poster = ch.logo
-                }
-            }
-        // 2026-06-22 : Canal+ prepend retiré (ne fonctionne plus).
-        val otfSectionName = "OTF TV - $selectedGroup"
-        sections.add(Category(name = otfSectionName, list = otfShows))
-
-        // 2026-05-31 : section "Favoris" OTF — inclut les chaînes OTF marquées favorites
-        try {
-            // getFavorites retourne "livehub::" + clé normalisée (ex: "livehub::otfcanaldecale")
-            val allFavs = com.streamflixreborn.streamflix.utils.IptvFavoritesStore
-                .getFavorites("TV Hub")
-            val otfFavKeys = allFavs
-                .filter { it.startsWith("livehub::otf") }
-                .map { it.removePrefix("livehub::otf") } // "canaldecale"
-            if (otfFavKeys.isNotEmpty()) {
-                val otfFavShows = otfFavKeys.mapNotNull { favKey ->
-                    val ch = otfChannelsFromApi.firstOrNull { it.normalizedKey == favKey }
-                    ch?.let {
-                        TvShow(id = "livehub::otf::${it.normalizedKey}", title = it.name).apply {
-                            providerName = "TV Hub"
-                            poster = it.logo
-                        }
-                    }
-                }
-                if (otfFavShows.isNotEmpty()) {
-                    // Insérer en haut de la liste (après les sections OLA/Vegeta existantes, avant OTF)
-                    val otfIdx = sections.indexOfFirst { it.name.startsWith("OTF TV") }
-                    if (otfIdx >= 0) {
-                        sections.add(otfIdx, Category(name = "Favoris", list = otfFavShows))
-                    } else {
-                        sections.add(Category(name = "Favoris", list = otfFavShows))
-                    }
-                }
-            }
-        } catch (_: Throwable) {}
+        // 2026-07-12 : OTF TV = LAZY LOAD — on n'appelle PAS l'API OTF au boot.
+        //   Le folder card apparaît quand même grâce à alwaysShowKeys("otf")
+        //   dans groupSectionsIntoFolders. Au clic, LiveHubFolderDialog détecte
+        //   folderContents["otf"] == null → lance le fetch on-demand via
+        //   showOtfWithGroupPicker (toast "Chargement…" + fetch API + dialog).
+        //   NE PAS ajouter de section vide : sinon folderContents["otf"] contient
+        //   1 Category vide que le dialog prend pour du cache → dialog vide.
 
         // 2026-06-14 (user "3tvbox a fermé, on nettoie sauf l'alias") :
         //   bloc BoxXtemus retiré (= ne pollue plus le hub avec ses 12 catégories
@@ -701,29 +568,9 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //
         //   Pour réactiver temporairement (ex: debug), passer DRIC4RTV_IN_HUB
         //   à true en haut du fichier.
-        if (DRIC4RTV_IN_HUB) {
-            try {
-                val dricSections = com.streamflixreborn.streamflix.providers
-                    .Dric4rTvProvider.getHome()
-                for (cat in dricSections) {
-                    val rebadged = (cat.list as? List<*>)?.mapNotNull { item ->
-                        val tv = item as? TvShow ?: return@mapNotNull null
-                        if (com.streamflixreborn.streamflix.fragments.player.settings
-                                .IptvBannedChannels.isBanned(tv.id)) return@mapNotNull null
-                        TvShow(id = tv.id, title = tv.title).apply {
-                            providerName = "TV Hub"
-                            poster = tv.poster
-                            banner = tv.banner
-                        }
-                    } ?: emptyList()
-                    if (rebadged.isNotEmpty()) {
-                        sections.add(Category(name = "France TV - ${cat.name}", list = rebadged))
-                    }
-                }
-            } catch (t: Throwable) {
-                Log.w(TAG, "Dric4rTV getHome failed: ${t.message}")
-            }
-        }
+        // 2026-06-14 : Dric4rTV injection dans le TvHub désactivée (user
+        //   a demandé de retirer cette source du Hub). Dric4rTvProvider.kt
+        //   reste pour compat des anciens favoris (IDs `livehub::dric4rtv::*`).
 
         // 2026-06-08 (user "favoris ça marche sur OTF mais pas France TV /
         //   Dric4rTV") : section "Favoris France TV" qui agrège les chaînes
@@ -1178,7 +1025,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
             //   les sections WiTV sont DANS les dossiers (= au home, l'user
             //   voit "📁 Sport", "📁 Cinéma", etc. + Live TF1+/M6+ + Favoris).
             //   Clic sur le dossier → dialog liste les chaînes.
-            FolderDef("generaliste", "Généraliste", Regex("^Généraliste$")),
+            // 2026-07-13 : "Généraliste" WiTV RETIRÉ du home (user "qu'est-ce qu'il fout là")
+            //   → absorbé par le catch-all "autres_replay" ci-dessous.
             FolderDef("cinema", "Cinéma", Regex("^Cinéma$")),
             FolderDef("info", "Info", Regex("^Info$")),
             FolderDef("sport", "Sport", Regex("^Sport$")),
@@ -1206,7 +1054,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
             FolderDef("sony_one", "Sony One", Regex("^Sony One.*")),
             // Catch-all : Arte sous-catégories, Replay non encore matchés.
             //   On limite au préfixe "Replay " (= n'attrape pas WiTV).
-            FolderDef("autres_replay", "Autres Replays", Regex("^Replay .*")),
+            // 2026-07-13 : "Généraliste" WiTV absorbé ici (plus de dossier dédié au home)
+            FolderDef("autres_replay", "Autres Replays", Regex("^Replay .*|^Généraliste$")),
         )
         // Sections gardées visibles directement (= pas dans un dossier) :
         //   - Favoris (= le top du home)
@@ -1257,7 +1106,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   (tf1plus/m6plus/francetv/arte/autres_replay) même si vides au
         //   boot (le contenu est fetché on-demand au click via lazy fetch).
         //   Sans ça, dossiers Replay invisibles au home en mode lazy.
-        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf")
+        val alwaysShowKeys = setOf("tf1plus", "m6plus", "bfmplay", "francetv", "arte", "autres_replay", "samsung_tvplus", "pluto_tv", "plex_tv", "lg_channels", "rakuten_tv", "sony_one", "musique", "stream4cf", "otf")
         // 2026-06-20 (user "mettre une petite jaquette sur les dossiers pour faire
         //   joli, correspondant au replay/catégorie") : map folderKey → URL logo.
         //   Pour les bouquets de chaînes (TF1+/M6+/France TV/Arte/OTF/Adrar), on
@@ -1405,8 +1254,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
             }
             id.startsWith("livehub::dailymotion::") -> dailymotionChannelToTvShow()
             id.startsWith("livehub::freeshot::") -> {
-                val fid = id.removePrefix("livehub::freeshot::").substringBefore("::")
-                freeshotChannels.firstOrNull { it.id == fid }?.let { freeshotToTvShow(it) }
+                // freeshot.live retired (all 48 channels CF-blocked); kept for old favorites compat
+                null
             }
             // 2026-06-04 (user "OTF TV coupe sur téléphone") : avant, on tombait
             //   ligne 646 sur `channelById[id]` (keyed sur livehub::<witvKey>) qui
@@ -4166,7 +4015,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
         }
         // 2) REPLI (CF qui hoquette au boot) : LISTE EN DUR des 53 chaînes (slugs + logos) → le dossier
         //    n'est JAMAIS vide ; chaque chaîne se résout via le CF au clic (l'app le passe).
-        val cats = parseFastM3u(com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.BAKED_CHANNELS_M3U)
+        val cats = parseFastM3u(com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.BAKED_CHANNELS_M3U_PROXIED)
         if (cats.isNotEmpty()) {
             stream4CfCache = cats; stream4CfCacheTs = now
             Log.d(TAG, "Stream4Free: ${cats.size} cat (liste EN DUR repli ; CF au clic)")

@@ -837,10 +837,10 @@ object DessinAnimeProvider : Provider, ProgressiveServersProvider {
     //   Animation=16) + Trending pour peupler le home. Le CF bypass tourne EN FOND (warmUpCf)
     //   pour être prêt quand le user cliquera sur un titre (= getServers, seul endroit CF).
     override suspend fun getHome(): List<Category> = coroutineScope {
-        // Lancer le préchauffage CF en fond (non bloquant) pour les futurs getServers
-        launch(Dispatchers.IO) {
-            try { warmUpCf() } catch (_: Exception) {}
-        }
+        // 2026-07-12 : warmUpCf() RETIRÉ du getHome. Le home est 100% TMDB (zéro CF),
+        //   pas besoin de charger le moteur Chromium/WebView ici. Le CF se chauffe
+        //   au premier clic sur un titre (getServers → WebViewResolver à la demande).
+        //   Économise ~60 frames de jank sur Chromecast au boot.
 
         val animGenreMovie = TMDb3.Params.WithBuilder(TMDb3.Genre.Movie.ANIMATION)
         val animGenreTv = TMDb3.Params.WithBuilder(TMDb3.Genre.Tv.ANIMATION)

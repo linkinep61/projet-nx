@@ -93,6 +93,9 @@ class ProviderViewHolder(
         // }
         com.streamflixreborn.streamflix.StreamFlixApp.instance
             .refreshProviderUrlAsync(provider.provider)
+        // 2026-07-12 : signaler au onDestroy que c'est un switch provider,
+        //   PAS un close d'app → ne pas stopper la radio.
+        MiniPlayerController.isProviderSwitching = true
         context.toActivity()?.apply {
             startActivity(
                 Intent(this, this::class.java).apply {
