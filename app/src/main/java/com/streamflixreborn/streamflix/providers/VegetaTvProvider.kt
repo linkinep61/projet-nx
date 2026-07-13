@@ -109,6 +109,37 @@ object VegetaTvProvider : Provider, IptvProvider {
             android.util.Log.d(TAG, "clearCache: VegetaTV registry vidé")
         } catch (_: Throwable) {}
     }
+
+    /** 2026-07-12 (user « sur de la VOD, libérer la RAM des registres IPTV ») : vide le registre
+     *  EN MÉMOIRE → libère la RAM. Le cache DISQUE reste → retour sur Vegeta recharge vite. À
+     *  n'appeler QUE si Vegeta n'est PAS le provider actif. */
+    fun releaseMemory() {
+        try {
+            // 2026-07-12 (user « sur une VOD Movix le serveur met du temps à se lancer, saturation
+            //   mémoire ») : DIAGNOSTIC = releaseMemory vidait bien le registre MAIS le probe-all
+            //   (NonCancellable) + le backfill continuaient à re-parser des m3u de 10MB / 26000
+            //   lignes EN FOND → le registre se re-remplissait, la RAM saturait (heap 305MB, GC
+            //   bloquant 7s+), et la VOD ramait. FIX : vodSuspended coupe les boucles d'ingestion.
+            vodSuspended = true
+            val had = channelRegistry.size
+            synchronized(registryLock) { channelRegistry.clear() }
+            vegetaServers = emptyList()
+            registryLoaded = false
+            lastLoadTime = 0L
+            if (had > 0) android.util.Log.d(TAG, "releaseMemory: Vegeta registry ($had chaînes) vidé de la RAM + scans suspendus (cache disque conservé)")
+        } catch (_: Throwable) {}
+    }
+
+    /** 2026-07-12 : true = on est sur une VOD (Vegeta pas actif) → les boucles de probe/ingest/
+     *  backfill s'auto-abandonnent pour ne plus allouer de RAM. Remis à false quand Vegeta
+     *  redevient actif (ensureRegistry). */
+    @Volatile private var vodSuspended = false
+
+    /** 2026-07-12 : true dès que Vegeta a chargé son registre au moins une fois cette session.
+     *  Permet à UserPreferences de ne PAS déclencher releaseMemory (donc l'init lourde) si Vegeta
+     *  n'a jamais servi (ex : démarrage direct sur une VOD). */
+    @Volatile private var everLoaded = false
+    fun wasEverLoaded(): Boolean = everLoaded
     @Volatile private var lastLoadTime = 0L
     private const val CACHE_DURATION = 30 * 60 * 1000L // 30 min
 
@@ -296,32 +327,47 @@ object VegetaTvProvider : Provider, IptvProvider {
         }
     }
 
-    private val manualLogoMap: Map<String, String> by lazy {
-        val base = "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/france"
-        mapOf(
-            "tf1" to "$base/tf1-fr.png",
-            "france2" to "$base/france-2-fr.png",
-            "france3" to "$base/france-3-fr.png",
-            "france4" to "$base/france-4-fr.png",
-            "france5" to "$base/france-5-fr.png",
-            "m6" to "$base/m6-fr.png",
-            "w9" to "$base/w9-fr.png",
-            "c8" to "$base/c8-fr.png",
-            "arte" to "$base/arte-fr.png",
-            "tmc" to "$base/tmc-fr.png",
-            "tfx" to "$base/tfx-fr.png",
-            "canalplus" to "$base/canal-plus-fr.png",
-            "canalpluscinema" to "$base/canal-plus-cinema-fr.png",
-            "bfmtv" to "$base/bfm-tv-fr.png",
-            "lci" to "$base/lci-fr.png",
-            "lequipe" to "$base/l-equipe-fr.png",
-        )
+    // 2026-07-12 (réplique OLA) : couche logo GitHub `tv-logos` SUPPRIMÉE — lente + URLs mortes
+    //   (404 en ~30s sur la Chromecast). Remplacée par iptv-org (fichier bundlé, CDN rapides
+    //   imgur/wikimedia — même source qu'OLA), ~679 logos FR, lookup local instantané.
+    private val iptvOrgLogoMap: Map<String, String> by lazy {
+        try {
+            com.streamflixreborn.streamflix.StreamFlixApp.instance
+                .assets.open("fr_channel_logos.json").bufferedReader(Charsets.UTF_8).use { reader ->
+                    val json = org.json.JSONObject(reader.readText())
+                    val out = HashMap<String, String>(json.length() * 2)
+                    val it = json.keys()
+                    while (it.hasNext()) {
+                        val nm = it.next()
+                        val url = json.optString(nm, "")
+                        if (url.isNotBlank()) out[normalizeForLogo(nm)] = url
+                    }
+                    Log.d(TAG, "iptv-org FR logos loaded: ${out.size} entries")
+                    out
+                }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load fr_channel_logos.json: ${e.message}")
+            emptyMap()
+        }
     }
 
     private fun logoUrlFor(name: String): String {
         val lookup = normalizeForLogo(name)
-        manualLogoMap[lookup]?.let { return it }
+        iptvOrgLogoMap[lookup]?.let { return it }
         return uiAvatarFallback(name)
+    }
+
+    /** 2026-07-12 : poids qualité pour l'auto-play des lives — léger = petit poids → premier.
+     *  HD (720p) = sweet spot ; SD ok ; FHD/4K relégués (dispo en manuel). */
+    private fun qualityWeight(label: String): Int {
+        val l = label.lowercase()
+        return when {
+            l.contains("4k") || l.contains("uhd") || l.contains("2160") -> 3
+            l.contains("fhd") || l.contains("1080") -> 2
+            l.contains("sd") && !l.contains("hd") -> 1
+            l.contains("hd") -> 0
+            else -> 1
+        }
     }
 
     private fun uiAvatarFallback(name: String): String {
@@ -692,6 +738,7 @@ object VegetaTvProvider : Provider, IptvProvider {
         isFr: Boolean,
     ): Int {
         if (xtreamUrl.isBlank()) return 0
+        if (vodSuspended) return 0  // VOD active → ne télécharge PAS le m3u 10MB
         Log.d(TAG, "Server[$serverIdx]: fetching Xtream m3u (isFr=$isFr) — $xtreamUrl")
         val m3u = fetchWithProxyFallback(xtreamUrl) ?: run {
             Log.w(TAG, "Server[$serverIdx]: m3u fetch failed (all proxies)")
@@ -725,6 +772,10 @@ object VegetaTvProvider : Provider, IptvProvider {
         val rawLines = m3u.split("\n")
         var pending = StringBuilder()
         for (raw in rawLines) {
+            if (vodSuspended) {  // passé en VOD pendant le parse → on arrête d'allouer
+                Log.d(TAG, "Server[$serverIdx]: parse ABANDONNÉ (VOD active) à $totalAdded chaînes")
+                return totalAdded
+            }
             val line = raw.trim()
             if (line.isBlank()) continue
             if (line.startsWith("#EXTINF:")) {
@@ -1292,8 +1343,14 @@ object VegetaTvProvider : Provider, IptvProvider {
                     Log.d(TAG, "On-demand backfill ($reason): no servers left this session (alreadyDone=${alreadyDone.size})")
                     return@launch
                 }
-                Log.d(TAG, "On-demand backfill ($reason): scanning ${nextPair.size} servers (sem=10, timeout 12s)${if (priorityServerIdx != null) " (priority=Vegeta[$priorityServerIdx])" else ""}")
-                val odSem = kotlinx.coroutines.sync.Semaphore(10)
+                // 2026-07-12 (user) : le parallélisme dépend du CONTEXTE.
+                //   - Chaîne MANQUANTE (pas encore au registre, l'user ATTEND qu'on la trouve) →
+                //     sem=8, RAPIDE (sinon « No initial servers » pendant 30s+).
+                //   - Backfill de serveurs EN PLUS (la chaîne joue DÉJÀ) → sem=3, DOUX, pour ne pas
+                //     saturer le réseau Chromecast et étouffer le flux en cours (m3u jusqu'à 10 MB).
+                val odParallel = if (reason.startsWith("missing")) 8 else 3
+                Log.d(TAG, "On-demand backfill ($reason): scanning ${nextPair.size} servers (sem=$odParallel, timeout 12s)${if (priorityServerIdx != null) " (priority=Vegeta[$priorityServerIdx])" else ""}")
+                val odSem = kotlinx.coroutines.sync.Semaphore(odParallel)
                 coroutineScope {
                     nextPair.map { server ->
                         async {
@@ -1329,6 +1386,10 @@ object VegetaTvProvider : Provider, IptvProvider {
     }
 
     private suspend fun ensureRegistry() {
+        // 2026-07-12 : Vegeta redevient actif → on lève la suspension VOD pour ré-autoriser
+        //   les ingestions.
+        vodSuspended = false
+        everLoaded = true
         if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return
         registryMutex.withLock {
             if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return@withLock
@@ -1400,8 +1461,10 @@ object VegetaTvProvider : Provider, IptvProvider {
                         coroutineScope {
                             raceServers.map { server ->
                                 async {
+                                    if (vodSuspended) return@async  // VOD active → n'alloue plus
                                     probeSem.acquire()
                                     try {
+                                        if (vodSuspended) return@async  // suspendu pendant l'attente du sem
                                         val added = try {
                                             kotlinx.coroutines.withTimeoutOrNull(12_000L) {
                                                 var n = ingestServerChannelsViaXtreamM3u(server.idx, server.xtreamUrl, server.isFr)
@@ -1477,8 +1540,32 @@ object VegetaTvProvider : Provider, IptvProvider {
 
     // ───────── Provider API ─────────
 
+    /** 2026-07-12 (réplique OLA) : attend que Vegeta soit RÉELLEMENT jouable (registre peuplé de
+     *  flux depuis ≥1 serveur vivant) avant de rendre le home → on clique, ça marche. Cold-start
+     *  uniquement : sur cache-hit le registre est restauré en <1s → retour quasi immédiat. Cap 22s.
+     *  Vegeta a MOINS de serveurs → seuil abaissé (≥30 flux). */
+    private suspend fun awaitReady() {
+        val deadline = System.currentTimeMillis() + 22_000L
+        var lastLog = -1
+        while (System.currentTimeMillis() < deadline) {
+            val streamCount = synchronized(registryLock) { channelRegistry.values.sumOf { it.streams.size } }
+            if (streamCount != lastLog) {
+                Log.d(TAG, "awaitReady: $streamCount flux prêts…")
+                lastLog = streamCount
+            }
+            if (registryLoaded && streamCount >= 30) return
+            if (phase3Done) return
+            kotlinx.coroutines.delay(400)
+        }
+        Log.d(TAG, "awaitReady: cap 22s atteint — on rend la main avec ce qu'on a")
+    }
+
     override suspend fun getHome(): List<Category> = try {
         scope.launch { try { ensureRegistry() } catch (_: Exception) { } }
+
+        // 2026-07-12 (réplique OLA) : au cold-start, on attend d'être jouable avant d'afficher le
+        //   home (le spinner tourne pendant ce temps). Cache-hit → immédiat.
+        awaitReady()
 
         val categoryOrder = listOf("Généraliste", "Cinéma", "Canal+ Live", "Info", "Sport", "Musique", "Documentaire", "Enfants")
         val sections = mutableListOf<Category>()
@@ -1835,12 +1922,15 @@ object VegetaTvProvider : Provider, IptvProvider {
 
             // Promote the last-known-good stream for this channel (if any) to first
             // position so the user doesn't have to wait through a broken variant.
+            // 2026-07-12 (user « les lives 1080/4K chargent mal, prends la plus légère ») : parmi
+            //   les serveurs équivalents, on auto-joue la qualité la PLUS LÉGÈRE d'abord (HD 720p =
+            //   sweet spot). Le lastGood reste épinglé en tête ; FHD/4K restent en choix manuel.
             val lastGood = lastGoodStreamUrl[key]
             val sortedStreams = if (lastGood != null) {
                 val pinned = aliveStreams.firstOrNull { it.url == lastGood }
-                if (pinned != null) listOf(pinned) + aliveStreams.filter { it.url != lastGood }
-                else aliveStreams
-            } else aliveStreams
+                if (pinned != null) listOf(pinned) + aliveStreams.filter { it.url != lastGood }.sortedBy { qualityWeight(it.label) }
+                else aliveStreams.sortedBy { qualityWeight(it.label) }
+            } else aliveStreams.sortedBy { qualityWeight(it.label) }
 
             // Build display labels with auto-disambiguation: when multiple streams
             // share the same base label (e.g. all "Server 39"), append #1, #2, etc.

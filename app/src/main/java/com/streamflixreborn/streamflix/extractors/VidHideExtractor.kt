@@ -29,7 +29,17 @@ class VidHideExtractor: Extractor() {
         // VoirAnime / VoirDrama serve "LECTEUR SB" (stream*B*lasher) URLs
         // pointing here, used to be unrecognised → "No extractors found".
         "https://streamhide.to",
-        "https://streamhide.com"
+        "https://streamhide.com",
+        // 2026-07-13 (user « les rouges de Coflix Boston, on commence par Morencius ») :
+        //   morencius.com = mirror EarnVids du player RNVIDS (lecteurvideo.com/embed.php).
+        //   Embed = /embed/<id>.html → page JS packée jwplayer → sources file:…m3u8
+        //   (CDN /stream/<hash>/<hash>/<expiry>/<id>/index-v1-a1.m3u8). Anti-hotlink
+        //   IDENTIQUE à minochinos : GET nu = page "EarnVids" 4k restreinte ; il faut
+        //   Referer/Origin=lecteurvideo.com + Sec-Fetch iframe/cross-site/navigate pour
+        //   servir la vraie page player (132k). Traité via la branche isRnvidsMirror.
+        "https://morencius.com"
+        // NOTE : streamhg.com est EarnVids AUSSI mais derrière Cloudflare Turnstile
+        //   (OkHttp ne passe pas) → géré par StreamhgExtractor dédié (WebView + STEALTH_JS).
     )
 
     companion object {
@@ -47,15 +57,19 @@ class VidHideExtractor: Extractor() {
         // avec les headers Sec-Fetch-* d'un iframe browser (Dest=iframe,
         // Site=cross-site, Mode=navigate) + Referer/Origin=lecteurvideo.com
         // debloque la vraie page player (16k vs 4k "restricted"). Valide par curl.
-        val isMinochinos = URL(link).host.contains("minochinos")
-        val referer = if (isMinochinos) {
+        // 2026-07-13 : morencius.com = même famille EarnVids que minochinos, servie par
+        //   le player RNVIDS lecteurvideo.com. Sans Referer/Origin=lecteurvideo + Sec-Fetch
+        //   iframe/cross-site/navigate → page "EarnVids" 4k restreinte (pas de packed JS).
+        val host = URL(link).host
+        val isRnvidsMirror = host.contains("minochinos") || host.contains("morencius")
+        val referer = if (isRnvidsMirror) {
             "https://lecteurvideo.com/"
         } else {
             try { UserPreferences.currentProvider?.baseUrl ?: fallback }
             catch (_: Throwable) { fallback }
         }
-        val origin = if (isMinochinos) "https://lecteurvideo.com" else referer
-        Log.d(TAG, "referer=$referer origin=$origin isMinochinos=$isMinochinos")
+        val origin = if (isRnvidsMirror) "https://lecteurvideo.com" else referer
+        Log.d(TAG, "referer=$referer origin=$origin isRnvidsMirror=$isRnvidsMirror")
 
         val service = Extractor.createJsoupService<Service>(mainLink, referer)
         val source = service.getSource(
@@ -63,9 +77,9 @@ class VidHideExtractor: Extractor() {
             referer = referer,
             origin = origin,
             userAgent = Extractor.DEFAULT_USER_AGENT,
-            secFetchDest = if (isMinochinos) "iframe" else "empty",
-            secFetchSite = if (isMinochinos) "cross-site" else "same-origin",
-            secFetchMode = if (isMinochinos) "navigate" else "cors"
+            secFetchDest = if (isRnvidsMirror) "iframe" else "empty",
+            secFetchSite = if (isRnvidsMirror) "cross-site" else "same-origin",
+            secFetchMode = if (isRnvidsMirror) "navigate" else "cors"
         )
         Log.d(TAG, "HTML length=${source.toString().length}")
 

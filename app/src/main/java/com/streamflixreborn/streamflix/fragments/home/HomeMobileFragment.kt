@@ -190,6 +190,8 @@ class HomeMobileFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
+        // 2026-07-12 : la coupure EFFECTIVE des jaquettes (niveau activité) se fait au PLAY, dans le
+        //   player, PAS ici — sinon elle couperait les images de la fiche synopsis. (Pas de pause ici.)
         // Keep the mini player running in background — don't pause.
         // Only detach the PlayerView so the surface is freed.
         if (_binding != null) {

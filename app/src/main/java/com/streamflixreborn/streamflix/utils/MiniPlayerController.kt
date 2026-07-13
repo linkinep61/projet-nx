@@ -105,6 +105,11 @@ object MiniPlayerController {
     //   RadioPlaybackService depuis n'importe quelle fonction.
     @Volatile private var appContext: Context? = null
     @Volatile private var radioServiceRunning: Boolean = false
+    // 2026-07-12 : flag posé par ProviderViewHolder AVANT finish() pour signaler
+    //   que le onDestroy qui suit est un SWITCH de provider, PAS un close d'app.
+    //   MainTvActivity/MainMobileActivity.onDestroy ne stoppent la radio QUE si
+    //   ce flag est false (= vrai close). Réinitialisé en onDestroy après lecture.
+    @Volatile var isProviderSwitching: Boolean = false
     // Promoted to field so we can apply per-channel headers (Referer/Origin)
     // before each play. Necessary for sources like meritend.net that 403
     // sans Referer correct.

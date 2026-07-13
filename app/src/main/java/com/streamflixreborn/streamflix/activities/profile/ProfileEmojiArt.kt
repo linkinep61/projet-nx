@@ -359,14 +359,21 @@ object ProfileEmojiArt {
         //    l'ancienne version du code) et on retombe sur l'URL.
         val ctx = image.context.applicationContext
         val local = emoji?.let { localFile(ctx, it) }
-        val source: Any = if (local != null && local.exists() && local.length() > 100 && isImageFile(local)) {
-            local
+        val source: Any? = if (local != null && local.exists() && local.length() > 100 && isImageFile(local)) {
+            local   // cache local valide → 0 réseau
         } else {
-            // Pas de cache local valide → on lance un download fire-and-forget
-            // en tâche de fond pour que la prochaine ouverture l'ait en local.
-            // cacheLocally nettoiera tout vestige corrompu avant de retenter.
-            if (emoji != null) backgroundScope.launch { cacheLocally(ctx, emoji) }
-            url
+            // 2026-07-12 : PAS de download ici. L'image se télécharge UNIQUEMENT
+            // quand l'user choisit un emoji dans le picker (cacheLocally appelé
+            // dans ProfilePickerActivity / ProfilePickerTvActivity / EmojiPickerDialog).
+            // Au boot / affichage profil sans cache → on affiche le fallback texte.
+            null
+        }
+
+        if (source == null) {
+            // Pas de cache → emoji texte natif (ex: 🎬), zéro réseau
+            image.visibility = View.GONE
+            fallback?.apply { visibility = View.VISIBLE; text = fallbackText }
+            return
         }
 
         fallback?.apply { visibility = View.VISIBLE; text = fallbackText }

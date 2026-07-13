@@ -85,20 +85,37 @@ object CrossProviderResolver {
             //   Signature : season.id contient "/@" (format wrapper AnimeSama).
             //   FIX : re-appeler getTvShow avec langue forcée (id@vf ou id@vostfr)
             //   → le provider retourne les VRAIES saisons numérotées (Saison 1,2,3…).
+            // 2026-07-12 : wrapper unwrap INTELLIGENT. On essaie VF puis VOSTFR, mais on ne
+            //   break QUE si la langue choisie a la SAISON CIBLE. Sinon on essaie l'autre langue.
+            //   Ex: Mushoku Tensei S3 n'existe qu'en VOSTFR → VF n'a que S1/S2 → on passait en VF
+            //   → S3 introuvable. Maintenant : VF essayé → S3 absente → on continue → VOSTFR → S3 trouvée.
             if (full.seasons.any { s -> s.id.contains("/@") }) {
                 val baseSlug = tvShowId.substringBefore("@")
                 android.util.Log.d(TAG, "[${provider.name}] detected lang wrappers for $tvShowId " +
-                    "(seasons=${full.seasons.map { "'${it.title}'" }}) → retrying with forced lang")
+                    "(seasons=${full.seasons.map { "'${it.title}'" }}) → retrying with forced lang (target S$effectiveSeason)")
+                var bestFallback: TvShow? = null
                 for (lang in listOf("vf", "vostfr")) {
                     val unwrapped = try {
                         withTimeoutOrNull(20_000) { provider.getTvShow("$baseSlug@$lang") }
                     } catch (_: Exception) { null }
                     if (unwrapped != null && unwrapped.seasons.isNotEmpty() &&
                         unwrapped.seasons.none { s -> s.id.contains("/@") }) {
-                        android.util.Log.i(TAG, "[${provider.name}] unwrapped → ${unwrapped.seasons.size} real seasons via @$lang")
-                        full = unwrapped
-                        break
+                        android.util.Log.i(TAG, "[${provider.name}] unwrapped @$lang → ${unwrapped.seasons.size} real seasons: " +
+                            unwrapped.seasons.map { "S${it.number}='${it.title}'" })
+                        // Préférer la langue qui A la saison cible
+                        if (unwrapped.seasons.any { it.number == effectiveSeason }) {
+                            android.util.Log.i(TAG, "[${provider.name}] @$lang HAS target S$effectiveSeason → using it")
+                            full = unwrapped
+                            break
+                        }
+                        // Garder comme fallback (la 1ère langue qui a des vraies saisons)
+                        if (bestFallback == null) bestFallback = unwrapped
                     }
+                }
+                // Si aucune langue n'a la saison cible, utiliser le meilleur fallback
+                if (full.seasons.any { s -> s.id.contains("/@") } && bestFallback != null) {
+                    android.util.Log.w(TAG, "[${provider.name}] no lang has S$effectiveSeason, using best fallback")
+                    full = bestFallback
                 }
             }
             // 2026-07-09 : PLUS de fallback aveugle sur la 1ère saison/épisode.
@@ -116,9 +133,22 @@ object CrossProviderResolver {
                 android.util.Log.i(TAG, "[${provider.name}] S1 not found, using sole S0 as fallback for $tvShowId")
                 targetSeason = full.seasons[0]
             }
+            // 2026-07-12 : fallback par TITRE de saison. Si le match par numéro échoue
+            //   (numérotation positionnelle ≠ TMDB, ex "Saison 2 Partie 2" = #3 au lieu de #2),
+            //   chercher une saison dont le LABEL contient "Saison N" / "Season N".
+            if (targetSeason == null) {
+                targetSeason = full.seasons.firstOrNull { s ->
+                    val m = Regex("""(?i)\bsaison\s*(\d+)|\bseason\s*(\d+)""").find(s.title ?: "")
+                    val n = m?.let { (it.groupValues[1].ifBlank { it.groupValues[2] }).toIntOrNull() }
+                    n == effectiveSeason
+                }
+                if (targetSeason != null) {
+                    android.util.Log.i(TAG, "[${provider.name}] S$effectiveSeason found by TITLE match: '${targetSeason.title}' (number=${targetSeason.number})")
+                }
+            }
             if (targetSeason == null) {
                 android.util.Log.w(TAG, "[${provider.name}] no season S$effectiveSeason for $tvShowId " +
-                    "(available: ${full.seasons.map { "S${it.number}" }}) → SKIP (pas de fallback)")
+                    "(available: ${full.seasons.map { "S${it.number}='${it.title}'" }}) → SKIP (pas de fallback)")
                 return null
             }
             val episodes = withTimeoutOrNull(20_000) { provider.getEpisodesBySeason(targetSeason.id) } ?: emptyList()

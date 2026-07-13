@@ -267,12 +267,10 @@ class MainMobileActivity : FragmentActivity() {
 
         var previousDestinationId: Int? = null
         navController.addOnDestinationChangedListener { _, destination, _ ->
-            // Clear Glide memory cache when switching between main tabs to free memory
-            if (previousDestinationId != null && previousDestinationId != destination.id
-                && isTopLevelProviderDestination(previousDestinationId)
-                && isTopLevelProviderDestination(destination.id)) {
-                CacheUtils.clearMemoryCache(this)
-            }
+            // 2026-07-12 (user « que les jaquettes soient là c'est pas un problème, mais qu'elles
+            //   continuent de se télécharger, si ») : plus de vidage du cache image à chaque tab
+            //   switch (forçait le re-téléchargement de toutes les jaquettes = pic mémoire/CPU).
+            //   Le cache Glide est borné (LRU) → on le garde. Cf. MainTvActivity.
             previousDestinationId = destination.id
 
             updateNavigationVisibility(destination.id)
@@ -403,7 +401,11 @@ class MainMobileActivity : FragmentActivity() {
             // stopper le mini-player + le service radio foreground quand l'user
             // ferme l'app intentionnellement (back/swipe). Sans ça, le foreground
             // service survit et l'audio continue en arrière-plan.
-            try { com.streamflixreborn.streamflix.utils.MiniPlayerController.stop() } catch (_: Throwable) {}
+            // 2026-07-12 : SAUF pendant un switch de provider — la radio survit.
+            if (!com.streamflixreborn.streamflix.utils.MiniPlayerController.isProviderSwitching) {
+                try { com.streamflixreborn.streamflix.utils.MiniPlayerController.stop() } catch (_: Throwable) {}
+            }
+            com.streamflixreborn.streamflix.utils.MiniPlayerController.isProviderSwitching = false
         }
         dismissUpdateDialog()
         _binding = null

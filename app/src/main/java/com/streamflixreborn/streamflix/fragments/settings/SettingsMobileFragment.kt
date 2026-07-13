@@ -984,6 +984,35 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             true
         }
 
+        // 2026-07-11 : lecteur externe par défaut — affiche le nom du lecteur
+        //   choisi et permet de réinitialiser (revenir à ExoPlayer interne).
+        val extPlayerPref = findPreference<Preference>("external_player_default")
+        fun updateExtPlayerSummary() {
+            val pkg = com.streamflixreborn.streamflix.utils.UserPreferences.externalPlayerPackage
+            val active = com.streamflixreborn.streamflix.utils.UserPreferences.alwaysUseExternalPlayer
+            if (active && !pkg.isNullOrBlank()) {
+                val appName = try {
+                    val pm = requireContext().packageManager
+                    pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+                } catch (_: Exception) { pkg }
+                extPlayerPref?.summary = "$appName — appuyez pour réinitialiser"
+            } else {
+                extPlayerPref?.summary = "Aucun — utiliser le lecteur interne (ExoPlayer)"
+            }
+        }
+        updateExtPlayerSummary()
+        extPlayerPref?.setOnPreferenceClickListener {
+            if (com.streamflixreborn.streamflix.utils.UserPreferences.alwaysUseExternalPlayer) {
+                com.streamflixreborn.streamflix.utils.UserPreferences.alwaysUseExternalPlayer = false
+                com.streamflixreborn.streamflix.utils.UserPreferences.externalPlayerPackage = null
+                Toast.makeText(requireContext(), "Lecteur externe par défaut désactivé", Toast.LENGTH_SHORT).show()
+                updateExtPlayerSummary()
+            } else {
+                Toast.makeText(requireContext(), "Aucun lecteur externe défini — choisissez-en un depuis le bouton lecteur externe du player", Toast.LENGTH_LONG).show()
+            }
+            true
+        }
+
         findPreference<Preference>("preferred_player_reset")?.setOnPreferenceClickListener {
             PreferenceManager.getDefaultSharedPreferences(requireContext())
                 .edit()

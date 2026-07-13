@@ -44,20 +44,12 @@ class VideasyExtractor : Extractor() {
 
     /** Construit les serveurs (URL SANS seed — le seed est récupéré au moment de l'extract). */
     fun servers(videoType: Video.Type, language: String): List<Video.Server> {
-        val langLabel = when (language) {
-            "fr" -> "VOSTFR"
-            "de" -> "DE"; "it" -> "IT"; "es" -> "ES"
-            else -> "VO"
-        }
-        return serverConfigs.mapNotNull { cfg ->
-            if (cfg.movieOnly && videoType !is Video.Type.Movie) return@mapNotNull null
-            val url = buildSourcesUrl(cfg.endpoint, videoType) ?: return@mapNotNull null
-            Video.Server(
-                id = "${cfg.name} (Videasy $langLabel)",
-                name = "${cfg.name} (Videasy $langLabel)",
-                src = url,
-            )
-        }
+        // 2026-07-12 (user « ces 3 serveurs Videasy VOSTFR apparaissent partout mais ne lisent
+        //   jamais / n'ont pas de source → les retirer partout ») : on NEUTRALISE Videasy à la
+        //   racine. Plus aucun serveur ajouté (Movix, Cloudstream, backup Embed passent tous ici).
+        //   Videasy étant VOSTFR/VO uniquement (jamais VF), ça ne touche AUCUN serveur français VF.
+        //   L'extracteur reste enregistré pour le routage d'URL (inoffensif) mais ne propose rien.
+        return emptyList()
     }
 
     fun server(videoType: Video.Type, language: String): Video.Server? =

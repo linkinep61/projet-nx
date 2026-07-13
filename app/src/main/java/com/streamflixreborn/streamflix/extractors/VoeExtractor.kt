@@ -26,7 +26,11 @@ class VoeExtractor : Extractor() {
         "https://maryspecialwatch.com", "https://rebeccacostthousand.com",
         "https://bryantenunder.com",
         // 2026-07-06 : domaines VOE courts (< 12 chars) non captés par rotatingDomain regex
-        "https://vvide0.com", "https://playmogo.com"
+        // 2026-07-12 (user « le VOE de Frembed échoue alors qu'il marche sur leur site ») :
+        //   RETIRÉ "playmogo.com" — c'est en réalité du DoodStream (page = titre « DoodStream »,
+        //   CDN doodcdn.io/doimg.net), déjà géré par DoodLaExtractor. Il était dans LES DEUX
+        //   extracteurs → routé à tort vers VOE → « no encoded JSON ». Laisse DoodLa le prendre.
+        "https://vvide0.com"
         // PAS d'alias "kokoflix.lol" — c'est un proxy multi-host (osaka_go.php
         //   = Voe, grandline_go.php = Netu, etc.). On matche seulement le
         //   pattern OSAKA via rotatingDomain ci-dessous. Sinon Netu se fait

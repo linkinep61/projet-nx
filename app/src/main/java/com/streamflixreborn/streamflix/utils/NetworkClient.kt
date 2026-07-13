@@ -109,6 +109,19 @@ object NetworkClient {
     )
 
     private fun buildClient(dns: Dns, customizer: ((OkHttpClient.Builder) -> Unit)? = null): OkHttpClient {
+        // 2026-07-12 : security init (Conscrypt + ISRG + TLS) est sur IO thread au boot.
+        //   Attendre sa fin UNIQUEMENT sur les threads background (IO/Default).
+        //   Sur le main thread (boot: Provider class-loading → lazy client init),
+        //   NE PAS bloquer — le système Android 10+ a déjà Conscrypt en default.
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+            try {
+                kotlinx.coroutines.runBlocking { com.streamflixreborn.streamflix.StreamFlixApp.securityReady.await() }
+            } catch (_: Throwable) {}
+        } else {
+            // DIAG: identifier QUI déclenche buildClient sur le main thread au boot
+            Log.w("NetworkClient", "buildClient() on MAIN thread — skipping security wait",
+                Exception("DIAG stack"))
+        }
         val builder = OkHttpClient.Builder()
             .cache(httpCache)
             .connectionPool(sharedConnectionPool)

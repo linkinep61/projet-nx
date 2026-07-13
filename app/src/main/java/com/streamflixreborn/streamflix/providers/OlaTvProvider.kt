@@ -78,6 +78,17 @@ object OlaTvProvider : Provider, IptvProvider {
         .readTimeout(5, TimeUnit.SECONDS)
         .build()
 
+    // 2026-07-11 (Chromecast : loadLiveCids mettait ~49s → bloquait tout le démarrage) : client
+    //   dédié BORNÉ pour le fetch GitHub de live-cids.json. DNS SYSTÈME (pas DoH : c'est un
+    //   domaine normal, la résolution DoH ajoutait de la latence inutile) + callTimeout 12s → le
+    //   fetch ne peut plus bloquer le démarrage. S'il échoue, on retombe sur le scan sans filtre.
+    private val liveCidsClient = client.newBuilder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(6, TimeUnit.SECONDS)
+        .callTimeout(12, TimeUnit.SECONDS)
+        .dns(okhttp3.Dns.SYSTEM)
+        .build()
+
     // ───────── Channel registry ─────────
 
     private data class OlaStreamRef(val cid: String, val label: String, val url: String)
@@ -107,6 +118,38 @@ object OlaTvProvider : Provider, IptvProvider {
             android.util.Log.d(TAG, "clearCache: OlaTV registry vidé")
         } catch (_: Throwable) {}
     }
+
+    /** 2026-07-12 (user « sur de la VOD, libérer la RAM des registres IPTV ») : vide le registre
+     *  EN MÉMOIRE (channelRegistry + pools + caches) → libère ~50-80 MB. Le cache DISQUE reste
+     *  intact → un retour sur OLA recharge en ~500ms. À n'appeler QUE si OLA n'est PAS le provider
+     *  actif (pendant une lecture VOD). */
+    fun releaseMemory() {
+        try {
+            // 2026-07-12 : comme Vegeta — coupe les ingestions en fond (phase 3 / backfill) pour
+            //   qu'elles ne re-remplissent pas le registre pendant une VOD (saturation RAM).
+            vodSuspended = true
+            val had = channelRegistry.size
+            synchronized(registryLock) {
+                channelRegistry.clear()
+                fullStreamPool.clear()
+                emittedStreamUrls.clear()
+            }
+            resolvedUrlCache.clear()
+            resolvedUrlTs.clear()
+            probeOkCache.clear()
+            demotedUrls.clear()
+            registryLoaded = false
+            lastLoadTime = 0L
+            if (had > 0) android.util.Log.d(TAG, "releaseMemory: OLA registry ($had chaînes) vidé de la RAM + scans suspendus (cache disque conservé)")
+        } catch (_: Throwable) {}
+    }
+
+    /** 2026-07-12 : true = VOD active → les boucles d'ingestion OLA s'auto-abandonnent. */
+    @Volatile private var vodSuspended = false
+
+    /** 2026-07-12 : true dès qu'OLA a chargé son registre au moins une fois cette session. */
+    @Volatile private var everLoaded = false
+    fun wasEverLoaded(): Boolean = everLoaded
     @Volatile private var lastLoadTime = 0L
     private const val CACHE_DURATION = 30 * 60 * 1000L // 30 min
 
@@ -117,7 +160,11 @@ object OlaTvProvider : Provider, IptvProvider {
     //   ORDONNÉE (meilleurs cids FR en premier). Vide = pas de filtrage (fallback historique).
     @Volatile private var olaLiveCids: List<String> = emptyList()
     @Volatile private var liveCidsLoadedAt = 0L
-    private const val LIVE_CIDS_TTL = 6 * 60 * 60 * 1000L // 6h
+    // 2026-07-11 (user « pour qu'Ola réponde mieux ») : 6h → 2h. La source nx-data se régénère
+    //   ~toutes les 2h ; garder la liste 6h = jusqu'à plusieurs heures de retard → plus de cids
+    //   morts sondés. Le fetch est un simple fichier GitHub (zéro charge Ola) → on peut le
+    //   rafraîchir plus souvent pour avoir moins de serveurs morts à tester.
+    private const val LIVE_CIDS_TTL = 2 * 60 * 60 * 1000L // 2h
 
     /** Charge (cache TTL) la liste ORDONNÉE des cids FR classés par richesse (nx-data).
      *  Liste vide si indisponible → le scan retombe sur son comportement complet (aléatoire). */
@@ -127,7 +174,7 @@ object OlaTvProvider : Provider, IptvProvider {
         try {
             val req = Request.Builder().url(OLA_LIVE_CIDS_URL)
                 .header("User-Agent", USER_AGENT).build()
-            client.newCall(req).execute().use { resp ->
+            liveCidsClient.newCall(req).execute().use { resp ->
                 val body = resp.body?.string()
                 if (resp.isSuccessful && !body.isNullOrBlank()) {
                     val arr = JSONObject(body).optJSONArray("cids")
@@ -174,9 +221,13 @@ object OlaTvProvider : Provider, IptvProvider {
     private val phase3Mutex = Mutex()
 
     // Phase 3 tuning
-    private const val PHASE3_MAX_CANDIDATES = 60  // probe more cids — most are dead, need breadth
+    // 2026-07-11 (user « qu'Ola réponde du tac au tac sur TV ») : on s'appuie sur la liste
+    //   pré-validée live-cids → moins de sondage à l'aveugle. 60→30 candidats + 8→4 en parallèle
+    //   = 2× moins de charge d'un coup sur Ola ET moins de concurrence réseau/CPU avec la lecture
+    //   sur la TV (appareil faible). Filet : 2ᵉ vague de 30 si la 1ʳᵉ ne ramène rien (cf. scan).
+    private const val PHASE3_MAX_CANDIDATES = 30  // 1ʳᵉ vague (2ᵉ vague déclenchée si vide)
     private const val PHASE3_MAX_FR_CIDS = 15     // collect up to N healthy FR cids for stream diversity
-    private const val PHASE3_PARALLELISM = 8      // aggressive parallelism — dead domains fail fast anyway
+    private const val PHASE3_PARALLELISM = 4      // plus doux : 2× moins de requêtes simultanées vers Ola
 
     // Cap of progressive variants emitted per channel for the initial batch.
     // Keeps the "Chaîne" page tidy so the user can pick a source manually.
@@ -194,7 +245,10 @@ object OlaTvProvider : Provider, IptvProvider {
     // 2026-07-07 : suffixe "_r2" bumpé pour INVALIDER l'ancien cache top-first (24h) → force
     //   un scan frais dans le NOUVEL ordre inversé (cids du bas d'abord). Sinon le cache
     //   masquerait le changement pendant 24h.
-    private const val FR_CIDS_CACHE_FILE = "olatv_fr_cids_r2.json"
+    // 2026-07-11 : "_r3" — l'ancien cache contenait le primaire FIGÉ mort (owliptv) qui était
+    //   re-sondé sans fin par le chemin "cached". On invalide → scan frais avec le primaire
+    //   dérivé de live-cids (plus de serveur codé en dur).
+    private const val FR_CIDS_CACHE_FILE = "olatv_fr_cids_r3.json"
 
     // 2026-06-15 (user "ola tv démarre lentement, élimine les serveurs DOWN") :
     //   ban-set persistant des CIDs morts (no FR genre OU 0 stream OU exception)
@@ -847,6 +901,20 @@ object OlaTvProvider : Provider, IptvProvider {
         return hostHealth[h]?.score() ?: 0.5
     }
 
+    /** 2026-07-12 : poids de qualité pour l'auto-play des lives — plus léger = plus petit poids →
+     *  passe en premier. HD (720p) = sweet spot (charge vite, reste net) ; SD acceptable ; FHD/4K
+     *  plus lourds relégués (mais dispo en choix manuel). Label OLA type « HD FRANCE / FHD / 4K ». */
+    private fun qualityWeight(label: String): Int {
+        val l = label.lowercase()
+        return when {
+            l.contains("4k") || l.contains("uhd") || l.contains("2160") -> 3
+            l.contains("fhd") || l.contains("1080") -> 2
+            l.contains("sd") && !l.contains("hd") -> 1
+            l.contains("hd") -> 0   // HD (720p) en premier
+            else -> 1               // inconnu → milieu
+        }
+    }
+
     /** Player calls this when a stream URL fails. The URL is demoted to the bottom of
      *  the rotation but stays playable so the failover can wrap back to it if all
      *  fresher URLs also fail. */
@@ -1429,130 +1497,24 @@ object OlaTvProvider : Provider, IptvProvider {
             .replace(Regex("[^a-z0-9]"), "")
     }
 
-    /** Manual map of channel display name → verified tv-logos GitHub URL.
-     *  Used as primary lookup before iptv-org for top-priority TNT channels. */
-    private val manualLogoMap: Map<String, String> by lazy {
-        val base = "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/france"
-        // Keys are compact (no spaces, lowercase, alphanumeric only) — matches normalizeForLogo.
-        mapOf(
-            // TNT généraliste
-            "tf1" to "$base/tf1-fr.png",
-            "tf1seriesfilms" to "$base/tf1-series-films-fr.png",
-            "tfx" to "$base/tfx-fr.png",
-            "tmc" to "$base/tmc-fr.png",
-            "france2" to "$base/france-2-fr.png",
-            "france3" to "$base/france-3-fr.png",
-            "france4" to "$base/france-4-fr.png",
-            "france5" to "$base/france-5-fr.png",
-            "franceinfo" to "$base/franceinfo-fr.png",
-            "franceo" to "$base/france-o-fr.png",
-            "m6" to "$base/m6-fr.png",
-            "w9" to "$base/w9-fr.png",
-            "6ter" to "$base/6ter-fr.png",
-            "arte" to "$base/arte-fr.png",
-            "c8" to "$base/c8-fr.png",
-            "cstar" to "$base/cstar-fr.png",
-            "cnews" to "$base/cnews-fr.png",
-            "nrj12" to "$base/nrj-12-fr.png",
-            "lcp" to "$base/lcp-fr.png",
-            "gulli" to "$base/gulli-fr.png",
-            "lequipe" to "$base/l-equipe-fr.png",
-            "lachainelequipe" to "$base/l-equipe-fr.png",
-            "rmcstory" to "$base/rmc-story-fr.png",
-            "rmcdecouverte" to "$base/rmc-decouverte-fr.png",
-            "cherie25" to "$base/cherie-25-fr.png",
-            "lci" to "$base/lci-fr.png",
-            "bfmtv" to "$base/bfm-tv-fr.png",
-            "bfmbusiness" to "$base/bfm-business-fr.png",
-            // Info internationale
-            "france24" to "$base/france-24-fr.png",
-            "tv5monde" to "$base/tv5-monde-fr.png",
-            "euronews" to "$base/euronews-fr.png",
-            "i24news" to "$base/i24-news-fr.png",
-            // Canal+ family
-            "canalplus" to "$base/canal-plus-fr.png",
-            "canalpluscinema" to "$base/canal-plus-cinema-fr.png",
-            "canalplusseries" to "$base/canal-plus-series-fr.png",
-            "canalplusfamily" to "$base/canal-plus-family-fr.png",
-            "canalplusdocs" to "$base/canal-plus-docs-fr.png",
-            "canalplussport" to "$base/canal-plus-sport-fr.png",
-            "canalplussport360" to "$base/canal-plus-sport-360-fr.png",
-            // Cinéma & séries
-            "ocsmax" to "$base/ocs-max-fr.png",
-            "ocsgeants" to "$base/ocs-geants-fr.png",
-            "ocschoc" to "$base/ocs-choc-fr.png",
-            "ocscity" to "$base/ocs-city-fr.png",
-            "cineplupremier" to "$base/cine-plus-premier-fr.png",
-            "cineplusfrisson" to "$base/cine-plus-frisson-fr.png",
-            "cineplusemotion" to "$base/cine-plus-emotion-fr.png",
-            "cineplusfamiz" to "$base/cine-plus-famiz-fr.png",
-            "cineplusclub" to "$base/cine-plus-club-fr.png",
-            "cineplusclassic" to "$base/cine-plus-classic-fr.png",
-            "paramountchannel" to "$base/paramount-channel-fr.png",
-            "13emerue" to "$base/13eme-rue-fr.png",
-            "syfy" to "$base/syfy-fr.png",
-            "warnertv" to "$base/warner-tv-fr.png",
-            "tcmcinema" to "$base/tcm-cinema-fr.png",
-            // Sport
-            "beinsports1" to "$base/bein-sports-1-fr.png",
-            "beinsports2" to "$base/bein-sports-2-fr.png",
-            "beinsports3" to "$base/bein-sports-3-fr.png",
-            "beinsports4" to "$base/bein-sports-4-fr.png",
-            "rmcsport1" to "$base/rmc-sport-1-fr.png",
-            "rmcsport2" to "$base/rmc-sport-2-fr.png",
-            "rmcsport3" to "$base/rmc-sport-3-fr.png",
-            "rmcsport4" to "$base/rmc-sport-4-fr.png",
-            "eurosport1" to "$base/eurosport-1-fr.png",
-            "eurosport2" to "$base/eurosport-2-fr.png",
-            "infosportplus" to "$base/infosport-plus-fr.png",
-            // Musique
-            "mtv" to "$base/mtv-fr.png",
-            "mtvhits" to "$base/mtv-hits-fr.png",
-            "mcm" to "$base/mcm-fr.png",
-            "m6music" to "$base/m6-music-fr.png",
-            "nrjhits" to "$base/nrj-hits-fr.png",
-            "traceurban" to "$base/trace-urban-fr.png",
-            "mezzo" to "$base/mezzo-fr.png",
-            // Documentaire
-            "planeteplus" to "$base/planete-plus-fr.png",
-            "ushuaiatv" to "$base/ushuaia-tv-fr.png",
-            "histoiretv" to "$base/histoire-tv-fr.png",
-            "toutelhistoire" to "$base/toute-l-histoire-fr.png",
-            "scienceetvietv" to "$base/science-vie-tv-fr.png",
-            "nationalgeographic" to "$base/national-geographic-fr.png",
-            "natgeowild" to "$base/nat-geo-wild-fr.png",
-            "discoverychannel" to "$base/discovery-channel-fr.png",
-            "trek" to "$base/trek-fr.png",
-            // Enfants
-            "disneychannel" to "$base/disney-channel-fr.png",
-            "disneyjunior" to "$base/disney-junior-fr.png",
-            "cartoonnetwork" to "$base/cartoon-network-fr.png",
-            "boomerang" to "$base/boomerang-fr.png",
-            "nickelodeon" to "$base/nickelodeon-fr.png",
-            "nickjr" to "$base/nick-jr-fr.png",
-            "tiji" to "$base/tiji-fr.png",
-            "piwiplus" to "$base/piwi-plus-fr.png",
-            "canalj" to "$base/canal-j-fr.png",
-            "tfoumax" to "$base/tfou-max-fr.png",
-        )
-    }
+    // 2026-07-11 : manualLogoMap (URLs tv-logos GitHub) SUPPRIMÉ — lent sur la Chromecast + URLs
+    //   mortes (404 en ~30s). iptv-org (local, CDN rapides) le remplace intégralement.
 
     /** Build a logo URL for a channel — guaranteed to return SOMETHING displayable.
-     *  Priority order:
-     *   1. manualLogoMap (verified tv-logos URL for popular FR channels)
-     *   2. tv-logos slug heuristic (works for many channels)
-     *   3. ui-avatars.com fallback (always renders a colored circle with the channel
-     *      initials, color picked from category — guarantees no blank cards). */
+     *  2026-07-11 (user « les jaquettes sont instantanées, la couche GitHub c'est un truc qu'on a
+     *    oublié d'enlever ») : SUPPRIMÉ la couche `manualLogoMap` (URLs tv-logos sur GitHub, tentée
+     *    en 1er) — lente sur la Chromecast (réseau GitHub) et plusieurs URLs MORTES → 404 en ~30s.
+     *    iptv-org (local, ~679 logos sur imgur/wikimedia = CDN rapides) couvre déjà tout → il passe
+     *    primaire. Priorité :
+     *   1. iptvOrgLogoMap (curated FR, CDN rapides, lookup local instantané)
+     *   2. ui-avatars.com fallback (cercle coloré avec les initiales — jamais de carte vide). */
     private fun logoUrlFor(name: String): String {
         val lookup = normalizeForLogo(name)
 
-        // 1. Manual map first — TNT channels we want to be sure about (verified URLs)
-        manualLogoMap[lookup]?.let { return it }
-
-        // 2. iptv-org's curated FR logos — ~800 entries from channels.json + logos.json
+        // 1. iptv-org's curated FR logos — ~679 entries, CDN rapides (imgur/wikimedia).
         iptvOrgLogoMap[lookup]?.let { return it }
 
-        // 3. ui-avatars fallback — guaranteed renderable image with channel initials
+        // 2. ui-avatars fallback — guaranteed renderable image with channel initials
         return uiAvatarFallback(name)
     }
 
@@ -1588,6 +1550,7 @@ object OlaTvProvider : Provider, IptvProvider {
     /** Ingest ALL channels from a cid into the registry. Reusable for primary + scan.
      *  Returns the number of stream refs added (channels merged by normalized name). */
     private suspend fun ingestCidChannels(cid: String, creds: MacCredentials, forceAllGenres: Boolean = false): Int {
+        if (vodSuspended) return 0  // VOD active → n'ingère plus (évite la saturation RAM)
         val channels = olaListMacPortalChannels(creds.baseUrl, creds.mac, forceAllGenres)
         var added = 0
         synchronized(registryLock) {
@@ -1858,35 +1821,31 @@ object OlaTvProvider : Provider, IptvProvider {
             //   on essaie les cids du bas d'abord → ils entrent dans les 15 ingérés.
             val live = loadLiveCids().reversed()
             val usingLive = live.isNotEmpty()
-            val candidates = if (usingLive) {
+            // 2026-07-11 : liste ÉLIGIBLE complète (sans take) → permet une 2ᵉ vague de secours.
+            val eligible = if (usingLive) {
                 live.filter { it != primaryCid && it !in olaBannedCids && it in olaTvServerMap.keys }
-                    .take(PHASE3_MAX_CANDIDATES)
             } else {
                 olaTvServerMap.keys
                     .filter { it != primaryCid && it !in olaBannedCids }
                     .shuffled()
-                    .take(PHASE3_MAX_CANDIDATES)
             }
-            Log.d(TAG, "Phase 3 fresh scan: probing ${candidates.size} candidate cids " +
-                    "(skipped $bannedBefore DOWN, live-cids=${if (live.isEmpty()) "off" else "${live.size} classés"})…")
+            val firstWave = eligible.take(PHASE3_MAX_CANDIDATES)
+            Log.d(TAG, "Phase 3 fresh scan: probing ${firstWave.size} candidate cids " +
+                    "(skipped $bannedBefore DOWN, live-cids=${if (live.isEmpty()) "off" else "${live.size} classés"}, éligibles=${eligible.size})…")
 
             val foundCids = java.util.concurrent.CopyOnWriteArrayList<String>()
             foundCids.add(primaryCid)
             val newlyBanned = java.util.concurrent.CopyOnWriteArrayList<String>()
 
-            coroutineScope {
+            // Scan d'un lot de cids (borné par PHASE3_PARALLELISM). Réutilisable pour la 1ʳᵉ ET la
+            //   2ᵉ vague. live-cids étant DÉJÀ validé FR (fr_counts>0), on saute le probe genre.
+            suspend fun probeBatch(batch: List<String>) = coroutineScope {
                 val sem = kotlinx.coroutines.sync.Semaphore(PHASE3_PARALLELISM)
-                val jobs = candidates.map { cid ->
+                val jobs = batch.map { cid ->
                     async {
                         sem.acquire()
                         try {
                             if (foundCids.size >= PHASE3_MAX_FR_CIDS) return@async
-                            // 1) Test rapide "a-t-il un genre FR ?" — si non, ban.
-                            // 2026-07-07 (user « n'ingérer QUE les cids validés, éviter de chercher
-                            //   pour rien ») : les cids de live-cids sont DÉJÀ validés FR par le CI
-                            //   nx-data (fr_counts>0) → on SAUTE le probe cidHasFrenchGenre
-                            //   (handshake + get_genres) redondant et on ingère direct. Économise un
-                            //   aller-retour portail par cid → Phase 3 nettement plus rapide.
                             if (!usingLive && !cidHasFrenchGenre(cid)) {
                                 newlyBanned.add(cid)
                                 return@async
@@ -1895,11 +1854,16 @@ object OlaTvProvider : Provider, IptvProvider {
                                 newlyBanned.add(cid)
                                 return@async
                             }
-                            // 2) Ingestion. Si 0 stream, ban aussi.
                             val n = ingestCidChannels(cid, creds, forceAllGenres = false)
                             if (n > 0) {
                                 foundCids.add(cid)
                                 frCids.add(cid)
+                                // Dès le 1er cid vivant : registre « prêt » (awaitReady se libère,
+                                //   pas besoin d'attendre le primaire lent).
+                                if (!registryLoaded) {
+                                    registryLoaded = true
+                                    lastLoadTime = System.currentTimeMillis()
+                                }
                                 Log.d(TAG, "  Phase 3 cid=$cid IS FR → +$n streams (total FR cids: ${foundCids.size})")
                             } else {
                                 newlyBanned.add(cid)
@@ -1911,6 +1875,20 @@ object OlaTvProvider : Provider, IptvProvider {
                     }
                 }
                 jobs.awaitAll()
+            }
+
+            probeBatch(firstWave)
+
+            // 2026-07-11 (user « imagine sur les 30 on n'a rien, que se passe-t-il ? ») : filet de
+            //   sécurité. Si la 1ʳᵉ vague ne ramène AUCUN cid vivant (il ne reste que le primaire),
+            //   on tente une 2ᵉ vague des 30 cids suivants. Léger d'habitude, résilient les mauvais
+            //   jours (sans repasser à 60 systématiques).
+            if (foundCids.size <= 1) {
+                val secondWave = eligible.drop(PHASE3_MAX_CANDIDATES).take(PHASE3_MAX_CANDIDATES)
+                if (secondWave.isNotEmpty()) {
+                    Log.d(TAG, "Phase 3 : 1ʳᵉ vague vide (que le primaire) → 2ᵉ vague de ${secondWave.size} cids (secours)")
+                    probeBatch(secondWave)
+                }
             }
 
             // Persiste les nouveaux DOWN (= moins de probes au prochain boot)
@@ -1928,6 +1906,8 @@ object OlaTvProvider : Provider, IptvProvider {
     // ───────── Catalog loading ─────────
 
     private suspend fun ensureRegistry() {
+        vodSuspended = false  // 2026-07-12 : OLA redevient actif → ré-autorise les ingestions
+        everLoaded = true
         if (registryLoaded && System.currentTimeMillis() - lastLoadTime < CACHE_DURATION) return
         // Load persistent caches on first call
         if (workingChannelUrls.isEmpty()) loadWorkingChannelUrls()
@@ -1959,7 +1939,10 @@ object OlaTvProvider : Provider, IptvProvider {
                         try {
                             // Need olaTvServerMap for Phase 3 candidate selection — parse it.
                             parseOlaTvServerList()
-                            val primaryCid = olaTvServerMap.entries.find { it.value == OLA_TV_PRIMARY_FR }?.key
+                            // 2026-07-11 : primaire = meilleur cid vivant de live-cids (plus de figé).
+                            loadBannedCids()
+                            val primaryCid = loadLiveCids().reversed().firstOrNull { it in olaTvServerMap.keys && it !in olaBannedCids }
+                                ?: olaTvServerMap.keys.firstOrNull { it !in olaBannedCids }
                             if (primaryCid != null) {
                                 scanAdditionalFrCids(primaryCid)
                                 saveRegistryCache()  // refresh disk with newly enriched streams
@@ -1982,45 +1965,49 @@ object OlaTvProvider : Provider, IptvProvider {
                         return@withContext
                     }
 
-                    // Step 2: find the cid mapped to category_name "2020" (primary FR per OLA TV)
-                    val primaryCid = olaTvServerMap.entries.find { it.value == OLA_TV_PRIMARY_FR }?.key
+                    // 2026-07-11 (user « pas de trucs codés en dur, on rafraîchit tout le temps ») :
+                    //   le "primaire" n'est plus le serveur FIGÉ (category_name=2020, owliptv…) qui
+                    //   peut être mort et bloquait le démarrage. C'est le MEILLEUR cid VIVANT de la
+                    //   liste live-cids (rafraîchie, validée FR ; bas-d'abord = plus fiable, cf user).
+                    //   Le mapping figé ne sert plus que de DERNIER recours si live-cids est injoignable.
+                    loadBannedCids()
+                    val primaryCid = loadLiveCids().reversed().firstOrNull { it in olaTvServerMap.keys && it !in olaBannedCids }
+                        ?: olaTvServerMap.keys.firstOrNull { it !in olaBannedCids }
                     if (primaryCid == null) {
-                        Log.e(TAG, "Primary FR cid (category_name=$OLA_TV_PRIMARY_FR) not found in server list")
+                        Log.e(TAG, "Aucun cid primaire éligible")
                         return@withContext
                     }
-                    Log.d(TAG, "Primary FR cid = $primaryCid (category_name=$OLA_TV_PRIMARY_FR)")
+                    Log.d(TAG, "Primary FR cid = $primaryCid (depuis live-cids)")
 
-                    // Step 3: get MAC credentials + scrape MAC portal channel list
-                    val creds = getMacCredentials(primaryCid)
-                    if (creds == null) {
-                        Log.e(TAG, "Could not extract MAC credentials for primary cid")
-                        return@withContext
-                    }
-                    Log.d(TAG, "Primary FR portal: ${creds.baseUrl}")
-
-                    // Primary cid is user-confirmed FR → fetch all genres even if not tagged "FR|"
-                    val added = ingestCidChannels(primaryCid, creds, forceAllGenres = true)
-                    frCids.add(primaryCid)
-                    Log.d(TAG, "Primary FR cid ingested: $added streams, registry size=${channelRegistry.size} in ${System.currentTimeMillis() - t0}ms")
-
-                    // ↓ KEY: set the loaded flag INSIDE the IO block, right after registry is
-                    // populated. This way even if the calling scope cancels right after,
-                    // subsequent calls see registryLoaded=true and skip the costly reload.
-                    if (channelRegistry.isNotEmpty()) {
-                        registryLoaded = true
-                        lastLoadTime = System.currentTimeMillis()
-                    }
-
-                    // ─── Phase 3: scan additional FR cids in BACKGROUND ───
-                    // Don't block ensureRegistry — fire-and-forget. As more cids are confirmed FR
-                    // and ingested, channels gain more OlaStreamRef entries. User sees more
-                    // servers in the picker the next time they open a channel.
+                    // 2026-07-11 (user « ça mouline / c'est lent à charger ») : Phase 3 lancé EN
+                    //   PARALLÈLE tout de suite — AVANT d'attendre le primaire. Le primaire, même
+                    //   vivant, peut ingérer ~900 chaînes en ~35s (12 genres × pages) ; le faire en
+                    //   séquentiel bloquait le registre 35s. Phase 3 trouve d'AUTRES serveurs vivants
+                    //   en ~10s → le registre (et awaitReady) est prêt vite pendant que le gros
+                    //   primaire finit tranquillement en fond.
                     scope.launch {
                         try {
                             scanAdditionalFrCids(primaryCid)
-                            // Save full registry to disk so next launch boots in <100ms.
-                            saveRegistryCache()
+                            saveRegistryCache()  // boot <100ms au prochain lancement
                         } catch (e: Exception) { Log.w(TAG, "Phase 3 background scan failed: ${e.message}") }
+                    }
+
+                    // Primaire ingéré en parallèle (best-effort, non bloquant). forceAllGenres=false
+                    //   = genres FR seulement → 2× plus rapide ; Phase 3 apporte déjà la diversité.
+                    val creds = getMacCredentials(primaryCid)
+                    if (creds != null) {
+                        Log.d(TAG, "Primary FR portal: ${creds.baseUrl}")
+                        val added = ingestCidChannels(primaryCid, creds, forceAllGenres = false)
+                        frCids.add(primaryCid)
+                        Log.d(TAG, "Primary FR cid ingested: $added streams, registry size=${channelRegistry.size} in ${System.currentTimeMillis() - t0}ms")
+                    } else {
+                        Log.w(TAG, "Primary cid $primaryCid : pas de creds — Phase 3 (parallèle) prend le relais")
+                    }
+
+                    // Marqué chargé dès qu'il y a des chaînes (primaire OU Phase 3, le 1er arrivé).
+                    if (channelRegistry.isNotEmpty()) {
+                        registryLoaded = true
+                        lastLoadTime = System.currentTimeMillis()
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Load failed: ${e.message}", e)
@@ -2057,11 +2044,41 @@ object OlaTvProvider : Provider, IptvProvider {
 
     // ───────── Provider API ─────────
 
+    /** 2026-07-11 : attend qu'OLA soit RÉELLEMENT jouable (registre peuplé de flux depuis ≥1 cid
+     *  vivant) avant de rendre le home. Cold-start uniquement : sur cache-hit le registre est
+     *  restauré en <1s → retour quasi immédiat. Cap de sécurité 22s (mauvais soir → on rend la
+     *  main quand même, avec ce qu'on a). "Prêt" = ≥1 cid FR vivant ingéré OU ≥60 flux au registre
+     *  OU scan Phase 3 terminé. */
+    private suspend fun awaitReady() {
+        val deadline = System.currentTimeMillis() + 22_000L
+        var lastLog = 0
+        while (System.currentTimeMillis() < deadline) {
+            val streamCount = synchronized(registryLock) { channelRegistry.values.sumOf { it.streams.size } }
+            val liveCids = frCids.size
+            if (liveCids != lastLog) {
+                Log.d(TAG, "awaitReady: $liveCids cid(s) vivant(s), $streamCount flux prêts…")
+                lastLog = liveCids
+            }
+            if (liveCids >= 1 && streamCount >= 60) return
+            if (phase3Done) return
+            kotlinx.coroutines.delay(400)
+        }
+        Log.d(TAG, "awaitReady: cap 22s atteint — on rend la main avec ce qu'on a")
+    }
+
     override suspend fun getHome(): List<Category> = try {
         // Kick off registry loading in background — never blocks the home render. The
         // page shows the FROZEN curated list with hardcoded logos for known channels.
         // Streams get linked at click-time; if they aren't ingested yet, the click waits.
         scope.launch { try { ensureRegistry() } catch (_: Exception) { } }
+
+        // 2026-07-11 (user « un chargement en temps réel qui fait attendre jusqu'à ce que ce soit
+        //   VRAIMENT prêt → tu cliques, ça marche ») : au COLD-START (registre encore vide de flux),
+        //   on ATTEND qu'OLA soit réellement jouable avant de rendre le home. Le home affiche son
+        //   spinner de chargement pendant ce temps, puis révèle une grille où le clic marche à coup
+        //   sûr. Sur cache-hit le registre est peuplé en <1s → awaitReady() rend la main tout de
+        //   suite (aucun ralentissement de l'usage normal).
+        awaitReady()
 
         val categoryOrder = listOf("Généraliste", "Cinéma", "Canal+ Live", "Info", "Sport", "Musique", "Documentaire", "Enfants")
         val sections = mutableListOf<Category>()
@@ -2397,6 +2414,11 @@ object OlaTvProvider : Provider, IptvProvider {
                 compareByDescending<OlaStreamRef> { (it.cid to it.label) in favoriteKeys }
                     .thenByDescending { it.url in probeOkCache }              // known-good first
                     .thenBy { it.url in demotedUrls }                         // known-bad last
+                    // 2026-07-12 (user « les lives 1080/4K chargent mal, prends la plus légère ») :
+                    //   parmi les serveurs équivalents, on auto-joue la qualité la PLUS LÉGÈRE
+                    //   d'abord (HD 720p = sweet spot → chargement rapide). L'user garde FHD/4K en
+                    //   choix manuel. Ne s'applique QUE là où le serveur propose plusieurs qualités.
+                    .thenBy { qualityWeight(it.label) }                       // HD < SD < FHD < 4K
                     .thenByDescending {                                        // direct > MAC portal
                         val raw = it.url.removePrefix("ffrt ").removePrefix("ffmpeg ").trim()
                         raw.startsWith("http") && !raw.contains("localhost") && !raw.contains("127.0.0.1")

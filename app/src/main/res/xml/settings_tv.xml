@@ -115,6 +115,14 @@
             android:key="pc_extractor_management"
             android:title="Sources vidéo">
 
+            <!-- 2026-07-13 (user "option au-dessus de Gérer les sources, globale à tous les
+                 providers : décochée = seuls les serveurs natifs, tous les backups désactivés"). -->
+            <SwitchPreferenceCompat
+                android:key="pref_backups_enabled"
+                android:title="Activer les backups"
+                android:summary="Décoché : seuls les serveurs natifs de chaque provider s'affichent (désactive tous les backups, pour tester les sources natives)"
+                android:defaultValue="true" />
+
             <Preference
                 android:key="p_settings_extractor_toggle"
                 android:title="Gérer les sources"
@@ -284,13 +292,13 @@
                 android:key="KEEP_SCREEN_ON_WHEN_PAUSED"
                 android:title="@string/settings_keep_screen_on_when_paused"
                 android:summary="@string/settings_keep_screen_on_when_paused_summary"
-                android:defaultValue="false" />
+                android:defaultValue="true" />
 
             <SwitchPreference
                 android:key="KEEP_SCREEN_ON_APP"
                 android:title="@string/settings_keep_screen_on_app"
                 android:summary="@string/settings_keep_screen_on_app_summary"
-                android:defaultValue="false" />
+                android:defaultValue="true" />
 
             <!-- 2026-06-29 RESTAURÉ depuis APK v1.7.226 — luminosité du LECTEUR.
                  PLAYER_DIM : assombrit l'image du lecteur (utile la nuit).
@@ -314,6 +322,11 @@
         </PreferenceCategory>
 
         <PreferenceCategory android:title="@string/player_settings">
+
+            <Preference
+                android:key="external_player_default"
+                android:title="Lecteur externe par défaut"
+                android:summary="Aucun — utiliser le lecteur interne (ExoPlayer)" />
 
             <ListPreference
                 android:key="preferred_player"

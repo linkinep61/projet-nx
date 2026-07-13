@@ -339,6 +339,20 @@ class ProvidersMobileFragment : Fragment() {
                 override fun onTabSelected(tab: com.google.android.material.tabs.TabLayout.Tab?) {
                     selectedTabIndex = tab?.position ?: 0
                     UserPreferences.providerTabIndex = selectedTabIndex
+                    // 2026-07-12 (user « dès qu'on clique Films/Séries ou Anime, faut suspendre le
+                    //   reste ») : onglet ≠ TV/IPTV (0=Films/Séries, 1=Animés) → libère la RAM des
+                    //   scans IPTV. EN ARRIÈRE-PLAN + seulement si l'IPTV a déjà servi (sinon l'init
+                    //   lourde des objets figeait l'UI à froid).
+                    if (selectedTabIndex != 2) {
+                        kotlin.concurrent.thread(isDaemon = true, name = "iptv-release-tab") {
+                            try {
+                                if (com.streamflixreborn.streamflix.providers.OlaTvProvider.wasEverLoaded())
+                                    com.streamflixreborn.streamflix.providers.OlaTvProvider.releaseMemory()
+                                if (com.streamflixreborn.streamflix.providers.VegetaTvProvider.wasEverLoaded())
+                                    com.streamflixreborn.streamflix.providers.VegetaTvProvider.releaseMemory()
+                            } catch (_: Throwable) {}
+                        }
+                    }
                     refilterProviders()
                 }
                 override fun onTabUnselected(tab: com.google.android.material.tabs.TabLayout.Tab?) {}

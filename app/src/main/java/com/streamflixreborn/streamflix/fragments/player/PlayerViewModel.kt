@@ -1457,6 +1457,21 @@ class PlayerViewModel(
         getVideoJob = null
     }
 
+    /** 2026-07-12 (user « une fois qu'un film joue, il faut arrêter des choses qui chargent en
+     *  fond ») : coupe la RECHERCHE de serveurs de secours (BackupRegistry + WebView CF lourdes
+     *  type cpasmal/Filemoon) qui traîne après le démarrage de la lecture — inutile une fois qu'on
+     *  regarde, et ça bouffe CPU/réseau/RAM sur la TV. Les serveurs DÉJÀ trouvés restent dans le
+     *  picker ; on arrête juste d'en chercher plus. Appelé par le fragment après ~lecture stable. */
+    fun stopBackgroundServerSearch() {
+        if (serverJob?.isActive == true || additionalServerJob?.isActive == true) {
+            Log.d("PlayerViewModel", "stopBackgroundServerSearch: lecture stable → coupe la recherche de backups")
+        }
+        serverJob?.cancel()
+        additionalServerJob?.cancel()
+        preExtractJob?.cancel()
+        progressiveStillCollecting = false
+    }
+
     fun getVideo(server: Video.Server): kotlinx.coroutines.Job {
         // 2026-05-18 : anti-cascade. Cancel previous getVideo AND any pre-extract
         //   job running en background, sinon plusieurs extractions WebView en

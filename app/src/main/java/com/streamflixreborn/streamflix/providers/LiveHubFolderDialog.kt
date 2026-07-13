@@ -536,11 +536,16 @@ object LiveHubFolderDialog {
             return
         }
         // 2026-07-10 (user "nouveau dossier séparé CF") : Stream4Free CF (test) — scrape live + CF.
+        // 2026-07-12 : warm-up CF DÉPLACÉ ICI (était au boot dans StreamFlixApp, retiré pour
+        //   économiser le moteur Chromium au démarrage). On chauffe le CF à l'ouverture du
+        //   dossier → scrape LIVE. Si le CF échoue → fallback BAKED (53 chaînes, instant).
         if (folderKey == "stream4cf") {
             android.widget.Toast.makeText(ctx, "Chargement de $folderName…", android.widget.Toast.LENGTH_SHORT).show()
             val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
             scope.launch {
                 try {
+                    // Chauffer le CF avant le scrape (sinon scrape échoue → BAKED seulement)
+                    runCatching { com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.warmUp() }
                     val cats = LiveTvHubProvider.fetchStream4CfCategoriesLive()
                     withContext(Dispatchers.Main) {
                         if (cats.isEmpty()) {
@@ -1156,13 +1161,18 @@ object LiveHubFolderDialog {
         val isTV = ctx.resources.configuration.uiMode and
                 android.content.res.Configuration.UI_MODE_TYPE_MASK ==
                 android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
-        // Sous-dossiers : Replays + Mix FR + WorldWide + (déplacés ici) Sport,
+        // 2026-07-13 : séparer les catégories "Live MIX" des autres mix FR
+        val liveMixCategories = mixCategories.filter { it.name.equals("Live MIX", ignoreCase = true) }
+        val pureMixCategories = mixCategories.filter { !it.name.equals("Live MIX", ignoreCase = true) }
+        // Sous-dossiers : Replays + Mix FR + Live MIX + WorldWide + Sport,
         //   Rakuten TV, Sony One. Chacun ouvre son sous-dialog.
         val folders = ArrayList<Pair<String, () -> Unit>>()
         if (baseCategories.isNotEmpty()) folders.add("📺 Replays" to {
             displayCategories(ctx, "Replays", baseCategories, onChannelSelected) })
-        if (mixCategories.isNotEmpty()) folders.add("📁 Mix FR" to {
-            displayCategories(ctx, "Mix FR", mixCategories, onChannelSelected) })
+        if (pureMixCategories.isNotEmpty()) folders.add("📁 Mix FR" to {
+            displayCategories(ctx, "Mix FR", pureMixCategories, onChannelSelected) })
+        if (liveMixCategories.isNotEmpty()) folders.add("📺 Live MIX" to {
+            displayCategories(ctx, "Live MIX", liveMixCategories, onChannelSelected) })
         if (worldwideCategories.isNotEmpty()) folders.add("🌍 WorldWide" to {
             displayCategories(ctx, "WorldWide", worldwideCategories, onChannelSelected) })
         if (sportCategories.isNotEmpty()) folders.add("🏆 Sport" to {

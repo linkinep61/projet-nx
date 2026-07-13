@@ -463,11 +463,18 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
 
         val seasons = (0 until saisons.length()).map { i ->
             val s = saisons.optJSONObject(i)
-            val sNum = i + 1
+            val posNum = i + 1   // positional → pour l'ID (= index array dans getEpisodesBySeason/getServers)
+            val label = s?.optString("title")?.ifBlank { "Saison $posNum" } ?: "Saison $posNum"
+            // 2026-07-12 : numéroter par le LABEL, PAS par la position.
+            //   Franime peut avoir des saisons intermédiaires (ex "Saison 2.5") qui décalent
+            //   la numérotation positionnelle ("Saison 3" = position 4 au lieu de 3).
+            //   L'ID garde la position (accès tableau), mais number = label pour le matching TMDB.
+            val labelNum = Regex("""(?i)saison\s*(\d+)""").find(label)
+                ?.groupValues?.get(1)?.toIntOrNull()
             Season(
-                id = "$id/$sNum",
-                number = sNum,
-                title = s?.optString("title")?.ifBlank { "Saison $sNum" } ?: "Saison $sNum",
+                id = "$id/$posNum",
+                number = labelNum ?: posNum,
+                title = label,
                 poster = poster,
             )
         }.ifEmpty {
@@ -591,6 +598,13 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
         // l'iframe vidéo après clic — FranimeExtractor gère le clic auto.
         val slug = slugify(anime.bestTitle()).ifBlank { "anime" }
 
+        // 2026-07-13 : le site Franime attend s=<label> (ex: s=3 pour "Saison 3"),
+        //   PAS s=<position> (qui serait 4 si "Saison 2.5" décale la numérotation).
+        //   sNum = positional (pour accéder au JSON array), sUrlParam = label (pour l'URL).
+        val saisonTitle = saison.optString("title") ?: ""
+        val sUrlParam = Regex("""(?i)saison\s*(\d+(?:\.\d+)?)""").find(saisonTitle)
+            ?.groupValues?.get(1) ?: sNum.toString()
+
         val servers = mutableListOf<Video.Server>()
         for (lang in listOf("vostfr", "vo", "vf")) {
             val l = langObj.optJSONObject(lang) ?: continue
@@ -604,7 +618,7 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
                 // est lu par FranimeSession JS pour cliquer la bonne option
                 // dans le dropdown FRAnime ("Lecteur SIBNET", "Lecteur FILEMOON"…).
                 // L'index `&l=$i` est gardé en fallback.
-                val src = "${baseUrl}anime/$slug?s=$sNum&ep=$epNum&lang=$lang&anime_id=$animeId&l=$i#lecteur=${hostName.lowercase()}"
+                val src = "${baseUrl}anime/$slug?s=$sUrlParam&ep=$epNum&lang=$lang&anime_id=$animeId&l=$i#lecteur=${hostName.lowercase()}"
                 servers.add(Video.Server(id = "$id|$lang|$i", name = display, src = src))
             }
         }

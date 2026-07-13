@@ -195,10 +195,6 @@ abstract class Extractor {
             UqloadExtractor(),
             // 2026-05-14 : ajouts pour DessinAnime (hydrax + 4meplayer)
             HydraxExtractor(),
-            // 2026-05-23 : Player4me désactivé — API renvoie "Video not found or deleted"
-            // sur tous les contenus testés. Le code d'extraction (hooks fetch/XHR) est prêt
-            // et fonctionnel → réactiver quand Player4me remarche.
-            // Player4meExtractor(),
             // 2026-05-15 : ajout Hoca8 pour chaînes sport/Canal+ Live de LiveTvHub
             Hoca8Extractor(),
             // 2026-05-15 : Freeshot pour les ~48 chaînes FR de freeshot.live
@@ -274,6 +270,13 @@ abstract class Extractor {
             // sur les 2370 animes du catalogue). Pattern playerParams JS avec qualités
             // url240/360/480/720/1080 + hls.
             VkExtractor(),
+            // 2026-07-13 : Emmmmbed / "PlayerBx" (mirror RNVIDS lecteurvideo, serveur
+            //   Coflix Boston). Page video.js + crypto-js qui déchiffre un .mp4 rumble.cloud
+            //   côté client → WebView headless capte le mp4.
+            EmmmmbedExtractor(),
+            // 2026-07-13 : Streamhg (EarnVids) = Cloudflare Turnstile non passable en headless
+            //   depuis l'IP courante → serveur MASQUÉ à la source (CoflixSourceProvider) et
+            //   extracteur RETIRÉ (inutile d'appeler un truc qui échoue). Fichier gardé pour ref.
         )
 
         // 2026-05-27 : expose la liste des noms d'extracteurs pour le toggle UI.
