@@ -80,9 +80,21 @@ jobs:
           keyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
           buildToolsVersion: "34.0.0"
 
+      # 2026-07-17 : nommage rétrocompatible avec le sélecteur d'update embarqué
+      # dans les VIEILLES apps déjà installées (impossible à patcher OTA) :
+      #   - layout "default" (majorité mobile+TV) : sa branche else prend le 1er
+      #     asset qui ne finit ni par "-mobile.apk" ni par "-tv.apk". L'ancien
+      #     "-mobile-tv.apk" finissait par "-tv.apk" → exclu → elle tombait sur
+      #     "-x86.apk" (crash "config package" sur ARM). On expose donc l'ARM
+      #     universel sous "-universal.apk" (1er dans la liste = celui qu'elle prend).
+      #   - layout "mobile" (hérité) : cherche "-mobile.apk" → on fournit une copie
+      #     ARM identique sous ce nom.
+      #   - layout "tv" : cherche "-tv.apk" → déjà couvert (ARM).
+      # Même binaire ARM universel pour les 2 copies (universal + mobile).
       - name: Rename Universal APK
         run: |
-          cp "${{ steps.sign_apk_universal.outputs.signedFile }}" "onyx-${{ github.ref_name }}-mobile-tv.apk"
+          cp "${{ steps.sign_apk_universal.outputs.signedFile }}" "onyx-${{ github.ref_name }}-universal.apk"
+          cp "${{ steps.sign_apk_universal.outputs.signedFile }}" "onyx-${{ github.ref_name }}-mobile.apk"
 
       # --- 2. TV build ---
       - name: Set TV layout
@@ -148,8 +160,12 @@ jobs:
       - name: Upload APKs to Release
         uses: softprops/action-gh-release@v2
         with:
+          # ORDRE IMPORTANT : -universal.apk en PREMIER — les vieilles apps
+          # layout "default" prennent le 1er asset non(-mobile/-tv) → doit être
+          # l'ARM universel, pas x86.
           files: |
-            onyx-${{ github.ref_name }}-mobile-tv.apk
+            onyx-${{ github.ref_name }}-universal.apk
+            onyx-${{ github.ref_name }}-mobile.apk
             onyx-${{ github.ref_name }}-tv.apk
             onyx-${{ github.ref_name }}-x86.apk
 
@@ -169,10 +185,11 @@ jobs:
           body: |
             ONYX ${{ github.ref_name }}
 
-            - `onyx-${{ github.ref_name }}-mobile-tv.apk` — Mobile + TV (ARM)
+            - `onyx-${{ github.ref_name }}-universal.apk` — Mobile + TV (ARM, recommandé)
             - `onyx-${{ github.ref_name }}-tv.apk` — Android TV (ARM)
             - `onyx-${{ github.ref_name }}-x86.apk` — Émulateurs / TV Intel (x86)
           files: |
-            onyx-${{ github.ref_name }}-mobile-tv.apk
+            onyx-${{ github.ref_name }}-universal.apk
+            onyx-${{ github.ref_name }}-mobile.apk
             onyx-${{ github.ref_name }}-tv.apk
             onyx-${{ github.ref_name }}-x86.apk
