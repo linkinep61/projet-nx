@@ -2,6 +2,7 @@ package com.streamflixreborn.streamflix.activities.main
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -46,15 +47,42 @@ class MainViewModel : ViewModel() {
             val newReleases = InAppUpdater.getNewReleases()
             if (newReleases.isEmpty()) return@launch
 
-            val asset = newReleases.first().assets
-                .filter { it.contentType == "application/vnd.android.package-archive" }
-                .find {
-                    when (BuildConfig.APP_LAYOUT) {
-                        "mobile" -> it.name.endsWith("-mobile.apk")
-                        "tv" -> it.name.endsWith("-tv.apk")
-                        else -> !it.name.endsWith("-mobile.apk") && !it.name.endsWith("-tv.apk")
-                    }
+            // 2026-07-17 : sélection d'APK selon LAYOUT + ABI de l'appareil.
+            // Assets d'une release : onyx-<tag>-universal.apk (défaut mobile+TV,
+            // ARM), onyx-<tag>-tv.apk (TV-only, ARM), onyx-<tag>-x86.apk (défaut,
+            // x86 émulateurs/TV Intel).
+            // BUG CORRIGÉ : l'ancienne logique matchait « -mobile.apk » (inexistant)
+            // et sa branche else tombait sur « -x86.apk » (car l'ARM s'appelait
+            // « -mobile-tv.apk » et finit par « -tv.apk » → exclu) → x86 installé
+            // sur ARM = INSTALL_FAILED_NO_MATCHING_ABIS (« config du package »).
+            // Le rename ARM → « -universal.apk » (1er asset uploadé) fait que même
+            // les vieilles apps cassées reprennent l'ARM via leur branche else.
+            val apkAssets = newReleases.first().assets
+                .filter {
+                    it.contentType == "application/vnd.android.package-archive" ||
+                        it.name.endsWith(".apk", ignoreCase = true)
                 }
+
+            // ABI primaire de l'appareil : x86/x86_64 = émulateur ou TV Intel Atom.
+            val isX86Device = Build.SUPPORTED_ABIS.firstOrNull()?.let {
+                it.equals("x86", ignoreCase = true) || it.equals("x86_64", ignoreCase = true)
+            } == true
+
+            val asset = when {
+                // Appareil x86/x86_64 → APK x86 dédié (émulateur, TV Intel).
+                isX86Device ->
+                    apkAssets.firstOrNull { it.name.endsWith("-x86.apk", ignoreCase = true) }
+
+                // Build TV-only ARM → l'APK -tv.apk.
+                BuildConfig.APP_LAYOUT == "tv" ->
+                    apkAssets.firstOrNull { it.name.endsWith("-tv.apk", ignoreCase = true) }
+
+                // Défaut (mobile + TV, ARM).
+                else ->
+                    apkAssets.firstOrNull { it.name.endsWith("-universal.apk", ignoreCase = true) }
+            }
+                // Filet de sécurité : n'importe quel APK NON-x86 (jamais x86 sur ARM).
+                ?: apkAssets.firstOrNull { !it.name.endsWith("-x86.apk", ignoreCase = true) }
                 ?: throw Exception("Can't find update APK")
 
             _state.emit(State.SuccessCheckingUpdate(newReleases, asset))
