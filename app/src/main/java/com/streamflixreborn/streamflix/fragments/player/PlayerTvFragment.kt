@@ -1596,6 +1596,46 @@ class PlayerTvFragment : Fragment() {
                 viewModel.resortServers()
             }
 
+            // 2026-07-16 : appui LONG sur un serveur (TV) → signaler « mauvais » (envoi GitHub).
+            binding.settings.onServerReported = { server ->
+                val vt = args.videoType
+                val title = when (vt) {
+                    is com.streamflixreborn.streamflix.models.Video.Type.Episode -> vt.tvShow.title
+                    is com.streamflixreborn.streamflix.models.Video.Type.Movie -> vt.title
+                } ?: "?"
+                val episode = (vt as? com.streamflixreborn.streamflix.models.Video.Type.Episode)?.number ?: 0
+                val season = Regex("(?i)saison\\s*(\\d+)").find(args.id)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: (vt as? com.streamflixreborn.streamflix.models.Video.Type.Episode)?.season?.number ?: 0
+                val source = when {
+                    server.id.startsWith("bkreg::") -> server.id.removePrefix("bkreg::").substringBefore("::")
+                    server.name.contains(" · ") -> server.name.substringBefore(" · ")
+                    else -> server.name
+                }
+                androidx.appcompat.app.AlertDialog.Builder(requireContext())
+                    .setTitle("Signaler ce serveur")
+                    .setMessage("Signaler « ${server.name} » comme MAUVAIS (mauvaise saison/épisode/langue) pour « $title » ?")
+                    .setNegativeButton("Annuler", null)
+                    .setPositiveButton("Signaler") { _, _ ->
+                        com.streamflixreborn.streamflix.utils.BrokenSourceReporter.reportBadMatch(
+                            serverName = server.name,
+                            sourceLabel = source,
+                            resolvedUrl = args.id,
+                            contentTitle = title,
+                            season = season,
+                            episode = episode,
+                        ) { ok ->
+                            view?.post {
+                                android.widget.Toast.makeText(
+                                    requireContext(),
+                                    if (ok) "Serveur signalé, merci !" else "Échec du signalement",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    }
+                    .show()
+            }
+
             // 2026-06-30 : qualité vidéo détectée par le probe ExoPlayer headless.
             // On rafraîchit le picker pour afficher le sub-text (1080p, 720p...).
             viewLifecycleOwner.lifecycleScope.launch {
@@ -4878,6 +4918,12 @@ class PlayerTvFragment : Fragment() {
                     || video.type == androidx.media3.common.MimeTypes.APPLICATION_MPD
                 )
                 if (isHls) {
+                    // 2026-07-16 : OnlyFlix (SeekStreaming/EmbedSeek) = HLS `…/hlsmod/…` avec segments
+                    //   TS-dans-PNG → on enveloppe le DataSource pour stripper l'en-tête PNG. Gaté.
+                    val dsFactoryHls: androidx.media3.datasource.DataSource.Factory =
+                        if (video.source.contains("/tt/master.m3u8", ignoreCase = true) || video.source.contains("/hlsmod/", ignoreCase = true))
+                            com.streamflixreborn.streamflix.utils.SeekStreamPngDataSource.Factory(dataSourceFactory)
+                        else dataSourceFactory
                     val hlsExtractorFactory = androidx.media3.exoplayer.hls.DefaultHlsExtractorFactory(
                         androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
                             androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
@@ -4902,7 +4948,7 @@ class PlayerTvFragment : Fragment() {
                             dsFactory2, loadPolicy, parserFactory, cmcdConfig, 30.0
                         )
                     }
-                    val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(dataSourceFactory)
+                    val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(dsFactoryHls)
                         .setAllowChunklessPreparation(true)
                         .setExtractorFactory(hlsExtractorFactory)
                         .apply {
@@ -8475,7 +8521,7 @@ class PlayerTvFragment : Fragment() {
             val ctx = requireContext()
             // 2026-07-09 : seekplayer TV = même approche que le mobile (WebView dans la zone vidéo
             //   native derrière nos contrôles + miroir + 2 boutons), PAS le curseur générique.
-            val isSeekPlayerTv = embedUrl.contains("seekplayer")
+            val isSeekPlayerTv = embedUrl.contains("seekplayer") || embedUrl.contains("embedseek") || embedUrl.contains("swiftflow")
             val nativeVideoOverlay = binding.pvPlayer.overlayFrameLayout
             val useNativeControls = isSeekPlayerTv && nativeVideoOverlay != null
             val rootView: ViewGroup = if (useNativeControls) nativeVideoOverlay!! else binding.root as ViewGroup
@@ -8528,13 +8574,17 @@ class PlayerTvFragment : Fragment() {
             // 2026-07-09 : SeekStreaming (seekplayer.vip/.me) — chargement direct + UA OS.Gatu-like +
             //   pub coupée + autoplay + auto-clic « Reprendre ». Le curseur TV (flèches + OK) sert de
             //   clic réel sur le gros bouton bleu (vrai geste → lecture fiable).
-            val isSeekPlayer = embedUrl.contains("seekplayer")
+            val isSeekPlayer = embedUrl.contains("seekplayer") || embedUrl.contains("embedseek")
+            // 2026-07-16 : SwiftFlow (swiftflow.lol) — player Movix Plyr à ad-gate. Même famille
+            //   de traitement que seekplayer, avec son propre JS d'auto-clic sur l'ad-gate.
+            val isSwiftFlow = embedUrl.contains("swiftflow")
             val seekAdHosts = listOf(
                 "boredomcuff", "spleniidizzy", "gappedpeatmen", "popads", "popcash", "propeller",
                 "onclick", "adsterra", "hilltopads", "monetag", "clickadu", "doubleclick",
-                "googlesyndication", "syndication", "exoclick", "juicyads", "trafficjunky"
+                "googlesyndication", "syndication", "exoclick", "juicyads", "trafficjunky",
+                "eminentpercentvandalism"
             )
-            if (isSeekPlayer) {
+            if (isSeekPlayer || isSwiftFlow) {
                 wv.settings.userAgentString = com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA
             }
             overlayIsAbyss = isAbyssEmbed
@@ -8575,7 +8625,12 @@ class PlayerTvFragment : Fragment() {
                     }
                     if (isSeekPlayer) {
                         val nh = request?.url?.host ?: return false
-                        if (!nh.contains("seekplayer.")) { Log.d("PlayerTV", "Seek NAV BLOCKED: $nh"); return true }
+                        if (!(nh.contains("seekplayer.") || nh.contains("embedseek."))) { Log.d("PlayerTV", "Seek NAV BLOCKED: $nh"); return true }
+                        return false
+                    }
+                    if (isSwiftFlow) {
+                        val nh = request?.url?.host ?: return false
+                        if (!nh.contains("swiftflow.")) { Log.d("PlayerTV", "SwiftFlow NAV BLOCKED: $nh"); return true }
                         return false
                     }
                     if (!isAbyssEmbed) return false
@@ -8589,11 +8644,11 @@ class PlayerTvFragment : Fragment() {
                 ): WebResourceResponse? {
                     val url = request?.url?.toString() ?: return null
 
-                    // SeekStreaming : coupe les pubs
-                    if (isSeekPlayer) {
+                    // SeekStreaming / SwiftFlow : coupe les pubs
+                    if (isSeekPlayer || isSwiftFlow) {
                         val sh = request?.url?.host ?: ""
                         if (seekAdHosts.any { sh.contains(it, ignoreCase = true) }) {
-                            Log.d("PlayerTV", "Seek AD BLOCKED: $sh")
+                            Log.d("PlayerTV", "Seek/SwiftFlow AD BLOCKED: $sh")
                             return WebResourceResponse("text/plain", "UTF-8",
                                 java.io.ByteArrayInputStream("".toByteArray()))
                         }
@@ -8762,6 +8817,20 @@ class PlayerTvFragment : Fragment() {
                         view?.postDelayed({ if (webViewOverlay != null) overlayWebView?.evaluateJavascript(seekJs, null) }, 3000L)
                     }
 
+                    // ── SwiftFlow : neutralise window.open (débloque l'ad-gate sans vraie pub),
+                    //   auto-clic « Regarder maintenant », plein écran + play. Le mp4 citron-edge
+                    //   signé charge dans le <video> natif (piloté par le miroir/contrôles TV). ──
+                    if (isSwiftFlow) {
+                        val sfJs = "(function(){try{try{window.open=function(){return {closed:false,focus:function(){},blur:function(){},close:function(){},location:{href:''}};};}catch(e){}" +
+                            "try{var css=document.createElement('style');css.textContent='html,body{margin:0!important;padding:0!important;background:#000!important;width:100vw!important;height:100vh!important;overflow:hidden!important;}video,.plyr,.plyr__video-wrapper,.plyr--video{width:100vw!important;height:100vh!important;position:fixed!important;top:0!important;left:0!important;object-fit:contain!important;z-index:2147483000!important;background:#000!important;}a[target=\"_blank\"],[class*=\"popup\"],[id*=\"popup\"]{display:none!important;pointer-events:none!important;}';(document.head||document.documentElement).appendChild(css);}catch(e){}" +
+                            "function gate(){try{document.querySelectorAll('button,a,[role=\"button\"],div,span').forEach(function(b){if(b.querySelector&&b.querySelector('button,a'))return;var t=((b.textContent||b.innerText||'')+'').trim().toLowerCase();if(t.indexOf('regarder maintenant')>=0&&t.length<40){try{b.click();}catch(e){}}});}catch(e){}}" +
+                            "function go(){try{gate();var v=document.querySelector('video');if(v){try{v.muted=false;v.play();}catch(e){}}document.querySelectorAll('a[target=\"_blank\"]').forEach(function(a){try{a.remove();}catch(e){}});}catch(e){}}" +
+                            "go();var n=0;var tm=setInterval(function(){n++;go();if(n>25)clearInterval(tm);},800);}catch(e){}})();"
+                        view?.evaluateJavascript(sfJs, null)
+                        view?.postDelayed({ if (webViewOverlay != null) overlayWebView?.evaluateJavascript(sfJs, null) }, 1500L)
+                        view?.postDelayed({ if (webViewOverlay != null) overlayWebView?.evaluateJavascript(sfJs, null) }, 3500L)
+                    }
+
                     // ── DaddyLive: inject anti-popup/ad JS ──
                     //   (PAS pour Player4me : ce JS supprime les divs fixed/absolute
                     //   z>100 → il enlevait le conteneur du player 4meplayer = écran noir.
@@ -8806,7 +8875,7 @@ class PlayerTvFragment : Fragment() {
 
             // ── Hint text ──
             val hint = TextView(ctx).apply {
-                text = if (isDaddyLiveEmbed) "Chargement du flux DaddyLive..." else if (isSeekPlayer) "Placez le curseur sur le gros bouton bleu et OK pour lancer/mettre en pause" else if (isAbyssEmbed) "OK = lecture/pause     gauche/droite = -10s / +10s" else if (isPlayer4me) "Placez le curseur sur la vidéo et OK pour lancer  •  ensuite : Haut = barre, Gauche/Droite = avancer (maintenir = plus vite)" else "Utilisez les flèches pour déplacer, OK pour cliquer"
+                text = if (isDaddyLiveEmbed) "Chargement du flux DaddyLive..." else if (isSwiftFlow) "Chargement de la vidéo…" else if (isSeekPlayer) "Placez le curseur sur le gros bouton bleu et OK pour lancer/mettre en pause" else if (isAbyssEmbed) "OK = lecture/pause     gauche/droite = -10s / +10s" else if (isPlayer4me) "Placez le curseur sur la vidéo et OK pour lancer  •  ensuite : Haut = barre, Gauche/Droite = avancer (maintenir = plus vite)" else "Utilisez les flèches pour déplacer, OK pour cliquer"
                 setTextColor(Color.WHITE)
                 textSize = 14f
                 setShadowLayer(4f, 0f, 0f, Color.BLACK)
@@ -8954,6 +9023,9 @@ class PlayerTvFragment : Fragment() {
             } else if (isSeekPlayer) {
                 Log.d("PlayerTV", "Loading SeekStreaming directly: ${embedUrl.take(100)}")
                 wv.loadUrl(embedUrl)
+            } else if (isSwiftFlow) {
+                Log.d("PlayerTV", "Loading SwiftFlow directly: ${embedUrl.take(100)}")
+                wv.loadUrl(embedUrl, mapOf("Referer" to "https://swiftflow.lol/"))
             } else {
                 // Other embeds: use iframe wrapper (page expects to be in an iframe)
                 val iframeWrapper = """

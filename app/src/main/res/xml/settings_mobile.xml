@@ -168,6 +168,14 @@
                 android:defaultValue="@array/backup_source_keys"
                 app:iconSpaceReserved="false" />
 
+            <!-- 2026-07-13 (user : rapport auto des sources cassées vers GitHub, 1 fois par URL). -->
+            <SwitchPreferenceCompat
+                android:key="pref_report_broken_sources"
+                android:title="Signaler les sources cassées"
+                android:summary="Quand une source échoue parce que son URL/domaine a changé (dns, ssl, 404, parsing), envoie automatiquement UNE notification GitHub pour la réparer. Sans spam : 1 seule fois par source+domaine."
+                android:defaultValue="true"
+                app:iconSpaceReserved="false" />
+
         </PreferenceCategory>
 
         <PreferenceCategory
@@ -633,6 +641,12 @@
             android:icon="@drawable/ic_telegram"
             android:key="p_settings_telegram"
             android:title="@string/settings_telegram"
+            app:iconSpaceReserved="false" />
+
+        <Preference
+            android:icon="@drawable/ic_github"
+            android:key="p_settings_github"
+            android:title="@string/settings_github"
             app:iconSpaceReserved="false" />
 
         <Preference

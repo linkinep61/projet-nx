@@ -1231,6 +1231,8 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
             if (hasFrSub && origSid != frDub?.subjectId) tracks.add(Track(origSid, "VOSTFR", 1))
             val ordered = tracks.sortedBy { it.rank }
             Log.i(TAG, "backup '$title' : dubs=${dubs.size} frDub=${frDub?.subjectId != null} frSub=$hasFrSub → ${ordered.size} piste(s) FR")
+            // 2026-07-14 DIAG mauvaise-saison : quel subjectId chaque piste utilise vs le subject principal, + se/ep demandé.
+            Log.i(TAG, "MVBX-DIAG mainSid=$searchSid se=$se ep=$ep | dubs=${dubs.joinToString { "${it.lanCode}/t${it.type}/orig${it.original}/sid=${it.subjectId ?: "-"}" }} | tracks=${ordered.joinToString { "${it.label}→sid=${it.sid}" }}")
             val seenUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
             val out = coroutineScope {
                 val deferreds: List<kotlinx.coroutines.Deferred<List<Video.Server>>> = ordered.map { t ->

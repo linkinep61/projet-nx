@@ -243,6 +243,7 @@
     <string name="settings_about_version_name">Version %s</string>
     <string name="settings_help">Aide</string>
     <string name="settings_telegram">Groupe Telegram</string>
+    <string name="settings_github">GitHub</string>
     <string name="settings_category_streamingcommunity">Paramètres StreamingCommunity</string>
     <string name="settings_category_streamingcommunity_domain">Nom de domaine StreamingCommunity</string>
     <string name="settings_streamingcommunity_domain_reset">Réinitialiser le domaine</string>

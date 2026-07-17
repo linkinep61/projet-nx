@@ -83,7 +83,20 @@ object DnsResolver : Dns {
             addresses
         } catch (e: Exception) {
             Log.e(TAG, "Failed to resolve $hostname with $providerName: ${e.message}")
-            throw e
+            // 2026-07-16 : filet de sécurité — si le DoH échoue (serveur DoH injoignable,
+            //   ex. cloudflare-dns.com non résolvable via un DNS privé/cassé), on tente le
+            //   DNS SYSTÈME pour NE PAS faire tomber tout le provider (AnimeSama échouait
+            //   entièrement : catalogue, genres, épisodes, recherche). Si le domaine est
+            //   bloqué par le DNS FAI, le système échouera aussi → on relance l'erreur DoH.
+            return try {
+                val sys = Dns.SYSTEM.lookup(hostname)
+                Log.i(TAG, "Fallback SYSTEM DNS resolved $hostname to: ${sys.joinToString { it.hostAddress ?: "" }}")
+                cache[hostname] = CachedAddr(sys, now + CACHE_TTL_MS)
+                sys
+            } catch (e2: Exception) {
+                Log.e(TAG, "Fallback SYSTEM DNS also failed for $hostname: ${e2.message}")
+                throw e
+            }
         }
     }
 
@@ -113,10 +126,18 @@ object DnsResolver : Dns {
     private fun buildDoh(url: String): Dns {
         return if (url.isNotEmpty()) {
             try {
-                DnsOverHttps.Builder()
+                val httpUrl = url.toHttpUrl()
+                val builder = DnsOverHttps.Builder()
                     .client(client)
-                    .url(url.toHttpUrl())
-                    .build()
+                    .url(httpUrl)
+                // 2026-07-16 : IPs de bootstrap du serveur DoH → OkHttp se connecte
+                //   DIRECTEMENT à l'IP sans devoir résoudre le host DoH (cloudflare-dns.com…)
+                //   via le DNS système. Sans ça, quand le DNS système ne résout pas le host
+                //   DoH (réseau/DNS privé), TOUT le DoH tombe (bug AnimeSama).
+                bootstrapHostsFor(httpUrl.host).takeIf { it.isNotEmpty() }?.let {
+                    builder.bootstrapDnsHosts(it)
+                }
+                builder.build()
             } catch (e: Exception) {
                 Log.e(TAG, "Error building DoH for $url, falling back to SYSTEM: ${e.message}")
                 Dns.SYSTEM
@@ -125,5 +146,21 @@ object DnsResolver : Dns {
             Log.d(TAG, "No DoH URL provided, using SYSTEM DNS")
             Dns.SYSTEM
         }
+    }
+
+    /** IPs connues des serveurs DoH courants (littéraux → aucune résolution DNS). */
+    private fun bootstrapHostsFor(host: String): List<InetAddress> {
+        val ips = when {
+            host.contains("cloudflare", true) ->
+                listOf("1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001")
+            host.contains("google", true) ->
+                listOf("8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844")
+            host.contains("quad9", true) ->
+                listOf("9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9")
+            host.contains("adguard", true) ->
+                listOf("94.140.14.14", "94.140.15.15")
+            else -> emptyList()
+        }
+        return ips.mapNotNull { runCatching { InetAddress.getByName(it) }.getOrNull() }
     }
 }

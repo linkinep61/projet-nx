@@ -159,8 +159,27 @@ object CoflixSourceProvider {
             .substringBefore("/")
             .trim()
         if (serieSlug.isBlank()) return emptyList()
-        val episodeUrl = "${urlBase(match.url)}/episode/$serieSlug-${seasonNumber}x${episodeNumber}/"
-        return extractFromCoflixPage(episodeUrl, label = "Coflix Boston")
+
+        // 2026-07-14 FIX (House of the Dragon) : WordPress ajoute parfois un suffixe de
+        //   désambiguïsation au slug de la SÉRIE (ex « house-of-the-dragon-p2 ») qui N'EST PAS
+        //   présent sur les slugs d'ÉPISODE (« house-of-the-dragon-3x4 »). Résultat : l'URL
+        //   « …-p2-3x4 » renvoie 404 → 0 serveur. On essaie donc le slug complet PUIS le slug
+        //   débarrassé d'un suffixe « -pN » / « -N » final.
+        val slugCandidates = buildList {
+            add(serieSlug)
+            val stripped = serieSlug.replace(Regex("-p?\\d+$"), "")
+            if (stripped.isNotBlank() && stripped != serieSlug) add(stripped)
+        }
+        for (slug in slugCandidates) {
+            val episodeUrl = "${urlBase(match.url)}/episode/$slug-${seasonNumber}x${episodeNumber}/"
+            val servers = extractFromCoflixPage(episodeUrl, label = "Coflix Boston")
+            if (servers.isNotEmpty()) {
+                Log.i(TAG, "getEpisodeSources '$showTitle' S${seasonNumber}E$episodeNumber → slug='$slug' → ${servers.size} serveurs")
+                return servers
+            }
+        }
+        Log.i(TAG, "getEpisodeSources '$showTitle' S${seasonNumber}E$episodeNumber → 0 (slugs testés: $slugCandidates)")
+        return emptyList()
     }
 
     private fun urlBase(url: String): String {

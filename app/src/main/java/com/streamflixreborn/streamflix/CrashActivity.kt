@@ -138,6 +138,13 @@ class CrashActivity : Activity() {
                 setOnClickListener { sendToGitHub(this, fingerprint) }
             }
             buttonsLayout.addView(sendBtn, btnLp())
+            // 2026-07-13 : AUTO-envoi du crash/ANR (pas besoin de cliquer), si le switch global
+            //   « Signaler les sources cassées » est ON et que ce crash n'a pas déjà été envoyé.
+            val sbNN = sendBtn!!
+            if (!alreadySent &&
+                runCatching { com.streamflixreborn.streamflix.utils.UserPreferences.reportBrokenSources }.getOrDefault(true)) {
+                sbNN.post { sendToGitHub(sbNN, fingerprint) }
+            }
         }
 
         val copyBtn = Button(this).apply {

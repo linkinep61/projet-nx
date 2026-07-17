@@ -366,6 +366,12 @@ object AoneroomClient {
         if (se > 0) params["se"] = "$se"
         if (ep > 0) params["ep"] = "$ep"
         val resp = apiGet(PLAY_INFO_PATH, params) ?: return emptyList()
+        // 2026-07-14 DIAG mauvaise-saison : ce que play-info renvoie réellement pour se/ep demandé.
+        run {
+            val d = resp.optJSONObject("data")
+            val streamsN = d?.optJSONArray("streams")?.length() ?: 0
+            android.util.Log.i("AoneroomClient", "MVBX-DIAG play-info sid=$subjectId demandé se=$se ep=$ep → streams=$streamsN | resp.se=${d?.opt("se")} resp.ep=${d?.opt("ep")} title='${d?.optString("title")}' epTitle='${d?.optString("episodeTitle")}' resource=${d?.opt("resourceId") ?: d?.opt("resource")}")
+        }
         val streamArr = resp.optJSONObject("data")?.optJSONArray("streams") ?: return emptyList()
         return (0 until streamArr.length()).mapNotNull { i ->
             val s = streamArr.optJSONObject(i) ?: return@mapNotNull null

@@ -204,7 +204,8 @@ object CpasmieuxProvider {
         return when {
             host.contains("uqload") -> "Uqload"
             host.contains("filemoon") || host.contains("filmoon") -> "Filemoon"
-            host.contains("dood") || host.contains("kakaflix") -> "Dood"
+            host.contains("dood") -> "Dood"
+            host.contains("kakaflix") || host.contains("kokoflix") -> "Proxy"
             host.contains("vidzy") -> "Vidzy"
             host.contains("voe") -> "VOE"
             host.contains("fsvid") -> "FSVID"

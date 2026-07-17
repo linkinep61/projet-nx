@@ -170,6 +170,8 @@ object ExtractorRanker {
         "videasy" to 8,
         "primesrc" to 8,
         "kakaflix" to 8,
+        "kokoflix" to 8,
+        "redirectproxy" to 8,
         "moflix" to 8,
         "moiflix" to 8,
         "papadustream" to 8,
@@ -449,19 +451,27 @@ object ExtractorRanker {
         }
     }
 
-    /** Construit la clé favori langue-aware pour un serveur. */
+    /** Construit la clé favori langue-aware pour un serveur.
+     *  2026-07-16 : inclut le PRÉFIXE source (avant le ·) dans la clé pour que
+     *  « AniCloud · Filemoon (VOSTFR) » ≠ « Filemoon (VOSTFR) » ≠ « Movix · Filemoon (VOSTFR) ».
+     *  Avant, tous les serveurs du même extracteur partageaient la même clé →
+     *  favoriser un Filemoon les favorisait TOUS. */
     fun favKeyFor(server: Video.Server): String {
+        val parts = server.name.split(Regex("\\s[—–·-]\\s"), limit = 2)
+        val wrapperPrefix = if (parts.size == 2) parts[0].trim().lowercase() + "·" else ""
         val extName = (resolveExtractorName(server) ?: server.name).lowercase()
         val lang = serverLangBucket(server.name)
-        return "$extName:$lang"
+        return "$wrapperPrefix$extName:$lang"
     }
 
     /** Construit la clé favori langue-aware depuis un nom de serveur. */
     fun favKeyFor(serverName: String): String {
+        val parts = serverName.split(Regex("\\s[—–·-]\\s"), limit = 2)
+        val wrapperPrefix = if (parts.size == 2) parts[0].trim().lowercase() + "·" else ""
         val extName = (resolveExtractorName(Video.Server(id = "", name = serverName))
             ?: serverName).lowercase()
         val lang = serverLangBucket(serverName)
-        return "$extName:$lang"
+        return "$wrapperPrefix$extName:$lang"
     }
 
     /**

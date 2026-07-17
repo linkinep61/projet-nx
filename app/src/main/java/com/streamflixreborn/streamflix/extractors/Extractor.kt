@@ -236,12 +236,18 @@ abstract class Extractor {
             HxfileExtractor(),
             ZillaExtractor(),
             PDrainExtractor(),
+            // 2026-07-13 : kakaflix.lol MORT mais kokoflix.lol VIVANT (même famille).
+            // Transformé en handler proxy générique : kokoflix + kakaflix + newPlayer.php.
+            // Suit le redirect HTTP → délègue à l'extracteur du domaine résolu.
             KakaflixExtractor(),
             NetuExtractor(),
             SeekPlaysExtractor(),
             // 2026-07-09 : nouveau domaine + chiffrement de SeekStreaming (seekplayer.vip/.me)
             //   → extraction via WebView (leur JS déchiffre, on capte le m3u8).
             SeekPlayerExtractor(),
+            // 2026-07-16 : SwiftFlow (swiftflow.lol) — player Movix à ad-gate qui sert un mp4
+            //   citron-edge signé. Joué dans l'overlay WebView (même pattern que SeekStreaming).
+            SwiftFlowExtractor(),
             XshotcokExtractor(),
             DarkiboxExtractor(),
             Up4StreamExtractor(),
@@ -342,6 +348,12 @@ abstract class Extractor {
         private fun recordSuccess(serverName: String) {
             // Successful extraction resets the failure counter for that server.
             serverHealth.remove(serverName)
+            // Reset aussi le compteur « extracteur mort » (un succès = l'extracteur vit).
+            runCatching {
+                com.streamflixreborn.streamflix.utils.BrokenSourceReporter.noteExtractorOutcome(
+                    name = serverName, success = true,
+                )
+            }
             // Reset aussi le compteur persistant — l'écran "Extracteurs" affiche
             // donc les échecs CONSÉCUTIFS (depuis le dernier succès), pas le
             // cumul. Détecte mieux les extracteurs vraiment cassés vs bruit.
@@ -522,6 +534,9 @@ abstract class Extractor {
                 rec.brokenUntilMs = now + HEALTH_BROKEN_DURATION_MS
             }
             Log.w("Extractor", "Server '$serverName' marked broken (external/$errorTag, instant flag, until ${rec.brokenUntilMs})")
+            // 2026-07-13 : « flux mort » — l'extracteur a réussi mais le stream final est KO
+            //   (HEAD 404/timeout). Cumul → issue [flux mort] (l'extracteur crache des liens périmés).
+            runCatching { com.streamflixreborn.streamflix.utils.BrokenSourceReporter.noteStreamDead(serverName) }
             // Track aussi en persistance pour l'écran "Extracteurs"
             val providerName = runCatching { UserPreferences.currentProvider?.name }.getOrNull()
             com.streamflixreborn.streamflix.utils.ExtractorFailureTracker.recordFailure(
@@ -784,6 +799,20 @@ abstract class Extractor {
                     // le provider source (UserPreferences.currentProvider) dans le
                     // rapport bug — utile pour debug à distance.
                     recordFailure(name, error = e)
+                    // 2026-07-13 : rapport auto « source cassée » (URL/domaine changé) → GitHub,
+                    //   1 seule fois par source+domaine, seulement pour dns/connect/ssl/404/parsing.
+                    runCatching {
+                        com.streamflixreborn.streamflix.utils.BrokenSourceReporter.maybeReport(
+                            sourceName = name,
+                            url = finalLink,
+                            error = e,
+                            providerName = runCatching { UserPreferences.currentProvider?.name }.getOrNull(),
+                        )
+                        // Détection « extracteur mort » : cumul d'échecs consécutifs.
+                        com.streamflixreborn.streamflix.utils.BrokenSourceReporter.noteExtractorOutcome(
+                            name = name, success = false, error = e, url = finalLink,
+                        )
+                    }
                     throw e
                 }
                 val extractDurationMs = System.currentTimeMillis() - extractStartMs

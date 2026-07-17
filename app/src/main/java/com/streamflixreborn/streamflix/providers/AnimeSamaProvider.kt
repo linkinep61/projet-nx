@@ -80,10 +80,10 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         val origin: String = when {
             rawUrl.isNullOrBlank() || rawUrl.startsWith("data:") ->
                 "raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/${slug}.jpg"
-            rawUrl.contains("raw.githubusercontent.com/Anime-Sama/IMG") ->
-                "raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/${rawUrl.substringAfterLast("/")}"
+            rawUrl.contains("raw.githubusercontent.com/Anime-Sama/IMG") && rawUrl.contains("/contenu/") ->
+                "raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/${rawUrl.substringAfter("/contenu/")}"
             rawUrl.contains("cdn.jsdelivr.net") && rawUrl.contains("/contenu/") ->
-                "raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/${rawUrl.substringAfterLast("/")}"
+                "raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/${rawUrl.substringAfter("/contenu/")}"
             rawUrl.contains("anime-sama.to") || rawUrl.contains("anime-sama.pw") ->
                 "raw.githubusercontent.com/Anime-Sama/IMG/img/contenu/${slug}.jpg"
             else ->
@@ -486,6 +486,19 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             categories.add(0, Category(name = Category.FEATURED, list = featuredList))
         }
 
+        // ── Await catalogue deferred (lancés en parallèle au début) ──
+        // IMPORTANT : await AVANT l'enrichissement TMDB pour que les items
+        // catalogue reçoivent aussi leurs posters TMDB (sinon ils gardent
+        // l'URL weserv/GitHub qui peut être cassée — bug jaquettes catalogue).
+        val catalogAnimeItems = try { catalogAnimeDeferred.await() } catch (_: Exception) { emptyList() }
+        val catalogFilmItems = try { catalogFilmDeferred.await() } catch (_: Exception) { emptyList() }
+        if (catalogAnimeItems.isNotEmpty()) {
+            categories.add(Category(name = "Catalogue Anime", list = catalogAnimeItems))
+        }
+        if (catalogFilmItems.isNotEmpty()) {
+            categories.add(Category(name = "Catalogue Films", list = catalogFilmItems))
+        }
+
         // ── Enrichissement TMDB des jaquettes ──
         // Les covers AnimeSama (GitHub Anime-Sama/IMG) ne correspondent souvent pas
         // au contenu réel. On cherche chaque titre sur TMDB et on remplace le poster
@@ -554,16 +567,6 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             } catch (e: Exception) {
                 Log.w(TAG, "TMDB enrichment failed: ${e.message}")
             }
-        }
-
-        // ── Await catalogue deferred (lancés en parallèle au début) ──
-        val catalogAnimeItems = try { catalogAnimeDeferred.await() } catch (_: Exception) { emptyList() }
-        val catalogFilmItems = try { catalogFilmDeferred.await() } catch (_: Exception) { emptyList() }
-        if (catalogAnimeItems.isNotEmpty()) {
-            categories.add(Category(name = "Catalogue Anime", list = catalogAnimeItems))
-        }
-        if (catalogFilmItems.isNotEmpty()) {
-            categories.add(Category(name = "Catalogue Films", list = catalogFilmItems))
         }
 
         // Reorder: 1.FEATURED 2.Épisodes/récents 3.Séries récentes 4.Films récents 5.Séries 6.Films 7.Catalogue
@@ -1355,9 +1358,18 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             for ((idx, pair) in foldersToList.withIndex()) {
                 val (path, label) = pair
                 val subSeasonId = if (path.isEmpty()) "$slug/$lang" else "$slug/$path/$lang"
+                // 2026-07-13 (user « le Film/OAV ne doivent pas être comptés/numérotés comme des
+                //   saisons » + diag OPPO Slime : AniCloud cherchait « Saison 5 » pour la Saison 4) :
+                //   les VRAIES saisons sont numérotées par le LABEL (« Saison 4 » → 4), PAS par la
+                //   position (idx+1) qui COMPTAIT le Film/OAV et décalait tout (+1). Les Film/OAV/
+                //   spin-offs (label SANS « Saison N ») restent VISIBLES mais reçoivent un numéro
+                //   HORS-SAISON (900+idx) → ils n'entrent jamais en collision avec une vraie saison
+                //   ni ne sont matchés par un backup (pas de « Saison 900 »).
+                val subLabelNum = Regex("""(?i)saison\s*(\d+)""").find(label)
+                    ?.groupValues?.get(1)?.toIntOrNull()
                 episodes.add(Episode(
                     id = "@subfolder:$subSeasonId",
-                    number = idx + 1,
+                    number = subLabelNum ?: (900 + idx),
                     title = label,
                     poster = episodePoster,
                     overview = "@subfolder",

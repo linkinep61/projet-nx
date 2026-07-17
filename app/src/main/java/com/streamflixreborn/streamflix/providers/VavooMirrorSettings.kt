@@ -16,8 +16,14 @@ object VavooMirrorSettings {
 
     data class Mirror(val url: String, val label: String)
 
+    // 2026-07-16 (user « sur vavoo pas besoin de VPN ») : vavoo.net + kool.ws EN TÊTE
+    //   (priorité + défaut). Vérifié en direct : les deux servent l'API mediahubmx
+    //   (mediahubmx-catalog/resolve.json → 400 « Validation error » = endpoints valides)
+    //   et fonctionnent sans le bypass VYPN. Les .to restent en fallback.
     val list = listOf(
-        Mirror("https://vavoo.to", "vavoo.to (défaut)"),
+        Mirror("https://vavoo.net", "vavoo.net (défaut, sans VPN)"),
+        Mirror("https://kool.ws", "kool.ws (sans VPN)"),
+        Mirror("https://vavoo.to", "vavoo.to"),
         Mirror("https://kool.to", "kool.to"),
         Mirror("https://oha.to", "oha.to"),
         Mirror("https://huhu.to", "huhu.to"),

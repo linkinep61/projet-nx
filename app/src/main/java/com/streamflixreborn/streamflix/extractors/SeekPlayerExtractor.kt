@@ -1,21 +1,23 @@
 package com.streamflixreborn.streamflix.extractors
 
+import android.util.Log
+import androidx.media3.common.MimeTypes
 import com.streamflixreborn.streamflix.models.Video
+import com.streamflixreborn.streamflix.utils.WebViewResolver
+import java.net.URL
 
 /**
- * 2026-07-09 — Player "SeekStreaming" de Movix (seekplayer.vip / seekplayer.me).
+ * 2026-07-09 / 2026-07-16 — Player "SeekStreaming" de Movix (seekplayer.vip / seekplayer.me).
  *
- * Le site a tourné son domaine (`seekplays.pro` → `seekplayer.vip/.me`) ET son chiffrement :
- * `/api/v1/info?id=<id>` renvoie une config chiffrée AES-CBC déchiffrée CÔTÉ CLIENT. Le VRAI
- * flux (manifeste HLS sur un CDN tournant type novacrestventures.space, servi en `.txt`) n'est
- * révélé QUE pendant une lecture réelle (P2P/WebRTC + hls.js, via un player vidstack qui fait du
- * lazy-load et un leurre `preload.m3u8`). Une WebView headless ne reproduit pas cette lecture →
- * extraction pure impossible de façon fiable.
+ * `/api/v1/info?id=<id>` renvoie une config chiffrée AES-CBC déchiffrée CÔTÉ CLIENT → l'URL d'un
+ * **master.m3u8 proxifié** (`…/hlsmod/<tiktokcdn>/…/tt/master.m3u8`) dont les segments sont du
+ * MPEG-TS caché dans des images PNG sur le CDN TikTok (cf. OnlyFlixResolver + SeekStreamPngDataSource).
  *
- * Comme Hydrax/Abyss, on JOUE donc seekplayer DANS une WebView dédiée (le seul contexte où le
- * flux se révèle) : on renvoie une Video qui déclenche l'overlay WebView du player (path
- * `isSeekPlayer` dans PlayerMobileFragment/PlayerTvFragment.showWebViewOverlay) — navigation
- * hors seekplayer/CDN bloquée, pubs coupées, autoplay + plein écran. Zéro extraction d'URL.
+ * 2026-07-16 (user « fais un truc comme SwiftFlow, pas du WebView ») : on EXTRAIT désormais le
+ * master.m3u8 via une WebView HEADLESS (OnlyFlixResolver laisse le JS déchiffrer, on capte l'URL
+ * SANS lecture visible) et on le joue en NATIF dans ExoPlayer (le DataSource strippe les en-têtes
+ * PNG des segments). Si l'extraction échoue (timeout, page KO), FALLBACK sur l'ancien overlay
+ * WebView (`needsWebViewClick` → path `isSeekPlayer` des fragments), qui reste fonctionnel.
  */
 class SeekPlayerExtractor : Extractor() {
 
@@ -29,10 +31,24 @@ class SeekPlayerExtractor : Extractor() {
     override val cacheTtlMs: Long = 0L
 
     override suspend fun extract(link: String): Video {
-        return Video(
-            source = link,
-            webViewUrl = link,
-            needsWebViewClick = true,
-        )
+        val master = try { OnlyFlixResolver.resolveMasterM3u8(link) } catch (e: Exception) {
+            Log.w("SeekPlayerExtractor", "headless resolve error: ${e.message}"); null
+        }
+        if (master != null) {
+            val origin = try { val u = URL(link); "${u.protocol}://${u.host}/" } catch (_: Exception) { "$mainUrl/" }
+            Log.d("SeekPlayerExtractor", "resolved master.m3u8 → native ExoPlayer")
+            return Video(
+                source = master,
+                type = MimeTypes.APPLICATION_M3U8,
+                headers = mapOf(
+                    "User-Agent" to WebViewResolver.STEALTH_UA,
+                    "Referer" to origin,
+                    "Origin" to origin.trimEnd('/'),
+                ),
+            )
+        }
+        // Fallback : ancien overlay WebView (toujours câblé dans les fragments).
+        Log.d("SeekPlayerExtractor", "headless resolve failed → WebView overlay fallback")
+        return Video(source = link, webViewUrl = link, needsWebViewClick = true)
     }
 }

@@ -33,12 +33,71 @@ open class FilemoonExtractor : Extractor() {
         private const val TAG = "FilemoonExtractor"
         private const val ANDROID_CHROME_UA =
             "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+
+        // 2026-07-16 : domaines de fallback. Si le TLS handshake échoue sur un domaine
+        // (Cloudflare bloque certains domaines par IP/JA3, ex. bysebuho.com depuis Tahiti),
+        // on retente le même video ID sur un autre domaine Byse — les IDs sont cross-domain.
+        private val FALLBACK_DOMAINS = listOf(
+            "https://filemoon.sx",
+            "https://filemoon.org",
+            "https://bysezoxexe.com",
+            "https://bysejikuar.com"
+        )
+
+        private val VIDEO_ID_REGEX = Regex("""/(e|d)/([a-zA-Z0-9]+)""")
+
+        /** Vérifie si l'erreur est un problème réseau/SSL (pas un 404 côté serveur). */
+        private fun isNetworkError(e: Exception): Boolean {
+            val msg = e.message.orEmpty().lowercase()
+            return e is javax.net.ssl.SSLHandshakeException ||
+                e is javax.net.ssl.SSLException ||
+                e is java.net.ConnectException ||
+                e is java.net.UnknownHostException ||
+                msg.contains("connection closed") ||
+                msg.contains("ssl") ||
+                msg.contains("handshake") ||
+                msg.contains("timed out") ||
+                msg.contains("connect")
+        }
+
+        /** Domains known to serve the Filemoon verification iframe. */
+        private val VERIFICATION_DOMAINS = setOf("q8y5z.com")
+
+        /**
+         * JS injected into the verification iframe HTML. Clicks every interactive
+         * element it can find (buttons, SVGs, clickable divs) at multiple delays
+         * to ensure the play button gets hit even if it renders late.
+         */
+        private val AUTO_CLICK_SCRIPT = """
+            <script>
+            (function(){
+                function tryClick(){
+                    var c=document.querySelectorAll('button,[role="button"],[onclick],a,.play-btn,.btn-play,.play,.vjs-big-play-button');
+                    for(var i=0;i<c.length;i++){try{c[i].click();}catch(e){}}
+                    var s=document.querySelectorAll('svg,.play-icon,.fa-play,.icon-play');
+                    for(var i=0;i<s.length;i++){try{s[i].click();if(s[i].parentElement)s[i].parentElement.click();}catch(e){}}
+                    try{
+                        var el=document.elementFromPoint(window.innerWidth/2,window.innerHeight/2);
+                        if(el){el.click();if(el.parentElement)el.parentElement.click();}
+                    }catch(e){}
+                    try{
+                        var evt=new MouseEvent('click',{bubbles:true,cancelable:true,clientX:window.innerWidth/2,clientY:window.innerHeight/2});
+                        var t=document.elementFromPoint(window.innerWidth/2,window.innerHeight/2);
+                        if(t)t.dispatchEvent(evt);
+                    }catch(e){}
+                }
+                function schedule(){setTimeout(tryClick,600);setTimeout(tryClick,1800);setTimeout(tryClick,3500);}
+                if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',schedule);}
+                else{schedule();}
+            })();
+            </script>
+        """.trimIndent()
     }
 
     override val name = "Filemoon"
     override val mainUrl = "https://filemoon.org"
     // 2026-06-01 : nettoyé bf0skv.org + filemoon.site (NXDOMAIN)
-    override val aliasUrls = listOf("https://bysejikuar.com","https://moflix-stream.link","https://bysezoxexe.com","https://bysebuho.com","https://filemoon.sx","https://bysekoze.com","https://bysesayeveum.com","https://lukefirst.lol","https://weneverbeenfree.com")
+    override val aliasUrls = listOf("https://bysejikuar.com","https://moflix-stream.link","https://bysezoxexe.com","https://bysebuho.com","https://filemoon.sx","https://bysekoze.com","https://bysesayeveum.com","https://lukefirst.lol","https://weneverbeenfree.com","https://gn1r5n.org")
 
     /**
      * Two-tier extraction strategy:
@@ -61,23 +120,66 @@ open class FilemoonExtractor : Extractor() {
      */
     override suspend fun extract(link: String): Video {
         return try {
+            extractOnDomain(link)
+        } catch (e: Exception) {
+            // 2026-07-16 : fallback cross-domaine. Les IDs Filemoon/Byse sont partagés
+            // entre TOUS les domaines. Si un domaine échoue (SSL, 428, timeout, WAF…),
+            // on retente sur un autre. Seul cas où on ne retente PAS : link rot (vidéo
+            // supprimée côté Filemoon → inutile d'essayer ailleurs, même ID = même réponse).
+            val msg = e.message.orEmpty()
+            if (msg.contains("link rot", ignoreCase = true) ||
+                msg.contains("video expired", ignoreCase = true)
+            ) {
+                throw e // Vraiment mort, pas la peine de retenter ailleurs
+            }
+            val match = VIDEO_ID_REGEX.find(link) ?: throw e
+            val linkType = match.groupValues[1]
+            val videoId = match.groupValues[2]
+            val originalDomain = Regex("""(https?://[^/]+)""").find(link)?.groupValues?.get(1)
+                ?: throw e
+
+            Log.w(TAG, "[Filemoon] Domain $originalDomain failed (${e.javaClass.simpleName}: $msg) — trying fallback domains")
+
+            for (fallback in FALLBACK_DOMAINS) {
+                if (fallback.equals(originalDomain, ignoreCase = true)) continue
+                val fallbackLink = "$fallback/$linkType/$videoId"
+                Log.d(TAG, "[Filemoon] Trying fallback domain: $fallbackLink")
+                try {
+                    return extractOnDomain(fallbackLink)
+                } catch (fe: Exception) {
+                    val fMsg = fe.message.orEmpty()
+                    if (fMsg.contains("link rot", ignoreCase = true) ||
+                        fMsg.contains("video expired", ignoreCase = true)
+                    ) {
+                        throw fe // Vidéo morte sur ce domaine aussi
+                    }
+                    Log.w(TAG, "[Filemoon] Fallback $fallback failed: ${fe.javaClass.simpleName}: $fMsg")
+                    // Continue vers le prochain domaine
+                }
+            }
+            // Tous les fallbacks ont échoué
+            throw e
+        }
+    }
+
+    /** Extraction sur un seul domaine : API d'abord, puis WebView fallback. */
+    private suspend fun extractOnDomain(link: String): Video {
+        return try {
             extractViaApi(link)
         } catch (e: Exception) {
             val msg = e.message.orEmpty()
-            // Link rot — fail fast, don't waste 8s in WebView for a deleted video.
             if (msg.contains("link rot", ignoreCase = true) ||
                 msg.contains("video expired", ignoreCase = true)
             ) {
                 Log.w(TAG, "[Filemoon] Link rot detected — failing fast: $msg")
                 throw e
             }
-            // Anything else — try WebView fallback.
             Log.w(TAG, "[Filemoon] API failed (${e.javaClass.simpleName}: $msg) — trying WebView fallback")
             try {
                 extractViaWebView(link)
             } catch (we: Exception) {
                 Log.e(TAG, "[Filemoon] WebView fallback also failed: ${we.message}")
-                throw e // surface the original API error — more informative
+                throw e
             }
         }
     }
@@ -98,7 +200,7 @@ open class FilemoonExtractor : Extractor() {
         // per-video allowlist of embedding domains (e.g. weneverbeenfree.com — a
         // "Byse Frontend" SPA used by VoirAnime/VoirDrama). Without these headers,
         // the details endpoint returns 403 "embedding from this domain is not allowed".
-        val parentUrl = try {
+        val parentUrl = byseParentUrl(currentDomain) ?: try {
             UserPreferences.currentProvider?.baseUrl
         } catch (_: Throwable) { null }
         val parentOrigin = parentUrl?.trimEnd('/')
@@ -228,28 +330,33 @@ open class FilemoonExtractor : Extractor() {
     /**
      * Headless WebView fallback. Loads `/e/{videoId}` and intercepts the first
      * `*.m3u8` (or `master.m3u8` / `index.m3u8`) request the SPA fires once it has
-     * decrypted the playback response. No user interaction, no JS bridge needed —
-     * the network layer alone tells us the source URL.
+     * decrypted the playback response.
      *
-     * Headers are set on the load URL so the page sees the same Referer/Origin
-     * the API path would have sent, in case the site sniffs them. The X-Embed-*
-     * trio is NOT added here — those only matter for the API endpoints, not for
-     * the user-facing /e/{id} HTML page.
+     * 2026-07-16: Filemoon added a "human verification" step. The embed page now
+     * loads a cross-origin iframe (q8y5z.com) that shows a centered play button
+     * with "Cliquez sur le bouton de lecture pour vérifier que vous êtes humain".
+     * Only after clicking the button does the iframe swap to the actual JW player
+     * that fires the m3u8 request.
      *
-     * Timeout: 12s. The SPA boots its Vite bundle (~350 KB) + decrypts AES-GCM
-     * + builds the player; on a fast network this completes in 2-4s, on slow
-     * networks 6-10s.
+     * Strategy: intercept the cross-origin iframe HTTP response in
+     * shouldInterceptRequest, inject JS that auto-clicks the verification button,
+     * and return the modified HTML. The injected JS runs in the iframe's own
+     * context (same-origin with the served response), so it CAN access the
+     * iframe's DOM — unlike dispatchTouchEvent which can't reach into a
+     * cross-origin iframe from a headless (non-windowed) WebView.
+     *
+     * Timeout: 25s to accommodate verification + player load delay.
      */
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun extractViaWebView(link: String): Video = withContext(Dispatchers.Main) {
-        val parentUrl = try {
+        val currentDomain = Regex("""(https?://[^/]+)""").find(link)?.groupValues?.get(1)
+            ?: throw Exception("Could not extract base URL")
+        val parentUrl = byseParentUrl(currentDomain) ?: try {
             UserPreferences.currentProvider?.baseUrl
         } catch (_: Throwable) { null }
         val parentOrigin = parentUrl?.trimEnd('/')
-        val currentDomain = Regex("""(https?://[^/]+)""").find(link)?.groupValues?.get(1)
-            ?: throw Exception("Could not extract base URL")
 
-        val result = withTimeoutOrNull(12_000L) {
+        val result = withTimeoutOrNull(25_000L) {
             suspendCancellableCoroutine<Video> { cont ->
                 val context = StreamFlixApp.instance.applicationContext
                 var resolved = false
@@ -274,6 +381,71 @@ open class FilemoonExtractor : Extractor() {
                     }
                 }
 
+                /**
+                 * Intercept a verification iframe request: fetch the HTML ourselves,
+                 * inject the auto-click script, and return the modified response.
+                 * Runs on WebView IO thread (NOT main thread), safe for network I/O.
+                 */
+                fun interceptVerificationIframe(url: String): WebResourceResponse? {
+                    return try {
+                        val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                        conn.setRequestProperty("User-Agent", ANDROID_CHROME_UA)
+                        conn.setRequestProperty("Referer", link)
+                        conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                        conn.setRequestProperty("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
+                        // Forward cookies from CookieManager
+                        val cookies = android.webkit.CookieManager.getInstance().getCookie(url)
+                        if (!cookies.isNullOrBlank()) conn.setRequestProperty("Cookie", cookies)
+                        conn.connectTimeout = 8000
+                        conn.readTimeout = 8000
+                        conn.instanceFollowRedirects = true
+
+                        val responseCode = conn.responseCode
+                        // Store any Set-Cookie headers back into CookieManager
+                        conn.headerFields?.get("Set-Cookie")?.forEach { cookie ->
+                            android.webkit.CookieManager.getInstance().setCookie(url, cookie)
+                        }
+
+                        val html = conn.inputStream.bufferedReader().readText()
+                        conn.disconnect()
+
+                        // Inject auto-click script
+                        val modified = if (html.contains("</body>", ignoreCase = true)) {
+                            html.replaceFirst("</body>", "$AUTO_CLICK_SCRIPT\n</body>", ignoreCase = true)
+                        } else if (html.contains("</html>", ignoreCase = true)) {
+                            html.replaceFirst("</html>", "$AUTO_CLICK_SCRIPT\n</html>", ignoreCase = true)
+                        } else {
+                            html + "\n" + AUTO_CLICK_SCRIPT
+                        }
+
+                        Log.d(TAG, "[Filemoon-WV] Injected auto-click into verification iframe ($responseCode, ${modified.length} chars)")
+
+                        // Build response headers — pass through CORS-relevant ones
+                        val responseHeaders = mutableMapOf<String, String>()
+                        responseHeaders["Access-Control-Allow-Origin"] = "*"
+                        responseHeaders["Cache-Control"] = "no-cache"
+                        conn.headerFields?.forEach { (key, values) ->
+                            if (key != null && values.isNotEmpty() &&
+                                key.lowercase() !in setOf("set-cookie", "transfer-encoding", "content-length", "content-encoding")
+                            ) {
+                                responseHeaders[key] = values.last()
+                            }
+                        }
+
+                        WebResourceResponse(
+                            "text/html",
+                            "UTF-8",
+                            responseCode,
+                            if (responseCode in 200..299) "OK" else "Error",
+                            responseHeaders,
+                            modified.byteInputStream(Charsets.UTF_8)
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[Filemoon-WV] Failed to intercept verification iframe: ${e.message}")
+                        null // Let WebView handle it normally
+                    }
+                }
+
                 webView = WebView(context).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
@@ -283,6 +455,13 @@ open class FilemoonExtractor : Extractor() {
                     settings.mediaPlaybackRequiresUserGesture = false
                     settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
                 }
+
+                // Real layout so the iframe renders with actual dimensions
+                val wSpec = android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY)
+                val hSpec = android.view.View.MeasureSpec.makeMeasureSpec(1920, android.view.View.MeasureSpec.EXACTLY)
+                webView.measure(wSpec, hSpec)
+                webView.layout(0, 0, 1080, 1920)
+
                 android.webkit.CookieManager.getInstance().setAcceptCookie(true)
                 android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
@@ -292,10 +471,10 @@ open class FilemoonExtractor : Extractor() {
                         request: WebResourceRequest?
                     ): WebResourceResponse? {
                         val url = request?.url?.toString() ?: return null
+
+                        // 1. Intercept m3u8 requests → we have the video
                         if (url.contains(".m3u8") && !resolved) {
                             Log.i(TAG, "[Filemoon-WV] m3u8 captured: $url")
-                            // Use the embed page URL as Referer for downstream playback.
-                            // ExoPlayer needs this header set; the SPA sends it natively.
                             val videoHeaders = mutableMapOf(
                                 "Referer" to link,
                                 "Origin" to currentDomain,
@@ -303,6 +482,17 @@ open class FilemoonExtractor : Extractor() {
                             )
                             cleanupAndResume(Video(source = url, headers = videoHeaders))
                         }
+
+                        // 2. Intercept verification iframe → inject auto-click
+                        val host = request?.url?.host ?: return null
+                        if (!resolved && VERIFICATION_DOMAINS.any { host.contains(it, ignoreCase = true) }) {
+                            // Only intercept document requests (HTML), not sub-resources
+                            val accept = request.requestHeaders?.get("Accept") ?: ""
+                            if (accept.contains("text/html") || accept.isEmpty()) {
+                                return interceptVerificationIframe(url)
+                            }
+                        }
+
                         return null
                     }
                 }
@@ -316,9 +506,6 @@ open class FilemoonExtractor : Extractor() {
                     }
                 }
 
-                // Provide Referer/Origin matching the parent provider so the embed
-                // page accepts us as a legit iframe load. Without these, some Filemoon
-                // variants block the SPA's API calls.
                 val loadHeaders = mutableMapOf<String, String>()
                 if (parentUrl != null) {
                     loadHeaders["Referer"] = parentUrl
@@ -328,12 +515,25 @@ open class FilemoonExtractor : Extractor() {
                 Log.d(TAG, "[Filemoon-WV] loading $link (referer=$parentUrl)")
                 webView.loadUrl(link, loadHeaders)
             }
-        } ?: throw Exception("Filemoon WebView fallback timed out (12s)")
+        } ?: throw Exception("Filemoon WebView fallback timed out (25s)")
 
         if (result.source.isBlank()) {
             throw Exception("Filemoon WebView fallback resolved empty source")
         }
         result
+    }
+
+    /**
+     * 2026-07-16 : les hôtes « Byse frontend » gn1r5n.org / weneverbeenfree.com sont servis par
+     *   VoirAnime (ex. LECTEUR MOON). Quand ils arrivent en BACKUP (l'user est sur un AUTRE
+     *   provider — ex. AnimeSama), le parent/référer par défaut (currentProvider = anime-sama.to)
+     *   est REFUSÉ par le WAF Filemoon → l'extraction échoue (serveur mort dans l'app alors que le
+     *   flux marche dans le navigateur). On force donc le référer sur le vrai site embarquant.
+     */
+    private fun byseParentUrl(currentDomain: String): String? = when {
+        currentDomain.contains("gn1r5n", ignoreCase = true) ||
+            currentDomain.contains("weneverbeenfree", ignoreCase = true) -> "https://voir-anime.to"
+        else -> null
     }
 
     private fun decryptPlayback(data: PlaybackData): String {

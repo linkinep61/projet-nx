@@ -484,6 +484,12 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
 
             // Download button — visible only for non-IPTV server items
             if (item is Settings.Server) {
+                // 2026-07-16 : appui LONG sur un serveur → le signaler comme « mauvais » (mauvais
+                //   épisode/saison/langue). Envoi GitHub géré par le fragment (qui a le videoType).
+                binding.root.setOnLongClickListener {
+                    settingsView.onServerReported?.invoke(item)
+                    true
+                }
                 val knownBad = isKnownWebViewOnlyServer(item.name)
                 binding.ivSettingDownload.visibility = View.VISIBLE
                 binding.ivSettingDownload.alpha = if (knownBad) 0.25f else 1.0f

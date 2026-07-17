@@ -1202,14 +1202,11 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     }
                     // Long-press menu contextuel — isLongClickable AVANT
                     binding.root.isLongClickable = true
+                    // 2026-07-16 : le favori est déjà accessible par le cœur à droite (D-pad droite),
+                    //   donc l'appui long TV sert directement à SIGNALER le serveur (mauvais match).
+                    //   Le fragment affiche ensuite la confirmation.
                     binding.root.setOnLongClickListener {
-                        val ctx = binding.root.context
-                        val label = if (isFav) "♥ Retirer du favori" else "♥ Marquer favori"
-                        androidx.appcompat.app.AlertDialog.Builder(ctx)
-                            .setTitle("Action sur ce serveur")
-                            .setItems(arrayOf(label)) { _, _ ->
-                                binding.ivSettingFavorite.performClick()
-                            }.show()
+                        settingsView.onServerReported?.invoke(item)
                         true
                     }
                 } else {

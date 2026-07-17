@@ -3,10 +3,16 @@ package com.streamflixreborn.streamflix.utils
 import android.util.Log
 import com.streamflixreborn.streamflix.extractors.Extractor
 import com.streamflixreborn.streamflix.models.Video
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 /**
@@ -244,7 +250,11 @@ stream4cf://rts2
 stream4cf://public-senat
 """.trimEnd()
 
-    suspend fun resolve(src: String): Video? = withContext(Dispatchers.IO) {
+    /**
+     * @param userInitiated true quand le USER clique sur la chaîne (affichage QR autorisé),
+     *                      false en pré-résolution fond (jamais de popup QR).
+     */
+    suspend fun resolve(src: String, userInitiated: Boolean = false): Video? = withContext(Dispatchers.IO) {
         // 2026-07-10 : pré-chargement des liens en dur RETIRÉ — testé, ils renvoient 403 (token mort).
         //   La vraie source fraîche = le git repoussé par le scraper GitHub Actions (CF côté serveur).
         val slug = src.removePrefix("stream4cf://").removePrefix("stream4free://").trim()
@@ -319,10 +329,32 @@ stream4cf://public-senat
         }.onFailure { Log.w(TAG, "WebView CF get KO: ${it.message}") }.getOrDefault("")
 
         val m3u8Wv = M3U8_REGEX.find(wvHtml)?.value
-        if (m3u8Wv == null) { Log.w(TAG, "resolve: pas de m3u8 même après WebView CF pour $slug"); return@withContext null }
-        Log.d(TAG, "resolve WebView CF OK: $slug → $m3u8Wv")
-        urlCache[slug] = m3u8Wv to System.currentTimeMillis()
-        videoOf(m3u8Wv)
+        if (m3u8Wv != null) {
+            Log.d(TAG, "resolve WebView CF OK: $slug → $m3u8Wv")
+            urlCache[slug] = m3u8Wv to System.currentTimeMillis()
+            return@withContext videoOf(m3u8Wv)
+        }
+
+        // QR bypass — DÉSACTIVÉ pour le moment (à réactiver quand prêt).
+        // La condition userInitiated empêche le QR de s'afficher pendant le batch pré-resolve.
+        // Seul un clic utilisateur sur une chaîne CF-bloquée déclenchera le QR.
+        if (isDeviceTv() && userInitiated) {
+            // TODO: RÉACTIVER — décommenter le bloc ci-dessous quand le QR sera prêt
+            // Log.i(TAG, "resolve: CF échoué sur TV — lancement QR bypass pour $slug")
+            // val m3u8FromPhone = showQrAndWaitForPhoneResolve(slug)
+            // if (m3u8FromPhone != null) {
+            //     Log.d(TAG, "resolve QR bypass OK: $slug → ${m3u8FromPhone.take(80)}")
+            //     urlCache[slug] = m3u8FromPhone to System.currentTimeMillis()
+            //     return@withContext videoOf(m3u8FromPhone)
+            // }
+            // Log.w(TAG, "resolve: QR bypass timeout/annulé pour $slug")
+            Log.w(TAG, "resolve: CF échoué sur TV pour $slug (QR bypass désactivé, userInitiated=true)")
+        } else if (isDeviceTv()) {
+            Log.w(TAG, "resolve: CF échoué sur TV pour $slug (pré-résolution fond, pas de QR)")
+        } else {
+            Log.w(TAG, "resolve: pas de m3u8 même après WebView CF pour $slug (non-TV)")
+        }
+        null
     }
 
     /**
@@ -401,4 +433,195 @@ stream4cf://public-senat
         ),
         type = "application/vnd.apple.mpegurl",
     )
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  QR BYPASS via Cloudflare Worker + D1
+    //  TV crée une session, affiche un QR vers la page Worker.
+    //  N'importe quel téléphone (iPhone/Android, avec ou sans ONYX) scanne,
+    //  résout le CF, et poste le m3u8 dans D1.
+    //  La TV poll le résultat.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private const val WORKER_API_URL = "https://streamflix-api.logami61250.workers.dev"
+    private const val QR_BYPASS_TIMEOUT_MS = 120_000L  // 2 min pour scanner le QR
+    private const val QR_POLL_INTERVAL_MS = 3_000L     // poll toutes les 3s
+    private val JSON_MEDIA = "application/json".toMediaType()
+
+    @Volatile private var cfQrDialog: android.app.AlertDialog? = null
+
+    private fun isDeviceTv(): Boolean {
+        val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance ?: return false
+        return try {
+            ctx.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
+        } catch (_: Throwable) { false }
+    }
+
+    /**
+     * Crée une session CF bypass sur le Worker D1, affiche un QR code sur la TV,
+     * et poll le résultat. N'importe quel téléphone peut scanner le QR.
+     */
+    private suspend fun showQrAndWaitForPhoneResolve(slug: String): String? {
+        val activity = com.streamflixreborn.streamflix.StreamFlixApp.currentActivity ?: run {
+            Log.w(TAG, "QR bypass: pas d'activity visible")
+            return null
+        }
+
+        // 1. Créer la session sur le Worker D1
+        val session = createBypassSession(slug)
+        if (session == null) {
+            Log.e(TAG, "QR bypass: impossible de créer la session Worker")
+            return null
+        }
+        val (token, pageUrl) = session
+        Log.d(TAG, "QR bypass: session créée, pageUrl=$pageUrl")
+
+        // 2. Afficher le QR dialog sur le main thread
+        val cancelled = CompletableDeferred<Boolean>()
+        withContext(Dispatchers.Main) {
+            showCfBypassQrDialog(activity, pageUrl) {
+                cancelled.complete(true)
+            }
+        }
+
+        // 3. Poll le résultat avec timeout
+        var pollCount = 0
+        val m3u8 = try {
+            withTimeoutOrNull(QR_BYPASS_TIMEOUT_MS) {
+                while (true) {
+                    if (cancelled.isCompleted) return@withTimeoutOrNull null
+                    pollCount++
+                    val result = pollBypassSession(token)
+                    if (result != null) {
+                        Log.d(TAG, "QR bypass: résultat reçu via D1 (poll #$pollCount): ${result.take(80)}")
+                        return@withTimeoutOrNull result
+                    }
+                    if (pollCount % 5 == 1) Log.d(TAG, "QR bypass: poll #$pollCount en attente (token=${token.take(12)}…)")
+                    delay(QR_POLL_INTERVAL_MS)
+                }
+                @Suppress("UNREACHABLE_CODE") null
+            }
+        } finally {
+            withContext(Dispatchers.Main) {
+                cfQrDialog?.dismiss()
+                cfQrDialog = null
+            }
+        }
+
+        return m3u8
+    }
+
+    /** POST /cf-bypass/create {slug} → {token, pageUrl} */
+    private fun createBypassSession(slug: String): Pair<String, String>? {
+        val body = JSONObject().apply { put("slug", slug) }.toString()
+        val req = Request.Builder()
+            .url("$WORKER_API_URL/cf-bypass/create")
+            .post(body.toByteArray(Charsets.UTF_8).toRequestBody(JSON_MEDIA))
+            .build()
+        return try {
+            client.newCall(req).execute().use { r ->
+                if (!r.isSuccessful) {
+                    Log.w(TAG, "createBypassSession: HTTP ${r.code}")
+                    return null
+                }
+                val json = JSONObject(r.body?.string() ?: return null)
+                val token = json.getString("token")
+                val pageUrl = json.getString("pageUrl")
+                token to pageUrl
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "createBypassSession KO: ${e.message}")
+            null
+        }
+    }
+
+    /** POST /cf-bypass/poll {token} → {status, m3u8Url?} */
+    private fun pollBypassSession(token: String): String? {
+        val body = JSONObject().apply { put("token", token) }.toString()
+        val req = Request.Builder()
+            .url("$WORKER_API_URL/cf-bypass/poll")
+            .post(body.toByteArray(Charsets.UTF_8).toRequestBody(JSON_MEDIA))
+            .build()
+        return try {
+            client.newCall(req).execute().use { r ->
+                if (!r.isSuccessful) return null
+                val json = JSONObject(r.body?.string() ?: return null)
+                if (json.optString("status") == "resolved") json.getString("m3u8Url") else null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "pollBypassSession: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Dialog QR code adapté TV (Leanback) — taille responsive, focusable pour la télécommande.
+     * Le QR pointe vers la page Worker (HTTPS, pas deep link → fonctionne partout).
+     */
+    private fun showCfBypassQrDialog(
+        activity: android.app.Activity,
+        qrContent: String,
+        onCancel: () -> Unit,
+    ) {
+        val dm = activity.resources.displayMetrics
+        val density = dm.density
+        val dialogWidth = (dm.widthPixels * 0.60f).toInt()
+        val qrSize = minOf(
+            (dialogWidth - (density * 64).toInt()).coerceAtLeast((density * 200).toInt()),
+            (dm.heightPixels * 0.45f).toInt().coerceAtLeast((density * 200).toInt()),
+        )
+        val bitmap = try { QrUtils.generate(qrContent, qrSize) } catch (e: Exception) {
+            Log.e(TAG, "QR generation failed: ${e.message}")
+            onCancel()
+            return
+        }
+
+        val imageView = android.widget.ImageView(activity).apply {
+            setImageBitmap(bitmap)
+            setBackgroundColor(android.graphics.Color.WHITE)
+            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+            adjustViewBounds = true
+            val pad = (density * 8).toInt()
+            setPadding(pad, pad, pad, pad)
+        }
+
+        val instructionsView = android.widget.TextView(activity).apply {
+            text = "Cloudflare bloqué sur TV.\nScannez ce QR code avec n'importe quel téléphone\npour débloquer la chaîne."
+            setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextColor(android.graphics.Color.WHITE)
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, (density * 12).toInt(), 0, 0)
+        }
+
+        val container = android.widget.LinearLayout(activity).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            setPadding(
+                (density * 24).toInt(),
+                (density * 16).toInt(),
+                (density * 24).toInt(),
+                (density * 12).toInt(),
+            )
+            isFocusable = true
+            isFocusableInTouchMode = true
+        }
+        container.addView(imageView, android.widget.LinearLayout.LayoutParams(qrSize, qrSize).apply {
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+        })
+        container.addView(instructionsView, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+        ))
+
+        cfQrDialog = android.app.AlertDialog.Builder(activity, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("Scan QR — Cloudflare")
+            .setView(container)
+            .setCancelable(true)
+            .setNegativeButton("Annuler") { _, _ -> onCancel() }
+            .setOnCancelListener { onCancel() }
+            .create()
+
+        cfQrDialog?.show()
+        cfQrDialog?.window?.setLayout(dialogWidth, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT)
+        container.requestFocus()
+    }
 }

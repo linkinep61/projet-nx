@@ -26,10 +26,9 @@ open class DoodLaExtractor : Extractor() {
         "https://doodstream.me",
         // 2026-06-02 : kokoflix.lol RETIRÉ — c'est un proxy multi-host de FS
         //   qui route selon le suffix /<XXX>_go.php : osaka_go.php = VOE (pas
-        //   Dood !), grandline_go.php = autre host. Le router auto le mettait
-        //   sur DoodLaExtractor qui échouait sur le vrai contenu (Voe).
-        //   VoeExtractor a maintenant kokoflix.lol/osaka_go.php dans son
-        //   rotatingDomain pour matcher correctement.
+        //   Dood !), grandline_go.php = autre host.
+        //   2026-07-13 : géré par KakaflixExtractor (proxy générique) qui suit
+        //   le redirect puis délègue à l'extracteur du domaine résolu.
     )
 
     private val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"

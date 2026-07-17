@@ -12,6 +12,10 @@ jobs:
   build-and-release:
     name: Build & Release APK
     runs-on: ubuntu-latest
+    env:
+      # Mappé au niveau job pour pouvoir être testé dans un `if:` d'étape
+      # (le contexte `secrets` n'est PAS accessible dans un `if:`, `env` oui).
+      PUBLIC_REPO_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -140,10 +144,34 @@ jobs:
         run: |
           cp "${{ steps.sign_apk_x86.outputs.signedFile }}" "onyx-${{ github.ref_name }}-x86.apk"
 
-      # --- Upload all APKs to the existing release ---
+      # --- Upload all APKs to the existing release (projet-nx) ---
       - name: Upload APKs to Release
         uses: softprops/action-gh-release@v2
         with:
+          files: |
+            onyx-${{ github.ref_name }}-mobile-tv.apk
+            onyx-${{ github.ref_name }}-tv.apk
+            onyx-${{ github.ref_name }}-x86.apk
+
+      # --- Mirror the SAME APKs to the PUBLIC repo (warbix-prog/ONYX) ---
+      # 2026-07-16 : publie automatiquement la release + les APKs sur le dépôt public
+      #   de distribution. Nécessite un secret PUBLIC_REPO_TOKEN (PAT avec droit
+      #   « Contents: write » sur warbix-prog/ONYX). Ne bloque pas le build si absent.
+      - name: Publish APKs to public repo (warbix-prog/ONYX)
+        if: ${{ env.PUBLIC_REPO_TOKEN != '' }}
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: warbix-prog/ONYX
+          token: ${{ env.PUBLIC_REPO_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: ONYX ${{ github.ref_name }}
+          body: |
+            ONYX ${{ github.ref_name }}
+
+            - `onyx-${{ github.ref_name }}-mobile-tv.apk` — Mobile + TV (ARM)
+            - `onyx-${{ github.ref_name }}-tv.apk` — Android TV (ARM)
+            - `onyx-${{ github.ref_name }}-x86.apk` — Émulateurs / TV Intel (x86)
           files: |
             onyx-${{ github.ref_name }}-mobile-tv.apk
             onyx-${{ github.ref_name }}-tv.apk

@@ -13,8 +13,8 @@ class StreamtapeExtractor : Extractor() {
 
     override val name = "Streamtape"
     override val mainUrl = "https://streamtape.com"
-    override val aliasUrls = listOf("https://streamta.site")
-    
+    override val aliasUrls = listOf("https://streamta.site", "https://strtape.cloud", "https://stape.fun")
+
 
     override suspend fun extract(link: String): Video {
         val linkJustParameter = link.replace(mainUrl, "")
@@ -22,16 +22,16 @@ class StreamtapeExtractor : Extractor() {
         val service = Extractor.createJsoupService<StreamtapeExtractorService>(mainUrl)
         val source = service.getSource(linkJustParameter)
 
-        // Streamtape uses rotating element IDs: 'botlink', 'norobotlink', 'ideoooolink', etc.
+        // Streamtape uses rotating element IDs: 'botlink', 'norobotlink', 'ideoolink', etc.
         // Try multiple regex patterns for different Streamtape page versions
         val html = source.html()
 
         val scriptRegexPatterns = listOf(
-            // New format: document.getElementById('norobotlink').innerHTML = '...' + ('...').substring(N)
+            // Old format: document.getElementById('norobotlink').innerHTML = '...' + ('...').substring(N)
             Regex("""document\.getElementById\('norobotlink'\)\.innerHTML\s*=\s*'([^']+)'\s*\+\s*\('([^']+)'\)\.substring\(([0-9]+)\)"""),
-            // Old format: document.getElementById('botlink').innerHTML = '...' + ('...').substring(N)
+            // Current format: document.getElementById('botlink').innerHTML = '...' + ('...').substring(N)
             Regex("""document\.getElementById\('botlink'\)\.innerHTML\s*=\s*'([^']+)'\s*\+\s*\('([^']+)'\)\.substring\(([0-9]+)\)"""),
-            // Generic: any getElementById with innerHTML assignment
+            // Generic: any getElementById with *link ID and innerHTML assignment
             Regex("""document\.getElementById\('[^']*link'\)\.innerHTML\s*=\s*'([^']+)'\s*\+\s*\('([^']+)'\)\.substring\(([0-9]+)\)"""),
         )
 
@@ -42,23 +42,25 @@ class StreamtapeExtractor : Extractor() {
         val paramString = scriptMatch.groupValues[2]
         val substringIndex = scriptMatch.groupValues[3].toInt()
 
-        // Applica substring per ottenere i parametri corretti
+        // Concat baseUrl + remaining params to build the full get_video URL.
+        // baseUrl is typically "//streamtape.com/get_video?id=" and cleanParams
+        // starts with the id value followed by "&expires=...&ip=...&token=...".
+        // Previous code tried to parse each param individually but Streamtape
+        // moved the id= into the baseUrl part → "video id not found" crash.
         val cleanParams = paramString.substring(substringIndex)
+        var finalVideoUrl = baseUrl + cleanParams
 
-        // Build the video URL from baseUrl + cleanParams
-        val tokenRegex = Regex("token=([^&']+)")
-        val token = tokenRegex.find(cleanParams)?.groupValues?.get(1) ?: throw Exception("token not found")
+        // Ensure scheme
+        if (finalVideoUrl.startsWith("//")) {
+            finalVideoUrl = "https:$finalVideoUrl"
+        } else if (!finalVideoUrl.startsWith("http")) {
+            finalVideoUrl = "$mainUrl$finalVideoUrl"
+        }
 
-        // Reconstruct the full get_video URL
-        val idRegex = Regex("id=([^&]+)")
-        val expiresRegex = Regex("expires=([^&]+)")
-        val ipRegex = Regex("ip=([^&]+)")
-
-        val videoId = idRegex.find(cleanParams)?.groupValues?.get(1) ?: throw Exception("video id not found")
-        val expires = expiresRegex.find(cleanParams)?.groupValues?.get(1) ?: throw Exception("expires not found")
-        val ip = ipRegex.find(cleanParams)?.groupValues?.get(1) ?: throw Exception("ip not found")
-
-        val finalVideoUrl = "$mainUrl/get_video?id=$videoId&expires=$expires&ip=$ip&token=$token&stream=1"
+        // Append &stream=1 if not present (forces redirect to actual mp4)
+        if (!finalVideoUrl.contains("stream=")) {
+            finalVideoUrl += "&stream=1"
+        }
 
         val response = service.getVideo(finalVideoUrl)
         val sourceUrl = (response.raw() as okhttp3.Response).networkResponse?.request?.url?.toString()

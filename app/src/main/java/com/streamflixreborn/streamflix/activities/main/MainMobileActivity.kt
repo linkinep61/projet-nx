@@ -46,7 +46,9 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import com.streamflixreborn.streamflix.utils.NetworkClient
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -689,8 +691,29 @@ class MainMobileActivity : FragmentActivity() {
         val data = intent.data ?: return false
 
         if (data.scheme == "streamflix" && data.host == "resolve") {
+            val type = data.getQueryParameter("type")
+            val slug = data.getQueryParameter("slug")
+
+            // Stream4Free QR bypass via Worker D1 : le phone résout le CF (écran visible
+            // → Turnstile passe) et poste le m3u8 dans la base D1 (le TV poll le résultat).
+            // workerToken = session D1, workerApi = URL du Worker.
+            val workerToken = data.getQueryParameter("workerToken")
+            val workerApi = data.getQueryParameter("workerApi")
+            if (type == "stream4free" && !slug.isNullOrBlank() && !workerToken.isNullOrBlank()) {
+                Log.d("ResolverWS", "Stream4Free QR bypass (D1): slug=$slug workerToken=$workerToken")
+                resolveStream4FreeViaWorker(workerToken, workerApi ?: "https://streamflix-api.logami61250.workers.dev", slug)
+                return true
+            }
+
+            // Fallback ancien flow WebSocket (SerienStream, etc.)
             val ws = data.getQueryParameter("ws") ?: return false
             val token = data.getQueryParameter("token") ?: return false
+
+            if (type == "stream4free" && !slug.isNullOrBlank()) {
+                Log.d("ResolverWS", "Stream4Free QR bypass (WS legacy): slug=$slug ws=$ws token=$token")
+                resolveStream4Free(ws, token, slug)
+                return true
+            }
 
             Log.d("ResolverWS", "WS: $ws")
 
@@ -716,6 +739,102 @@ class MainMobileActivity : FragmentActivity() {
                 Intent(this@MainMobileActivity, BypassWebViewActivity::class.java)
                     .putExtra(BypassWebViewActivity.EXTRA_URL, payload.url)
             )
+        }
+    }
+
+    /**
+     * QR bypass Stream4Free via Worker D1 : le phone résout le CF directement
+     * (son écran visible fait passer le Turnstile), puis poste le m3u8 dans D1.
+     * La TV poll le résultat depuis le Worker.
+     */
+    private fun resolveStream4FreeViaWorker(workerToken: String, workerApi: String, slug: String) {
+        Toast.makeText(this, "Résolution Stream4Free en cours…", Toast.LENGTH_LONG).show()
+
+        lifecycleScope.launch {
+            val video = try {
+                withContext(Dispatchers.IO) {
+                    com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest
+                        .resolve("stream4cf://$slug")
+                }
+            } catch (e: Exception) {
+                Log.e("ResolverWS", "Stream4Free resolve KO: ${e.message}", e)
+                null
+            }
+
+            if (video == null) {
+                Toast.makeText(this@MainMobileActivity, "Échec résolution Stream4Free", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+
+            val m3u8Url = video.source
+            Log.d("ResolverWS", "Stream4Free résolu via D1: ${m3u8Url.take(80)}")
+
+            // Poster le résultat dans D1 via le Worker API
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    val json = org.json.JSONObject().apply {
+                        put("token", workerToken)
+                        put("m3u8Url", m3u8Url)
+                    }.toString()
+                    val req = okhttp3.Request.Builder()
+                        .url("$workerApi/cf-bypass/submit")
+                        .post(json.toByteArray(Charsets.UTF_8).toRequestBody(
+                            "application/json".toMediaType()))
+                        .build()
+                    com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest
+                        .let { /* use shared client via reflection or create one */ }
+                    okhttp3.OkHttpClient().newCall(req).execute().use { it.isSuccessful }
+                } catch (e: Exception) {
+                    Log.e("ResolverWS", "Worker submit KO: ${e.message}", e)
+                    false
+                }
+            }
+
+            Toast.makeText(
+                this@MainMobileActivity,
+                if (ok) "Stream4Free débloqué sur TV !" else "Erreur envoi au serveur",
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
+    }
+
+    /**
+     * QR bypass Stream4Free (LEGACY WebSocket) : le phone résout le CF directement
+     * puis envoie le m3u8 à la TV via WebSocket.
+     */
+    private fun resolveStream4Free(ws: String, token: String, slug: String) {
+        Toast.makeText(this, "Résolution Stream4Free en cours…", Toast.LENGTH_LONG).show()
+
+        lifecycleScope.launch {
+            val video = try {
+                withContext(Dispatchers.IO) {
+                    com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest
+                        .resolve("stream4cf://$slug")
+                }
+            } catch (e: Exception) {
+                Log.e("ResolverWS", "Stream4Free resolve KO: ${e.message}", e)
+                null
+            }
+
+            if (video == null) {
+                Toast.makeText(
+                    this@MainMobileActivity,
+                    "Échec résolution Stream4Free",
+                    Toast.LENGTH_SHORT,
+                ).show()
+                return@launch
+            }
+
+            val m3u8Url = video.source
+            Log.d("ResolverWS", "Stream4Free résolu: ${m3u8Url.take(80)}")
+
+            sendWebSocketDone(ws, token, m3u8Url)
+
+            Toast.makeText(
+                this@MainMobileActivity,
+                "Stream4Free débloqué sur TV !",
+                Toast.LENGTH_SHORT,
+            ).show()
         }
     }
 

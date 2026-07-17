@@ -2244,7 +2244,8 @@ object LiveTvHubProvider : Provider, IptvProvider {
         // REPLI (git injoignable) : chaînes de la liste EN DUR en `stream4cf://` → résolues via le
         //   bypass WebView CF (cache 24h + auto-réparation). Marche seulement si le CF passe.
         if (com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.isCfUrl(server.src)) {
-            return com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.resolve(server.src)
+            // userInitiated=true : le user a cliqué sur cette chaîne → QR autorisé (quand réactivé)
+            return com.streamflixreborn.streamflix.utils.Stream4FreeResolverCfTest.resolve(server.src, userInitiated = true)
                 ?: throw Exception("Stream4Free resolver failed for ${server.src}")
         }
         // 2026-07-10 (user "supprime LumiChat partout") : résolveur LumiChat RETIRÉ.

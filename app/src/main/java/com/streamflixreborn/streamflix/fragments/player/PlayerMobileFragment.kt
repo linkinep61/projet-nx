@@ -320,6 +320,47 @@ class PlayerMobileFragment : Fragment() {
               console.log('SEEKPP activate paused='+(v?v.paused:'?'));
             }catch(e){console.log('SEEKPP err '+e);}})();
         """
+
+        // 2026-07-16 : SwiftFlow (swiftflow.lol) — player Plyr à ad-gate. Le bouton « Regarder
+        //   maintenant » ouvre une pub via window.open PUIS débloque le player. On neutralise
+        //   window.open (renvoie une fausse fenêtre → le handler croit la pub ouverte et débloque
+        //   SANS ouvrir de vraie pub), on auto-clique l'ad-gate, plein écran + play. Le mp4
+        //   citron-edge signé se charge alors dans le <video> natif (piloté par nos contrôles miroir).
+        private const val SWIFTFLOW_PLAY_JS = """
+            (function(){
+                try { window.open=function(){return {closed:false,focus:function(){},blur:function(){},close:function(){},location:{href:''}};}; }catch(e){}
+                try {
+                    var css=document.createElement('style');
+                    css.textContent='html,body{margin:0!important;padding:0!important;background:#000!important;'
+                        +'width:100vw!important;height:100vh!important;overflow:hidden!important;}'
+                        +'video,.plyr,.plyr__video-wrapper,.plyr--video{width:100vw!important;height:100vh!important;'
+                        +'position:fixed!important;top:0!important;left:0!important;object-fit:contain!important;'
+                        +'z-index:2147483000!important;background:#000!important;}'
+                        +'a[target="_blank"],[class*="popup"],[id*="popup"],[class*="interstitial"]{display:none!important;pointer-events:none!important;}';
+                    (document.head||document.documentElement).appendChild(css);
+                } catch(e){}
+                function gate(){
+                    var hit=false;
+                    try {
+                        document.querySelectorAll('button,a,[role="button"],div,span').forEach(function(b){
+                            if(b.querySelector && b.querySelector('button,a')) return; // que les feuilles
+                            var t=((b.textContent||b.innerText||'')+'').trim().toLowerCase();
+                            if(t.indexOf('regarder maintenant')>=0 && t.length<40){ try{b.click();hit=true;}catch(e){} }
+                        });
+                    } catch(e){}
+                    return hit;
+                }
+                function go(){
+                    try {
+                        gate();
+                        var v=document.querySelector('video');
+                        if(v){ try{ v.muted=false; v.play(); }catch(e){} }
+                        document.querySelectorAll('a[target="_blank"]').forEach(function(a){ try{a.remove();}catch(e){} });
+                    } catch(e){}
+                }
+                go(); var n=0; var t=setInterval(function(){ n++; go(); if(n>25)clearInterval(t); }, 800);
+            })();
+        """
     }
 
     /** Flag : a-t-on déjà auto-sélectionné un sous-titre OpenSubtitles ?
@@ -1214,6 +1255,50 @@ class PlayerMobileFragment : Fragment() {
                                 // 2026-07-08 : re-trier les serveurs pour que les cœurs
                                 // remontent immédiatement en tête (VOD + IPTV).
                                 viewModel.resortServers()
+                            }
+
+                            // 2026-07-16 : appui LONG sur un serveur → le signaler comme « mauvais »
+                            //   (mauvaise saison/épisode/langue). Envoi GitHub (onyx-crash-reports),
+                            //   dédup 1×/serveur. Pour les bêtatesteurs.
+                            binding.settings.onServerReported = { server ->
+                                val vt = args.videoType
+                                val title = when (vt) {
+                                    is com.streamflixreborn.streamflix.models.Video.Type.Episode -> vt.tvShow.title
+                                    is com.streamflixreborn.streamflix.models.Video.Type.Movie -> vt.title
+                                } ?: "?"
+                                val episode = (vt as? com.streamflixreborn.streamflix.models.Video.Type.Episode)?.number ?: 0
+                                // Saison RÉELLE depuis l'id (« …/saisonN/… ») car AnimeSama met la langue
+                                //   dans season.number ; fallback = season.number.
+                                val season = Regex("(?i)saison\\s*(\\d+)").find(args.id)?.groupValues?.get(1)?.toIntOrNull()
+                                    ?: (vt as? com.streamflixreborn.streamflix.models.Video.Type.Episode)?.season?.number ?: 0
+                                val source = when {
+                                    server.id.startsWith("bkreg::") -> server.id.removePrefix("bkreg::").substringBefore("::")
+                                    server.name.contains(" · ") -> server.name.substringBefore(" · ")
+                                    else -> server.name
+                                }
+                                androidx.appcompat.app.AlertDialog.Builder(requireContext())
+                                    .setTitle("Signaler ce serveur")
+                                    .setMessage("Signaler « ${server.name} » comme MAUVAIS (mauvaise saison/épisode/langue) pour « $title » ?")
+                                    .setNegativeButton("Annuler", null)
+                                    .setPositiveButton("Signaler") { _, _ ->
+                                        com.streamflixreborn.streamflix.utils.BrokenSourceReporter.reportBadMatch(
+                                            serverName = server.name,
+                                            sourceLabel = source,
+                                            resolvedUrl = args.id,
+                                            contentTitle = title,
+                                            season = season,
+                                            episode = episode,
+                                        ) { ok ->
+                                            view?.post {
+                                                android.widget.Toast.makeText(
+                                                    requireContext(),
+                                                    if (ok) "Serveur signalé, merci !" else "Échec du signalement",
+                                                    android.widget.Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        }
+                                    }
+                                    .show()
                             }
 
                             // 2026-06-03 v2 (user "Elles disparaissent") : ne CLEAR que sur
@@ -4655,7 +4740,14 @@ class PlayerMobileFragment : Fragment() {
                 video.source.substringBefore('?').endsWith(".mpd", ignoreCase = true)
                 || video.type == androidx.media3.common.MimeTypes.APPLICATION_MPD
             )
-            val teeFactory = com.streamflixreborn.streamflix.download.TeeDataSourceFactory(dataSourceFactory)
+            // 2026-07-16 : sources OnlyFlix (SeekStreaming/EmbedSeek) = HLS `…/hlsmod/…` dont les
+            //   segments sont du TS caché dans des PNG. On enveloppe le DataSource pour stripper
+            //   l'en-tête PNG à la volée (cf. SeekStreamPngDataSource). N'affecte que ces sources.
+            val hlsBaseFactory: androidx.media3.datasource.DataSource.Factory =
+                if (video.source.contains("/tt/master.m3u8", ignoreCase = true) || video.source.contains("/hlsmod/", ignoreCase = true))
+                    com.streamflixreborn.streamflix.utils.SeekStreamPngDataSource.Factory(dataSourceFactory)
+                else dataSourceFactory
+            val teeFactory = com.streamflixreborn.streamflix.download.TeeDataSourceFactory(hlsBaseFactory)
             if (isHls) {
                 // 2026-05-09 v23 : retry 403 sur HLS Live (cf PlayerTvFragment).
                 val errorPolicy = object : androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy() {
@@ -7315,7 +7407,7 @@ class PlayerMobileFragment : Fragment() {
         //   un lecteur MIROIR (WebPlayerMirror) sur la PlayerView → NOS contrôles natifs pilotent la
         //   vidéo web (play/pause/seek), mobile ET télécommande TV. Les autres embeds gardent
         //   l'overlay plein écran sur la racine.
-        val webViewIsPlayer = embedUrl.contains("seekplayer") || embedUrl.contains("abyss") || embedUrl.contains("4meplayer")
+        val webViewIsPlayer = embedUrl.contains("seekplayer") || embedUrl.contains("embedseek") || embedUrl.contains("abyss") || embedUrl.contains("4meplayer") || embedUrl.contains("swiftflow")
         val nativeVideoOverlay = binding.pvPlayer.overlayFrameLayout
         val useNativeControls = webViewIsPlayer && nativeVideoOverlay != null
         val rootView: ViewGroup = if (useNativeControls) nativeVideoOverlay!! else binding.root as ViewGroup
@@ -7369,13 +7461,20 @@ class PlayerMobileFragment : Fragment() {
         //   inextractible headless (flux révélé seulement en lecture réelle) → on le JOUE dans
         //   l'overlay WebView comme abyss : nav top-level hors seekplayer bloquée (tue les redirects
         //   pub), pubs coupées, autoplay + plein écran injectés.
-        val isSeekPlayer = embedUrl.contains("seekplayer")
+        // 2026-07-16 : embedseek = MÊME player OnlyFlix que seekplayer → même traitement.
+        val isSeekPlayer = embedUrl.contains("seekplayer") || embedUrl.contains("embedseek")
+        // 2026-07-16 : SwiftFlow (swiftflow.lol) — player Movix Plyr à ad-gide (« Regarder
+        //   maintenant »). Même famille de traitement que seekplayer (nav-block, ad-block,
+        //   overlay lecteur), mais avec son propre JS d'auto-clic sur l'ad-gate.
+        val isSwiftFlow = embedUrl.contains("swiftflow")
         val seekAdHosts = listOf(
             "boredomcuff", "spleniidizzy", "gappedpeatmen", "popads", "popcash", "propeller",
             "onclick", "adsterra", "hilltopads", "monetag", "clickadu", "doubleclick",
             "googlesyndication", "syndication", "exoclick", "juicyads", "trafficjunky",
+            // 2026-07-16 : pubs vues sur l'ad-gate swiftflow.lol
+            "eminentpercentvandalism",
         )
-        if (isSeekPlayer) {
+        if (isSeekPlayer || isSwiftFlow) {
             wv.settings.userAgentString = com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA
         }
         val abyssNavAllow = listOf(
@@ -7412,7 +7511,15 @@ class PlayerMobileFragment : Fragment() {
                 //   (shouldInterceptRequest), pas en navigation → non impacté.
                 if (isSeekPlayer) {
                     val nh = request?.url?.host ?: return false
-                    if (!nh.contains("seekplayer.")) { Log.d("PlayerMobile", "Seek NAV BLOCKED: $nh"); return true }
+                    if (!(nh.contains("seekplayer.") || nh.contains("embedseek."))) { Log.d("PlayerMobile", "Seek NAV BLOCKED: $nh"); return true }
+                    return false
+                }
+                // SwiftFlow : seule la page player swiftflow.lol doit naviguer top-level.
+                //   Le mp4 citron-edge + le signing cheksum se chargent en RESSOURCE (non impacté).
+                //   Toute autre navigation = redirect pub de l'ad-gate → bloquée.
+                if (isSwiftFlow) {
+                    val nh = request?.url?.host ?: return false
+                    if (!nh.contains("swiftflow.")) { Log.d("PlayerMobile", "SwiftFlow NAV BLOCKED: $nh"); return true }
                     return false
                 }
                 if (!isAbyssEmbed) return false
@@ -7426,11 +7533,11 @@ class PlayerMobileFragment : Fragment() {
             ): WebResourceResponse? {
                 val url = request?.url?.toString() ?: return null
 
-                // SeekStreaming : coupe les hôtes de pub (le player charge sinon des onclick/pop).
-                if (isSeekPlayer) {
+                // SeekStreaming / SwiftFlow : coupe les hôtes de pub (le player charge sinon des onclick/pop).
+                if (isSeekPlayer || isSwiftFlow) {
                     val sh = request?.url?.host ?: ""
                     if (seekAdHosts.any { sh.contains(it, ignoreCase = true) }) {
-                        Log.d("PlayerMobile", "Seek AD BLOCKED: $sh")
+                        Log.d("PlayerMobile", "Seek/SwiftFlow AD BLOCKED: $sh")
                         return WebResourceResponse("text/plain", "UTF-8",
                             java.io.ByteArrayInputStream("".toByteArray()))
                     }
@@ -7580,6 +7687,12 @@ class PlayerMobileFragment : Fragment() {
                     view?.evaluateJavascript(SEEKPLAYER_PLAY_JS, null)
                     view?.postDelayed({ view.evaluateJavascript(SEEKPLAYER_PLAY_JS, null) }, 2500)
                 }
+                // ── SwiftFlow : auto-clic ad-gate « Regarder maintenant » + plein écran + play ──
+                if (isSwiftFlow) {
+                    view?.evaluateJavascript(SWIFTFLOW_PLAY_JS, null)
+                    view?.postDelayed({ view.evaluateJavascript(SWIFTFLOW_PLAY_JS, null) }, 1500)
+                    view?.postDelayed({ view.evaluateJavascript(SWIFTFLOW_PLAY_JS, null) }, 3500)
+                }
             }
 
             // 2026-05-21 : accepter les certs SSL invalides dans l'overlay player
@@ -7611,7 +7724,7 @@ class PlayerMobileFragment : Fragment() {
 
         // ── Hint text ──
         val hint = TextView(ctx).apply {
-            text = if (isSeekPlayer) "Astuce : appuyez plusieurs fois sur ▶ / ⏸"
+            text = if (isSeekPlayer || isSwiftFlow) "Astuce : appuyez plusieurs fois sur ▶ / ⏸"
                 else if (isDaddyLiveEmbed) "Chargement de la vidéo…"
                 else "Appuyez sur le bouton play pour lancer la vidéo"
             setTextColor(Color.WHITE)
@@ -7652,6 +7765,11 @@ class PlayerMobileFragment : Fragment() {
             // SeekStreaming : chargement DIRECT de l'embed (le player vidstack joue dedans).
             Log.d("PlayerMobile", "Loading SeekStreaming directly: ${embedUrl.take(100)}")
             wv.loadUrl(embedUrl)
+        } else if (isSwiftFlow) {
+            // SwiftFlow : chargement DIRECT du player swiftflow.lol (le Plyr joue dedans après
+            //   auto-clic de l'ad-gate). Referer swiftflow.lol pour le signing cheksum/citron.
+            Log.d("PlayerMobile", "Loading SwiftFlow directly: ${embedUrl.take(100)}")
+            wv.loadUrl(embedUrl, mapOf("Referer" to "https://swiftflow.lol/"))
         } else {
             // Other embeds: use iframe wrapper (page expects to be in an iframe)
             val baseHost = if (isAbyssEmbed) "https://dessinanime.cc/" else "https://frembed.cyou/"

@@ -324,13 +324,11 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
 
     fun ignoreSource(source: String, href: String): Boolean {
         if (source.trim().equals("Dood.Stream", ignoreCase = true) && href.contains("/bigwar5/")) return true
-        // kakaflix.lol is a phantom domain that FrenchStream lists for the
-        // VFF/VFQ/VOSTFR variants of Dood/Voe/Filmoon but every endpoint
-        // returns a clean 404 from the LiteSpeed server (verified across
-        // multiple URLs, methods, headers, networks). Filter them out so
-        // the user only sees working sources (typically the Default entry
-        // which routes through kokoflix.lol → playmogo.com).
-        if (href.contains("kakaflix.lol", ignoreCase = true)) return true
+        // 2026-07-13 : kakaflix.lol MORT mais le redirect proxy générique
+        // (KakaflixExtractor) gère maintenant kokoflix + kakaflix + newPlayer.
+        // On ne filtre plus kakaflix ici — l'extracteur essaiera et échouera
+        // proprement (dns-fail → timeout rapide) au lieu de masquer la source.
+        // Si le domaine revient un jour, ça remarchera automatiquement.
         return false
     }
 
@@ -1620,7 +1618,12 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
     }
 
     override suspend fun getVideo(server: Video.Server): Video {
-        val finalUrl = if (server.src.contains("kokoflix.lol", ignoreCase = true)) {
+        // Logique calquée sur l'upstream : kokoflix/kakaflix/newPlayer sont des
+        // proxies de redirection. On suit le redirect côté provider (headers FS)
+        // puis on passe l'URL résolue à l'extracteur approprié.
+        val finalUrl = if (server.src.contains("kokoflix.lol", ignoreCase = true) ||
+            server.src.contains("kakaflix.lol", ignoreCase = true) ||
+            server.src.contains("newPlayer.php", ignoreCase = true)) {
             val response = service.getRedirectLink(server.src)
                 .let { response -> response.raw() as okhttp3.Response }
             response.request.url.toString()

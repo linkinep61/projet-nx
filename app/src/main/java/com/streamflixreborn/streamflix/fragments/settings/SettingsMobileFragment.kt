@@ -604,6 +604,11 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             true
         }
 
+        findPreference<Preference>("p_settings_github")?.setOnPreferenceClickListener {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/warbix-prog/ONYX")))
+            true
+        }
+
         findPreference<Preference>("p_settings_kofi")?.setOnPreferenceClickListener {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://ko-fi.com/nanico")))
             true
