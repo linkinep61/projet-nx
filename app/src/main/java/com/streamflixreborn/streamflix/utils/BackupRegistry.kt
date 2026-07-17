@@ -5,6 +5,7 @@ import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.providers.CloudstreamProvider
 import com.streamflixreborn.streamflix.providers.CoflixSourceProvider
 import com.streamflixreborn.streamflix.providers.CoflixWikiProvider
+import com.streamflixreborn.streamflix.providers.DessinAnimeNetProvider
 import com.streamflixreborn.streamflix.providers.CpasmieuxProvider
 import com.streamflixreborn.streamflix.providers.CpasmalProvider
 import com.streamflixreborn.streamflix.providers.MovieboxProvider
@@ -69,6 +70,7 @@ object BackupRegistry {
         "Webflix" to "Webflix",
         "Coflix Boston" to "Coflix Boston",
         "CoflixWiki" to "CoflixWiki",
+        "DessinAnimeNet" to "DessinAnime.net",
         "AniCloud" to "AniCloud (animes)",
         "Papadustream V2" to "Papadustream V2",
         "Embed" to "Embed (Videasy VOSTFR)",
@@ -119,15 +121,12 @@ object BackupRegistry {
     )
     private const val CF_SECOND_WAVE_MS = 5000L
 
-    // 2026-07-12 (user « les providers films/séries n'ont pas beaucoup de manga côté série et font
-    //   des mauvais matchs ; on les garde SEULEMENT pour les films → ça réduit les CF et le bazar
-    //   sur les séries ») : ces backups (orientés films) ne sont interrogés QUE pour les FILMS.
-    //   Pour les séries/épisodes, on les SAUTE → moins de CF, moins de faux matchs. Les séries
-    //   restent couvertes par les providers anime + Wiflix + les backups sans CF (Moviebox, Movix,
-    //   Frembed, Nakios, CoflixWiki…).
+    // 2026-07-14 (user : « à la base on parlait QUE de Moviebox ») : le blocage films-only
+    //   ne visait QUE Moviebox (qui ramenait la mauvaise saison sur les séries). Les autres
+    //   providers (Cpasmal, Cpasmieux, aplouf, Papadustream, FrenchStream, 1Jour1Film) avaient
+    //   été embarqués à tort → RETIRÉS : ils tournent de nouveau sur les séries/épisodes aussi.
+    //   Moviebox reste seul bridé aux films.
     private val FILM_ONLY_PROVIDERS = setOf(
-        "Cpasmal", "Cpasmieux", "aplouf", "Papadustream", "Papadustream V2", "FrenchStream", "1Jour1Film",
-        // 2026-07-12 (user « Moviebox ramène la mauvaise saison sur les séries ») : films uniquement.
         "Moviebox"
     )
 
@@ -283,9 +282,28 @@ object BackupRegistry {
      *  saison → ACCEPTÉ (beaucoup de fiches S1 n'ont pas de "Saison 1"). Films → toujours ok. */
     fun seasonTitleOk(candidateTitle: String, isMovieTarget: Boolean, targetSeason: Int): Boolean {
         if (isMovieTarget) return true
-        val m = Regex("""(?i)\bsaison\s*(\d+)|\bseason\s*(\d+)|\bs(\d+)\b""").find(candidateTitle) ?: return true
-        val declared = (m.groupValues[1].ifBlank { m.groupValues[2].ifBlank { m.groupValues[3] } }).toIntOrNull() ?: return true
-        return declared == targetSeason
+        // 1) Forme explicite « Saison N » / « Season N » / « SN ».
+        Regex("""(?i)\bsaison\s*(\d+)|\bseason\s*(\d+)|\bs(\d+)\b""").find(candidateTitle)?.let { m ->
+            val declared = (m.groupValues[1].ifBlank { m.groupValues[2].ifBlank { m.groupValues[3] } }).toIntOrNull()
+            if (declared != null) return declared == targetSeason
+        }
+        // 2) 2026-07-16 (bug VoirAnime : « Classroom of the Elite 4 (VF) » = saison 4 accepté pour S1) :
+        //    les sites anime (VoirAnime…) nomment leurs saisons « Titre N » — un NUMÉRO en SUFFIXE,
+        //    éventuellement suivi d'un tag langue/qualité NU ou ENTRE PARENTHÈSES (« 4 (VF) », « 4 VOSTFR »).
+        //    On retire d'abord ces décorations finales, puis on lit le numéro en bout de titre.
+        //    Numéro 2..50 uniquement (évite « 100 »/années/titres-nombres), n° 1 = base laissé permissif.
+        var base = candidateTitle.trim()
+        repeat(3) {
+            base = base
+                .replace(Regex("""(?i)\s*[\(\[]\s*(?:vf|vostfr|vost|vo|multi|fr|hd|fhd|uhd|4k|\d{3,4}p)[^)\]]*[\)\]]\s*$"""), "")
+                .replace(Regex("""(?i)\s+(?:vf|vostfr|vost|vo|multi|fr|hd|fhd|uhd|4k|\d{3,4}p)\s*$"""), "")
+                .trim()
+        }
+        val trailing = Regex("""(?:^|\s)(\d{1,2})$""").find(base)?.groupValues?.get(1)?.toIntOrNull()
+        if (trailing != null && trailing in 2..50) {
+            return trailing == targetSeason
+        }
+        return true
     }
 
     fun workMatches(candidateTitle: String, knownTitles: Collection<String>, targetYear: Int?, isMovie: Boolean): Boolean {
@@ -445,7 +463,7 @@ object BackupRegistry {
         return t.trim()
     }
 
-    private fun keyOf(videoType: Video.Type, titleHint: String?): Key = when (videoType) {
+    private fun keyOf(videoType: Video.Type, titleHint: String?, episodeIdHint: String? = null): Key = when (videoType) {
         is Video.Type.Movie -> Key(
             title = cleanTitle(videoType.title.ifBlank { titleHint.orEmpty() }),
             year = videoType.releaseDate.take(4).toIntOrNull(),
@@ -459,7 +477,11 @@ object BackupRegistry {
             //   pour les backups. AnimeSama natif garde son `0` (il joue via son propre id d'épisode,
             //   il n'utilise pas key.season). Bénéficie aux DEUX familles : scrapers (FrenchManga
             //   seasonOk → « Saison 1 ») ET providers TMDB (Embed/Movix/Cloudstream/Frembed → API saison 1).
-            season = videoType.season.number.let { if (it <= 0) 1 else it },
+            // 2026-07-13 : VRAIE saison depuis l'id d'épisode si présent (« …/saison4/… » → 4).
+            //   Sur AnimeSama VF+VOSTFR, videoType.season.number = la LANGUE (1/2), pas la saison.
+            //   L'id, lui, porte le vrai dossier « saisonN ». Fallback = season.number (≤0 → 1).
+            season = (episodeIdHint?.let { Regex("(?i)saison\\s*(\\d+)").find(it)?.groupValues?.get(1)?.toIntOrNull() })
+                ?: videoType.season.number.let { if (it <= 0) 1 else it },
             episode = videoType.number,
             isMovie = false,
         )
@@ -484,8 +506,12 @@ object BackupRegistry {
         //   bon anime JP et gaspillent réseau/CPU pendant la lecture. Si true : on NE lance QUE
         //   les backups ANIME (groupe ANIME dans la boucle générique) + Embed (Videasy VOSTFR).
         isAnimeProvider: Boolean = false,
+        // 2026-07-13 : id d'épisode brut du provider (ex AnimeSama « slug/saison4/vostfr/2 »).
+        //   Pour les anime VF+VOSTFR, `videoType.season.number` = la LANGUE (VOSTFR=1), PAS la vraie
+        //   saison — celle-ci n'est QUE dans ce chemin. On l'extrait dans keyOf (« saison4 » → 4).
+        episodeIdHint: String? = null,
     ): Flow<List<Video.Server>> = channelFlow {
-        val key = keyOf(videoType, titleHint)
+        val key = keyOf(videoType, titleHint, episodeIdHint)
 
         // 2026-07-04 : si tmdbId est null mais qu'on a un titre, on RÉSOUT le tmdbId
         //   via TMDB Search.multi → débloque Nakios/Movix/Embed/Webflix pour les
@@ -703,6 +729,19 @@ object BackupRegistry {
             }
             result
         } }
+        // 2026-07-14 : DessinAnime.net (dessins animés + animes FR). CMS turc, structure propre
+        //   (saison/épisode dans l'URL → zéro devinette d'id). Résolution POST /ajax/embed →
+        //   iframe (emmmmbed & co, extracteurs existants). Matching titre STRICT.
+        launch { emit("DessinAnimeNet") {
+            var result = emptyList<Video.Server>()
+            for (titleTry in knownTitles) {
+                if (titleTry.isBlank()) continue
+                result = if (key.isMovie) DessinAnimeNetProvider.getMovieSources(titleTry)
+                          else DessinAnimeNetProvider.getEpisodeSources(titleTry, key.season, key.episode)
+                if (result.isNotEmpty()) break
+            }
+            result
+        } }
         // 2026-07-11 : Cpasmieux (site DataLife FR streaming, VF/VOSTFR). Matching STRICT
         //   titre+année (film ↔ série discriminés par le « - s N e E » du titre de résultat).
         //   Serveurs data-url délégués aux extracteurs existants (Uqload/Filemoon/Dood/Vidzy/
@@ -828,7 +867,7 @@ object BackupRegistry {
             //   Identité par id (findSubjectId matche titre+année STRICT côté aoneroom) →
             //   zéro faux positif. Flux réels (CDN hakunaymatata + cookies CloudFront),
             //   lus via MovieboxExtractor (court-circuit direct). Films + séries/épisodes.
-            if (key.isMovie) launch { emit("Moviebox") {  // 2026-07-12 : FILMS uniquement (mauvaise saison sur les séries)
+            if (key.isMovie) launch { emit("Moviebox") {  // 2026-07-12 : FILMS uniquement (mauvaise saison sur les séries — diag 07-14 : pas de dub FR sur séries testées)
                 val tmdbInt = resolvedTmdbId.toIntOrNull()
                 if (tmdbInt == null) emptyList() else {
                     val tmdbVt: Video.Type = if (key.isMovie) {
@@ -949,53 +988,30 @@ object BackupRegistry {
                     }
                     if (targetSectionId < 0) targetSectionId = sections.getJSONObject(0).optInt("id", -1)
                 } else {
-                    // a) Matching STRICT : uniquement "Saison N" / "Season N" / "S N"
-                    //    PAS "Partie N", "Part N", "Blood War 1", etc.
-                    val saisonRegex = Regex("(?:saison|season|s)\\s*(\\d+)", RegexOption.IGNORE_CASE)
+                    // 2026-07-13 — DIAGNOSTIC DÉFINITIF (screenshot user, Slime). AniCloud met le
+                    //   Film / l'OAV / les spin-offs DANS la liste des saisons (positions 3,6,7) MAIS
+                    //   les NOMME distinctement (« Film », « OAV », « The Slime Diaries ») ; les vraies
+                    //   saisons portent le nom « Saison N » qui donne le VRAI numéro (« Saison 4 » =
+                    //   vraie S4, à la position 5). AnimeSama, lui, sépare Saisons/Films/OAV en onglets
+                    //   → sa « Saison N » = vraie saison N. DONC on matche la section AniCloud dont le
+                    //   NOM est « Saison {key.season} » : ça exclut naturellement Film/OAV (user : « le
+                    //   film et les OAV ne doivent pas être comptés comme des saisons »). Compter par
+                    //   ORDRE était faux (le Film décalait tout). Épisode = local (étape 7).
+                    val saisonRegex = Regex("(?:saison|season)\\s*(\\d+)", RegexOption.IGNORE_CASE)
+                    var chosenName = ""
                     for (i in 0 until sections.length()) {
                         val sec = sections.getJSONObject(i)
-                        val secName = sec.optString("name", "")
-                        val m = saisonRegex.find(secName)
-                        if (m != null) {
-                            val secNum = m.groupValues[1].toIntOrNull() ?: continue
-                            if (secNum == key.season) { targetSectionId = sec.optInt("id", -1); break }
+                        val nm = sec.optString("name", "")
+                        val m = saisonRegex.find(nm)
+                        if (m != null && m.groupValues[1].toIntOrNull() == key.season) {
+                            targetSectionId = sec.optInt("id", -1); chosenName = nm; break
                         }
                     }
-                    // b) Fallback section_number de l'API (si fourni)
                     if (targetSectionId < 0) {
-                        for (i in 0 until sections.length()) {
-                            val sec = sections.getJSONObject(i)
-                            val secNum = sec.optInt("section_number", -1)
-                            if (secNum > 0 && secNum == key.season) {
-                                targetSectionId = sec.optInt("id", -1); break
-                            }
-                        }
+                        Log.i(TAG, "AniCloud anime/$acSlug : aucune section nommée « Saison ${key.season} » (Film/OAV exclus) → skip")
+                        return@emit emptyList()
                     }
-                    // c) Fallback : section de type "saison" avec le PLUS d'épisodes
-                    //    par langue (= la série principale, ex "Avec fillers" pour Bleach).
-                    //    On vérifie que l'épisode demandé peut exister dedans.
-                    if (targetSectionId < 0) {
-                        var bestId = -1; var bestCount = 0
-                        for (i in 0 until sections.length()) {
-                            val sec = sections.getJSONObject(i)
-                            val secType = sec.optString("section_type", "")
-                            if (!secType.equals("saison", ignoreCase = true)) continue
-                            // Compter les épisodes par langue (VF ou VOSTFR, max)
-                            val langs = sec.optJSONObject("languages")
-                            val perLang = if (langs != null) {
-                                maxOf(langs.optInt("vf", 0), langs.optInt("vostfr", 0))
-                            } else sec.optInt("episode_count", 0) / 2
-                            if (perLang > bestCount) { bestCount = perLang; bestId = sec.optInt("id", -1) }
-                        }
-                        if (bestId > 0 && bestCount >= key.episode) {
-                            targetSectionId = bestId
-                            Log.i(TAG, "AniCloud anime/$acSlug saison ${key.season} → fallback section principale (id=$bestId, $bestCount eps/lang)")
-                        }
-                    }
-                    // d) Dernier recours : section unique
-                    if (targetSectionId < 0 && sections.length() == 1) {
-                        targetSectionId = sections.getJSONObject(0).optInt("id", -1)
-                    }
+                    Log.i(TAG, "AniCloud anime/$acSlug : saison ${key.season} → section « $chosenName » (id=$targetSectionId)")
                 }
                 if (targetSectionId < 0) {
                     Log.i(TAG, "AniCloud anime/$acSlug saison ${key.season} non trouvée dans ${sections.length()} sections")
@@ -1022,10 +1038,21 @@ object BackupRegistry {
                 if (isAcMovie) {
                     for (i in 0 until episodes.length()) targetEps.add(episodes.getJSONObject(i))
                 } else {
+                    // NUMÉRO LOCAL (algo user « chaque saison repart à l'épisode 1 ») : dans la section,
+                    //   le 1ᵉʳ épisode = épisode 1, quel que soit son numéro affiché (absolu ou non).
+                    //   Cible = min(episode_number) + key.episode - 1. Gère AniCloud absolu (77,78…) ET
+                    //   par-saison (1,2…). Toutes langues de cet épisode.
+                    var minNum = Int.MAX_VALUE
+                    for (i in 0 until episodes.length()) {
+                        val n = episodes.getJSONObject(i).optInt("episode_number", -1)
+                        if (n in 1 until minNum) minNum = n
+                    }
+                    val targetNum = if (minNum == Int.MAX_VALUE) key.episode else minNum + key.episode - 1
                     for (i in 0 until episodes.length()) {
                         val ep = episodes.getJSONObject(i)
-                        if (ep.optInt("episode_number", -1) == key.episode) targetEps.add(ep)
+                        if (ep.optInt("episode_number", -1) == targetNum) targetEps.add(ep)
                     }
+                    Log.i(TAG, "AniCloud section=$targetSectionId : local ép ${key.episode} → absolu $targetNum (base $minNum)")
                 }
                 if (targetEps.isEmpty()) {
                     Log.i(TAG, "AniCloud section=$targetSectionId épisode ${key.episode} non trouvé")

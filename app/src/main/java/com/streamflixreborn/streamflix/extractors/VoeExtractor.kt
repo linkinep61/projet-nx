@@ -32,18 +32,17 @@ class VoeExtractor : Extractor() {
         //   extracteurs → routé à tort vers VOE → « no encoded JSON ». Laisse DoodLa le prendre.
         "https://vvide0.com"
         // PAS d'alias "kokoflix.lol" — c'est un proxy multi-host (osaka_go.php
-        //   = Voe, grandline_go.php = Netu, etc.). On matche seulement le
-        //   pattern OSAKA via rotatingDomain ci-dessous. Sinon Netu se fait
-        //   router vers Voe à tort et fail.
+        //   = Voe, grandline_go.php = Netu, etc.). Géré par KakaflixExtractor
+        //   (proxy générique) qui résout le redirect, puis l'URL VOE réelle
+        //   matche le rotatingDomain word-pattern ci-dessous.
     )
 
     // Voe uses rotating random-word domains (e.g. sandratableother.com, marissasharecareer.com)
     // Pattern: 3+ concatenated English words (12+ lowercase chars) + /e/ path
-    //   + le proxy FS kokoflix.lol/osaka_go.php?id=... qui resolve en Voe.
-    //   (grandline_go.php = Netu, PAS Voe — d'où le filtre strict osaka_go.)
+    //   Note : kokoflix.lol/osaka_go.php RETIRÉ d'ici — le KakaflixExtractor (proxy
+    //   générique) résout le redirect AVANT, donc VoeExtractor reçoit l'URL VOE réelle.
     override val rotatingDomain: List<Regex> = listOf(
-        Regex("""^[a-zA-Z0-9-]{12,60}\.(com|net|org|to|sx)/e/[a-zA-Z0-9]+"""),
-        Regex("""kokoflix\.lol/osaka_go\.php""")
+        Regex("""^[a-zA-Z0-9-]{12,60}\.(com|net|org|to|sx)/e/[a-zA-Z0-9]+""")
     )
 
 

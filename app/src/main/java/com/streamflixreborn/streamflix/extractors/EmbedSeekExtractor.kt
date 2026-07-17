@@ -48,6 +48,38 @@ class EmbedSeekExtractor : Extractor() {
     private val USER_AGENT = Extractor.DEFAULT_USER_AGENT
 
     override suspend fun extract(link: String): Video = withContext(Dispatchers.IO) {
+        // 2026-07-16 : embedseek = MÊME player « OnlyFlix » que seekplayer → même flux
+        //   (config AES `/api/v1/info` → master.m3u8 `…/hlsmod/…` + segments TS-dans-PNG).
+        //   On EXTRAIT le master.m3u8 via WebView HEADLESS (OnlyFlixResolver) → lecture NATIVE
+        //   ExoPlayer (SeekStreamPngDataSource strippe le PNG). Fallback overlay WebView si KO.
+        val master = try { OnlyFlixResolver.resolveMasterM3u8(link) } catch (e: Exception) {
+            Log.w(TAG, "headless resolve error: ${e.message}"); null
+        }
+        if (master != null) {
+            val origin = try { val u = java.net.URL(link); "${u.protocol}://${u.host}/" } catch (_: Exception) { "$mainUrl/" }
+            Log.d(TAG, "resolved master.m3u8 → native ExoPlayer")
+            return@withContext Video(
+                source = master,
+                type = androidx.media3.common.MimeTypes.APPLICATION_M3U8,
+                headers = mapOf(
+                    "User-Agent" to com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA,
+                    "Referer" to origin,
+                    "Origin" to origin.trimEnd('/'),
+                ),
+            )
+        }
+        Log.d(TAG, "headless resolve failed → WebView overlay fallback")
+        return@withContext Video(
+            source = link,
+            webViewUrl = link,
+            needsWebViewClick = true,
+        )
+    }
+
+    /** 2026-07-16 : ancien chemin API `/api/v1/player` DÉSACTIVÉ (token dérivé en JS → 403/invalid).
+     *  Conservé pour référence ; plus appelé. */
+    @Suppress("unused")
+    private suspend fun extractViaApiLegacy(link: String): Video = withContext(Dispatchers.IO) {
         // Le token est dans le fragment (après #) de l'URL embedseek.
         // Ex: https://bll.embedseek.com/#k9zrt → token = "k9zrt"
         val uri = try { URI(link) } catch (e: Exception) {

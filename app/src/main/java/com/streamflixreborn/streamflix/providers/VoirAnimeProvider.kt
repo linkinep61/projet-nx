@@ -551,6 +551,10 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
                     .replace("\\/", "/")
                     .replace("\\\"", "\"")
                     .takeIf { it.startsWith("http") } ?: return@forEach
+                // 2026-07-16 : gn1r5n.org (LECTEUR MOON, frontend Byse) est INEXTRACTIBLE en headless
+                //   — challenge anti-bot : API 403 (jeton JS requis) + WebView headless timeout (comme
+                //   Streamhg). On le MASQUE pour ne pas afficher un serveur toujours mort.
+                if (rawSrc.contains("gn1r5n", ignoreCase = true)) return@forEach
                 if (!seenSrcs.add(rawSrc)) return@forEach
                 val hostShort = try {
                     java.net.URL(rawSrc).host.split(".").first { it != "www" }
@@ -568,6 +572,7 @@ object VoirAnimeProvider : Provider, ProviderConfigUrl, ProgressiveServersProvid
             //    don't have thisChapterSources, e.g. older episodes or movies).
             document.select(".chapter-video-frame iframe, .reading-content iframe, .entry-content iframe, iframe[src]").forEach { iframe ->
                 val src = iframe.attr("src").takeIf { it.isNotBlank() && it.startsWith("http") } ?: return@forEach
+                if (src.contains("gn1r5n", ignoreCase = true)) return@forEach // Byse inextractible headless — masqué
                 if (!seenSrcs.add(src)) return@forEach
                 val serverName = try {
                     java.net.URL(src).host.split(".").first { it != "www" }

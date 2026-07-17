@@ -62,7 +62,7 @@ object VavooProvider : Provider, IptvProvider {
         get() = try {
             VavooMirrorSettings.getOrderedSites(com.streamflixreborn.streamflix.StreamFlixApp.instance.applicationContext)
         } catch (_: Exception) {
-            listOf("https://vavoo.to", "https://kool.to", "https://oha.to", "https://huhu.to")
+            listOf("https://vavoo.net", "https://kool.ws", "https://vavoo.to", "https://kool.to", "https://oha.to", "https://huhu.to")
         }
 
     // 2026-06-12 (décompil VYPN bundle) : `www.vypn.net/api/app/ping` est le

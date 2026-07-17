@@ -13,6 +13,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
 
 /**
  * 2026-07-08 : Backup provider pour coflix.wiki — FLUX 100% AJAX (zéro CF).
@@ -41,6 +42,19 @@ object CoflixWikiProvider {
 
     private val httpClient by lazy { Extractor.sharedClient }
 
+    /**
+     * Client BORNÉ pour la fiche saison (page HTML). Le sharedClient a des timeouts larges ;
+     * une page coflix.wiki lente/CF peut BLOQUER le thread OkHttp (HANGDUMP observé) → la source
+     * CoflixWiki dépasse alors son plafond et DISPARAÎT. On borne donc à 10s max total.
+     */
+    private val pageClient by lazy {
+        Extractor.sharedClient.newBuilder()
+            .callTimeout(10, TimeUnit.SECONDS)
+            .connectTimeout(6, TimeUnit.SECONDS)
+            .readTimeout(6, TimeUnit.SECONDS)
+            .build()
+    }
+
     // ── HTTP helpers ───────────────────────────────────────────────────────
 
     private suspend fun ajaxPost(path: String): String? = withContext(Dispatchers.IO) {
@@ -64,6 +78,63 @@ object CoflixWikiProvider {
             }
         } catch (e: Exception) {
             Log.i(TAG, "POST $path failed: ${e.message}")
+            null
+        }
+    }
+
+    /** GET AJAX (X-Requested-With) — utilisé pour /ajax/episode/list-episode. */
+    private suspend fun ajaxGet(path: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url("$BASE_URL$path")
+                .get()
+                .header("User-Agent", USER_AGENT)
+                .header("Accept-Language", "fr-FR,fr;q=0.9")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .header("Referer", "$BASE_URL/")
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.i(TAG, "GET $path → HTTP ${resp.code}")
+                    return@withContext null
+                }
+                resp.body?.string()
+            }
+        } catch (e: Exception) {
+            Log.i(TAG, "GET $path failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * GET page HTML brute (document) — pour extraire le movieId de la fiche saison.
+     * Utilise le client BORNÉ (jamais de hang) + détecte un éventuel challenge CF (→ null).
+     */
+    private suspend fun fetchPage(path: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url("$BASE_URL$path")
+                .get()
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .header("Accept-Language", "fr-FR,fr;q=0.9")
+                .header("Referer", "$BASE_URL/")
+                .build()
+            pageClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.i(TAG, "GET page $path → HTTP ${resp.code}")
+                    return@withContext null
+                }
+                val html = resp.body?.string() ?: return@withContext null
+                // Challenge CF (« Just a moment » / Turnstile) → pas de vraie page → null
+                if (Regex("(?i)just a moment|challenge-platform|cf-browser-verification|turnstile").containsMatchIn(html)) {
+                    Log.i(TAG, "GET page $path → challenge CF détecté")
+                    return@withContext null
+                }
+                html
+            }
+        } catch (e: Exception) {
+            Log.i(TAG, "GET page $path failed: ${e.message}")
             null
         }
     }
@@ -130,11 +201,51 @@ object CoflixWikiProvider {
             }
             ?: return emptyList()
 
-        // L'ep-ID du suggest est le 1er épisode → épisode N = firstEpId + (N - 1)
-        val targetEpId = match.episodeId + (episodeNumber - 1)
-        Log.i(TAG, "Épisode S${seasonNumber}E${episodeNumber} → epId=${match.episodeId} + ${episodeNumber - 1} = $targetEpId")
+        // 2026-07-14 FIX (House of the Dragon) : les episode_id NE SONT PAS séquentiels.
+        //   Ex HotD S3 VF : E1=217907, E2=220810, E3=221053, E4=221227 (écarts de milliers).
+        //   L'ancien calcul `firstEpId + (N-1)` matchait donc le MAUVAIS épisode (E2 → 217908
+        //   = en fait l'E1 VOSTFR). On lit désormais la VRAIE map épisode→id via l'AJAX
+        //   /ajax/episode/list-episode?movieId={id} (le movieId vit dans la fiche saison,
+        //   seul `data-id` de la page brute). Fallback = ancien calcul si l'AJAX échoue.
+        val targetEpId = runCatching { resolveRealEpisodeId(match.slug, match.episodeId, episodeNumber) }.getOrNull()
+            ?: (match.episodeId + (episodeNumber - 1)).also {
+                Log.i(TAG, "resolveRealEpisodeId ÉCHEC → fallback calcul epId=$it")
+            }
+        Log.i(TAG, "Épisode S${seasonNumber}E${episodeNumber} → epId=$targetEpId (firstEp=${match.episodeId})")
 
         return fetchServersForEpisode(targetEpId, match.version)
+    }
+
+    /**
+     * 2026-07-14 : résout le VRAI episode_id via la map officielle du site (les ids ne sont
+     *   PAS séquentiels). Étapes :
+     *     1. GET la fiche saison → extrait movieId (unique `data-id` de la page brute).
+     *     2. GET /ajax/episode/list-episode?movieId={movieId} → JSON { html } contenant
+     *        des <a data-num="N" data-id="{epId}">.
+     *     3. map[episodeNumber] = le vrai id.
+     *   Retourne null si une étape échoue (→ l'appelant retombe sur l'ancien calcul).
+     */
+    private suspend fun resolveRealEpisodeId(slug: String, firstEpId: Int, episodeNumber: Int): Int? {
+        val pageHtml = fetchPage("/film/$slug") ?: run {
+            Log.i(TAG, "resolveRealEpisodeId: fiche saison /film/$slug injoignable")
+            return null
+        }
+        val movieId = Regex("""data-id="(\d+)"""").find(pageHtml)?.groupValues?.get(1) ?: run {
+            Log.i(TAG, "resolveRealEpisodeId: movieId introuvable dans la fiche saison")
+            return null
+        }
+        val body = ajaxGet("/ajax/episode/list-episode?movieId=$movieId") ?: return null
+        val json = runCatching { JSONObject(body) }.getOrNull() ?: return null
+        val html = json.optString("html").takeIf { it.isNotBlank() } ?: return null
+        val map = Regex("""data-num="(\d+)"\s+data-id="(\d+)"""").findAll(html)
+            .mapNotNull { m ->
+                val n = m.groupValues[1].toIntOrNull() ?: return@mapNotNull null
+                val id = m.groupValues[2].toIntOrNull() ?: return@mapNotNull null
+                n to id
+            }.toMap()
+        val realId = map[episodeNumber]
+        Log.i(TAG, "resolveRealEpisodeId slug=$slug movieId=$movieId E$episodeNumber → $realId (${map.size} épisodes)")
+        return realId
     }
 
     // ── SEARCH (AJAX) ─────────────────────────────────────────────────────

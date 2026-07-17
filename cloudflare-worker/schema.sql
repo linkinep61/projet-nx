@@ -43,7 +43,20 @@ CREATE TABLE IF NOT EXISTS device_sync (
     expires_at INTEGER NOT NULL
 );
 
+-- QR CF bypass sessions (relais TV ↔ téléphone via D1)
+-- La TV crée une session, affiche un QR. Le téléphone scanne,
+-- résout le CF, et poste le m3u8 ici. La TV poll le résultat.
+CREATE TABLE IF NOT EXISTS cf_bypass_sessions (
+    token TEXT PRIMARY KEY,
+    slug TEXT NOT NULL,
+    m3u8_url TEXT,
+    status TEXT DEFAULT 'pending',  -- pending, resolved
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
 -- Index pour les requetes frequentes
 CREATE INDEX IF NOT EXISTS idx_rating_votes_key ON rating_votes(content_key);
 CREATE INDEX IF NOT EXISTS idx_language_votes_key ON language_votes(content_key);
 CREATE INDEX IF NOT EXISTS idx_device_sync_expires ON device_sync(expires_at);
+CREATE INDEX IF NOT EXISTS idx_cf_bypass_expires ON cf_bypass_sessions(expires_at);

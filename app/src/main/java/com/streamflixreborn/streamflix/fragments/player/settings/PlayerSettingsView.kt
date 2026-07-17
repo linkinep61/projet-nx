@@ -417,6 +417,9 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
     /** Called when the user toggles favorite on an IPTV server (★ button). */
     var onServerFavoriteToggled: ((Settings.Server) -> Unit)? = null
 
+    /** 2026-07-16 : appui LONG sur un serveur → signaler « mauvais serveur/épisode » (envoi GitHub). */
+    var onServerReported: ((Settings.Server) -> Unit)? = null
+
     protected var onChannelVariantSelected: ((Settings.ChannelVariant) -> Unit)? = null
     fun setOnChannelVariantSelectedListener(listener: (variant: Settings.ChannelVariant) -> Unit) {
         this.onChannelVariantSelected = listener

@@ -1,5 +1,6 @@
 package com.streamflixreborn.streamflix.extractors
 
+import android.util.Log
 import com.streamflixreborn.streamflix.models.Video
 import com.streamflixreborn.streamflix.utils.DnsResolver
 import kotlinx.coroutines.Dispatchers
@@ -7,22 +8,32 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
+// Gestionnaire generique de proxy de redirection (kokoflix/kakaflix/newPlayer).
+// Suit le redirect HTTP puis delegue a l'extracteur du domaine resolu.
+// Calque sur upstream streamflix-reborn FrenchStreamProvider L814.
 class KakaflixExtractor : Extractor() {
 
-    override val name = "Kakaflix"
-    override val mainUrl = "https://kakaflix.lol"
+    override val name = "RedirectProxy"
+    override val mainUrl = "https://kokoflix.lol"
+
+    override val aliasUrls = listOf(
+        "https://kakaflix.lol"
+    )
+
+    override val rotatingDomain: List<Regex> = listOf(
+        Regex("""newPlayer\.php""")
+    )
 
     override suspend fun extract(link: String): Video {
-        // Kakaflix is a redirect proxy - follow the redirect to get the actual embed URL.
-        // 2026-05-07 : timeouts courts (3s connect, 4s read) car kakaflix.lol est
-        // souvent down → on échoue vite pour passer au serveur suivant.
+        Log.d("RedirectProxy", "Resolving proxy: $link")
+
         val client = OkHttpClient.Builder()
             .dns(DnsResolver.doh)
             .followRedirects(true)
             .followSslRedirects(true)
-            .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
-            .callTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+            .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
             .build()
 
         val resolvedUrl = withContext(Dispatchers.IO) {
@@ -32,6 +43,7 @@ class KakaflixExtractor : Extractor() {
                     "User-Agent",
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                 )
+                .header("Referer", "https://www.frenchstream.re/")
                 .build()
 
             client.newCall(request).execute().use { response ->
@@ -39,11 +51,14 @@ class KakaflixExtractor : Extractor() {
             }
         }
 
-        if (resolvedUrl == link || resolvedUrl.contains("kakaflix.lol")) {
-            throw Exception("Kakaflix redirect failed: $resolvedUrl")
+        Log.d("RedirectProxy", "Resolved: $link -> $resolvedUrl")
+
+        if (resolvedUrl == link ||
+            resolvedUrl.contains("kokoflix.lol", ignoreCase = true) ||
+            resolvedUrl.contains("kakaflix.lol", ignoreCase = true)) {
+            throw Exception("Redirect proxy failed: $link -> $resolvedUrl")
         }
 
-        // Delegate to the appropriate extractor based on the resolved URL
         return Extractor.extract(resolvedUrl)
     }
 }

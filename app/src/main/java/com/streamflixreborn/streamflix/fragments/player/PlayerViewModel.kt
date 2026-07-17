@@ -952,6 +952,7 @@ class PlayerViewModel(
                 exclude = setOf(providerName),
                 titleHint = com.streamflixreborn.streamflix.utils.BackupRegistry.titleFromId(id),
                 isAnimeProvider = isAnimeProvider,
+                episodeIdHint = id,
             )
             // 2026-07-04 : porte de démarrage des backups (registre). Ouverte APRÈS le 1er
             //   tri natif (fait device au repos) → le natif s'affiche vite, PUIS le registre

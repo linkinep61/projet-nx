@@ -72,13 +72,13 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     }
 
     override val name = "Movix"
-    override val defaultBaseUrl: String = "https://api.movix.cloud/"  // v90 2026-05-27 : movix.tax mort NXDOMAIN, domaine actif = movix.cloud
+    override val defaultBaseUrl: String = "https://api.movix.date/"  // v91 2026-07-13 : movix.cloud → movix.date (auto-update movix.online confirme)
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
             return cacheURL.ifEmpty { field }
         }
-    override val defaultPortalUrl: String = "https://movix.cloud/"
+    override val defaultPortalUrl: String = "https://movix.date/"
     override val portalUrl: String = defaultPortalUrl
         get() {
             val cachePortalURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_PORTAL_URL)
@@ -146,6 +146,13 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             withTimeoutOrNull(ENDPOINT_TIMEOUT_MS) { block() }
         } catch (e: Exception) {
             Log.w("MovixProvider", "Endpoint '$endpointName' threw: ${e.message}")
+            // 2026-07-13 : si le DOMAINE Movix lui-même est mort (dns/connect/ssl), signaler
+            //   « provider cassé » (1 fois par provider+domaine, dédup GitHub globale).
+            runCatching {
+                com.streamflixreborn.streamflix.utils.BrokenSourceReporter.maybeReportProvider(
+                    providerName = "Movix", url = baseUrl, error = e,
+                )
+            }
             null
         }
         val health = endpointHealth.getOrPut(endpointName) { EndpointHealth() }
@@ -578,6 +585,27 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         val players: Map<String, List<FstreamPlayer>>?,
         val error: String?,
         val message: String?
+    )
+
+    // 2026-07-16 : SwiftFlow — nouvel endpoint Movix `api/swiftflow/movie/{tmdbId}`
+    //   (api.movix.show / api.movix.date). L'app ne l'appelait PAS → le serveur SwiftFlow
+    //   n'apparaissait jamais (user « il n'apparaît même pas dans les serveurs »).
+    //   Structure : players.{vf,vostfr}[] = {name, url (iframe swiftflow.lol/api/v1/index.php
+    //   ?route=movies/{id}/player&api_key=…), type:"iframe", label (taille ex "1005.2 MB")}.
+    //   Le player swiftflow.lol sert un mp4 direct citron-edge.lol (ad-gate → cheksum sign) →
+    //   joué via SwiftFlowExtractor (overlay WebView). FILMS UNIQUEMENT (TV = « partenaires »,
+    //   403 sur swiftflow.lol). Confirmé en direct dans Chrome sur L'Odyssée (tmdb 1368337).
+    data class SwiftflowPlayer(
+        val name: String?,
+        val url: String?,
+        val type: String?,
+        val label: String?
+    )
+
+    data class SwiftflowMovieResponse(
+        val success: Boolean?,
+        val players: Map<String, List<SwiftflowPlayer>>?,
+        val error: String?
     )
 
     data class FstreamTvEpisode(
@@ -1577,7 +1605,20 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         }
 
         val servers = mutableListOf<Video.Server>()
-        servers.addAll(fetchNativeMovixServers(id, videoType))
+        val nativeMovix = fetchNativeMovixServers(id, videoType)
+        // 2026-07-13 : casse silencieuse — Movix natif répond mais 0 source de façon répétée
+        //   (structure changée). On joint le titre recherché pour aiguiller.
+        runCatching {
+            val t = when (videoType) {
+                is Video.Type.Movie -> videoType.title
+                is Video.Type.Episode -> "${videoType.tvShow.title} S${videoType.season.number}E${videoType.number}"
+                else -> id
+            }
+            com.streamflixreborn.streamflix.utils.BrokenSourceReporter.noteProviderResult(
+                "Movix (natif)", found = nativeMovix.isNotEmpty(), searchedTitle = t,
+            )
+        }
+        servers.addAll(nativeMovix)
         // 2026-07-04 : backups inline DÉSACTIVÉS → registre central.
         if (!skipBackupsForBackupCall && !com.streamflixreborn.streamflix.utils.BackupRegistry.INLINE_BACKUPS_DISABLED) {
             servers.addAll(fetchMovixBackups(id, videoType))
@@ -1834,6 +1875,31 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                             listOf(buildMoiflixServer(matchUrl))
                         }
                     }
+                    // 2026-07-16 : SwiftFlow — endpoint dédié Movix (api/swiftflow/movie/{id}).
+                    //   players.{vf,vostfr}[] → 1 Video.Server par player (src = iframe swiftflow.lol).
+                    //   Résolu par SwiftFlowExtractor (overlay WebView). FILMS uniquement.
+                    val swiftflowDeferred = async {
+                        runEndpoint("swiftflow-movie") {
+                            val sf = movixServiceInstance.getSwiftflowMovie(tmdbId)
+                            val list = mutableListOf<Video.Server>()
+                            if (sf.success == true) {
+                                sf.players?.forEach { (lang, players) ->
+                                    val displayLang = formatLang(lang)
+                                    players.forEach { p ->
+                                        val url = p.url ?: return@forEach
+                                        if (url.isBlank() || !url.contains("swiftflow", ignoreCase = true)) return@forEach
+                                        val label = p.label?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""
+                                        list.add(Video.Server(
+                                            id = "swiftflow-$lang-${list.size}",
+                                            name = "SwiftFlow ($displayLang)$label",
+                                            src = url,
+                                        ))
+                                    }
+                                }
+                            }
+                            list
+                        }
+                    }
                     // 2026-05-11 : ROLLBACK lien VoirDrama-Movix. Le user veut garder
                     // les providers séparés pour bien voir quelle source produit quel
                     // serveur. VoirDrama reste accessible en standalone.
@@ -1842,7 +1908,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     // 2026-07-09 : fstream REMIS — le user préfère avoir les serveurs FS même si
                     //   le matching Movix API est parfois imprécis (ex: "FROM" → "From Dusk Till Dawn").
                     //   Mieux vaut quelques serveurs en trop que zéro FrenchStream.
-                    listOf(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, videasyDeferred, yflixDeferred, moiflixDeferred)
+                    listOf(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, videasyDeferred, yflixDeferred, moiflixDeferred, swiftflowDeferred)
                         .map { d -> async { val r = d.await(); if (r.isNotEmpty() && onPartial != null) onPartial(r); r } }
                         .awaitAll()
                 }
@@ -3402,6 +3468,11 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
             @Path("tmdbId") tmdbId: String,
             @Path("season") season: Int
         ): FstreamTvResponse
+
+        @GET("api/swiftflow/movie/{tmdbId}")
+        suspend fun getSwiftflowMovie(
+            @Path("tmdbId") tmdbId: String
+        ): SwiftflowMovieResponse
 
         @GET("api/links/movie/{tmdbId}")
         suspend fun getLinksMovie(
