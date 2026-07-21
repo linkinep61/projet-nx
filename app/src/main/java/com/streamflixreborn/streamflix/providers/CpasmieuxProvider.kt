@@ -33,7 +33,14 @@ import kotlin.math.max
 object CpasmieuxProvider {
 
     private const val TAG = "CpasmieuxProvider"
-    private const val BASE = "https://www.cpasmieux.is"
+    /** 2026-07-21 — signalé par l'auto-report `[casse silencieuse] Backup Cpasmieux` (9 échecs
+     *  consécutifs). Cause : **`cpasmieux.is` est mort** (page d'erreur). Le site a simplement
+     *  changé de TLD — vérifié en direct : `www.cpasmieux.life` répond HTTP 200 et tourne sur le
+     *  MÊME moteur DataLife Engine (`index.php?do=search&subaction=search` → « Site search » ;
+     *  `dle_` présent dans le HTML), donc tous les chemins scrapés par ce provider restent valides.
+     *  Alternatives vérifiées vivantes et aussi en DLE si `.life` tombe : `cpasmieux.app`.
+     *  (`cpasmieux.im` répond mais N'EST PAS du DLE → structure différente, ne pas l'utiliser.) */
+    private const val BASE = "https://www.cpasmieux.life"
     private const val USER_AGENT =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 

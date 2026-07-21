@@ -759,6 +759,12 @@ class PlayerTvFragment : Fragment() {
                             com.streamflixreborn.streamflix.activities.player.OtfPlayerTvActivity::class.java,
                         ).apply {
                             putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerTvActivity.EXTRA_URL, url)
+                            // 2026-07-20 : toutes les URLs (CDN multiples) pour la bascule auto.
+                            putStringArrayListExtra(
+                                com.streamflixreborn.streamflix.activities.player.OtfPlayerTvActivity.EXTRA_URLS,
+                                ArrayList(urls),
+                            )
+                            putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerTvActivity.EXTRA_KEY, key)
                             putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerTvActivity.EXTRA_TITLE, args.title)
                         }
                         startActivity(intent)
@@ -8657,6 +8663,16 @@ class PlayerTvFragment : Fragment() {
                     // Abyss/Hydrax: player dedie sans pub
                     if (isAbyssEmbed) {
                         val ah = request?.url?.host ?: ""
+                        // 2026-07-17 : au VRAI OK/tap play, abyss mint l'URL MP4 googleapis → on la
+                        //   CAPTE et on bascule en lecture NATIVE ExoPlayer → contrôle télécommande
+                        //   COMPLET (barre de seek, etc.), comme les autres serveurs.
+                        if (!m3u8Intercepted && isAbyssMediaUrl(url)) {
+                            Log.d("PlayerTV", "Abyss media intercepted → native: ${url.take(90)}")
+                            m3u8Intercepted = true
+                            android.os.Handler(android.os.Looper.getMainLooper()).post { onAbyssMediaIntercepted(url) }
+                            return WebResourceResponse("text/plain", "UTF-8",
+                                java.io.ByteArrayInputStream("".toByteArray()))
+                        }
                         if (abyssAdHosts.any { ah.contains(it, ignoreCase = true) }) {
                             Log.d("PlayerTV", "Abyss AD BLOCKED: $ah")
                             return WebResourceResponse("text/plain", "UTF-8",
@@ -9646,6 +9662,38 @@ class PlayerTvFragment : Fragment() {
                 subtitles = video.subtitles
             )
             displayVideo(newVideo, server)
+        }
+
+        private fun isAbyssMediaUrl(url: String): Boolean {
+            val l = url.lowercase()
+            if (!l.startsWith("http")) return false
+            return l.contains("storage.googleapis.com")
+                || l.contains("commondatastorage.googleapis.com")
+                || (l.contains(".mp4") && !l.contains("abysscdn.com/?") && !l.contains("google-analytics"))
+        }
+
+        /** Abyss a miné l'URL MP4 (au vrai OK/tap) → ferme l'overlay, joue en NATIF (télécommande OK). */
+        private fun onAbyssMediaIntercepted(mediaUrl: String) {
+            val video = pendingWebViewVideo ?: return
+            val server = pendingWebViewServer ?: return
+            val clean = mediaUrl.substringBefore("#")
+            Log.d("PlayerTV", "onAbyssMediaIntercepted → native ExoPlayer: ${clean.take(90)}")
+            hideWebViewOverlay()
+            val newVideo = Video(
+                source = clean,
+                type = MimeTypes.VIDEO_MP4,
+                headers = mapOf(
+                    "User-Agent" to NetworkClient.USER_AGENT,
+                    "Referer" to "https://abysscdn.com/",
+                ),
+                webViewUrl = null,
+                subtitles = video.subtitles,
+            )
+            displayVideo(newVideo, server)
+            // Restaure l'interface native TV (contrôles télécommande + focus) — identique aux autres.
+            binding.pvPlayer.postDelayed({
+                try { binding.pvPlayer.useController = true; binding.pvPlayer.showController(); binding.pvPlayer.requestFocus() } catch (_: Exception) {}
+            }, 400)
         }
 
         /**

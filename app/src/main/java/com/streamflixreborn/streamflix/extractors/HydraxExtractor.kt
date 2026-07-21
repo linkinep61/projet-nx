@@ -37,6 +37,10 @@ open class HydraxExtractor : Extractor() {
     override val cacheTtlMs: Long = 0L
 
     override suspend fun extract(link: String): Video {
+        // Abyss = overlay WebView UNIQUE (path isAbyssEmbed), joué avec le vrai tap de l'utilisateur.
+        //   L'extraction directe automatique a été tentée à fond (cf. AbyssResolver, gardé dormant) :
+        //   abyss refuse de mint l'URL sans geste humain réel → pas fiable en auto. On garde donc le
+        //   seul overlay (pas de 2e WebView headless qui créait un double overlay).
         return Video(
             source = link,
             webViewUrl = link,

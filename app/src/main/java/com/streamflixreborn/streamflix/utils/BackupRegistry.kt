@@ -102,6 +102,35 @@ object BackupRegistry {
     )
     private val heavyGate = Semaphore(if (LOW_RAM) 2 else 16)
 
+    /** 2026-07-21 — ANTI FAUX POSITIF sur la « casse silencieuse ».
+     *  Ces sources renvoient LÉGITIMEMENT 0 hors de leur périmètre : un site d'animes ne trouvera
+     *  jamais un film live-action, un site de dramas asiatiques non plus. Sans garde-fou elles
+     *  franchissaient le seuil et créaient des issues bidon (constaté : VoirDrama, DessinAnime et
+     *  DessinAnimeNet à 4/8 sur « Enola Holmes 3 »), exactement comme le faux positif Movix #28.
+     *  Un système d'alerte bruyant finit ignoré → on ne compte QUE dans leur périmètre. */
+    private val ANIME_ORIENTED_SOURCES = setOf(
+        "DessinAnime", "DessinAnimeNet", "AniCloud", "AnimeSama",
+        "VoirAnime", "FrenchManga", "FrenchAnime", "FRAnime", "Franime",
+    )
+    private val DRAMA_ORIENTED_SOURCES = setOf("VoirDrama", "Dramacool", "DramaCool")
+
+    /** 2026-07-21 : domaine représentatif d'une source de backup, pour que l'issue « provider
+     *  cassé » indique un hôte exploitable (le reporter extrait l'hôte de l'URL fournie). */
+    private fun backupProbeUrl(source: String): String? = when (source) {
+        "Nakios" -> "https://nakios.live"
+        "Movix" -> "https://movix.date"
+        "Coflix Boston" -> "https://coflix.boston"
+        "CoflixWiki" -> "https://kokoflix.lol"
+        "Moviebox", "Cloudstream" -> "https://api.aoneroom.com"
+        "Webflix" -> "https://webflix.lol"
+        "Frembed" -> "https://frembed.icu"
+        "Papadustream V2" -> "https://papadustream.rip"
+        "DessinAnimeNet" -> "https://dessinanime.net"
+        "AniCloud" -> "https://anicloud.to"
+        "1Jour1Film" -> "https://1jour1film.pro"
+        else -> null
+    }
+
     // 2026-07-07 : pacing mémoire RETIRÉ (régressait la Chromecast :
     //   heapTight()=true en PERMANENCE sur Chromecast car heap normal=80%
     //   → mutex 12s par backup → sérialise tout → timeout 45s → 0 serveurs).
@@ -685,6 +714,16 @@ object BackupRegistry {
                 Log.i(TAG, "$source → DÉSACTIVÉ par l'utilisateur (skip)")
                 return
             }
+            // 2026-07-21 (user : « comment ça se fait qu'on n'a pas reçu d'alerte pour ce genre de
+            //   cas — à la base on avait mis le système d'alerte exprès pour ça ») :
+            //   TROU D'ALERTE comblé. Le reporter n'était branché QUE sur `Extractor.extract` et sur
+            //   le getServers/runEndpoint de Movix + Cloudstream. Les sources de BACKUP passent
+            //   TOUTES par ce point unique et n'étaient JAMAIS surveillées → Nakios a pu mourir
+            //   complètement (page de statut `nakios.online` disparue → domaine jamais résolu →
+            //   0 serveur à chaque fois) sans qu'aucune issue ne soit créée.
+            //   Désormais : 0 serveur répété = « casse silencieuse », et une erreur réseau
+            //   (DNS/connect/SSL) = « provider cassé ». Dédup GitHub déjà gérée par le reporter.
+            var failure: Throwable? = null
             val servers = try {
                 // 60s : ne pas couper une source lente. Sources LOURDES (WebView) via heavyGate.
                 if (source in HEAVY_SOURCES) {
@@ -693,7 +732,36 @@ object BackupRegistry {
                     withTimeoutOrNull(60_000) { fetch() } ?: emptyList()
                 }
             } catch (e: Exception) {
+                failure = e
                 Log.w(TAG, "$source failed: ${e.message}"); emptyList()
+            }
+            runCatching {
+                val reporterName = "Backup $source"
+                if (failure != null) {
+                    com.streamflixreborn.streamflix.utils.BrokenSourceReporter.maybeReportProvider(
+                        reporterName,
+                        backupProbeUrl(source) ?: "https://$source",
+                        failure,
+                    )
+                }
+                // Compteur consécutif : 0 source → bump, ≥1 → reset. Le titre cherché est joint
+                //   à l'issue, c'est lui qui aiguille la réparation.
+                //   ⚠ On ne compte QUE dans le périmètre de la source (cf. ANIME_ORIENTED_SOURCES) :
+                //   un 0 hors-périmètre n'est PAS une panne. Les erreurs réseau, elles, restent
+                //   signalées dans tous les cas (au-dessus) — une source vraiment morte est donc
+                //   toujours détectée.
+                val inScope = when (source) {
+                    in ANIME_ORIENTED_SOURCES -> isAnimeContent
+                    in DRAMA_ORIENTED_SOURCES -> false // périmètre (contenu asiatique) non détectable
+                    else -> true
+                }
+                if (inScope) {
+                    com.streamflixreborn.streamflix.utils.BrokenSourceReporter.noteProviderResult(
+                        reporterName,
+                        servers.isNotEmpty(),
+                        key.title,
+                    )
+                }
             }
             pushServers(source, servers)
         }
@@ -776,8 +844,18 @@ object BackupRegistry {
         // Papadustream ancien (captcha) — RETIRÉ (user 2026-07-07 "le papastream qui a captcha, vire-le").
         // Seul PapadustreamV2 (sans captcha) reste actif.
         // Nakios + Moiflix = via helpers exposés (WebJS). Nakios a besoin du tmdbId.
-        if (!resolvedTmdbId.isNullOrBlank()) launch { emit("Nakios") {
-            NakiosProvider.fetchNakiosBackupServers(resolvedTmdbId, videoType, key.season, key.episode)
+        // 2026-07-21 : Nakios n'a PLUS d'API par tmdbId (site refait en Laravel SSR) → il lui faut
+        //   le TITRE pour dériver le slug de la fiche. On lui passe tous les titres connus.
+        launch { emit("Nakios") {
+            var res = emptyList<Video.Server>()
+            for (t in knownTitles) {
+                if (t.isBlank()) continue
+                res = NakiosProvider.fetchNakiosBackupServers(
+                    resolvedTmdbId ?: "", videoType, key.season, key.episode, titleHint = t,
+                )
+                if (res.isNotEmpty()) break
+            }
+            res
         } }
         // 2026-07-04 (reconnexion registre — phase 1) : sources dédiées dont les méthodes ne
         //   sont pas encore restaurées → DÉSACTIVÉES pour l'instant. Wiflix, Cloudstream et

@@ -56,16 +56,23 @@ object NakiosProvider : Provider, ProviderConfigUrl {
 
     /** Page de statut officielle Nakios — stable, sert à découvrir le domaine
      *  courant si nakios.fit change (le JS bundle contient la valeur "live"). */
-    private const val STATUS_PAGE = "https://nakios.online"
+    /** 2026-07-21 : `nakios.online` est MORT (page d'erreur) — c'est pour ça que la découverte
+     *  restait bloquée sur le domaine par défaut et que Nakios ne remontait plus aucun serveur.
+     *  Le nouveau hub officiel est **`nakios.org`**, qui liste les domaines de l'écosystème
+     *  (`nakios.org` = hub, `nakios.live` = catalogue/streaming, `nakios.info` = infos). */
+    private const val STATUS_PAGE = "https://nakios.org"
+
+    /** Domaines du hub qui ne sont PAS le service de streaming (à écarter à la découverte). */
+    private val NON_STREAMING_DOMAINS = listOf("nakios.org", "nakios.info", "nakios.online")
 
     /** Default si la découverte échoue. Mis à jour par onChangeUrl(). */
-    override val defaultBaseUrl: String = "https://nakios.store"
+    override val defaultBaseUrl: String = "https://nakios.live"
 
     /** Front URL courant (pour Origin/Referer). */
-    @Volatile private var currentFrontUrl: String = "https://nakios.store"
+    @Volatile private var currentFrontUrl: String = "https://nakios.live"
 
-    /** API base courant (`https://api.nakios.store` par défaut). */
-    @Volatile private var currentApiBase: String = "https://api.nakios.store"
+    /** API base courant. */
+    @Volatile private var currentApiBase: String = "https://api.nakios.live"
 
     override val baseUrl: String
         get() = currentApiBase
@@ -98,23 +105,31 @@ object NakiosProvider : Provider, ProviderConfigUrl {
      * la status page est mise à jour avant le reste.
      */
     override suspend fun onChangeUrl(forceRefresh: Boolean): String = changeUrlMutex.withLock {
-        if (!forceRefresh && currentApiBase != "https://api.nakios.store") {
+        if (!forceRefresh && currentApiBase != "https://api.nakios.live") {
             // déjà découvert et différent du défaut → on garde
             return@withLock currentApiBase
         }
         try {
             val statusHtml = httpGetRaw(STATUS_PAGE) ?: return@withLock currentApiBase
-            // Trouver le bundle JS référencé
-            val jsPath = Regex("""src="(/assets/[^"]+\.js)"""").find(statusHtml)?.groupValues?.get(1)
-                ?: return@withLock currentApiBase
-            val js = httpGetRaw("$STATUS_PAGE$jsPath") ?: return@withLock currentApiBase
-            // Le JS contient https://nakios.<TLD> (le domaine officiel courant)
-            var officialFront = Regex("""https?://nakios\.[a-z]{2,8}""")
-                .findAll(js)
+            // 2026-07-21 : le hub `nakios.org` est du HTML simple (plus de bundle Vue). On cherche
+            //   d'abord directement dans la page ; on garde le chemin « bundle JS » en repli au cas
+            //   où le hub redeviendrait une SPA.
+            val fromPage = Regex("""https?://nakios\.[a-z]{2,8}""")
+                .findAll(statusHtml)
                 .map { it.value }
-                .filter { !it.contains("nakios.online", ignoreCase = true) }
+                .filter { c -> NON_STREAMING_DOMAINS.none { c.contains(it, ignoreCase = true) } }
                 .firstOrNull()
-                ?: return@withLock currentApiBase
+            var officialFront = fromPage ?: run {
+                val jsPath = Regex("""src="(/assets/[^"]+\.js)"""").find(statusHtml)?.groupValues?.get(1)
+                    ?: return@withLock currentApiBase
+                val js = httpGetRaw("$STATUS_PAGE$jsPath") ?: return@withLock currentApiBase
+                Regex("""https?://nakios\.[a-z]{2,8}""")
+                    .findAll(js)
+                    .map { it.value }
+                    .filter { c -> NON_STREAMING_DOMAINS.none { c.contains(it, ignoreCase = true) } }
+                    .firstOrNull()
+                    ?: return@withLock currentApiBase
+            }
 
             // 2026-07-08 : le status page peut référencer un ancien domaine (ex nakios.ink)
             //   qui redirige vers le nouveau (nakios.store). On suit la redirection pour
@@ -131,7 +146,9 @@ object NakiosProvider : Provider, ProviderConfigUrl {
                         val loc = probeResp.header("Location")
                         if (loc != null) {
                             val redirectDomain = Regex("""https?://nakios\.[a-z]{2,8}""").find(loc)?.value
-                            if (redirectDomain != null && !redirectDomain.contains("nakios.online")) {
+                            if (redirectDomain != null &&
+                                NON_STREAMING_DOMAINS.none { redirectDomain.contains(it, ignoreCase = true) }
+                            ) {
                                 Log.d(TAG, "Domain redirect: $officialFront → $redirectDomain")
                                 officialFront = redirectDomain
                             }
@@ -520,43 +537,138 @@ object NakiosProvider : Provider, ProviderConfigUrl {
      *  d'autres providers en backup (ex: CloudstreamProvider). Pas de Moiflix/etc.
      *  - Movie : `tmdbId` direct
      *  - Episode : `tmdbId|season|episode` */
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 2026-07-21 — RÉÉCRITURE EN SCRAPER HTML.
+    //   Nakios a été reconstruit en **Laravel rendu côté serveur** : l'API JSON
+    //   `api.nakios.<tld>/api/...` n'existe PLUS (vérifié : `/api/movies/trending` → 404,
+    //   `api.nakios.live` → redirige vers le hub `nakios.org`). Les pages exposent désormais
+    //   leurs serveurs dans un blob JSON ÉCHAPPÉ inclus dans le HTML (slashes `\/`), consommé
+    //   par Alpine.js (`currentVersionVideos`).
+    //   Forme d'un serveur : {"server_name":…,"label":…,"version":"VF|VOSTFR",
+    //                         "embed_type":…,"type":…,"link":"https:\/\/…"}
+    //   Les liens pointent sur des hôtes DÉJÀ gérés par nos extracteurs : vidzy.live,
+    //   uqload.is, voe.sx, kokoflix.lol, bysebuho.com → aucun nouvel extracteur nécessaire.
+    //   URLs : film = /movie/<slug>, série = /tv-show/<slug>, épisode = /episode/<slug>/<S>-<E>.
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /** Slug Nakios : minuscules, accents retirés, tout non-alphanumérique → « - ». */
+    private fun slugify(title: String): String {
+        val noAccent = java.text.Normalizer.normalize(title, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{Mn}+"), "")
+        return noAccent.lowercase()
+            .replace(Regex("[^a-z0-9]+"), "-")
+            .trim('-')
+    }
+
+    /** Déséchappe le JSON inline (slashes et unicode). */
+    private fun unescapeJson(s: String): String = s
+        .replace("\\/", "/")
+        .replace("\\u0026", "&")
+        .replace("\\\"", "\"")
+
+    /**
+     * 2026-07-21 : RECHERCHE du site = **`/search/<requête>`** (trouvé en sondant les schémas
+     * d'URL : `/search?q=`, `/recherche`, `/api/search` → tous 404 ; `/search/<q>` → 200 avec les
+     * cartes). Renvoie les slugs des fiches, ce qui est bien plus fiable que de deviner le slug
+     * depuis le titre TMDB (le site peut nommer une fiche autrement).
+     *
+     * @return liste de Pair(slug, isMovie) dans l'ordre du site.
+     */
+    private suspend fun searchSlugs(query: String): List<Pair<String, Boolean>> {
+        val q = java.net.URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
+        val front = currentFrontUrl.trimEnd('/')
+        val html = httpGetRaw("$front/search/$q") ?: return emptyList()
+        val out = LinkedHashSet<Pair<String, Boolean>>()
+        Regex("""href="[^"]*?/(movie|tv-show)/([a-z0-9\-]+)"""", RegexOption.IGNORE_CASE)
+            .findAll(html)
+            .forEach { m ->
+                val isMovie = m.groupValues[1].equals("movie", true)
+                out.add(m.groupValues[2] to isMovie)
+            }
+        return out.toList()
+    }
+
+    /** Extrait les serveurs du blob JSON échappé présent dans le HTML de la page. */
+    private fun parseNakiosServers(html: String): List<Video.Server> {
+        // Chaque serveur = un objet JSON plat contenant "link". On isole objet par objet.
+        val objRegex = Regex("""\{[^{}]*?"link"\s*:\s*"(https:[^"]+)"[^{}]*?\}""")
+        val fieldOf = { obj: String, field: String ->
+            Regex("\"$field\"\\s*:\\s*\"([^\"]*)\"").find(obj)?.groupValues?.get(1)?.trim().orEmpty()
+        }
+        val out = LinkedHashMap<String, Video.Server>()
+        for (m in objRegex.findAll(html)) {
+            val obj = m.value
+            val link = unescapeJson(m.groupValues[1])
+            if (!link.startsWith("http")) continue
+            val serverName = fieldOf(obj, "server_name").ifBlank { fieldOf(obj, "label") }
+            val version = fieldOf(obj, "version")
+            val label = fieldOf(obj, "label")
+            val name = buildString {
+                append("Nakios · ")
+                append(serverName.ifBlank { runCatching { java.net.URL(link).host }.getOrDefault("source") })
+                if (label.isNotBlank() && !label.equals(serverName, true)) append(" $label")
+                if (version.isNotBlank()) append(" ($version)")
+            }
+            // Dédup par URL : le blob contient les DEUX versions (VF + VOSTFR).
+            out.putIfAbsent(link, Video.Server(id = "nakios_backup_$link", name = name, src = link))
+        }
+        return out.values.toList()
+    }
+
+    /**
+     * Backup Nakios. On n'a plus d'API par tmdbId : on retrouve la fiche par SLUG dérivé du
+     * titre, puis on lit les serveurs dans le HTML. On essaie les titres fournis (FR puis
+     * original) pour absorber les différences de nommage du site.
+     */
     suspend fun fetchNakiosBackupServers(
         tmdbId: String,
         videoType: Video.Type,
         season: Int = 0,
         episode: Int = 0,
+        titleHint: String? = null,
     ): List<Video.Server> {
-        if (tmdbId.isBlank() || !tmdbId.all { it.isDigit() }) return emptyList()
-        val path = when (videoType) {
-            is Video.Type.Movie -> "/api/sources/movie/$tmdbId"
-            is Video.Type.Episode -> {
-                if (season <= 0 || episode <= 0) return emptyList()
-                "/api/sources/tv/$tmdbId/$season/$episode"
-            }
-        }
-        val body = apiGet(path) ?: return emptyList()
-        val resp = try {
-            gson.fromJson(body, SourcesResponse::class.java)
-        } catch (e: Exception) {
-            Log.e(TAG, "fetchNakiosBackupServers parse failed: ${e.message}")
+        val titles = listOfNotNull(titleHint?.takeIf { it.isNotBlank() })
+            .flatMap { listOf(it) }
+            .distinct()
+        if (titles.isEmpty()) {
+            Log.d(TAG, "backup: pas de titre (tmdbId=$tmdbId) → skip")
             return emptyList()
         }
-        val sources = resp?.sources ?: emptyList()
-        return sources.mapNotNull { src ->
-            val srcUrl = src.url ?: return@mapNotNull null
-            val absoluteUrl = if (srcUrl.startsWith("http")) srcUrl else "$baseUrl$srcUrl"
-            val label = buildString {
-                append("Nakios — ")
-                append(src.name ?: src.provider ?: "")
-                src.quality?.takeIf { it.isNotBlank() }?.let { append(" $it") }
-                src.lang?.takeIf { it.isNotBlank() }?.let { append(" [$it]") }
+        // S'assure que le domaine courant est résolu (hub nakios.org).
+        runCatching { onChangeUrl(false) }
+        val front = currentFrontUrl.trimEnd('/')
+
+        val wantMovie = videoType is Video.Type.Movie
+        for (t in titles) {
+            // 1) slug deviné depuis le titre (rapide, marche dans la majorité des cas)
+            // 2) puis les slugs RÉELS renvoyés par la recherche du site (fiable si le nommage diffère)
+            val candidates = LinkedHashSet<String>()
+            slugify(t).takeIf { it.isNotBlank() }?.let { candidates.add(it) }
+            runCatching { searchSlugs(t) }.getOrDefault(emptyList())
+                .filter { it.second == wantMovie }
+                .take(4)
+                .forEach { candidates.add(it.first) }
+
+            val pages = candidates.map { slug ->
+                if (wantMovie) "$front/movie/$slug"
+                else {
+                    if (season <= 0 || episode <= 0) return emptyList()
+                    "$front/episode/$slug/$season-$episode"
+                }
             }
-            Video.Server(
-                id = "nakios_backup_${src.id ?: srcUrl}",
-                name = label.trim(),
-                src = absoluteUrl,
-            )
+            for (page in pages) {
+                val html = httpGetRaw(page) ?: continue
+                // Page 404 Laravel → pas de blob serveurs.
+                if (!html.contains("server_name")) continue
+                val servers = parseNakiosServers(html)
+                if (servers.isNotEmpty()) {
+                    Log.d(TAG, "backup: $page → ${servers.size} serveurs")
+                    return servers
+                }
+            }
         }
+        Log.d(TAG, "backup: aucun serveur pour « ${titles.firstOrNull()} »")
+        return emptyList()
     }
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> = coroutineScope {

@@ -48,6 +48,22 @@ jobs:
           sed -i "s/versionName \"[^\"]*\"/versionName \"$TAG\"/" app/build.gradle
           echo "Set versionName=$TAG versionCode=$VERSION_CODE"
 
+      # 2026-07-17 : les notes de version affichées aux utilisateurs proviennent
+      #   désormais du MESSAGE DU TAG (git tag -m "..."), au lieu d'un texte
+      #   générique identique à chaque release. Repli sur le nom du tag si le
+      #   tag n'est pas annoté.
+      - name: Read release notes from tag
+        id: notes
+        run: |
+          git fetch --force --tags || true
+          NOTES="$(git tag -l --format='%(contents)' "${GITHUB_REF_NAME}")"
+          if [ -z "$NOTES" ]; then NOTES="ONYX ${GITHUB_REF_NAME}"; fi
+          {
+            echo "body<<__ONYX_EOF__"
+            echo "$NOTES"
+            echo "__ONYX_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Make Gradle executable
         run: chmod +x ./gradlew
 
@@ -160,6 +176,15 @@ jobs:
       - name: Upload APKs to Release
         uses: softprops/action-gh-release@v2
         with:
+          name: ONYX ${{ github.ref_name }}
+          body: |
+            ${{ steps.notes.outputs.body }}
+
+            ---
+            **Téléchargement**
+            - `onyx-${{ github.ref_name }}-universal.apk` — Mobile + TV (ARM) — **recommandé**
+            - `onyx-${{ github.ref_name }}-tv.apk` — Android TV (ARM)
+            - `onyx-${{ github.ref_name }}-x86.apk` — Émulateurs / TV Intel (x86)
           # ORDRE IMPORTANT : -universal.apk en PREMIER — les vieilles apps
           # layout "default" prennent le 1er asset non(-mobile/-tv) → doit être
           # l'ARM universel, pas x86.
@@ -183,9 +208,11 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ONYX ${{ github.ref_name }}
           body: |
-            ONYX ${{ github.ref_name }}
+            ${{ steps.notes.outputs.body }}
 
-            - `onyx-${{ github.ref_name }}-universal.apk` — Mobile + TV (ARM, recommandé)
+            ---
+            **Téléchargement**
+            - `onyx-${{ github.ref_name }}-universal.apk` — Mobile + TV (ARM) — **recommandé**
             - `onyx-${{ github.ref_name }}-tv.apk` — Android TV (ARM)
             - `onyx-${{ github.ref_name }}-x86.apk` — Émulateurs / TV Intel (x86)
           files: |

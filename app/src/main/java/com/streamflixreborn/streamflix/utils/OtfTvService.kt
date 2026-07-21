@@ -26,6 +26,105 @@ object OtfTvService {
     private const val OTF_API_URL = "https://app.otf-tv.com/otf/authV4.php"
     private const val OTF_AES_KEY = "@z5wFi5vDgtF_vds"
 
+    /** 2026-07-20 (user « OTF ne fonctionne plus … écran noir ») — DIAGNOSTIC RÉSEAU on-device
+     *  (PCAPdroid sur l'app officielle OTF TV V3.2 / com.iptvsmartflixplayer) : elle interroge
+     *  `authV3.php` puis streame depuis **blcco.linkip.org**. Or `authV4.php` (ce qu'on appelait
+     *  seul) ne sert AUCUNE URL blcco : 1133/1667 chaînes sont sur `*.dencreak.com` (NXDOMAIN,
+     *  domaine mort) et le reste sur `stm.linkip.org` (HTTP 522, origine morte) → écran noir.
+     *  TESTÉ : `authV3.php` avec notre payload répond **302 vers `ash-speed.hetzner.com/10GB.bin`**
+     *  (tarpit anti-scraper) → inutilisable, on ne l'appelle PAS. La vraie solution est la
+     *  reconstruction des URLs sur les hôtes CDN vivants (cf. `expandCdnMirrors`). */
+    private val OTF_API_URLS = listOf(
+        "https://app.otf-tv.com/otf/authV4.php",
+    )
+
+    /** 2026-07-20 — CDN dont le DOMAINE est mort (NXDOMAIN via Cloudflare/Google/Quad9), constaté
+     *  en diagnostic on-device : l'API OTF sert encore ~1133 chaînes sur 1667 avec ces hôtes
+     *  (py892/fr.dencreak.com) → UnknownHostException → écran noir. VÉRIFIÉ : le domaine `dencreak.com`
+     *  ENTIER est NXDOMAIN (1.1.1.1 depuis le PC, DNS privé du téléphone à `off`) → ce n'est PAS un
+     *  filtrage local, le CDN est mort. On relègue simplement ces URLs en dernier dans la liste de
+     *  la chaîne (le player passe à la suivante). */
+    private val DEAD_CDN_HOSTS = listOf("dencreak.com", "stm.linkip.org", "stb.blc2cdn.fyi")
+
+    /** CDN vérifié VIVANT (celui que l'app officielle utilise réellement) → priorité maximale. */
+    private val PREFERRED_CDN_HOSTS = listOf("blcco.linkip.org", "blc2cr.linkip.org")
+
+    /** 2026-07-20 (user : « quand je change de chaîne ça change pas… obligé de faire retour ») —
+     *  le catalogue contient PLUSIEURS entrées portant EXACTEMENT le même nom (ex. « TF1 » présent
+     *  en double/triple sur des CDN différents). Le tri TNT les plaçant côte à côte, « chaîne
+     *  suivante » tombait sur un doublon → log `switchChannel delta=1 : TF1 → TF1`, et comme le
+     *  doublon est souvent sur un CDN mort, on avait en plus une erreur réseau.
+     *  → On fusionne les entrées de même nom en une seule (URLs cumulées, CDN vivant d'abord),
+     *  ce qui rend prev/next réellement utile ET donne à chaque chaîne toutes ses sources. */
+    /** 2026-07-20 : la chaîne a-t-elle au moins une source jouable ? (après miroir stm→blcco).
+     *  Sert au zapping : inutile de s'arrêter 45 s sur une chaîne dont tous les CDN sont morts —
+     *  le user appuie sur « suivante », il veut la prochaine chaîne QUI MARCHE. */
+    fun hasLiveSource(ch: OtfChannel): Boolean =
+        orderUrlsByCdnHealth(ch.urls).any { cdnRank(it) < 2 }
+
+    fun dedupeChannels(list: List<OtfChannel>): List<OtfChannel> {
+        val m = LinkedHashMap<String, OtfChannel>()
+        for (c in list) {
+            val prev = m[c.normalizedKey]
+            m[c.normalizedKey] = if (prev == null) c else prev.copy(
+                urls = orderUrlsByCdnHealth(prev.urls + c.urls),
+                logo = prev.logo ?: c.logo,
+            )
+        }
+        return m.values.toList()
+    }
+
+    /** 2026-07-20 — ✅ MIROIR VÉRIFIÉ `stm.linkip.org` → `blcco.linkip.org`.
+     *  `stm.linkip.org` répond HTTP 522 (origine morte) mais `blcco.linkip.org` — l'hôte que
+     *  streame réellement l'app officielle — sert le MÊME espace d'identifiants, avec le MÊME
+     *  chemin `/live/<id>_.m3u8`. Vérifié EMPIRIQUEMENT en décodant une image de chaque flux :
+     *  id 1704 → France 24, 792/793/794/795 → beIN Sports, 803 → RMC Sport 1, 843/847 → Canal+
+     *  Sport, 787 → Eurosport 1 — tous conformes au nom que le catalogue donne à ces ids.
+     *  C'est donc une substitution d'hôte SÛRE (contrairement à dencreak, cf. plus bas).
+     *  On ajoute l'URL blcco EN PREMIER et on garde l'originale en repli. */
+    private fun mirrorStmToBlcco(urls: List<String>): List<String> {
+        val out = LinkedHashSet<String>()
+        for (u in urls) {
+            if (u.contains("//stm.linkip.org/", true)) {
+                out.add(u.replace("//stm.linkip.org/", "//blcco.linkip.org/", true))
+            }
+            out.add(u)
+        }
+        return out.toList()
+    }
+
+    /** ⛔ RETIRÉ 2026-07-20 (vérifié EN DIRECT, user : « j'ai mis France 2 j'ai une chaîne arabe ») :
+     *  j'avais tenté de reconstruire l'URL sur un hôte vivant en gardant le même id
+     *  (`/live/<id>_.m3u8`). **C'EST FAUX** : chaque CDN a son PROPRE espace d'identifiants —
+     *  l'id 1704 = « France 24 » sur `stm.linkip.org` mais diffuse TF1 sur `blcco.linkip.org`.
+     *  Principe du projet : PAS DE FLUX plutôt que la MAUVAISE chaîne. On ne réécrit donc JAMAIS
+     *  l'hôte d'une URL OTF. Idem pour l'agrégation de « variantes » de nom, retirée pour la même
+     *  raison. Ne pas retenter sans une VRAIE table de correspondance par CDN.
+     */
+
+    /** Trie les URLs d'UNE MÊME chaîne (plusieurs qualités) en mettant les CDN vivants d'abord.
+     *  Ne fabrique AUCUNE URL : on ne joue que ce que l'API a réellement renvoyé pour cette chaîne.
+     *
+     *  2026-07-20 (user : « les chaînes partent pas aussi vite qu'avant, comme si elle passait par
+     *  une phase d'échec avant d'aller à la source qui fonctionne » puis « pourquoi t'as gardé la
+     *  morte, ça sert à rien ») : les URLs sur CDN mort sont **PUREMENT SUPPRIMÉES**, jamais
+     *  reléguées **au sein d'une même chaîne** : si la chaîne a au moins une URL vivante, on ne
+     *  tente PAS d'abord un hôte NXDOMAIN (c'était la « phase d'échec » avant la bonne source).
+     *  En revanche on ne supprime jamais une chaîne du catalogue (cf. `fetchFromEndpoint`) : si
+     *  toutes ses URLs sont mortes, on les garde telles quelles — l'API fait foi. */
+    fun orderUrlsByCdnHealth(urls: List<String>): List<String> {
+        val distinct = mirrorStmToBlcco(urls).distinct()
+        val alive = distinct.filter { cdnRank(it) < 2 }
+        return if (alive.isNotEmpty()) alive.sortedBy { cdnRank(it) } else distinct
+    }
+
+    /** Rang de préférence d'une URL : 0 = CDN privilégié, 1 = neutre, 2 = CDN mort. */
+    private fun cdnRank(u: String): Int = when {
+        PREFERRED_CDN_HOSTS.any { u.contains(it, true) } -> 0
+        DEAD_CDN_HOSTS.any { u.contains(it, true) } -> 2
+        else -> 1
+    }
+
     data class OtfChannel(
         val name: String,
         val normalizedKey: String,
@@ -111,22 +210,70 @@ object OtfTvService {
         Log.d(TAG, "getUrlsForChannel: looking for key='$key'")
         val channels = fetchChannels()
         Log.d(TAG, "getUrlsForChannel: ${channels.size} channels in cache")
-        // D'abord chercher par catId (numérique), puis par normalizedKey
+        // 2026-07-20 (user "OTF ne fonctionne plus") : DIAGNOSTIC on-device — l'API répond
+        //   parfaitement (991 Ko déchiffrés, 1667 chaînes) MAIS la 1re entrée trouvée pointait
+        //   sur `fr.dencreak.com`, un domaine MORT (NXDOMAIN) → UnknownHostException → écran noir.
+        //   L'app officielle, elle, streame depuis blcco.linkip.org. Cause : on faisait
+        //   `firstOrNull` → une seule entrée, sans repli. FIX : agréger les URLs de TOUTES les
+        //   entrées correspondantes (la même chaîne existe dans plusieurs groupes/CDN), en
+        //   dédupliquant, et en reléguant EN DERNIER les hôtes connus morts. Le player peut
+        //   ainsi basculer sur un CDN vivant.
         val catIdInt = key.toIntOrNull()
-        val match = if (catIdInt != null && catIdInt > 0) {
-            channels.firstOrNull { it.catId == catIdInt }
+        val exact = if (catIdInt != null && catIdInt > 0) {
+            channels.filter { it.catId == catIdInt }
         } else {
-            channels.firstOrNull { it.normalizedKey == key }
+            channels.filter { it.normalizedKey == key }
         }
-        if (match != null) {
-            Log.d(TAG, "getUrlsForChannel: FOUND '${match.name}' (catId=${match.catId}) → ${match.urls.size} URLs: ${match.urls.firstOrNull()}")
-        } else {
+        // ⛔ 2026-07-20 : l'agrégation par « variantes de nom » (france2 ≈ france2hd…) est RETIRÉE.
+        //   Elle rapatriait les URLs d'une AUTRE entrée du catalogue → user : « j'ai mis France 2,
+        //   j'ai une chaîne arabe ». On ne joue QUE les URLs de la chaîne demandée.
+        if (exact.isEmpty()) {
             Log.w(TAG, "getUrlsForChannel: NOT FOUND for key='$key'")
+            return emptyList()
         }
-        return match?.urls ?: emptyList()
+        val ordered = orderUrlsByCdnHealth(exact.flatMap { it.urls })
+        val liveCount = ordered.count { cdnRank(it) < 2 }
+        Log.d(TAG, "getUrlsForChannel: ${exact.size} entrée(s) → ${ordered.size} URLs " +
+            "($liveCount sur CDN vivant) — 1re: ${ordered.firstOrNull()?.take(60)}")
+        return ordered
     }
 
+    /** 2026-07-20 : interroge V3 **et** V4 et fusionne les URLs par chaîne (clé = CatID si présent,
+     *  sinon nom normalisé). Une chaîne dont l'entrée V4 est sur un CDN mort récupère ainsi l'URL
+     *  V3 (blcco.linkip.org) que l'app officielle utilise. */
     private fun fetchFromApi(): List<OtfChannel> {
+        val merged = LinkedHashMap<String, OtfChannel>()
+        for (endpoint in OTF_API_URLS) {
+            val list = try {
+                fetchFromEndpoint(endpoint)
+            } catch (t: Throwable) {
+                Log.w(TAG, "OTF $endpoint KO: ${t.javaClass.simpleName}: ${t.message}")
+                emptyList()
+            }
+            Log.d(TAG, "OTF $endpoint → ${list.size} chaînes")
+            for (ch in list) {
+                // ⚠ CatID n'est PAS unique par chaîne (plusieurs chaînes le partagent) : la clé de
+                //   fusion DOIT inclure le nom normalisé, sinon on écrase 1667 chaînes en 48.
+                val k = "${ch.catId}|${ch.normalizedKey}"
+                val prev = merged[k]
+                merged[k] = if (prev == null) ch else prev.copy(
+                    urls = (prev.urls + ch.urls).distinct(),
+                    logo = prev.logo ?: ch.logo,
+                )
+            }
+        }
+        val result = merged.values.toList()
+        Log.d(TAG, "OTF TV: ${result.size} chaînes après fusion V3+V4")
+        try {
+            val hosts = result.flatMap { it.urls }.mapNotNull {
+                try { java.net.URL(it).host } catch (_: Exception) { null }
+            }.groupingBy { it }.eachCount().entries.sortedByDescending { it.value }
+            Log.d(TAG, "OTF TV (fusion): hôtes CDN = " + hosts.take(12).joinToString(", ") { "${it.key}(${it.value})" })
+        } catch (_: Throwable) {}
+        return result
+    }
+
+    private fun fetchFromEndpoint(apiUrl: String): List<OtfChannel> {
         // 2026-06-19 v38 : DeviceID = Settings.Secure.ANDROID_ID brut (= 16
         //   chars hex) comme l'app officielle OTF TV V3.2 (décompilé). Avec
         //   notre ancien format "sf<hash>otf", le serveur rejetait silencieux.
@@ -177,7 +324,7 @@ object OtfTvService {
             .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
             .build()
         val req = Request.Builder()
-            .url(OTF_API_URL)
+            .url(apiUrl)
             .post(formBody)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
             .cacheControl(okhttp3.CacheControl.Builder().noStore().noCache().build())
@@ -283,6 +430,9 @@ object OtfTvService {
                     }
                 }
 
+                // 2026-07-20 (user : « tu prends tout ce qu'il y a ») : le catalogue reflète
+                //   EXACTEMENT ce que l'API renvoie — on ne masque aucune chaîne, même si son CDN
+                //   est actuellement hors ligne. Aucun filtrage, aucune URL fabriquée.
                 if (urls.isNotEmpty()) {
                     result.add(OtfChannel(name, key, catId, urls, logo, groupName))
                 }
@@ -290,6 +440,13 @@ object OtfTvService {
         }
 
         Log.d(TAG, "OTF TV: parsed ${result.size} channels with URLs")
+        // DIAG 2026-07-20 : répartition des hôtes CDN dans la réponse (pour repérer les CDN morts).
+        try {
+            val hosts = result.flatMap { it.urls }.mapNotNull {
+                try { java.net.URL(it).host } catch (_: Exception) { null }
+            }.groupingBy { it }.eachCount().entries.sortedByDescending { it.value }
+            Log.d(TAG, "OTF TV: hôtes CDN = " + hosts.take(12).joinToString(", ") { "${it.key}(${it.value})" })
+        } catch (_: Throwable) {}
         return result
     }
 

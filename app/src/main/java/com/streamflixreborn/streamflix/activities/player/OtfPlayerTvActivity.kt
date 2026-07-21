@@ -34,6 +34,10 @@ class OtfPlayerTvActivity : Activity() {
 
     companion object {
         const val EXTRA_URL = "extra_otf_url"
+        /** 2026-07-20 : toutes les URLs (CDN multiples) — bascule au lieu de boucler sur un CDN mort. */
+        const val EXTRA_URLS = "extra_otf_urls"
+        /** 2026-07-20 : clé exacte de la chaîne (cf. OtfPlayerActivity.EXTRA_KEY). */
+        const val EXTRA_KEY = "extra_otf_key"
         const val EXTRA_TITLE = "extra_otf_title"
         private const val TAG = "OtfPlayerTvActivity"
     }
@@ -43,11 +47,16 @@ class OtfPlayerTvActivity : Activity() {
     private lateinit var channelsPanel: android.widget.LinearLayout
     private lateinit var channelsList: androidx.recyclerview.widget.RecyclerView
     private var currentUrl: String? = null
+    private var currentKey: String? = null
+    /** Toutes les URLs candidates de la chaîne courante, triées CDN vivant d'abord. */
+    private var urlList: List<String> = emptyList()
+    private var urlIndex = 0
     private var currentTitle: String? = null
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private var retryInFlight = false
     private val recentRetries = ArrayDeque<Long>()
-    private val MAX_RETRIES_IN_WINDOW = 5
+    // 2026-07-20 : 5 → 12, chaque retry teste désormais un CDN DIFFÉRENT.
+    private val MAX_RETRIES_IN_WINDOW = 12
     private val RETRY_WINDOW_MS = 60_000L
     private val RETRY_DELAY_MS = 1_500L
     private var otfChannels: List<com.streamflixreborn.streamflix.utils.OtfTvService.OtfChannel> = emptyList()
@@ -136,14 +145,21 @@ class OtfPlayerTvActivity : Activity() {
                 or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
             )
 
-        val url = intent.getStringExtra(EXTRA_URL)
+        val single = intent.getStringExtra(EXTRA_URL)
+        val many = intent.getStringArrayListExtra(EXTRA_URLS)?.filter { it.isNotBlank() } ?: emptyList()
         currentTitle = intent.getStringExtra(EXTRA_TITLE)
+        currentKey = intent.getStringExtra(EXTRA_KEY)
+        urlList = com.streamflixreborn.streamflix.utils.OtfTvService.orderUrlsByCdnHealth(
+            listOfNotNull(single) + many,
+        )
+        urlIndex = 0
+        val url = urlList.firstOrNull()
         if (url.isNullOrBlank()) {
             Log.w(TAG, "EXTRA_URL missing, finish")
             finish()
             return
         }
-        Log.d(TAG, "Starting OTF TV playback (ExoPlayer 2.19.1): $url")
+        Log.d(TAG, "Starting OTF TV playback (ExoPlayer 2.19.1): ${urlList.size} URL(s) — 1re: $url")
         startPlayback(url)
         // Charge le catalogue OTF en background pour alimenter le panel chaînes
         loadChannelsAsync()
@@ -169,20 +185,37 @@ class OtfPlayerTvActivity : Activity() {
             Log.d(TAG, "switchChannel: catalogue pas chargé")
             return
         }
-        val cur = otfChannels.firstOrNull { it.name.equals(currentTitle, ignoreCase = true) }
+        // 2026-07-20 : localisation par CLÉ exacte d'abord (le titre affiché peut différer du nom
+        //   du catalogue → on retombait sur la 1re chaîne, donc « ça ne change pas »).
+        val cur = currentKey?.let { k -> otfChannels.firstOrNull { it.normalizedKey == k } }
+            ?: otfChannels.firstOrNull { it.name.equals(currentTitle, ignoreCase = true) }
             ?: otfChannels.firstOrNull()
             ?: return
         // 2026-06-04 : tri TNT FR pour cohérence avec le panel
         val sameGroup = com.streamflixreborn.streamflix.utils.OtfTvService
-            .sortChannelsFrenchTntOrder(otfChannels.filter { it.group == cur.group })
+            .sortChannelsFrenchTntOrder(
+                com.streamflixreborn.streamflix.utils.OtfTvService
+                    .dedupeChannels(otfChannels.filter { it.group == cur.group }),
+            )
         val idx = sameGroup.indexOfFirst { it.name.equals(cur.name, ignoreCase = true) }
         if (idx < 0 || sameGroup.isEmpty()) return
         val size = sameGroup.size
-        val newIdx = ((idx + delta) % size + size) % size
+        // 2026-07-20 : saute les chaînes sans source vivante (cf. OtfPlayerActivity).
+        var newIdx = ((idx + delta) % size + size) % size
+        var guard = 0
+        while (guard < size && !com.streamflixreborn.streamflix.utils.OtfTvService
+                .hasLiveSource(sameGroup[newIdx])
+        ) {
+            newIdx = ((newIdx + delta) % size + size) % size
+            guard++
+        }
         val ch = sameGroup[newIdx]
-        val newUrl = ch.urls.firstOrNull() ?: return
+        urlList = com.streamflixreborn.streamflix.utils.OtfTvService.orderUrlsByCdnHealth(ch.urls)
+        urlIndex = 0
+        val newUrl = urlList.firstOrNull() ?: return
         Log.d(TAG, "switchChannel delta=$delta : ${cur.name} → ${ch.name}")
         currentTitle = ch.name
+        currentKey = ch.normalizedKey
         currentUrl = newUrl
         recentRetries.clear()
         val dsf = DefaultHttpDataSource.Factory()
@@ -216,11 +249,18 @@ class OtfPlayerTvActivity : Activity() {
                     } else otfChannels
                     // 2026-06-04 : tri ordre TNT France (TF1, France 2, ... puis alpha).
                     val sortedChannels = com.streamflixreborn.streamflix.utils.OtfTvService
-                        .sortChannelsFrenchTntOrder(sameGroupChannels)
+                        .sortChannelsFrenchTntOrder(
+                            com.streamflixreborn.streamflix.utils.OtfTvService
+                                .dedupeChannels(sameGroupChannels),
+                        )
                     channelsList.adapter = ChannelsAdapter(sortedChannels, currentTitle) { ch ->
-                        ch.urls.firstOrNull()?.let { newUrl ->
+                        urlList = com.streamflixreborn.streamflix.utils.OtfTvService
+                            .orderUrlsByCdnHealth(ch.urls)
+                        urlIndex = 0
+                        urlList.firstOrNull()?.let { newUrl ->
                             Log.d(TAG, "User picked channel: ${ch.name}")
                             currentTitle = ch.name
+                            currentKey = ch.normalizedKey
                             currentUrl = newUrl
                             recentRetries.clear()
                             val dsf = DefaultHttpDataSource.Factory()
@@ -363,7 +403,14 @@ class OtfPlayerTvActivity : Activity() {
     /** 2026-06-04 : retry auto avec anti-flap (max 5 retries / 60s, 1.5s entre). */
     private fun scheduleRetry(reason: String) {
         if (retryInFlight) return
-        val url = currentUrl ?: return
+        // 2026-07-20 : bascule sur le CDN suivant au lieu de re-tenter la même URL morte.
+        val url = if (urlList.size > 1) {
+            urlIndex = (urlIndex + 1) % urlList.size
+            urlList[urlIndex].also {
+                currentUrl = it
+                Log.w(TAG, "Bascule CDN → URL ${urlIndex + 1}/${urlList.size}: ${it.take(70)}")
+            }
+        } else currentUrl ?: return
         val now = System.currentTimeMillis()
         recentRetries.removeAll { (now - it) > RETRY_WINDOW_MS }
         if (recentRetries.size >= MAX_RETRIES_IN_WINDOW) {

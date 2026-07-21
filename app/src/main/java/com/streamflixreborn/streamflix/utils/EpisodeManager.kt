@@ -13,6 +13,75 @@ object EpisodeManager {
     var currentIndex = 0
         private set
 
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 2026-07-20 (testeur « One Piece » : Classroom of the Elite, S2E13 → aucune
+    //   détection des saisons suivantes ; S3E1 lancée via l'icône saisons → le
+    //   lecteur ne relie plus rien, « suivant » inactif et l'icône saisons ne
+    //   trouve rien) :
+    //
+    //   CAUSE — sur AnimeSama, quand une série existe en VF **et** VOSTFR,
+    //   `getTvShow` ne renvoie PAS les vraies saisons mais 2 ENVELOPPES de langue
+    //   (`slug/@vostfr/…` numérotée 1, `slug/@vf/…` numérotée 2). Or l'épisode en
+    //   cours porte le VRAI numéro de saison (3). Donc
+    //   `tvShow.seasons.find { it.number == 3 }` → null → aucun épisode chargé,
+    //   et `ensureNextEpisodeAvailable` compare 3 aux numéros factices 1/2 → rien.
+    //
+    //   FIX — on dérive la vraie saison depuis l'ID de l'épisode (format AnimeSama
+    //   `slug/saison3/vostfr/1`), et on sait déplier une enveloppe de langue pour
+    //   obtenir la liste des VRAIES sous-saisons.
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    private val ANIMESAMA_TAIL = Regex("""/(vostfr|vf|va|vo)/\d+$""", RegexOption.IGNORE_CASE)
+
+    /** `slug/saison3/vostfr/1` → `slug/saison3/vostfr` (= un Season.id AnimeSama valide). */
+    private fun animeSamaSeasonIdOf(episodeId: String): String? =
+        if (ANIMESAMA_TAIL.containsMatchIn(episodeId)) episodeId.substringBeforeLast("/") else null
+
+    /** Vrai numéro de saison lu dans l'ID (`saison3` → 3), indépendant des enveloppes de langue. */
+    private fun animeSamaSeasonNumberOf(episodeId: String): Int? =
+        Regex("""(?i)saison\s*(\d+)""").find(episodeId)?.groupValues?.get(1)?.toIntOrNull()
+
+    private fun animeSamaLangOf(episodeId: String): String? =
+        ANIMESAMA_TAIL.find(episodeId)?.groupValues?.get(1)?.lowercase()
+
+    /**
+     * Déplie les enveloppes de langue AnimeSama pour obtenir les VRAIES sous-saisons.
+     * `getEpisodesBySeason("slug/@vostfr/…")` retourne des pseudo-épisodes `@subfolder:` dont
+     * l'ID est le vrai Season.id et le numéro le vrai numéro de saison.
+     * Les Film/OAV sont numérotés 900+ par le provider → on les exclut du chaînage.
+     */
+    private suspend fun resolveAnimeSamaSubSeasons(
+        provider: com.streamflixreborn.streamflix.providers.Provider,
+        tvShowId: String,
+        episodeId: String,
+    ): List<Season> {
+        val lang = animeSamaLangOf(episodeId) ?: return emptyList()
+        val tvShow = runCatching { provider.getTvShow(tvShowId) }.getOrNull() ?: return emptyList()
+        val wrappers = tvShow.seasons.filter { it.id.contains("/@$lang/", ignoreCase = true) }
+            .ifEmpty { tvShow.seasons.filter { it.id.contains("/@") } }
+        if (wrappers.isEmpty()) return emptyList()
+
+        val out = mutableListOf<Season>()
+        for (wrapper in wrappers) {
+            val subs = runCatching { provider.getEpisodesBySeason(wrapper.id) }
+                .getOrDefault(emptyList())
+            subs.filter { it.id.startsWith("@subfolder:") }.forEach { pseudo ->
+                val subSeasonId = pseudo.id.removePrefix("@subfolder:")
+                // On ne garde que les sous-saisons de la langue en cours de lecture.
+                if (subSeasonId.endsWith("/$lang", ignoreCase = true)) {
+                    out.add(
+                        Season(
+                            id = subSeasonId,
+                            number = pseudo.number,
+                            title = pseudo.title ?: "Saison ${pseudo.number}",
+                        ).apply { this.tvShow = tvShow },
+                    )
+                }
+            }
+        }
+        return out.filter { it.number in 1..899 }.distinctBy { it.number }
+    }
+
     fun addEpisodes(list: List<Episode>) {
         episodes.clear()
         episodes.addAll(list)
@@ -67,8 +136,12 @@ object EpisodeManager {
             try {
                 val tvShow = provider.getTvShow(tvShowId)
                 val season = tvShow.seasons.find { it.number == seasonNumber }
-                if (season != null) {
-                    var fetchedEpisodes = provider.getEpisodesBySeason(season.id)
+                // 2026-07-20 : si la saison courante n'est pas dans `tvShow.seasons` (cas
+                //   AnimeSama VF+VOSTFR : ce sont des enveloppes de langue numérotées 1/2, donc
+                //   la saison 3 est introuvable), on dérive son ID directement depuis l'épisode.
+                val seasonIdToFetch = season?.id ?: animeSamaSeasonIdOf(type.id)
+                if (seasonIdToFetch != null) {
+                    var fetchedEpisodes = provider.getEpisodesBySeason(seasonIdToFetch)
                     // 2026-07-05 (testeur "AnimeSama : reprise via 'Continuer à regarder'
                     //   après fermeture de l'appli → flèche épisode précédent ABSENTE, suivant
                     //   inactif, pas de focus sur l'épisode courant ; le contournement = repasser
@@ -101,7 +174,7 @@ object EpisodeManager {
                     if (fetchedEpisodes.isNotEmpty()) {
                         fetchedEpisodes.forEach { episode ->
                             episode.tvShow = episode.tvShow ?: tvShow
-                            episode.season = episode.season ?: season
+                            episode.season = episode.season ?: (season ?: seasonContext)
                         }
                         withContext(Dispatchers.IO) {
                             database.episodeDao().insertAll(fetchedEpisodes)
@@ -131,7 +204,11 @@ object EpisodeManager {
             ?: type
         val provider = UserPreferences.currentProvider ?: return false
         val tvShowId = currentEpisode.tvShow.id
-        val currentSeasonNumber = currentEpisode.season.number
+        // 2026-07-20 : le numéro porté par l'objet Season peut être un numéro d'ENVELOPPE de
+        //   langue AnimeSama (1=VOSTFR, 2=VF). L'ID de l'épisode, lui, contient le vrai numéro
+        //   (`slug/saison3/vostfr/1`) → on le privilégie, sinon le chaînage compare 3 à 1/2.
+        val currentSeasonNumber = animeSamaSeasonNumberOf(currentEpisode.id)
+            ?: currentEpisode.season.number
 
         fun nextSeasonFrom(seasons: List<Season>): Season? =
             seasons
@@ -156,6 +233,14 @@ object EpisodeManager {
                     }
                     nextSeason = nextSeasonFrom(tvShow.seasons)
                 }
+        }
+
+        // 2026-07-20 : dernier recours AnimeSama — les saisons du provider sont des enveloppes de
+        //   langue, on les déplie pour obtenir les VRAIES sous-saisons et trouver la suivante.
+        //   C'est ce qui manquait pour passer de S2E13 à S3E1 (testeur « One Piece »).
+        if (nextSeason == null) {
+            val realSeasons = resolveAnimeSamaSubSeasons(provider, tvShowId, currentEpisode.id)
+            if (realSeasons.isNotEmpty()) nextSeason = nextSeasonFrom(realSeasons)
         }
 
         val seasonToLoad = nextSeason ?: return false
