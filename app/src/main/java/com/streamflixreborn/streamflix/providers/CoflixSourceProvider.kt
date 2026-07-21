@@ -42,14 +42,32 @@ object CoflixSourceProvider {
     private const val USER_AGENT =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
-    /** Liste des miroirs connus du site. On essaie dans l'ordre jusqu'à un 200. */
+    /** Miroirs de repli si l'auto-découverte (CoflixMirrorDiscovery) échoue.
+     *  On essaie dans l'ordre jusqu'à un 200.
+     *  2026-07-17 : le domaine actif est désormais résolu dynamiquement via
+     *  coflix.domains (redirect_url). coflix.cloud = défaut connu-bon au 17/07 ;
+     *  coflix.boston = ancien domaine (WordPress) gardé en dernier filet. */
     private val MIRRORS = listOf(
-        // 2026-07-12 : coflix.boston = site ACTIF (WordPress, WP REST API).
-        //   Les anciens domaines (trade/cymru/date/click) redirigent vers Telegram.
+        "https://coflix.cloud",
         "https://coflix.boston",
     )
 
     @Volatile private var lastWorkingMirror: String = MIRRORS.first()
+
+    /** Rafraîchit lastWorkingMirror depuis le registre coflix.domains (cache 6h).
+     *  Appelé au début de la résolution : quand Coflix migre, l'app suit sans
+     *  release. Ne throw jamais (discover() renvoie au pire le défaut). */
+    private suspend fun ensureActiveMirror() {
+        try {
+            val active = CoflixMirrorDiscovery.discover()
+            if (active != lastWorkingMirror) {
+                Log.d(TAG, "miroir actif (registre) : $lastWorkingMirror → $active")
+                lastWorkingMirror = active
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "ensureActiveMirror ignoré: ${e.message}")
+        }
+    }
 
     /** 2026-06-02 — Backoff après HTTP 429. Quand un mirror Coflix renvoie 429,
      *  on marque Coflix comme indispo pendant 30 min : tous les calls suivants
@@ -200,7 +218,10 @@ object CoflixSourceProvider {
             return null
         }
         val encoded = URLEncoder.encode(cleanTitle, "UTF-8")
-        // 2026-07-12 : coflix.boston = WordPress, utilise WP REST API pour la recherche.
+        // 2026-07-17 : résout le domaine Coflix actif via coflix.domains (cache 6h)
+        //   AVANT de construire la liste — l'app suit les migrations sans release.
+        ensureActiveMirror()
+        // WordPress : utilise WP REST API pour la recherche.
         //   L'ancien suggest.php n'existe plus (HTTP 500).
         val mirrors = buildList {
             if (lastWorkingMirror !in this) add(lastWorkingMirror)

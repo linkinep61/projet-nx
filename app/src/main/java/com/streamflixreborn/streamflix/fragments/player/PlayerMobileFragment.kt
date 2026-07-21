@@ -926,6 +926,13 @@ class PlayerMobileFragment : Fragment() {
                             com.streamflixreborn.streamflix.activities.player.OtfPlayerActivity::class.java,
                         ).apply {
                             putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerActivity.EXTRA_URL, url)
+                            // 2026-07-20 : on passe TOUTES les URLs (CDN multiples) pour que le
+                            //   player bascule au lieu de rester bloqué sur un CDN mort.
+                            putStringArrayListExtra(
+                                com.streamflixreborn.streamflix.activities.player.OtfPlayerActivity.EXTRA_URLS,
+                                ArrayList(urls),
+                            )
+                            putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerActivity.EXTRA_KEY, key)
                             putExtra(com.streamflixreborn.streamflix.activities.player.OtfPlayerActivity.EXTRA_TITLE, args.title)
                         }
                         startActivity(intent)
@@ -7407,6 +7414,8 @@ class PlayerMobileFragment : Fragment() {
         //   un lecteur MIROIR (WebPlayerMirror) sur la PlayerView → NOS contrôles natifs pilotent la
         //   vidéo web (play/pause/seek), mobile ET télécommande TV. Les autres embeds gardent
         //   l'overlay plein écran sur la racine.
+        // 2026-07-17 : abyss = mode MIROIR (contrôles natifs play/pause/seek qui pilotent la WebView,
+        //   fonctionne à la télécommande sur TV). + interception → bascule native si abyss mint l'URL.
         val webViewIsPlayer = embedUrl.contains("seekplayer") || embedUrl.contains("embedseek") || embedUrl.contains("abyss") || embedUrl.contains("4meplayer") || embedUrl.contains("swiftflow")
         val nativeVideoOverlay = binding.pvPlayer.overlayFrameLayout
         val useNativeControls = webViewIsPlayer && nativeVideoOverlay != null
@@ -7546,6 +7555,17 @@ class PlayerMobileFragment : Fragment() {
                 // Abyss/Hydrax: player dedie sans pub
                 if (isAbyssEmbed) {
                     val ah = request?.url?.host ?: ""
+                    // 2026-07-17 : au VRAI tap play (geste de confiance), abyss mint l'URL MP4
+                    //   googleapis → on la CAPTE et on bascule en lecture NATIVE ExoPlayer (contrôle
+                    //   télécommande complet sur TV, comme les autres serveurs). Le WebView ne sert
+                    //   qu'à révéler l'URL via ton interaction.
+                    if (!m3u8Intercepted && isAbyssMediaUrl(url)) {
+                        Log.d("PlayerMobile", "Abyss media intercepted → native: ${url.take(90)}")
+                        m3u8Intercepted = true
+                        android.os.Handler(android.os.Looper.getMainLooper()).post { onAbyssMediaIntercepted(url) }
+                        return WebResourceResponse("text/plain", "UTF-8",
+                            java.io.ByteArrayInputStream("".toByteArray()))
+                    }
                     if (abyssAdHosts.any { ah.contains(it, ignoreCase = true) }) {
                         Log.d("PlayerMobile", "Abyss AD BLOCKED: $ah")
                         return WebResourceResponse("text/plain", "UTF-8",
@@ -7861,6 +7881,39 @@ class PlayerMobileFragment : Fragment() {
             subtitles = video.subtitles
         )
         displayVideo(newVideo, server)
+    }
+
+    /** URL média réelle d'abyss (MP4 signé sur googleapis) captée dans l'overlay. */
+    private fun isAbyssMediaUrl(url: String): Boolean {
+        val l = url.lowercase()
+        if (!l.startsWith("http")) return false
+        return l.contains("storage.googleapis.com")
+            || l.contains("commondatastorage.googleapis.com")
+            || (l.contains(".mp4") && !l.contains("abysscdn.com/?") && !l.contains("google-analytics"))
+    }
+
+    /** Abyss a miné l'URL MP4 (au vrai tap play) → on ferme l'overlay et on joue en NATIF. */
+    private fun onAbyssMediaIntercepted(mediaUrl: String) {
+        val video = pendingWebViewVideo ?: return
+        val server = pendingWebViewServer ?: return
+        val clean = mediaUrl.substringBefore("#")
+        Log.d("PlayerMobile", "onAbyssMediaIntercepted → native ExoPlayer: ${clean.take(90)}")
+        hideWebViewOverlay()
+        val newVideo = Video(
+            source = clean,
+            type = MimeTypes.VIDEO_MP4,
+            headers = mapOf(
+                "User-Agent" to NetworkClient.USER_AGENT,
+                "Referer" to "https://abysscdn.com/",
+            ),
+            webViewUrl = null,
+            subtitles = video.subtitles,
+        )
+        displayVideo(newVideo, server)
+        // Restaure explicitement l'interface native (contrôles, liste serveurs) — identique aux autres.
+        binding.pvPlayer.postDelayed({
+            try { binding.pvPlayer.useController = true; binding.pvPlayer.showController() } catch (_: Exception) {}
+        }, 400)
     }
 
     /**

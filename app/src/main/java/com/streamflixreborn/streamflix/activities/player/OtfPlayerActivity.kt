@@ -33,9 +33,24 @@ class OtfPlayerActivity : Activity() {
 
     companion object {
         const val EXTRA_URL = "extra_otf_url"
+        /** 2026-07-20 : liste COMPLÈTE des URLs de la chaîne (plusieurs CDN / qualités).
+         *  Le player bascule sur la suivante quand une URL échoue, au lieu de re-tenter
+         *  indéfiniment la même (cause de l'écran noir quand un CDN meurt). */
+        const val EXTRA_URLS = "extra_otf_urls"
         const val EXTRA_TITLE = "extra_otf_title"
+        /** 2026-07-20 : clé EXACTE (normalizedKey) de la chaîne. Sans elle, le player se
+         *  localisait dans le catalogue par le TITRE ; si le titre affiché différait du nom du
+         *  catalogue, l'index valait -1 et **prev/next ne faisait plus rien** (« quand je veux
+         *  changer de chaîne ça change pas »). */
+        const val EXTRA_KEY = "extra_otf_key"
         private const val TAG = "OtfPlayerActivity"
     }
+
+    private var currentKey: String? = null
+
+    /** Toutes les URLs candidates de la chaîne courante, triées CDN vivant d'abord. */
+    private var urlList: List<String> = emptyList()
+    private var urlIndex = 0
 
     private var player: ExoPlayer? = null
     private lateinit var playerView: StyledPlayerView
@@ -44,7 +59,9 @@ class OtfPlayerActivity : Activity() {
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private var retryInFlight = false
     private val recentRetries = ArrayDeque<Long>()
-    private val MAX_RETRIES_IN_WINDOW = 5
+    // 2026-07-20 : relevé de 5 → 12 car chaque retry teste désormais un CDN DIFFÉRENT
+    //   (une chaîne peut avoir 7-8 URLs) : il faut pouvoir tous les essayer.
+    private val MAX_RETRIES_IN_WINDOW = 12
     private val RETRY_WINDOW_MS = 60_000L
     private val RETRY_DELAY_MS = 1_500L
     // 2026-06-04 (user "chaîne suivante/précédente à la place des 4 boutons inutiles") :
@@ -112,14 +129,21 @@ class OtfPlayerActivity : Activity() {
                 or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
             )
 
-        val url = intent.getStringExtra(EXTRA_URL)
+        val single = intent.getStringExtra(EXTRA_URL)
+        val many = intent.getStringArrayListExtra(EXTRA_URLS)?.filter { it.isNotBlank() } ?: emptyList()
         currentTitle = intent.getStringExtra(EXTRA_TITLE)
+        currentKey = intent.getStringExtra(EXTRA_KEY)
+        urlList = com.streamflixreborn.streamflix.utils.OtfTvService.orderUrlsByCdnHealth(
+            (listOfNotNull(single) + many),
+        )
+        urlIndex = 0
+        val url = urlList.firstOrNull()
         if (url.isNullOrBlank()) {
             Log.w(TAG, "EXTRA_URL missing, finish")
             finish()
             return
         }
-        Log.d(TAG, "Starting OTF playback (ExoPlayer 2.19.1): $url")
+        Log.d(TAG, "Starting OTF playback (ExoPlayer 2.19.1): ${urlList.size} URL(s) candidates — 1re: $url")
         startPlayback(url)
         loadGroupChannelsAsync()
     }
@@ -131,16 +155,25 @@ class OtfPlayerActivity : Activity() {
                 val all = kotlinx.coroutines.runBlocking {
                     com.streamflixreborn.streamflix.utils.OtfTvService.fetchChannels()
                 }
-                val cur = all.firstOrNull { it.name.equals(currentTitle, ignoreCase = true) }
+                // 2026-07-20 : on se localise d'abord par la CLÉ exacte (fiable), puis par le titre.
+                val cur = currentKey?.let { k -> all.firstOrNull { it.normalizedKey == k } }
+                    ?: all.firstOrNull { it.name.equals(currentTitle, ignoreCase = true) }
                 val rawList = if (cur != null) all.filter { it.group == cur.group } else all
                 // 2026-06-04 (user "trier les chaînes OTF dans l'ordre des
                 //   chaînes France") : tri TNT FR pour cohérence prev/next.
                 val list = com.streamflixreborn.streamflix.utils.OtfTvService
-                    .sortChannelsFrenchTntOrder(rawList)
-                val idx = list.indexOfFirst { it.name.equals(currentTitle, ignoreCase = true) }
+                    .sortChannelsFrenchTntOrder(
+                        com.streamflixreborn.streamflix.utils.OtfTvService.dedupeChannels(rawList),
+                    )
+                val idx = list.indexOfFirst {
+                    (currentKey != null && it.normalizedKey == currentKey) ||
+                        it.name.equals(currentTitle, ignoreCase = true)
+                }
                 handler.post {
                     groupChannels = list
-                    currentChannelIndex = idx
+                    // Si on ne se retrouve pas dans la liste, on se place quand même au début :
+                    //   prev/next doit RESTER utilisable (avant : index -1 = boutons morts).
+                    currentChannelIndex = if (idx >= 0) idx else 0
                     Log.d(TAG, "Loaded ${list.size} channels in group (TNT order), current idx=$idx")
                 }
             } catch (e: Exception) {
@@ -156,12 +189,25 @@ class OtfPlayerActivity : Activity() {
             return
         }
         val size = groupChannels.size
-        val newIdx = ((currentChannelIndex + delta) % size + size) % size
+        // 2026-07-20 : on saute les chaînes sans AUCUNE source vivante (CDN mort) — sinon
+        //   « chaîne suivante » s'arrêtait sur une chaîne injouable, bouclait sur des erreurs
+        //   réseau, et le user avait l'impression que le zapping ne marchait pas.
+        var newIdx = ((currentChannelIndex + delta) % size + size) % size
+        var guard = 0
+        while (guard < size && !com.streamflixreborn.streamflix.utils.OtfTvService
+                .hasLiveSource(groupChannels[newIdx])
+        ) {
+            newIdx = ((newIdx + delta) % size + size) % size
+            guard++
+        }
         val ch = groupChannels[newIdx]
-        val newUrl = ch.urls.firstOrNull() ?: return
+        urlList = com.streamflixreborn.streamflix.utils.OtfTvService.orderUrlsByCdnHealth(ch.urls)
+        urlIndex = 0
+        val newUrl = urlList.firstOrNull() ?: return
         Log.d(TAG, "switchChannel delta=$delta : ${currentTitle} → ${ch.name}")
         currentChannelIndex = newIdx
         currentTitle = ch.name
+        currentKey = ch.normalizedKey
         currentUrl = newUrl
         recentRetries.clear()
         val dsf = DefaultHttpDataSource.Factory()
@@ -241,9 +287,34 @@ class OtfPlayerActivity : Activity() {
     /** 2026-06-04 : retry auto avec anti-flap (max 5 retries / 60s, 1.5s entre). */
     private fun scheduleRetry(reason: String) {
         if (retryInFlight) return
-        val url = currentUrl ?: return
+        // 2026-07-20 : on ne re-tente PLUS la même URL en boucle. À chaque échec on passe au CDN
+        //   suivant de la chaîne — c'est ce qui débloque l'écran noir quand un CDN meurt.
+        val url = if (urlList.size > 1) {
+            urlIndex = (urlIndex + 1) % urlList.size
+            urlList[urlIndex].also {
+                currentUrl = it
+                Log.w(TAG, "Bascule CDN → URL ${urlIndex + 1}/${urlList.size}: ${it.take(70)}")
+            }
+        } else currentUrl ?: return
         val now = System.currentTimeMillis()
         recentRetries.removeAll { (now - it) > RETRY_WINDOW_MS }
+        // 2026-07-20 : si AUCUNE URL de cette chaîne n'est sur un CDN vivant, inutile d'insister
+        //   12 fois — on abandonne vite et on le DIT, au lieu de laisser un écran noir muet.
+        val noLiveSource = com.streamflixreborn.streamflix.utils.OtfTvService
+            .orderUrlsByCdnHealth(urlList).none { u ->
+                !u.contains("dencreak.com", true) && !u.contains("stm.linkip.org", true)
+            }
+        if (noLiveSource && recentRetries.size >= 2) {
+            Log.e(TAG, "Chaîne sans CDN vivant — abandon")
+            try {
+                android.widget.Toast.makeText(
+                    this,
+                    "${currentTitle ?: "Cette chaîne"} est indisponible (serveur hors ligne)",
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
+            } catch (_: Exception) {}
+            return
+        }
         if (recentRetries.size >= MAX_RETRIES_IN_WINDOW) {
             Log.e(TAG, "Too many retries (${recentRetries.size} in ${RETRY_WINDOW_MS}ms) — stop")
             return

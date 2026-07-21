@@ -175,6 +175,19 @@ abstract class Extractor {
             YflixExtractor(),
             MeritendExtractor(),
             MoiflixExtractor(),
+            // 2026-07-17 : nouveaux hosters vus côté FrenchStream / Flemmix(Wiflix)
+            //   qui remontaient « No extractors found ». Extraction 100 % native
+            //   (API JSON en clair, aucune WebView) — cf. en-têtes des fichiers.
+            VidaraExtractor(),   // viewdara.com / vidara.to → POST /api/stream
+            // 2026-07-17 : AnonMp4Extractor RETIRÉ (décision user).
+            //   L'extraction native est impossible : `tracks[].track_url` n'est
+            //   servable que depuis le contexte de la page, et le player ne
+            //   s'initialise que sur un vrai geste utilisateur (profil Abyss).
+            //   Seul l'overlay WebView aurait marché → jugé pas rentable pour
+            //   1 serveur sur les 15 que propose Wiflix, d'autant que l'auto-switch
+            //   bascule déjà tout seul sur un autre serveur.
+            //   Serveur MASQUÉ à la source (MovixProvider) + extracteur retiré ici
+            //   (inutile d'appeler un truc qui échoue). Fichier gardé pour ref.
             PapadustreamExtractor(),
             MovieboxExtractor(),
             VideoSibNetExtractor(),
@@ -362,18 +375,35 @@ abstract class Extractor {
 
         private fun recordFailure(serverName: String, error: Throwable? = null) {
             val now = System.currentTimeMillis()
-            val rec = serverHealth.getOrPut(serverName) { ServerHealth() }
-            synchronized(rec) {
-                if (now - rec.firstFailureAtMs > HEALTH_FAILURE_WINDOW_MS) {
-                    rec.firstFailureAtMs = now
-                    rec.failureCount = 1
-                } else {
-                    rec.failureCount++
+            val errorType = error?.let { classifyError(it) }
+
+            // 2026-07-17 — Une SOURCE morte ne dit RIEN sur la santé de
+            //   l'EXTRACTEUR : vidéo supprimée, pas encore encodée côté hoster,
+            //   lien expiré… L'extracteur a parfaitement fait son travail, c'est
+            //   le fichier qui n'existe pas.
+            //   Sans ce garde-fou, quelques fichiers HS d'affilée suffisent à
+            //   blacklister un extracteur 100 % fonctionnel pendant tout le
+            //   HEALTH_BROKEN_DURATION_MS. Constaté en réel : AnonMP4 marqué
+            //   "broken (3 failures)" alors que son API répondait proprement
+            //   "Video queued for processing" à chaque fois.
+            //   → On enregistre quand même la STAT (utile dans l'écran
+            //     Extracteurs), mais on ne compte pas l'échec SANTÉ.
+            if (errorType != "dead-content") {
+                val rec = serverHealth.getOrPut(serverName) { ServerHealth() }
+                synchronized(rec) {
+                    if (now - rec.firstFailureAtMs > HEALTH_FAILURE_WINDOW_MS) {
+                        rec.firstFailureAtMs = now
+                        rec.failureCount = 1
+                    } else {
+                        rec.failureCount++
+                    }
+                    if (rec.failureCount >= HEALTH_FAILURE_THRESHOLD) {
+                        rec.brokenUntilMs = now + HEALTH_BROKEN_DURATION_MS
+                        Log.w("Extractor", "Server '$serverName' marked broken until ${rec.brokenUntilMs} (${rec.failureCount} failures in window)")
+                    }
                 }
-                if (rec.failureCount >= HEALTH_FAILURE_THRESHOLD) {
-                    rec.brokenUntilMs = now + HEALTH_BROKEN_DURATION_MS
-                    Log.w("Extractor", "Server '$serverName' marked broken until ${rec.brokenUntilMs} (${rec.failureCount} failures in window)")
-                }
+            } else {
+                Log.d("Extractor", "Server '$serverName' : source morte (dead-content) — santé extracteur NON pénalisée")
             }
             // Persistance pour l'écran "Extracteurs" dans Paramètres
             // (auto-reset au bump de versionCode).
@@ -384,7 +414,6 @@ abstract class Extractor {
             //    l'utilisateur navigue forcément depuis un provider à un instant T,
             //    donc cette valeur reflète bien d'où vient l'appel (y compris pour
             //    les chaînes de backup type Movix → Cloudstream → ...).
-            val errorType = error?.let { classifyError(it) }
             val providerName = runCatching { UserPreferences.currentProvider?.name }.getOrNull()
             com.streamflixreborn.streamflix.utils.ExtractorFailureTracker.recordFailure(
                 extractorName = serverName,

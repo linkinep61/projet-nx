@@ -1792,6 +1792,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     sources.forEach { source ->
                                         val url = source.url ?: return@forEach
                                         if (url.isBlank()) return@forEach
+                                        if (isHiddenHost(url)) return@forEach
                                         val playerName = source.name?.takeIf { it.isNotBlank() } ?: guessPlayerName(url)
                                         list.add(Video.Server(id = "wiflix-$lang-${list.size}", name = "Wiflix · $playerName ($displayLang)", src = url))
                                     }
@@ -1974,6 +1975,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                 sources.forEach { source ->
                                     val url = source.url ?: return@forEach
                                     if (url.isBlank()) return@forEach
+                                    if (isHiddenHost(url)) return@forEach
                                     val playerName = source.name?.takeIf { it.isNotBlank() } ?: guessPlayerName(url)
                                     list.add(Video.Server(id = "wiflix-$lang-${list.size}", name = "Wiflix · $playerName ($displayLang)", src = url))
                                 }
@@ -3199,6 +3201,21 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
         } catch (_: Exception) {}
         return null
     }
+
+    /**
+     * 2026-07-17 — Hosts VOLONTAIREMENT masqués (décision user), jamais listés.
+     *
+     * anonmp4.help : extraction native impossible (le manifeste n'est servable que
+     *   depuis le contexte de la page, et le player ne s'initialise que sur un vrai
+     *   geste utilisateur — profil Abyss). Seul un overlay WebView aurait marché,
+     *   jugé pas rentable pour 1 serveur sur les 15 que propose Wiflix. L'auto-switch
+     *   bascule déjà tout seul. Même logique que Streamhg côté Coflix.
+     *   → masqué ICI (jamais proposé) + extracteur retiré du routage (Extractor.kt).
+     */
+    private val hiddenHosts = listOf("anonmp4.help")
+
+    private fun isHiddenHost(url: String): Boolean =
+        hiddenHosts.any { url.contains(it, ignoreCase = true) }
 
     private fun guessPlayerName(url: String): String {
         // Try the accurate extractor-based detection first

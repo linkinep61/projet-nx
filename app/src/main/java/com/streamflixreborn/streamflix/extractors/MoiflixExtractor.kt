@@ -45,7 +45,17 @@ open class MoiflixExtractor : Extractor() {
     //   .click → .dad → .fans). On utilise .fans comme principal + .dad/.click/
     //   .com/.org en alias pour matcher les anciens liens.
     override val mainUrl = "https://moiflix.fans/"
-    override val aliasUrls = listOf("https://moiflix.dad", "https://moiflix.click", "https://moiflix.com", "https://moiflix.org")
+    // 2026-07-17 : xtremestream servi EN DIRECT par Coflix (cfServers → lecteurvideo →
+    //   mirror "MP4 Direct" = https://lecteur1.xtremestream.xyz/player/index.php?data=…).
+    //   Le matching d'extracteur est un startsWith sur l'URL : sans le SOUS-DOMAINE
+    //   exact en alias, aucun extracteur ne matchait l'URL nue → l'app lisait l'index.php
+    //   comme une vidéo brute → serveur ROUGE. On route donc vers MoiflixExtractor, qui
+    //   charge l'index.php en WebView et intercepte le master m3u8 (xs1.php?data=…).
+    //   NB : startsWith ⇒ il faut le host complet (lecteur1.…), pas le domaine nu.
+    override val aliasUrls = listOf(
+        "https://moiflix.dad", "https://moiflix.click", "https://moiflix.com", "https://moiflix.org",
+        "https://lecteur1.xtremestream.xyz", "https://lecteur1.xtremestream.com",
+    )
 
     private val context = StreamFlixApp.instance.applicationContext
 
