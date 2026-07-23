@@ -807,20 +807,56 @@ object LiveHubFolderDialog {
         headerLayout.addView(langBtn)
 
         // ── Liste des chaînes ── (2026-06-22 : ListView custom, pas setItems)
+        val filteredOtf = channels.toMutableList()
+        val otfAdapter = android.widget.ArrayAdapter(
+            ctx, android.R.layout.simple_list_item_1, channels.map { it.title }.toMutableList(),
+        )
         val listView = android.widget.ListView(ctx).apply {
-            adapter = android.widget.ArrayAdapter(
-                ctx,
-                android.R.layout.simple_list_item_1,
-                channels.map { it.title },
-            )
+            adapter = otfAdapter
             setOnItemClickListener { _, _, idx, _ ->
-                onChannelSelected(channels[idx])
+                filteredOtf.getOrNull(idx)?.let { onChannelSelected(it) }
             }
+        }
+        // 2026-07-23 (user "je veux une recherche à l'ouverture de chaque dossier") :
+        //   filtre les chaînes OTF par nom en temps réel.
+        val otfSearch = android.widget.EditText(ctx).apply {
+            hint = "🔍 Rechercher dans $folderName…"
+            setHintTextColor(android.graphics.Color.parseColor("#88FFFFFF"))
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = if (isTV) 14f else 12f
+            setPadding((10 * dp).toInt(), (6 * dp).toInt(), (10 * dp).toInt(), (6 * dp).toInt())
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(android.graphics.Color.argb(0xCC, 0x2A, 0x2A, 0x2A)); cornerRadius = 6 * dp
+            }
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+            isSingleLine = true
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(e: android.text.Editable?) {
+                    val q = normSearch((e?.toString() ?: "").trim())
+                    filteredOtf.clear()
+                    if (q.isEmpty()) filteredOtf.addAll(channels)
+                    else filteredOtf.addAll(channels.filter { normSearch(it.title).contains(q) })
+                    otfAdapter.clear(); otfAdapter.addAll(filteredOtf.map { it.title }); otfAdapter.notifyDataSetChanged()
+                }
+            })
+        }
+        val otfContent = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            addView(otfSearch, android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins((12 * dp).toInt(), (4 * dp).toInt(), (12 * dp).toInt(), (4 * dp).toInt()) })
+            addView(listView, android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT
+            ))
         }
         var dlgRef: android.app.AlertDialog? = null
         val dlg = android.app.AlertDialog.Builder(ctx)
             .setCustomTitle(headerLayout)
-            .setView(listView)
+            .setView(otfContent)
             .setNegativeButton("Retour", null)
             .create()
         try { dlg.show() } catch (_: android.view.WindowManager.BadTokenException) { return }
@@ -1326,7 +1362,12 @@ object LiveHubFolderDialog {
         // 2026-07-04 (user "quand on va dans Stream4Free on pourrait verrouiller
         //   un film ou une série ou un Live") : passe le parentFolderKey pour
         //   activer le contrôle parental sur chaque sous-dossier (long-press).
-        showSimpleFolderList(ctx, folderName, folders, parentFolderKey = "folder:stream4")
+        // 2026-07-23 : + recherche à l'ouverture (agrège chaînes + films + séries).
+        val plexSearch = (live + films + series).flatMap {
+            (it.list as? List<*>)?.filterIsInstance<TvShow>().orEmpty()
+        }
+        showSimpleFolderList(ctx, folderName, folders, parentFolderKey = "folder:stream4",
+            searchItems = plexSearch, onSearchItemSelected = onChannelSelected)
     }
 
     /** 2026-06-27 : dossier Pluto unique en 3 sous-dossiers (📡 Chaînes / 🎬 Films /
@@ -1355,7 +1396,12 @@ object LiveHubFolderDialog {
         if (folders.isEmpty()) { displayCategories(ctx, folderName, allCats, onChannelSelected); return }
         // 2026-07-04 : idem que Stream4 — active le contrôle parental sur les
         //   sous-dossiers Pluto (Chaînes en direct / Films / Séries).
-        showSimpleFolderList(ctx, folderName, folders, parentFolderKey = "folder:pluto_tv")
+        // 2026-07-23 : + recherche à l'ouverture (agrège chaînes + films + séries).
+        val plutoSearch = (live + films + series).flatMap {
+            (it.list as? List<*>)?.filterIsInstance<TvShow>().orEmpty()
+        }
+        showSimpleFolderList(ctx, folderName, folders, parentFolderKey = "folder:pluto_tv",
+            searchItems = plutoSearch, onSearchItemSelected = onChannelSelected)
     }
 
     /** Petit dialog liste-de-dossiers réutilisable (titre + liste + RETOUR).
@@ -1369,17 +1415,31 @@ object LiveHubFolderDialog {
         folderName: String,
         folders: List<Pair<String, () -> Unit>>,
         parentFolderKey: String? = null,
+        searchItems: List<TvShow>? = null,
+        onSearchItemSelected: ((TvShow) -> Unit)? = null,
     ) {
         val dp = ctx.resources.displayMetrics.density
         val isTV = ctx.resources.configuration.uiMode and
                 android.content.res.Configuration.UI_MODE_TYPE_MASK ==
                 android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+        val folderLabels = folders.map { it.first }
         val adapter = android.widget.ArrayAdapter(
-            ctx, android.R.layout.simple_list_item_1, folders.map { it.first }.toMutableList(),
+            ctx, android.R.layout.simple_list_item_1, folderLabels.toMutableList(),
         )
+        // 2026-07-23 (user "je veux une recherche à l'ouverture de chaque dossier —
+        //   Plex, Pluto aussi") : si searchItems fourni, un champ recherche filtre
+        //   TOUS les programmes agrégés (Chaînes + Films + Séries) ; clic = lecture.
+        val simpleSearchable = searchItems?.distinctBy { it.id } ?: emptyList()
+        var simpleSearchMode = false
+        var simpleResults: List<TvShow> = emptyList()
         val listView = android.widget.ListView(ctx).apply {
             this.adapter = adapter
             setOnItemClickListener { _, _, idx, _ ->
+                if (simpleSearchMode) {
+                    val show = simpleResults.getOrNull(idx) ?: return@setOnItemClickListener
+                    onSearchItemSelected?.invoke(show)
+                    return@setOnItemClickListener
+                }
                 val (label, action) = folders[idx]
                 // 2026-07-04 : gate contrôle parental sur les sous-dossiers.
                 //   Si le sous-dossier est verrouillé ET pas débloqué session
@@ -1412,6 +1472,7 @@ object LiveHubFolderDialog {
             //   si parentFolderKey a été fourni par le caller.
             if (parentFolderKey != null) {
                 setOnItemLongClickListener { _, _, idx, _ ->
+                    if (simpleSearchMode) return@setOnItemLongClickListener false
                     val label = folders[idx].first
                     val subKey = com.streamflixreborn.streamflix.utils.TvHubFolderLockStore
                         .subFolderKey(parentFolderKey, label)
@@ -1464,12 +1525,45 @@ object LiveHubFolderDialog {
             }
             isFocusable = true
         }
+        val simpleSearchBox = if (simpleSearchable.isNotEmpty()) android.widget.EditText(ctx).apply {
+            hint = "🔍 Rechercher dans $folderName…"
+            setHintTextColor(android.graphics.Color.parseColor("#88FFFFFF"))
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = if (isTV) 14f else 12f
+            setPadding((10 * dp).toInt(), (6 * dp).toInt(), (10 * dp).toInt(), (6 * dp).toInt())
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(android.graphics.Color.argb(0xCC, 0x2A, 0x2A, 0x2A)); cornerRadius = 6 * dp
+            }
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+            isSingleLine = true
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(e: android.text.Editable?) {
+                    val q = normSearch((e?.toString() ?: "").trim())
+                    if (q.isEmpty()) {
+                        simpleSearchMode = false; simpleResults = emptyList()
+                        adapter.clear(); adapter.addAll(folderLabels); adapter.notifyDataSetChanged()
+                    } else {
+                        simpleResults = simpleSearchable.filter { normSearch(it.title).contains(q) }
+                        simpleSearchMode = true
+                        adapter.clear(); adapter.addAll(simpleResults.map { it.title }); adapter.notifyDataSetChanged()
+                    }
+                }
+            })
+        } else null
         val contentCol = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             addView(titleTv, android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { setMargins((6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt(), (2 * dp).toInt()) })
+            simpleSearchBox?.let {
+                addView(it, android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { setMargins((8 * dp).toInt(), (2 * dp).toInt(), (8 * dp).toInt(), (4 * dp).toInt()) })
+            }
             addView(listView, android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
@@ -1644,13 +1738,28 @@ object LiveHubFolderDialog {
         //   ListView custom au lieu de setItems → pas d'auto-dismiss.
         var dlgAggRef: android.app.AlertDialog? = null
         val labels = displayEntries.map { it.first }
+        // 2026-07-23 (user "je veux une recherche à l'ouverture de chaque dossier") :
+        //   recherche dans la vue agrégée (France TV / Arte / M6+ / BFM) → filtre à
+        //   travers TOUS les programmes de toutes les sous-catégories. Quand une
+        //   requête est saisie, la liste des catégories est remplacée par les
+        //   programmes correspondants (clic = lecture directe).
+        val aggAllProgs = aggregated.values.flatten().distinctBy { it.id }
+        var aggSearchMode = false
+        var aggResults: List<TvShow> = emptyList()
+        val aggAdapter = android.widget.ArrayAdapter(
+            ctx, android.R.layout.simple_list_item_1, labels.toMutableList()
+        )
         val listView = android.widget.ListView(ctx).apply {
-            adapter = android.widget.ArrayAdapter(
-                ctx,
-                android.R.layout.simple_list_item_1,
-                labels,
-            )
+            adapter = aggAdapter
             setOnItemClickListener { _, _, idx, _ ->
+                if (aggSearchMode) {
+                    val show = aggResults.getOrNull(idx) ?: return@setOnItemClickListener
+                    if (show.id == com.streamflixreborn.streamflix.utils.MiniPlayerController.currentChannelId) {
+                        dismissAllDialogs()
+                    }
+                    onChannelSelected(show)
+                    return@setOnItemClickListener
+                }
                 val (label, shows) = displayEntries[idx]
                 if (label.startsWith("🔓")) {
                     dismissAllDialogs()
@@ -1756,7 +1865,40 @@ object LiveHubFolderDialog {
             isFocusable = true
             isFocusableInTouchMode = false
         }
-        // Titre dans le flux + liste + RETOUR en ligne après la liste
+        // 2026-07-23 : champ recherche à l'ouverture du dossier agrégé (filtre
+        //   tous les programmes de toutes les sous-catégories).
+        val searchBoxAgg = android.widget.EditText(ctx).apply {
+            hint = "🔍 Rechercher dans $folderName…"
+            setHintTextColor(android.graphics.Color.parseColor("#88FFFFFF"))
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = if (isTV2) 14f else 12f
+            setPadding((10 * dp2).toInt(), (6 * dp2).toInt(), (10 * dp2).toInt(), (6 * dp2).toInt())
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(android.graphics.Color.argb(0xCC, 0x2A, 0x2A, 0x2A))
+                cornerRadius = 6 * dp2
+            }
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+            isSingleLine = true
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+                override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(e: android.text.Editable?) {
+                    val q = normSearch((e?.toString() ?: "").trim())
+                    if (q.isEmpty()) {
+                        aggSearchMode = false
+                        aggResults = emptyList()
+                        aggAdapter.clear(); aggAdapter.addAll(labels); aggAdapter.notifyDataSetChanged()
+                    } else {
+                        aggResults = aggAllProgs.filter { normSearch(it.title).contains(q) }
+                        aggSearchMode = true
+                        aggAdapter.clear()
+                        aggAdapter.addAll(aggResults.map { it.title })
+                        aggAdapter.notifyDataSetChanged()
+                    }
+                }
+            })
+        }
+        // Titre dans le flux + recherche + liste + RETOUR en ligne après la liste
         val contentColAgg = android.widget.LinearLayout(ctx).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             addView(titleBarAgg, android.widget.LinearLayout.LayoutParams(
@@ -1764,6 +1906,12 @@ object LiveHubFolderDialog {
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
                 setMargins((6 * dp2).toInt(), (4 * dp2).toInt(), (6 * dp2).toInt(), (2 * dp2).toInt())
+            })
+            addView(searchBoxAgg, android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins((8 * dp2).toInt(), (2 * dp2).toInt(), (8 * dp2).toInt(), (4 * dp2).toInt())
             })
             addView(listView, android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,

@@ -15,6 +15,10 @@
         android:required="false" />
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Android Auto : surface plein écran pour projeter la vidéo (technique app NAVIGATION, CarStream). -->
+    <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
+    <uses-permission android:name="androidx.car.app.NAVIGATION_TEMPLATES" />
+    <uses-permission android:name="androidx.car.app.MAP_TEMPLATES" />
     <!-- 2026-05-31 : Google Cast — découverte Chromecast sur le réseau local -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
@@ -238,6 +242,25 @@
             android:name=".activities.main.MainTvActivity"
             android:exported="true"
             android:theme="@style/AppTheme.Tv" />
+
+        <!-- ═══════════════ Android Auto — ONYX sur l'écran de voiture ═══════════════
+             CarAppService catégorie NAVIGATION → Android Auto donne une surface plein écran
+             (ACCESS_SURFACE) sur laquelle OnyxCarVideoScreen projette la vidéo (miroir du player
+             téléphone). ⚠ HostValidator = ALLOW_ALL (dev) → à durcir si un jour distribué via Play. -->
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
+        <meta-data
+            android:name="androidx.car.app.minCarApiLevel"
+            android:value="7" />
+        <service
+            android:name=".car.OnyxCarAppService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="androidx.car.app.CarAppService" />
+                <category android:name="androidx.car.app.category.NAVIGATION" />
+            </intent-filter>
+        </service>
 
         <service
             android:name=".download.DownloadService"

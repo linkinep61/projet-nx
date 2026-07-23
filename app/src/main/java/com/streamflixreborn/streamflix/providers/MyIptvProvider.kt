@@ -1173,26 +1173,40 @@ object MyIptvProvider : Provider, IptvProvider {
             cache[source.id] = CachedChannels(channels, System.currentTimeMillis() + CACHE_TTL_MS)
             return channels
         }
-        // 3. 2026-05-12 (user "VU IPTV charge live/movies/series séparément") : si l'URL
-        //    est du format Xtream Codes (get.php?username=X&password=Y), on appelle
-        //    player_api.php au lieu de parser le M3U entier. Classification fiable +
-        //    rapide car serveur classifie déjà.
-        if (source.type == IptvSource.Type.M3U) {
-            val xtream = tryFetchXtream(source)
-            if (xtream != null) {
-                cache[source.id] = CachedChannels(xtream, System.currentTimeMillis() + CACHE_TTL_MS)
-                if (xtream.isNotEmpty()) saveToDisk(source.id, xtream)
-                return xtream
+        // 2026-07-22 (user « plusieurs testeurs crashent au chargement des playlists ») :
+        //   on ENROBE tout le fetch/parse dans un catch (Throwable) qui rattrape AUSSI les
+        //   OutOfMemoryError (grosses playlists 176k chaînes) — le `catch (Exception)` interne du
+        //   parseur les laissait passer → crash dur non signalé. Sur échec : rapport GitHub dédié
+        //   (contexte mémoire/hôte/exception) + on renvoie une liste vide au lieu de planter l'app.
+        return try {
+            // 3. Xtream Codes (get.php?username=X&password=Y) → player_api.php, classification serveur.
+            if (source.type == IptvSource.Type.M3U) {
+                val xtream = tryFetchXtream(source)
+                if (xtream != null) {
+                    cache[source.id] = CachedChannels(xtream, System.currentTimeMillis() + CACHE_TTL_MS)
+                    if (xtream.isNotEmpty()) saveToDisk(source.id, xtream)
+                    return xtream
+                }
             }
+            // 4. Fallback : parse M3U classique
+            val channels = when (source.type) {
+                IptvSource.Type.M3U -> fetchM3u(source)
+                IptvSource.Type.STALKER -> fetchStalker(source)
+            }
+            cache[source.id] = CachedChannels(channels, System.currentTimeMillis() + CACHE_TTL_MS)
+            if (channels.isNotEmpty()) saveToDisk(source.id, channels)
+            channels
+        } catch (t: Throwable) {
+            Log.e(TAG, "loadChannels CRASH ${source.name}: ${t.javaClass.simpleName}: ${t.message}", t)
+            // Libère un peu de RAM au cas où c'est un OOM (évite un 2e crash en cascade).
+            runCatching { System.gc() }
+            com.streamflixreborn.streamflix.utils.BrokenSourceReporter.reportIptvLoadCrash(
+                sourceName = source.name,
+                url = source.url,
+                error = t,
+            )
+            emptyList()
         }
-        // 4. Fallback : parse M3U classique
-        val channels = when (source.type) {
-            IptvSource.Type.M3U -> fetchM3u(source)
-            IptvSource.Type.STALKER -> fetchStalker(source)
-        }
-        cache[source.id] = CachedChannels(channels, System.currentTimeMillis() + CACHE_TTL_MS)
-        if (channels.isNotEmpty()) saveToDisk(source.id, channels)
-        return channels
     }
 
     /** 2026-05-12 : tente Xtream Codes API. Retourne null si pas Xtream ou si l'API

@@ -133,6 +133,7 @@ abstract class Extractor {
         }
 
         private val extractors = listOf(
+            AnonMp4Extractor(),
             OnRegardeOuExtractor(),
             RabbitstreamExtractor(),
             RabbitstreamExtractor.MegacloudExtractor(),
@@ -172,7 +173,11 @@ abstract class Extractor {
             MagaSavorExtractor(),
             VidMoLyExtractor(),
             VidMoLyExtractor.ToDomain(),
-            YflixExtractor(),
+            // 2026-07-22 (user « tant qu'on n'a pas l'équivalent FR, désactive-le ») : yflix est
+            //   un site anglophone international (contenu NON-FRANÇAIS ; l'ancien yflix.to n'était
+            //   français que via Google Translate). Hors périmètre ONYX → extracteur DÉSACTIVÉ.
+            //   Réactiver (décommenter) si un équivalent réellement français est trouvé.
+            // YflixExtractor(),
             MeritendExtractor(),
             MoiflixExtractor(),
             // 2026-07-17 : nouveaux hosters vus côté FrenchStream / Flemmix(Wiflix)
@@ -203,6 +208,20 @@ abstract class Extractor {
             VidGuardExtractor(),
             OkruExtractor(),
             VixSrcExtractor(),
+            // 2026-07-23 : importés depuis streamflix-reborn (upstream) — hosts qu'on
+            //   n'avait pas. Additifs, domaines vérifiés sans chevauchement avec l'existant.
+            //   (VidxGo et AfterDark NON importés : le 1er exige un champ player maintainToken
+            //    absent chez nous, le 2ᵉ est un agrégateur qui se câble dans un provider, pas
+            //    un extracteur d'URL — évités pour ne rien casser.)
+            VixcloudExtractor(),   // vixcloud.co (famille VixSrc)
+            MaxstreamExtractor(),  // maxstream.video
+            NuuploadExtractor(),   // nupload.top / nupload.me
+            NekostreamExtractor(), // vidtube.site / megaplay.buzz (anime)
+            StreamSBExtractor(),   // streamsb + alias (packed)
+            Mp4UploadExtractor(),  // mp4upload.com (packed)
+            StreamlareExtractor(), // streamlare.com (packed)
+            NinjaStreamExtractor(),// ninjastream (packed, rotating)
+            UchExtractor(),        // uch (packed, rotating)
             GoodstreamExtractor(),
             LamovieExtractor(),
             UqloadExtractor(),

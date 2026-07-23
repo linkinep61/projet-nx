@@ -1208,7 +1208,27 @@ object LiveTvHubProvider : Provider, IptvProvider {
         val q = query.trim().lowercase()
         val all = allHomeChannels()
         if (q.isBlank()) return all
-        return all.filter { (it.title ?: "").lowercase().contains(q) }
+        val liveHits = all.filter { (it.title ?: "").lowercase().contains(q) }
+        // 2026-07-23 (user "cale une recherche à l'ouverture du replay BFM pour
+        //   retrouver une série/film rapidement — mais dans notre playlist déjà
+        //   scrapée, sinon ça ne marchera pas") : la recherche couvre désormais
+        //   AUSSI le catalogue REPLAY (data-replay.m3u déjà en cache disque) →
+        //   TF1+, M6+, BFM/RMC, France.tv, Arte. Tout ce qui remonte est déjà
+        //   jouable (on NE fait PAS de recherche RMC live = ids non résolubles).
+        val replayHits = try {
+            fetchReplayCategories()
+                .asSequence()
+                .flatMap { it.list.asSequence() }
+                .filterIsInstance<TvShow>()
+                .filter { (it.title ?: "").lowercase().contains(q) }
+                .distinctBy { it.id }
+                .take(150)
+                .toList()
+        } catch (e: Exception) {
+            Log.w(TAG, "search: replay filter failed: ${e.message}")
+            emptyList()
+        }
+        return (liveHits + replayHits).distinctBy { it.id }
     }
 
     override suspend fun getMovies(page: Int): List<Movie> = emptyList()

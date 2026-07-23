@@ -399,6 +399,76 @@ object BrokenSourceReporter {
         else bumpCat("empty", providerName, null, "0-source", searchedTitle)
     }
 
+    /**
+     * 2026-07-22 (user « plusieurs testeurs se plaignent de crash au chargement des playlists
+     *   Mon IPTV — envoie un rapport sur le site ») : rapport DÉDIÉ des plantages de chargement
+     *   IPTV. Rattrape aussi les `OutOfMemoryError` (grosses playlists), que le `catch (Exception)`
+     *   du parseur laissait passer → crash dur non signalé. Dédup GitHub par nom de source.
+     *   Contexte joint : hôte, type d'exception, mémoire (free/max), nb de chaînes si connu.
+     */
+    fun reportIptvLoadCrash(
+        sourceName: String,
+        url: String?,
+        error: Throwable,
+        channelCount: Int? = null,
+    ) {
+        if (!UserPreferences.reportBrokenSources) return
+        try {
+            val token = try { BuildConfig.GITHUB_CRASH_TOKEN } catch (_: Throwable) { "" }
+            val repo = try { BuildConfig.GITHUB_CRASH_REPO } catch (_: Throwable) { "" }
+            if (token.isNullOrBlank() || repo.isNullOrBlank()) return
+            val host = url?.let { hostOf(it) } ?: "?"
+            val errType = error.javaClass.simpleName
+            // Dédup : 1 issue par (source + type d'erreur) tant qu'elle est ouverte.
+            val dedupKey = "iptvcrash|$sourceName|$errType"
+            val prefs = StreamFlixApp.instance.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+            val reported = prefs.getStringSet(KEY_REPORTED, emptySet()) ?: emptySet()
+            if (dedupKey in reported) return
+            prefs.edit().putStringSet(KEY_REPORTED, reported + dedupKey).apply()
+            Thread {
+                try {
+                    if (githubTitleExists(repo, token, "crash IPTV", sourceName, errType)) {
+                        Log.d(TAG, "reportIptvLoadCrash: déjà signalé ($sourceName / $errType)"); return@Thread
+                    }
+                    val rt = Runtime.getRuntime()
+                    val freeMb = (rt.maxMemory() - (rt.totalMemory() - rt.freeMemory())) / (1024 * 1024)
+                    val maxMb = rt.maxMemory() / (1024 * 1024)
+                    val title = "[crash IPTV] $sourceName — $errType"
+                    val body = buildString {
+                        appendLine("## Crash au chargement d'une playlist « Mon IPTV »")
+                        appendLine()
+                        appendLine("| Champ | Valeur |")
+                        appendLine("|---|---|")
+                        appendLine("| Source | **$sourceName** |")
+                        appendLine("| Hôte | `$host` |")
+                        appendLine("| Exception | `$errType` |")
+                        appendLine("| Message | ${(error.message ?: "(aucun)").take(200).replace("\n", " ")} |")
+                        if (channelCount != null) appendLine("| Chaînes parsées | $channelCount |")
+                        appendLine("| Mémoire | ${freeMb} Mo libres / ${maxMb} Mo max |")
+                        appendLine("| App | ${runCatching { BuildConfig.VERSION_NAME }.getOrDefault("?")} |")
+                        appendLine("| Appareil | ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} (Android ${android.os.Build.VERSION.RELEASE}) |")
+                        appendLine()
+                        appendLine("<details><summary>Stacktrace (tronquée)</summary>\n")
+                        appendLine("```")
+                        appendLine(Log.getStackTraceString(error).take(2500))
+                        appendLine("```")
+                        appendLine("</details>")
+                    }
+                    val ok = runCatching { httpPostIssue(repo, token, title, body) }.getOrDefault(false)
+                    if (!ok) {
+                        val cur = prefs.getStringSet(KEY_REPORTED, emptySet()) ?: emptySet()
+                        prefs.edit().putStringSet(KEY_REPORTED, cur - dedupKey).apply()
+                    }
+                    Log.d(TAG, "reportIptvLoadCrash: ${if (ok) "OK" else "KO"} $title")
+                } catch (e: Throwable) {
+                    Log.w(TAG, "reportIptvLoadCrash thread: ${e.message}")
+                }
+            }.apply { isDaemon = true }.start()
+        } catch (e: Throwable) {
+            Log.w(TAG, "reportIptvLoadCrash: ${e.message}")
+        }
+    }
+
     /** Compteur consécutif générique pour une catégorie. Reporte 1 fois au franchissement du seuil. */
     @Synchronized
     private fun bumpCat(cat: String, name: String, host: String?, errType: String, extra: String?) {

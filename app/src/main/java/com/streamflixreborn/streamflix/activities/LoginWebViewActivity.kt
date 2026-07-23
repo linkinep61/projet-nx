@@ -16,6 +16,8 @@ import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import com.streamflixreborn.streamflix.utils.BfmAuth
 import com.streamflixreborn.streamflix.utils.M6Auth
 import com.streamflixreborn.streamflix.utils.TF1Auth
@@ -124,6 +126,17 @@ class LoginWebViewActivity : AppCompatActivity() {
             //   Permet le re-login automatique quand le token expire.
             if (service == SERVICE_BFM) {
                 addJavascriptInterface(BfmCredsBridge(), "OnyxBfmBridge")
+            }
+            // 2026-07-23 (testeur admin "sur Kodi mon compte n'a JAMAIS été
+            //   déconnecté, sur ONYX je dois me reconnecter aléatoirement" —
+            //   compte Yopmail = email/mdp) : même mécanisme que BFM pour TF1 et
+            //   M6 → capture email/mdp au login pour le re-login auto (Gigya
+            //   accounts.login), comme le fait Kodi catchuptvandmore.
+            if (service == SERVICE_TF1) {
+                addJavascriptInterface(Tf1CredsBridge(), "OnyxTf1Bridge")
+            }
+            if (service == SERVICE_M6) {
+                addJavascriptInterface(M6CredsBridge(), "OnyxM6Bridge")
             }
         }
         progress = ProgressBar(this).apply {
@@ -807,6 +820,35 @@ class LoginWebViewActivity : AppCompatActivity() {
                 //   "Se connecter" et c'est fini.
                 injectBfmSavedCredentials(view)
             }
+            // 2026-07-23 : capture email/mdp (comptes NON-Google) + pré-remplissage
+            //   sur TF1 et M6, pour le re-login auto silencieux (comme BFM/Kodi).
+            //   Rien n'est capturé sur les popups OAuth Google/Apple/FB (pas de
+            //   mdp lisible) → aucun impact pour ces utilisateurs.
+            if (service == SERVICE_TF1 && url != null && url.contains("tf1.fr")
+                && !url.contains("accounts.google") && !url.contains("facebook.com")
+                && !url.contains("apple.com")
+            ) {
+                injectCredentialCapture(view, "OnyxTf1Bridge")
+                injectSavedCredentials(
+                    view,
+                    com.streamflixreborn.streamflix.utils.TF1GigyaAuth.savedEmail(applicationContext),
+                    com.streamflixreborn.streamflix.utils.TF1GigyaAuth.savedPassword(applicationContext),
+                    "tf1",
+                )
+            }
+            if (service == SERVICE_M6 && url != null
+                && (url.contains("6play.fr") || url.contains("m6.fr"))
+                && !url.contains("accounts.google") && !url.contains("facebook.com")
+                && !url.contains("apple.com")
+            ) {
+                injectCredentialCapture(view, "OnyxM6Bridge")
+                injectSavedCredentials(
+                    view,
+                    com.streamflixreborn.streamflix.utils.M6GigyaAuth.savedEmail(applicationContext),
+                    com.streamflixreborn.streamflix.utils.M6GigyaAuth.savedPassword(applicationContext),
+                    "m6",
+                )
+            }
             // 2026-06-19 v35 (user "les logos pour se connecter avec Facebook
             //   Google et Apple apparaissent 2 secondes et s'en vont") :
             //   l'injection CSS hide cachait les logos OAuth. On la DÉSACTIVE
@@ -1437,6 +1479,87 @@ class LoginWebViewActivity : AppCompatActivity() {
             )
         }
     }
+
+    // ── Bridges JS pour capturer les credentials TF1 et M6 (2026-07-23) ──
+    //   Symétriques de BfmCredsBridge : le JS injecté (CREDENTIAL_CAPTURE_JS)
+    //   lit email+password au submit/clic/périodique et appelle onCredentials.
+
+    inner class Tf1CredsBridge {
+        @android.webkit.JavascriptInterface
+        fun onCredentials(email: String?, password: String?) {
+            if (email.isNullOrBlank() || password.isNullOrBlank()) return
+            Log.d(TAG, "TF1 credentials captured (email=${email.take(5)}…)")
+            com.streamflixreborn.streamflix.utils.TF1GigyaAuth.saveCredentials(
+                this@LoginWebViewActivity, email, password
+            )
+        }
+    }
+
+    @Volatile private var m6HeadlessLoginDone = false
+    inner class M6CredsBridge {
+        @android.webkit.JavascriptInterface
+        fun onCredentials(email: String?, password: String?) {
+            if (email.isNullOrBlank() || password.isNullOrBlank()) return
+            Log.d(TAG, "M6 credentials captured (email=${email.take(5)}…)")
+            val ctx = applicationContext
+            com.streamflixreborn.streamflix.utils.M6GigyaAuth.saveCredentials(ctx, email, password)
+            // 2026-07-23 : le nouveau login OIDC (auth.m6.fr) ne pose PLUS le
+            //   cookie glt_ → captureM6 (cookie) n'aboutit jamais. On fait donc
+            //   un login Gigya HEADLESS avec les identifiants captés (apiKey de
+            //   secours) pour obtenir un vrai login_token et l'enregistrer →
+            //   M6 fonctionne malgré l'OIDC, ET la session est amorcée pour le
+            //   re-login auto futur (méthode Kodi). Une seule fois par écran.
+            if (m6HeadlessLoginDone) return
+            m6HeadlessLoginDone = true
+            lifecycleScope.launch {
+                try {
+                    val tok = com.streamflixreborn.streamflix.utils.M6GigyaAuth.login(
+                        ctx, email, password,
+                        com.streamflixreborn.streamflix.utils.M6GigyaAuth.apiKeyFor(ctx),
+                    )
+                    if (!tok.isNullOrBlank()) {
+                        Log.i(TAG, "M6 headless Gigya login OK (token seeded, len=${tok.length})")
+                        runOnUiThread {
+                            if (!captured) {
+                                captured = true
+                                Toast.makeText(this@LoginWebViewActivity,
+                                    "✓ Connecté à M6 6play", Toast.LENGTH_SHORT).show()
+                                setResult(RESULT_OK)
+                                finish()
+                            }
+                        }
+                    } else {
+                        Log.w(TAG, "M6 headless Gigya login failed")
+                        m6HeadlessLoginDone = false  // autorise un nouvel essai
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "M6 headless login err: ${e.message}")
+                    m6HeadlessLoginDone = false
+                }
+            }
+        }
+    }
+
+    /** Injecte le hook JS générique de capture email/mdp (submit + clic bouton
+     *  + relevé périodique) qui envoie les identifiants à <bridgeGlobal>. */
+    private fun injectCredentialCapture(view: WebView?, bridgeGlobal: String) {
+        view?.evaluateJavascript(CREDENTIAL_CAPTURE_JS.replace("__BRIDGE__", bridgeGlobal), null)
+    }
+
+    /** Pré-remplit email+password sauvegardés dans le formulaire (SANS
+     *  auto-submit : l'utilisateur garde le contrôle du clic). `guard` = clé
+     *  unique par service pour éviter la double-injection. */
+    private fun injectSavedCredentials(view: WebView?, email: String?, pass: String?, guard: String) {
+        if (email.isNullOrBlank() || pass.isNullOrBlank()) return
+        fun esc(s: String) = s.replace("\\", "\\\\").replace("'", "\\'")
+            .replace("\n", "\\n").replace("\r", "\\r")
+        val js = AUTOFILL_JS
+            .replace("__GUARD__", guard)
+            .replace("__EMAIL__", esc(email))
+            .replace("__PASS__", esc(pass))
+        view?.evaluateJavascript(js, null)
+        Log.d(TAG, "$guard autofill JS injected (email=${email.take(5)}…)")
+    }
 }
 
 /** 2026-06-21 (user "sur BFM, le mail et le mdp ne se sauvegardent pas, je
@@ -1626,6 +1749,106 @@ private const val JS_HIDE_WEBVIEW_FINGERPRINT = """
 //   Chrome) qui n'a aucun signal Android/WebView → Google nous prend pour un
 //   navigateur normal et autorise le login. Trade-off : le site M6 voit aussi
 //   un desktop client (= layout web normal, pas mobile/responsive), c'est OK.
+/** 2026-07-23 : hook JS GÉNÉRIQUE de capture des identifiants (email+password),
+ *  paramétré par le nom du bridge natif (`__BRIDGE__`). Lit les champs au submit
+ *  du formulaire, au clic sur un bouton de connexion, et en relevé périodique
+ *  (2 s) — couvre les formulaires classiques ET les SPA qui soumettent en AJAX.
+ *  Envoie les identifiants dès que les deux champs sont remplis. N'intercepte
+ *  jamais les popups OAuth (pas de champ password lisible). */
+private const val CREDENTIAL_CAPTURE_JS = """
+(function(){
+  try {
+    var B = window.__BRIDGE__;
+    if (!B) return;
+    // Persiste email + password ENTRE les étapes (login OIDC en 2 écrans :
+    //   email d'abord, mot de passe ensuite → jamais les 2 champs en même temps).
+    if (window.__onyxEmail === undefined) window.__onyxEmail = '';
+    if (window.__onyxPwd === undefined)   window.__onyxPwd   = '';
+    // Traverse aussi le shadow DOM (auth.m6.fr = SPA moderne, champs possiblement
+    //   dans des web components) — document.querySelectorAll ne le perce pas.
+    function collectInputs(root, out, depth){
+      if(!root || depth>6) return;
+      try{ root.querySelectorAll('input').forEach(function(el){ out.push(el); }); }catch(e){}
+      try{ root.querySelectorAll('*').forEach(function(el){ if(el.shadowRoot) collectInputs(el.shadowRoot, out, depth+1); }); }catch(e){}
+    }
+    function scan(){
+      var inputs=[]; collectInputs(document, inputs, 0);
+      inputs.forEach(function(el){
+        var t=(el.type||'').toLowerCase();
+        var n=(el.name||el.id||el.getAttribute('autocomplete')||'').toLowerCase();
+        var v=el.value||'';
+        if(!v) return;
+        if(t==='password' || n.indexOf('pass')>=0){ window.__onyxPwd = v; }
+        else if(t==='email' || v.indexOf('@')>=0 || n.indexOf('mail')>=0 ||
+                n.indexOf('user')>=0 || n.indexOf('login')>=0 || n.indexOf('identif')>=0){
+          window.__onyxEmail = v;
+        }
+      });
+    }
+    function send(){
+      scan();
+      if(window.__onyxEmail && window.__onyxPwd && window.__onyxPwd.length>=3 && !window.__onyxSent){
+        try{ B.onCredentials(window.__onyxEmail, window.__onyxPwd); window.__onyxSent=true; return true; }catch(e){}
+      }
+      return false;
+    }
+    if(!window.__onyxCredHooked){
+      window.__onyxCredHooked = true;
+      // capture au fil de la frappe (l'email de l'étape 1 disparaît à l'étape 2)
+      document.addEventListener('input',  function(){ try{ scan(); }catch(e){} }, true);
+      document.addEventListener('change', function(){ try{ scan(); }catch(e){} }, true);
+      document.addEventListener('blur',   function(){ try{ scan(); }catch(e){} }, true);
+      document.addEventListener('submit', function(){ try{ send(); }catch(e){} }, true);
+      document.addEventListener('click', function(e){
+        try{
+          var el=e.target; if(!el) return;
+          var tag=(el.tagName||'').toLowerCase(); var ty=(el.type||'').toLowerCase();
+          var tx=(el.textContent||'').toLowerCase();
+          if((tag==='button'||tag==='input'||(el.getAttribute&&el.getAttribute('role')==='button')) &&
+             (ty==='submit' || tx.indexOf('connexion')>=0 || tx.indexOf('connect')>=0 ||
+              tx.indexOf('se connecter')>=0 || tx.indexOf('login')>=0 ||
+              tx.indexOf('valider')>=0 || tx.indexOf('continuer')>=0 ||
+              tx.indexOf('suivant')>=0 || tx.indexOf('sign in')>=0)){
+            send();
+          }
+        }catch(e){}
+      }, true);
+      var iv=setInterval(function(){ try{ if(window.__onyxSent){ clearInterval(iv); return; } send(); }catch(e){} }, 1500);
+      console.log('[OnyxCred] capture hook installed (2-step aware)');
+    }
+  } catch(e){ console.log('[OnyxCred] err: ' + e.message); }
+})();
+"""
+
+/** 2026-07-23 : pré-remplissage des identifiants sauvegardés (`__EMAIL__` /
+ *  `__PASS__`), garde `__GUARD__` unique par service. Utilise le setter natif
+ *  (React/Angular/Gigya) + dispatch input/change/blur. PAS d'auto-submit. */
+private const val AUTOFILL_JS = """
+(function(){
+  try{
+    if(window.__onyxFill___GUARD__) return;
+    var filled=false;
+    function fill(){
+      var ei=null, pi=null;
+      document.querySelectorAll('input').forEach(function(el){
+        var t=(el.type||'').toLowerCase(); var n=(el.name||el.id||'').toLowerCase();
+        if((t==='email'||n.indexOf('mail')>=0||n.indexOf('user')>=0||n.indexOf('login')>=0)&&t!=='password'){ ei=el; }
+        if(t==='password'||n.indexOf('pass')>=0){ pi=el; }
+      });
+      if(ei&&pi){
+        var ns=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+        ns.call(ei,'__EMAIL__'); ns.call(pi,'__PASS__');
+        ['input','change','blur'].forEach(function(ev){ ei.dispatchEvent(new Event(ev,{bubbles:true})); pi.dispatchEvent(new Event(ev,{bubbles:true})); });
+        window.__onyxFill___GUARD__=true; filled=true;
+        console.log('[OnyxFill] __GUARD__ OK');
+      }
+    }
+    fill();
+    if(!filled){ var a=0; var iv=setInterval(function(){ fill(); a++; if(filled||a>=15) clearInterval(iv); },300); }
+  }catch(e){ console.log('[OnyxFill] err: ' + e.message); }
+})();
+"""
+
 private const val USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 

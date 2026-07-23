@@ -567,6 +567,22 @@ object NakiosProvider : Provider, ProviderConfigUrl {
         .replace("\\\"", "\"")
 
     /**
+     * 2026-07-23 — GARDE-FOU ANTI-MAUVAIS-FILM (régression série « H »).
+     * La recherche `/search/<q>` du site renvoie toutes les fiches dont le nom contient la
+     * requête ; pour un titre court comme « H » ça ramenait n'importe quoi, et on servait les
+     * serveurs d'une AUTRE série. On ne retient un slug QUE si TOUS les mots du titre apparaissent
+     * comme segments du slug (tolère l'année ou des mots en plus : « enola-holmes-3 » ✓ pour
+     * « Enola Holmes », « h » ou « serie-h » ✓ pour « H », mais « harry-potter » ✗ pour « H »).
+     * Principe projet : PAS DE SERVEUR plutôt que le mauvais film.
+     */
+    private fun slugMatchesTitle(slug: String, title: String): Boolean {
+        val titleTokens = slugify(title).split("-").filter { it.isNotBlank() }
+        if (titleTokens.isEmpty()) return false
+        val slugTokens = slug.split("-").filter { it.isNotBlank() }.toSet()
+        return titleTokens.all { it in slugTokens }
+    }
+
+    /**
      * 2026-07-21 : RECHERCHE du site = **`/search/<requête>`** (trouvé en sondant les schémas
      * d'URL : `/search?q=`, `/recherche`, `/api/search` → tous 404 ; `/search/<q>` → 200 avec les
      * cartes). Renvoie les slugs des fiches, ce qui est bien plus fiable que de deviner le slug
@@ -574,9 +590,12 @@ object NakiosProvider : Provider, ProviderConfigUrl {
      *
      * @return liste de Pair(slug, isMovie) dans l'ordre du site.
      */
-    private suspend fun searchSlugs(query: String): List<Pair<String, Boolean>> {
+    private suspend fun searchSlugs(
+        query: String,
+        base: String = currentFrontUrl.trimEnd('/'),
+    ): List<Pair<String, Boolean>> {
         val q = java.net.URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
-        val front = currentFrontUrl.trimEnd('/')
+        val front = base.trimEnd('/')
         val html = httpGetRaw("$front/search/$q") ?: return emptyList()
         val out = LinkedHashSet<Pair<String, Boolean>>()
         Regex("""href="[^"]*?/(movie|tv-show)/([a-z0-9\-]+)"""", RegexOption.IGNORE_CASE)
@@ -643,11 +662,19 @@ object NakiosProvider : Provider, ProviderConfigUrl {
             // 1) slug deviné depuis le titre (rapide, marche dans la majorité des cas)
             // 2) puis les slugs RÉELS renvoyés par la recherche du site (fiable si le nommage diffère)
             val candidates = LinkedHashSet<String>()
-            slugify(t).takeIf { it.isNotBlank() }?.let { candidates.add(it) }
+            // Le slug deviné n'est ajouté QUE si le titre est assez spécifique. Un titre court
+            // comme « H » (slug « h ») matcherait une fiche au hasard → mauvaise série. Dans ce
+            // cas on s'appuie uniquement sur la recherche filtrée par slugMatchesTitle.
+            val guessed = slugify(t)
+            val guessedTokens = guessed.split("-").filter { it.isNotBlank() }
+            val guessedIsSpecific = guessed.length >= 3 && !(guessedTokens.size == 1 && guessedTokens[0].length <= 2)
+            if (guessed.isNotBlank() && guessedIsSpecific) candidates.add(guessed)
             runCatching { searchSlugs(t) }.getOrDefault(emptyList())
                 .filter { it.second == wantMovie }
+                .filter { slugMatchesTitle(it.first, t) }
                 .take(4)
                 .forEach { candidates.add(it.first) }
+            if (candidates.isEmpty()) continue
 
             val pages = candidates.map { slug ->
                 if (wantMovie) "$front/movie/$slug"
@@ -669,6 +696,74 @@ object NakiosProvider : Provider, ProviderConfigUrl {
         }
         Log.d(TAG, "backup: aucun serveur pour « ${titles.firstOrNull()} »")
         return emptyList()
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 2026-07-22 — BACKUP « LoiFlix » (SÉPARÉ de Nakios, ne touche PAS son chemin).
+    //   `zoolingz.com` (LoiFlix) et `movix.bet` (« Movix » — SANS rapport avec notre provider
+    //   Movix `api.movix.show`, pure collision de nom) sont deux sites FRANÇAIS bâtis sur le MÊME
+    //   moteur Laravel SSR que le nouveau Nakios : fiche `/movie/<slug>`, épisode
+    //   `/episode/<slug>/<S>-<E>`, serveurs dans un blob JSON échappé (`server_name`), recherche
+    //   `/search/<q>`. On S'INSPIRE du scraper Nakios (réutilise `slugify` + `searchSlugs` +
+    //   `parseNakiosServers`, tous en LECTURE SEULE), mais dans une fonction INDÉPENDANTE : si un
+    //   de ces domaines meurt ou change, Nakios n'est pas affecté. On balaie les 2 domaines et on
+    //   déduplique par URL (résilience + pools de hosters éventuellement différents).
+    // ─────────────────────────────────────────────────────────────────────────────
+    private val LOIFLIX_DOMAINS = listOf("https://zoolingz.com", "https://movix.bet")
+
+    suspend fun fetchLoiflixBackupServers(
+        videoType: Video.Type,
+        season: Int = 0,
+        episode: Int = 0,
+        titleHint: String? = null,
+    ): List<Video.Server> {
+        val titles = listOfNotNull(titleHint?.takeIf { it.isNotBlank() }).distinct()
+        if (titles.isEmpty()) return emptyList()
+        val wantMovie = videoType is Video.Type.Movie
+        val merged = LinkedHashMap<String, Video.Server>()
+        for (base in LOIFLIX_DOMAINS) {
+            for (t in titles) {
+                val candidates = LinkedHashSet<String>()
+                // Même garde-fou que Nakios : slug deviné seulement si titre spécifique, et
+                // résultats de recherche filtrés par correspondance de titre (anti « H »).
+                val guessed = slugify(t)
+                val guessedTokens = guessed.split("-").filter { it.isNotBlank() }
+                val guessedIsSpecific = guessed.length >= 3 && !(guessedTokens.size == 1 && guessedTokens[0].length <= 2)
+                if (guessed.isNotBlank() && guessedIsSpecific) candidates.add(guessed)
+                runCatching { searchSlugs(t, base) }.getOrDefault(emptyList())
+                    .filter { it.second == wantMovie }
+                    .filter { slugMatchesTitle(it.first, t) }
+                    .take(4)
+                    .forEach { candidates.add(it.first) }
+                if (candidates.isEmpty()) continue
+
+                val pages = candidates.mapNotNull { slug ->
+                    if (wantMovie) "$base/movie/$slug"
+                    else if (season > 0 && episode > 0) "$base/episode/$slug/$season-$episode" else null
+                }
+                var got = false
+                for (page in pages) {
+                    val html = httpGetRaw(page) ?: continue
+                    if (!html.contains("server_name")) continue
+                    // Réutilise le parseur Nakios (lecture seule), puis renomme le préfixe LoiFlix.
+                    val servers = parseNakiosServers(html).map { s ->
+                        s.copy(
+                            id = "loiflix_backup_${s.src}",
+                            name = s.name.replaceFirst("Nakios ·", "LoiFlix ·"),
+                        )
+                    }
+                    if (servers.isNotEmpty()) {
+                        Log.d(TAG, "backup [LoiFlix]: $page → ${servers.size} serveurs")
+                        servers.forEach { merged.putIfAbsent(it.src, it) }
+                        got = true
+                        break
+                    }
+                }
+                if (got) break
+            }
+        }
+        Log.d(TAG, "backup [LoiFlix]: ${merged.size} serveurs (dédup) / ${LOIFLIX_DOMAINS.size} domaines")
+        return merged.values.toList()
     }
 
     override suspend fun getServers(id: String, videoType: Video.Type): List<Video.Server> = coroutineScope {

@@ -116,6 +116,9 @@
         <item>Frembed</item>
         <item>Moviebox</item>
         <item>Nakios</item>
+        <item>LoiFlix (zoolingz/movix.bet)</item>
+        <item>AfterDark</item>
+        <item>Nabistream (dramas)</item>
         <item>Webflix</item>
         <item>CoflixWiki</item>
         <item>AniCloud (animes)</item>
@@ -137,6 +140,9 @@
         <item>Frembed</item>
         <item>Moviebox</item>
         <item>Nakios</item>
+        <item>LoiFlix</item>
+        <item>AfterDark</item>
+        <item>Nabistream</item>
         <item>Webflix</item>
         <item>CoflixWiki</item>
         <item>AniCloud</item>
@@ -151,5 +157,41 @@
         <item>FrenchManga</item>
         <item>VoirDrama</item>
         <item>DessinAnime</item>
+    </string-array>
+
+    <!-- 2026-07-22 : langues de sous-titres (OpenSubtitles + SubDL). Codes = ISO-639-2/B ;
+         SubDL est mappé côté code (SubDL.osToSubdl). Défaut = français. -->
+    <string-array name="subtitle_language_labels">
+        <item>Français</item>
+        <item>Anglais</item>
+        <item>Arabe</item>
+        <item>Espagnol</item>
+        <item>Italien</item>
+        <item>Allemand</item>
+        <item>Portugais</item>
+        <item>Turc</item>
+        <item>Néerlandais</item>
+        <item>Russe</item>
+        <item>Japonais</item>
+        <item>Coréen</item>
+        <item>Chinois</item>
+    </string-array>
+    <string-array name="subtitle_language_values">
+        <item>fre</item>
+        <item>eng</item>
+        <item>ara</item>
+        <item>spa</item>
+        <item>ita</item>
+        <item>ger</item>
+        <item>por</item>
+        <item>tur</item>
+        <item>dut</item>
+        <item>rus</item>
+        <item>jpn</item>
+        <item>kor</item>
+        <item>chi</item>
+    </string-array>
+    <string-array name="subtitle_language_default">
+        <item>fre</item>
     </string-array>
 </resources>

@@ -241,6 +241,16 @@ class OtfPlayerActivity : Activity() {
         player = exoPlayer
         playerView.player = exoPlayer
 
+        // Android Auto : publier ce lecteur OTF (ExoPlayer 2.19.1) au pont voiture → projection miroir.
+        com.streamflixreborn.streamflix.car.CarPlaybackBridge.attach(
+            token = exoPlayer,
+            title = intent.getStringExtra(EXTRA_TITLE) ?: "Live",
+            setSurface = { s -> try { exoPlayer.setVideoSurface(s) } catch (_: Exception) {} },
+            getIsPlaying = { runCatching { exoPlayer.playWhenReady }.getOrDefault(false) },
+            setPlaying = { pw -> runCatching { exoPlayer.playWhenReady = pw } },
+            reattach = { try { playerView.player = null; playerView.player = exoPlayer } catch (_: Exception) {} },
+        )
+
         // DataSource avec UA OTF (CDN stm.linkip.org accepte ce UA).
         val dataSourceFactory = DefaultHttpDataSource.Factory()
             .setUserAgent("ExoPlayerLib/2.19.1")
@@ -358,6 +368,7 @@ class OtfPlayerActivity : Activity() {
         super.onDestroy()
         handler.removeCallbacksAndMessages(null)
         try {
+            player?.let { com.streamflixreborn.streamflix.car.CarPlaybackBridge.detach(it) }
             player?.stop()
             player?.release()
         } catch (_: Exception) {}

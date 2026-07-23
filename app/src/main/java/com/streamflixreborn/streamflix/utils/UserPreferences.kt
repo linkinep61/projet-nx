@@ -114,7 +114,7 @@ object UserPreferences {
     //   (ex: Coflix Boston), on bump ce compteur → la 1ère vérification ajoute les sources
     //   manquantes au set sauvé. L'user peut ensuite les désactiver dans les Paramètres.
     private const val KEY_BACKUP_MIGRATION_V = "BACKUP_MIGRATION_V"
-    private const val CUR_BACKUP_MIGRATION = 2 // bump quand on ajoute de nouvelles sources
+    private const val CUR_BACKUP_MIGRATION = 5 // bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream)
 
     // 2026-07-13 (user "une option au-dessus de Gérer les sources pour activer/désactiver les
     //   backups — ça permet de tester si les sources natives du provider sont encore valables") :
@@ -657,6 +657,18 @@ object UserPreferences {
             Key.ENABLE_ENGLISH_SUBTITLES.setBoolean(value)
         }
 
+    // 2026-07-22 (testeur : « je n'arrive pas à avoir les sous-titres en arabe » / user :
+    //   « si les utilisateurs veulent changer de langue, tu mets en place ») : sélecteur de
+    //   LANGUES de sous-titres (MultiSelect). Codes = ISO-639-2/B (OpenSubtitles) ; SubDL est
+    //   mappé dans SubDL.osToSubdl(). Défaut = français seul → comportement historique préservé.
+    //   Le toggle anglais existant reste respecté (union) pour ne casser aucune config.
+    var subtitleLanguages: Set<String>
+        get() = (Key.SUBTITLE_LANGUAGES.getStringSet()?.takeIf { it.isNotEmpty() } ?: setOf("fre"))
+            .let { base -> if (enableEnglishSubtitles) base + "eng" else base }
+        set(value) {
+            Key.SUBTITLE_LANGUAGES.setStringSet(value)
+        }
+
     var selectedTheme: String
         get() = Key.SELECTED_THEME.getString() ?: "nero_amoled_oled"
         set(value) = Key.SELECTED_THEME.setString(value)
@@ -1065,6 +1077,7 @@ object UserPreferences {
         SERVER_AUTO_SUBTITLES_DISABLED,
         EXTERNAL_SUBS_OVERLAY_DISABLED,
         ENABLE_ENGLISH_SUBTITLES,
+        SUBTITLE_LANGUAGES,
         ENABLE_TMDB,
         PARENTAL_CONTROL_PIN,
         PARENTAL_CONTROL_ADMIN_PIN,

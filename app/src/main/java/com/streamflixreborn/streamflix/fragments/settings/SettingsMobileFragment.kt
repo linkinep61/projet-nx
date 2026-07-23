@@ -67,6 +67,32 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
     private val PREFS_ERROR_VALUE = "PREFS_NOT_INIT_ERROR"
     private var currentScreenState = SettingsScreenState(rootKey = null, title = null)
     private val screenBackStack = ArrayDeque<SettingsScreenState>()
+
+    // 2026-07-23 (retour testeur : « quand on revient d'un réglage, le scroll remonte
+    //   tout en haut ») : tous les sous-écrans de Paramètres partagent UNE seule
+    //   RecyclerView, re-remplie par renderCurrentScreen() → le scroll se réinitialise.
+    //   On mémorise la position de scroll PAR écran (clé = rootKey) et on la restaure au
+    //   retour. Additif : ne touche à rien d'autre.
+    private val scrollPositions = HashMap<String, Pair<Int, Int>>()
+
+    private fun scrollKey(): String = currentScreenState.rootKey ?: "__root__"
+
+    private fun saveScrollPosition() {
+        val lm = (listView?.layoutManager) as? androidx.recyclerview.widget.LinearLayoutManager ?: return
+        val pos = lm.findFirstVisibleItemPosition()
+        if (pos < 0) return
+        val offset = lm.findViewByPosition(pos)?.top ?: 0
+        scrollPositions[scrollKey()] = pos to offset
+    }
+
+    private fun restoreScrollPosition() {
+        val saved = scrollPositions[scrollKey()] ?: return
+        val rv = listView ?: return
+        rv.post {
+            (rv.layoutManager as? androidx.recyclerview.widget.LinearLayoutManager)
+                ?.scrollToPositionWithOffset(saved.first, saved.second)
+        }
+    }
     private lateinit var settingsBackCallback: OnBackPressedCallback
     /** Toolbar de notre wrapper (cf onCreateView) — null avant inflate. */
     private var wrapperToolbar: androidx.appcompat.widget.Toolbar? = null
@@ -207,6 +233,7 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         settingsBackCallback = object : OnBackPressedCallback(false) {
             override fun handleOnBackPressed() {
                 if (screenBackStack.isEmpty()) return
+                saveScrollPosition()
                 currentScreenState = screenBackStack.removeLast()
                 settingsBackCallback.isEnabled = screenBackStack.isNotEmpty()
                 renderCurrentScreen()
@@ -291,6 +318,7 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             // existant pour ne pas dupliquer la logique).
             // Sinon → on quitte les paramètres et on retourne au Home Fournisseur.
             if (screenBackStack.isNotEmpty()) {
+                saveScrollPosition()
                 currentScreenState = screenBackStack.removeLast()
                 settingsBackCallback.isEnabled = screenBackStack.isNotEmpty()
                 renderCurrentScreen()
@@ -315,6 +343,7 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
 
     override fun onPreferenceTreeClick(preference: Preference): Boolean {
         if (preference is PreferenceScreen && !preference.key.isNullOrBlank()) {
+            saveScrollPosition() // mémorise où on en était sur l'écran parent
             screenBackStack.addLast(currentScreenState)
             currentScreenState = SettingsScreenState(
                 rootKey = preference.key,
@@ -349,6 +378,8 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             displaySettings()
         }
         applyScreenTitle()
+        // Restaure la position de scroll mémorisée pour CET écran (retour d'un sous-écran).
+        restoreScrollPosition()
     }
 
     private fun displaySettings() {

@@ -581,6 +581,16 @@
                 android:summary="@string/settings_subdl_api_key_summary"
                 android:inputType="text"
                 app:iconSpaceReserved="false" />
+
+            <!-- 2026-07-22 : langues de sous-titres recherchées (OpenSubtitles + SubDL). -->
+            <MultiSelectListPreference
+                android:key="SUBTITLE_LANGUAGES"
+                android:title="Langues des sous-titres"
+                android:summary="Choisissez les langues à rechercher (le français reste par défaut)"
+                android:entries="@array/subtitle_language_labels"
+                android:entryValues="@array/subtitle_language_values"
+                android:defaultValue="@array/subtitle_language_default"
+                app:iconSpaceReserved="false" />
         </PreferenceCategory>
     </PreferenceScreen>
 

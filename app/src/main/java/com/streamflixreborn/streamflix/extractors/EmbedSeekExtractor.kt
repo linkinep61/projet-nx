@@ -41,8 +41,18 @@ class EmbedSeekExtractor : Extractor() {
     override val mainUrl = "https://bll.embedseek.com"
     override val aliasUrls = listOf(
         "https://embedseek.com",
-        // Si embedseek déploie d'autres sous-domaines (ll, cc, dd…), les
-        // ajouter ici. Pour l'instant on a observé "bll" uniquement.
+        "https://neocine.embedseek.com",
+    )
+
+    // 2026-07-23 : embedseek tourne sur PLUSIEURS sous-domaines selon le type de contenu
+    //   indexé par Movix — « bll » (nouveautés films), « neocine » (séries, ex : série H
+    //   → https://neocine.embedseek.com/#token), et sûrement d'autres à venir. Le routage
+    //   par startsWith(host) ne matchait que bll/embedseek.com → « neocine » tombait en
+    //   « No extractors found » (serveur bloqué sur « Chargement… »). Cette regex capte
+    //   N'IMPORTE QUEL sous-domaine *.embedseek.com (3ᵉ passe de routage = containsMatchIn).
+    //   L'extract() est déjà host-agnostique (il lit uri.host), donc rien d'autre à changer.
+    override val rotatingDomain: List<Regex> = listOf(
+        Regex("""[a-z0-9-]+\.embedseek\.com"""),
     )
 
     private val USER_AGENT = Extractor.DEFAULT_USER_AGENT

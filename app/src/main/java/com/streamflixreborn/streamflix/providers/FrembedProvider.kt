@@ -45,27 +45,31 @@ import kotlin.collections.map
 object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, ProgressiveServersProvider {
     override val name = "Frembed"
 
-    // 2026-06-29 (REPAIR — user "mets la nouvelle URL directement en principal") :
-    //   domaine courant = frembed.hair (audin213.com + frembed.bond = anciens, on
-    //   les ignore dans le cache pour que les users existants basculent direct).
-    override val defaultPortalUrl: String = "https://frembed.hair/"
+    // 2026-07-22 (user « regarde si frembed.asia est conforme ») : `frembed.hair` est MORT
+    //   (page d'erreur). Nouveau domaine = **`frembed.asia`**, API STRICTEMENT IDENTIQUE
+    //   (vérifié en direct : `/api/films`, `/api/series`, `/api/streaming/player` VIP, mêmes
+    //   champs `link1..7`/`+vostfr`/`+vo`, mêmes redirections relatives `/api/stream`). Aucun
+    //   nouveau type de serveur → simple bascule de domaine. Les anciens domaines morts
+    //   (audin213, bond, hair, cyou) sont ignorés dans le cache pour forcer la bascule.
+    private val DEAD_DOMAINS = listOf("audin213", "frembed.bond", "frembed.hair", "frembed.cyou")
+
+    override val defaultPortalUrl: String = "https://frembed.asia/"
 
     override val portalUrl: String = defaultPortalUrl
         get() {
             val cachePortalURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_PORTAL_URL)
             val isValid = cachePortalURL.length > 10 && cachePortalURL.startsWith("http") &&
-                !cachePortalURL.contains("audin213") && !cachePortalURL.contains("frembed.bond")
+                DEAD_DOMAINS.none { cachePortalURL.contains(it) }
             return if (isValid) cachePortalURL else field
         }
 
-    // 2026-06-29 : URL de base = frembed.hair en dur (domaine courant).
-    override val defaultBaseUrl: String = "https://frembed.hair/"
+    override val defaultBaseUrl: String = "https://frembed.asia/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
-            // ignore cache pourri (= "/", vide, sans http) + anciens domaines (audin213, bond)
+            // ignore cache pourri (= "/", vide, sans http) + anciens domaines morts
             val isValid = cacheURL.length > 10 && cacheURL.startsWith("http") &&
-                !cacheURL.contains("audin213") && !cacheURL.contains("frembed.bond")
+                DEAD_DOMAINS.none { cacheURL.contains(it) }
             return if (isValid) cacheURL else field
         }
 
@@ -231,9 +235,16 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
         val series: List<FrembedShortCutItem>
     )
 
+    // 2026-07-17 : movies/tvShows NULLABLES. L'API renvoie parfois un objet
+    //   { "error": "Query must be at least 2 characters" } (ou autre erreur :
+    //   rate-limit, maintenance…) SANS ces champs. Gson (qui ignore la nullabilité
+    //   Kotlin) les mettait alors à null, et `result.movies.map {}` faisait un
+    //   NullPointerException → écran « Une erreur est survenue ». En nullable +
+    //   orEmpty() dans search(), une erreur API = 0 résultat, plus de crash.
     data class FrembedSearchResponse(
-        val movies: List<FrembedShortCutItem>,
-        val tvShows: List<FrembedShortCutItem>
+        val error: String? = null,
+        val movies: List<FrembedShortCutItem>? = null,
+        val tvShows: List<FrembedShortCutItem>? = null
     )
 
     data class FrembedActorItem(
@@ -307,9 +318,16 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
             initializeService()
         }
 
+        // Frembed refuse les requêtes < 2 caractères (renvoie {error:...}).
+        //   On court-circuite pour ne pas taper l'API pour rien ET éviter le crash.
+        if (query.trim().length < 2) return emptyList()
+
         val result = service.getApiSearch(page, query)
 
-        return result.movies.map { it.toShow(true) as Movie } + result.tvShows.map { it.toShow(tvshow=true) as TvShow }
+        // orEmpty() : si l'API a renvoyé une erreur (movies/tvShows absents),
+        //   on remonte 0 résultat au lieu de NPE.
+        return result.movies.orEmpty().map { it.toShow(true) as Movie } +
+            result.tvShows.orEmpty().map { it.toShow(tvshow = true) as TvShow }
     }
 
     override suspend fun getMovies(page: Int): List<Movie> {

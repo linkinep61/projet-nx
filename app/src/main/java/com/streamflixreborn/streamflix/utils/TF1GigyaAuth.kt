@@ -100,6 +100,10 @@ object TF1GigyaAuth {
         ctx.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             .getString(K_EMAIL, null)
 
+    fun savedPassword(ctx: Context): String? =
+        ctx.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .getString(K_PASSWORD, null)
+
     /**
      * Pipeline complet bootstrap → login → JWT. Retourne le JWT ou null si
      * échec. À appeler en IO dispatcher.

@@ -67,6 +67,9 @@ object BackupRegistry {
         "Frembed" to "Frembed",
         "Moviebox" to "Moviebox",
         "Nakios" to "Nakios",
+        "LoiFlix" to "LoiFlix",
+        "AfterDark" to "AfterDark",
+        "Nabistream" to "Nabistream (dramas)",
         "Webflix" to "Webflix",
         "Coflix Boston" to "Coflix Boston",
         "CoflixWiki" to "CoflixWiki",
@@ -118,6 +121,9 @@ object BackupRegistry {
      *  cassé » indique un hôte exploitable (le reporter extrait l'hôte de l'URL fournie). */
     private fun backupProbeUrl(source: String): String? = when (source) {
         "Nakios" -> "https://nakios.live"
+        "LoiFlix" -> "https://zoolingz.com"
+        "AfterDark" -> "https://afterdark06.mom"
+        "Nabistream" -> "https://nabistream.mom"
         "Movix" -> "https://movix.date"
         "Coflix Boston" -> "https://coflix.boston"
         "CoflixWiki" -> "https://kokoflix.lol"
@@ -367,12 +373,25 @@ object BackupRegistry {
         val shortKnown = knownTitles.firstOrNull { t ->
             t.trim().replace(Regex("[^a-zA-Z0-9]"), "").length in 1..2
         }
-        if (shortKnown != null && targetYear != null) {
-            val cy = yearIn(candidateTitle)
-            val token = shortKnown.trim().lowercase()
-            val tokenIsolated = Regex("(?i)(?<![a-z0-9])" + Regex.escape(token) + "(?![a-z0-9])")
-                .containsMatchIn(candidateTitle)
-            if (tokenIsolated && cy != null && kotlin.math.abs(cy - targetYear) <= 1) return true
+        if (shortKnown != null) {
+            val token = shortKnown.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
+            // 2026-07-23 (log OPPO : FrenchStream « H - Saison 1 » rejeté) : le titre du candidat
+            //   est DÉCORÉ « H - Saison N » et NE CONTIENT PAS l'année (juste un n° de saison) →
+            //   l'ancienne voie « token isolé + année DANS le titre » échouait. On NETTOIE d'abord
+            //   le candidat (retrait « - Saison N », parenthèses, .html — via cleanTitle) puis on
+            //   exige l'ÉGALITÉ STRICTE avec le token court. Ex : « H - Saison 4 » → « H » == « h ».
+            //   Sûr : égalité exacte après nettoyage (pas un simple contains), et la bonne saison
+            //   est vérifiée en aval par seasonTitleOk. On a déjà l'id TMDB + effectiveYear comme
+            //   discriminants → pas besoin de l'année dans le titre.
+            val cleanedCand = cleanTitle(candidateTitle).lowercase().replace(Regex("[^a-z0-9]"), "")
+            if (cleanedCand == token) return true
+            // Ancienne voie conservée : token isolé + année PRÉSENTE dans le titre candidat (±1).
+            if (targetYear != null) {
+                val cy = yearIn(candidateTitle)
+                val tokenIsolated = Regex("(?i)(?<![a-z0-9])" + Regex.escape(shortKnown.trim()) + "(?![a-z0-9])")
+                    .containsMatchIn(candidateTitle)
+                if (tokenIsolated && cy != null && kotlin.math.abs(cy - targetYear) <= 1) return true
+            }
         }
         return knownTitles.any { it.isNotBlank() && titleMatches(candidateTitle, it) && titleMatches(it, candidateTitle) }
     }
@@ -548,7 +567,14 @@ object BackupRegistry {
         val resolvedTmdbId: String? = run {
             val initial: String? = if (!tmdbId.isNullOrBlank()) {
                 tmdbId
-            } else if (key.title.length >= 2) {
+            } else if (key.title.isNotBlank()) {
+                // 2026-07-23 (user « H : FrenchStream a 4 serveurs mais ne se propage pas ;
+                //   et lui ne reçoit pas non plus ») : log OPPO = `title='H' tmdbId=null
+                //   year=null`. Le gate était `>= 2` → aucune résolution d'id pour « H » →
+                //   0 backup par id sur les providers SANS année (FrenchStream/slug). On
+                //   ouvre à TOUT titre non vide : le `titleMatches` interne est déjà EXACT
+                //   pour ≤2 caractères (nc==nq), donc « H » ne matche qu'une fiche TMDB
+                //   nommée exactement « H » → zéro faux positif.
                 try {
                     val results = TMDb3.Search.multi(key.title, language = "fr-FR")
                     val wantMovie = key.isMovie
@@ -624,6 +650,11 @@ object BackupRegistry {
         //   append_to_response=alternative_titles = même requête, zéro appel API supplémentaire.
         val knownTitles = linkedSetOf<String>()
         if (key.title.isNotBlank()) knownTitles.add(key.title)
+        // 2026-07-23 : année EFFECTIVE. Certains providers (FrenchStream/slug) n'envoient
+        //   PAS d'année (key.year=null) → les backups par TITRE d'un titre ultra-court (« H »)
+        //   restent bloqués (le matcher a besoin de l'année comme discriminant). On la déduit
+        //   de la fiche TMDB résolue (bloc details ci-dessous) → title-based backups OK partout.
+        var effectiveYear: Int? = key.year
         // 2026-07-09 : détection contenu anime par la langue originale TMDB.
         //   Quand originalLanguage="ja" → le contenu est japonais (anime/drama).
         //   On traite comme anime → skip les backups non-anime (CoflixWiki, Moviebox,
@@ -662,6 +693,8 @@ object BackupRegistry {
                         if (d.originalLanguage == "ja") isAnimeContent = true
                         // Confirmé PAS de l'animation : genres connus ET genre 16 (Animation) absent
                         if (d.genres.isNotEmpty() && d.genres.none { it.id == 16 }) notAnimationConfirmed = true
+                        // Année déduite si le provider n'en a pas fourni.
+                        if (effectiveYear == null) effectiveYear = d.releaseDate?.take(4)?.toIntOrNull()
                     } else {
                         val d = TMDb3.TvSeries.details(
                             seriesId = idInt,
@@ -679,6 +712,8 @@ object BackupRegistry {
                         // Détection anime : langue originale japonaise
                         if (d.originalLanguage == "ja") isAnimeContent = true
                         if (d.genres.isNotEmpty() && d.genres.none { it.id == 16 }) notAnimationConfirmed = true
+                        // Année déduite si le provider n'en a pas fourni.
+                        if (effectiveYear == null) effectiveYear = d.firstAirDate?.take(4)?.toIntOrNull()
                     }
                 }
             } catch (e: Exception) {
@@ -693,7 +728,7 @@ object BackupRegistry {
             Log.i(TAG, "fetchAll contenu ANIME détecté (originalLanguage=ja) → effectiveAnime=true")
         }
 
-        Log.i(TAG, "fetchAll title='${key.title}' knownTitles=$knownTitles tmdbId=$resolvedTmdbId year=${key.year} season=${key.season} ep=${key.episode}")
+        Log.i(TAG, "fetchAll title='${key.title}' knownTitles=$knownTitles tmdbId=$resolvedTmdbId year=${key.year} effectiveYear=$effectiveYear season=${key.season} ep=${key.episode}")
         val seen = ConcurrentHashMap.newKeySet<String>()
 
         // Dédup (par LANGUE + URL normalisée, ne fusionne JAMAIS VF/VOSTFR/VO) + envoi.
@@ -857,6 +892,19 @@ object BackupRegistry {
             }
             res
         } }
+        // 2026-07-22 : LoiFlix (zoolingz.com + movix.bet) — MÊME moteur que Nakios, SOURCE SÉPARÉE
+        //   (NakiosProvider.fetchLoiflixBackupServers, indépendante du chemin Nakios). Titre requis.
+        launch { emit("LoiFlix") {
+            var res = emptyList<Video.Server>()
+            for (t in knownTitles) {
+                if (t.isBlank()) continue
+                res = NakiosProvider.fetchLoiflixBackupServers(
+                    videoType, key.season, key.episode, titleHint = t,
+                )
+                if (res.isNotEmpty()) break
+            }
+            res
+        } }
         // 2026-07-04 (reconnexion registre — phase 1) : sources dédiées dont les méthodes ne
         //   sont pas encore restaurées → DÉSACTIVÉES pour l'instant. Wiflix, Cloudstream et
         //   VoirDrama sont couverts par la BOUCLE GÉNÉRIQUE par titre (retirés du set
@@ -938,6 +986,22 @@ object BackupRegistry {
                 }
                 com.streamflixreborn.streamflix.providers.FrembedProvider.getServers(resolvedTmdbId, tmdbVt)
             } }
+
+            // ── AFTERDARK (par tmdbId) — API NDJSON afterdark06.mom (embeds multi-hébergeurs) ──
+            launch {
+                emit("AfterDark") {
+                    com.streamflixreborn.streamflix.providers.AfterDarkProvider
+                        .fetchAfterDarkBackupServers(resolvedTmdbId, videoType, key.season, key.episode)
+                }
+            }
+
+            // ── NABISTREAM (par tmdbId) — dramas asiatiques VOSTFR, HLS tanastream + sous-titres FR ──
+            launch {
+                emit("Nabistream") {
+                    com.streamflixreborn.streamflix.providers.NabistreamProvider
+                        .fetchNabistreamBackupServers(resolvedTmdbId, videoType, key.season, key.episode, knownTitles.toList())
+                }
+            }
 
             // ── MOVIEBOX (par tmdbId) — API mobile signée aoneroom ────────────────
             // 2026-07-10 (user "on transforme Moviebox en backup principal pour tous
@@ -1184,7 +1248,15 @@ object BackupRegistry {
         //   getServers (BATCH = ne rappelle PAS le registre → pas de récursion). Les
         //   WebJsProviders sont exclus (leur getServers déclenche leur propre XBACKUP →
         //   récursion ; Wiflix est déjà couvert en source dédiée ci-dessus).
-        if (key.title.length >= 2) {
+        // 2026-07-17 (user « la série H : sur Wiflix 3 serveurs, sur Movix 1… avec les
+        //   backups ça devrait pas arriver ») : la boucle générique (Wiflix / FrenchStream /
+        //   VoirDrama… recherche par TITRE) était sautée dès que le titre faisait 1 caractère
+        //   (« H ») → aucun de ces backups ne remontait ; seuls les providers par ID TMDB
+        //   (Frembed) agrégeaient. On l'AUTORISE pour 1 caractère UNIQUEMENT si l'ANNÉE est
+        //   connue : le matcher (matchesKnownTitles → branche shortKnown+année, ~L372) exige
+        //   déjà « token exact isolé dans le candidat + année ±1 » = discriminant fort, zéro
+        //   faux positif. Sans année (pas de discriminant) → toujours sauté, comportement inchangé.
+        if (key.title.length >= 2 || (key.title.isNotBlank() && effectiveYear != null)) {
             // 2026-07-04 : seuls les providers AVEC une source dédiée ci-dessus sont exclus
             //   de la boucle générique. Wiflix/Cloudstream/FrenchAnime (natifs) reviennent DANS
             //   la boucle générique par titre (matching STRICT). DessinAnime (WebJsProvider)
@@ -1213,11 +1285,15 @@ object BackupRegistry {
                         //   que sur son propre provider") : Cloudstream ne fournit PLUS de backup aux
                         //   autres providers → disponible uniquement sur le provider Cloudstream.
                         !p.name.equals("Cloudstream", ignoreCase = true) &&
-                        // 2026-07-09 (décision user) : NetMirror HORS backups — en backup son API
-                        //   répond souvent « Video ID not found » (id non résolu) → serveur rouge sur
-                        //   du contenu d'autres providers. Il reste sur SON PROPRE onglet, où il
-                        //   résout le bon id et joue le vrai film reconstruit.
-                        !p.name.equals("NetMirror", ignoreCase = true) &&
+                        // 2026-07-23 (décision user — RÉACTIVATION de l'exclusion du 09/07) :
+                        //   NetMirror REMIS dans les backups pour en faire profiter les autres
+                        //   providers (il est peu utilisé en solo). Vérifié : il joue films ET
+                        //   séries (« La Petite Maison dans la Prairie » OK) ; l'ancien « Video ID
+                        //   not found » était CONTENT-SPECIFIC (contenu qu'il n'a pas), pas un bug —
+                        //   et ce cas est géré en dead-content (aucun blacklist de l'extracteur).
+                        //   Anti-récursion OK : sur son propre onglet il est déjà dans `exclude`
+                        //   (= setOf(providerName), cf. PlayerViewModel). Les users qui n'en veulent
+                        //   pas le coupent via le toggle par-source (Paramètres).
                         // 2026-07-08 (user "remets tous les serveurs CF dans la liste normale en dernier") :
                         //   DessinAnime remis dans les backups. Classé WEBVIEW_HEAVY → 2ᵉ vague (5s délai),
                         //   arrive après les backups légers. Précédemment exclu pour test/diagnostic.
@@ -1268,7 +1344,7 @@ object BackupRegistry {
                                     else -> item.javaClass.simpleName
                                 }
                                 val tok = typeOk(item)
-                                val wm = if (tok) workMatches(itemTitle, knownTitles, key.year, key.isMovie) else false
+                                val wm = if (tok) workMatches(itemTitle, knownTitles, effectiveYear, key.isMovie) else false
                                 val st = if (tok && wm) seasonTitleOk(itemTitle, key.isMovie, key.season) else false
                                 Log.i(TAG, "DIAG [${p.name}]   [$i] '$itemTitle' type=$itemType typeOk=$tok workMatch=$wm seasonOk=$st")
                             }
@@ -1295,7 +1371,7 @@ object BackupRegistry {
                                     val t = (item as? com.streamflixreborn.streamflix.models.Movie)?.title
                                         ?: (item as? com.streamflixreborn.streamflix.models.TvShow)?.title
                                         ?: return@firstOrNull false
-                                    workMatchesStrict(t, knownTitles, key.year, key.isMovie) &&
+                                    workMatchesStrict(t, knownTitles, effectiveYear, key.isMovie) &&
                                         seasonTitleOk(t, key.isMovie, key.season)
                                 }
                                 if (match != null) break
@@ -1395,6 +1471,7 @@ object BackupRegistry {
             "Movix" -> MovixProvider.getVideo(orig)
             "Cloudstream" -> CloudstreamProvider.getVideo(orig)
             "Webflix" -> WebflixProvider.getVideo(orig)
+            "Nabistream" -> com.streamflixreborn.streamflix.providers.NabistreamProvider.getVideo(orig)
             "Papadustream V2" -> PapadustreamV2Provider.getVideo(orig)
             else -> {
                 // Backup web DYNAMIQUE (manifeste hébergé) → son getVideo (WebJsProvider).
