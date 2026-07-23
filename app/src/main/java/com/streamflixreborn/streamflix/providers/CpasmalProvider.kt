@@ -31,7 +31,12 @@ import kotlin.math.max
 object CpasmalProvider {
 
     private const val TAG = "CpasmalProvider"
-    private const val BASE = "https://www.cpasmal.rip"
+    // 2026-07-22 : `cpasmal.rip` MORT. `cpasmal.xyz` est vivant mais RECONSTRUIT (non-DLE, structure
+    //   `/fiches/<id>/<slug>` → incompatible). Le user a fourni **`www.cpasmal.my`** qui est le
+    //   MÊME moteur DataLife Engine que l'ancien (vérifié : `index.php?do=search` → « Site search » ;
+    //   résultats au format `/NNNN-slug.html` ex `/23202-enola-holmes-3.html`, matché par
+    //   RESULT_ANCHOR). Simple bascule de domaine → provider restauré.
+    private const val BASE = "https://www.cpasmal.my"
     private const val MAX_SERVERS = 8
 
     private val app get() = StreamFlixApp.instance

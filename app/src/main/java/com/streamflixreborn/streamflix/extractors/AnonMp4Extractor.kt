@@ -1,131 +1,142 @@
 package com.streamflixreborn.streamflix.extractors
 
+import android.annotation.SuppressLint
 import android.util.Log
-import androidx.media3.common.MimeTypes
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import com.streamflixreborn.streamflix.StreamFlixApp
 import com.streamflixreborn.streamflix.models.Video
+import com.streamflixreborn.streamflix.utils.WebViewResolver
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import okhttp3.Request
-import org.json.JSONObject
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 
 /**
- * 2026-07-17 — AnonMP4 (anonmp4.help).
+ * 2026-07-23 — AnonMP4 (anonmp4.help/embed/<id>).
  *
- * Nouveau hoster apparu côté Flemmix (ex-Wiflix) / FrenchStream — signalé
- * « No extractors found » dans les logs.
+ * Player ArtPlayer + Hls.js dont l'URL m3u8 est protégée par un module **WebAssembly** (le HTML brut
+ * ne contient qu'un blob base64 `\0asm` ; `playM3u8` décode l'URL au runtime). Impossible à calculer
+ * en Kotlin → on charge l'embed dans une **WebView ATTACHÉE** (sinon le WASM/JS ne tourne pas), on
+ * laisse le player résoudre, et on **capture l'URL m3u8** (config `times` / requêtes Hls).
  *
- * EMBED : https://anonmp4.help/embed/<code>   (code ~15 chars)
- * Player : ArtPlayer + hls.js  (`hls_url: json.hls` dans le JS de la page)
- *
- * EXTRACTION 100 % NATIVE (aucune WebView) — validé en direct dans Chrome :
- *   1. GET la page embed.
- *   2. La page contient EN DUR (rendu serveur, aucun calcul JS) l'URL de l'API :
- *        https://cryoapi.shadowapi.<tld>/load/<token>
- *      (vérifié : aucun atob/btoa/charCodeAt autour du fetch → rien à reverser)
- *   3. GET cette URL → JSON :
- *        succès  : { "success": true,  "hls": "<master m3u8>", ... }
- *        échec   : { "success": false, "type": "remotepending",
- *                    "error": "Video queued for processing" }
- *
- * Le champ lu est `hls` (le JS fait `hls_url: json.hls`). On tolère quelques
- * alias de clé au cas où l'API évolue.
+ * Le m3u8 est un media playlist standard `m3cloud.shadowcloud.<tld>/hls/playlist/<token>.m3u8` dont les
+ * segments sont du **TS BRUT déguisé en `.webp`** (octet de sync 0x47, pas d'en-tête image) → ExoPlayer
+ * les joue directement en HLS (aucun DataSource custom nécessaire, contrairement à SeekStream/PNG).
  */
 class AnonMp4Extractor : Extractor() {
-
     override val name = "AnonMP4"
     override val mainUrl = "https://anonmp4.help"
+    override val aliasUrls = listOf("https://anonmp4.com", "https://anonmp4.net")
 
-    private val userAgent =
-        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-
-    /** L'API de résolution est sur un domaine tiers (shadowapi), TLD variable. */
-    private val apiRegex = Regex("""https?://cryoapi\.shadowapi\.[a-z0-9-]+/load/[A-Za-z0-9_\-]+""")
-
-    private fun get(url: String, referer: String): String {
-        val request = Request.Builder()
-            .url(url)
-            .header("User-Agent", userAgent)
-            .header("Referer", referer)
-            .header("Accept-Language", "fr-FR,fr;q=0.9")
-            .build()
-        return sharedClient.newCall(request).execute().use { resp ->
-            if (!resp.isSuccessful) throw Exception("AnonMP4: HTTP ${resp.code} sur $url")
-            resp.body?.string().orEmpty()
-        }
-    }
-
-    override suspend fun extract(link: String): Video = withContext(Dispatchers.IO) {
-        val origin = Regex("^(https?://[^/]+)").find(link)?.groupValues?.get(1)
-            ?: mainUrl
-
-        // 1) page embed
-        val html = get(link, "$origin/")
-        if (html.isBlank()) throw Exception("AnonMP4: page embed vide")
-
-        // 2) URL de l'API écrite en dur dans la page
-        val apiUrl = apiRegex.find(html)?.value
-            ?: throw Exception("AnonMP4: URL cryoapi introuvable dans la page embed")
-
-        // 3) résolution
-        val body = get(apiUrl, "$origin/")
-        val json = runCatching { JSONObject(body) }.getOrNull()
-            ?: throw Exception("AnonMP4: réponse API non-JSON")
-
-        // ── Cas ÉCHEC : {"success":false,"type":"remotepending","error":"..."} ──
-        // ⚠️ On préfixe "source unavailable" car classifyError() (Extractor.kt)
-        //   mappe cette formule sur "dead-content" : la SOURCE est morte, pas
-        //   l'extracteur. Sans ça, quelques fichiers non encodés suffisent à
-        //   faire blacklister AnonMP4 en entier ("marked broken, N failures").
-        if (json.has("success") && !json.optBoolean("success", true)) {
-            val err = json.optString("error").ifBlank { json.optString("type") }
-                .ifBlank { "indisponible" }
-            throw Exception("AnonMP4: source unavailable — $err")
-        }
-
-        // ── Cas SUCCÈS ──
-        // 2026-07-17 : la réponse réelle N'EST PAS {success, hls} (ce que laissait
-        //   croire le JS `hls_url: json.hls`, visiblement une forme héritée) mais :
-        //     { "status": "ok",
-        //       "tracks": [ { "track_name": "French",
-        //                     "track_url": "https://n0x.cipherx.life/load/multi/<token>" } ] }
-        //   `track_url` sert directement le manifeste HLS — on le passe tel quel à
-        //   ExoPlayer, qui le fetch avec NOS headers (Referer obligatoire : sans lui
-        //   l'API répond {"success":false,"error":"Invalid request or content not found"}).
-        val tracks = json.optJSONArray("tracks")
-        if (tracks == null || tracks.length() == 0) {
-            throw Exception("AnonMP4: source unavailable — aucune piste dans la réponse API")
-        }
-
-        val names = (0 until tracks.length())
-            .mapNotNull { tracks.optJSONObject(it)?.optString("track_name") }
-            .filter { it.isNotBlank() }
-        Log.d("AnonMp4Extractor", "source prête (${tracks.length()} piste(s) : $names) → overlay WebView")
-
-        // ── Lecture : OVERLAY WEBVIEW, pas d'extraction directe ──
-        // 2026-07-17 — Pourquoi on ne renvoie PAS `tracks[].track_url` comme m3u8,
-        //   alors qu'on l'a sous la main : il N'EST PAS servable hors du contexte
-        //   de la page. Vérifié exhaustivement (ne pas refaire) :
-        //     • ExoPlayer + Referer            → JSON d'erreur → MANIFEST_MALFORMED
-        //     • sans Origin (comme hls.js)     → idem
-        //     • rejeu navigateur même origine  → {"success":false,"error":
-        //                                         "Invalid request or content not found"}
-        //     • aucun cookie de session à reprendre (document.cookie vide)
-        //     • token régénéré à chaque appel → échoue quand même
-        //   Seule la requête émise par le player de la page obtient un 200, et ce
-        //   player ne s'initialise QUE sur un vrai geste utilisateur (aucun <video>
-        //   ni instance ArtPlayer avant tap). C'est le profil Abyss/Hydrax, que la
-        //   mémoire projet documente comme un puits sans fond en extraction headless.
-        //   → On applique la conclusion déjà payée : overlay WebView joué par le
-        //     VRAI tap de l'utilisateur (même chemin que SeekPlayer / Abyss).
-        //
-        //   L'appel cryoapi ci-dessus reste utile comme PRÉ-CHECK : si la source
-        //   n'est pas encodée, on échoue vite et proprement (dead-content →
-        //   auto-switch) au lieu d'ouvrir un overlay sur une vidéo morte.
-        Video(
-            source = link,
-            webViewUrl = link,
-            needsWebViewClick = true,
+    override suspend fun extract(link: String): Video {
+        val m3u8 = resolveM3u8(link)
+            ?: throw Exception("AnonMP4: URL m3u8 non capturée pour $link")
+        val headers = hashMapOf(
+            "Referer" to "$mainUrl/",
+            "Origin" to mainUrl,
+            "User-Agent" to WebViewResolver.STEALTH_UA,
+        )
+        return Video(
+            source = m3u8,
+            type = androidx.media3.common.MimeTypes.APPLICATION_M3U8,
+            headers = headers,
         )
     }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private suspend fun resolveM3u8(embedUrl: String): String? = withTimeoutOrNull(25_000L) {
+        withContext(Dispatchers.Main) {
+            suspendCancellableCoroutine<String?> { cont ->
+                val ctx = StreamFlixApp.instance
+                var webView: WebView? = null
+                var attachedRoot: android.view.ViewGroup? = null
+                var finished = false
+
+                fun finish(result: String?) {
+                    if (finished) return
+                    finished = true
+                    runCatching {
+                        attachedRoot?.removeView(webView)
+                        webView?.stopLoading()
+                        webView?.loadUrl("about:blank")
+                        webView?.destroy()
+                    }
+                    attachedRoot = null
+                    webView = null
+                    if (cont.isActive) cont.resume(result?.takeIf { it.startsWith("http") })
+                }
+
+                val wv = WebView(ctx)
+                webView = wv
+                wv.settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    userAgentString = WebViewResolver.STEALTH_UA
+                    mediaPlaybackRequiresUserGesture = true
+                }
+                wv.addJavascriptInterface(object {
+                    @JavascriptInterface fun result(s: String?) { runCatching { wv.post { finish(s) } } }
+                    @JavascriptInterface fun log(s: String?) { Log.d(TAG, "js: $s") }
+                }, "AMP")
+
+                val js = """
+                    (function(){
+                      var done=false;
+                      function report(u){
+                        if(done||!u) return;
+                        var s=''+u;
+                        if(!/shadowcloud|m3cloud|\.m3u8/i.test(s)) return;
+                        var m=s.match(/https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*/i);
+                        if(m){ done=true; AMP.log('m3u8 capté'); AMP.result(m[0]); }
+                      }
+                      try{ var of=window.fetch; window.fetch=function(){var a=arguments[0]; report(typeof a==='string'?a:(a&&a.url)); return of.apply(this,arguments);}; }catch(e){}
+                      try{ var oo=XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open=function(m,u){ report(u); return oo.apply(this,arguments);}; }catch(e){}
+                      var ticks=0;
+                      var iv=setInterval(function(){
+                        ticks++;
+                        try{ for(var k in window){ var o; try{o=window[k];}catch(e){continue;}
+                          if(o&&typeof o==='object'){ for(var kk in o){ try{ var v=o[kk];
+                            if(typeof v==='string'&&/shadowcloud|m3cloud/i.test(v)){ report(v); } }catch(e){} } } } }catch(e){}
+                        if(done||ticks>55){ clearInterval(iv); if(!done){ AMP.log('timeout'); AMP.result(''); } }
+                      }, 400);
+                    })();
+                """.trimIndent()
+
+                wv.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        if (finished) return
+                        wv.postDelayed({ if (!finished) wv.evaluateJavascript(js, null) }, 700)
+                    }
+                }
+
+                runCatching {
+                    val root = StreamFlixApp.currentActivity?.findViewById<android.view.ViewGroup>(android.R.id.content)
+                    if (root != null) {
+                        wv.alpha = 0.02f
+                        root.addView(
+                            wv, 0,
+                            android.view.ViewGroup.LayoutParams(
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            ),
+                        )
+                        attachedRoot = root
+                    } else {
+                        wv.layout(0, 0, 1280, 720)
+                    }
+                }
+
+                val headers = HashMap<String, String>()
+                headers["Referer"] = "$mainUrl/"
+                wv.loadUrl(embedUrl, headers)
+
+                cont.invokeOnCancellation { runCatching { wv.post { finish(null) } } }
+            }
+        }
+    }
+
+    companion object { private const val TAG = "AnonMp4Extractor" }
 }

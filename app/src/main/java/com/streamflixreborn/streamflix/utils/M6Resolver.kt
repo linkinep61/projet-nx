@@ -69,6 +69,26 @@ object M6Resolver {
         }
     }
 
+    /** 2026-07-23 (testeur admin "sur Kodi mon compte n'a JAMAIS été déconnecté,
+     *  sur ONYX je dois me reconnecter aléatoirement" — compte email/mdp Yopmail) :
+     *  si le login_token Gigya est expiré/absent ET qu'on a des identifiants
+     *  email/mdp persistés, on relance un login Gigya SILENCIEUX (M6GigyaAuth,
+     *  HTTP rapide, pas de WebView) — exactement ce que fait Kodi catchuptvandmore.
+     *  Aucun effet pour les comptes Google/Apple/FB (pas de mdp stocké → skip). */
+    private suspend fun ensureFreshM6Token(ctx: android.content.Context) {
+        try {
+            val tok = M6Auth.getToken(ctx)
+            if (tok.isNullOrBlank() && M6GigyaAuth.hasCredentials(ctx)) {
+                Log.d(TAG, "ensureFreshM6Token: token expiré/absent → re-login Gigya silencieux")
+                val fresh = M6GigyaAuth.reloginFromSaved(ctx)
+                if (!fresh.isNullOrBlank()) Log.i(TAG, "ensureFreshM6Token: re-login silencieux OK")
+                else Log.w(TAG, "ensureFreshM6Token: re-login échoué (identifiants invalides ?)")
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "ensureFreshM6Token: ${e.message}")
+        }
+    }
+
     fun isM6Url(url: String): Boolean = url.startsWith("m6play://", ignoreCase = true) ||
         url.startsWith("m6live://", ignoreCase = true)
 
@@ -90,6 +110,9 @@ object M6Resolver {
     )
 
     suspend fun resolveTyped(m6Url: String): Resolved? {
+        // 2026-07-23 : re-login Gigya silencieux si le token a expiré (couvre
+        //   live ET replay) — comptes email/mdp seulement, no-op sinon.
+        appContextRef?.let { ensureFreshM6Token(it) }
         // 2026-06-19 v38 (user "ajoute Live M6+ M6/W9/6ter/Gulli") : si scheme
         //   m6live:// → délègue à resolveLive (= pipeline live, différent du
         //   replay car endpoint /live au lieu de /videos).
@@ -617,9 +640,10 @@ object M6Resolver {
      *  pipeline LIVE M6+ pour M6/W9/6ter/Gulli (= 4 gratuites en clair).
      *  2026-06-19 fix : reverse-engineering via DevTools Chrome desktop sur
      *  www.m6.fr/m6/direct → le SPA web charge le MPD à l'URL :
-     *    https://edge-cf-m6web.live.6cloud.fr/out/v1/6play/6play-<chan>/cmaf_cenc00_N3/dash-short-hd.mpd
-     *  (= `_N3` au lieu de rien après `cmaf_cenc00`, file `dash-short-hd.mpd`
-     *   au lieu de `dash-short-hd720.mpd`). C'est un DASH+CENC PlayReady+Widevine.
+     *    https://edge-cf-m6web.live.6cloud.fr/out/v1/6play/6play-<chan>/cmaf_cenc00/dash-short-hd.mpd
+     *  (profil `cmaf_cenc00`, file `dash-short-hd.mpd`). C'est un DASH+CENC
+     *  PlayReady+Widevine. 2026-07-23 : l'ancien profil `cmaf_cenc00_N3` a été
+     *  retiré côté 6cloud (403) → bascule sur `cmaf_cenc00` (cf. plus bas).
      *  Le license URL est lic.drmtoday.com mais le browser passe par un CDM
      *  helper (= invisible aux DevTools Network tab) avec un `x-dt-auth-token`
      *  que seule l'app native M6+ peut fournir. Sans PCAP de cette app, on ne
@@ -641,7 +665,13 @@ object M6Resolver {
                 return null
             }
         }
-        val streamUrl = "https://edge-cf-m6web.live.6cloud.fr/out/v1/6play/$chanPath/cmaf_cenc00_N3/dash-short-hd.mpd"
+        // 2026-07-23 (user "M6 live W9 etc ne fonctionne plus") : le profil
+        //   `cmaf_cenc00_N3` a été SUPPRIMÉ côté 6cloud → 403 (vérifié en direct :
+        //   m6/w9 sur _N3 = 403, sur `cmaf_cenc00` = 200). Le player web M6+
+        //   (www.m6.fr/m6/direct, migré depuis 6play.fr) charge désormais
+        //   `.../6play-<chan>/cmaf_cenc00/dash-short-hd.mpd` (SANS `_N3`, sans
+        //   token — manifeste public, la DRM Widevine reste le seul gate).
+        val streamUrl = "https://edge-cf-m6web.live.6cloud.fr/out/v1/6play/$chanPath/cmaf_cenc00/dash-short-hd.mpd"
         val mime = "application/dash+xml"
         Log.d(TAG, "resolveLive: $service → $streamUrl")
         val ctx = appContextRef

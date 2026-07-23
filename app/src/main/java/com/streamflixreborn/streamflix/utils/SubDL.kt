@@ -21,6 +21,25 @@ object SubDL {
     private const val URL = "https://api.subdl.com/api/v1/"
     private const val DOWNLOAD_BASE_URL = "https://dl.subdl.com"
 
+    /** 2026-07-22 : SubDL utilise des codes langue à 2 lettres MAJ, OpenSubtitles des codes
+     *  ISO-639-2/B à 3 lettres. Table de conversion pour le sélecteur de langues commun. */
+    fun osToSubdl(os: String): String = when (os.lowercase()) {
+        "fre", "fra" -> "FR"
+        "eng" -> "EN"
+        "ara" -> "AR"
+        "spa" -> "ES"
+        "ita" -> "IT"
+        "ger", "deu" -> "DE"
+        "por" -> "PT"
+        "tur" -> "TR"
+        "dut", "nld" -> "NL"
+        "rus" -> "RU"
+        "jpn" -> "JA"
+        "kor" -> "KO"
+        "chi", "zho" -> "ZH"
+        else -> os.uppercase().take(2)
+    }
+
     private val service = Service.build()
 
     suspend fun download(

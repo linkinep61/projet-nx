@@ -72,13 +72,19 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     }
 
     override val name = "Movix"
-    override val defaultBaseUrl: String = "https://api.movix.date/"  // v91 2026-07-13 : movix.cloud → movix.date (auto-update movix.online confirme)
+    // 2026-07-22 : movix.date + movix.cloud MORTS. `movix.online` (page de statut, vivante)
+    //   annonce **movix.show** comme domaine courant → défaut bumpé. L'auto-update (fetchActiveDomain
+    //   via <title> de movix.online) confirme movix.show en runtime, mais on met un défaut VIVANT
+    //   au cas où le cache serait vide (sinon api.movix.date mort = 0 catalogue au 1er boot).
+    override val defaultBaseUrl: String = "https://api.movix.show/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
-            return cacheURL.ifEmpty { field }
+            // ignore un cache pointant sur un domaine mort connu → force le re-fallback/redécouverte.
+            val dead = listOf("movix.date", "movix.cloud")
+            return if (cacheURL.isNotEmpty() && dead.none { cacheURL.contains(it) }) cacheURL else field
         }
-    override val defaultPortalUrl: String = "https://movix.date/"
+    override val defaultPortalUrl: String = "https://movix.show/"
     override val portalUrl: String = defaultPortalUrl
         get() {
             val cachePortalURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_PORTAL_URL)

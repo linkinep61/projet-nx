@@ -44,8 +44,12 @@ import kotlin.coroutines.resume
  */
 open class YflixExtractor : Extractor() {
     override val name = "Yflix"
-    override val mainUrl = "https://yflix.to/"
-    override val aliasUrls = listOf<String>()
+    // 2026-07-22 : `yflix.to` MORT → **`yflix.ws`** (user l'a fourni). MÊME moteur (lecteur iframe
+    //   interne yflix → host externe → m3u8, capté par WebView). Changements : domaine, fiche
+    //   `/movie/watch-{id}-{slug}-hd` (au lieu de `/watch/{slug}.{id}`), sélecteur serveurs
+    //   `button.server-btn` (au lieu de `li.server[data-lid]`).
+    override val mainUrl = "https://yflix.ws/"
+    override val aliasUrls = listOf("https://yflix.to/")
 
     private val context = StreamFlixApp.instance.applicationContext
 
@@ -66,8 +70,8 @@ open class YflixExtractor : Extractor() {
         return Video(
             source = hlsUrl,
             headers = mapOf(
-                "Referer" to "https://yflix.to/",
-                "Origin" to "https://yflix.to",
+                "Referer" to "https://yflix.ws/",
+                "Origin" to "https://yflix.ws",
                 "User-Agent" to ANDROID_CHROME_UA,
             )
         )
@@ -154,14 +158,22 @@ open class YflixExtractor : Extractor() {
                             //   li.server[data-lid]. La liste est peuplée via un ajax token,
                             //   donc on retente le clic quelques fois jusqu'à ce qu'elle
                             //   existe ; le m3u8 est capté dans shouldInterceptRequest.
-                            if (finishedUrl != null && finishedUrl.contains("/watch/") && !cycleStarted) {
+                            // 2026-07-22 : la fiche yflix.ws est /movie/watch-{id}-{slug}-hd ou
+                            //   /tv/... (avant : /watch/{slug}.{id}). On déclenche sur ces chemins.
+                            val isDetailPage = finishedUrl != null && (
+                                finishedUrl.contains("/movie/") || finishedUrl.contains("/tv/") ||
+                                    finishedUrl.contains("/watch/")
+                                )
+                            if (isDetailPage && !cycleStarted) {
                                 cycleStarted = true
                                 val idx = srvIndex - 1
                                 for (d in longArrayOf(1_000L, 3_000L, 5_000L, 7_000L)) {
                                     view.postDelayed({
                                         if (resolved) return@postDelayed
+                                        // Sélecteur yflix.ws : button.server-btn (repli sur l'ancien li.server).
                                         view.evaluateJavascript(
-                                            "(function(){var s=document.querySelectorAll('li.server[data-lid]');" +
+                                            "(function(){var s=document.querySelectorAll('button.server-btn');" +
+                                                "if(!s||!s.length){s=document.querySelectorAll('li.server[data-lid]');}" +
                                                 "if(s&&s[$idx]){s[$idx].click();return s.length;}return s?s.length:0;})()",
                                             null,
                                         )
@@ -186,7 +198,7 @@ open class YflixExtractor : Extractor() {
                         }
                     }
 
-                    webView.loadUrl(url, mapOf("Referer" to "https://yflix.to/"))
+                    webView.loadUrl(url, mapOf("Referer" to "https://yflix.ws/"))
 
                     cont.invokeOnCancellation {
                         resolved = true
@@ -209,7 +221,9 @@ open class YflixExtractor : Extractor() {
         private const val PER_SERVER_MS = 8_000L
         // Hosts qu'on autorise à charger leurs JS/iframes pour la chaîne d'extraction
         private val ALLOWED_HOSTS = listOf(
+            "yflix.ws",
             "yflix.to",
+            "acscdn.com",
             "rapidshareee.site",
             "rapidshareee.com",
             "challenges.cloudflare.com", // CF JS analytics passive

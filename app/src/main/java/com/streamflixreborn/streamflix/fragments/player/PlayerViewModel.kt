@@ -1613,61 +1613,37 @@ class PlayerViewModel(
         launch {
             try {
                 Log.d("PlayerViewModel", "Inizio ricerca OpenSubtitles")
-                // 2026-05-15 (user "ajoute le sub anglais pour ceux qui veulent
-                // dans OpenSubtitles, censé être activable sur tous les providers") :
-                // si UserPreferences.enableEnglishSubtitles est ON, on récupère
-                // aussi les subs anglais en parallèle (en plus du FR par défaut).
-                val frenchOnly = "fre"
-                val includeEnglish = com.streamflixreborn.streamflix.utils.UserPreferences.enableEnglishSubtitles
-                // 2026-05-04 : on PASSE TOUJOURS imdb_id quand le provider le
-                // fournit. Sans ça la recherche tombait en mode "query texte"
-                // et matchait "Fear City: New York Vs The Mafia S01E03" pour
-                // "New York 911 S01E03" (tous deux contiennent "New York")
-                // -> sous-titre dingue d'une autre série, donc "désynchronisé".
-                // Tri : downloads DESC (le plus téléchargé = le mieux synchro).
-                val frenchSubtitles = when (videoType) {
-                    is Video.Type.Episode -> {
-                        OpenSubtitles.search(
+                // 2026-07-22 (user « si les utilisateurs veulent changer de langue, tu mets en
+                //   place ») : on interroge TOUTES les langues choisies dans les Paramètres
+                //   (MultiSelect « Langues des sous-titres »), le français restant le défaut.
+                //   Le toggle anglais historique est inclus via UserPreferences.subtitleLanguages.
+                //   L'ordre suit celui de la préférence (français d'abord par convention).
+                // 2026-05-04 : on PASSE TOUJOURS imdb_id quand le provider le fournit (sinon la
+                //   recherche tombe en mode « query texte » et peut matcher une autre œuvre).
+                val languages = com.streamflixreborn.streamflix.utils.UserPreferences.subtitleLanguages
+                val orderedLangs = (listOf("fre") + languages).distinct().filter { it in languages }
+                val perLang = LinkedHashMap<String, List<OpenSubtitles.Subtitle>>()
+                for (lang in orderedLangs) {
+                    val res = when (videoType) {
+                        is Video.Type.Episode -> OpenSubtitles.search(
                             imdbId = videoType.tvShow.imdbId,
                             query = if (videoType.tvShow.imdbId.isNullOrBlank()) videoType.tvShow.title else null,
                             season = videoType.season.number,
                             episode = videoType.number,
-                            subLanguageId = frenchOnly,
+                            subLanguageId = lang,
                         )
-                    }
-                    is Video.Type.Movie -> {
-                        OpenSubtitles.search(
+                        is Video.Type.Movie -> OpenSubtitles.search(
                             imdbId = videoType.imdbId,
                             query = if (videoType.imdbId.isNullOrBlank()) videoType.title else null,
-                            subLanguageId = frenchOnly,
+                            subLanguageId = lang,
                         )
                     }
+                    perLang[lang] = res.sortedByDescending { it.subDownloadsCnt }
                 }
-                val englishSubtitles = if (includeEnglish) {
-                    when (videoType) {
-                        is Video.Type.Episode -> {
-                            OpenSubtitles.search(
-                                imdbId = videoType.tvShow.imdbId,
-                                query = if (videoType.tvShow.imdbId.isNullOrBlank()) videoType.tvShow.title else null,
-                                season = videoType.season.number,
-                                episode = videoType.number,
-                                subLanguageId = "eng",
-                            )
-                        }
-                        is Video.Type.Movie -> {
-                            OpenSubtitles.search(
-                                imdbId = videoType.imdbId,
-                                query = if (videoType.imdbId.isNullOrBlank()) videoType.title else null,
-                                subLanguageId = "eng",
-                            )
-                        }
-                    }
-                } else emptyList()
-                // FR en premier, puis EN après — tri downloads DESC dans chaque groupe.
-                val subtitles = (frenchSubtitles.sortedByDescending { it.subDownloadsCnt } +
-                    englishSubtitles.sortedByDescending { it.subDownloadsCnt })
+                // Concatène langue par langue (tri downloads DESC dans chaque groupe).
+                val subtitles = perLang.values.flatten()
 
-                Log.d("PlayerViewModel", "OpenSubtitles: FR=${frenchSubtitles.size}, EN=${englishSubtitles.size}")
+                Log.d("PlayerViewModel", "OpenSubtitles: " + perLang.entries.joinToString { "${it.key}=${it.value.size}" })
                 _subtitleState.emit(SubtitleState.SuccessOpenSubtitles(subtitles))
             } catch (e: Exception) {
                 Log.e("PlayerViewModel", "Errore OpenSubtitles: ", e)
@@ -1678,24 +1654,32 @@ class PlayerViewModel(
         launch {
             try {
                 Log.d("PlayerViewModel", "Inizio ricerca SubDL")
+                // 2026-07-22 : mêmes langues que OpenSubtitles (préférence commune), converties
+                //   au format SubDL (2 lettres MAJ) via SubDL.osToSubdl().
+                val subdlLangs = com.streamflixreborn.streamflix.utils.UserPreferences.subtitleLanguages
+                    .map { SubDL.osToSubdl(it) }.distinct()
+                val subdlLangParam = (listOf("FR") + subdlLangs).distinct()
+                    .filter { it in subdlLangs }.joinToString(",")
                 val subtitles = when (videoType) {
                     is Video.Type.Episode -> {
                         SubDL.search(
                             filmName = videoType.tvShow.title,
                             seasonNumber = videoType.season.number,
                             episodeNumber = videoType.number,
-                            type = "tv"
+                            type = "tv",
+                            languages = subdlLangParam,
                         )
                     }
                     is Video.Type.Movie -> {
                         SubDL.search(
                             filmName = videoType.title,
-                            type = "movie"
+                            type = "movie",
+                            languages = subdlLangParam,
                         )
                     }
                 }
-                
-                Log.d("PlayerViewModel", "Ricerca SubDL completata: ${subtitles.size} risultati")
+
+                Log.d("PlayerViewModel", "Ricerca SubDL completata ($subdlLangParam): ${subtitles.size} risultati")
                 _subtitleState.emit(SubtitleState.SuccessSubDLSubtitles(subtitles))
             } catch (e: Exception) {
                 Log.e("PlayerViewModel", "Errore SubDL: ", e)

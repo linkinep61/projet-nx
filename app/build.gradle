@@ -47,8 +47,8 @@ android {
         applicationId "com.streamfr.app"
         minSdk 23
         targetSdk 35
-        versionCode 10935
-        versionName "1.7.235"
+        versionCode 10936
+        versionName "1.7.236"
 
         // ABI pilotée par la propriété ABI_TARGET (local.properties, posée par la CI).
         //   APK par défaut = ARM (armeabi-v7a + arm64-v8a).
@@ -189,6 +189,10 @@ dependencies {
     implementation 'androidx.fragment:fragment-ktx:1.8.6'
     implementation 'androidx.lifecycle:lifecycle-livedata-ktx:2.8.7'
     implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7' // lifecycleScope (écrans Android Auto)
+    // Android Auto — Car App Library (projection vidéo sur l'écran voiture + templates)
+    implementation 'androidx.car.app:app:1.4.0'
+    implementation 'androidx.car.app:app-projected:1.4.0'
     implementation 'androidx.preference:preference-ktx:1.2.1'
     implementation 'androidx.leanback:leanback-preference:1.2.0'
 

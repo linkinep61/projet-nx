@@ -63,19 +63,33 @@ object CpasmieuxProvider {
     // 2026-07-11 : le VRAI moteur = GET /search/{keyword}/ (custom, cf search.js →
     //   window.location='/search/'+kw+'/'). Le POST DLE `do=search` renvoyait juste
     //   l'accueil (33 KB fixes) → ne filtrait pas. `query` est DÉJÀ url-encodé par l'appelant.
+    // 2026-07-22 : sur `www.cpasmieux.life` (nouveau domaine), l'URL amicale `/search/<kw>/`
+    //   renvoie **HTTP 404**. La recherche DLE classique **GET `index.php?do=search&…&story=`**
+    //   marche et renvoie les vraies fiches (vérifié : « enola holmes » → `/1924988-enola-holmes-2.html`,
+    //   `/1822500-enola-holmes.html`). On tente donc DLE GET d'abord, puis `/search/<kw>/` en repli
+    //   (au cas où un domaine futur ne supporterait que celui-là).
     private suspend fun httpSearch(query: String): String? = withContext(Dispatchers.IO) {
-        try {
-            val req = Request.Builder().url("$BASE/search/$query/")
-                .header("User-Agent", USER_AGENT)
-                .header("Accept-Language", "fr-FR,fr;q=0.9")
-                .header("Referer", "$BASE/")
-                .header("X-Requested-With", "XMLHttpRequest")
-                .build()
-            httpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) { Log.d(TAG, "search → HTTP ${resp.code}"); return@withContext null }
-                resp.body?.string()
-            }
-        } catch (e: Exception) { Log.d(TAG, "search failed: ${e.message}"); null }
+        val dleGet = "$BASE/index.php?do=search&subaction=search&search_start=0&full_search=0&result_from=1&story=$query"
+        val friendly = "$BASE/search/$query/"
+        for (url in listOf(dleGet, friendly)) {
+            try {
+                val req = Request.Builder().url(url)
+                    .header("User-Agent", USER_AGENT)
+                    .header("Accept-Language", "fr-FR,fr;q=0.9")
+                    .header("Referer", "$BASE/")
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) { Log.d(TAG, "search $url → HTTP ${resp.code}"); return@use }
+                    val body = resp.body?.string()
+                    // On ne garde que si la page contient de vrais résultats (ancres /NNNN-slug.html).
+                    if (body != null && Regex("""href="/\d+-[a-z0-9-]+\.html"""", RegexOption.IGNORE_CASE).containsMatchIn(body)) {
+                        return@withContext body
+                    }
+                }
+            } catch (e: Exception) { Log.d(TAG, "search failed ($url): ${e.message}") }
+        }
+        null
     }
 
     // ── API publique ─────────────────────────────────────────────────────────

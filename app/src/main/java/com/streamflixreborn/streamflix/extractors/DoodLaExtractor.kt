@@ -24,6 +24,9 @@ open class DoodLaExtractor : Extractor() {
         "https://dood.work",
         "https://doply.net",
         "https://doodstream.me",
+        // 2026-07-23 (audit serveurs Movix) : ds2video.com = domaine Doodstream vu chez Movix
+        //   mais non routé (« No extractors found »). Même moteur pass_md5.
+        "https://ds2video.com",
         // 2026-06-02 : kokoflix.lol RETIRÉ — c'est un proxy multi-host de FS
         //   qui route selon le suffix /<XXX>_go.php : osaka_go.php = VOE (pas
         //   Dood !), grandline_go.php = autre host.

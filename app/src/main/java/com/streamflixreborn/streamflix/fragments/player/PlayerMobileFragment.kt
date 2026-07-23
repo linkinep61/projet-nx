@@ -6972,6 +6972,27 @@ class PlayerMobileFragment : Fragment() {
         binding.settings.player = player
         binding.settings.subtitleView = binding.pvPlayer.subtitleView
         binding.settings.onSubtitlesClicked = { viewModel.getSubtitles(args.videoType) }
+
+        // Android Auto : publier AUSSI le player TRANSFÉRÉ du mini-lecteur au pont (sinon, en passant
+        // par le mini-lecteur, le miroir voiture reste vide — le hook de création n'est pas atteint).
+        com.streamflixreborn.streamflix.car.CarPlaybackBridge.attach(
+            token = player,
+            title = when (val t = args.videoType) {
+                is Video.Type.Movie -> t.title
+                is Video.Type.Episode -> "${t.tvShow.title} • S${t.season.number} E${t.number}"
+            },
+            setSurface = { s -> try { player.setVideoSurface(s) } catch (_: Exception) {} },
+            getIsPlaying = { runCatching { player.playWhenReady }.getOrDefault(false) },
+            setPlaying = { pw -> runCatching { player.playWhenReady = pw } },
+            reattach = {
+                try {
+                    if (_binding != null && ::player.isInitialized) {
+                        binding.pvPlayer.player = null
+                        binding.pvPlayer.player = player
+                    }
+                } catch (_: Exception) {}
+            },
+        )
         com.streamflixreborn.streamflix.utils.MiniPlayerController.clearTransitionFlag()
         // REPEAT_MODE_OFF pour live (cf TV fragment)
         if (isLiveIptvHere) {
@@ -7098,6 +7119,26 @@ class PlayerMobileFragment : Fragment() {
         binding.settings.onSubtitlesClicked = {
             viewModel.getSubtitles(args.videoType)
         }
+
+        // Android Auto : publier ce player au pont voiture → l'écran AA projette la MÊME lecture (miroir).
+        com.streamflixreborn.streamflix.car.CarPlaybackBridge.attach(
+            token = player,
+            title = when (val t = args.videoType) {
+                is Video.Type.Movie -> t.title
+                is Video.Type.Episode -> "${t.tvShow.title} • S${t.season.number} E${t.number}"
+            },
+            setSurface = { s -> try { player.setVideoSurface(s) } catch (_: Exception) {} },
+            getIsPlaying = { runCatching { player.playWhenReady }.getOrDefault(false) },
+            setPlaying = { pw -> runCatching { player.playWhenReady = pw } },
+            reattach = {
+                try {
+                    if (_binding != null && ::player.isInitialized) {
+                        binding.pvPlayer.player = null
+                        binding.pvPlayer.player = player
+                    }
+                } catch (_: Exception) {}
+            },
+        )
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -8057,6 +8098,7 @@ class PlayerMobileFragment : Fragment() {
         binding.settings.player = null
         binding.settings.subtitleView = null
         if (::player.isInitialized) {
+            try { com.streamflixreborn.streamflix.car.CarPlaybackBridge.detach(player) } catch (_: Exception) {}
             activePlayerListener?.let { try { player.removeListener(it) } catch (_: Exception) {} }
             player.release()
         }
