@@ -47,8 +47,8 @@ android {
         applicationId "com.streamfr.app"
         minSdk 23
         targetSdk 35
-        versionCode 10936
-        versionName "1.7.236"
+        versionCode 10937
+        versionName "1.7.237"
 
         // ABI pilotée par la propriété ABI_TARGET (local.properties, posée par la CI).
         //   APK par défaut = ARM (armeabi-v7a + arm64-v8a).
@@ -210,6 +210,14 @@ dependencies {
     ksp 'androidx.room:room-compiler:2.7.0-rc01'
 
     implementation("org.mozilla:rhino:1.8.0")
+    // 2026-07-24 : NewPipeExtractor — recherche + extraction AUDIO YouTube (2e source musique,
+    //   complément de FileSearch). Extrait en natif JVM, sans instance tierce (contrairement à Piped).
+    implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.26.4') {
+        // NewPipe tire protobuf-javalite 4.x → « Duplicate class com.google.protobuf » avec le
+        //   protobuf repackagé de Firebase (protolite-well-known-types). On exclut celui de NewPipe ;
+        //   les classes com.google.protobuf viennent de Firebase.
+        exclude group: 'com.google.protobuf', module: 'protobuf-javalite'
+    }
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
     // 2026-05-07 : conscrypt 2.5.3 — libs natives 16 KB-aligned (fix popup
     // "Android App Compatibility" sur Android 16+ avec page size 16 KB).

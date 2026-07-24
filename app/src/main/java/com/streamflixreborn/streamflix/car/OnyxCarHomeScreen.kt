@@ -38,6 +38,16 @@ class OnyxCarHomeScreen(carContext: CarContext) : Screen(carContext) {
                     .setBrowsable(true)
                     .build(),
             )
+            .addItem(
+                Row.Builder()
+                    .setTitle("🎵 Ma playlist")
+                    .addText("Ta musique favorite (préparée dans ONYX)")
+                    .setOnClickListener {
+                        screenManager.push(OnyxCarListScreen(carContext, OnyxCarListScreen.Kind.MUSIC))
+                    }
+                    .setBrowsable(true)
+                    .build(),
+            )
             .build()
 
         return ListTemplate.Builder()

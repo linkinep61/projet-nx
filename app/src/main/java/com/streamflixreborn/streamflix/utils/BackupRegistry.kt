@@ -70,6 +70,8 @@ object BackupRegistry {
         "LoiFlix" to "LoiFlix",
         "AfterDark" to "AfterDark",
         "Nabistream" to "Nabistream (dramas)",
+        "TV Hub" to "TV Hub (France.tv/Arte gratuit)",
+        "FileSearch" to "FileSearch (fichiers directs)",
         "Webflix" to "Webflix",
         "Coflix Boston" to "Coflix Boston",
         "CoflixWiki" to "CoflixWiki",
@@ -124,6 +126,8 @@ object BackupRegistry {
         "LoiFlix" -> "https://zoolingz.com"
         "AfterDark" -> "https://afterdark06.mom"
         "Nabistream" -> "https://nabistream.mom"
+        "TV Hub" -> "https://api.arte.tv"
+        "FileSearch" -> "https://filesearch.tools"
         "Movix" -> "https://movix.date"
         "Coflix Boston" -> "https://coflix.boston"
         "CoflixWiki" -> "https://kokoflix.lol"
@@ -1003,6 +1007,24 @@ object BackupRegistry {
                 }
             }
 
+            // ── TV HUB (par titre) — France.tv/Arte GRATUIT depuis le catalogue replay caché ──
+            //   Matching STRICT (titre + saison/épisode). getVideo route auto vers le provider « TV Hub ».
+            launch {
+                emit("TV Hub") {
+                    com.streamflixreborn.streamflix.providers.LiveTvHubProvider
+                        .fetchTvHubReplayBackupServers(videoType, key.season, key.episode, knownTitles.toList())
+                }
+            }
+
+            // ── FILESEARCH (par titre) — filesearch.tools, fichiers DIRECTS .mp4/.mkv multi-hôtes ──
+            //   Matching STRICT (titre + année films / SxxExx séries). getVideo renvoie le fichier direct.
+            launch {
+                emit("FileSearch") {
+                    com.streamflixreborn.streamflix.providers.FileSearchProvider
+                        .fetchFileSearchBackupServers(videoType, key.season, key.episode, key.year, knownTitles.toList())
+                }
+            }
+
             // ── MOVIEBOX (par tmdbId) — API mobile signée aoneroom ────────────────
             // 2026-07-10 (user "on transforme Moviebox en backup principal pour tous
             //   les autres") : Moviebox rejoint le registre COMME les autres, par tmdbId.
@@ -1472,6 +1494,7 @@ object BackupRegistry {
             "Cloudstream" -> CloudstreamProvider.getVideo(orig)
             "Webflix" -> WebflixProvider.getVideo(orig)
             "Nabistream" -> com.streamflixreborn.streamflix.providers.NabistreamProvider.getVideo(orig)
+            "FileSearch" -> com.streamflixreborn.streamflix.providers.FileSearchProvider.getVideo(orig)
             "Papadustream V2" -> PapadustreamV2Provider.getVideo(orig)
             else -> {
                 // Backup web DYNAMIQUE (manifeste hébergé) → son getVideo (WebJsProvider).

@@ -250,15 +250,39 @@
         <meta-data
             android:name="com.google.android.gms.car.application"
             android:resource="@xml/automotive_app_desc" />
+        <!-- 2026-07-24 : minCarApiLevel RETIRÉ en mode MÉDIA SEUL. C'est un marqueur d'app
+             TEMPLATE/projection ; le garder avec le CarAppService désactivé fait qu'Android Auto
+             tente d'ouvrir une app template inexistante → « Android Auto a reçu une erreur inconnue ».
+             Réactiver (value=7) si on remet le CarAppService (projection). -->
+        <!--
         <meta-data
             android:name="androidx.car.app.minCarApiLevel"
             android:value="7" />
+        -->
+
+        <!-- 2026-07-24 : CarAppService (projection vidéo) RÉACTIVÉ — on le garde EN PLUS du
+             MediaBrowserService (test user : média rend l'app visible, projection tente la vidéo).
+             Si AA classe l'app en média et n'expose pas la surface, on garde au moins l'audio. -->
         <service
             android:name=".car.OnyxCarAppService"
+            android:enabled="false"
             android:exported="true">
             <intent-filter>
                 <action android:name="androidx.car.app.CarAppService" />
                 <category android:name="androidx.car.app.category.NAVIGATION" />
+            </intent-filter>
+        </service>
+
+        <!-- 2026-07-24 : MediaBrowserService DÉSACTIVÉ — modèle AAAD (une seule entrée projection).
+             On s'appuie sur l'origine d'install vending (launcher/Shizuku) pour faire passer le
+             CarAppService. Le service média créait une 2e icône ONYX (qui se marchait dessus).
+             Réactiver (enabled=true) + remettre <uses name="media"/> si on veut un fallback audio
+             pour les users sans launcher. -->
+        <service
+            android:name=".car.OnyxMediaBrowserService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
             </intent-filter>
         </service>
 
