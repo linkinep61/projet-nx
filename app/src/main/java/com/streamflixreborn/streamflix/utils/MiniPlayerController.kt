@@ -52,7 +52,8 @@ object MiniPlayerController {
     fun isRadioChannel(id: String?): Boolean {
         if (id.isNullOrBlank()) return false
         return id.startsWith("livehub::dric4rtv::r4di0::") ||
-            id.startsWith("radio::")
+            id.startsWith("radio::") ||
+            id.startsWith("music::") // 2026-07-24 : fichiers musique FileSearch = audio (mini-player, pas plein écran)
     }
 
     // 2026-06-29 RESTAURÉ depuis APK v1.7.226 — décide si la grille doit
@@ -573,7 +574,34 @@ object MiniPlayerController {
                 Log.w(TAG, "onTracksChanged dump failed: ${e.message}")
             }
         }
+        // 2026-07-24 : PLAYLIST MUSIQUE — enchaînement natif ExoPlayer. À chaque piste,
+        //   met à jour l'id/titre affichés dans le mini-player audio.
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            if (!musicPlaylistActive || mediaItem == null) return
+            val url = (mediaItem.localConfiguration?.tag as? String)
+                ?: mediaItem.localConfiguration?.uri?.toString() ?: return
+            val title = mediaItem.mediaMetadata.title?.toString() ?: currentChannelName ?: ""
+            currentChannelId = "music::$url"
+            currentChannelName = title
+            currentChannelPoster = null
+            _state.value = State.Playing("music::$url", title, null)
+            try { appContext?.let { rememberLastRadio(it, "music::$url", title, null, url) } } catch (_: Throwable) {}
+            Log.d(TAG, "music transition → $title")
+        }
+
         override fun onPlayerError(error: PlaybackException) {
+            // 2026-07-24 : PLAYLIST MUSIQUE — un morceau mort ne coupe pas la playlist :
+            //   on saute au suivant tant qu'il en reste.
+            if (musicPlaylistActive) {
+                try {
+                    val p = player
+                    if (p != null && p.hasNextMediaItem()) {
+                        Log.w(TAG, "Music track KO → skip suivant: ${error.message}")
+                        p.seekToNextMediaItem(); p.prepare(); p.playWhenReady = true
+                        return
+                    }
+                } catch (_: Throwable) {}
+            }
             // 2026-07-11 : RADIO — fallback multi-flux. Si le flux radio courant échoue et
             //   qu'il reste des URLs de secours (stations homonymes fusionnées / sources
             //   Famelack multiples), on bascule sur la suivante au lieu de fail. Placé EN
@@ -1887,6 +1915,12 @@ object MiniPlayerController {
 
     private fun jumpRadio(delta: Int) {
         val currentId = currentChannelId ?: return
+        // 2026-07-24 : PLAYLIST MUSIQUE → suivant/précédent = saut de PISTE (natif ExoPlayer),
+        //   pas de saut de station. Marche aussi depuis la notification (téléphone verrouillé).
+        if (musicPlaylistActive || currentId.startsWith("music::")) {
+            if (delta > 0) skipToNextTrack() else skipToPreviousTrack()
+            return
+        }
         if (!isRadioChannel(currentId)) return
         scope.launch {
             try {
@@ -1963,11 +1997,108 @@ object MiniPlayerController {
     //   + sources multiples Famelack). Consommés un par un par onPlayerError.
     @Volatile private var radioFallbackUrls: List<String> = emptyList()
 
+    // 2026-07-24 : true tant qu'une PLAYLIST musique est en cours (enchaînement natif).
+    @Volatile private var musicPlaylistActive = false
+
+    /**
+     * 2026-07-24 (user « les favoris vont s'enchaîner ou en aléatoire ? ») : lecture d'une
+     *   PLAYLIST musique (fichiers FileSearch) avec enchaînement NATIF ExoPlayer + mode
+     *   aléatoire. `tracks` = (url directe, titre). Le mini-player audio suit la piste
+     *   courante (onMediaItemTransition). Un morceau mort est sauté (onPlayerError).
+     */
+    fun playMusicPlaylist(tracks: List<Pair<String, String>>, startIndex: Int, shuffle: Boolean) {
+        if (tracks.isEmpty()) return
+        val start = startIndex.coerceIn(0, tracks.size - 1)
+        val startTrack = tracks[start]
+        Log.d(TAG, "playMusicPlaylist: ${tracks.size} pistes, start=$start shuffle=$shuffle")
+        musicPlaylistActive = true
+        radioFallbackUrls = emptyList()
+        startRadioForegroundService(startTrack.second, "Musique")
+        radioOriginProviderName = UserPreferences.currentProvider?.name
+        try { appContext?.let { rememberLastRadio(it, "music::${startTrack.first}", startTrack.second, null, startTrack.first) } } catch (_: Throwable) {}
+        try { player?.let { it.stop(); it.clearMediaItems() } } catch (_: Throwable) {}
+        currentChannelId = "music::${startTrack.first}"
+        currentChannelName = startTrack.second
+        currentChannelPoster = null
+        availableServers.clear(); triedServerUrls.clear(); hostFailCounts.clear()
+        currentServerIndex = 0; retryCycle = 0; serversExhausted = false
+        retryJob?.cancel(); progressiveServerJob?.cancel(); cancelBufferingWatchdog()
+        _state.value = State.Playing(currentChannelId!!, startTrack.second, null)
+        loadJob?.cancel()
+        loadJob = scope.launch {
+            try {
+                val p = player ?: return@launch
+                try {
+                    p.setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                            .setUsage(C.USAGE_MEDIA).build(),
+                        /* handleAudioFocus */ true
+                    )
+                } catch (_: Throwable) {}
+                val items = tracks.map { (url, title) ->
+                    MediaItem.Builder()
+                        .setUri(url.toUri())
+                        .setTag(url)
+                        .setMediaMetadata(androidx.media3.common.MediaMetadata.Builder().setTitle(title).build())
+                        .build()
+                }
+                p.shuffleModeEnabled = shuffle
+                // 2026-07-24 (user « sinon ça va pas durer ») : BOUCLE → la playlist rejoue
+                //   sans fin (en aléatoire = flux « radio de l'artiste » perpétuel), même
+                //   dialog fermé. La lecture n'est jamais coupée par la fermeture du picker.
+                p.repeatMode = androidx.media3.common.Player.REPEAT_MODE_ALL
+                // 2026-07-24 : URLs YouTube (NewPipe) résolues PARESSEUSEMENT à l'ouverture de chaque
+                //   piste (ResolvingDataSource) → enchaînement natif OK. Les mp3/mkv directs (FileSearch)
+                //   passent tels quels. Fallback setMediaItems si la construction échoue.
+                try {
+                    val httpFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                        .setAllowCrossProtocolRedirects(true)
+                    val resolving = androidx.media3.datasource.ResolvingDataSource.Factory(httpFactory) { dataSpec ->
+                        val u = dataSpec.uri.toString()
+                        if (com.streamflixreborn.streamflix.providers.NewPipeAudio.isYouTubeUrl(u)) {
+                            val real = com.streamflixreborn.streamflix.providers.NewPipeAudio.resolveAudioUrl(u)
+                            if (!real.isNullOrBlank()) dataSpec.withUri(android.net.Uri.parse(real)) else dataSpec
+                        } else dataSpec
+                    }
+                    val msf = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(resolving)
+                    val sources = items.map { msf.createMediaSource(it) }
+                    p.setMediaSources(sources, start, 0L)
+                } catch (e: Throwable) {
+                    Log.w(TAG, "playMusicPlaylist: setMediaSources KO (${e.message}) → fallback items")
+                    p.setMediaItems(items, start, 0L)
+                }
+                p.prepare()
+                p.playWhenReady = true
+                Log.d(TAG, "playMusicPlaylist: prepared ${items.size} items (loop+shuffle=$shuffle)")
+            } catch (t: Throwable) {
+                Log.w(TAG, "playMusicPlaylist failed: ${t.message}")
+                _state.value = State.Error(currentChannelId ?: "music", t.message ?: "Erreur lecture musique")
+            }
+        }
+    }
+
+    /** Active/désactive l'aléatoire sur la playlist musique en cours. */
+    fun setMusicShuffle(enabled: Boolean) {
+        try { player?.shuffleModeEnabled = enabled } catch (_: Throwable) {}
+    }
+
+    /** Piste suivante de la playlist musique (boucle → revient au début après la dernière). */
+    fun skipToNextTrack() {
+        try { player?.let { if (it.hasNextMediaItem()) it.seekToNextMediaItem() } } catch (_: Throwable) {}
+    }
+
+    /** Piste précédente de la playlist musique. */
+    fun skipToPreviousTrack() {
+        try { player?.let { if (it.hasPreviousMediaItem()) it.seekToPreviousMediaItem() } } catch (_: Throwable) {}
+    }
+
     fun playRadioDirect(
         channelId: String, channelName: String, channelPoster: String?, streamUrl: String,
         fallbackUrls: List<String> = emptyList(),
     ) {
         Log.d(TAG, "playRadioDirect: $channelName ($channelId) → $streamUrl (${fallbackUrls.size} fallback)")
+        musicPlaylistActive = false
         radioFallbackUrls = fallbackUrls
         // 2026-06-09 : keep-alive foreground pour audio écran éteint.
         startRadioForegroundService(channelName, "Radio")
@@ -2019,6 +2150,7 @@ object MiniPlayerController {
                         /* handleAudioFocus */ true
                     )
                 } catch (_: Throwable) {}
+                try { p.repeatMode = androidx.media3.common.Player.REPEAT_MODE_OFF } catch (_: Throwable) {}
                 val mediaItem = MediaItem.Builder()
                     .setUri(streamUrl.toUri())
                     .build()
@@ -2120,6 +2252,7 @@ object MiniPlayerController {
 
     fun playChannel(channelId: String, channelName: String, channelPoster: String?) {
         Log.d(TAG, "playChannel: $channelName ($channelId)")
+        musicPlaylistActive = false
         fireChannelStateChanged()
         // 2026-06-10 (user "j'ai activé sous-titres j'en vois pas") : applique
         //   le toggle iptvShowSubtitlesFr À CHAQUE switch de chaîne. initPlayer
@@ -2823,6 +2956,8 @@ object MiniPlayerController {
                     ?: com.streamflixreborn.streamflix.utils.M6Resolver
                         .getWidevineLicenseUrl(video.source)
                     ?: com.streamflixreborn.streamflix.utils.BfmResolver
+                        .getWidevineLicenseUrl(video.source)
+                    ?: com.streamflixreborn.streamflix.utils.BrightcoveResolver
                         .getWidevineLicenseUrl(video.source))
                 // Pluto = HttpMediaDrmCallback standard (jwt dans l'URL) → drmHeaders null.
                 val drmHeaders = if (isPlutoDash) null else

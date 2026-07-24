@@ -114,7 +114,7 @@ object UserPreferences {
     //   (ex: Coflix Boston), on bump ce compteur → la 1ère vérification ajoute les sources
     //   manquantes au set sauvé. L'user peut ensuite les désactiver dans les Paramètres.
     private const val KEY_BACKUP_MIGRATION_V = "BACKUP_MIGRATION_V"
-    private const val CUR_BACKUP_MIGRATION = 5 // bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream)
+    private const val CUR_BACKUP_MIGRATION = 7 // bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream ; v6 : TV Hub ; v7 : FileSearch)
 
     // 2026-07-13 (user "une option au-dessus de Gérer les sources pour activer/désactiver les
     //   backups — ça permet de tester si les sources natives du provider sont encore valables") :

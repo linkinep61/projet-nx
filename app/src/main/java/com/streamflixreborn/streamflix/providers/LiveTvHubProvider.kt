@@ -1231,6 +1231,72 @@ object LiveTvHubProvider : Provider, IptvProvider {
         return (liveHits + replayHits).distinctBy { it.id }
     }
 
+    /**
+     * 2026-07-23 — BACKUP VOD par TITRE (France.tv / Arte, gratuit sans compte) depuis le catalogue
+     * REPLAY DÉJÀ EN CACHE (`fetchReplayCategories`, zéro appel réseau à la recherche). Matching
+     * STRICT : titre normalisé exact + (pour les séries) saison/épisode exacts → jamais le mauvais
+     * contenu (« pas de serveur plutôt que le mauvais film/épisode »). Appelé par BackupRegistry.
+     */
+    suspend fun fetchTvHubReplayBackupServers(
+        videoType: Video.Type,
+        season: Int,
+        episode: Int,
+        titles: List<String>,
+    ): List<Video.Server> {
+        val wanted = titles.mapNotNull { it.trim().takeIf { t -> t.isNotBlank() }?.let(::tvhubNorm) }.toHashSet()
+        if (wanted.isEmpty()) return emptyList()
+        val items = try {
+            fetchReplayCategories().asSequence().flatMap { it.list.asSequence() }.toList()
+        } catch (e: Exception) { return emptyList() }
+
+        for (item in items) {
+            val id: String
+            val title: String
+            when (item) {
+                is Movie -> { id = item.id; title = item.title }
+                is TvShow -> { id = item.id; title = item.title }
+                else -> continue
+            }
+            if (title.isBlank() || tvhubNorm(title) !in wanted) continue
+
+            // TF1+ / M6+ = LOGIN REQUIS. On ne les propose qu'aux comptes CONNECTÉS (sinon serveur
+            //   mort). France.tv/Arte (gratuit sans compte) passent toujours. Détection par l'id.
+            val idl = id.lowercase()
+            val isTf1 = listOf("replay::tf1", "replay::tmc", "replay::tfx", "replay::lci", "tf1ep::", "tf1plus")
+                .any { idl.contains(it) }
+            val isM6 = M6_SERVICES.any { idl.contains(it) } || idl.contains("m6live") ||
+                idl.contains("m6play") || idl.contains("6play")
+            if (isTf1 || isM6) {
+                val ctx = com.streamflixreborn.streamflix.StreamFlixApp.instance
+                if (isTf1 && !com.streamflixreborn.streamflix.utils.TF1Auth.isLoggedIn(ctx)) continue
+                if (isM6 && !com.streamflixreborn.streamflix.utils.M6Auth.isLoggedIn(ctx)) continue
+            }
+
+            try {
+                val servers = if (videoType is Video.Type.Movie) {
+                    getServers(id, videoType)
+                } else {
+                    if (season <= 0 || episode <= 0) continue
+                    val show = getTvShow(id)
+                    val seas = show.seasons.firstOrNull { it.number == season } ?: continue
+                    val ep = getEpisodesBySeason(seas.id).firstOrNull { it.number == episode } ?: continue
+                    getServers(ep.id, videoType)
+                }
+                if (servers.isNotEmpty()) {
+                    Log.i(TAG, "TVHub replay backup: '$title' → ${servers.size} serveurs")
+                    return servers.map {
+                        Video.Server(id = it.id, name = "TV Hub · ${it.name}", src = it.src, mirrors = it.mirrors)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "TVHub backup resolve KO for '$title': ${e.message}")
+            }
+        }
+        return emptyList()
+    }
+
+    private fun tvhubNorm(s: String) = s.lowercase().replace(Regex("[^a-z0-9]+"), "")
+
     override suspend fun getMovies(page: Int): List<Movie> = emptyList()
 
     override suspend fun getMovie(id: String): Movie =
@@ -2295,6 +2361,18 @@ object LiveTvHubProvider : Provider, IptvProvider {
         if (server.src.startsWith("bfmplay://") || server.src.startsWith("bfmlive://")) {
             val resolved = com.streamflixreborn.streamflix.utils.BfmResolver.resolveTyped(server.src)
                 ?: throw Exception("BFM resolver failed for ${server.src}")
+            return Video(
+                source = resolved.url,
+                type = resolved.mimeType,
+            )
+        }
+        // 2026-07-24 : Brightcove Live Widevine (Télé-Québec / Jeunesse) →
+        //   BrightcoveResolver. src = brightcove://<acct>/<player>/<video>.
+        //   Renvoie une source DASH ; la licence Widevine est mise en cache par
+        //   le resolver et lue par le player (getWidevineLicenseUrl).
+        if (com.streamflixreborn.streamflix.utils.BrightcoveResolver.isBrightcoveUrl(server.src)) {
+            val resolved = com.streamflixreborn.streamflix.utils.BrightcoveResolver.resolveTyped(server.src)
+                ?: throw Exception("Brightcove resolver failed for ${server.src}")
             return Video(
                 source = resolved.url,
                 type = resolved.mimeType,
@@ -3717,7 +3795,7 @@ object LiveTvHubProvider : Provider, IptvProvider {
                         "http-origin" -> pendingHeaders["Origin"] = v
                     }
                 }
-                pendingExtinf != null && (t.startsWith("http://") || t.startsWith("https://")) -> {
+                pendingExtinf != null && (t.startsWith("http://") || t.startsWith("https://") || t.startsWith("brightcove://")) -> {
                     val ext = pendingExtinf!!
                     val url = t
                     val title = ext.substringAfterLast(",").trim()

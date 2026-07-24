@@ -1,15 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 2026-07-22 (projet Android Auto) : déclaration requise par com.google.android.gms.car.application.
-     TECHNIQUE AAAD/CarStream/aabrowser (vérifié par décompilation androguard de
-     com.kododake.aabrowser.aaad_ded741 res/oc.xml) : se déclarer comme app MÉDIA
-     (<uses name="media"/>) — les apps média sont TOUJOURS listées dans le lanceur Android Auto,
-     SANS MediaBrowserService (aabrowser n'en a aucun). Ensuite la catégorie NAVIGATION +
-     CAR_LAUNCHER sur SplashActivity fait PROJETER l'activité réelle (vidéo native).
-     <uses name="template"/> exigeait une vraie app Car App Library valide → ONYX était rejeté. -->
+<!-- 2026-07-24 : MÉDIA SEUL (durable en VRAIE voiture). La voie média (MediaBrowserService) est
+     validée par Android Auto SANS le Play-check Finsky → elle SURVIT sur une vraie voiture connectée,
+     contrairement à la projection (template) que Finsky écarte (l'origine vending ne trompe Finsky
+     que sur le DHU où le service Play-check est déconnecté). Décision user : rester sur radio+favoris.
+     Réactiver <uses name="template"/> + le CarAppService si un jour on passe par AAAD (clé Google-trust)
+     ou un dongle pour la vidéo. -->
 <automotiveApp>
-    <!-- 2026-07-23 : TEMPLATE PUR (voie CarStream). En déclarant media + template, AA classait ONYX
-         comme app MÉDIA (navigateur de listes audio) et n'exposait JAMAIS le CarAppService → aucune
-         vidéo. Template seul = AA cherche le CarAppService de navigation → OnyxCarVideoScreen obtient
-         la surface (ACCESS_SURFACE) et y projette la VIDÉO ExoPlayer. -->
-    <uses name="template" />
+    <uses name="media" />
 </automotiveApp>

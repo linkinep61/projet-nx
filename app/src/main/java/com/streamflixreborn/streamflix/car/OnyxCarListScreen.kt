@@ -32,6 +32,7 @@ class OnyxCarListScreen(
         FAVORITES("Favoris"),
         CONTINUE("Continuer à regarder"),
         RADIO("Radio"),
+        MUSIC("Ma playlist ♪"),
     }
 
     private data class RadioItem(val id: String, val name: String, val url: String, val fallbacks: List<String>)
@@ -49,6 +50,13 @@ class OnyxCarListScreen(
     }
 
     private suspend fun loadRadios(): List<RadioItem> {
+        if (kind == Kind.MUSIC) {
+            val tracks = runCatching {
+                com.streamflixreborn.streamflix.utils.MusicFavoritesStore.all()
+            }.getOrDefault(emptyList())
+            Log.i(TAG, "playlist musique: ${tracks.size} morceaux")
+            return tracks.map { RadioItem("music::${it.url}", it.title, it.url, emptyList()) }
+        }
         if (kind != Kind.RADIO) return emptyList()
         val stations = runCatching { RadioCatalog.list() }.getOrDefault(emptyList())
         val items = stations
@@ -69,7 +77,7 @@ class OnyxCarListScreen(
 
         val favIds = runCatching { RadioFavoritesStore.all() }.getOrDefault(emptySet())
         val playing = CarRadioController.currentName
-        val visible = if (showFavoritesOnly) rows.filter { it.id in favIds } else rows
+        val visible = if (kind == Kind.RADIO && showFavoritesOnly) rows.filter { it.id in favIds } else rows
 
         val limit = runCatching {
             carContext.getCarService(androidx.car.app.constraints.ConstraintManager::class.java)
@@ -91,7 +99,14 @@ class OnyxCarListScreen(
                 }
                 if (marks.isNotEmpty()) row.addText(marks.joinToString("  "))
                 row.setOnClickListener {
-                    CarRadioController.play(carContext, item.name, item.url, item.fallbacks)
+                    if (kind == Kind.MUSIC) {
+                        // Lance TOUTE la playlist depuis la piste cliquée (enchaînement + boucle).
+                        val queue = visible.map { it.url to it.name }
+                        val idx = visible.indexOfFirst { it.id == item.id }.coerceAtLeast(0)
+                        CarRadioController.playPlaylist(carContext, queue, idx, false)
+                    } else {
+                        CarRadioController.play(carContext, item.name, item.url, item.fallbacks)
+                    }
                     invalidate()
                 }
                 builder.addItem(row.build())
@@ -102,22 +117,24 @@ class OnyxCarListScreen(
         //   Au-delà : IllegalArgumentException « Action list exceeded max number of 1 actions with
         //   custom titles » → CRASH. Donc : Favoris = ICÔNE étoile (toggle filtre) ; Arrêter = TITRE.
         val strip = ActionStrip.Builder()
-        val starIconRes = if (showFavoritesOnly)
-            com.streamflixreborn.streamflix.R.drawable.ic_favorite_enable
-        else com.streamflixreborn.streamflix.R.drawable.ic_star
-        strip.addAction(
-            Action.Builder()
-                .setIcon(
-                    androidx.car.app.model.CarIcon.Builder(
-                        androidx.core.graphics.drawable.IconCompat.createWithResource(carContext, starIconRes),
-                    ).build(),
-                )
-                .setOnClickListener {
-                    showFavoritesOnly = !showFavoritesOnly
-                    invalidate()
-                }
-                .build(),
-        )
+        if (kind == Kind.RADIO) {
+            val starIconRes = if (showFavoritesOnly)
+                com.streamflixreborn.streamflix.R.drawable.ic_favorite_enable
+            else com.streamflixreborn.streamflix.R.drawable.ic_star
+            strip.addAction(
+                Action.Builder()
+                    .setIcon(
+                        androidx.car.app.model.CarIcon.Builder(
+                            androidx.core.graphics.drawable.IconCompat.createWithResource(carContext, starIconRes),
+                        ).build(),
+                    )
+                    .setOnClickListener {
+                        showFavoritesOnly = !showFavoritesOnly
+                        invalidate()
+                    }
+                    .build(),
+            )
+        }
         if (playing != null) {
             strip.addAction(
                 Action.Builder()
@@ -130,12 +147,15 @@ class OnyxCarListScreen(
             )
         }
 
-        return ListTemplate.Builder()
+        // ActionStrip vide = crash AA. RADIO a toujours l'étoile ; MUSIC n'a que « Arrêter »
+        //   (visible seulement en lecture) → on ne pose la strip que si elle a ≥ 1 action.
+        val hasAction = kind == Kind.RADIO || playing != null
+        val tpl = ListTemplate.Builder()
             .setSingleList(builder.build())
             .setTitle(kind.title)
             .setHeaderAction(Action.BACK)
-            .setActionStrip(strip.build())
-            .build()
+        if (hasAction) tpl.setActionStrip(strip.build())
+        return tpl.build()
     }
 
     companion object {

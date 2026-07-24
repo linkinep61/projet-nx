@@ -812,6 +812,9 @@ object LiveHubFolderDialog {
             ctx, android.R.layout.simple_list_item_1, channels.map { it.title }.toMutableList(),
         )
         val listView = android.widget.ListView(ctx).apply {
+            // 2026-07-24 : focus TV visible = liseré blanc par-dessus la ligne sélectionnée.
+            selector = androidx.core.content.ContextCompat.getDrawable(ctx, com.streamflixreborn.streamflix.R.drawable.bg_list_selector_tv)
+            isDrawSelectorOnTop = true
             adapter = otfAdapter
             setOnItemClickListener { _, _, idx, _ ->
                 filteredOtf.getOrNull(idx)?.let { onChannelSelected(it) }
@@ -1055,6 +1058,9 @@ object LiveHubFolderDialog {
             ctx, android.R.layout.simple_list_item_1, labels,
         )
         val listView = android.widget.ListView(ctx).apply {
+            // 2026-07-24 : focus TV visible = liseré blanc par-dessus la ligne sélectionnée.
+            selector = androidx.core.content.ContextCompat.getDrawable(ctx, com.streamflixreborn.streamflix.R.drawable.bg_list_selector_tv)
+            isDrawSelectorOnTop = true
             this.adapter = adapter
             setOnItemClickListener { _, _, idx, _ ->
                 showChannelsList(ctx, displayCats[idx], onChannelSelected)
@@ -1232,6 +1238,9 @@ object LiveHubFolderDialog {
         val folderAdapter = android.widget.ArrayAdapter(
             ctx, android.R.layout.simple_list_item_1, folders.map { it.first }.toMutableList())
         val folderList = android.widget.ListView(ctx).apply {
+            // 2026-07-24 : focus TV visible = liseré blanc par-dessus la ligne sélectionnée.
+            selector = androidx.core.content.ContextCompat.getDrawable(ctx, com.streamflixreborn.streamflix.R.drawable.bg_list_selector_tv)
+            isDrawSelectorOnTop = true
             adapter = folderAdapter
             setOnItemClickListener { _, _, idx, _ -> folders[idx].second.invoke() }
         }
@@ -1239,6 +1248,9 @@ object LiveHubFolderDialog {
         val resultsAdapter = android.widget.ArrayAdapter(
             ctx, android.R.layout.simple_list_item_1, ArrayList<String>())
         val resultsList = android.widget.ListView(ctx).apply {
+            // 2026-07-24 : focus TV visible = liseré blanc par-dessus la ligne sélectionnée.
+            selector = androidx.core.content.ContextCompat.getDrawable(ctx, com.streamflixreborn.streamflix.R.drawable.bg_list_selector_tv)
+            isDrawSelectorOnTop = true
             adapter = resultsAdapter
             visibility = android.view.View.GONE
             setOnItemClickListener { _, _, idx, _ ->
@@ -1433,6 +1445,9 @@ object LiveHubFolderDialog {
         var simpleSearchMode = false
         var simpleResults: List<TvShow> = emptyList()
         val listView = android.widget.ListView(ctx).apply {
+            // 2026-07-24 : focus TV visible = liseré blanc par-dessus la ligne sélectionnée.
+            selector = androidx.core.content.ContextCompat.getDrawable(ctx, com.streamflixreborn.streamflix.R.drawable.bg_list_selector_tv)
+            isDrawSelectorOnTop = true
             this.adapter = adapter
             setOnItemClickListener { _, _, idx, _ ->
                 if (simpleSearchMode) {
@@ -1750,6 +1765,9 @@ object LiveHubFolderDialog {
             ctx, android.R.layout.simple_list_item_1, labels.toMutableList()
         )
         val listView = android.widget.ListView(ctx).apply {
+            // 2026-07-24 : focus TV visible = liseré blanc par-dessus la ligne sélectionnée.
+            selector = androidx.core.content.ContextCompat.getDrawable(ctx, com.streamflixreborn.streamflix.R.drawable.bg_list_selector_tv)
+            isDrawSelectorOnTop = true
             adapter = aggAdapter
             setOnItemClickListener { _, _, idx, _ ->
                 if (aggSearchMode) {
@@ -2526,6 +2544,9 @@ object LiveHubFolderDialog {
             }
         }
         val listView = android.widget.ListView(ctx).apply {
+            // 2026-07-24 : focus TV visible = liseré blanc par-dessus la ligne sélectionnée.
+            selector = androidx.core.content.ContextCompat.getDrawable(ctx, com.streamflixreborn.streamflix.R.drawable.bg_list_selector_tv)
+            isDrawSelectorOnTop = true
             adapter = itemsAdapter
         }
 

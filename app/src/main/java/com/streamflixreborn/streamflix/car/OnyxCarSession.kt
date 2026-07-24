@@ -15,11 +15,22 @@ class OnyxCarSession : Session() {
 
     override fun onCreateScreen(intent: Intent): Screen {
         launchPhoneApp()
-        return OnyxCarHomeScreen(carContext)
+        // 2026-07-24 (user « quand on tape l'icône ONYX dans Android Auto ça désactive la vidéo »)
+        //   Comme CarStream : si le téléphone a déjà un lecteur (on regardait un truc), taper ONYX
+        //   rouvre DIRECT la projection vidéo au lieu du menu. Sinon (rien en cours) → le menu.
+        return if (CarPlaybackBridge.hasPlayer) OnyxCarVideoScreen(carContext)
+        else OnyxCarHomeScreen(carContext)
     }
 
     override fun onNewIntent(intent: Intent) {
         launchPhoneApp()
+        // App déjà active + on re-tape l'icône : si ça joue, remonter à la vidéo.
+        if (CarPlaybackBridge.hasPlayer) {
+            runCatching {
+                val sm = carContext.getCarService(androidx.car.app.ScreenManager::class.java)
+                if (sm.top !is OnyxCarVideoScreen) sm.push(OnyxCarVideoScreen(carContext))
+            }
+        }
     }
 
     /** Démarre (ou ramène au premier plan) l'app ONYX sur le téléphone. */

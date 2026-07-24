@@ -4980,6 +4980,8 @@ class PlayerTvFragment : Fragment() {
                         ?: com.streamflixreborn.streamflix.utils.M6Resolver
                             .getWidevineLicenseUrl(video.source)
                         ?: com.streamflixreborn.streamflix.utils.BfmResolver
+                            .getWidevineLicenseUrl(video.source)
+                        ?: com.streamflixreborn.streamflix.utils.BrightcoveResolver
                             .getWidevineLicenseUrl(video.source))
                     val drmHeaders = if (isPlutoDashTv) null else
                         (com.streamflixreborn.streamflix.utils.M6Resolver
@@ -8183,7 +8185,12 @@ class PlayerTvFragment : Fragment() {
                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                     .setPreferredAudioLanguage("fr").build()
             }
-            mediaSession = MediaSession.Builder(requireContext(), player).build()
+            try {
+                mediaSession = MediaSession.Builder(requireContext(), player).build()
+            } catch (e: Throwable) {
+                // 2026-07-24 : garde-fou "Out of range" (live DASH Brightcove) au transfert mini→plein écran.
+                android.util.Log.w("PlayerTvFragment", "MediaSession build (transfer) failed — skip (${e.message})")
+            }
             binding.pvPlayer.player = player
             binding.settings.player = player
             binding.settings.subtitleView = binding.pvPlayer.subtitleView
@@ -8489,9 +8496,13 @@ class PlayerTvFragment : Fragment() {
                     // 2026-06-02 : setId unique pour éviter le crash
                     //   "IllegalStateException: Session ID must be unique"
                     //   quand le player TV est recréé rapidement (BACK + ré-entrée).
-                    mediaSession = MediaSession.Builder(requireContext(), player)
-                        .setId("streamflix-tv-${System.currentTimeMillis()}-${kotlin.random.Random.nextInt(100000)}")
-                        .build()
+                    try {
+                        mediaSession = MediaSession.Builder(requireContext(), player)
+                            .setId("streamflix-tv-${System.currentTimeMillis()}-${kotlin.random.Random.nextInt(100000)}")
+                            .build()
+                    } catch (e: Throwable) {
+                        android.util.Log.w("PlayerTvFragment", "MediaSession build failed — skip (${e.message})")
+                    }
                 }
 
             // 2026-05-21 : governor de qualité adaptatif — actif uniquement en VOD +

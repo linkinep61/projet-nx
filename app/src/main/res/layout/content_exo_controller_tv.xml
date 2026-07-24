@@ -373,15 +373,15 @@
             android:focusable="true"
             android:focusableInTouchMode="true"
             android:nextFocusUp="@id/exo_play_pause"
-            app:bar_height="5dp"
+            app:bar_height="9dp"
             app:played_color="#FFFFFFFF"
-            app:scrubber_color="#FFFFFFFF"
-            app:unplayed_color="#33FFFFFF"
+            app:scrubber_color="#FFFF3D00"
+            app:unplayed_color="#4DFFFFFF"
             app:buffered_color="#CCFFFFFF"
-            app:scrubber_enabled_size="16dp"
+            app:scrubber_enabled_size="20dp"
             app:scrubber_disabled_size="0dp"
-            app:scrubber_dragged_size="24dp"
-            app:touch_target_height="32dp" />
+            app:scrubber_dragged_size="32dp"
+            app:touch_target_height="40dp" />
 
         <!-- Custom barre 1 (chunk en lecture, en haut) — visible pour live IPTV -->
         <androidx.media3.ui.DefaultTimeBar

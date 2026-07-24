@@ -15,6 +15,8 @@
     android:focusable="true"
     android:focusableInTouchMode="true"
     android:clickable="true"
+    android:foreground="@drawable/bg_focus_white_border"
+    android:foregroundGravity="fill"
     app:cardBackgroundColor="#22FFFFFF"
     app:cardCornerRadius="8dp"
     app:cardElevation="0dp"

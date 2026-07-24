@@ -4792,6 +4792,8 @@ class PlayerMobileFragment : Fragment() {
                     ?: com.streamflixreborn.streamflix.utils.M6Resolver
                         .getWidevineLicenseUrl(video.source)
                     ?: com.streamflixreborn.streamflix.utils.BfmResolver
+                        .getWidevineLicenseUrl(video.source)
+                    ?: com.streamflixreborn.streamflix.utils.BrightcoveResolver
                         .getWidevineLicenseUrl(video.source))
                 val drmHeaders = if (isPlutoDashFs) null else
                     (com.streamflixreborn.streamflix.utils.M6Resolver
@@ -6965,9 +6967,21 @@ class PlayerMobileFragment : Fragment() {
                 .build(), !isLiveIptvHere)
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setPreferredAudioLanguage("fr").build()
-        mediaSession = MediaSession.Builder(requireContext(), player)
-            .setId("player_mobile_${System.nanoTime()}")
-            .build()
+        // 2026-07-24 (user "du mini au grand lecteur ça crashe" sur Télé-Québec) :
+        //   le live DASH Brightcove a une timeline epoch-based ÉNORME (position
+        //   ~30760974362062 ms) → MediaSession.Builder.build() lève
+        //   IllegalArgumentException "Out of range" au passage mini→plein écran
+        //   (le player transféré a déjà avancé dans cette timeline). On ENTOURE
+        //   d'un try-catch : sans MediaSession le player fonctionne quand même
+        //   (elle ne sert qu'aux contrôles média externes / notif). Le release
+        //   est déjà gardé par ::mediaSession.isInitialized.
+        try {
+            mediaSession = MediaSession.Builder(requireContext(), player)
+                .setId("player_mobile_${System.nanoTime()}")
+                .build()
+        } catch (e: Throwable) {
+            Log.w("PlayerDebug", "MediaSession build (transfer) failed — skip (${e.message})")
+        }
         binding.pvPlayer.player = player
         binding.settings.player = player
         binding.settings.subtitleView = binding.pvPlayer.subtitleView
@@ -7093,9 +7107,14 @@ class PlayerMobileFragment : Fragment() {
                 }
                 player.trackSelectionParameters = tsBuilder.build()
 
-                mediaSession = MediaSession.Builder(requireContext(), player)
-                    .setId("player_mobile_${System.nanoTime()}")
-                    .build()
+                try {
+                    mediaSession = MediaSession.Builder(requireContext(), player)
+                        .setId("player_mobile_${System.nanoTime()}")
+                        .build()
+                } catch (e: Throwable) {
+                    // 2026-07-24 : idem transfert — garde-fou "Out of range" (live DASH Brightcove).
+                    Log.w("PlayerDebug", "MediaSession build failed — skip (${e.message})")
+                }
             }
 
         // 2026-05-21 : governor de qualité adaptatif — actif uniquement en VOD +
