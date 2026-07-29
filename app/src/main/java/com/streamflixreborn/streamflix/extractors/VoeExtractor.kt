@@ -13,8 +13,18 @@ import java.net.URL
 class VoeExtractor : Extractor() {
 
     override val name = "VOE"
-    override val mainUrl = "https://voe.sx/"
+
+    // 2026-07-31 (user « retrouve-moi le vrai VOE ») : **voe.sx est MORT** (NXDOMAIN,
+    //   vérifié en direct) — c'était pourtant le mainUrl. VOE ne vit plus que via ses
+    //   miroirs rotatifs « 3 mots anglais collés », qui répondent tous (testé :
+    //   jessicachoosemake / jilliandescribecompany / maryspecialwatch / bryantenunder /
+    //   rebeccacostthousand). On prend donc un miroir VIVANT comme mainUrl et on garde
+    //   voe.sx en alias au cas où il reviendrait.
+    override val mainUrl = "https://jessicachoosemake.com"
     override val aliasUrls = listOf(
+        "https://voe.sx",
+        // 2026-07-31 : miroir actif signalé par le user (capture du menu du player)
+        "https://jessicachoosemake.com",
         "https://jilliandescribecompany.com", "https://mikaylaarealike.com",
         "https://christopheruntilpoint.com", "https://walterprettytheir.com",
         "https://crystaltreatmenteast.com", "https://lauradaydo.com",
@@ -42,7 +52,19 @@ class VoeExtractor : Extractor() {
     //   Note : kokoflix.lol/osaka_go.php RETIRÉ d'ici — le KakaflixExtractor (proxy
     //   générique) résout le redirect AVANT, donc VoeExtractor reçoit l'URL VOE réelle.
     override val rotatingDomain: List<Regex> = listOf(
-        Regex("""^[a-zA-Z0-9-]{12,60}\.(com|net|org|to|sx)/e/[a-zA-Z0-9]+""")
+        Regex("""^[a-zA-Z0-9-]{12,60}\.(com|net|org|to|sx)/e/[a-zA-Z0-9]+"""),
+        // 2026-07-31 (user : « corrige le nom d'affichage, VOE au lieu de Jessica ») :
+        //   l'ancien motif exigeait le chemin « /e/ ». Dès que l'URL VOE avait une autre
+        //   forme (page d'accueil, /d/, /v/, code direct…), identifyServiceName ne
+        //   reconnaissait plus le service → le picker affichait le DOMAINE BRUT
+        //   (« jessicachoosemake.com ») au lieu de « VOE ».
+        //   Ce 2ᵉ motif reconnaît la signature des miroirs VOE — un domaine fait
+        //   UNIQUEMENT de lettres minuscules (mots anglais collés), 12-60 car., en
+        //   .com/.net/.org — QUEL QUE SOIT le chemin. Sûr : cette passe n'intervient
+        //   qu'APRÈS l'échec du matching mainUrl/alias de tous les autres extracteurs,
+        //   et les hébergeurs connus ont des noms plus courts (doodstream=10,
+        //   streamwish=10) ou d'autres TLD (filemoon.sx, kokoflix.lol…).
+        Regex("""^[a-z]{12,60}\.(com|net|org)(?:/|\z)"""),
     )
 
 
@@ -175,11 +197,40 @@ class VoeExtractor : Extractor() {
     /**
      * Fetch a page using a fresh Retrofit service for the given URL's domain.
      */
+    /**
+     * 2026-07-31 (user « le serveur VOE ne fonctionne pas alors qu'il marche sur le web ») :
+     *   les miroirs VOE sont passés derrière **Cloudflare** (jessicayeahcatch.com résout en
+     *   104.21.x.x = CF, vérifié depuis la box). Le fetch Jsoup/OkHttp nu se prend le mur CF
+     *   → exception AVANT le 1er log de extract() (d'où « extraction-failed » sans aucune
+     *   trace VOE_EXTRACT dans logcat). Le navigateur, lui, passe → « ça marche sur le web ».
+     *   FIX : on tente le fetch direct (rapide), et si ça échoue OU si on reçoit une page de
+     *   challenge, on repasse par le bypass CF maison (WebViewResolver, silencieux).
+     */
     private suspend fun fetchPage(url: String): Document {
         val baseUrl = URL(url).let { "${it.protocol}://${it.host}" }
-        val service = Extractor.createJsoupService<VoeExtractorService>(baseUrl, url)
-        return service.getSource(url)
+        val direct = try {
+            val service = Extractor.createJsoupService<VoeExtractorService>(baseUrl, url)
+            service.getSource(url)
+        } catch (e: Exception) {
+            Log.w("VOE_EXTRACT", "fetch direct KO (${e.message}) → bypass Cloudflare")
+            null
+        }
+        if (direct != null && !isCloudflareWall(direct.html())) return direct
+
+        Log.d("VOE_EXTRACT", "mur Cloudflare détecté → WebViewResolver sur $url")
+        val html = com.streamflixreborn.streamflix.utils.WebViewResolver(
+            com.streamflixreborn.streamflix.StreamFlixApp.instance
+        ).get(url, silent = true, markerTimeoutMs = 14_000L)
+        return org.jsoup.Jsoup.parse(html, url)
     }
+
+    /** Page de challenge / blocage Cloudflare (pas le vrai contenu VOE). */
+    private fun isCloudflareWall(html: String): Boolean =
+        html.contains("Just a moment", true) ||
+            html.contains("cf-browser-verification", true) ||
+            html.contains("Attention Required", true) ||
+            html.contains("Enable JavaScript and cookies to continue", true) ||
+            html.contains("challenge-platform", true)
 
 
     private interface VoeExtractorService {

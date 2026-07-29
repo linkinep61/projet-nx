@@ -27,6 +27,24 @@
         <item name="android:textColor">#FFFFFF</item>
     </style>
 
+    <!-- 2026-07-25 (user « améliore les interfaces de profil comme la radio ») : thème de dialogue
+         sombre ONYX (feuille arrondie #15171C, texte clair, boutons accent rouge). Appliqué aux
+         dialogues de profil + sélecteur d'avatar via AlertDialog.Builder(ctx, R.style.OnyxDialog). -->
+    <style name="OnyxDialog" parent="Theme.MaterialComponents.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_onyx_dialog</item>
+        <item name="colorAccent">#E23B3B</item>
+        <item name="android:textColorPrimary">#F5F6F8</item>
+        <item name="android:textColorSecondary">#9AA0AA</item>
+        <item name="android:textColor">#EAECEF</item>
+        <item name="buttonBarPositiveButtonStyle">@style/OnyxDialog.Button</item>
+        <item name="buttonBarNegativeButtonStyle">@style/OnyxDialog.Button</item>
+        <item name="buttonBarNeutralButtonStyle">@style/OnyxDialog.Button</item>
+    </style>
+
+    <style name="OnyxDialog.Button" parent="Widget.MaterialComponents.Button.TextButton.Dialog">
+        <item name="android:textColor">#E23B3B</item>
+    </style>
+
     <!-- Stile per forzare il fondo nero nelle schermate di impostazione (Leanback) -->
     <!-- Usiamo direttamente android:background nella preferenceTheme per non romper il build -->
     <style name="PreferenceThemeOverlay.Leanback.Amoled" parent="PreferenceThemeOverlayLeanback">

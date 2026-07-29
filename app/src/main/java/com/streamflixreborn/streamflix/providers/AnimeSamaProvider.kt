@@ -168,6 +168,211 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
 
     private var service: Service = Service.build(baseUrl)
 
+    // ───────────────────── Bypass Cloudflare (COPIE CONFORME de Wiflix) ─────────────────────
+    // 2026-07-31 (user : « AnimeSama ajoute de manière intermittente un challenge CF. Voir
+    //   pour ajouter EXACTEMENT le même bypass que Wiflix — les mêmes déclenchements,
+    //   l'invisibilité, tout exactement comme Wiflix »).
+    //
+    //   Tout ce bloc est repris à l'identique de WiflixProvider : mêmes constantes, mêmes
+    //   mots-clés de challenge, même escalade, mêmes cooldowns, même retry OkHttp après
+    //   bypass, même politique de cache.
+    //
+    //   SEULE ADAPTATION (indispensable, sinon ça ne peut pas marcher) : les marqueurs de
+    //   « contenu réel » de `isBypassFailed`, qui sont par nature propres à chaque site —
+    //   Wiflix teste `mov-t`/`posterimg`, ici on teste les marqueurs d'AnimeSama.
+    //
+    //   ⚠️ DIFFÉRENCE DE DÉCLENCHEMENT ASSUMÉE : Wiflix est SOUS Cloudflare en permanence,
+    //   donc il part directement en WebView quand le cookie manque. AnimeSama n'a le
+    //   challenge QUE par intermittence (mot du user) : partir en WebView à chaque page
+    //   ouvrirait une WebView à chaque démarrage alors que 99 % du temps il n'y a pas de
+    //   challenge. On garde donc le fetch normal, et on bascule sur CE pipeline dès qu'un
+    //   challenge est détecté — c'est le déclencheur réel de Wiflix aussi. Une fois
+    //   déclenché, le comportement est rigoureusement identique.
+    private var webViewResolver: com.streamflixreborn.streamflix.utils.WebViewResolver? = null
+    private const val CF_TAG = "AnimeSamaBypass"
+
+    private const val CACHE_TTL_MS = 5 * 60 * 1000L // 5 minutes
+    private val documentCache = mutableMapOf<String, Pair<Document, Long>>()
+
+    @Volatile private var lastVisibleBypassAt = 0L
+    private const val VISIBLE_BYPASS_COOLDOWN_MS = 60_000L
+    // captcha invisible par défaut, visible seulement après 3 échecs silencieux consécutifs
+    @Volatile private var silentFailStreak = 0
+    private const val VISIBLE_AFTER_STREAK = 3
+
+    private val cfSemaphore = Semaphore(8)
+
+    @Volatile private var rateLimit1015Until = 0L
+    private const val RATE_LIMIT_COOLDOWN_MS = 15 * 60 * 1000L  // 15 minutes
+
+    private fun getCachedDocument(url: String): Document? {
+        val entry = documentCache[url] ?: return null
+        if (System.currentTimeMillis() - entry.second > CACHE_TTL_MS) {
+            documentCache.remove(url)
+            return null
+        }
+        return entry.first
+    }
+
+    private fun cacheDocument(url: String, doc: Document) {
+        if (documentCache.size > 20) {
+            val now = System.currentTimeMillis()
+            documentCache.entries.removeAll { now - it.value.second > CACHE_TTL_MS }
+        }
+        documentCache[url] = Pair(doc, System.currentTimeMillis())
+    }
+
+    private fun getResolver(): com.streamflixreborn.streamflix.utils.WebViewResolver {
+        return webViewResolver
+            ?: com.streamflixreborn.streamflix.utils.WebViewResolver(
+                com.streamflixreborn.streamflix.StreamFlixApp.instance
+            ).also { webViewResolver = it }
+    }
+
+    private val challengeKeywords = listOf(
+        "Just a moment...", "cf-browser-verification", "challenge-running",
+        "Checking your browser", "cf-turnstile",
+        "Bot shield active"
+    )
+
+    /** Détection rapide sur un Document déjà parsé (sans re-sérialiser le DOM). */
+    private fun isCloudflareChallenge(doc: Document): Boolean {
+        val title = doc.title()
+        if (title.contains("Just a moment", ignoreCase = true) ||
+            title.contains("Checking your browser", ignoreCase = true)) return true
+        if (doc.selectFirst("#challenge-running") != null) return true
+        if (doc.selectFirst(".cf-browser-verification") != null) return true
+        if (doc.selectFirst("[name=cf-turnstile-response]") != null) return true
+        return false
+    }
+
+    /** true si le cookie cf_clearance est déjà présent dans le CookieManager. */
+    private fun hasCfClearanceCookie(): Boolean = try {
+        val cookies = android.webkit.CookieManager.getInstance().getCookie(baseUrl) ?: ""
+        cookies.contains("cf_clearance=")
+    } catch (_: Throwable) { false }
+
+    /** Tente un fetch OkHttp avec le cookie CF frais. Null si challenge/erreur. */
+    private fun tryOkHttp(url: String): Document? {
+        return try {
+            // MÊME UA que le WebView stealth : le cookie cf_clearance est lié à l'UA.
+            val webCookie = try {
+                android.webkit.CookieManager.getInstance().getCookie(baseUrl) ?: ""
+            } catch (_: Throwable) { "" }
+            val request = Request.Builder()
+                .url(url)
+                .header("Referer", baseUrl)
+                .header("User-Agent", com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA)
+                .apply { if (webCookie.isNotBlank()) header("Cookie", webCookie) }
+                .build()
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) {
+                val html = response.body?.string() ?: ""
+                if (challengeKeywords.none { html.contains(it, ignoreCase = true) }) {
+                    val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+                    cacheDocument(url, doc)
+                    doc
+                } else {
+                    Log.d(CF_TAG, "[Provider] Cloudflare challenge in HTML for $url")
+                    null
+                }
+            } else {
+                Log.d(CF_TAG, "[Provider] HTTP ${response.code} for $url")
+                null
+            }
+        } catch (e: Exception) {
+            Log.d(CF_TAG, "[Provider] OkHttp failed for $url: ${e.message}")
+            null
+        }
+    }
+
+    /** Récupère un document en passant le challenge CF (pipeline identique à Wiflix). */
+    private suspend fun getDocumentWithBypass(
+        url: String,
+        silentBypass: Boolean = true,
+    ): Document = cfSemaphore.withPermit {
+        getCachedDocument(url)?.let {
+            Log.d(CF_TAG, "[Provider] Cache HIT for $url")
+            return@withPermit it
+        }
+
+        val now = System.currentTimeMillis()
+        if (now < rateLimit1015Until) {
+            val left = (rateLimit1015Until - now) / 1000
+            Log.w(CF_TAG, "[Provider] Rate limit cooldown active (${left}s left) — skipping $url")
+            return@withPermit Jsoup.parse("<html><!-- rate limited 1015 --></html>")
+                .apply { setBaseUri(baseUrl) }
+        }
+
+        // Tentative 1 : OkHttp direct si le cookie cf_clearance est déjà là.
+        val okHttpDoc = if (hasCfClearanceCookie()) tryOkHttp(url) else null
+        if (okHttpDoc != null) return@withPermit okHttpDoc
+
+        // Tentative 2 : WebView bypass (Turnstile), SILENCIEUX par défaut.
+        Log.d(CF_TAG, "[Provider] Launching WebView Bypass for $url (silent=$silentBypass)")
+        var html = getResolver().get(url, silent = silentBypass)
+
+        fun isBypassFailed(h: String): Boolean {
+            if (h.contains("<!-- silent fail -->") ||
+                h.contains("<!-- no live activity -->") ||
+                h.contains("<!-- rate limited 1015 -->") ||
+                h.contains("User cancelled")) return true
+            val looksLikeChallenge = challengeKeywords.any { h.contains(it, ignoreCase = true) }
+            // marqueurs de contenu réel propres à AnimeSama (équivalent mov-t/posterimg)
+            val hasRealContent = h.contains("/catalogue/") || h.contains("catalog-card") ||
+                h.contains("episodes.js") || h.contains("panneauAnime") ||
+                h.contains("anime-sama")
+            return looksLikeChallenge && !hasRealContent
+        }
+        var bypassFailed = isBypassFailed(html)
+
+        // captcha INVISIBLE par défaut ; VISIBLE seulement à partir de 3 échecs consécutifs.
+        if (silentBypass) {
+            if (bypassFailed) {
+                silentFailStreak++
+                if (silentFailStreak >= VISIBLE_AFTER_STREAK &&
+                    System.currentTimeMillis() - lastVisibleBypassAt > VISIBLE_BYPASS_COOLDOWN_MS) {
+                    lastVisibleBypassAt = System.currentTimeMillis()
+                    Log.d(CF_TAG, "[Provider] $silentFailStreak échecs silencieux → captcha VISIBLE pour $url")
+                    html = getResolver().get(url, silent = false)
+                    bypassFailed = isBypassFailed(html)
+                    if (!bypassFailed) { silentFailStreak = 0 }
+                } else {
+                    Log.d(CF_TAG, "[Provider] Échec silencieux #$silentFailStreak (captcha reste invisible) pour $url")
+                }
+            } else {
+                silentFailStreak = 0
+            }
+        }
+
+        if (html.contains("Error 1015") || html.contains("You are being rate limited")) {
+            rateLimit1015Until = System.currentTimeMillis() + RATE_LIMIT_COOLDOWN_MS
+            Log.w(CF_TAG, "[Provider] CLOUDFLARE 1015 detected for $url — cooldown 15min activated")
+        }
+
+        if (bypassFailed) {
+            Log.d(CF_TAG, "[Provider] WebView bypass failed for $url — NOT caching")
+            return@withPermit Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+        }
+
+        // Bypass réussi → cookie cf_clearance posé : on relance OkHttp pour un HTML propre.
+        Log.d(CF_TAG, "[Provider] WebView bypass succeeded — retrying OkHttp with fresh cookie")
+        val freshDoc = tryOkHttp(url)
+        if (freshDoc != null) {
+            Log.d(CF_TAG, "[Provider] OkHttp retry after bypass SUCCESS for $url")
+            return@withPermit freshDoc
+        }
+
+        Log.d(CF_TAG, "[Provider] OkHttp retry after bypass FAILED — using WebView HTML")
+        val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+        if (!isCloudflareChallenge(doc) && !html.contains("Bot shield active", ignoreCase = true)) {
+            cacheDocument(url, doc)
+        } else {
+            Log.w(CF_TAG, "[Provider] Fallback HTML is still a challenge — NOT caching for $url")
+        }
+        return@withPermit doc
+    }
+
     private suspend fun fetchDocument(url: String): Document = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url(url)
@@ -176,7 +381,15 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             .build()
         val response = client.newCall(request).execute()
         val html = response.body?.string() ?: ""
-        Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+        val doc = Jsoup.parse(html).apply { setBaseUri(baseUrl) }
+        // Challenge CF intermittent détecté → on bascule sur le pipeline Wiflix.
+        if (isCloudflareChallenge(doc) ||
+            challengeKeywords.any { html.contains(it, ignoreCase = true) }
+        ) {
+            Log.d(CF_TAG, "[Provider] Challenge CF détecté sur $url → bypass (comme Wiflix)")
+            return@withContext getDocumentWithBypass(url)
+        }
+        doc
     }
 
     private suspend fun fetchText(url: String): String = fetchTextWith(url, client)
@@ -191,7 +404,29 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
             .build()
         val response = httpClient.newCall(request).execute()
         if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
-        val text = response.body?.string() ?: ""
+        var text = response.body?.string() ?: ""
+        // 2026-07-31 : le challenge CF intermittent peut aussi tomber sur les fichiers
+        //   (episodes.js…) — on reçoit alors du HTML de challenge à la place du script.
+        //   Même traitement que les pages : on fait résoudre le challenge (WebView
+        //   silencieuse, cookie cf_clearance posé), puis on REJOUE la requête avec le
+        //   cookie + l'UA stealth associé.
+        if (challengeKeywords.any { text.contains(it, ignoreCase = true) }) {
+            Log.d(CF_TAG, "[Provider] Challenge CF sur une ressource ($url) → bypass")
+            getDocumentWithBypass(baseUrl)
+            val cookie = try {
+                android.webkit.CookieManager.getInstance().getCookie(baseUrl) ?: ""
+            } catch (_: Throwable) { "" }
+            val retry = Request.Builder()
+                .url(url)
+                .header("User-Agent", com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA)
+                .header("Referer", baseUrl)
+                .apply { if (cookie.isNotBlank()) header("Cookie", cookie) }
+                .build()
+            val retryResponse = httpClient.newCall(retry).execute()
+            if (retryResponse.isSuccessful) {
+                text = retryResponse.body?.string() ?: text
+            }
+        }
         // Detect 404 pages disguised as 200
         if (text.contains("Page introuvable") || text.contains("Accès Introuvable")) {
             throw Exception("Soft 404 detected")
@@ -203,15 +438,32 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
         val body = FormBody.Builder()
             .add("query", query)
             .build()
-        val request = Request.Builder()
+        fun bâtirRequête(ua: String, cookie: String) = Request.Builder()
             .url("${baseUrl}template-php/defaut/fetch.php")
-            .header("User-Agent", USER_AGENT)
+            .header("User-Agent", ua)
             .header("Referer", baseUrl)
             .header("X-Requested-With", "XMLHttpRequest")
-            .post(body)
+            .apply { if (cookie.isNotBlank()) header("Cookie", cookie) }
+            .post(FormBody.Builder().add("query", query).build())
             .build()
-        val response = client.newCall(request).execute()
-        response.body?.string() ?: ""
+
+        val response = client.newCall(bâtirRequête(USER_AGENT, "")).execute()
+        val texte = response.body?.string() ?: ""
+        // 2026-07-31 : la RECHERCHE (POST fetch.php) peut elle aussi se prendre le
+        //   challenge intermittent — sans ça, la recherche renverrait « aucun résultat »
+        //   au lieu de déclencher le bypass. On résout puis on rejoue le POST.
+        if (challengeKeywords.any { texte.contains(it, ignoreCase = true) }) {
+            Log.d(CF_TAG, "[Provider] Challenge CF sur la recherche → bypass")
+            getDocumentWithBypass(baseUrl)
+            val cookie = try {
+                android.webkit.CookieManager.getInstance().getCookie(baseUrl) ?: ""
+            } catch (_: Throwable) { "" }
+            val retry = client.newCall(
+                bâtirRequête(com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA, cookie)
+            ).execute()
+            if (retry.isSuccessful) return@withContext retry.body?.string() ?: texte
+        }
+        texte
     }
 
     // ========== HOME ==========
@@ -1792,7 +2044,16 @@ object AnimeSamaProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Filte
                             .build()
                         val response = client.newCall(request).execute()
                         val html = response.body?.string() ?: ""
-                        Jsoup.parse(html)
+                        // 2026-07-31 : le PORTAIL sert à découvrir le domaine actif. S'il se
+                        //   prend le challenge, la mise à jour d'URL échoue et c'est TOUT le
+                        //   provider qui tombe (domaine périmé). On le passe donc aussi, en
+                        //   WebView silencieuse — même politique d'invisibilité qu'ailleurs.
+                        if (challengeKeywords.any { html.contains(it, ignoreCase = true) }) {
+                            Log.d(CF_TAG, "[Provider] Challenge CF sur le portail → bypass")
+                            Jsoup.parse(getResolver().get(portalUrl, silent = true))
+                        } else {
+                            Jsoup.parse(html)
+                        }
                     }
 
                     // Extract the redirect link from "Accéder à Anime-Sama" button

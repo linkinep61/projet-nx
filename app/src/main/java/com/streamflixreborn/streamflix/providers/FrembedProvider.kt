@@ -45,15 +45,14 @@ import kotlin.collections.map
 object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, ProgressiveServersProvider {
     override val name = "Frembed"
 
-    // 2026-07-22 (user « regarde si frembed.asia est conforme ») : `frembed.hair` est MORT
-    //   (page d'erreur). Nouveau domaine = **`frembed.asia`**, API STRICTEMENT IDENTIQUE
-    //   (vérifié en direct : `/api/films`, `/api/series`, `/api/streaming/player` VIP, mêmes
-    //   champs `link1..7`/`+vostfr`/`+vo`, mêmes redirections relatives `/api/stream`). Aucun
-    //   nouveau type de serveur → simple bascule de domaine. Les anciens domaines morts
-    //   (audin213, bond, hair, cyou) sont ignorés dans le cache pour forcer la bascule.
-    private val DEAD_DOMAINS = listOf("audin213", "frembed.bond", "frembed.hair", "frembed.cyou")
+    // 2026-07-30 : `frembed.asia` est MORT (NXDOMAIN). Nouveau domaine = **`frembed.casa`**
+    //   (vérifié en direct : `/api/public/movies` renvoie le vrai JSON Frembed). API IDENTIQUE
+    //   → simple bascule de domaine. L'auto-redirection runtime trouvait déjà casa ; on remet
+    //   juste un défaut VIVANT (frembed.asia NXDOMAIN = 0 catalogue au 1er boot sinon).
+    //   Les anciens domaines morts sont ignorés dans le cache pour forcer la bascule.
+    private val DEAD_DOMAINS = listOf("audin213", "frembed.bond", "frembed.hair", "frembed.cyou", "frembed.asia")
 
-    override val defaultPortalUrl: String = "https://frembed.asia/"
+    override val defaultPortalUrl: String = "https://frembed.casa/"
 
     override val portalUrl: String = defaultPortalUrl
         get() {
@@ -63,7 +62,7 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
             return if (isValid) cachePortalURL else field
         }
 
-    override val defaultBaseUrl: String = "https://frembed.asia/"
+    override val defaultBaseUrl: String = "https://frembed.casa/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)

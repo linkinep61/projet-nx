@@ -85,6 +85,22 @@ object FranimeProvider : Provider, ProgressiveServersProvider {
     }
 
     // ── Cache JSON catalogue complet ────────────────────────────────────
+    // 2026-08-02 (user : « pourquoi il manque VIDMOLY alors qu'il devrait y être »,
+    //   Hajime no Ippo E3) : le TTL de 24 h figeait la liste des LECTEURS.
+    //   Vérifié en direct sur l'API : elle déclare bien
+    //     vo → [filemoon, sibnet, sendvid, vidmoly]
+    //     vf → [sendvid, filemoon, sibnet, vidmoly]
+    //   alors que l'app n'affichait que Sibnet + SendVid : notre copie disque datait
+    //   d'avant l'ajout de Filemoon et Vidmoly. Le code de lecture, lui, est correct
+    //   (il ne filtre que « TELECHARGEMENT »).
+    //   TTL MAINTENU À 24 h — le passage à 6 h a été testé puis ANNULÉ le 2026-08-02 :
+    //   recharger ce catalogue coûte très cher sur Chromecast. Mesuré juste après la purge :
+    //     GC freed 43MB … total 4.117s   /   GC freed 19MB … total 2.225s
+    //     HANGDUMP → FranimeProvider.fetchText (thread bloqué sur le parse)
+    //   Pendant ce temps FRAnime dépasse son délai et ne rend AUCUN serveur : réduire le TTL
+    //   multipliait donc ces gels sans rien gagner. La bonne réponse à un catalogue périmé
+    //   est de purger le fichier ponctuellement (`files/franime_catalogue.json`), pas de le
+    //   retélécharger en boucle.
     private val CATALOGUE_TTL_MS = 24L * 60L * 60L * 1000L
     @Volatile private var catalogue: List<JSONObject>? = null
     // 2026-05-16 v8 : Long au lieu de Int. Certains IDs FRAnime dépassent

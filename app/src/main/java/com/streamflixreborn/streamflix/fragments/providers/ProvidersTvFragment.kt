@@ -59,6 +59,23 @@ class ProvidersTvFragment : Fragment() {
                 .hasWallpaper(requireContext())) android.view.View.GONE
             else android.view.View.VISIBLE
 
+        // 2026-07-25 (user « fais-le aussi pour la TV : icônes + couleur du texte ») : applique la
+        //   couleur choisie (Apparence → Couleur du texte) aux onglets ET aux icônes de l'en-tête
+        //   (le cœur reste rouge = accent favoris).
+        run {
+            val prim = com.streamflixreborn.streamflix.utils.UserPreferences.appTextColorInt
+            val sec = com.streamflixreborn.streamflix.utils.UserPreferences.appTextColorSecondaryInt
+            view.findViewById<com.google.android.material.tabs.TabLayout>(R.id.tl_provider_groups)
+                ?.setTabTextColors(sec, prim)
+            intArrayOf(
+                R.id.btn_radio, R.id.btn_wallpaper, R.id.btn_power_off,
+                R.id.btn_providers_downloads, R.id.btn_providers_settings,
+                R.id.btn_providers_profile_switch, R.id.btn_providers_lock, R.id.btn_providers_kofi,
+            ).forEach { id ->
+                view.findViewById<android.widget.ImageView>(id)?.setColorFilter(prim)
+            }
+        }
+
         // 2026-05-12 : kill le mini-player IPTV qui pourrait encore tourner
         // en background. Quand l'user revient au home picker provider, il
         // ne doit PLUS entendre le son d'une chaîne TV qu'il venait de quitter.

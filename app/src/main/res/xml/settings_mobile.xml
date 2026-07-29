@@ -465,6 +465,15 @@
                 android:defaultValue="default"
                 app:iconSpaceReserved="false" />
 
+            <ListPreference
+                android:key="APP_TEXT_COLOR"
+                android:title="Couleur du texte"
+                android:summary="%s"
+                android:entries="@array/text_color_names"
+                android:entryValues="@array/text_color_values"
+                android:defaultValue="white"
+                app:iconSpaceReserved="false" />
+
             <SwitchPreference
                 android:key="IMMERSIVE_MODE"
                 android:title="@string/settings_immersive_mode"
@@ -657,6 +666,22 @@
             android:icon="@drawable/ic_github"
             android:key="p_settings_github"
             android:title="@string/settings_github"
+            app:iconSpaceReserved="false" />
+
+        <!-- 2026-07-25 : bascule Android Auto (radio ↔ vidéo, exclusifs). -->
+        <SwitchPreferenceCompat
+            android:key="pref_car_video_mode"
+            android:title="Android Auto : mode vidéo"
+            android:summary="Coché : vidéo sur l'écran voiture. Décoché : radio. Reconnecter AA."
+            android:defaultValue="false"
+            app:iconSpaceReserved="false" />
+
+        <!-- Juste en dessous de la bascule : on passe en mode vidéo, puis on choisit
+             immédiatement une vidéo du téléphone à lire (★ favori par appui long). -->
+        <Preference
+            android:key="p_settings_local_videos"
+            android:title="Vidéos locales"
+            android:summary="Vidéos internes, carte SD ou clé USB (appui long = favori) (appui long = favori)"
             app:iconSpaceReserved="false" />
 
         <Preference

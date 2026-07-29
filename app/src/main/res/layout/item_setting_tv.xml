@@ -5,13 +5,15 @@
     android:id="@+id/root_setting"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginStart="16dp"
-    android:layout_marginEnd="16dp"
+    android:layout_marginStart="14dp"
+    android:layout_marginEnd="14dp"
+    android:layout_marginTop="4dp"
+    android:layout_marginBottom="4dp"
     android:background="@drawable/bg_item_setting"
     android:focusable="true"
     android:focusableInTouchMode="false"
-    android:minHeight="52dp"
-    android:paddingTop="8dp"
+    android:minHeight="54dp"
+    android:paddingTop="9dp"
     android:paddingBottom="8dp">
 
     <ImageView

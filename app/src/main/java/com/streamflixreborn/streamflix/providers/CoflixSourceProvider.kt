@@ -45,11 +45,12 @@ object CoflixSourceProvider {
     /** Miroirs de repli si l'auto-découverte (CoflixMirrorDiscovery) échoue.
      *  On essaie dans l'ordre jusqu'à un 200.
      *  2026-07-17 : le domaine actif est désormais résolu dynamiquement via
-     *  coflix.domains (redirect_url). coflix.cloud = défaut connu-bon au 17/07 ;
-     *  coflix.boston = ancien domaine (WordPress) gardé en dernier filet. */
+     *  coflix.domains (redirect_url) — l'app suit les migrations sans release.
+     *  2026-07-30 : coflix.domains redirige désormais vers **coflix.esq** (vérifié :
+     *  vraie page Coflix). coflix.boston est MORT → retiré ; coflix.esq mis en tête. */
     private val MIRRORS = listOf(
+        "https://coflix.esq",
         "https://coflix.cloud",
-        "https://coflix.boston",
     )
 
     @Volatile private var lastWorkingMirror: String = MIRRORS.first()

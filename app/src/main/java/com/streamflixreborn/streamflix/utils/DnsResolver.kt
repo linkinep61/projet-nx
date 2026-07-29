@@ -18,6 +18,7 @@ import java.util.concurrent.ConcurrentHashMap
 object DnsResolver : Dns {
     private const val TAG = "DnsResolver"
 
+
     /** 2026-05-14 (user "chargements infinis sur la liste IPTV") : Glide
      *  faisait un appel DoH HTTPS PAR logo (~50/s) sur le même host
      *  logoipro2.com → saturation réseau, list visible mais logos arrivent
@@ -83,6 +84,21 @@ object DnsResolver : Dns {
             addresses
         } catch (e: Exception) {
             Log.e(TAG, "Failed to resolve $hostname with $providerName: ${e.message}")
+            // 2026-07-29 : AVANT le DNS système (filtré par le FAI), tenter un DoH
+            //   non-filtrant de SECOURS (dns.sb sur le port 443). Utile quand le DoT
+            //   (port 853) est bloqué sur le réseau (certains Wifi/opérateurs) : le
+            //   443 passe presque toujours → on garde un résolveur NON filtré au lieu
+            //   de retomber sur le DNS FAI qui bloque justement les domaines visés.
+            try {
+                val backup = backupDoh().lookup(hostname)
+                if (backup.isNotEmpty()) {
+                    Log.i(TAG, "Backup DoH (dns.sb) resolved $hostname to: ${backup.joinToString { it.hostAddress ?: "" }}")
+                    cache[hostname] = CachedAddr(backup, now + CACHE_TTL_MS)
+                    return backup
+                }
+            } catch (eb: Exception) {
+                Log.w(TAG, "Backup DoH also failed for $hostname: ${eb.message}")
+            }
             // 2026-07-16 : filet de sécurité — si le DoH échoue (serveur DoH injoignable,
             //   ex. cloudflare-dns.com non résolvable via un DNS privé/cassé), on tente le
             //   DNS SYSTÈME pour NE PAS faire tomber tout le provider (AnimeSama échouait
@@ -124,6 +140,19 @@ object DnsResolver : Dns {
 
     @Synchronized
     private fun buildDoh(url: String): Dns {
+        // 2026-07-29 : DNS-over-TLS (DoT). Les serveurs sans DoH (FDN, Mullvad,
+        //   dns.sb, DNSForge clean…) sont stockés sous la forme "dot://<host>".
+        //   C'est le même mécanisme que le "DNS privé" d'Android (port 853).
+        if (url.startsWith("dot://", true)) {
+            val host = url.removePrefix("dot://").removePrefix("DOT://").trim('/').trim()
+            return try {
+                Log.i(TAG, "Building DoT resolver for host=$host")
+                DotDns(host, DotDns.bootstrapFor(host))
+            } catch (e: Exception) {
+                Log.e(TAG, "Error building DoT for $host, falling back to SYSTEM: ${e.message}")
+                Dns.SYSTEM
+            }
+        }
         return if (url.isNotEmpty()) {
             try {
                 val httpUrl = url.toHttpUrl()
@@ -148,6 +177,30 @@ object DnsResolver : Dns {
         }
     }
 
+    /** DoH non-filtrant de secours (dns.sb, port 443) — construit à la 1re utilisation.
+     *  Sert quand le resolver principal (souvent DoT/853) est injoignable réseau. */
+    private var _backupDoh: Dns? = null
+    @Synchronized
+    private fun backupDoh(): Dns {
+        _backupDoh?.let { return it }
+        val built = try {
+            val url = "https://doh.dns.sb/dns-query".toHttpUrl()
+            DnsOverHttps.Builder()
+                .client(client)
+                .url(url)
+                .bootstrapDnsHosts(
+                    listOf("185.222.222.222", "45.11.45.11")
+                        .mapNotNull { runCatching { InetAddress.getByName(it) }.getOrNull() }
+                )
+                .build()
+        } catch (e: Exception) {
+            Log.e(TAG, "Backup DoH build failed: ${e.message}")
+            Dns.SYSTEM
+        }
+        _backupDoh = built
+        return built
+    }
+
     /** IPs connues des serveurs DoH courants (littéraux → aucune résolution DNS). */
     private fun bootstrapHostsFor(host: String): List<InetAddress> {
         val ips = when {
@@ -157,6 +210,13 @@ object DnsResolver : Dns {
                 listOf("8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844")
             host.contains("quad9", true) ->
                 listOf("9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9")
+            // 2026-07-30 : DoH non-filtrants 443 (utiles derrière Bouygues qui bloque le DoT/853
+            //   et détourne le DNS 53). Bootstrap indispensable : sinon l'hôte DoH serait résolu
+            //   par le DNS FAI détourné → échec.
+            host.contains("dns.sb", true) ->
+                listOf("185.222.222.222", "45.11.45.11", "2a09::", "2a11::")
+            host.contains("mullvad", true) ->
+                listOf("194.242.2.2", "2a07:e340::2")
             host.contains("adguard", true) ->
                 listOf("94.140.14.14", "94.140.15.15")
             else -> emptyList()

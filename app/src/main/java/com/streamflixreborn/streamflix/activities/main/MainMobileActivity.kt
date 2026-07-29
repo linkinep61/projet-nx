@@ -119,8 +119,16 @@ class MainMobileActivity : FragmentActivity() {
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val palette = ThemeManager.palette(UserPreferences.selectedTheme)
-        window.statusBarColor = palette.systemBar
-        window.navigationBarColor = palette.systemBar
+        // 2026-07-25 (user « 2 bandes en haut et en bas, pas joli ») : sur Android 15+ / targetSdk 35
+        //   la COULEUR des barres est ignorée (edge-to-edge imposé) et le système dessine un SCRIM de
+        //   contraste GRIS derrière les barres transparentes → d'où les 2 bandes. On le désactive
+        //   (API 29+) pour que le contenu passe pleinement derrière les barres, comme « Qui regarde ? ».
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
+        }
 
         _binding = ActivityMainMobileBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -153,7 +161,7 @@ class MainMobileActivity : FragmentActivity() {
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
 
-        ViewCompat.setOnApplyWindowInsetsListener(binding.mainContent) { view, windowInsets ->
+        ViewCompat.setOnApplyWindowInsetsListener(binding.mainContent) { _, windowInsets ->
             val insets = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
             val navHostFragment = supportFragmentManager.findFragmentById(R.id.nav_main_fragment) as? NavHostFragment
             val currentFragment = navHostFragment?.childFragmentManager?.primaryNavigationFragment
@@ -161,10 +169,20 @@ class MainMobileActivity : FragmentActivity() {
             val isPlayer = currentFragment is PlayerMobileFragment
             val isBottomNavVisible = binding.bnvMain.visibility == View.VISIBLE
 
-            val bottomPadding = if (isPlayer || isBottomNavVisible) 0 else insets.bottom
             val topPadding = if (isPlayer) 0 else insets.top
 
-            view.setPadding(insets.left, topPadding, insets.right, bottomPadding)
+            // 2026-07-25 (user « bande noire en haut et en bas ») : on ne padde PLUS la racine
+            //   (elle porte le wallpaper plein écran, qui DOIT rester derrière les barres). On pousse
+            //   uniquement le CONTENU (fragment + barre de nav) sous les barres → le wallpaper va
+            //   bord à bord, comme « Qui regarde ? ».
+            binding.mainContent.setPadding(0, 0, 0, 0)
+            binding.navMainFragment.setPadding(
+                insets.left,
+                topPadding,
+                insets.right,
+                if (isPlayer || isBottomNavVisible) 0 else insets.bottom,
+            )
+            binding.bnvMain.setPadding(0, 0, 0, if (!isPlayer && isBottomNavVisible) insets.bottom else 0)
             windowInsets
         }
 
@@ -901,8 +919,12 @@ class MainMobileActivity : FragmentActivity() {
         binding.bnvMain.itemIconTintList = navColors
         binding.bnvMain.itemTextColor = navColors
 
-        window.statusBarColor = palette.systemBar
-        window.navigationBarColor = palette.systemBar
+        // 2026-07-25 (user « 2 bandes noires en haut et en bas, pas joli ») : barres système
+        //   TRANSPARENTES → le wallpaper étoilé (posé sur binding.root, plein écran) passe derrière,
+        //   comme l'écran « Qui regarde ? ». Le contenu garde ses paddings d'insets (pas de
+        //   chevauchement). Avant : peintes en palette.systemBar → bandes pleines.
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
 
         WindowInsetsControllerCompat(window, window.decorView).apply {
             isAppearanceLightStatusBars = false

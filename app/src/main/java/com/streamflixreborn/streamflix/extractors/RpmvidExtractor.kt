@@ -66,18 +66,35 @@ class RpmvidExtractor : Extractor() {
         var cfPath = json.get("cf")?.asString?.takeIf { it.isNotEmpty() }
         val cfExpire = json.get("cfExpire")?.asString?.takeIf { it.isNotEmpty() }
 
+        // 2026-08-01 (user : « le serveur Rpmvid ne marche pas, plusieurs tests ») : le CDN
+        //   `/v4/<x>/<y>/cf-master.<ts>.txt` renvoie **403** — y compris via Cronet, donc ce
+        //   n'est PAS le fingerprint TLS. Vérifié en direct sur `flemmix.upns.pro` : ce
+        //   manifeste se charge SANS token, mais UNIQUEMENT depuis le domaine du lecteur —
+        //   depuis une origine tierce il est refusé. C'est un contrôle d'ORIGINE.
+        //   Or on n'envoyait que `Referer`, jamais `Origin` : le CDN nous voyait donc comme
+        //   un tiers → 403. On ajoute `Origin` (+ les `Sec-Fetch-*` d'une requête de lecteur,
+        //   même recette que celle qui a débloqué Vidzy).
+        //   Ce CDN est PARTAGÉ : le même 403 frappait aussi 1Jour1Film/Movix
+        //   (astroliteonline.online) et Coflix Boston (viatrix.space) → correctif commun.
+        val enTetesLecteur = mapOf(
+            "Referer" to "$mainLink/",
+            "Origin" to mainLink,
+            "Sec-Fetch-Dest" to "empty",
+            "Sec-Fetch-Mode" to "cors",
+            "Sec-Fetch-Site" to "cross-site",
+        )
         val (finalUrl, headers) = when {
             !hlsPath.isNullOrEmpty() -> {
-                toAbsoluteUrl(mainLink, hlsPath) to mapOf("Referer" to mainLink)
+                toAbsoluteUrl(mainLink, hlsPath) to enTetesLecteur
             }
             !hlsTiktok.isNullOrEmpty() -> {
                 val v = extractTiktokV(json)
                 val query = if (!v.isNullOrEmpty()) "?v=$v" else ""
-                toAbsoluteUrl(mainLink, "$hlsTiktok$query") to mapOf("Referer" to mainLink)
+                toAbsoluteUrl(mainLink, "$hlsTiktok$query") to enTetesLecteur
             }
             !cfPath.isNullOrEmpty() -> {
                 cfPath = buildCloudFlareUrl(cfPath, cfExpire, json)
-                toAbsoluteUrl(mainLink, cfPath ?: "") to mapOf("Referer" to mainLink)
+                toAbsoluteUrl(mainLink, cfPath ?: "") to enTetesLecteur
             }
             else -> throw Exception("Missing hls, hlsVideoTiktok or cf in response")
         }
@@ -94,11 +111,24 @@ class RpmvidExtractor : Extractor() {
                 )
             }.orEmpty()
 
+        // 2026-08-01 (user : « Movix Rpmvid VF est en réalité en VOSTFR ») : cet hébergeur
+        //   expose le NOM DE FICHIER réel — vérifié en direct, le lecteur l'affiche en titre :
+        //     serix.upns.live/#k8rxrg → « In.the.Grey.2026.VOSTFR.1080p.WEBRip.x264.mp4 »
+        //   alors que Movix annonçait ce lien en « (VF) ». Le nom de fichier, lui, ne ment
+        //   pas : on le remonte pour corriger l'étiquette de langue du serveur.
+        val nomFichier = sequenceOf("title", "name", "filename", "fileName", "file_name")
+            .mapNotNull { k -> runCatching { json.get(k)?.asString }.getOrNull() }
+            .firstOrNull { it.isNotBlank() }
+        if (nomFichier != null) {
+            android.util.Log.d("RpmvidExtractor", "nom de fichier réel = $nomFichier")
+        }
+
         return Video(
             source = finalUrl,
             subtitles,
             headers = headers,
-            type = MimeTypes.APPLICATION_M3U8
+            type = MimeTypes.APPLICATION_M3U8,
+            fileName = nomFichier,
         )
     }
 

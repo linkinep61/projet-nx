@@ -881,7 +881,8 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
 
                     is Settings.Subtitle.SubDLSubtitles.Subtitle -> item.subDLSubtitle.lang?.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() } ?: ""
 
-                    is Settings.Server -> item.quality ?: ""
+                    // 2026-07-31 : langue réelle + qualité (parité avec la vue TV).
+                    is Settings.Server -> listOfNotNull(item.language, item.quality).joinToString(" · ")
 
                     else -> ""
                 }
@@ -998,6 +999,9 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                     else -> View.GONE
                 }
             }
+            // 2026-07-28 : bordure rouge accent sur l'option ACTIVE (coche visible), comme la
+            //   maquette validée — vaut pour tous les sous-menus (serveur/qualité/vitesse/audio…).
+            binding.root.isActivated = binding.ivSettingIsSelected.visibility == View.VISIBLE
 
             binding.ivSettingEnter.apply {
                 visibility = when (item) {

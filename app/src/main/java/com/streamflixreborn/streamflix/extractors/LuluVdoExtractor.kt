@@ -63,6 +63,145 @@ class LuluVdoExtractor : Extractor() {
         }
     }
 
+    // 2026-07-31 (user « je pense que t'as un problème avec Lulu ») : PAS DE CACHE.
+    //   L'extracteur héritait du TTL par défaut (10 min) → l'URL extraite était rejouée telle
+    //   quelle, ce qui posait DEUX problèmes : (1) les correctifs d'extraction n'étaient jamais
+    //   repris (le code ne repassait pas — d'où l'absence de log « KVS: … » et l'échec) ;
+    //   (2) le jeton `t=` de ce CDN a une durée de vie courte → une URL rejouée plus tard est
+    //   refusée (ERROR_CODE_IO_BAD_HTTP_STATUS). Comme Hydrax/Embed4me/Emmmmbed : TTL = 0.
+    override val cacheTtlMs: Long = 0L
+
+    /**
+     * 2026-07-31 (user, LuLuTV → onPlayerError) : sur ce CDN KVS, quand la VARIANTE est déjà
+     * dans le chemin (`…/<id>_h/master.m3u8`), c'est la playlist `index-v1-a1.m3u8` qui joue —
+     * le `master.m3u8` de ce même dossier est refusé par le player.
+     * Vérifié en direct : `…/95jtgebwe93n_h/index-v1-a1.m3u8?t=…` → 200 + playlist complète.
+     * No-op si la forme ne correspond pas (on ne touche pas aux vrais masters `,a,b,c,.urlset/`).
+     */
+    private fun preferVariantPlaylist(url: String): String = try {
+        val q = url.indexOf('?')
+        val path = if (q >= 0) url.substring(0, q) else url
+        val query = if (q >= 0) url.substring(q) else ""
+        val rx = Regex("""/([^/,]+_(?:h|n|l|fre|eng|vf|vo))/master\.m3u8$""", RegexOption.IGNORE_CASE)
+        if (rx.containsMatchIn(path)) {
+            val newPath = path.removeSuffix("master.m3u8") + "index-v1-a1.m3u8"
+            Log.d(TAG, "KVS: master → index-v1-a1 (variante déjà dans le chemin)")
+            newPath + query
+        } else url
+    } catch (_: Exception) { url }
+
+    /** 2026-07-31 : vrai si le dernier échec WebView vient d'une vidéo SUPPRIMÉE (page "/dl",
+     *  « no longer available »…) et non d'un défaut d'extraction. Sert à lever une exception
+     *  classée « dead-content » → l'extracteur n'est pas blacklisté à tort. */
+    @Volatile private var lastWasDeadContent = false
+
+    /**
+     * 2026-07-31 : extraction 100 % NATIVE (aucune WebView), analysée en direct dans Chrome.
+     *   1. GET la page embed (OkHttp).
+     *   2. Déballe le packed JS `eval(p,a,c,k,e,d)` → le m3u8 y est EN CLAIR.
+     *   3. Le master KVS `…/,<a>,<b>,<c>,.urlset/master.m3u8` est souvent gaté (403) alors que
+     *      la playlist de VARIANTE `<v>/index-v1-a1.m3u8` passe avec le seul token `t=` (même
+     *      constat que pour upbolt, cf. OnRegardeOuExtractor). On teste donc le master, et on
+     *      bascule sur la variante (FR prioritaire) s'il est refusé.
+     * Retourne null si quoi que ce soit échoue → l'appelant repasse par la WebView.
+     */
+    private suspend fun tryNativeExtract(link: String, linkHost: String): Video? = withContext(Dispatchers.IO) {
+        try {
+            val headers = mapOf(
+                "User-Agent" to NetworkClient.USER_AGENT,
+                "Referer" to "$linkHost/",
+                "Accept" to "text/html,application/xhtml+xml,*/*;q=0.8",
+            )
+            val pageReq = okhttp3.Request.Builder().url(link).apply {
+                headers.forEach { (k, v) -> header(k, v) }
+            }.build()
+            val html = sharedClient.newCall(pageReq).execute().use { r ->
+                if (!r.isSuccessful) return@withContext null
+                r.body?.string().orEmpty()
+            }
+            if (html.isBlank()) return@withContext null
+
+            // packed JS → m3u8 en clair
+            val packed = Regex("""\}\s*\('.*?'\.split\('\|'\)""", RegexOption.DOT_MATCHES_ALL)
+                .find(html.substringAfter("function(p,a,c,k,e,d)", ""))?.value
+            val unpacked = packed?.let {
+                runCatching { com.streamflixreborn.streamflix.utils.JsUnpacker(it).unpack() }.getOrNull()
+            }
+            val searchIn = unpacked ?: html
+            val master = Regex("""(https?://[^\s"'`]+\.m3u8[^\s"'`]*)""").find(searchIn)?.groupValues?.get(1)
+                ?: return@withContext null
+            Log.d(TAG, "native: master m3u8 trouvé (${master.length} chars)")
+
+            // 2026-07-31 (user, LuLuTV → 403 persistant) — MESURE À L'APPUI :
+            //   la MÊME URL répond 200 en accès DIRECT (testé dans Chrome, aucun Referer ni
+            //   Origin) mais 403 quand on l'accompagne de « Referer/Origin: luluvdo.com ».
+            //   Ce CDN refuse donc les requêtes estampillées « venant d'un autre site » —
+            //   comportement inverse de Vidzy, où le Referer était au contraire exigé.
+            //   → on n'envoie QUE l'User-Agent, comme le ferait un accès direct.
+            val streamHeaders = mapOf(
+                "User-Agent" to NetworkClient.USER_AGENT,
+                "Accept" to "*/*",
+            )
+
+            // 2026-07-31 (user « aucun Lulu ne fonctionne ») — LEÇON IMPORTANTE :
+            //   je vérifiais l'URL par un GET avant de la rendre… ce qui CONSOMMAIT le jeton.
+            //   Ces CDN n'honorent le `t=` qu'UNE SEULE FOIS : le contrôle renvoyait 200, puis
+            //   le player recevait 403 sur la même URL (constaté noir sur blanc dans les logs :
+            //   « native probe 200 → OK » suivi de « Response code: 403 »).
+            //   → PLUS AUCUNE requête de vérification ici. On applique directement la
+            //     réécriture KVS (master → variante) et on laisse le player faire LA requête.
+            val url = rewriteKvsMasterToVariant(master) ?: master
+
+            Video(
+                source = preferVariantPlaylist(url),
+                type = MimeTypes.APPLICATION_M3U8,
+                headers = streamHeaders,
+            )
+        } catch (e: Exception) {
+            Log.d(TAG, "native KO: ${e.message}")
+            null
+        }
+    }
+
+    /** GET court : l'URL renvoie-t-elle bien une playlist HLS (et pas un 403) ? */
+    private fun probeOk(url: String, headers: Map<String, String>): Boolean = try {
+        val req = okhttp3.Request.Builder().url(url).apply {
+            headers.forEach { (k, v) -> header(k, v) }
+        }.build()
+        sharedClient.newCall(req).execute().use { r ->
+            val ok = r.isSuccessful && (r.body?.string()?.contains("#EXTM3U") == true)
+            Log.d(TAG, "native probe ${r.code} → ${if (ok) "OK" else "refusé"}")
+            ok
+        }
+    } catch (_: Exception) { false }
+
+    /**
+     * KVS : `…/04086/,<id>_h,lang/fre/<id>_fre,.urlset/master.m3u8?t=…`
+     *   → `…/04086/lang/fre/<id>_fre/index-v1-a1.m3u8?t=…` (le token couvre tout le préfixe).
+     * Priorité au FRANÇAIS, puis à la meilleure qualité (`_h`), sinon la dernière variante.
+     */
+    private fun rewriteKvsMasterToVariant(url: String): String? = try {
+        val q = url.indexOf('?')
+        val query = if (q >= 0) url.substring(q) else ""
+        val path = if (q >= 0) url.substring(0, q) else url
+        val mi = path.indexOf(".urlset/master.m3u8")
+        if (mi < 0) null else {
+            val before = path.substring(0, mi)               // …/04086/,<a>,<b>,<c>,
+            val lastSlashBeforeList = before.indexOf(",").let { c ->
+                if (c < 0) -1 else before.lastIndexOf('/', c)
+            }
+            if (lastSlashBeforeList < 0) null else {
+                val prefix = before.substring(0, lastSlashBeforeList + 1)
+                val names = before.substring(lastSlashBeforeList + 1)
+                    .trim(',').split(',').filter { it.isNotBlank() }
+                val chosen = names.firstOrNull { it.contains("/fre", true) || it.endsWith("_fre") }
+                    ?: names.lastOrNull { it.endsWith("_h") }
+                    ?: names.lastOrNull()
+                if (chosen == null) null else "$prefix$chosen/index-v1-a1.m3u8$query"
+            }
+        }
+    } catch (_: Exception) { null }
+
     override suspend fun extract(link: String): Video {
         val linkHost = try {
             java.net.URL(link).let { "${it.protocol}://${it.host}" }
@@ -71,8 +210,38 @@ class LuluVdoExtractor : Extractor() {
         val fileCode = link.trimEnd('/').substringAfterLast("/").substringBefore(".")
         Log.d(TAG, "Extracting file_code=$fileCode from $linkHost")
 
+        // 2026-07-31 (user « avoir le serveur sans passer par le site, c'est le mieux ») :
+        //   on tente D'ABORD une extraction 100 % NATIVE (aucune WebView). Vérifié en direct :
+        //   la page LuluVdo contient un packed JS `eval(p,a,c,k,e,d)` qui, déballé, expose le
+        //   m3u8 EN CLAIR (pas de chiffrement ni de leurre, contrairement à Vidzy). L'URL est
+        //   au format KVS `…/,<id>_h,lang/fre/<id>_fre,.urlset/master.m3u8?t=…` — la même
+        //   famille qu'upbolt, où le MASTER est gaté (403) mais la playlist de VARIANTE passe
+        //   avec le seul token. Si cette voie échoue → repli sur la WebView (comportement
+        //   historique, rien n'est cassé).
+        // 2026-07-31 — VOIE NATIVE DÉSACTIVÉE (et le commentaire d'en-tête avait RAISON).
+        //   J'avais ajouté une extraction directe (page → packed JS → m3u8) en croyant le
+        //   commentaire « CDN blocks all non-WebView clients » périmé, parce qu'un test
+        //   NAVIGATEUR renvoyait 200. C'était une erreur de méthode : le jeton `t=` de ce CDN
+        //   est lié à la SESSION qui a chargé la page. Un client HTTP tiers (OkHttp/ExoPlayer,
+        //   avec ou sans Referer/Origin, avec ou sans vérification préalable) se prend un 403 —
+        //   constaté sur 4 essais consécutifs.
+        //   Pire : cette voie « réussissait » l'extraction, donc elle COURT-CIRCUITAIT le
+        //   mécanisme WebView + data-URI ci-dessous, qui lui fonctionne (la WebView lit le
+        //   manifeste dans SA session, puis on le sert à ExoPlayer en data-URI ; seuls les
+        //   segments .ts, non protégés, sont ensuite téléchargés normalement).
+        //   Le code de `tryNativeExtract` est conservé, inutilisé, au cas où ce CDN
+        //   s'assouplirait — mais il ne doit PAS être rebranché sans preuve hors navigateur.
+
+        lastWasDeadContent = false
         val result = resolveViaWebView(linkHost, fileCode)
-            ?: throw Exception("WebView extraction timed out or failed for LuluVdo")
+            ?: if (lastWasDeadContent) {
+                // Message contenant un marqueur reconnu par Extractor.classifyError → "dead-content".
+                //   L'extracteur n'est alors PAS pénalisé (c'est la vidéo qui a été supprimée),
+                //   donc LuluVdo reste disponible pour les liens suivants.
+                throw Exception("LuluVdo: video not found — file removed or expired")
+            } else {
+                throw Exception("WebView extraction timed out or failed for LuluVdo")
+            }
 
         val headers = mutableMapOf(
             "Referer" to "$linkHost/",
@@ -108,6 +277,8 @@ class LuluVdoExtractor : Extractor() {
             mimeType = MimeTypes.APPLICATION_M3U8
         } else {
             Log.w(TAG, "No M3U8 content captured, using URL: ${result.m3u8Url.take(80)}")
+            // 2026-07-31 : on NE touche PAS à l'URL rendue par la WebView (ma réécriture
+            //   master→variante est retirée d'ici) — comportement d'origine restauré.
             source = result.m3u8Url
             mimeType = if (source.contains(".m3u8")) MimeTypes.APPLICATION_M3U8 else null
         }
@@ -259,6 +430,13 @@ class LuluVdoExtractor : Extractor() {
                                     ) { result ->
                                         if (result?.contains("DEAD") == true && !resolved) {
                                             Log.w(TAG, "fast-fail: LuluVdo dead-content détecté → resume(null) immédiat")
+                                            // 2026-07-31 (user « fais en sorte que ça n'interfère pas ») :
+                                            //   on MÉMORISE la raison. Sans ça, extract() levait
+                                            //   « WebView extraction timed out… » → le mot « timed out »
+                                            //   classait l'échec en TIMEOUT → LuluVdo était marqué
+                                            //   « broken » 10 min après 3 fichiers morts, et n'était
+                                            //   PLUS essayé même sur des liens valides.
+                                            lastWasDeadContent = true
                                             resolved = true
                                             cleanup()
                                             if (continuation.isActive) continuation.resume(null)

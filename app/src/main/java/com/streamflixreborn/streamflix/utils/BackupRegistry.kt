@@ -6,8 +6,6 @@ import com.streamflixreborn.streamflix.providers.CloudstreamProvider
 import com.streamflixreborn.streamflix.providers.CoflixSourceProvider
 import com.streamflixreborn.streamflix.providers.CoflixWikiProvider
 import com.streamflixreborn.streamflix.providers.DessinAnimeNetProvider
-import com.streamflixreborn.streamflix.providers.CpasmieuxProvider
-import com.streamflixreborn.streamflix.providers.CpasmalProvider
 import com.streamflixreborn.streamflix.providers.MovieboxProvider
 import com.streamflixreborn.streamflix.providers.MovixProvider
 import com.streamflixreborn.streamflix.providers.NakiosProvider
@@ -65,10 +63,9 @@ object BackupRegistry {
         "Cloudstream" to "Cloudstream",
         "Movix" to "Movix",
         "Frembed" to "Frembed",
-        "Moviebox" to "Moviebox",
+        "Vidzy" to "Vidzy (par TMDB)",
         "Nakios" to "Nakios",
         "LoiFlix" to "LoiFlix",
-        "AfterDark" to "AfterDark",
         "Nabistream" to "Nabistream (dramas)",
         "TV Hub" to "TV Hub (France.tv/Arte gratuit)",
         "FileSearch" to "FileSearch (fichiers directs)",
@@ -134,6 +131,7 @@ object BackupRegistry {
         "Moviebox", "Cloudstream" -> "https://api.aoneroom.com"
         "Webflix" -> "https://webflix.lol"
         "Frembed" -> "https://frembed.icu"
+        "Vidzy" -> "https://vidzy.org"
         "Papadustream V2" -> "https://papadustream.rip"
         "DessinAnimeNet" -> "https://dessinanime.net"
         "AniCloud" -> "https://anicloud.to"
@@ -155,8 +153,9 @@ object BackupRegistry {
     //   que pour les films). Les providers ANIME (FrenchAnime, VoirAnime, FrenchManga, Franime,
     //   VoirDrama, DessinAnime) NE SONT PLUS retardés : pour un anime ce sont EUX les serveurs
     //   utiles → les retarder de 5s repoussait inutilement l'affichage.
+    // 2026-08-01 : Cpasmal et Cpasmieux retirés de ce set (sources supprimées, cf. plus bas).
     private val WEBVIEW_HEAVY_PROVIDERS = setOf(
-        "Cpasmal", "Cpasmieux", "aplouf", "FrenchStream", "Papadustream", "1Jour1Film"
+        "aplouf", "FrenchStream", "Papadustream", "1Jour1Film"
     )
     private const val CF_SECOND_WAVE_MS = 5000L
 
@@ -315,6 +314,43 @@ object BackupRegistry {
      *   - si le candidat porte une année ET qu'on connaît l'année cible → écart ≤ 1 sinon rejet
      *     (« Naruto 2002 » ≠ « Naruto 2023 »). Année absente → on ne rejette pas là-dessus.
      */
+    /**
+     * 2026-08-01 (retour testeur : « AnimeSama / Hajime no Ippo E3 — les liens VoirAnime ne
+     * proposent pas le bon épisode ») : rejette un candidat dont le SOUS-TITRE diffère.
+     *
+     * Beaucoup d'animes nomment chaque saison différemment. Mesuré sur ce cas :
+     *   demandé  : « Hajime no Ippo : The Fighting »   (saison 1)
+     *   VoirAnime: « Hajime no Ippo: Rising (VF) »     (saison 3 !)
+     * Les mots « hajime no ippo » suffisaient à valider le match, et on servait donc
+     * l'épisode 3 de *Rising* à la place de celui de *The Fighting* — Wiflix, DessinAnime et
+     * NetMirror, eux, retournaient bien « Larmes de joie ».
+     *
+     * Règle : si le titre demandé ET le candidat portent chacun un sous-titre (après « : »),
+     * ils doivent partager au moins un mot significatif. Si l'un des deux n'en a pas, on
+     * accepte (beaucoup de fiches sont nommées sans sous-titre).
+     */
+    fun sousTitreDe(s: String): Set<String> {
+        val apres = s.substringAfter(':', "").substringBefore('(')
+        return if (apres.isBlank()) emptySet() else sigWords(apres)
+    }
+
+    /**
+     * @param titrePrincipal le titre RÉELLEMENT demandé (surtout PAS la liste des titres
+     *   alternatifs TMDB). Mesuré sur Hajime no Ippo : `knownTitles` contient
+     *   « Hajime No Ippo: Rising » et « … New Challenger » — c'est-à-dire les noms des AUTRES
+     *   SAISONS. Comparer à cette liste revenait à valider « Rising » avec « Rising » : le
+     *   filtre s'auto-annulait. On ne compare donc qu'au titre principal.
+     */
+    fun sousTitreCompatible(candidateTitle: String, titrePrincipal: String): Boolean {
+        val cand = sousTitreDe(candidateTitle)
+        val attendu = sousTitreDe(titrePrincipal)
+        // Le titre demandé porte un sous-titre → le candidat doit partager un mot.
+        if (attendu.isNotEmpty()) return cand.isEmpty() || attendu.any { it in cand }
+        // Le titre demandé n'en a PAS (ex. « Hajime no Ippo ») → on refuse les candidats qui
+        //   en ajoutent un (« … : Rising », « … : New Challenger ») : ce sont d'autres saisons.
+        return cand.isEmpty()
+    }
+
     /** 2026-07-06 (user "recherche stricte TMDB — le matching backup ramène la mauvaise saison") :
      *  rejette un candidat backup dont le TITRE déclare une saison DIFFÉRENTE de celle demandée
      *  (ex : "Jujutsu Kaisen Saison 2" pour une requête S1). Si le candidat ne déclare aucune
@@ -849,33 +885,19 @@ object BackupRegistry {
             }
             result
         } }
-        // 2026-07-11 : Cpasmieux (site DataLife FR streaming, VF/VOSTFR). Matching STRICT
-        //   titre+année (film ↔ série discriminés par le « - s N e E » du titre de résultat).
-        //   Serveurs data-url délégués aux extracteurs existants (Uqload/Filemoon/Dood/Vidzy/
-        //   VOE/FSVID). Essaie tous les titres connus (alt TMDB inclus).
-        if (key.isMovie) launch { kotlinx.coroutines.delay(CF_SECOND_WAVE_MS); emit("Cpasmieux") {  // CF → 2ᵉ vague, FILMS uniquement
-            var result = emptyList<Video.Server>()
-            for (titleTry in knownTitles) {
-                if (titleTry.isBlank()) continue
-                result = if (key.isMovie) CpasmieuxProvider.getMovieSources(titleTry, key.year)
-                          else CpasmieuxProvider.getEpisodeSources(titleTry, key.year, key.season, key.episode)
-                if (result.isNotEmpty()) break
-            }
-            result
-        } }
-        // 2026-07-11 : Cpasmal (cpasmal.rip, DataLife FR). CF bloque le POST search en XHR (403)
-        //   mais laisse passer la NAVIGATION → httpSearch envoie des headers de navigation
-        //   (Sec-Fetch-Mode: navigate + pas de X-Requested-With). Serveurs via getxfield (XHR OK).
-        if (key.isMovie) launch { kotlinx.coroutines.delay(CF_SECOND_WAVE_MS); emit("Cpasmal") {  // CF → 2ᵉ vague, FILMS uniquement
-            var result = emptyList<Video.Server>()
-            for (titleTry in knownTitles) {
-                if (titleTry.isBlank()) continue
-                result = if (key.isMovie) CpasmalProvider.getMovieSources(titleTry, key.year)
-                          else CpasmalProvider.getEpisodeSources(titleTry, key.year, key.season, key.episode)
-                if (result.isNotEmpty()) break
-            }
-            result
-        } }
+        // 2026-08-01 (décision user : « ne perds pas de temps avec ces deux-là, vire-les
+        //   complètement ») : Cpasmieux ET Cpasmal RETIRÉS.
+        //   Constat vérifié en direct sur les deux fiches du même film :
+        //     • cpasmieux.life → le bloc lecteur affiche « Connectez-vous maintenant !
+        //       Ça ne prend que 30 secondes pour regarder Le film » → AUCUN lien à extraire
+        //       sans compte (d'où `extractServers → 0 serveurs`, qui était donc le
+        //       comportement CORRECT, pas un parsing cassé).
+        //     • cpasmal.my → mêmes symptômes (bloc `.fplayer`/`.video-box` vides, message de
+        //       connexion, zéro iframe), le lecteur étant chargé en AJAX réservé aux membres.
+        //       En prime il coûtait un « WebView Global Timeout » à CHAQUE film.
+        //   Les deux tournent sur le même CMS (DataLife) et sont passés derrière un mur
+        //   d'inscription : ils ne peuvent plus rien rapporter, seulement retarder la liste.
+        //   Pour les réactiver un jour, il faudrait gérer un compte (comme TF1Auth/M6Auth).
         // 2026-07-10 : ANCIEN emit("Moviebox") par TITRE (getMovieboxSourcesByTitle = h5 search
         //   token-gaté → renvoyait 0 + doublonnait le log) SUPPRIMÉ. Le SEUL Moviebox est le
         //   nouveau emit par tmdbId (plus bas, API mobile signée). "ce qui en reste à part le
@@ -991,13 +1013,37 @@ object BackupRegistry {
                 com.streamflixreborn.streamflix.providers.FrembedProvider.getServers(resolvedTmdbId, tmdbVt)
             } }
 
-            // ── AFTERDARK (par tmdbId) — API NDJSON afterdark06.mom (embeds multi-hébergeurs) ──
-            launch {
-                emit("AfterDark") {
-                    com.streamflixreborn.streamflix.providers.AfterDarkProvider
-                        .fetchAfterDarkBackupServers(resolvedTmdbId, videoType, key.season, key.episode)
-                }
-            }
+            // ── VIDZY (par tmdbId) — api.vidzy.org, VF/VOSTFR, sans clé ni compte ──────────
+            //   2026-07-31 (user) : indexé PAR TMDB → aucun matching de titre, donc AUCUN
+            //   mauvais film/série possible (contrairement aux providers qui cherchent par nom).
+            //   /serie/{tmdb}/{s}/{e} et /movie/{tmdb} → iframe vidzy.cc lue par l'extracteur Vidzy.
+            launch { emit("Vidzy") {
+                com.streamflixreborn.streamflix.providers.VidzyTmdbProvider.fetchVidzyBackupServers(
+                    tmdbId = resolvedTmdbId,
+                    isMovie = key.isMovie,
+                    season = key.season,
+                    episode = key.episode,
+                )
+            } }
+
+            // ── AFTERDARK — RETIRÉ le 2026-08-01 ────────────────────────────────────
+            // DÉCISION user : « dorénavant on garde que les serveurs VF HD, il nous faut
+            //   vraiment que ceux qui sont notifiés VF, pas de VOSTFR dans du VF » — après
+            //   trois constats successifs de VOSTFR joué depuis un serveur AfterDark.
+            // Pourquoi c'était IMPOSSIBLE à filtrer : cette source annonce « vf » sur
+            //   TOUTES ses entrées (vérifié sur son propre site : FMX, VIDARA, LULUSTREAM,
+            //   VIDSONIC, DDSTREAM, SAVE, VMOLY, FILELIONS… tous marqués VF, y compris ceux
+            //   qui jouent du VOSTFR ; mesuré aussi via son API : 14 sources sur 15 en
+            //   « vf » pour un même film). Son champ `language` ne vaut donc rien, et comme
+            //   ses liens sont des pages d'EMBED (et non des manifestes HLS), la sonde qui
+            //   lit les balises LANGUAGE ne peut pas trancher AVANT lecture.
+            //   → Aucun moyen de garantir « pas de VOSTFR » en le gardant actif.
+            // Au passage, il coûtait ~23 s sur CHAQUE film (tout le reste terminait à
+            //   11:19:07, lui rendait la main à 11:19:30) + une WebView avec bypass CF et
+            //   ad-gate, et sa page de gate a un UUID codé en dur.
+            // Ce qu'on perd : ses copies alternatives chez les mêmes hébergeurs (utiles
+            //   quand un fichier est supprimé ailleurs). `AfterDarkProvider` est CONSERVÉ —
+            //   restaurer ce bloc suffit à réactiver la source.
 
             // ── NABISTREAM (par tmdbId) — dramas asiatiques VOSTFR, HLS tanastream + sous-titres FR ──
             launch {
@@ -1031,28 +1077,21 @@ object BackupRegistry {
             //   Identité par id (findSubjectId matche titre+année STRICT côté aoneroom) →
             //   zéro faux positif. Flux réels (CDN hakunaymatata + cookies CloudFront),
             //   lus via MovieboxExtractor (court-circuit direct). Films + séries/épisodes.
-            if (key.isMovie) launch { emit("Moviebox") {  // 2026-07-12 : FILMS uniquement (mauvaise saison sur les séries — diag 07-14 : pas de dub FR sur séries testées)
-                val tmdbInt = resolvedTmdbId.toIntOrNull()
-                if (tmdbInt == null) emptyList() else {
-                    val tmdbVt: Video.Type = if (key.isMovie) {
-                        Video.Type.Movie(
-                            id = resolvedTmdbId, title = key.title,
-                            releaseDate = key.year?.toString() ?: "", poster = "", imdbId = null,
-                        )
-                    } else {
-                        Video.Type.Episode(
-                            id = resolvedTmdbId, number = key.episode, title = null, poster = null, overview = null,
-                            tvShow = Video.Type.Episode.TvShow(
-                                id = resolvedTmdbId, title = key.title, poster = null, banner = null,
-                                releaseDate = key.year?.toString(), imdbId = null,
-                            ),
-                            season = Video.Type.Episode.Season(number = key.season, title = null),
-                        )
-                    }
-                    com.streamflixreborn.streamflix.providers.MovieboxProvider
-                        .getMovieboxSourcesByTmdbId(tmdbInt, tmdbVt)
-                }
-            } }
+            // 2026-08-01 (DÉCISION user : « supprime-moi Moviebox ») : backup Moviebox RETIRÉ.
+            //   Établi en direct sur moviebox.ph, sur le film qui échouait (« Les Spécialistes ») :
+            //     • le film EST présent, avec même une fiche dédiée « [Version française] » ;
+            //     • MAIS la page affiche « Déverrouiller maintenant » et ne charge qu'une
+            //       BANDE-ANNONCE (mp4 de 112 s) — le film complet est derrière un mur premium ;
+            //     • conséquence côté API : `play-info` renvoie bien le champ `signCookie`, mais
+            //       VIDE (vérifié : `MVBX-STREAMKEYS … signCookieTrouve=false`). Or ce cookie
+            //       CloudFront est obligatoire → le CDN répond HTTP 428 (Precondition Required),
+            //       en 1080p COMME en 480p (les deux testés).
+            //   La qualité affichée (« Français 1080p ») venait du champ `resolutions` déclaré
+            //   par l'API, pas d'une sonde réelle : elle ne prouvait donc rien sur la lecture.
+            //   → Aucun flux exploitable sans compte payant : on ne l'interroge plus.
+            //   Le code de MovieboxProvider est CONSERVÉ (il sert encore aux backups croisés
+            //   `mbbackup__` de DessinAnime et `nm_mb__` de NetMirror) ; il suffit de restaurer
+            //   ce bloc pour réactiver la source si Moviebox rouvrait ses flux.
         }
 
         // ── ANICLOUD (anime FR, API REST, zéro CF) ──────────────────────────────
@@ -1372,13 +1411,79 @@ object BackupRegistry {
                             }
                         }
 
-                        var match = searchResults.firstOrNull { item ->
-                            if (!typeOk(item)) return@firstOrNull false
+                        // 2026-08-01 (user : « 1Jour1Film n'a qu'un serveur et il ne marche pas ») :
+                        //   on prenait le PREMIER candidat valide. Sur les titres HOMONYMES, c'est
+                        //   souvent le mauvais. Cas mesuré : « Les Spécialistes » (2026, In the Grey)
+                        //   → le site propose AUSSI « LES SPECIALISTES (1985) », film français
+                        //   homonyme. On tombait sur la fiche 1985 (durée 1 h 29 au lieu de 1 h 38),
+                        //   donc sur ses serveurs, au lieu de `in-the-grey-vf-2026` et de ses
+                        //   3 lecteurs VF fonctionnels.
+                        //   → Parmi les candidats VALIDES, on préfère désormais celui dont le titre
+                        //     porte l'ANNÉE du film demandé (ces sites l'affichent : « … (2026) »).
+                        //     À défaut d'année explicite, comportement inchangé (1ᵉʳ valide).
+                        val candidatsValides = searchResults.filter { item ->
+                            if (!typeOk(item)) return@filter false
                             val t = (item as? com.streamflixreborn.streamflix.models.Movie)?.title
                                 ?: (item as? com.streamflixreborn.streamflix.models.TvShow)?.title
-                                ?: return@firstOrNull false
+                                ?: return@filter false
                             workMatchesStrict(t, knownTitles, key.year, key.isMovie) &&
-                                seasonTitleOk(t, key.isMovie, key.season)
+                                seasonTitleOk(t, key.isMovie, key.season) &&
+                                sousTitreCompatible(t, key.title)
+                        }
+                        val anneeVoulue = key.year?.takeIf { it > 1800 }
+                        fun titreDe(item: Any): String =
+                            (item as? com.streamflixreborn.streamflix.models.Movie)?.title
+                                ?: (item as? com.streamflixreborn.streamflix.models.TvShow)?.title ?: ""
+                        fun idDe(item: Any): String =
+                            (item as? com.streamflixreborn.streamflix.models.Movie)?.id
+                                ?: (item as? com.streamflixreborn.streamflix.models.TvShow)?.id ?: ""
+                        // 2026-08-01 : l'année peut être dans le TITRE (« … (2026) ») ou dans
+                        //   l'IDENTIFIANT/slug (« les-specialistes-vf-1985 ») — mesuré : pour
+                        //   « Les Spécialistes », le titre renvoyé est nu (« LES SPECIALISTES »)
+                        //   et SEUL le slug porte l'année. On regarde donc les deux.
+                        fun anneeDe(item: Any): Int? =
+                            Regex("""\b(19|20)\d{2}\b""")
+                                .findAll(titreDe(item) + " " + idDe(item))
+                                .map { it.value.toInt() }
+                                .lastOrNull()
+                        // 2026-08-02 (Hajime no Ippo) : le SOUS-TITRE sert à PRÉFÉRER, pas à
+                        //   rejeter. Mesuré sur VoirAnime, qui renvoie 10 fiches pour
+                        //   « hajime no ippo » : Rising (S3), New Challenger (S2), Champion
+                        //   Road, Mashiba vs Kimura… ET « Hajime no Ippo (VF) » (S1, la bonne).
+                        //   Toutes passent workMatches — on prenait donc la 1ʳᵉ, c.-à-d. Rising.
+                        //   → Quand le titre demandé n'a PAS de sous-titre, on privilégie le
+                        //     candidat qui n'en a pas non plus ; s'il en a un, on privilégie
+                        //     celui qui partage un mot avec lui.
+                        //   Mais on ne REJETTE jamais sur ce seul critère : Wiflix ne propose que
+                        //   « Hajime no Ippo : The Fighting » (= la saison 1, bon contenu) et le
+                        //   rejeter faisait perdre un provider valide.
+                        fun scoreSousTitre(c: Any): Int =
+                            if (sousTitreCompatible(titreDe(c), key.title)) 0 else 1
+                        val triés = candidatsValides.sortedBy { scoreSousTitre(it) }
+                        var match = if (anneeVoulue != null) {
+                            val compatible = triés.firstOrNull { c ->
+                                val a = anneeDe(c); a == null || kotlin.math.abs(a - anneeVoulue) <= 1
+                            }
+                            val premier = candidatsValides.firstOrNull()
+                            if (compatible !== premier && premier != null) {
+                                Log.i(
+                                    TAG,
+                                    "DIAG [${p.name}] CANDIDAT PRÉFÉRÉ : '${titreDe(compatible ?: premier)}' " +
+                                        "au lieu de '${titreDe(premier)}' (année=${anneeDe(premier)} vs $anneeVoulue, sous-titre)",
+                                )
+                            }
+                            compatible
+                        } else {
+                            val choisi = triés.firstOrNull()
+                            val premier = candidatsValides.firstOrNull()
+                            if (choisi !== premier && premier != null && choisi != null) {
+                                Log.i(
+                                    TAG,
+                                    "DIAG [${p.name}] CANDIDAT PRÉFÉRÉ : '${titreDe(choisi)}' " +
+                                        "au lieu de '${titreDe(premier)}' (sous-titre plus proche de '${key.title}')",
+                                )
+                            }
+                            choisi
                         }
                         // 2026-07-08 : essayer TOUS les titres connus (alternatifs TMDB inclus)
                         if (match == null && knownTitles.size > 1) {
@@ -1393,8 +1498,17 @@ object BackupRegistry {
                                     val t = (item as? com.streamflixreborn.streamflix.models.Movie)?.title
                                         ?: (item as? com.streamflixreborn.streamflix.models.TvShow)?.title
                                         ?: return@firstOrNull false
-                                    workMatchesStrict(t, knownTitles, effectiveYear, key.isMovie) &&
-                                        seasonTitleOk(t, key.isMovie, key.season)
+                                    // 2026-08-01 : même garde-fou homonyme que sur la recherche
+                                    //   principale — l'année du slug/titre doit être compatible.
+                                    val a = anneeDe(item)
+                                    val anneeOk = anneeVoulue == null || a == null ||
+                                        kotlin.math.abs(a - anneeVoulue) <= 1
+                                    anneeOk &&
+                                        workMatchesStrict(t, knownTitles, effectiveYear, key.isMovie) &&
+                                        seasonTitleOk(t, key.isMovie, key.season) &&
+                                        // 2026-08-02 : rejet sur le sous-titre CONSERVÉ (faux
+                                        //   positifs type Wiflix sur une série qu'il n'a pas).
+                                        sousTitreCompatible(t, key.title)
                                 }
                                 if (match != null) break
                             }
@@ -1423,11 +1537,26 @@ object BackupRegistry {
                                     val kw = sigWords(kt); kw.isNotEmpty() && sigWords(trustTitle).any { it in kw }
                                 }
                                 val seasonOk = seasonTitleOk(trustTitle, key.isMovie, key.season)
-                                if (sharesWord && seasonOk) {
+                                // 2026-08-01 (testeur : « Hajime no Ippo E3, VoirAnime ne propose
+                                //   pas le bon épisode ») : ce fallback accepte un résultat unique
+                                //   dès qu'il partage UN mot. Or « Hajime no Ippo: Rising » partage
+                                //   « hajime » avec « Hajime no Ippo : The Fighting »… alors que
+                                //   Rising est la SAISON 3, une autre série. Le sous-titre doit
+                                //   donc être compatible ici AUSSI (il ne l'était que sur la
+                                //   recherche principale — d'où le trou).
+                                // 2026-08-02 (user : « Wiflix ne possède pas cet anime, à mon avis
+                                //   c'était un faux positif ») : le sous-titre RESTE un motif de
+                                //   rejet ici. Ce fallback accepte un résultat unique dès qu'il
+                                //   partage UN mot — c'est précisément ce qui laissait Wiflix
+                                //   revendiquer « Hajime no Ippo : The Fighting » alors qu'il n'a
+                                //   pas la série. Rejet confirmé UTILE : « pas de serveur plutôt
+                                //   qu'un mauvais serveur ».
+                                val stOk = sousTitreCompatible(trustTitle, key.title)
+                                if (sharesWord && seasonOk && stOk) {
                                     match = cand
                                     Log.i(TAG, "DIAG [${p.name}] FALLBACK confiance search unique: '$trustTitle' (1 résultat typé, mot commun OK)")
                                 } else {
-                                    Log.i(TAG, "DIAG [${p.name}] FALLBACK REFUSÉ '$trustTitle' (sharesWord=$sharesWord seasonOk=$seasonOk) → 0 serveur")
+                                    Log.i(TAG, "DIAG [${p.name}] FALLBACK REFUSÉ '$trustTitle' (sharesWord=$sharesWord seasonOk=$seasonOk sousTitreOk=$stOk) → 0 serveur")
                                 }
                             }
                         }

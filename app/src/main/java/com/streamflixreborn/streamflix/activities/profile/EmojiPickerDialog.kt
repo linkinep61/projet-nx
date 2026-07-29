@@ -56,7 +56,7 @@ object EmojiPickerDialog {
             }
         }
 
-        dialogRef = AlertDialog.Builder(context)
+        dialogRef = AlertDialog.Builder(context, com.streamflixreborn.streamflix.R.style.OnyxDialog)
             .setTitle("Choisir un avatar")
             .setView(view)
             .setNegativeButton("Annuler", null)
@@ -87,7 +87,7 @@ object EmojiPickerDialog {
             }
             setPadding(48, 24, 48, 0)
         }
-        AlertDialog.Builder(context)
+        AlertDialog.Builder(context, com.streamflixreborn.streamflix.R.style.OnyxDialog)
             .setTitle("URL d'avatar personnalisée")
             .setMessage("Colle un lien d'image (PNG, JPG, WEBP ou GIF animé)")
             .setView(input)
@@ -155,8 +155,9 @@ object EmojiPickerDialog {
 
         override fun onBindViewHolder(holder: VH, position: Int) {
             val emoji = emojis[position]
-            // 2026-05-20 : rendu Fluent 3D (image) avec fallback emoji systeme.
-            ProfileEmojiArt.bind(emoji, holder.image, holder.text)
+            // 2026-07-25 : dans le PICKER on charge depuis le CDN (bindPicker), sinon rien n'est en
+            //   cache local → la grille affichait les noms de dossier au lieu des images.
+            ProfileEmojiArt.bindPicker(emoji, holder.image, holder.text)
             holder.itemView.isSelected = emoji == currentEmoji
             holder.itemView.setOnClickListener { onClick(emoji) }
         }

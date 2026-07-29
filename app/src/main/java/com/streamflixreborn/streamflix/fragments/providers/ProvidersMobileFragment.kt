@@ -53,12 +53,30 @@ class ProvidersMobileFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        // 2026-06-09 : applique le fond d'écran personnalisé. Cache aussi le bg par défaut.
-        com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(view)
+        // 2026-07-25 (user « le home pas réglé / décalé ») : NE PLUS reposer le wallpaper sur le
+        //   fragment (il serait INSET par le padding des barres → décalé par-dessus le fond plein
+        //   écran de l'activité). On masque juste le fond noir par défaut quand un wallpaper existe
+        //   → le fond plein écran de l'ACTIVITÉ transparaît, UN SEUL calque aligné haut→bas.
         view.findViewById<android.widget.ImageView>(R.id.iv_providers_default_bg)
             ?.visibility = if (com.streamflixreborn.streamflix.utils.AppearanceManager
                 .hasWallpaper(requireContext())) android.view.View.GONE
             else android.view.View.VISIBLE
+
+        // 2026-07-25 (user « couleur du texte pour fond clair ») : applique la couleur choisie
+        //   (Apparence → Couleur du texte) aux onglets — l'indicateur reste rouge.
+        run {
+            val prim = com.streamflixreborn.streamflix.utils.UserPreferences.appTextColorInt
+            val sec = com.streamflixreborn.streamflix.utils.UserPreferences.appTextColorSecondaryInt
+            view.findViewById<com.google.android.material.tabs.TabLayout>(R.id.tl_provider_groups)
+                ?.setTabTextColors(sec, prim)
+            // Icônes de l'en-tête suivent la couleur du texte (le cœur reste rouge = accent favoris).
+            intArrayOf(
+                R.id.iv_settings, R.id.iv_profile_switch, R.id.iv_radio,
+                R.id.iv_wallpaper, R.id.iv_kofi, R.id.iv_downloads,
+            ).forEach { id ->
+                view.findViewById<android.widget.ImageView>(id)?.setColorFilter(prim)
+            }
+        }
 
         // 2026-05-12 : kill le mini-player IPTV qui pourrait encore tourner
         // en background. Quand l'user revient au home picker provider, il

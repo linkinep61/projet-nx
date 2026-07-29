@@ -43,6 +43,8 @@ class MovieTvFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        // 2026-07-30 : bouton retour TV -> menu precedent
+        binding.btnBackTv.setOnClickListener { androidx.navigation.Navigation.findNavController(it).navigateUp() }
 
         initializeMovie()
 

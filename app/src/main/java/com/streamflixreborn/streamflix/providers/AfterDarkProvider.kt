@@ -90,11 +90,34 @@ object AfterDarkProvider {
                     ?: it.provider?.takeIf { s -> s.isNotBlank() }
                     ?: host
                 val q = it.quality?.takeIf { s -> s.isNotBlank() && !s.equals("unknown", true) }
-                val lang = it.language?.takeIf { s -> s.isNotBlank() }?.uppercase() ?: "VF"
+                // 2026-08-01 (DÉCISION user : « pour AfterDark je t'interdis de prendre tout
+                //   ce qui est VO et VOSTFR ») : on n'émet QUE le français.
+                //   Contexte : l'utilisateur voyait des serveurs AfterDark annoncés VF qui
+                //   jouaient du VOSTFR. AfterDark (ex-Voirdrama) est orienté dramas sous-titrés
+                //   et remonte beaucoup de VOSTFR/VO ; ces sources polluaient la liste et,
+                //   via `orderByFrenchBuckets`, pouvaient passer devant de vrais VF.
+                //   → Tout item déclaré `vo` ou `vostfr` est ÉCARTÉ ici même. On garde `vf`
+                //     et `multi` (piste française incluse).
+                val langBrute = it.language?.takeIf { s -> s.isNotBlank() }?.uppercase()
+                if (langBrute == "VO" || langBrute == "VOSTFR" ||
+                    langBrute == "VOST" || langBrute == "SUBFRENCH"
+                ) continue
+                // 2026-08-01 bis (user : « AfterDark ramène encore du VOSTFR en étant marqué
+                //   VF », capture à l'appui sur « AfterDark · vidara hd [VF] ») : écarter les
+                //   items DÉCLARÉS vostfr ne suffit pas, car cette API étiquette aussi « vf »
+                //   des contenus qui n'en sont pas (mesuré : 14 sources sur 15 annoncées vf
+                //   pour un même film). Son affirmation « vf » ne vaut donc RIEN.
+                //   → On n'affiche plus « [VF] » sur sa seule parole : sans étiquette, le
+                //     serveur part dans le bucket NEUTRE (il ne double plus les vrais VF dans
+                //     `orderByFrenchBuckets`) et la sonde qualité peut renseigner la VRAIE
+                //     langue en lisant les balises LANGUAGE du manifeste HLS.
+                //   Les mentions non-VF restantes (ex. MULTI) sont conservées : elles ne
+                //   peuvent pas faire passer un contenu étranger pour du français.
+                val lang = langBrute?.takeIf { !it.equals("VF", ignoreCase = true) }
                 val name = buildString {
                     append("AfterDark · ").append(svc)
                     q?.let { append(" ").append(it) }
-                    append(" [").append(lang).append("]")
+                    lang?.let { append(" [").append(it).append("]") }
                 }
                 servers.add(Video.Server(id = "afterdark-${servers.size}", name = name, src = src))
             }

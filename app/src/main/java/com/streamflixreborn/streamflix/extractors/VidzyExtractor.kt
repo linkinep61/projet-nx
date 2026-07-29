@@ -20,12 +20,27 @@ class VidzyExtractor : Extractor() {
 
     override val name = "Vidzy"
     override val mainUrl = "https://vidzy.org"
-    override val aliasUrls = listOf("https://vidzy.live")
+    // 2026-07-31 : `vidzy.cc` (et `vidzy.to`) = domaines d'EMBED réellement servis par
+    //   l'iframe des pages vidzy.org/{movie,serie}/… (et par CoflixWiki). Sans ces alias,
+    //   AUCUN extracteur n'était sélectionné pour un lien vidzy.cc → serveur mort.
+    override val aliasUrls = listOf("https://vidzy.live", "https://vidzy.cc", "https://vidzy.to")
 
     // Match rotating subdomains like u14.vidzy.live
     override val rotatingDomain: List<Regex> = listOf(
         Regex("""u\d+\.vidzy\.(live|org)""")
     )
+
+    // 2026-08-01 (user : « depuis quand ça apparaît comme ça, Vidzy ? », capture de l'overlay
+    //   WebView) : NE PAS METTRE EN CACHE le résultat de cet extracteur.
+    //   Diagnostic : les logs ne montraient AUCUNE trace de VidzyExtractor, seulement
+    //   « [EXTRACTOR] -> Cache HIT for vidzy.cc/embed-… » — l'extraction n'était jamais
+    //   rejouée. Un ancien échec avait été mémorisé sous sa forme de REPLI
+    //   (`needsWebViewClick = true`), et ce repli était resservi pendant 10 min : l'overlay
+    //   WebView revenait donc systématiquement, même une fois le vrai flux redevenu
+    //   extractible. Le résultat de Vidzy est de toute façon éphémère (URL déchiffrée en JS,
+    //   liée à la session), donc le cache n'apportait rien.
+    //   Même famille de piège que LuluVdo et DoodStream, corrigés pareil aujourd'hui.
+    override val cacheTtlMs: Long = 0L
 
     companion object {
         private const val TAG = "VidzyExtractor"
@@ -241,7 +256,61 @@ class VidzyExtractor : Extractor() {
             Regex("""file\s*:\s*["'](https?://[^"']+)["']""")
         ).firstNotNullOfOrNull { regex ->
             regex.find(searchText)?.groupValues?.get(1)
-        } ?: throw Exception("No stream URL found in Vidzy response")
+        }
+            // 2026-07-31 (user « pas fonctionné », Silo S3E5) : Vidzy CHIFFRE désormais
+            //   l'URL du flux (base64 → binaire, déchiffré à l'exécution) et laisse un
+            //   LEURRE en clair dans le JS (« …fsvid.lol/troll/master.m3u8 ») pour piéger
+            //   les scrapers. Aucune regex statique ne peut plus marcher.
+            //   → repli : on exécute la page dans une WebView et on CAPTE la vraie requête
+            //     sortante (u<N>.vidzy.cc/hls2/…/master.m3u8?t=…), comme AnonMP4/Filemoon.
+            ?.takeIf { !it.contains("/troll/", true) && !it.contains("fsvid.lol", true) }
+            ?: run {
+                // 2026-07-31 (user, Silo S3E5) : Vidzy CHIFFRE l'URL du flux (base64 → binaire,
+                //   déchiffrée en JS) et laisse un LEURRE en clair (« …fsvid.lol/troll/… »).
+                //   → on capte la VRAIE URL en exécutant la page dans une WebView.
+                Log.i(TAG, "URL en clair absente/leurre → résolution WebView")
+                val resolved = com.streamflixreborn.streamflix.utils.WebViewStreamResolver.resolve(
+                    entryUrl = link,
+                    referer = link,
+                    timeoutMs = 20_000L,
+                    clickPlay = true,
+                    attach = true,
+                )
+                if (resolved != null) {
+                    // ⚠️ Les headers captés par WebResourceRequest ne contiennent PAS les
+                    //   Sec-Fetch-*. Sans eux, l'intercepteur NetworkClient pose
+                    //   « document/navigate/none » = signature d'une NAVIGATION de page →
+                    //   le CDN vidzy répond 403 (exactement ce que dit déjà le commentaire du
+                    //   chemin nominal plus bas). On rejoue donc avec les MÊMES headers que
+                    //   le chemin nominal (empty/cors/same-site), qui eux fonctionnent.
+                    val host = try { URL(link).host } catch (_: Exception) { "vidzy.cc" }
+                    val finalHeaders = HashMap(resolved.headers).apply {
+                        put("Referer", link)
+                        put("Origin", "https://$host")
+                        put("Accept", "*/*")
+                        put("Sec-Fetch-Dest", "empty")
+                        put("Sec-Fetch-Mode", "cors")
+                        put("Sec-Fetch-Site", "same-site")
+                    }
+                    Log.i(TAG, "WebView a capté le flux — rejeu avec Sec-Fetch empty/cors/same-site")
+                    return Video(
+                        source = resolved.url,
+                        type = if (resolved.url.contains(".m3u8")) MimeTypes.APPLICATION_M3U8 else null,
+                        subtitles = extractSubtitles(searchText),
+                        headers = finalHeaders,
+                        useServerSubtitleSetting = true,
+                    )
+                }
+                // 2026-08-01 (DÉCISION user : « je préfère pas avoir de repli plutôt que
+                //   d'avoir cette *** là ») : l'overlay WebView est SUPPRIMÉ.
+                //   Il servait de filet quand la capture du flux échouait, mais il impose une
+                //   page web par-dessus le lecteur — inutilisable au confort à la télécommande,
+                //   et l'utilisateur le refuse explicitement.
+                //   On échoue donc PROPREMENT : le serveur est marqué mort et le player
+                //   enchaîne tout seul sur le suivant, au lieu d'imposer cette interface.
+                Log.w(TAG, "WebView n'a rien capté → échec (pas d'overlay, on passe au serveur suivant)")
+                throw Exception("Vidzy: flux non extractible (overlay WebView désactivé)")
+            }
 
         Log.i(TAG, "Stream URL found: $streamUrl")
 

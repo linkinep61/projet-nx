@@ -114,6 +114,7 @@
         <item>Cloudstream</item>
         <item>Movix</item>
         <item>Frembed</item>
+        <item>Vidzy (par TMDB)</item>
         <item>Moviebox</item>
         <item>Nakios</item>
         <item>LoiFlix (zoolingz/movix.bet)</item>
@@ -140,6 +141,7 @@
         <item>Cloudstream</item>
         <item>Movix</item>
         <item>Frembed</item>
+        <item>Vidzy</item>
         <item>Moviebox</item>
         <item>Nakios</item>
         <item>LoiFlix</item>
@@ -197,5 +199,13 @@
     </string-array>
     <string-array name="subtitle_language_default">
         <item>fre</item>
+    </string-array>
+    <string-array name="text_color_names">
+        <item>Blanc</item>
+        <item>Noir</item>
+    </string-array>
+    <string-array name="text_color_values">
+        <item>white</item>
+        <item>black</item>
     </string-array>
 </resources>

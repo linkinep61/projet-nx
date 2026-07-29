@@ -665,7 +665,14 @@ class PlayerTvFragment : Fragment() {
             //   pas l'animation mais on RE-FOCUS le picker serveurs pour que le
             //   D-pad démarre dessus (sinon focus coincé sur la zone chargement).
             runCatching { binding.settings.showServers() }
-            runCatching { binding.settings.requestFocus() }
+            // 2026-08-01 (user « pendant le chargement des serveurs le focus fait
+            //   n'importe quoi, il n'est pas censé se balader ») : ne PAS reprendre le
+            //   focus si l'utilisateur l'a déjà posé dans le panneau — c'est lui qui
+            //   décide. Sans cette garde, chaque relance d'auto-play ramenait le focus
+            //   sur la racine du panneau pendant que l'utilisateur naviguait.
+            if (!binding.settings.hasFocus()) {
+                runCatching { binding.settings.requestFocus() }
+            }
             return
         }
 
@@ -689,7 +696,13 @@ class PlayerTvFragment : Fragment() {
             // ET peut cliquer un autre serveur direct via la télécommande.
             runCatching { binding.settings.showServers() }
             // TV : focus le picker pour que la nav D-pad démarre dessus.
-            runCatching { binding.settings.requestFocus() }
+            // 2026-08-01 : uniquement si l'utilisateur n'a pas déjà le focus dans le
+            //   panneau. Ce Runnable (250 ms) et le debounce de rafraîchissement des
+            //   serveurs (200 ms) tombaient quasi en même temps pendant le chargement :
+            //   les deux réclamaient le focus, chacun sur une cible différente.
+            if (!binding.settings.hasFocus()) {
+                runCatching { binding.settings.requestFocus() }
+            }
         }
         loadingShowRunnable = runnable
         loadingShowHandler.postDelayed(runnable, LOADING_OVERLAY_SHOW_DELAY_MS)
@@ -1570,12 +1583,15 @@ class PlayerTvFragment : Fragment() {
                     val prevLoadingId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isLoading }?.id
                     // Préserver la qualité déjà détectée par le probe
                     val prevQualities = PlayerSettingsView.Settings.Server.list.associate { it.id to it.quality }
+                    // 2026-07-31 : idem pour la LANGUE détectée dans le manifeste HLS.
+                    val prevLanguages = PlayerSettingsView.Settings.Server.list.associate { it.id to it.language }
                     PlayerSettingsView.Settings.Server.list.clear()
                     PlayerSettingsView.Settings.Server.addAllUnique(nonOla.map {
                         PlayerSettingsView.Settings.Server(id = it.id, name = it.name).apply {
                             isSelected = (it.id == prevSelectedId)
                             isLoading = (it.id == prevLoadingId)
                             quality = it.quality ?: prevQualities[it.id]
+                            language = it.language ?: prevLanguages[it.id]
                         }
                     })
                     if (::player.isInitialized) {
@@ -2220,6 +2236,19 @@ class PlayerTvFragment : Fragment() {
 
             updatePlayerHeader()
 
+            // 2026-07-30 : bouton RETOUR (haut-gauche) → QUITTE le lecteur. On NE passe PAS
+            //   par onBackPressed() car son cas « contrôles visibles » (toujours vrai quand on
+            //   clique le bouton) se contentait de masquer les contrôles → le lecteur ne
+            //   quittait jamais. Ici : on ferme d'abord un panneau/overlay ouvert, sinon on remonte.
+            binding.pvPlayer.controller.binding.btnExoBack.setOnClickListener {
+                when {
+                    channelListVisible -> hideChannelListPanel()
+                    webViewOverlay != null -> hideWebViewOverlay()
+                    binding.settings.isVisible -> binding.settings.onBackPressed()
+                    else -> findNavController().navigateUp()
+                }
+            }
+
             // 2026-07-11 : lecteur externe TV — si un par-défaut est déjà choisi, lance
             //   directement ; sinon affiche le dialog avec checkbox "Définir par défaut".
             binding.pvPlayer.controller.binding.btnExoExternalPlayer.setOnClickListener {
@@ -2259,6 +2288,21 @@ class PlayerTvFragment : Fragment() {
                         binding.pvPlayer.controller.binding.btnExoChannelList.id
                     else
                         binding.pvPlayer.controller.binding.btnExoServer.id
+                // 2026-07-30 : rendre le bouton RETOUR (haut-gauche) FACILE à atteindre.
+                //   Depuis le centre : HAUT → barre haute (saisons/serveur), puis GAUCHE → retour.
+                //   Avant, le nextFocusLeft de la barre pointait sur une vue GONE → retour
+                //   inatteignable. On câble explicitement le bouton le plus à gauche visible.
+                run {
+                    val back = binding.pvPlayer.controller.binding.btnExoBack
+                    val leftTop = if (isIptvCtx || isVodEpisodeCtx)
+                        binding.pvPlayer.controller.binding.btnExoChannelList
+                    else
+                        binding.pvPlayer.controller.binding.btnExoServer
+                    leftTop.nextFocusLeftId = back.id
+                    back.nextFocusRightId = leftTop.id
+                    back.nextFocusDownId = binding.pvPlayer.controller.binding.exoPlayPause.id
+                    back.nextFocusUpId = back.id
+                }
                 // 2026-06-23 (user "pour IPTV c'est l'icône TV, pour VOD c'est la liste épisodes") :
                 binding.pvPlayer.controller.binding.btnExoChannelList.setImageResource(
                     if (isIptvCtx) R.drawable.ic_live_tv else R.drawable.ic_channel_list
@@ -4860,8 +4904,13 @@ class PlayerTvFragment : Fragment() {
                 val sourceHost = try { java.net.URL(video.source).host.lowercase() } catch (_: Throwable) { "" }
                 // 2026-07-09 : hosts JA3/TLS-fingerprinted (Cronet requis) — ne PAS
                 //   recréer DefaultHttpDataSource pour ceux-ci, sinon Cronet est contourné.
+                // 2026-07-31 (user « pas fonctionné », Silo S3E5 → 403 sur u14.vidzy.cc) :
+                //   VIDZY ajouté. Depuis que l'extracteur Vidzy résout via WebView, il renvoie
+                //   un User-Agent → on recréait un DefaultHttpDataSource, ce qui CONTOURNAIT
+                //   Cronet (pourtant exigé par needsCronet("vidzy.")) → TLS Android → 403.
                 val isJa3Host = sourceHost.contains("uqload") || sourceHost.contains("abyssa")
                     || sourceHost.contains("abysscdn") || sourceHost.contains("citron-edge")
+                    || sourceHost.contains("upbolt") || sourceHost.contains("vidzy")
                 if (!videoUa.isNullOrBlank() && videoUa != NetworkClient.USER_AGENT && !isJa3Host) {
                     try {
                         val customFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
@@ -5897,6 +5946,40 @@ class PlayerTvFragment : Fragment() {
                     binding.settings.refreshServerList()
                     Log.e("PlayerTvFragment", "onPlayerError: ", error)
 
+                    // 2026-08-01 (user, Rpmvid 403 « après lecture ») : DIAGNOSTIC.
+                    //   Les logs disaient « Response code: 403 » sans jamais dire SUR QUELLE
+                    //   URL. Or ici le manifeste passe (la lecture démarre) et ce sont les
+                    //   SEGMENTS qui retombent en 403 quelques secondes plus tard — donc
+                    //   l'URI fautive n'est PAS celle du serveur. On journalise l'URI exacte
+                    //   refusée + les en-têtes réellement envoyés, pour comparer avec ce qui
+                    //   fonctionne dans le navigateur au lieu de continuer à supposer.
+                    runCatching {
+                        var c: Throwable? = error
+                        while (c != null) {
+                            val spec = when (c) {
+                                is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException -> c.dataSpec
+                                is androidx.media3.datasource.HttpDataSource.HttpDataSourceException -> c.dataSpec
+                                else -> null
+                            }
+                            if (spec != null) {
+                                val code = (c as? androidx.media3.datasource.HttpDataSource
+                                    .InvalidResponseCodeException)?.responseCode ?: -1
+                                Log.e(
+                                    "PlayerNetwork",
+                                    "DIAG-403 code=$code uri=${spec.uri} " +
+                                        "position=${spec.position} length=${spec.length} " +
+                                        "httpMethod=${spec.httpMethod} specHeaders=${spec.httpRequestHeaders.keys}",
+                                )
+                                Log.e(
+                                    "PlayerNetwork",
+                                    "DIAG-403 headers envoyés = ${currentVideo?.headers}",
+                                )
+                                break
+                            }
+                            c = c.cause
+                        }
+                    }
+
                     val cause = error.cause?.cause
                     val causeMsg = cause?.message ?: ""
                     val errorCauseMsg = error.cause?.message ?: ""
@@ -5950,15 +6033,51 @@ class PlayerTvFragment : Fragment() {
                             || causeMsg.contains("ERR_SSL")
                             || causeMsg.contains("ERR_NETWORK")
                             || cause is CronetDataSource.OpenException
-                    if (usingCronet && isCronetNetworkError) {
-                        Log.w("PlayerNetwork", "Cronet network error ($causeMsg), retrying with OkHttp fallback")
+                    // 2026-07-29 : distinguer un ÉCHEC DNS (host bloqué par le FAI) d'une
+                    //   autre erreur Cronet. DNS bloqué → DoT-OkHttp (résout via dot.sb) +
+                    //   marquer l'hôte pour que le re-pick de createHttpDataSourceFactory
+                    //   garde le DoT. Sinon → DefaultHttp comme avant.
+                    val cronetDnsBlocked = error.errorCodeName.contains("CONNECTION_FAILED")
+                        || errorCauseMsg.contains("UnknownHost", true)
+                        || causeMsg.contains("UnknownHost", true)
+                        || causeMsg.contains("ERR_NAME_NOT_RESOLVED", true)
+                    if (usingCronet && (isCronetNetworkError || cronetDnsBlocked)) {
+                        Log.w("PlayerNetwork", "Cronet network error ($causeMsg) dnsBlocked=$cronetDnsBlocked, retry")
                         val video = currentVideo ?: return
                         val server = currentServer ?: return
-                        httpDataSource = createDefaultHttpDataSourceFactory()
+                        if (cronetDnsBlocked) hostOf(video.source)?.let { dnsBlockedHosts.add(it) }
+                        httpDataSource = if (cronetDnsBlocked) createDoHOkHttpDataSourceFactory() else createDefaultHttpDataSourceFactory()
                         dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
                         initializePlayer(currentExtraBuffering, currentSoftwareDecoder, video.source)
                         displayVideo(video, server)
                         return
+                    }
+
+                    // 2026-07-29 : repli DNS générique pour les appareils SANS Cronet (box TV
+                    //   RockChip / AOSP sans Google Play Services → DefaultHttpDataSource =
+                    //   DNS SYSTÈME = FAI filtré). Si la lecture échoue sur une erreur de
+                    //   résolution et qu'on n'utilise pas déjà DoT-OkHttp, on rebascule dessus
+                    //   (résout via notre resolver DoT dot.sb). Cas Cronet traité au-dessus.
+                    if (!usingCronet && !usingDoH) {
+                        val isDnsBlock = errorCauseMsg.contains("Unable to resolve host", true)
+                            || causeMsg.contains("Unable to resolve host", true)
+                            || errorCauseMsg.contains("UnknownHost", true)
+                            || causeMsg.contains("UnknownHost", true)
+                            || causeMsg.contains("No address associated", true)
+                            || causeMsg.contains("ERR_NAME_NOT_RESOLVED", true)
+                        if (isDnsBlock) {
+                            val video = currentVideo
+                            val server = currentServer
+                            if (video != null && server != null) {
+                                Log.w("PlayerNetwork", "Erreur DNS non-Cronet ($causeMsg) → repli DoT-OkHttp (bypass DNS FAI)")
+                                hostOf(video.source)?.let { dnsBlockedHosts.add(it) }
+                                httpDataSource = createDoHOkHttpDataSourceFactory()
+                                dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
+                                initializePlayer(currentExtraBuffering, currentSoftwareDecoder, video.source)
+                                displayVideo(video, server)
+                                return
+                            }
+                        }
                     }
 
                     // Fallback 2: if connection timed out, ISP-blocked, or WebView fetch failed,
@@ -6638,8 +6757,13 @@ class PlayerTvFragment : Fragment() {
                         (20 * resources.displayMetrics.density).toInt(), (16 * resources.displayMetrics.density).toInt())
                     // Grossir le texte pour la TV (lisibilité à distance)
                     tv.textSize = 18f
-                    v.isFocusable = true
-                    v.isFocusableInTouchMode = true
+                    // 2026-07-29 (bug user TV : « on sélectionne un lecteur, rien ne se passe ») :
+                    //   des lignes FOCUSABLES cassent le clic D-pad de la ListView — le focus part sur
+                    //   la ligne au lieu de la sélection de liste, donc OK/center ne déclenche pas
+                    //   onItemClick. On laisse la LISTVIEW gérer focus + sélection (lignes NON
+                    //   focusables) → D-pad haut/bas navigue et center lance bien le lecteur.
+                    v.isFocusable = false
+                    v.isFocusableInTouchMode = false
                     return v
                 }
             }
@@ -6661,6 +6785,21 @@ class PlayerTvFragment : Fragment() {
                 dividerHeight = 0
                 isFocusable = true
                 isFocusableInTouchMode = true
+                // 2026-07-29 (bug user TV : « on voit quasiment pas le rectangle de surbrillance ») :
+                //   sélecteur de liste bien visible (surbrillance rouge accent) → on voit la ligne active.
+                val hl = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(android.graphics.Color.parseColor("#66E23B3B"))
+                    setStroke((2 * resources.displayMetrics.density).toInt(), android.graphics.Color.parseColor("#E23B3B"))
+                    cornerRadius = 8 * resources.displayMetrics.density
+                }
+                val transparent = android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT)
+                selector = android.graphics.drawable.StateListDrawable().apply {
+                    addState(intArrayOf(android.R.attr.state_selected), hl)
+                    addState(intArrayOf(android.R.attr.state_pressed), hl)
+                    addState(intArrayOf(android.R.attr.state_focused), hl)
+                    addState(intArrayOf(), transparent)
+                }
+                setDrawSelectorOnTop(false)
             }
             container.addView(cb)
             container.addView(listView)
@@ -6682,6 +6821,11 @@ class PlayerTvFragment : Fragment() {
                 }
                 dialog.dismiss()
                 launchExternalPlayer(directPackage = pkg)
+            }
+            // Focus initial sur la liste (télécommande) → la surbrillance s'affiche direct.
+            dialog.setOnShowListener {
+                listView.requestFocus()
+                if (listView.count > 0) listView.setSelection(0)
             }
             dialog.show()
         }
@@ -7919,8 +8063,21 @@ class PlayerTvFragment : Fragment() {
             // 2026-07-06 : vidzy.cc/vidzy.to = CDN Vidmoly alternatif, même
             // JA3 que vidzy.live. vmwesa.online = autre CDN Vidmoly (rotation).
             // Sans Cronet → UnknownHostException sur Chromecast (DNS système KO).
+            // 2026-07-30 : vmwesa.online RETIRÉ de Cronet — son cert TLS est rejeté par
+            //   les vieux appareils (box Amlogic → ERR_CERT_AUTHORITY_INVALID -202) et
+            //   Cronet impose son propre magasin de CA (impossible à assouplir). Routé
+            //   vers needsDoH (OkHttp trust-all) qui accepte le cert + résout via DoT.
+            // 2026-08-01 : le CDN `/v4/…/cf-master` (Rpmvid, Movix, Coflix Boston) avait été
+            //   ajouté ici en supposant un blocage JA3. C'ÉTAIT FAUX : le 403 persistait
+            //   SOUS Cronet. Vérifié en direct depuis l'origine du lecteur — master, variante
+            //   ET segments répondent 200/206, avec ou sans en-tête Range. Ce CDN ne filtre
+            //   donc pas le TLS mais l'ORIGINE (corrigé dans RpmvidExtractor, qui envoie
+            //   désormais `Origin` en plus du `Referer`).
+            //   Détection RETIRÉE : sous Cronet le manifeste passait mais les segments
+            //   repartaient en 403 (`HlsMediaChunk` → 403 après quelques secondes de
+            //   lecture), alors que DefaultHttpDataSource applique proprement
+            //   `setDefaultRequestProperties` à TOUTES les requêtes, segments compris.
             return url.contains("vidzy.", ignoreCase = true)
-                || url.contains("vmwesa.online", ignoreCase = true)
                 || url.contains("cfglobalcdn.com", ignoreCase = true)
                 || url.contains("anime-sama.", ignoreCase = true)
                 || url.contains("uqload.is", ignoreCase = true)
@@ -7936,6 +8093,9 @@ class PlayerTvFragment : Fragment() {
                 //   strict. DefaultHttpDataSource (TLS Java) → redirect Telegram (anti-hotlink).
                 //   Cronet (TLS Chrome) + Referer nakios.store → 206 OK.
                 || url.contains("citron-edge", ignoreCase = true)
+                // 2026-07-27 : upbolt CDN (edge0X.upbolt.to) = DataDome + JA3 → Cronet requis
+                //   (cookie + Referer + UA mobile passés via headers, sinon coupe).
+                || url.contains("upbolt", ignoreCase = true)
         }
 
         private fun needsDoH(url: String): Boolean {
@@ -7961,7 +8121,15 @@ class PlayerTvFragment : Fragment() {
                 || url.contains("cdndirector.dailymotion.com", ignoreCase = true)
                 || url.contains("dmcdn.net", ignoreCase = true)
                 || url.contains("anime-sama.", ignoreCase = true)
+                // 2026-07-30 : CDN Vidmoly (cert rejeté par vieux CA store) → OkHttp trust-all.
+                || url.contains("vmwesa", ignoreCase = true)
+                || url.contains("acek-cdn", ignoreCase = true)
         }
+
+        // 2026-07-29 : hôtes de flux DNS-bloqués par le FAI (UnknownHost sous Cronet) →
+        //   forcés en DoT-OkHttp par createHttpDataSourceFactory (résout via dot.sb).
+        private val dnsBlockedHosts = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+        private fun hostOf(url: String?): String? = runCatching { android.net.Uri.parse(url).host }.getOrNull()
 
         /**
          * Creates the right DataSource factory for [videoUrl].
@@ -7970,6 +8138,14 @@ class PlayerTvFragment : Fragment() {
          * - everything else → DefaultHttpDataSource (system DNS, most compatible)
          */
         private fun createHttpDataSourceFactory(videoUrl: String = ""): HttpDataSource.Factory {
+            // 2026-07-29 : hôte de flux dont le DNS FAI a échoué (UnknownHost) → DoT-OkHttp
+            //   d'office (résout via dot.sb), même si needsCronet=true. Sinon Cronet (DNS
+            //   système) reboucle en UnknownHost et le repli était écrasé par le re-pick.
+            val vHost = runCatching { android.net.Uri.parse(videoUrl).host }.getOrNull()
+            if (vHost != null && dnsBlockedHosts.contains(vHost)) {
+                Log.w("PlayerNetwork", "Forced DoT-OkHttp for DNS-blocked host $vHost")
+                return createDoHOkHttpDataSourceFactory()
+            }
             if (!needsCronet(videoUrl)) {
                 if (needsDoH(videoUrl)) {
                     Log.d("PlayerNetwork", "URL needs DoH for CNAME resolution ($videoUrl)")
@@ -7991,12 +8167,20 @@ class PlayerTvFragment : Fragment() {
                 usingDoH = false
                 // 2026-05-20 : parité mobile. Uqload + Hydrax exigent EXACTEMENT le
                 //   meme UA desktop Chrome 148 que le fetch d'extraction, sinon 403.
-                val cronetUa = if (videoUrl.contains("uqload", ignoreCase = true) ||
-                                   videoUrl.contains("abyssa", ignoreCase = true) ||
-                                   videoUrl.contains("abysscdn", ignoreCase = true)) {
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
-                } else {
-                    NetworkClient.USER_AGENT
+                val cronetUa = when {
+                    videoUrl.contains("uqload", ignoreCase = true) ||
+                    videoUrl.contains("abyssa", ignoreCase = true) ||
+                    videoUrl.contains("abysscdn", ignoreCase = true) ->
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+                    // upbolt : cookie DataDome émis pour le Chrome mobile de la WebView (Pixel 8/131)
+                    // 2026-07-31 (user, Silo S3E5 → 403) : VIDZY idem — depuis que l'extracteur
+                    //   résout via WebViewStreamResolver, le token `t=` de u<N>.vidzy.cc est émis
+                    //   POUR L'UA DE LA WEBVIEW (ANDROID_CHROME_UA = Pixel 8 / Chrome 131). Le
+                    //   rejouer avec NetworkClient.USER_AGENT → 403. On aligne donc l'UA Cronet.
+                    videoUrl.contains("upbolt", ignoreCase = true) ||
+                    videoUrl.contains("vidzy", ignoreCase = true) ->
+                        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                    else -> NetworkClient.USER_AGENT
                 }
                 CronetDataSource.Factory(cronetEngine as CronetEngine, cronetExecutor)
                     .setUserAgent(cronetUa)
@@ -8120,15 +8304,33 @@ class PlayerTvFragment : Fragment() {
                 }
             }
 
+            // 2026-07-30 : trust TLS permissif. Beaucoup de CDN pirates (Vidmoly
+            //   vmwesa.online / acek-cdn.com…) présentent une chaîne de certificat
+            //   qu'un VIEIL appareil (box Amlogic, Chromecast) ne reconnaît pas
+            //   (magasin de CA ancien → handshake ERR_CERT_AUTHORITY_INVALID / -202
+            //   côté Cronet, SSLHandshake côté OkHttp). Comme ce client ne sert QU'À
+            //   streamer ces CDN (aucune donnée sensible), on accepte tout cert → la
+            //   lecture marche indépendamment du magasin de CA de l'appareil.
+            val trustAllPlayback = arrayOf<javax.net.ssl.TrustManager>(
+                object : javax.net.ssl.X509TrustManager {
+                    override fun checkClientTrusted(c: Array<java.security.cert.X509Certificate>, a: String) {}
+                    override fun checkServerTrusted(c: Array<java.security.cert.X509Certificate>, a: String) {}
+                    override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+                }
+            )
+            val sslPlaybackCtx = javax.net.ssl.SSLContext.getInstance("TLS")
+                .apply { init(null, trustAllPlayback, java.security.SecureRandom()) }
             val dohClient = OkHttpClient.Builder()
                 .dns(jsonDohDns)
+                .sslSocketFactory(sslPlaybackCtx.socketFactory, trustAllPlayback[0] as javax.net.ssl.X509TrustManager)
+                .hostnameVerifier { _, _ -> true }
                 .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
                 .followRedirects(true)
                 .followSslRedirects(true)
                 .build()
-            Log.d("PlayerNetwork", "Using OkHttpDataSource with Multi-DoH (cfglobalcdn resolution)")
+            Log.d("PlayerNetwork", "Using OkHttpDataSource with Multi-DoH (cfglobalcdn resolution) + trust-all TLS")
             return OkHttpDataSource.Factory(dohClient)
                 .setUserAgent(NetworkClient.USER_AGENT)
         }
@@ -8538,7 +8740,10 @@ class PlayerTvFragment : Fragment() {
             val ctx = requireContext()
             // 2026-07-09 : seekplayer TV = même approche que le mobile (WebView dans la zone vidéo
             //   native derrière nos contrôles + miroir + 2 boutons), PAS le curseur générique.
-            val isSeekPlayerTv = embedUrl.contains("seekplayer") || embedUrl.contains("embedseek") || embedUrl.contains("swiftflow")
+            // 2026-07-29 : embed4me = même player vidstack que seekplayer → il suit le MÊME miroir TV
+            //   (contrôles natifs pilotent la WebView, curseur masqué), pas la souris.
+            val isSeekPlayerTv = embedUrl.contains("seekplayer") || embedUrl.contains("embedseek") ||
+                embedUrl.contains("swiftflow") || embedUrl.contains("embed4me")
             val nativeVideoOverlay = binding.pvPlayer.overlayFrameLayout
             val useNativeControls = isSeekPlayerTv && nativeVideoOverlay != null
             val rootView: ViewGroup = if (useNativeControls) nativeVideoOverlay!! else binding.root as ViewGroup
@@ -8595,6 +8800,9 @@ class PlayerTvFragment : Fragment() {
             // 2026-07-16 : SwiftFlow (swiftflow.lol) — player Movix Plyr à ad-gate. Même famille
             //   de traitement que seekplayer, avec son propre JS d'auto-clic sur l'ad-gate.
             val isSwiftFlow = embedUrl.contains("swiftflow")
+            // 2026-07-29 : embed4me (lpayer, vidstack) joué en overlay WebView manuel — bloque
+            //   pop-unders/redirections pub + window.open (idem lecteur mobile).
+            val isEmbed4me = embedUrl.contains("embed4me")
             val seekAdHosts = listOf(
                 "boredomcuff", "spleniidizzy", "gappedpeatmen", "popads", "popcash", "propeller",
                 "onclick", "adsterra", "hilltopads", "monetag", "clickadu", "doubleclick",
@@ -8650,6 +8858,11 @@ class PlayerTvFragment : Fragment() {
                         if (!nh.contains("swiftflow.")) { Log.d("PlayerTV", "SwiftFlow NAV BLOCKED: $nh"); return true }
                         return false
                     }
+                    if (isEmbed4me) {
+                        val nh = request?.url?.host ?: return false
+                        if (!nh.contains("embed4me")) { Log.d("PlayerTV", "embed4me NAV BLOCKED: $nh"); return true }
+                        return false
+                    }
                     if (!isAbyssEmbed) return false
                     val navHost = request?.url?.host ?: return false
                     val allowed = abyssNavAllow.any { navHost == it || navHost.endsWith(".$it") }
@@ -8661,11 +8874,12 @@ class PlayerTvFragment : Fragment() {
                 ): WebResourceResponse? {
                     val url = request?.url?.toString() ?: return null
 
-                    // SeekStreaming / SwiftFlow : coupe les pubs
-                    if (isSeekPlayer || isSwiftFlow) {
+                    // SeekStreaming / SwiftFlow / embed4me : coupe les pubs
+                    if (isSeekPlayer || isSwiftFlow || isEmbed4me) {
                         val sh = request?.url?.host ?: ""
-                        if (seekAdHosts.any { sh.contains(it, ignoreCase = true) }) {
-                            Log.d("PlayerTV", "Seek/SwiftFlow AD BLOCKED: $sh")
+                        if (seekAdHosts.any { sh.contains(it, ignoreCase = true) } ||
+                            AD_BLOCK_PATTERNS.any { sh.contains(it, ignoreCase = true) }) {
+                            Log.d("PlayerTV", "Seek/SwiftFlow/embed4me AD BLOCKED: $sh")
                             return WebResourceResponse("text/plain", "UTF-8",
                                 java.io.ByteArrayInputStream("".toByteArray()))
                         }
@@ -8827,6 +9041,23 @@ class PlayerTvFragment : Fragment() {
                             view?.postDelayed({ if (webViewOverlay != null) dispatchClickToWebView(tgt, ovw.width / 2f, ovw.height / 2f) }, 4000L)
                             view?.postDelayed({ if (webViewOverlay != null) dispatchClickToWebView(tgt, ovw.width / 2f, ovw.height / 2f) }, 7000L)
                         }
+                    }
+
+                    // ── embed4me (vidstack) : plein écran + anti-pop + on LANCE via un clic RÉEL au
+                    //   centre (comme abyss/seek) → pas besoin de bouger une souris sur la TV. ──
+                    if (isEmbed4me) {
+                        val e4Js = "(function(){try{" +
+                            "window.open=function(){return {closed:false,focus:function(){},blur:function(){},close:function(){},location:{href:''}};};" +
+                            "try{document.onclick=null;if(document.body)document.body.onclick=null;}catch(e){}" +
+                            "var as=document.querySelectorAll('a[target=\"_blank\"],a[onclick]');for(var i=0;i<as.length;i++){try{as[i].removeAttribute('href');as[i].onclick=null;}catch(e){}}" +
+                            "try{var css=document.getElementById('__e4css')||document.createElement('style');css.id='__e4css';css.textContent='html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important;}media-player,media-provider,video{width:100vw!important;height:100vh!important;position:fixed!important;top:0!important;left:0!important;object-fit:contain!important;z-index:2147483000!important;background:#000!important;}';(document.head||document.documentElement).appendChild(css);}catch(e){}" +
+                            "try{var mp=document.querySelector('media-player');if(mp&&mp.play){mp.play();}var v=document.querySelector('video');if(v){v.play();}}catch(e){}" +
+                            "}catch(e){}})();"
+                        view?.evaluateJavascript(e4Js, null)
+                        view?.postDelayed({ if (webViewOverlay != null) overlayWebView?.evaluateJavascript(e4Js, null) }, 1500L)
+                        view?.postDelayed({ if (webViewOverlay != null) overlayWebView?.evaluateJavascript(e4Js, null) }, 4000L)
+                        // Pas de clic-souris : embed4me est isSeekPlayerTv → contrôles natifs (miroir)
+                        //   pilotent la lecture, curseur masqué.
                     }
 
                     // ── SeekStreaming : plein écran + autoplay + auto-clic « Reprendre » + on lance

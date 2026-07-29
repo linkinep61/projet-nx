@@ -381,11 +381,46 @@ object AoneroomClient {
             //   couvre tout le dossier (wildcard `/*`), donc UN cookie autorise manifeste + segments.
             //   On l'indexe par le PRÉFIXE de dossier de l'URL pour le retrouver au moment de lire
             //   (les segments ont une URL différente du manifeste mais le même dossier).
-            val signCookie = s.optString("signCookie").takeIf { it.isNotBlank() }
+            // 2026-08-01 (user, « Moviebox français ne joue pas ») : la lecture échoue en
+            //   HTTP 428 avec `cookie=false cacheSize=0` → le `signCookie` n'est JAMAIS
+            //   trouvé, donc aucun cookie CloudFront n'accompagne la requête. Soit l'API a
+            //   renommé le champ, soit il est ailleurs dans la réponse. On journalise les
+            //   CLÉS du stream (noms seuls, aucune valeur : ce sont des jetons signés) pour
+            //   savoir quoi lire, et on tolère les variantes de nommage les plus probables.
+            val signCookie = sequenceOf("signCookie", "signCookies", "sign_cookie", "cookie", "cookies")
+                .map { k -> s.optString(k) }
+                .firstOrNull { it.isNotBlank() }
+            if (i == 0) {
+                android.util.Log.i(
+                    "AoneroomClient",
+                    "MVBX-STREAMKEYS " + s.keys().asSequence().joinToString(",") +
+                        " | signCookieTrouve=${signCookie != null}",
+                )
+            }
             if (signCookie != null) cookieCache[cookieKey(u)] = normalizeCookie(signCookie)
             val res = s.optString("resolutions").ifEmpty { s.optString("resolution") }.toIntOrNull() ?: 0
             res to u
         }.sortedByDescending { it.first }
+    }
+
+    /**
+     * 2026-08-01 (user : « le serveur Moviebox français ne joue pas ») : true si l'URL peut
+     * réellement être lue.
+     *
+     * Le CDN `hakunaymatata` (CloudFront) EXIGE un cookie signé, fourni par `play-info` dans
+     * `signCookie`. Vérifié en direct : le champ est bien présent dans la réponse mais sa
+     * VALEUR est vide → aucun cookie en cache → le CDN répond **HTTP 428 (Precondition
+     * Required)** et la lecture échoue, en 1080p comme en 480p.
+     *
+     * Plutôt que de retirer Moviebox en dur (le cookie peut revenir), on écarte seulement les
+     * flux CloudFront pour lesquels aucun cookie n'est disponible : dès que l'API en renvoie
+     * un de nouveau, les serveurs réapparaissent automatiquement. Les URLs d'autres hôtes
+     * (mp4 directs) ne sont pas concernées.
+     */
+    fun isPlayable(url: String): Boolean {
+        if (!url.contains("hakunaymatata", ignoreCase = true)) return true
+        return cookieCache[cookieKey(url)] != null ||
+            cookieCache.entries.any { url.startsWith(it.key) }
     }
 
     /** Cookies CloudFront signés, indexés par préfixe de dossier de l'URL du stream. */
@@ -415,6 +450,16 @@ object AoneroomClient {
                 streamUrl.startsWith(it.key)
             }?.value)?.let { hdrs["Cookie"] = it }
         }
+        // 2026-08-01 (user : « le serveur Moviebox français ne joue pas ») : la lecture
+        //   échoue en HTTP 428 (Precondition Required). Or le Cookie CloudFront signé est
+        //   OBLIGATOIRE pour ce CDN, et il n'est mis en cache que si le play-info a renvoyé
+        //   un `signCookie`. Ce log dit lequel des 3 en-têtes manque au moment de lire —
+        //   sans exposer les valeurs (tokens).
+        android.util.Log.i(
+            "AoneroomClient",
+            "MVBX-PLAYHDR cookie=${hdrs.containsKey("Cookie")} bearer=${hdrs.containsKey("Authorization")} " +
+                "cacheSize=${cookieCache.size} cle='${streamUrl?.let { cookieKey(it) }?.takeLast(40)}'",
+        )
         return hdrs
     }
 }

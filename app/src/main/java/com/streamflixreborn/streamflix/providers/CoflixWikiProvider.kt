@@ -37,6 +37,10 @@ object CoflixWikiProvider {
 
     private const val TAG = "CoflixWikiProvider"
     private const val BASE_URL = "https://coflix.wiki"
+
+    /** 2026-07-31 : nb max de liens conservés pour un MÊME hébergeur (URLs différentes).
+     *  >1 permet de garder un second lien quand le premier pointe sur un fichier supprimé. */
+    private const val MAX_SERVERS_PER_DOMAIN = 3
     private const val USER_AGENT =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
@@ -151,16 +155,28 @@ object CoflixWikiProvider {
         val matches = searchAllMatches(title, isMovie = true, strictTitle = title, targetYear = year)
         if (matches.isEmpty()) return emptyList()
 
-        // Fetch serveurs de CHAQUE fiche candidate, merge avec dedup par domaine
-        val seenDomains = mutableSetOf<String>()
+        // 2026-07-31 (user : « on n'était pas censé fusionner les URL qui étaient différentes ? ») :
+        //   AVANT on dédupait par DOMAINE → deux liens DIFFÉRENTS du même hébergeur (ex. deux
+        //   fichiers Lulustream, l'un supprimé et l'autre valide) étaient fusionnés et un seul
+        //   survivait. Si le survivant était le fichier mort, la source valide était PERDUE.
+        //   MAINTENANT : dédup par URL EXACTE (on ne jette que les vrais doublons), avec un
+        //   plafond par hébergeur pour ne pas noyer la liste (les suivants sont numérotés #2, #3).
+        val seenUrls = mutableSetOf<String>()
+        val perDomain = mutableMapOf<String, Int>()
         val merged = mutableListOf<Video.Server>()
         for (match in matches) {
             val servers = fetchServersForEpisode(match.episodeId, match.version)
             for (server in servers) {
-                val domain = try { java.net.URL(server.src).host.lowercase() } catch (_: Throwable) { server.src }
-                if (seenDomains.add(domain)) {
-                    merged.add(server)
-                }
+                val url = server.src.trim()
+                if (url.isBlank() || !seenUrls.add(url)) continue   // vrai doublon → ignoré
+                val domain = try { java.net.URL(url).host.lowercase() } catch (_: Throwable) { url }
+                val n = (perDomain[domain] ?: 0) + 1
+                perDomain[domain] = n
+                if (n > MAX_SERVERS_PER_DOMAIN) continue
+                merged.add(
+                    if (n > 1) server.copy(id = "${server.id}#$n", name = "${server.name} #$n")
+                    else server
+                )
             }
         }
         Log.i(TAG, "getMovieSources '$title' → ${matches.size} fiches, ${merged.size} serveurs mergés")
@@ -193,10 +209,27 @@ object CoflixWikiProvider {
                     val slugLower = fallback.slug.lowercase()
                     val slugSaisonMatch = Regex("saison-(\\d+)").find(slugLower)
                     val slugSeason = slugSaisonMatch?.groupValues?.get(1)?.toIntOrNull()
-                    if (slugSeason != null && slugSeason != seasonNumber) {
-                        Log.i(TAG, "Fallback REJETÉ: slug '${fallback.slug}' = saison $slugSeason ≠ demandé S$seasonNumber")
-                        null
-                    } else fallback
+                    when {
+                        // Slug qui déclare une AUTRE saison → rejet (cas « FROM S2 » → fiche S4).
+                        slugSeason != null && slugSeason != seasonNumber -> {
+                            Log.i(TAG, "Fallback REJETÉ: slug '${fallback.slug}' = saison $slugSeason ≠ demandé S$seasonNumber")
+                            null
+                        }
+                        // 2026-07-31 (user « CoflixWiki fait encore des mauvais matchs », Silo S3) :
+                        //   slug SANS « saison-N » alors qu'on demande une saison > 1 → c'est la fiche
+                        //   GÉNÉRIQUE (= saison 1) → on jouerait la S1 à la place de la SN. REJET.
+                        //   (S1 : beaucoup de fiches légitimes n'écrivent pas « saison-1 » → tolérées.)
+                        slugSeason == null && seasonNumber > 1 -> {
+                            Log.i(TAG, "Fallback REJETÉ: slug '${fallback.slug}' ne déclare aucune saison mais on demande S$seasonNumber")
+                            null
+                        }
+                        // Le TITRE de la fiche doit aussi être cohérent avec la saison demandée.
+                        !BackupRegistry.seasonTitleOk(fallback.title, false, seasonNumber) -> {
+                            Log.i(TAG, "Fallback REJETÉ: titre '${fallback.title}' ≠ saison demandée S$seasonNumber")
+                            null
+                        }
+                        else -> fallback
+                    }
                 } else null
             }
             ?: return emptyList()
@@ -207,9 +240,20 @@ object CoflixWikiProvider {
         //   = en fait l'E1 VOSTFR). On lit désormais la VRAIE map épisode→id via l'AJAX
         //   /ajax/episode/list-episode?movieId={id} (le movieId vit dans la fiche saison,
         //   seul `data-id` de la page brute). Fallback = ancien calcul si l'AJAX échoue.
-        val targetEpId = runCatching { resolveRealEpisodeId(match.slug, match.episodeId, episodeNumber) }.getOrNull()
-            ?: (match.episodeId + (episodeNumber - 1)).also {
-                Log.i(TAG, "resolveRealEpisodeId ÉCHEC → fallback calcul epId=$it")
+        // 2026-07-31 (user « mauvais matchs », Silo S3E5) : le fallback « firstEpId + (N-1) »
+        //   fabriquait un id ARBITRAIRE quand la map échouait/l'épisode manquait — cet id
+        //   appartient presque toujours à un AUTRE contenu → mauvais film/série joué.
+        //   Règle user : « PAS DE SERVEUR plutôt que le mauvais film ».
+        //   → E1 : firstEpId est fiable PAR DÉFINITION (id du 1er épisode donné par le suggest).
+        //   → E>1 : UNIQUEMENT via la map réelle du site, sinon on n'émet RIEN.
+        val realEpId = runCatching { resolveRealEpisodeId(match.slug, match.episodeId, episodeNumber) }.getOrNull()
+        val targetEpId = realEpId
+            ?: if (episodeNumber == 1) {
+                match.episodeId.also { Log.i(TAG, "map indisponible → E1 = firstEpId=$it (sûr)") }
+            } else {
+                Log.i(TAG, "ABANDON S${seasonNumber}E$episodeNumber : épisode absent de la map du site " +
+                    "(slug=${match.slug}) — aucun serveur émis plutôt qu'un mauvais contenu")
+                return emptyList()
             }
         Log.i(TAG, "Épisode S${seasonNumber}E${episodeNumber} → epId=$targetEpId (firstEp=${match.episodeId})")
 
@@ -296,10 +340,21 @@ object CoflixWikiProvider {
                 BackupRegistry.titleMatches(titleForMatch, c.title) &&
                 (targetYear == null || c.year == null || kotlin.math.abs(c.year - targetYear) <= yearTolerance)
         }
-        Log.i(TAG, "searchAllMatches '$cleanTitle' → ${candidates.size} candidats, ${pool.size} typés, ${matched.size} titleMatches('$titleForMatch') année=$targetYear")
+
+        // 2026-07-29 (issue #123 « Joker » — mauvais film joué) : plusieurs films partagent souvent
+        //   le MÊME titre (Joker 2019, Joker 2015, …). Le « 2015 » se normalise aussi en « joker » →
+        //   il passe titleMatches. Comme getMovieSources FUSIONNE les serveurs de toutes les fiches
+        //   matchées, sans année on mélangeait 2 films différents et on jouait le mauvais.
+        //   → On désambiguïse par ANNÉE : si ONYX ne fournit pas d'année, on prend celle de la 1re
+        //   fiche (ordre du site = la plus canonique/populaire) et on écarte les fiches d'une AUTRE
+        //   année. Les fiches sans année sont gardées (souvent = versions VF/VOSTFR de la même fiche).
+        val filmYear = targetYear ?: matched.mapNotNull { it.year }.firstOrNull()
+        val disambiguated = if (filmYear == null) matched
+            else matched.filter { it.year == null || kotlin.math.abs(it.year - filmYear) <= yearTolerance }
+        Log.i(TAG, "searchAllMatches '$cleanTitle' → ${candidates.size} candidats, ${pool.size} typés, ${matched.size} titleMatches('$titleForMatch'), ${disambiguated.size} après désambiguïsation année=$filmYear")
 
         // Trier : VF d'abord, puis VOSTFR
-        return matched.sortedByDescending { it.version == "VF" }
+        return disambiguated.sortedByDescending { it.version == "VF" }
     }
 
     /**
@@ -344,6 +399,9 @@ object CoflixWikiProvider {
                     c.type != "movie" &&
                     BackupRegistry.titleMatches(c.title, showTitle) &&
                     BackupRegistry.titleMatches(showTitle, c.title) &&
+                    // 2026-07-31 : le TITRE doit aussi déclarer la bonne saison (double sécurité
+                    //   slug+titre) — « saison-3 » peut apparaître dans un slug pour une autre raison.
+                    BackupRegistry.seasonTitleOk(c.title, false, season) &&
                     (targetYear == null || c.year == null || kotlin.math.abs(c.year - targetYear) <= 5)
             }
             Log.i(TAG, "searchBestSeason('$showTitle', S$season) keyword='$keyword' → ${candidates.size} candidats, ${seasonMatch.size} slug+titleMatch année=$targetYear")
@@ -452,9 +510,16 @@ object CoflixWikiProvider {
             }
         }
 
-        // Dedup par DOMAINE hôte : l'API renvoie souvent 3 miroirs Kokoflix (URLs différentes,
-        // même hébergeur) → on ne garde que le 1er par domaine pour éviter les doublons visuels.
-        val seenDomains = mutableSetOf<String>()
+        // 2026-07-31 (user : « la fusion doit toucher tous les extracteurs, on doit perdre pas
+        //   mal de serveurs à cause de ça ») — IL AVAIT RAISON.
+        //   AVANT : dédup par DOMAINE → sur 3 miroirs d'un même hébergeur (URLs DIFFÉRENTES,
+        //   donc fichiers différents), 2 étaient jetés. Si le seul gardé pointait sur un fichier
+        //   supprimé, la source était perdue alors qu'un lien valide existait (constaté :
+        //   Lulustream mort dans ONYX mais fonctionnel sur Wiflix).
+        //   MAINTENANT : dédup par URL EXACTE (seuls les vrais doublons sautent) + plafond par
+        //   hébergeur pour ne pas noyer la liste ; les suivants sont numérotés #2, #3.
+        val seenUrls = mutableSetOf<String>()
+        val perDomainCount = mutableMapOf<String, Int>()
         val result = mutableListOf<Video.Server>()
         for (i in 0 until servers.length()) {
             val s = servers.optJSONObject(i) ?: continue
@@ -462,7 +527,10 @@ object CoflixWikiProvider {
             val serverVersion = s.optString("version").ifBlank { langLabel }
 
             val hosterDomain = serverLink.substringAfter("://").substringBefore("/").lowercase()
-            if (!seenDomains.add(hosterDomain)) continue  // même hébergeur déjà vu → skip
+            if (!seenUrls.add(serverLink.trim())) continue          // vrai doublon (URL identique)
+            val dupIndex = (perDomainCount[hosterDomain] ?: 0) + 1
+            perDomainCount[hosterDomain] = dupIndex
+            if (dupIndex > MAX_SERVERS_PER_DOMAIN) continue         // garde-fou anti-liste à rallonge
 
             val hosterName = when {
                 hosterDomain.contains("vidzy") -> "Vidzy"
@@ -477,10 +545,12 @@ object CoflixWikiProvider {
                     .replaceFirstChar { it.uppercase() }
             }
 
+            // Miroirs supplémentaires du même hébergeur → numérotés pour rester distinguables.
+            val displayName = if (dupIndex > 1) "$hosterName #$dupIndex" else hosterName
             result.add(
                 Video.Server(
                     id = "coflixwiki_${episodeId}_$i",
-                    name = "CoflixWiki · $hosterName ($serverVersion)",
+                    name = "CoflixWiki · $displayName ($serverVersion)",
                     src = serverLink,
                 ),
             )

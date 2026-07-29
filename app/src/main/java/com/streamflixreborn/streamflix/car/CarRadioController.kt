@@ -29,6 +29,14 @@ object CarRadioController {
     var currentName: String? = null
         private set
 
+    /**
+     * 2026-07-25 (user « changer de station favorite / de titre via les commandes au volant ») :
+     * appelé à chaque changement de piste (⏭/⏮ physiques du volant OU fin de piste) → le service
+     * média met à jour la carte « en cours » (titre + pochette/logo) et la cible du bouton ★.
+     */
+    @Volatile
+    var onTrackChanged: ((index: Int, uri: String?, title: String?) -> Unit)? = null
+
     private fun ensurePlayer(context: Context): ExoPlayer =
         player ?: ExoPlayer.Builder(context.applicationContext)
             .setMediaSourceFactory(DefaultMediaSourceFactory(youtubeAwareDataSource(context)))
@@ -45,6 +53,13 @@ object CarRadioController {
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     val t = mediaItem?.mediaMetadata?.title?.toString()
                     if (!t.isNullOrBlank()) currentName = t
+                    runCatching {
+                        onTrackChanged?.invoke(
+                            player?.currentMediaItemIndex ?: -1,
+                            mediaItem?.localConfiguration?.uri?.toString(),
+                            t,
+                        )
+                    }
                 }
             })
             player = it
@@ -104,6 +119,14 @@ object CarRadioController {
         p.playWhenReady = true
         currentName = tracks[start].second
         Log.i(TAG, "playPlaylist: ${tracks.size} pistes start=$start shuffle=$shuffle")
+    }
+
+    /** Lecture aléatoire (bouton 🔀 de l'écran de lecture Android Auto). */
+    val isShuffle: Boolean get() = runCatching { player?.shuffleModeEnabled == true }.getOrDefault(false)
+
+    fun setShuffle(enabled: Boolean) {
+        runCatching { player?.shuffleModeEnabled = enabled }
+        Log.i(TAG, "aléatoire = $enabled")
     }
 
     fun pause() { runCatching { player?.playWhenReady = false } }

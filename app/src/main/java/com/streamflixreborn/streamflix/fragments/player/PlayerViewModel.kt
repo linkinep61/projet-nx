@@ -283,6 +283,18 @@ class PlayerViewModel(
                     //   sans clic de l'user. On les résout uniquement au clic manuel.
                     if (server.src.contains("papadustream", ignoreCase = true) ||
                         server.src.contains("#xf=")) return@launch
+                    // 2026-07-27 : Filemoon exige une vérif humaine q8y5z (5-6 clics, confirmé user) →
+                    //   impossible à passer en pré-extraction background (15s), et surtout CHAQUE
+                    //   re-passe du pré-extract (serveurs progressifs) ANNULE le fallback WebView en
+                    //   cours au clic de l'user (« StandaloneCoroutine was cancelled ») → Filemoon ne
+                    //   se lançait JAMAIS. On ne le pré-extrait plus : résolution au clic manuel seul.
+                    run {
+                        val s = server.src.lowercase()
+                        if (s.contains("filemoon") || s.contains("lukefirst") || s.contains("weneverbeenfree") ||
+                            s.contains("moflix-stream") || s.contains("bysebuho") || s.contains("bysezoxexe") ||
+                            s.contains("bysejikuar") || s.contains("bysekoze") || s.contains("bysesayeveum") ||
+                            s.contains("bysejikuar") || s.contains("gn1r5n")) return@launch
+                    }
                     try {
                         val startMs = System.currentTimeMillis()
                         // 2026-05-09 v2 : timeout 10s → 15s. Donne le temps aux
@@ -298,6 +310,21 @@ class PlayerViewModel(
                         }
                         val durationMs = System.currentTimeMillis() - startMs
                         if (result != null) {
+                            // 2026-08-01 (user : « Movix Rpmvid VF est en réalité en VOSTFR ») :
+                            //   quand l'hébergeur donne le NOM DE FICHIER réel, il prime sur
+                            //   l'étiquette du site. Vérifié : Movix annonçait « (VF) » un lien
+                            //   dont le fichier s'appelle « In.the.Grey.2026.VOSTFR.1080p… ».
+                            //   Le nom de fichier ne ment pas — on corrige l'affichage.
+                            langueDepuisNomFichier(result.fileName)?.let { vraie ->
+                                if (!server.name.contains(vraie, ignoreCase = true)) {
+                                    Log.w(
+                                        "ServDiag",
+                                        "LANGUE CORRIGÉE '${server.name}' → $vraie " +
+                                            "(fichier: ${result.fileName})",
+                                    )
+                                }
+                                server.language = vraie
+                            }
                             // 2026-06-30 : probe qualité IMMÉDIATEMENT après extraction,
                             // AVANT le HEAD check qui peut invalider le cache via
                             // invalidateCache(). Comme ça, même si HEAD échoue, le
@@ -309,7 +336,9 @@ class PlayerViewModel(
                                         result.type?.contains("mpegurl", ignoreCase = true) == true ||
                                         result.type?.contains("hls", ignoreCase = true) == true
                                     val q = if (isHls) {
-                                        probeHlsQuality(extractedUrl, result.headers)
+                                        // 2026-07-31 : `server` transmis → la langue réelle est
+                                        //   lue dans le même manifeste (aucune requête en plus).
+                                        probeHlsQuality(extractedUrl, result.headers, server)
                                     } else null
                                     val finalQ = q ?: inferQualityFromText(extractedUrl) ?: inferQualityFromText(server.name)
                                     if (finalQ != null) {
@@ -464,7 +493,7 @@ class PlayerViewModel(
             video.type?.contains("mpegurl", ignoreCase = true) == true ||
             video.type?.contains("hls", ignoreCase = true) == true
 
-        val quality = if (isHls) probeHlsQuality(videoUrl, video.headers) else null
+        val quality = if (isHls) probeHlsQuality(videoUrl, video.headers, server) else null
         val assigned = if (quality != null) {
             server.quality = quality
             Log.w("QualityProbe", "$tag: ${server.name} → $quality")
@@ -531,9 +560,52 @@ class PlayerViewModel(
      * retourne la meilleure résolution trouvée sous forme de label.
      * Fallback : estimation via BANDWIDTH si pas de RESOLUTION.
      */
+    /**
+     * 2026-07-31 : langue(s) déclarée(s) par le manifeste HLS.
+     *   Les pistes audio y sont annoncées via `#EXT-X-MEDIA:TYPE=AUDIO,…,LANGUAGE="fre"`.
+     *   - une seule piste NON française  → « VOSTFR » (audio étranger, sous-titres FR)
+     *   - français présent avec d'autres → « VF+VO » (multi-langue)
+     *   - français seul                  → « VF »
+     *   Retourne null si le manifeste ne déclare aucune langue (on n'invente pas).
+     */
+    /**
+     * 2026-08-01 : langue déduite du NOM DE FICHIER réel du flux.
+     * Les sites étiquettent souvent « VF » sans vérifier ; le nom du fichier, lui, porte la
+     * mention exacte de la release (VOSTFR, TRUEFRENCH, MULTI…). Quand il est disponible, il
+     * fait autorité sur ce qu'annonce le site.
+     * Retourne null si le nom ne dit rien — on n'invente jamais une langue.
+     */
+    private fun langueDepuisNomFichier(nom: String?): String? {
+        val n = nom?.lowercase() ?: return null
+        // ordre important : VOSTFR/SUBFRENCH avant VF (« vostfr » contient… « vo »).
+        return when {
+            Regex("""vostfr|subfrench|sub[ ._-]?fr|vost\b""").containsMatchIn(n) -> "VOSTFR"
+            Regex("""multi""").containsMatchIn(n) -> "MULTI"
+            Regex("""truefrench|\bvff\b|\bvfq\b|\bvfi\b|\bvf2\b|\bvf\b|french""").containsMatchIn(n) -> "VF"
+            Regex("""\bvo\b|\bvostv?o\b""").containsMatchIn(n) -> "VO"
+            else -> null
+        }
+    }
+
+    private fun hlsLanguageLabel(manifest: String): String? {
+        val langs = Regex("""LANGUAGE\s*=\s*"([^"]+)"""", RegexOption.IGNORE_CASE)
+            .findAll(manifest)
+            .map { it.groupValues[1].lowercase().take(3) }
+            .toSet()
+        if (langs.isEmpty()) return null
+        val hasFr = langs.any { it.startsWith("fr") }
+        val hasOther = langs.any { !it.startsWith("fr") }
+        return when {
+            hasFr && hasOther -> "VF+VO"
+            hasFr -> "VF"
+            else -> "VOSTFR"
+        }
+    }
+
     private suspend fun probeHlsQuality(
         url: String,
         headers: Map<String, String>?,
+        server: Video.Server? = null,
     ): String? = withContext(Dispatchers.IO) {
         try {
             val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
@@ -566,6 +638,16 @@ class PlayerViewModel(
                 conn.inputStream.bufferedReader().use { it.readText() }
             } finally {
                 conn.disconnect()
+            }
+
+            // 2026-07-31 : le manifeste est DÉJÀ en mémoire → on y lit la langue au passage,
+            //   sans aucune requête supplémentaire (idée du user : « au check qualité,
+            //   normalement tu es capable de voir la langue »).
+            if (server != null && server.language == null) {
+                hlsLanguageLabel(body)?.let {
+                    server.language = it
+                    Log.w("QualityProbe", "langue: ${server.name} → $it")
+                }
             }
 
             // 1) Parse RESOLUTION=<W>x<H> — prendre la hauteur max
@@ -979,8 +1061,22 @@ class PlayerViewModel(
                                 n.contains(Regex("""\b(raw|eng|english|jap|vosa)\b""")) -> "vo"
                             else -> "vf"
                         }
+                        // 2026-08-02 (user : « FRAnime n'a émis qu'un seul serveur sur les 4 »,
+                        //   Hajime no Ippo E3) : cette normalisation coupe AVANT `#` ET `?`
+                        //   pour ignorer les jetons de signature. Mais chez FRAnime, c'est
+                        //   EXACTEMENT là que se trouve l'identité du lecteur :
+                        //     …/anime/fighting-spirit?s=1&ep=3&lang=vo&l=0#lecteur=filemoon
+                        //     …/anime/fighting-spirit?s=1&ep=3&lang=vo&l=3#lecteur=vidmoly
+                        //   Tronquées, les 4 entrées donnaient la MÊME clé → 3 jetées comme
+                        //   doublons (Filemoon et Vidmoly disparaissaient de la liste).
+                        //   → On conserve le discriminant `#lecteur=…` quand il existe : il
+                        //     nomme le lecteur et ne contient jamais de jeton, donc il ne peut
+                        //     pas ré-introduire de faux doublons.
+                        val lecteurTag = Regex("""#lecteur=([a-z0-9_\-]+)""", RegexOption.IGNORE_CASE)
+                            .find(srv.src)?.groupValues?.get(1)?.lowercase()
                         val normUrl = srv.src.substringBefore("#").trim()
-                            .substringBefore("?").trimEnd('/').lowercase()
+                            .substringBefore("?").trimEnd('/').lowercase() +
+                            (lecteurTag?.let { "#$it" } ?: "")
                         seenSrcKeys.add("$lang|$normUrl")
                     }
                 if (fresh.isEmpty()) {
@@ -1450,12 +1546,17 @@ class PlayerViewModel(
     // référence du Job d'extraction courant, pour permettre au fragment de
     // l'annuler quand l'user tap le loading overlay.
     private var getVideoJob: kotlinx.coroutines.Job? = null
+    /** Id du serveur dont l'extraction est en cours — évite de relancer (donc d'annuler) une
+     *  extraction déjà EN VOL pour le MÊME serveur. Filemoon, dont la vérif WebView q8y5z dure
+     *  ~20s, se faisait tuer par un 2e getVideo du même serveur (déclenché par la liste progressive). */
+    private var getVideoServerId: String? = null
 
     /** Annule l'extraction vidéo en cours (si une). Appelé par le fragment
      *  quand l'user tap l'overlay de chargement pour changer de serveur. */
     fun cancelGetVideo() {
         getVideoJob?.cancel()
         getVideoJob = null
+        getVideoServerId = null
     }
 
     /** 2026-07-12 (user « une fois qu'un film joue, il faut arrêter des choses qui chargent en
@@ -1474,11 +1575,21 @@ class PlayerViewModel(
     }
 
     fun getVideo(server: Video.Server): kotlinx.coroutines.Job {
+        // 2026-07-27 : si une extraction est DÉJÀ en cours pour CE serveur, on la RÉUTILISE au lieu
+        //   de l'annuler+relancer. Sinon Filemoon (vérif WebView ~20s) se faisait tuer par un 2e
+        //   getVideo du même serveur (déclenché par la liste progressive) → « cancelled » en boucle,
+        //   la vérif q8y5z (5-6 clics) n'avait jamais le temps d'aboutir.
+        val existing = getVideoJob
+        if (existing != null && existing.isActive && getVideoServerId == server.id) {
+            Log.d("PlayerViewModel", "getVideo déjà en cours pour ${server.name} — réutilisation (pas de cancel/restart)")
+            return existing
+        }
         // 2026-05-18 : anti-cascade. Cancel previous getVideo AND any pre-extract
         //   job running en background, sinon plusieurs extractions WebView en
         //   parallèle saturent CPU + mémoire et le player tourne dans le vide.
         getVideoJob?.cancel()
         preExtractJob?.cancel()
+        getVideoServerId = server.id
         // 2026-06-30 (user "la qualité serveur ne se déclenche plus") : NE PLUS
         //   annuler qualityProbeJob ici. L'auto-play du meilleur serveur appelle
         //   getVideo juste APRÈS getServers → ça tuait le probe qualité (attente

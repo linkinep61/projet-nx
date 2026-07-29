@@ -56,6 +56,8 @@ class TvShowTvFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        // 2026-07-30 : bouton retour TV -> menu precedent
+        binding.btnBackTv.setOnClickListener { androidx.navigation.Navigation.findNavController(it).navigateUp() }
 
         // Guard : si aucun provider n'est set (ex: restauration après crash), retour arrière
         if (com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider == null) {

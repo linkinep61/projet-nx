@@ -63,6 +63,9 @@ object WebViewStreamResolver {
         "popads", "popunder", "popcash", "propellerads",
         "exoclick", "juicyads", "trafficjunky",
         "googletagmanager", "google-analytics",
+        // 2026-07-29 : Yandex Metrica (mc.yandex.com/.ru) — spamme des requêtes de tracking dont
+        //   l'URL contient le titre « ….mp4 » en paramètre → faux positif de capture. Bloqué.
+        "yandex.com", "yandex.ru", "mc.yandex",
         "sharethis.com", "platform-api.sharethis.com",
         "translate-pa.googleapis.com", "translate.google.com",
         "facebook.net", "fbcdn.net",
@@ -89,11 +92,33 @@ object WebViewStreamResolver {
         userAgent: String = ANDROID_CHROME_UA,
         timeoutMs: Long = 12_000L,
         extraHeaders: Map<String, String> = emptyMap(),
+        // 2026-07-29 : certains lecteurs (embed4me) servent un MP4 progressif, pas du HLS. On peut
+        //   alors demander à capter aussi les .mp4. Désactivé par défaut (les .mp4 pub sont fréquents).
+        captureMp4: Boolean = false,
+        // 2026-07-29 : certains lecteurs (embed4me) attendent un CLIC sur le bouton play avant de
+        //   charger le flux. Si true, on injecte un auto-clic play + video.play() en boucle.
+        clickPlay: Boolean = false,
+        // 2026-07-29 : une WebView NON attachée à la fenêtre ne fait pas tourner le player (JS/
+        //   timers/rendu) → le flux n'est jamais demandé. Si true, on l'attache (invisible, alpha
+        //   0.02) le temps de la résolution — comme les extracteurs Filemoon/upbolt.
+        attach: Boolean = false,
     ): Resolved? = withContext(Dispatchers.Main) {
         withTimeoutOrNull(timeoutMs) {
-            doResolve(entryUrl, referer, userAgent, extraHeaders)
+            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach)
         }
     }
+
+    private val CLICK_PLAY_JS = """
+        (function(){try{
+            // vidstack (embed4me) : élément <media-player> avec sa propre méthode play().
+            var mp=document.querySelector('media-player'); if(mp){ try{mp.muted=true;}catch(e){} try{mp.play();}catch(e){} }
+            var v=document.querySelector('video'); if(v){ try{v.muted=true;}catch(e){} try{v.play();}catch(e){} }
+            var sels=['media-play-button','.vds-play-button','[data-media-button]','.play','.vjs-big-play-button',
+                '.jw-icon-display','#player_play','.plyr__control--overlaid','button[aria-label*="play" i]','.play-button',
+                '#play','.playbtn','.vp-center','.jw-display-icon-container','.bmpui-ui-playbacktogglebutton','.start','#start'];
+            for(var i=0;i<sels.length;i++){ var b=document.querySelector(sels[i]); if(b){ try{b.click();}catch(e){} } }
+        }catch(e){}})();
+    """.trimIndent()
 
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun doResolve(
@@ -101,16 +126,13 @@ object WebViewStreamResolver {
         referer: String?,
         userAgent: String,
         extraHeaders: Map<String, String>,
+        captureMp4: Boolean,
+        clickPlay: Boolean,
+        attach: Boolean,
     ): Resolved? = suspendCancellableCoroutine { cont ->
         val context = StreamFlixApp.instance.applicationContext
         var resolved = false
-
-        fun resolve(value: Resolved?) {
-            if (!resolved && cont.isActive) {
-                resolved = true
-                cont.resumeWith(Result.success(value))
-            }
-        }
+        var attachedParent: android.view.ViewGroup? = null
 
         val webView = WebView(context).apply {
             settings.javaScriptEnabled = true
@@ -119,9 +141,42 @@ object WebViewStreamResolver {
             settings.userAgentString = userAgent
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             settings.mediaPlaybackRequiresUserGesture = false
-            // Désactive le rendering visible pour économiser la GPU
-            settings.loadsImagesAutomatically = false
-            settings.blockNetworkImage = true
+            // Rendering désactivé SEULEMENT si non attachée (mode headless passif). Attachée, on
+            //   laisse le rendu normal pour que le player s'initialise.
+            settings.loadsImagesAutomatically = attach
+            settings.blockNetworkImage = !attach
+        }
+
+        // Nettoyage : détache + détruit la WebView (sur succès ET timeout).
+        fun cleanup() {
+            Handler(Looper.getMainLooper()).post {
+                try { attachedParent?.removeView(webView); attachedParent = null } catch (_: Throwable) {}
+                try { webView.stopLoading() } catch (_: Throwable) {}
+                try { webView.destroy() } catch (_: Throwable) {}
+            }
+        }
+        fun resolve(value: Resolved?) {
+            if (!resolved && cont.isActive) {
+                resolved = true
+                cont.resumeWith(Result.success(value))
+            }
+            cleanup()
+        }
+
+        // Attache la WebView à la fenêtre (invisible) pour que le player tourne réellement.
+        if (attach) {
+            try {
+                val act = StreamFlixApp.currentActivity
+                val root = act?.findViewById<android.view.ViewGroup>(android.R.id.content)
+                if (root != null) {
+                    webView.alpha = 0.02f
+                    // Taille RÉELLE (pas 1×1) : sinon des players modernes (vidstack) ne s'initialisent
+                    //   pas → jamais de requête flux. Invisible via alpha, retirée à la résolution.
+                    val d = context.resources.displayMetrics.density
+                    root.addView(webView, android.view.ViewGroup.LayoutParams((320 * d).toInt(), (180 * d).toInt()))
+                    attachedParent = root
+                }
+            } catch (_: Throwable) {}
         }
 
         webView.webChromeClient = object : WebChromeClient() {
@@ -150,8 +205,11 @@ object WebViewStreamResolver {
                 val reqUrl = request?.url?.toString() ?: return null
                 val host = request.url?.host ?: ""
 
-                // 1. Cible trouvée ?
-                val isStream = STREAM_EXTS.any { reqUrl.contains(it, ignoreCase = true) }
+                // 1. Cible trouvée ? On matche l'extension dans le CHEMIN uniquement (pas les query
+                //   params) — sinon un tracker avec « ?t=titre.mp4 » déclenche un faux positif.
+                val exts = if (captureMp4) STREAM_EXTS + ".mp4" else STREAM_EXTS
+                val reqPath = try { android.net.Uri.parse(reqUrl).path ?: "" } catch (_: Throwable) { reqUrl.substringBefore("?") }
+                val isStream = exts.any { reqPath.contains(it, ignoreCase = true) }
                 if (isStream && !POISONED_TARGET_HOSTS.any { host.contains(it) }) {
                     android.util.Log.d(
                         "WebViewStreamResolver",
@@ -188,6 +246,28 @@ object WebViewStreamResolver {
                 return null
             }
 
+            override fun onPageFinished(view: WebView?, url: String?) {
+                if (resolved || view == null || !clickPlay) return
+                // Auto-clic play en boucle (le lecteur charge le flux seulement après un clic).
+                var n = 0
+                fun kick() {
+                    if (resolved || n++ > 12) return
+                    view.evaluateJavascript(CLICK_PLAY_JS, null)
+                    view.postDelayed({ kick() }, 1500L)
+                }
+                view.postDelayed({ kick() }, 800L)
+            }
+
+            override fun onReceivedSslError(
+                view: WebView?,
+                handler: android.webkit.SslErrorHandler?,
+                error: android.net.http.SslError?,
+            ) {
+                // 2026-07-29 : beaucoup de CDN pirates ont des certs douteux (ERR_CERT_AUTHORITY_INVALID)
+                //   → sinon le player ne charge pas et le flux n'est jamais demandé. On accepte.
+                try { handler?.proceed() } catch (_: Throwable) { handler?.cancel() }
+            }
+
             override fun onReceivedError(
                 view: WebView?,
                 request: WebResourceRequest?,
@@ -205,13 +285,9 @@ object WebViewStreamResolver {
 
         cont.invokeOnCancellation {
             resolved = true
-            // 2026-05-11 (cf YflixExtractor) : les méthodes WebView DOIVENT
-            // tourner sur le main thread. Le handler de cancellation peut
-            // fire depuis DefaultExecutor → wrap obligatoire sinon crash fatal.
-            Handler(Looper.getMainLooper()).post {
-                try { webView.stopLoading() } catch (_: Throwable) {}
-                try { webView.destroy() } catch (_: Throwable) {}
-            }
+            // 2026-05-11 (cf YflixExtractor) : les méthodes WebView DOIVENT tourner sur le main
+            //   thread (cleanup poste déjà sur le main + détache la vue attachée).
+            cleanup()
         }
     }
 }

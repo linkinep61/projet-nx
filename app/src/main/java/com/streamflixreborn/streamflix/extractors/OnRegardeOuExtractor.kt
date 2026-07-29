@@ -59,9 +59,12 @@ class OnRegardeOuExtractor : Extractor() {
      *  Extractor.extract (VOE pour chuckle-tube, WebView OnRegardeOu pour les autres). */
     // 2026-07-02 (user "ce genre de serveur qui affiche une page à cliquer, on les désactive
     //   maintenant qu'on a plein de backups") : mirrors OnRegardeOu à NE PAS exposer.
-    //   uns.bio = player vidstack (PoW "Verifying human…" à cliquer, ne joue pas headless) ;
-    //   upbolt = DataDome + ad-gate (coupe en cours de lecture). bysezoxexe/VOE gardés.
-    private val DISABLED_MIRROR_HOSTS = listOf("uns.bio", "upbolt")
+    //   uns.bio = player vidstack (PoW "Verifying human…" à cliquer, ne joue pas headless).
+    //   2026-07-27 : upbolt RÉ-ACTIVÉ — le m3u8 (edge0X.upbolt.to) se lit sans en-tête (vérifié) ;
+    //   le seul blocage était le tap « play » qui redirigeait vers /dl (téléchargement) et tuait le
+    //   player. On bloque désormais cette navigation /dl (cf shouldOverrideUrlLoading) → le player
+    //   reste et le m3u8 part en XHR → intercepté. On garde juste la lecture NATIVE du m3u8 capté.
+    private val DISABLED_MIRROR_HOSTS = listOf("uns.bio")
 
     suspend fun expand(link: String, referer: String = mainUrl, suffix: String = ""): List<Video.Server> {
         if (link.isBlank()) return emptyList()
@@ -138,7 +141,41 @@ class OnRegardeOuExtractor : Extractor() {
         } catch (_: Exception) { null }
     }
 
+    /** upbolt/KVS : transforme le master multi-variantes
+     *  `.../00014/,id_l,id_n,id_h,.urlset/master.m3u8?t=...` en la playlist de la MEILLEURE
+     *  variante `.../00014/id_h/index-v1-a1.m3u8?t=...` (même token, préfixe couvert). Le master
+     *  est DDoS-gated (403) ; la variante joue au token seul. No-op si le format ne matche pas. */
+    private fun rewriteUpboltMasterToVariant(url: String): String {
+        try {
+            if (!url.contains("upbolt", ignoreCase = true) || !url.contains(".urlset/master.m3u8")) return url
+            val q = url.indexOf('?')
+            val query = if (q >= 0) url.substring(q) else ""
+            val path = if (q >= 0) url.substring(0, q) else url
+            val mi = path.indexOf(".urlset/master.m3u8")
+            if (mi < 0) return url
+            val beforeUrlset = path.substring(0, mi)            // https://.../00014/,id_l,id_n,id_h,
+            val lastSlash = beforeUrlset.lastIndexOf('/')
+            if (lastSlash < 0) return url
+            val prefix = beforeUrlset.substring(0, lastSlash + 1)   // https://.../00014/
+            val names = beforeUrlset.substring(lastSlash + 1).trim(',').split(',').filter { it.isNotBlank() }
+            if (names.isEmpty()) return url
+            val hi = names.lastOrNull { it.endsWith("_h") } ?: names.last()  // meilleure qualité
+            val variant = "$prefix$hi/index-v1-a1.m3u8$query"
+            android.util.Log.d("OnRegardeOu", "upbolt master→variante: $hi")
+            return variant
+        } catch (_: Exception) { return url }
+    }
+
     override suspend fun extract(link: String): Video {
+        // upbolt (edge0X.upbolt.to) = CDN DDoS-Guard : extraction native IMPOSSIBLE — master ET
+        //   variante renvoient 403 même avec cookie + Cronet + Referer + UA mobile (prouvé logs).
+        //   Le token/cookie est signé à la volée par le JS DDoS-Guard, non rejouable hors navigateur.
+        //   → On le joue en MIROIR dans l'overlay WebView (comme Abyss) : le player du site tourne
+        //   dans un vrai contexte navigateur (passe DDoS-Guard) et l'image est projetée sur les
+        //   contrôles natifs (path isUpbolt / webViewIsPlayer côté PlayerMobileFragment/TvFragment).
+        if (link.contains("upbolt", ignoreCase = true)) {
+            return Video(source = link, webViewUrl = link, needsWebViewClick = true)
+        }
         // onregardeou → URL de l'HÔTE réel (bysezoxexe = player Filemoon).
         val hostUrl = resolveHostUrl(link) ?: link
         // On charge l'HÔTE directement (bysezoxexe.com/e/<id>). C'EST LUI qui crée
@@ -148,23 +185,51 @@ class OnRegardeOuExtractor : Extractor() {
         //   device, voit TOUTES les frames, contrairement à Chrome).
         //   ⚠ NE PAS descendre jusqu'à q8y5z : chargé seul c'est une page de
         //   redirection sans parent → le player ne s'initialise jamais (écran noir).
-        val (streamUrl, streamReferer) = extractByIntercepting(hostUrl, "$mainUrl/")
+        val (rawStreamUrl, streamReferer) = extractByIntercepting(hostUrl, "$mainUrl/")
             ?: throw Exception("OnRegardeOu: aucun flux capté pour $hostUrl")
+        // upbolt (KVS) : le MASTER `.../,a,b,c,.urlset/master.m3u8` est gated par DDoS-Guard
+        //   → 403 même avec cookie/Cronet/DefaultHttp (prouvé). Mais le token `t=` couvre tout
+        //   le préfixe de chemin, et la playlist de VARIANTE `<hi>/index-v1-a1.m3u8` n'est PAS
+        //   gatée (elle joue au token seul). On vise donc directement la meilleure variante.
+        val streamUrl = rewriteUpboltMasterToVariant(rawStreamUrl)
         // HLS si .m3u8 OU master .txt/.urlset OU chemin /hls (uns.bio, streamwish…).
         //   Sinon (mp4 direct) → type null (auto-détecté par ExoPlayer).
         val isHls = streamUrl.contains(".m3u8") || streamUrl.contains(".txt") ||
             streamUrl.contains("master") || streamUrl.contains(".urlset") || streamUrl.contains("/hls")
         val originHost = Regex("(https?://[^/]+)").find(streamReferer)?.groupValues?.get(1) ?: mainUrl
+        // Cookie de session posé par la WebView pendant la lecture (datadome / cf_clearance
+        //   sur .upbolt.to). SANS lui, ExoPlayer démarre puis SE FAIT COUPER au bout de
+        //   quelques segments (le CDN edge0X.upbolt.to redemande le cookie). On le capte
+        //   sur le domaine du flux ET sur upbolt.to (le datadome est souvent posé domaine-wide).
+        val streamCookie = buildString {
+            try { android.webkit.CookieManager.getInstance().getCookie(streamUrl)?.let { append(it) } } catch (_: Exception) {}
+            try {
+                val extra = android.webkit.CookieManager.getInstance().getCookie(originHost)
+                if (!extra.isNullOrBlank() && !this.contains(extra)) { if (isNotEmpty()) append("; "); append(extra) }
+            } catch (_: Exception) {}
+        }
+        val headers = mutableMapOf(
+            // Referer = la frame qui a réellement demandé le m3u8 (q8y5z/bysezoxexe),
+            //   sinon le CDN (sprintcdn) refuse la lecture dans ExoPlayer.
+            "Referer" to streamReferer,
+            "Origin" to originHost,
+            "User-Agent" to ANDROID_CHROME_UA,
+        )
+        if (streamCookie.isNotBlank()) headers["Cookie"] = streamCookie
+        // upbolt (DDoS-Guard sur edge0X.upbolt.to) : le CDN sert le NAVIGATEUR (200) mais
+        //   403 un client « nu ». Il vérifie la cohérence des en-têtes fetch que Chrome
+        //   ajoute automatiquement pour un XHR de manifeste HLS. On les rejoue à l'identique.
+        if (streamUrl.contains("upbolt", ignoreCase = true)) {
+            headers["Accept"] = "*/*"
+            headers["Accept-Language"] = "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7"
+            headers["Sec-Fetch-Dest"] = "empty"
+            headers["Sec-Fetch-Mode"] = "cors"
+            headers["Sec-Fetch-Site"] = "same-site"
+        }
         return Video(
             source = streamUrl,
             type = if (isHls) androidx.media3.common.MimeTypes.APPLICATION_M3U8 else null,
-            headers = mapOf(
-                // Referer = la frame qui a réellement demandé le m3u8 (q8y5z/bysezoxexe),
-                //   sinon le CDN (sprintcdn) refuse la lecture dans ExoPlayer.
-                "Referer" to streamReferer,
-                "Origin" to originHost,
-                "User-Agent" to ANDROID_CHROME_UA,
-            )
+            headers = headers,
         )
     }
 
@@ -248,6 +313,16 @@ class OnRegardeOuExtractor : Extractor() {
                     webView.webViewClient = object : WebViewClient() {
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val host = request?.url?.host?.lowercase() ?: return true
+                            val path = request.url?.path?.lowercase().orEmpty()
+                            // upbolt : le tap « play » tente de NAVIGUER la page vers /dl (page de
+                            //   téléchargement) → ça tue le player avant que le m3u8 ne parte. Comme
+                            //   upbolt.to est dans la whitelist (même domaine que l'embed), il faut
+                            //   bloquer explicitement cette redirection. Le flux HLS passe par XHR/
+                            //   hls.js (shouldInterceptRequest), PAS par ce hook → le bloquer est sûr.
+                            if (host.contains("upbolt") && (path.endsWith("/dl") || path.contains("/download") || path.contains("/d/"))) {
+                                android.util.Log.d("OnRegardeOu", "NAV upbolt /dl bloquée (garde le player vivant)")
+                                return true
+                            }
                             // WHITELIST STRICTE de navigation : on n'autorise QUE la chaîne
                             //   du player (onregardeou → bysezoxexe → q8y5z). TOUTE autre
                             //   navigation = popunder pub (torontocasbahs, pieshopweedish…)
@@ -359,16 +434,29 @@ class OnRegardeOuExtractor : Extractor() {
          *  Le m3u8 part à l'init du player → intercepté. */
         private const val AUTO_PLAY_JS = """
             (function(){
+                function drive(doc){
+                    try {
+                        var v = doc.querySelector('video');
+                        if (v){ try{ v.muted=true; v.play(); }catch(e){} }
+                        // upbolt : bouton #vid_play qui injecte l'iframe player (le vrai
+                        //   player n'existe qu'APRÈS ce clic ; la redirection /dl est
+                        //   bloquée côté navigation → seul l'iframe reste).
+                        var b = doc.getElementById('vid_play'); if (b){ try{ b.click(); }catch(e){} }
+                        // boutons play génériques (jwplayer/video.js/overlays)
+                        var pl = doc.querySelectorAll('.jw-icon-display,.vjs-big-play-button,[class*=play-button],[id*=play]');
+                        for (var k=0;k<pl.length;k++){ try{ pl[k].click(); }catch(e){} }
+                    } catch(e){}
+                }
                 try {
-                    var v = document.querySelector('video');
-                    if (v){ try{ v.muted=true; v.play(); }catch(e){} }
-                    // idem dans les iframes same-origin accessibles (best effort)
                     var ifr = document.querySelectorAll('iframe');
-                    for (var i=0;i<ifr.length;i++){
-                        try{
-                            var d = ifr[i].contentDocument;
-                            if (d){ var vv = d.querySelector('video'); if (vv){ vv.muted=true; vv.play(); } }
-                        }catch(e){}
+                    // 1er passage : pas encore d'iframe → on pilote le top (clic #vid_play
+                    //   → injecte l'iframe player). Passages suivants : on pilote l'iframe
+                    //   same-origin (son #vid_play / <video> → le m3u8 part → intercepté).
+                    if (ifr.length === 0){ drive(document); }
+                    else {
+                        for (var i=0;i<ifr.length;i++){
+                            try{ var d = ifr[i].contentDocument; if (d){ drive(d); } }catch(e){}
+                        }
                     }
                 } catch(e){}
             })();

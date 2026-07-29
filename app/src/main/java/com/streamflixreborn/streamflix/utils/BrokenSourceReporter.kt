@@ -40,27 +40,11 @@ object BrokenSourceReporter {
             if (error == null) return
             val errorType = Extractor.classifyError(error)
             if (errorType !in URL_CHANGED_TYPES) return
-            val host = hostOf(url) ?: return
-            val dedupKey = "$sourceName|$host"
-
-            val prefs = StreamFlixApp.instance.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
-            val reported = prefs.getStringSet(KEY_REPORTED, emptySet()) ?: emptySet()
-            if (dedupKey in reported) return
-            // Marque AVANT le POST (évite un double si deux échecs simultanés sur le même host).
-            prefs.edit().putStringSet(KEY_REPORTED, reported + dedupKey).apply()
-
-            Thread {
-                val ok = runCatching { postIssue(sourceName, host, errorType, url, providerName) }
-                    .getOrDefault(false)
-                if (!ok) {
-                    // Échec réseau/API → on retire la clé pour pouvoir retenter plus tard.
-                    val cur = prefs.getStringSet(KEY_REPORTED, emptySet()) ?: emptySet()
-                    prefs.edit().putStringSet(KEY_REPORTED, cur - dedupKey).apply()
-                    Log.w(TAG, "report KO pour $dedupKey (retry possible plus tard)")
-                } else {
-                    Log.d(TAG, "source cassée signalée : $dedupKey ($errorType)")
-                }
-            }.apply { isDaemon = true }.start()
+            val host = hostOf(url)
+            // 2026-07-29 : plus de création d'issue LOCALE (source de faux positifs régionaux). On
+            //   envoie l'échec à la base D1 ; le Worker agrège tous les utilisateurs et ne signale
+            //   que si le domaine est confirmé mort sur plusieurs pays ET appareils.
+            HealthReporter.record(sourceName, kind = "source", ok = false, errorType = errorType, host = host)
         } catch (e: Exception) {
             Log.w(TAG, "maybeReport exception: ${e.message}")
         }
@@ -76,19 +60,9 @@ object BrokenSourceReporter {
             if (error == null) return
             val errorType = Extractor.classifyError(error)
             if (errorType !in PROVIDER_DEAD_TYPES) return
-            val host = hostOf(url) ?: return
-            val dedupKey = "provider|$providerName|$host"
-            val prefs = StreamFlixApp.instance.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
-            val reported = prefs.getStringSet(KEY_REPORTED, emptySet()) ?: emptySet()
-            if (dedupKey in reported) return
-            prefs.edit().putStringSet(KEY_REPORTED, reported + dedupKey).apply()
-            Thread {
-                val ok = runCatching { postProviderIssue(providerName, host, errorType, url) }.getOrDefault(false)
-                if (!ok) {
-                    val cur = prefs.getStringSet(KEY_REPORTED, emptySet()) ?: emptySet()
-                    prefs.edit().putStringSet(KEY_REPORTED, cur - dedupKey).apply()
-                } else Log.d(TAG, "provider cassé signalé : $providerName ($host)")
-            }.apply { isDaemon = true }.start()
+            val host = hostOf(url)
+            // 2026-07-29 : télémétrie D1 au lieu d'une issue locale (cf. maybeReport).
+            HealthReporter.record(providerName, kind = "provider", ok = false, errorType = errorType, host = host)
         } catch (e: Exception) { Log.w(TAG, "maybeReportProvider: ${e.message}") }
     }
 
@@ -360,11 +334,14 @@ object BrokenSourceReporter {
 
     /** Config par catégorie de détection consécutive : titre d'issue, seuil, min domaines, sens. */
     private data class CatCfg(val tag: String, val threshold: Int, val minHosts: Int, val desc: String)
+    //   2026-07-29 (user « trop de faux positifs ») : seuils remontés. « casse silencieuse » 8→20
+    //   (un provider natif qui rate 20 titres d'affilée = vraiment cassé ; en-dessous = titres
+    //   simplement absents) et « flux mort » 4→8 (moins de faux positifs sur des coupures réseau).
     private val CATS = mapOf(
         "dead"       to CatCfg("extracteur mort",   6, 3, "échoue systématiquement sur plusieurs contenus (schéma/JS/domaine changé)"),
         "blocked"    to CatCfg("bloqué",            5, 2, "refus 403 répétés — Cloudflare/anti-bot probablement ajouté (bypass à mettre à jour)"),
-        "streamdead" to CatCfg("flux mort",         4, 0, "extrait une URL mais le flux final est mort (404/HEAD KO) → liens périmés"),
-        "empty"      to CatCfg("casse silencieuse", 8, 0, "répond 200 OK mais 0 source (structure du site probablement changée)"),
+        "streamdead" to CatCfg("flux mort",         8, 0, "extrait une URL mais le flux final est mort (404/HEAD KO) → liens périmés"),
+        "empty"      to CatCfg("casse silencieuse", 20, 0, "répond 200 OK mais 0 source (structure du site probablement changée)"),
     )
 
     /**
@@ -374,19 +351,22 @@ object BrokenSourceReporter {
      */
     fun noteExtractorOutcome(name: String, success: Boolean, error: Throwable? = null, url: String? = null) {
         if (!UserPreferences.reportBrokenSources) return
-        if (success) { listOf("dead", "blocked", "streamdead").forEach { resetCat(it, name) }; return }
-        val et = error?.let { Extractor.classifyError(it) } ?: "other"
         val host = url?.let { hostOf(it) }
+        // 2026-07-29 : on envoie CHAQUE résultat (succès ET échec) à la base D1 → le Worker calcule
+        //   le vrai taux d'échec cross-utilisateurs. Plus de compteur/issue local (faux positifs régionaux).
+        if (success) { HealthReporter.record(name, kind = "dead", ok = true, host = host); return }
+        val et = error?.let { Extractor.classifyError(it) } ?: "other"
         when {
-            et in DEAD_COUNT_TYPES -> bumpCat("dead", name, host, et, null)
-            et == "403" -> bumpCat("blocked", name, host, et, null)
+            et in DEAD_COUNT_TYPES -> HealthReporter.record(name, kind = "dead", ok = false, errorType = et, host = host)
+            et == "403" -> HealthReporter.record(name, kind = "dead", ok = false, errorType = "403", host = host)
+            // timeout / other / 404 / dead-content : transitoires ou contenu spécifique → ignorés.
         }
     }
 
     /** Flux extrait mais MORT (échec de la validation HEAD post-extraction). */
     fun noteStreamDead(name: String) {
         if (!UserPreferences.reportBrokenSources) return
-        bumpCat("streamdead", name, null, "head-fail", null)
+        HealthReporter.record(name, kind = "streamdead", ok = false, errorType = "head-fail")
     }
 
     /**
@@ -395,8 +375,15 @@ object BrokenSourceReporter {
      */
     fun noteProviderResult(providerName: String, found: Boolean, searchedTitle: String?) {
         if (!UserPreferences.reportBrokenSources) return
-        if (found) resetCat("empty", providerName)
-        else bumpCat("empty", providerName, null, "0-source", searchedTitle)
+        // 2026-07-29 (user « trop de faux positifs Backup X ») : les BACKUPS ratent des titres par
+        //   nature (contenu de niche / régional / anime) → un « 0 source » n'est PAS une panne. On
+        //   ne compte la casse silencieuse QUE pour les providers NATIFS (catalogue principal). Un
+        //   backup vraiment mort reste détecté par maybeReportProvider (domaine dns/connect/ssl KO).
+        if (providerName.startsWith("Backup ", ignoreCase = true)) return
+        // 2026-07-29 : télémétrie D1 (succès=trouvé / échec=0 source) → le Worker décide « cassé »
+        //   sur l'ensemble des utilisateurs. Un provider natif qui trouve normalement → ok=true la
+        //   plupart du temps → jamais signalé ; s'il renvoie 0 partout → taux d'échec élevé → signalé.
+        HealthReporter.record(providerName, kind = "empty", ok = found, errorType = if (found) null else "0-source")
     }
 
     /**

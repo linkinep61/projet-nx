@@ -196,7 +196,8 @@ object DessinAnimeNetProvider {
             return emptyList()
         }
 
-        val seenDomains = mutableSetOf<String>()
+        val seenUrls = mutableSetOf<String>()
+        val perDomainCount = mutableMapOf<String, Int>()
         val result = mutableListOf<Video.Server>()
         for (sid in sourceIds) {
             val embedHtml = ajaxPostEmbed(sid) ?: continue
@@ -205,8 +206,15 @@ object DessinAnimeNetProvider {
                 ?.let { if (it.startsWith("//")) "https:$it" else it }
                 ?: continue
 
+            // 2026-07-31 (user : « la fusion doit toucher tous les extracteurs ») : on dédupait
+            //   par DOMAINE → deux liens DIFFÉRENTS d'un même hébergeur (fichiers différents,
+            //   l'un pouvant être mort) étaient fusionnés et un seul survivait. Désormais on ne
+            //   jette que les URLs strictement identiques, avec un plafond par hébergeur.
             val domain = try { java.net.URL(embedUrl).host.lowercase() } catch (_: Throwable) { embedUrl }
-            if (!seenDomains.add(domain)) continue
+            if (!seenUrls.add(embedUrl.trim())) continue
+            val dupIndex = (perDomainCount[domain] ?: 0) + 1
+            perDomainCount[domain] = dupIndex
+            if (dupIndex > 3) continue
 
             val hosterName = when {
                 domain.contains("emmmmbed") -> "Emmmmbed"

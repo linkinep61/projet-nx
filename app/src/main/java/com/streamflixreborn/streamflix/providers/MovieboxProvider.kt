@@ -997,7 +997,12 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
     private suspend fun resolveMovieboxStreams(
         detail: MovieboxSubject, subjectId: String, videoType: Video.Type, id: String,
     ): List<Video.Server> {
-        val frDub = detail.dubs?.firstOrNull { it.lanCode.equals("fr", ignoreCase = true) }
+        // 2026-08-01 : même correction que dans le chemin backup (cf. commentaire détaillé
+        //   plus bas) — quand plusieurs pistes `fr` existent, celle marquée `original=true`
+        //   est l'audio ORIGINAL du film, pas le doublage : la choisir donne un flux qui
+        //   échoue à la lecture (resource=null → BAD_HTTP_STATUS). On préfère le doublage.
+        val frDubs = detail.dubs?.filter { it.lanCode.equals("fr", ignoreCase = true) }.orEmpty()
+        val frDub = frDubs.firstOrNull { !it.original } ?: frDubs.firstOrNull()
         // Le vrai season/episode est ENCODÉ dans l'id (`mvbx::ep::<subjectId>::<se>::<ep>`),
         //   PAS fiable dans videoType (season.number=0 pour Moviebox). Parse depuis l'id, fallback videoType.
         val epParts = id.substringAfter("mvbx::ep::", "").split("::")
@@ -1014,6 +1019,12 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
             Log.i(TAG, "play-info $langLabel sid=$sid se=$playSe ep=$playEp → streams=${streams.size}")
             return streams.mapNotNull { (res, url) ->
                 if (!seenUrls.add(url)) return@mapNotNull null
+                // 2026-08-01 : sans cookie CloudFront, ce flux renverra 428 à coup sûr →
+                //   inutile de proposer un serveur mort à l'utilisateur.
+                if (!com.streamflixreborn.streamflix.utils.AoneroomClient.isPlayable(url)) {
+                    Log.d(TAG, "stream écarté (pas de cookie signé → 428 garanti)")
+                    return@mapNotNull null
+                }
                 Video.Server(
                     id = "mvbxplay::${url.hashCode()}",
                     name = "Moviebox ${if (res > 0) "${res}p" else "MP4"} $langLabel",
@@ -1220,9 +1231,23 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
             }.getOrNull()
             data class Track(val sid: String, val label: String, val rank: Int)
             val dubs = detail?.dubs.orEmpty()
-            val frDub = dubs.firstOrNull {
+            // 2026-08-01 (user « le serveur Moviebox français ne joue pas, ça ne doit pas être
+            //   une grosse erreur puisqu'il est détecté en qualité ») : Moviebox peut exposer
+            //   PLUSIEURS pistes `fr/type=0`, dont l'audio ORIGINAL du film (`original=true`).
+            //   Constaté sur « Les Spécialistes » :
+            //     fr/t0/orig=true  → sid=8831588536760565824  (= la VO, titre 'The Specialists')
+            //     fr/t0/orig=false → sid=1401731806554123968  (= le VRAI doublage français)
+            //   `firstOrNull` prenait la 1ʳᵉ, donc la VO → play-info renvoyait `resource=null`
+            //   et la lecture échouait en ERROR_CODE_IO_BAD_HTTP_STATUS, alors que le serveur
+            //   s'affichait bien « Français 1080p » (la qualité, elle, est lue ailleurs).
+            //   En prime, comme ce sid était AUSSI `origSid`, la piste VOSTFR était écartée par
+            //   le test `origSid != frDub` → on perdait un serveur au passage.
+            //   → On préfère désormais le doublage NON original ; repli sur l'ancien choix si
+            //     aucun n'est marqué (certains titres n'ont pas le drapeau `original`).
+            val frCandidats = dubs.filter {
                 it.lanCode.equals("fr", ignoreCase = true) && it.type == 0 && !it.subjectId.isNullOrBlank()
             }
+            val frDub = frCandidats.firstOrNull { !it.original } ?: frCandidats.firstOrNull()
             val hasFrSub = dubs.any { it.lanCode.equals("fr", ignoreCase = true) && it.type == 1 } ||
                 (detail?.subtitles?.contains("Français", ignoreCase = true) == true)
             val origSid = dubs.firstOrNull { it.original && !it.subjectId.isNullOrBlank() }?.subjectId ?: searchSid
@@ -1245,6 +1270,11 @@ object MovieboxProvider : Provider, ProgressiveServersProvider {
                                     val res = pair.first
                                     val url = pair.second
                                     if (!seenUrls.add(url)) null
+                                    // 2026-08-01 : idem chemin direct — un flux CloudFront sans
+                                    //   cookie signé échoue en 428, on ne l'émet pas.
+                                    else if (!com.streamflixreborn.streamflix.utils.AoneroomClient
+                                            .isPlayable(url)
+                                    ) null
                                     else Video.Server(
                                         id = "mvbxplay::${url.hashCode()}",
                                         // wrap() du registre ajoute déjà « Moviebox · » → on ne met que la langue.

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Carte "+ Ajouter" : neutre + bordure pointillée pour bien la différencier
-     des avatars colorés. -->
+<!-- 2026-07-25 (user « je voulais juste la petite croix, invisible pour que ça ne se voie pas sur
+     l'écran principal ») : carte « + Ajouter » SANS cadre. Fond transparent → seule la croix « + »
+     apparaît, comme un profil qui n'affiche que son logo. Plus rien à droite sur « Qui regarde ? ». -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <solid android:color="#22000000" />
-    <stroke android:width="2dp" android:color="#88FFFFFF" android:dashWidth="6dp" android:dashGap="4dp" />
+    <solid android:color="@android:color/transparent" />
     <corners android:radius="28dp" />
 </shape>
