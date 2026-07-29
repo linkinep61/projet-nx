@@ -237,7 +237,14 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             Setting.CAPTION_STYLE_MARGIN -> marginAdapter
             else -> settingsAdapter
         }
-        binding.rvSettings.requestFocus()
+        // 2026-08-01 (user « si la personne est dans les serveurs, le focus doit rester
+        //   dans les serveurs tant qu'elle n'a pas quitté ») : ce requestFocus() était
+        //   INCONDITIONNEL — il repartait sur le conteneur à chaque réaffichage du
+        //   panneau, y compris quand l'utilisateur avait déjà posé son focus sur une
+        //   ligne. On ne prend le focus que s'il n'est pas déjà DANS le panneau.
+        if (!hasFocus()) {
+            binding.rvSettings.requestFocus()
+        }
 
         // 2026-06-29 (user "sur la page serveurs TV, focus auto pour switcher facilement
         //   tant qu'aucun film ne joue") : le requestFocus() ci-dessus sur le RecyclerView
@@ -265,6 +272,16 @@ class PlayerSettingsTvView @JvmOverloads constructor(
             if (focused != null && focused !== binding.rvSettings) return
         }
         restoreServerFocus(previousIndex = 0, count = Settings.Server.list.size)
+    }
+
+    /** 2026-08-01 : id du serveur RÉELLEMENT sous le focus, lu depuis le ViewHolder de la
+     *  vue focusée. Insensible aux re-tris de la liste, contrairement à un index. */
+    private fun idServeurFocuse(): String? {
+        val focused = binding.rvSettings.findFocus() ?: return null
+        if (focused === binding.rvSettings) return null
+        val vh = runCatching { binding.rvSettings.findContainingViewHolder(focused) }.getOrNull()
+        val item = (vh as? SettingViewHolder)?.elementAffiche
+        return (item as? Settings.Server)?.id
     }
 
     /** 2026-06-29 v2 : renvoie l'index de l'item Serveur qui a actuellement
@@ -327,10 +344,10 @@ class PlayerSettingsTvView @JvmOverloads constructor(
         val previousCount = lastServerListCount
 
         // Sauver l'ID du serveur actuellement focusé AVANT la notification.
-        val focusedIdx = getFocusedServerAdapterPosition()
-        if (focusedIdx in 0 until Settings.Server.list.size) {
-            focusedServerId = Settings.Server.list.getOrNull(focusedIdx)?.id
-        }
+        // 2026-08-01 : lu depuis la VUE focusée (et non via un index dans la liste) —
+        //   la liste est reconstruite/re-triée en arrière-plan, donc un index capturé ici
+        //   pouvait désigner un autre serveur que celui réellement sous le focus.
+        idServeurFocuse()?.let { focusedServerId = it }
 
         try {
             when {
@@ -354,12 +371,22 @@ class PlayerSettingsTvView @JvmOverloads constructor(
         if (currentSettings == Setting.SERVERS && count > 0) {
             val savedId = focusedServerId
             if (savedId != null) {
-                // L'user avait un serveur focusé → on le retrouve par son ID.
-                val newIdx = Settings.Server.list.indexOfFirst { it.id == savedId }
-                if (newIdx >= 0) {
-                    restoreServerFocus(newIdx, count)
+                // 2026-08-01 : RÈGLE — on ne touche JAMAIS à un focus que l'utilisateur
+                //   tient déjà. Grâce aux ids stables, RecyclerView conserve le focus tout
+                //   seul dans l'immense majorité des cas ; re-demander le focus ici ne
+                //   servait qu'à provoquer un scrollToPosition parasite (la liste sautait
+                //   sous les doigts pendant que les serveurs arrivaient). On ne restaure
+                //   QUE si le focus a RÉELLEMENT été perdu.
+                val focusTenuParUtilisateur = binding.rvSettings.hasFocus() &&
+                    binding.rvSettings.findFocus() !== binding.rvSettings
+                if (!focusTenuParUtilisateur) {
+                    // L'user avait un serveur focusé → on le retrouve par son ID.
+                    val newIdx = Settings.Server.list.indexOfFirst { it.id == savedId }
+                    if (newIdx >= 0) {
+                        restoreServerFocus(newIdx, count)
+                    }
+                    // Si le serveur a disparu de la liste (rare), on ne bouge pas le focus.
                 }
-                // Si le serveur a disparu de la liste (rare), on ne bouge pas le focus.
             } else if (!hasPlayerStartedPlayback()) {
                 // Pas encore de focus user + pas encore d'auto-play :
                 //   focus sur le serveur sélectionné (auto-play) ou le 1er.
@@ -413,6 +440,29 @@ class PlayerSettingsTvView @JvmOverloads constructor(
         private val items: List<Item>,
     ) : RecyclerView.Adapter<SettingViewHolder>() {
 
+        init {
+            // 2026-08-01 (user « le focus fait n'importe quoi pendant le chargement des
+            //   serveurs, il n'est pas censé se balader ») : SANS identifiants stables, le
+            //   RecyclerView identifie ses vues par POSITION. À chaque lot de serveurs la
+            //   liste change de taille → notifyDataSetChanged() → toutes les vues sont
+            //   recyclées → le focus meurt avec la vue qui le portait, et Android le
+            //   repose arbitrairement. Avec des ids stables, RecyclerView RECONNAÎT les
+            //   lignes déjà présentes et CONSERVE lui-même le focus : c'est le mécanisme
+            //   natif, bien plus fiable que de le replacer à la main après coup.
+            setHasStableIds(true)
+        }
+
+        override fun getItemId(position: Int): Long {
+            val item = items.getOrNull(position) ?: return RecyclerView.NO_ID
+            // Identité MÉTIER (l'id du serveur), stable à travers les re-tris VF/qualité.
+            val cle = when (item) {
+                is Settings.Server -> "srv:${item.id}"
+                is Settings.ChannelVariant -> "chan:${item.id}"
+                else -> "pos:$position:${item.javaClass.simpleName}"
+            }
+            return cle.hashCode().toLong()
+        }
+
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
             SettingViewHolder(
                 settingsView,
@@ -438,7 +488,15 @@ class PlayerSettingsTvView @JvmOverloads constructor(
         private val binding: ItemSettingTvBinding,
     ) : RecyclerView.ViewHolder(binding.root) {
 
+        /** 2026-08-01 : élément réellement affiché par cette ligne. Sert à identifier le
+         *  serveur focusé SANS passer par un index — la liste étant reconstruite et
+         *  re-triée en arrière-plan, un index capturé juste avant un rafraîchissement
+         *  pouvait désigner un AUTRE serveur (focus restauré au mauvais endroit). */
+        var elementAffiche: Item? = null
+            private set
+
         fun displaySettings(item: Item) {
+            elementAffiche = item
             binding.root.apply {
                 when (item) {
                     Settings.Subtitle.Style,
@@ -955,7 +1013,12 @@ class PlayerSettingsTvView @JvmOverloads constructor(
 
                     is Settings.Subtitle.SubDLSubtitles.Subtitle -> item.subDLSubtitle.lang?.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() } ?: ""
 
-                    is Settings.Server -> item.quality ?: ""
+                    // 2026-07-31 (user : « le #2 est VOSTFR, il va se mélanger avec les FR ») :
+                    //   on affiche la LANGUE RÉELLE à côté de la qualité. Elle est lue dans le
+                    //   manifeste HLS pendant le sondage qualité (donc sans requête en plus),
+                    //   ce qui distingue deux liens d'un même hébergeur servant des langues
+                    //   différentes — invisible dans l'URL comme dans l'API.
+                    is Settings.Server -> listOfNotNull(item.language, item.quality).joinToString(" · ")
 
                     else -> ""
                 }

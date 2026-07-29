@@ -200,7 +200,7 @@ class UqloadExtractor : Extractor() {
                             view?.postDelayed({ if (!resolved) done(null) }, 18_000L)
                         }
                     }
-                    val wrapper = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>*{margin:0;padding:0}html,body,iframe{width:100%;height:100%;border:0;background:#000}</style></head><body><iframe src=\"" + url + "\" allow=\"autoplay;fullscreen;encrypted-media\" allowfullscreen referrerpolicy=\"origin\"></iframe></body></html>"
+                    val wrapper = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>*{margin:0;padding:0}html,body,iframe{width:100%;height:100%;border:0;background:#000}</style></head><body><iframe src=\"" + url + "\" allow=\"autoplay;fullscreen;encrypted-media\" allowfullscreen referrerpolicy=\"no-referrer\"></iframe></body></html>"
                     webView.loadDataWithBaseURL("https://dessinanime.cc/", wrapper, "text/html", "UTF-8", null)
                     cont.invokeOnCancellation {
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
@@ -224,7 +224,7 @@ class UqloadExtractor : Extractor() {
             val req = okhttp3.Request.Builder()
                 .url(url)
                 .header("User-Agent", CHROME_DESKTOP_UA)
-                .header("Referer", "https://dessinanime.cc/")
+                // 2026-07-29 : PAS de Referer (uqload bloque les referers non whitelistés → page vide).
                 .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                 .header("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
                 .build()
@@ -251,7 +251,10 @@ class UqloadExtractor : Extractor() {
             conn.requestMethod = "GET"
             // v85x : EXACT headers as PC Chrome 148 desktop sends
             conn.setRequestProperty("User-Agent", CHROME_DESKTOP_UA)
-            conn.setRequestProperty("Referer", "https://dessinanime.cc/")
+            // 2026-07-29 (log OPPO : embed 38 octets « Video embed restricted for this domain ») :
+            //   uqload a durci son anti-hotlink → un Referer non whitelisté (on envoyait
+            //   dessinanime.cc) fait renvoyer une page vide. Vérifié en direct : SANS Referer = page
+            //   complète avec le m3u8. On n'envoie donc AUCUN Referer (chargement « direct »).
             conn.setRequestProperty(
                 "Accept",
                 "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
@@ -264,7 +267,7 @@ class UqloadExtractor : Extractor() {
             conn.setRequestProperty("Upgrade-Insecure-Requests", "1")
             conn.setRequestProperty("Sec-Fetch-Dest", "document")
             conn.setRequestProperty("Sec-Fetch-Mode", "navigate")
-            conn.setRequestProperty("Sec-Fetch-Site", "cross-site")
+            conn.setRequestProperty("Sec-Fetch-Site", "none")
             conn.setRequestProperty("Sec-Fetch-User", "?1")
             conn.setRequestProperty(
                 "Sec-Ch-Ua",

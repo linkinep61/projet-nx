@@ -361,6 +361,77 @@ class PlayerMobileFragment : Fragment() {
                 go(); var n=0; var t=setInterval(function(){ n++; go(); if(n>25)clearInterval(t); }, 800);
             })();
         """
+
+        // embed4me (vidstack) : anti-pop (window.open + liens pub) + PLEIN ÉCRAN + on MASQUE les
+        //   contrôles du site (le miroir natif ONYX les remplace, comme upbolt/seekplayer) + play.
+        //   Contrôles masqués en opacity 0 (PAS display:none) → invisibles mais la zone reste
+        //   cliquable, donc le clic central du miroir tape dessus et pilote la lecture.
+        private const val EMBED4ME_AD_KILL_JS = """
+            (function(){try{
+                window.open=function(){return {closed:false,focus:function(){},blur:function(){},close:function(){},location:{href:''}};};
+                try{ document.onclick=null; }catch(e){}
+                try{ if(document.body) document.body.onclick=null; }catch(e){}
+                var as=document.querySelectorAll('a[target="_blank"],a[onclick]');
+                for(var i=0;i<as.length;i++){ try{ as[i].removeAttribute('href'); as[i].onclick=null; }catch(e){} }
+                try{
+                    var css=document.getElementById('__e4css')||document.createElement('style'); css.id='__e4css';
+                    css.textContent='html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important;}'
+                        +'media-player,media-provider,video{width:100vw!important;height:100vh!important;position:fixed!important;top:0!important;left:0!important;object-fit:contain!important;z-index:2147483000!important;background:#000!important;}'
+                        +'media-controls,.vds-controls,.vds-control-group,.vds-play-button,.vds-time-slider,.vds-controls-group,media-control-bar{opacity:0!important;pointer-events:auto!important;}';
+                    (document.head||document.documentElement).appendChild(css);
+                }catch(e){}
+                try{ var mp=document.querySelector('media-player'); if(mp&&mp.play){mp.play();} var v=document.querySelector('video'); if(v){v.play();} }catch(e){}
+            }catch(e){}})();
+        """
+
+        // upbolt : neutralise window.open (pop pub) + plein écran + clique #vid_play (qui injecte
+        //   l'iframe player) puis pilote l'iframe (#vid_play / <video>) → la vidéo joue dans la
+        //   WebView (contexte navigateur = passe DDoS-Guard) et est projetée par le miroir natif.
+        private const val UPBOLT_PLAY_JS = """
+            (function(){
+                try { window.open=function(){return {closed:false,focus:function(){},blur:function(){},close:function(){},location:{href:''}};}; }catch(e){}
+                var CSS='html,body{margin:0!important;padding:0!important;background:#000!important;width:100vw!important;height:100vh!important;overflow:hidden!important;}'
+                    +'video,.jw-wrapper,.jwplayer{width:100vw!important;height:100vh!important;position:fixed!important;top:0!important;left:0!important;object-fit:contain!important;z-index:2147483000!important;background:#000!important;}'
+                    +'iframe{width:100vw!important;height:100vh!important;position:fixed!important;top:0!important;left:0!important;border:0!important;z-index:2147483000!important;}'
+                    /* masque les contrôles du player du site (barre + gros bouton) : opacity 0 (PAS
+                       display:none) → invisible mais la zone reste cliquable, donc le bouton CENTRAL natif
+                       tape dessus et pilote la lecture. Un seul jeu de contrôles visible. */
+                    +'.jw-controlbar,.jwplayer .jw-controlbar,.jw-icon-display,.jw-display-icon-container,.jw-display,.jw-overlays,.jw-controls .jw-icon,.jw-icon-playback,.vjs-control-bar,.vjs-big-play-button,.plyr__controls,.plyr__control--overlaid{opacity:0!important;pointer-events:auto!important;}';
+                // injecte le CSS dans un document DONNÉ. LE PLAYER (JW) + SES BOUTONS VIVENT DANS L'IFRAME
+                //   → il FAUT masquer LÀ, pas seulement au top (bug signalé : gros bouton toujours visible).
+                function injectCss(doc){
+                    try { if(!doc) return; if(doc.getElementById('__ub_css')) return; var s=doc.createElement('style'); s.id='__ub_css'; s.textContent=CSS; (doc.head||doc.documentElement).appendChild(s); } catch(e){}
+                }
+                function eachDoc(fn){
+                    try { fn(document); } catch(e){}
+                    var ifr=document.querySelectorAll('iframe');
+                    for(var i=0;i<ifr.length;i++){ try{ var d=ifr[i].contentDocument; if(d) fn(d); }catch(e){} }
+                }
+                var done=false;
+                function drive(doc){
+                    try {
+                        var v=doc.querySelector('video'); if(v){ try{ v.muted=false; v.play(); }catch(e){} }
+                        var b=doc.getElementById('vid_play'); if(b){ try{ b.click(); }catch(e){} }
+                        var pl=doc.querySelectorAll('.jw-icon-display,.vjs-big-play-button,[class*=play-button]');
+                        for(var k=0;k<pl.length;k++){ try{ pl[k].click(); }catch(e){} }
+                    } catch(e){}
+                }
+                function isPlaying(doc){ try{ var v=doc.querySelector('video'); return !!(v && !v.paused && !v.ended && v.currentTime>0.2 && v.readyState>2); }catch(e){ return false; } }
+                function anyPlaying(){ var p=false; eachDoc(function(d){ if(isPlaying(d)) p=true; }); return p; }
+                function go(){
+                    eachDoc(injectCss);   // TOUJOURS masquer les contrôles du site (idempotent : 1 injection/doc)
+                    if(done) return;
+                    // dès que ça joue une fois → LATCH : on ne retouche plus jamais play (sinon on relancerait
+                    //   après chaque pause de l'utilisateur = boucle infinie signalée).
+                    if(anyPlaying()){ done=true; return; }
+                    var ifr=document.querySelectorAll('iframe');
+                    if(ifr.length===0){ drive(document); }
+                    else { for(var i=0;i<ifr.length;i++){ try{ var d=ifr[i].contentDocument; if(d) drive(d); }catch(e){} } }
+                    try { document.querySelectorAll('a[target="_blank"],a[href*="/dl"]').forEach(function(a){ try{a.removeAttribute('href');a.removeAttribute('target');}catch(e){} }); } catch(e){}
+                }
+                go(); var n=0; var t=setInterval(function(){ n++; if(n>40){clearInterval(t);return;} go(); }, 800);
+            })();
+        """
     }
 
     /** Flag : a-t-on déjà auto-sélectionné un sous-titre OpenSubtitles ?
@@ -1724,12 +1795,15 @@ class PlayerMobileFragment : Fragment() {
                 val prevSelectedId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isSelected }?.id
                 val prevLoadingId = PlayerSettingsView.Settings.Server.list.firstOrNull { it.isLoading }?.id
                 val prevQualities = PlayerSettingsView.Settings.Server.list.associate { it.id to it.quality }
+                // 2026-07-31 : langue détectée dans le manifeste HLS (parité avec la vue TV).
+                val prevLanguages = PlayerSettingsView.Settings.Server.list.associate { it.id to it.language }
                 PlayerSettingsView.Settings.Server.list.clear()
                 PlayerSettingsView.Settings.Server.addAllUnique(nonOla.map {
                     PlayerSettingsView.Settings.Server(id = it.id, name = it.name).apply {
                         isSelected = (it.id == prevSelectedId)
                         isLoading = (it.id == prevLoadingId)
                         quality = it.quality ?: prevQualities[it.id]
+                        language = it.language ?: prevLanguages[it.id]
                     }
                 })
                 if (::player.isInitialized) {
@@ -4554,9 +4628,12 @@ class PlayerMobileFragment : Fragment() {
             //   fingerprint Java identifiable -> 403). Route ces hosts via
             // 2026-05-19 v85k : uqload + abyssa passent par Cronet (TLS Chrome
             //   bypass JA3) — voir needsCronet(). Pas besoin de branche OkHttp ici.
+            // 2026-07-31 (parité TV) : VIDZY ajouté — l'extracteur Vidzy résout via WebView et
+            //   renvoie un User-Agent ; sans cette exclusion on recréait un DefaultHttpDataSource
+            //   qui CONTOURNAIT Cronet (exigé par needsCronet("vidzy.")) → 403 sur u<N>.vidzy.cc.
             if (!videoUa.isNullOrBlank() && videoUa != NetworkClient.USER_AGENT &&
                 !(sourceHost.contains("uqload") || sourceHost.contains("abyssa") || sourceHost.contains("abysscdn")
-                    || sourceHost.contains("citron-edge"))) {
+                    || sourceHost.contains("citron-edge") || sourceHost.contains("vidzy"))) {
                 try {
                     val customFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
                         .setUserAgent(videoUa)
@@ -5423,15 +5500,62 @@ class PlayerMobileFragment : Fragment() {
                         || causeMsg.contains("ERR_NAME_NOT_RESOLVED")
                         || causeMsg.contains("ERR_SSL")
                         || causeMsg.contains("ERR_NETWORK")
+                        // 2026-07-27 : uqload (strmN.uqload.is) — Cronet n'arrive pas à se connecter
+                        //   au CDN (ERROR_CODE_IO_NETWORK_CONNECTION_FAILED) alors que le navigateur
+                        //   ET la pile système y arrivent. Sans ça, on STICKY-retry en boucle sur
+                        //   Cronet puis on abandonne. → bascule DefaultHttp (comme le navigateur).
+                        || error.errorCodeName.contains("CONNECTION_FAILED")
+                        || causeMsg.contains("CONNECTION_FAILED")
                 if (usingCronet && isCronetNetworkError && !is403) {
-                    Log.w("PlayerNetwork", "Cronet network error ($causeMsg), retrying with DefaultHttp fallback")
                     val video = currentVideo ?: return
                     val server = currentServer ?: return
-                    httpDataSource = createDefaultHttpDataSourceFactory()
+                    // 2026-07-27 : DNS bloqué par le FAI (uqload strmN.uqload.is → ERR_NAME_NOT_RESOLVED /
+                    //   ERROR_CODE_IO_NETWORK_CONNECTION_FAILED). Cronet ET DefaultHttp utilisent le DNS
+                    //   système → échec. Seule la voie DoH-OkHttp (résolution Cloudflare) joint le host.
+                    //   Autres erreurs Cronet (SSL/reset…) → DefaultHttp comme avant.
+                    val dnsBlocked = error.errorCodeName.contains("CONNECTION_FAILED")
+                        || causeMsg.contains("ERR_NAME_NOT_RESOLVED")
+                        || causeMsg.contains("CONNECTION_FAILED")
+                        || causeMsg.contains("UnknownHost")
+                        || errorCauseMsg.contains("UnknownHost")
+                    // 2026-07-29 : marquer l'hôte comme DNS-bloqué → createHttpDataSourceFactory
+                    //   (rappelé par initializePlayer) forcera DoT-OkHttp pour lui, sinon il
+                    //   re-choisissait Cronet et rebouclait en UnknownHost.
+                    if (dnsBlocked) hostOf(video.source)?.let { dnsBlockedHosts.add(it) }
+                    httpDataSource = if (dnsBlocked) createDoHOkHttpDataSourceFactory() else createDefaultHttpDataSourceFactory()
+                    Log.w("PlayerNetwork", "Cronet network error ($causeMsg) → retry via ${if (dnsBlocked) "DoH-OkHttp (DNS bypass)" else "DefaultHttp"}")
                     dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
                     initializePlayer(currentExtraBuffering, currentSoftwareDecoder, video.source)
                     displayVideo(video, server)
                     return
+                }
+
+                // 2026-07-29 : repli DNS générique pour les appareils SANS Cronet (ex. Honor
+                //   sans Google Play Services → la lecture passe par DefaultHttpDataSource =
+                //   DNS SYSTÈME = FAI filtré → l'hôte vidéo bloqué ne se résout pas). Si la
+                //   lecture échoue sur une erreur de résolution et qu'on n'utilise pas déjà la
+                //   voie DoT-OkHttp, on rebascule dessus (résout via notre resolver DoT dot.sb).
+                //   Guardé `!usingCronet` : le cas Cronet est traité juste au-dessus.
+                if (!usingCronet && !usingDoH && !is403) {
+                    val isDnsBlock = errorCauseMsg.contains("Unable to resolve host", true)
+                        || causeMsg.contains("Unable to resolve host", true)
+                        || errorCauseMsg.contains("UnknownHost", true)
+                        || causeMsg.contains("UnknownHost", true)
+                        || causeMsg.contains("No address associated", true)
+                        || causeMsg.contains("ERR_NAME_NOT_RESOLVED", true)
+                    if (isDnsBlock) {
+                        val video = currentVideo
+                        val server = currentServer
+                        if (video != null && server != null) {
+                            Log.w("PlayerNetwork", "Erreur DNS non-Cronet ($causeMsg) → repli DoT-OkHttp (bypass DNS FAI)")
+                            hostOf(video.source)?.let { dnsBlockedHosts.add(it) }
+                            httpDataSource = createDoHOkHttpDataSourceFactory()
+                            dataSourceFactory = DefaultDataSource.Factory(requireContext(), httpDataSource)
+                            initializePlayer(currentExtraBuffering, currentSoftwareDecoder, video.source)
+                            displayVideo(video, server)
+                            return
+                        }
+                    }
                 }
 
                 // Fallback 1: if 403, try next server or channel variant
@@ -6604,8 +6728,13 @@ class PlayerMobileFragment : Fragment() {
         // 2026-07-06 : vidzy.cc/vidzy.to = CDN Vidmoly alternatif, même
         // JA3 que vidzy.live. vmwesa.online = autre CDN Vidmoly (rotation).
         // Sans Cronet → UnknownHostException sur Chromecast (DNS système KO).
+        // 2026-08-01 : détection `/v4/…/cf-master` RETIRÉE (parité TV). Ce CDN ne filtre pas
+        //   le TLS mais l'ORIGINE — le 403 persistait sous Cronet, et les segments
+        //   retombaient en 403 en cours de lecture. Corrigé dans RpmvidExtractor via `Origin`.
         return url.contains("vidzy.", ignoreCase = true)
-            || url.contains("vmwesa.online", ignoreCase = true)
+            // 2026-07-30 : vmwesa.online retiré de Cronet (cert rejeté par vieux CA store,
+            //   Cronet impose son magasin de CA) → routé needsDoH (OkHttp trust-all).
+            // (vmwesa.online géré via needsDoH)
             || url.contains("cfglobalcdn.com", ignoreCase = true)
             || url.contains("anime-sama.", ignoreCase = true)
             || url.contains("uqload.is", ignoreCase = true)
@@ -6646,6 +6775,9 @@ class PlayerMobileFragment : Fragment() {
             || url.contains("cdndirector.dailymotion.com", ignoreCase = true)
             || url.contains("dmcdn.net", ignoreCase = true)
             || url.contains("anime-sama.", ignoreCase = true)
+            // 2026-07-30 : CDN Vidmoly (cert rejeté par vieux CA store) → OkHttp trust-all.
+            || url.contains("vmwesa", ignoreCase = true)
+            || url.contains("acek-cdn", ignoreCase = true)
     }
 
     // 2026-05-20 (parité PlayerTvFragment) : détection émulateur (BlueStacks inclus)
@@ -6695,7 +6827,20 @@ class PlayerMobileFragment : Fragment() {
      * - tnmr.org/luluvdo → OkHttp with full browser headers (CDN requires browser-like requests)
      * - everything else → DefaultHttpDataSource (system DNS, most compatible)
      */
+    // 2026-07-29 : hôtes de flux dont le DNS FAI a échoué (UnknownHost) → on FORCE
+    //   la voie DoT-OkHttp pour eux, même si needsCronet=true. Sinon, sur les réseaux
+    //   qui bloquent l'hôte (ex. uqload strmN.uqload.is), Cronet (DNS système) reboucle
+    //   en UnknownHost et le repli était écrasé par le re-pick de createHttpDataSourceFactory.
+    private val dnsBlockedHosts = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private fun hostOf(url: String?): String? = runCatching { android.net.Uri.parse(url).host }.getOrNull()
+
     private fun createHttpDataSourceFactory(videoUrl: String = ""): HttpDataSource.Factory {
+        // Hôte connu comme DNS-bloqué par le FAI → DoT-OkHttp d'office (résout via dot.sb).
+        val vHost = hostOf(videoUrl)
+        if (vHost != null && dnsBlockedHosts.contains(vHost)) {
+            Log.w("PlayerNetwork", "Forced DoT-OkHttp for DNS-blocked host $vHost")
+            return createDoHOkHttpDataSourceFactory()
+        }
         if (!needsCronet(videoUrl)) {
             if (needsDoH(videoUrl)) {
                 Log.d("PlayerNetwork", "URL needs DoH for CNAME resolution ($videoUrl)")
@@ -6737,12 +6882,20 @@ class PlayerMobileFragment : Fragment() {
         usingBrowserOkHttp = false
         // 2026-05-19 v85k : Uqload + Hydrax exigent EXACTEMENT Chrome 131 Pixel 8.
         //   Le default Chrome 116 donne 403. Override pour ces hosts.
-        val cronetUa = if (videoUrl.contains("uqload", ignoreCase = true) ||
-                           videoUrl.contains("abyssa", ignoreCase = true) ||
-                           videoUrl.contains("abysscdn", ignoreCase = true)) {
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"  // v85x desktop UA match PC Chrome
-        } else {
-            NetworkClient.USER_AGENT
+        val cronetUa = when {
+            videoUrl.contains("uqload", ignoreCase = true) ||
+            videoUrl.contains("abyssa", ignoreCase = true) ||
+            videoUrl.contains("abysscdn", ignoreCase = true) ->
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"  // v85x desktop UA match PC Chrome
+            // upbolt : le cookie DataDome a été émis pour le Chrome MOBILE de la WebView
+            //   (Pixel 8 / Chrome 131). Cronet doit présenter le MÊME UA, sinon DataDome
+            //   invalide la session → on réutilise l'UA mobile de l'extracteur.
+            // 2026-07-31 (parité TV, Silo S3E5 → 403) : VIDZY idem — le token `t=` de
+            //   u<N>.vidzy.cc est émis pour l'UA de la WebView (Pixel 8 / Chrome 131).
+            videoUrl.contains("upbolt", ignoreCase = true) ||
+            videoUrl.contains("vidzy", ignoreCase = true) ->
+                "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+            else -> NetworkClient.USER_AGENT
         }
         Log.d("PlayerNetwork", "v85k Cronet UA = $cronetUa")
         return CronetDataSource.Factory(engine, cronetExecutor)
@@ -6871,15 +7024,30 @@ class PlayerMobileFragment : Fragment() {
             }
         }
 
+        // 2026-07-30 : trust TLS permissif (voir PlayerTvFragment) — les CDN Vidmoly
+        //   (vmwesa.online / acek-cdn.com) présentent un cert que les vieux appareils
+        //   ne reconnaissent pas (ERR_CERT_AUTHORITY_INVALID). Ce client ne sert qu'au
+        //   streaming de ces CDN → on accepte tout cert pour être indépendant du CA store.
+        val trustAllPlayback = arrayOf<javax.net.ssl.TrustManager>(
+            object : javax.net.ssl.X509TrustManager {
+                override fun checkClientTrusted(c: Array<java.security.cert.X509Certificate>, a: String) {}
+                override fun checkServerTrusted(c: Array<java.security.cert.X509Certificate>, a: String) {}
+                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+            }
+        )
+        val sslPlaybackCtx = javax.net.ssl.SSLContext.getInstance("TLS")
+            .apply { init(null, trustAllPlayback, java.security.SecureRandom()) }
         val dohClient = OkHttpClient.Builder()
             .dns(jsonDohDns)
+            .sslSocketFactory(sslPlaybackCtx.socketFactory, trustAllPlayback[0] as javax.net.ssl.X509TrustManager)
+            .hostnameVerifier { _, _ -> true }
             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
-        Log.d("PlayerNetwork", "Using OkHttpDataSource with Multi-DoH (cfglobalcdn resolution)")
+        Log.d("PlayerNetwork", "Using OkHttpDataSource with Multi-DoH (cfglobalcdn resolution) + trust-all TLS")
         return OkHttpDataSource.Factory(dohClient)
             .setUserAgent(NetworkClient.USER_AGENT)
     }
@@ -7363,12 +7531,30 @@ class PlayerMobileFragment : Fragment() {
         try { binding.pvPlayer.player = mirror } catch (e: Exception) { Log.w("PlayerMobile", "attach mirror KO: ${e.message}") }
         try { binding.pvPlayer.showController() } catch (_: Exception) {}
 
+        // upbolt : le player joue via JS play() (pas besoin d'un vrai geste, contrairement à
+        //   seek/abyss) → le bouton CENTRAL fait play ET pause en JS direct, et on MASQUE le bouton
+        //   pause dédié de droite (btn_seek_playpause) que le user veut virer.
+        val isUpboltMirror = pendingWebViewVideo?.webViewUrl?.contains("upbolt", ignoreCase = true) == true
+        // 2026-07-29 : embed4me utilise le VRAI-CLIC central (comme abyss/seek — le JS play() ne
+        //   démarre pas vidstack de façon fiable), MAIS on masque quand même le bouton pause dédié
+        //   de droite. On le masque en INVISIBLE (pas GONE) → aucun décalage du player.
+        val isEmbed4meMirror = pendingWebViewVideo?.webViewUrl?.contains("embed4me", ignoreCase = true) == true
+
         // Bouton du MILIEU (exoPlayPause, centré sur le gros bouton bleu) = UNIQUEMENT l'auto-clic :
         //   on override son clic pour envoyer un VRAI MotionEvent sur la WebView pile sur le bouton
         //   bleu (centre horizontal, hauteur de la barre). Il ne passe plus par la logique play/pause
         //   du miroir → plus d'interaction avec le bouton pause dédié.
         try {
             binding.pvPlayer.controller.binding.exoPlayPause.setOnClickListener {
+                if (isUpboltMirror) {
+                    // upbolt : play ET pause en JS direct depuis le bouton central (fiable ici).
+                    try {
+                        wv.evaluateJavascript(
+                            "(function(){try{function pick(){var v=document.querySelector('video');if(v)return v;var f=document.querySelectorAll('iframe');for(var i=0;i<f.length;i++){try{var d=f[i].contentDocument;if(d){var vv=d.querySelector('video');if(vv)return vv;}}catch(e){}}return null;}var v=pick();if(!v)return;if(v.paused){v.play();}else{v.pause();}}catch(e){}})()",
+                            null)
+                    } catch (_: Exception) {}
+                    return@setOnClickListener
+                }
                 try {
                     if (wv.width > 0 && wv.height > 0) {
                         val x = wv.width / 2f
@@ -7390,13 +7576,24 @@ class PlayerMobileFragment : Fragment() {
         // Bouton PAUSE dédié (dans la barre, câblé EN DIRECT) : v.pause()/v.play() FIABLE. La pause
         //   d'une vidéo qui joue ne nécessite aucun geste → v.pause() marche à coup sûr. Le play/
         //   lancement (qui exige un vrai geste) est géré par le bouton principal (MotionEvent).
+        //   upbolt : bouton MASQUÉ (le central fait déjà play/pause en JS) — demande user.
         try {
             val ppBtn = binding.pvPlayer.controller.binding.root
                 .findViewById<android.widget.ImageView>(R.id.btn_seek_playpause)
-            ppBtn?.visibility = View.VISIBLE
+            // upbolt = GONE (retiré). embed4me = INVISIBLE (masqué mais garde sa place → aucun
+            //   décalage du player, le vrai-clic central reste bien positionné).
+            ppBtn?.visibility = when {
+                isUpboltMirror -> View.GONE
+                isEmbed4meMirror -> View.INVISIBLE
+                else -> View.VISIBLE
+            }
             // Espaceur gauche pour garder le bouton play centré sur le bouton bleu.
             binding.pvPlayer.controller.binding.root
-                .findViewById<View>(R.id.btn_seek_spacer)?.visibility = View.VISIBLE
+                .findViewById<View>(R.id.btn_seek_spacer)?.visibility = when {
+                    isUpboltMirror -> View.GONE
+                    isEmbed4meMirror -> View.INVISIBLE
+                    else -> View.VISIBLE
+                }
             ppBtn?.setOnClickListener {
                 try {
                     wv.evaluateJavascript(
@@ -7476,7 +7673,7 @@ class PlayerMobileFragment : Fragment() {
         //   l'overlay plein écran sur la racine.
         // 2026-07-17 : abyss = mode MIROIR (contrôles natifs play/pause/seek qui pilotent la WebView,
         //   fonctionne à la télécommande sur TV). + interception → bascule native si abyss mint l'URL.
-        val webViewIsPlayer = embedUrl.contains("seekplayer") || embedUrl.contains("embedseek") || embedUrl.contains("abyss") || embedUrl.contains("4meplayer") || embedUrl.contains("swiftflow")
+        val webViewIsPlayer = embedUrl.contains("seekplayer") || embedUrl.contains("embedseek") || embedUrl.contains("abyss") || embedUrl.contains("4meplayer") || embedUrl.contains("swiftflow") || embedUrl.contains("upbolt") || embedUrl.contains("embed4me")
         val nativeVideoOverlay = binding.pvPlayer.overlayFrameLayout
         val useNativeControls = webViewIsPlayer && nativeVideoOverlay != null
         val rootView: ViewGroup = if (useNativeControls) nativeVideoOverlay!! else binding.root as ViewGroup
@@ -7536,6 +7733,16 @@ class PlayerMobileFragment : Fragment() {
         //   maintenant »). Même famille de traitement que seekplayer (nav-block, ad-block,
         //   overlay lecteur), mais avec son propre JS d'auto-clic sur l'ad-gate.
         val isSwiftFlow = embedUrl.contains("swiftflow")
+        // 2026-07-27 : upbolt (upbolt.to/e/<id>) — CDN edge0X.upbolt.to protégé DDoS-Guard,
+        //   inextractible (403 en natif). On le JOUE dans l'overlay WebView comme abyss/seekplayer :
+        //   nav top-level hors upbolt bloquée (tue la redirection /dl + les pop pub), pubs coupées,
+        //   auto-clic #vid_play (qui injecte l'iframe player) + play de l'iframe.
+        val isUpbolt = embedUrl.contains("upbolt")
+        // 2026-07-29 : embed4me (lpayer.embed4me.com, player vidstack) — joué dans l'overlay WebView
+        //   (mode manuel, l'utilisateur clique play). Il balance des pop-unders/redirections pub
+        //   (arnaque « Google prize ») → on bloque toute navigation top-level hors embed4me + les
+        //   hôtes de pub + window.open, comme upbolt/abyss.
+        val isEmbed4me = embedUrl.contains("embed4me")
         val seekAdHosts = listOf(
             "boredomcuff", "spleniidizzy", "gappedpeatmen", "popads", "popcash", "propeller",
             "onclick", "adsterra", "hilltopads", "monetag", "clickadu", "doubleclick",
@@ -7543,7 +7750,7 @@ class PlayerMobileFragment : Fragment() {
             // 2026-07-16 : pubs vues sur l'ad-gate swiftflow.lol
             "eminentpercentvandalism",
         )
-        if (isSeekPlayer || isSwiftFlow) {
+        if (isSeekPlayer || isSwiftFlow || isUpbolt) {
             wv.settings.userAgentString = com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA
         }
         val abyssNavAllow = listOf(
@@ -7591,6 +7798,26 @@ class PlayerMobileFragment : Fragment() {
                     if (!nh.contains("swiftflow.")) { Log.d("PlayerMobile", "SwiftFlow NAV BLOCKED: $nh"); return true }
                     return false
                 }
+                // upbolt : seule la page upbolt.to doit naviguer top-level. Le clic play tente de
+                //   NAVIGUER vers /dl (téléchargement) → on le bloque (garde le player vivant). Le
+                //   flux HLS + l'iframe player se chargent en ressource/sous-frame (non impacté).
+                if (isUpbolt) {
+                    val nh = request?.url?.host ?: return false
+                    val path = request.url?.path?.lowercase().orEmpty()
+                    if (nh.contains("upbolt") && (path.endsWith("/dl") || path.contains("/download") || path.contains("/d/"))) {
+                        Log.d("PlayerMobile", "upbolt NAV /dl BLOCKED"); return true
+                    }
+                    if (!nh.contains("upbolt.")) { Log.d("PlayerMobile", "upbolt NAV BLOCKED: $nh"); return true }
+                    return false
+                }
+                // embed4me : seule la page embed4me navigue top-level. Toute autre navigation =
+                //   redirection pub (pop-under scam) → bloquée. Le player vidstack + le flux se
+                //   chargent en ressource/sous-frame (non impactés).
+                if (isEmbed4me) {
+                    val nh = request?.url?.host ?: return false
+                    if (!nh.contains("embed4me")) { Log.d("PlayerMobile", "embed4me NAV BLOCKED: $nh"); return true }
+                    return false
+                }
                 if (!isAbyssEmbed) return false
                 val navHost = request?.url?.host ?: return false
                 val allowed = abyssNavAllow.any { navHost == it || navHost.endsWith(".$it") }
@@ -7602,11 +7829,12 @@ class PlayerMobileFragment : Fragment() {
             ): WebResourceResponse? {
                 val url = request?.url?.toString() ?: return null
 
-                // SeekStreaming / SwiftFlow : coupe les hôtes de pub (le player charge sinon des onclick/pop).
-                if (isSeekPlayer || isSwiftFlow) {
+                // SeekStreaming / SwiftFlow / upbolt / embed4me : coupe les hôtes de pub (sinon onclick/pop).
+                if (isSeekPlayer || isSwiftFlow || isUpbolt || isEmbed4me) {
                     val sh = request?.url?.host ?: ""
-                    if (seekAdHosts.any { sh.contains(it, ignoreCase = true) }) {
-                        Log.d("PlayerMobile", "Seek/SwiftFlow AD BLOCKED: $sh")
+                    if (seekAdHosts.any { sh.contains(it, ignoreCase = true) } ||
+                        AD_BLOCK_PATTERNS.any { sh.contains(it, ignoreCase = true) }) {
+                        Log.d("PlayerMobile", "Seek/SwiftFlow/upbolt/embed4me AD BLOCKED: $sh")
                         return WebResourceResponse("text/plain", "UTF-8",
                             java.io.ByteArrayInputStream("".toByteArray()))
                     }
@@ -7773,6 +8001,19 @@ class PlayerMobileFragment : Fragment() {
                     view?.postDelayed({ view.evaluateJavascript(SWIFTFLOW_PLAY_JS, null) }, 1500)
                     view?.postDelayed({ view.evaluateJavascript(SWIFTFLOW_PLAY_JS, null) }, 3500)
                 }
+                // ── upbolt : auto-clic #vid_play (injecte l'iframe player) + play de l'iframe ──
+                if (isUpbolt) {
+                    view?.evaluateJavascript(UPBOLT_PLAY_JS, null)
+                    view?.postDelayed({ view.evaluateJavascript(UPBOLT_PLAY_JS, null) }, 1500)
+                    view?.postDelayed({ view.evaluateJavascript(UPBOLT_PLAY_JS, null) }, 3500)
+                    view?.postDelayed({ view.evaluateJavascript(UPBOLT_PLAY_JS, null) }, 6000)
+                }
+                // ── embed4me : neutralise window.open + les pop-unders (l'utilisateur clique play) ──
+                if (isEmbed4me) {
+                    view?.evaluateJavascript(EMBED4ME_AD_KILL_JS, null)
+                    view?.postDelayed({ view.evaluateJavascript(EMBED4ME_AD_KILL_JS, null) }, 1500)
+                    view?.postDelayed({ view.evaluateJavascript(EMBED4ME_AD_KILL_JS, null) }, 4000)
+                }
             }
 
             // 2026-05-21 : accepter les certs SSL invalides dans l'overlay player
@@ -7804,7 +8045,7 @@ class PlayerMobileFragment : Fragment() {
 
         // ── Hint text ──
         val hint = TextView(ctx).apply {
-            text = if (isSeekPlayer || isSwiftFlow) "Astuce : appuyez plusieurs fois sur ▶ / ⏸"
+            text = if (isSeekPlayer || isSwiftFlow || isUpbolt) "Astuce : appuyez plusieurs fois sur ▶ / ⏸"
                 else if (isDaddyLiveEmbed) "Chargement de la vidéo…"
                 else "Appuyez sur le bouton play pour lancer la vidéo"
             setTextColor(Color.WHITE)
@@ -7850,6 +8091,11 @@ class PlayerMobileFragment : Fragment() {
             //   auto-clic de l'ad-gate). Referer swiftflow.lol pour le signing cheksum/citron.
             Log.d("PlayerMobile", "Loading SwiftFlow directly: ${embedUrl.take(100)}")
             wv.loadUrl(embedUrl, mapOf("Referer" to "https://swiftflow.lol/"))
+        } else if (isUpbolt) {
+            // upbolt : chargement DIRECT de l'embed (le player du site joue dedans après auto-clic
+            //   #vid_play). Referer onregardeou.site = contexte attendu par l'embed (ub_ext_host).
+            Log.d("PlayerMobile", "Loading upbolt directly: ${embedUrl.take(100)}")
+            wv.loadUrl(embedUrl, mapOf("Referer" to "https://onregardeou.site/"))
         } else {
             // Other embeds: use iframe wrapper (page expects to be in an iframe)
             val baseHost = if (isAbyssEmbed) "https://dessinanime.cc/" else "https://frembed.cyou/"

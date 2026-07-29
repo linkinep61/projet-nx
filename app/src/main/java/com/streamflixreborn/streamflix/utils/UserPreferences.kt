@@ -26,7 +26,9 @@ object UserPreferences {
     private lateinit var prefs: SharedPreferences
 
     // Default DoH Provider URL (Cloudflare)
-    private const val DEFAULT_DOH_PROVIDER_URL = "https://cloudflare-dns.com/dns-query"
+    // 2026-07-29 : défaut = dot.sb (DoT, sans filtrage) pour débloquer un max de
+    //   serveurs dès l'install. Cloudflare/Google censurent pour les utilisateurs FR.
+    private const val DEFAULT_DOH_PROVIDER_URL = "dot://dot.sb"
     const val DOH_DISABLED_VALUE = "" // Value to represent DoH being disabled
     private const val DEFAULT_STREAMINGCOMMUNITY_DOMAIN = "streamingunity.biz"
     private const val DEFAULT_CUEVANA_DOMAIN = "cuevana.gs"
@@ -84,6 +86,7 @@ object UserPreferences {
     // 2026-06-30 (user "case à cocher dans l'option lecteur externe : toujours
     //   l'utiliser, ne plus passer par le lecteur interne, et mémoriser le
     //   lecteur choisi") — persisté, mobile + TV.
+    private const val KEY_APP_TEXT_COLOR = "APP_TEXT_COLOR"
     private const val KEY_ALWAYS_EXTERNAL_PLAYER = "always_external_player"
     private const val KEY_EXTERNAL_PLAYER_PACKAGE = "external_player_package"
 
@@ -114,7 +117,7 @@ object UserPreferences {
     //   (ex: Coflix Boston), on bump ce compteur → la 1ère vérification ajoute les sources
     //   manquantes au set sauvé. L'user peut ensuite les désactiver dans les Paramètres.
     private const val KEY_BACKUP_MIGRATION_V = "BACKUP_MIGRATION_V"
-    private const val CUR_BACKUP_MIGRATION = 7 // bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream ; v6 : TV Hub ; v7 : FileSearch)
+    private const val CUR_BACKUP_MIGRATION = 8 // bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream ; v6 : TV Hub ; v7 : FileSearch ; v8 : Vidzy par TMDB)
 
     // 2026-07-13 (user "une option au-dessus de Gérer les sources pour activer/désactiver les
     //   backups — ça permet de tester si les sources natives du provider sont encore valables") :
@@ -614,6 +617,19 @@ object UserPreferences {
             Key.IMMERSIVE_MODE.setBoolean(value)
         }
 
+    // 2026-07-25 (user « couleur de l'écriture, pour un fond d'écran clair ») : couleur du texte
+    //   posé sur le fond (noms des providers, onglets…). "white" (défaut) ou "black".
+    var appTextColor: String
+        get() = if (::prefs.isInitialized) prefs.getString(KEY_APP_TEXT_COLOR, "white") ?: "white" else "white"
+        set(value) { if (::prefs.isInitialized) prefs.edit().putString(KEY_APP_TEXT_COLOR, value).apply() }
+
+    val appTextColorInt: Int
+        get() = if (appTextColor == "black") android.graphics.Color.parseColor("#141518")
+                else android.graphics.Color.WHITE
+    val appTextColorSecondaryInt: Int
+        get() = if (appTextColor == "black") android.graphics.Color.parseColor("#66000000")
+                else android.graphics.Color.parseColor("#AAFFFFFF")
+
     var forceExtraBuffering: Boolean
         get() = Key.FORCE_EXTRA_BUFFERING.getBoolean() ?: false
         set(value) {
@@ -966,11 +982,28 @@ object UserPreferences {
         }
 
     var dohProviderUrl: String
-        get() = Key.DOH_PROVIDER_URL.getString() ?: DEFAULT_DOH_PROVIDER_URL
+        get() {
+            val raw = Key.DOH_PROVIDER_URL.getString() ?: return DEFAULT_DOH_PROVIDER_URL
+            val migrated = migrateLegacyDns(raw)
+            if (migrated != raw) Key.DOH_PROVIDER_URL.setString(migrated)
+            return migrated
+        }
         set(value) {
             Key.DOH_PROVIDER_URL.setString(value)
             DnsResolver.setDnsUrl(value)
         }
+
+    // 2026-07-29 : migration des valeurs DNS périmées choisies avec l'ancienne liste.
+    //   FDN n'a JAMAIS eu de DoH (seulement DoT) → l'ancien "https://ns0.fdn.fr/dns-query"
+    //   échouait en silence → repli DNS FAI (filtré). OpenDNS/CleanBrowsing = retirés
+    //   (bloqués en France / filtrants). On remappe vers l'équivalent qui marche.
+    private fun migrateLegacyDns(url: String): String = when {
+        url.startsWith("https://ns0.fdn.fr", true) -> "dot://ns0.fdn.fr"
+        url.startsWith("https://ns1.fdn.fr", true) -> "dot://ns1.fdn.fr"
+        url.contains("opendns.com", true) -> DEFAULT_DOH_PROVIDER_URL
+        url.contains("cleanbrowsing", true) -> DEFAULT_DOH_PROVIDER_URL
+        else -> url
+    }
 
     var paddingX: Int
         get() = Key.SCREEN_PADDING_X.getInt() ?: 0

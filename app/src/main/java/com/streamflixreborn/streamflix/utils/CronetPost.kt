@@ -24,11 +24,37 @@ import java.util.concurrent.TimeUnit
 object CronetPost {
     private const val TAG = "CronetPost"
 
+    /**
+     * GET synchrone via Cronet. Retourne {status, body} ou null si fail.
+     *
+     * 2026-07-31 (FSVid) : certains hôtes derrière Cloudflare servent une page DÉGRADÉE
+     * (source publicitaire « /troll/ » à la place du film) quand la signature TLS n'est pas
+     * celle de Chrome — vérifié : la même URL, avec les mêmes cookies et le même Referer,
+     * renvoie 3 variantes selon le client. Cronet présente le ClientHello de Chrome, donc
+     * le serveur sert la vraie page.
+     */
+    fun get(
+        ctx: Context,
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        timeoutMs: Long = 15_000L,
+    ): Pair<Int, String>? = request(ctx, url, "GET", null, headers, timeoutMs)
+
     /** POST synchrone avec body + headers. Retourne {status, body} ou null si fail. */
     fun post(
         ctx: Context,
         url: String,
         body: String,
+        headers: Map<String, String> = emptyMap(),
+        timeoutMs: Long = 15_000L,
+    ): Pair<Int, String>? = request(ctx, url, "POST", body, headers, timeoutMs)
+
+    /** Coeur commun GET/POST (le POST historique passe désormais par ici, inchangé). */
+    private fun request(
+        ctx: Context,
+        url: String,
+        method: String,
+        body: String?,
         headers: Map<String, String> = emptyMap(),
         timeoutMs: Long = 15_000L,
     ): Pair<Int, String>? {
@@ -91,12 +117,14 @@ object CronetPost {
             }
 
             val builder = engine.newUrlRequestBuilder(url, callback, executor)
-                .setHttpMethod("POST")
+                .setHttpMethod(method)
             headers.forEach { (k, v) -> builder.addHeader(k, v) }
-            builder.setUploadDataProvider(
-                UploadDataProviders.create(body.toByteArray(Charsets.UTF_8)),
-                executor
-            )
+            if (body != null) {
+                builder.setUploadDataProvider(
+                    UploadDataProviders.create(body.toByteArray(Charsets.UTF_8)),
+                    executor
+                )
+            }
             val request = builder.build()
             request.start()
 

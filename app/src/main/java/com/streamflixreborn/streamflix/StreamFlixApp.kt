@@ -142,6 +142,10 @@ class StreamFlixApp : Application() {
         super.onCreate()
         instance = this
 
+        // 2026-07-25 : applique le mode Android Auto choisi (radio ou vidéo) — ils sont exclusifs,
+        // la bascule active/désactive OnyxMediaBrowserService.
+        runCatching { com.streamflixreborn.streamflix.car.CarModeSwitcher.applyFromPreferences(this) }
+
         // 2026-07-07 v2 : WIPE INCONDITIONNEL de app_webview/ à CHAQUE cold start.
         //   Avant : le wipe ne se faisait que quand le flag WEBVIEW_DEEP_WIPE_PENDING
         //   était armé par nuclearCachePurge. MAIS la purge ne se déclenche QUE si le

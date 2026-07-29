@@ -335,6 +335,56 @@ object ProfileEmojiArt {
     }
 
     /**
+     * 2026-07-25 (user « dans le sélecteur d'avatar les icônes ne chargent plus ») :
+     * variante pour LE PICKER qui charge depuis le CDN (Glide + cache disque). [bind] ne charge
+     * QUE le cache local (pour l'affichage hors-ligne des profils déjà choisis) → dans la grille du
+     * picker, aucun des ~1581 avatars n'est encore en cache, donc il affichait le nom du dossier au
+     * lieu de l'image. Ici on télécharge réellement (une fois, puis Glide garde en cache) et on
+     * masque le texte de secours pour ne pas montrer de nom tronqué pendant le chargement.
+     */
+    fun bindPicker(emoji: String?, image: ImageView?, fallback: TextView?) {
+        val url = urlForValue(emoji)
+        // Pas de nom de dossier en secours : soit l'image, soit rien (le fond arrondi de la tuile).
+        val fallbackText = if (emoji != null && PATHS.containsKey(emoji)) emoji else ""
+        if (image == null || url == null) {
+            image?.visibility = View.GONE
+            fallback?.apply { visibility = View.VISIBLE; text = fallbackText }
+            return
+        }
+        // Cache local d'abord (0 réseau), sinon CDN.
+        val ctx = image.context.applicationContext
+        val local = emoji?.let { localFile(ctx, it) }
+        val source: Any = if (local != null && local.exists() && local.length() > 100 && isImageFile(local)) local else url
+        fallback?.apply { visibility = View.VISIBLE; text = fallbackText }
+        image.visibility = View.VISIBLE
+        image.clipToOutline = false
+        image.outlineProvider = null
+        Glide.with(image)
+            .load(source)
+            .format(com.bumptech.glide.load.DecodeFormat.PREFER_ARGB_8888)
+            .diskCacheStrategy(com.bumptech.glide.load.engine.DiskCacheStrategy.ALL)
+            .fitCenter()
+            .listener(object : RequestListener<Drawable> {
+                override fun onLoadFailed(
+                    e: GlideException?, model: Any?, target: Target<Drawable>, isFirstResource: Boolean,
+                ): Boolean {
+                    image.visibility = View.GONE
+                    fallback?.apply { visibility = View.VISIBLE; text = fallbackText }
+                    return false
+                }
+                override fun onResourceReady(
+                    resource: Drawable, model: Any, target: Target<Drawable>?,
+                    dataSource: DataSource, isFirstResource: Boolean,
+                ): Boolean {
+                    fallback?.visibility = View.GONE
+                    image.visibility = View.VISIBLE
+                    return false
+                }
+            })
+            .into(image)
+    }
+
+    /**
      * Affiche l'avatar : fichier local en priorité (0 réseau), sinon CDN via
      * Glide, sinon emoji système en fallback.
      */

@@ -7,6 +7,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.drawable.BitmapDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
@@ -154,6 +155,69 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
                 android.widget.Toast.LENGTH_LONG
             ).show()
         }
+    }
+
+    // 2026-07-28 : sélecteur de DOSSIER (SAF) pour les vidéos locales sur box TV.
+    //   Sur certaines box, la permission READ_MEDIA_VIDEO ne s'accorde pas → on laisse
+    //   l'utilisateur pointer son dossier (ex. clé USB) une seule fois ; l'accès est
+    //   persistant, aucune permission Android requise, et ça NE TOUCHE QUE les vidéos.
+    private val videoFolderPickerLauncher: androidx.activity.result.ActivityResultLauncher<Uri?> =
+        registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        uri?.let { selected ->
+            try {
+                requireContext().contentResolver.takePersistableUriPermission(
+                    selected,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        android.content.Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                )
+            } catch (_: Throwable) {}
+            com.streamflixreborn.streamflix.utils.LocalMediaStore.setVideoFolder(requireContext(), selected)
+            com.streamflixreborn.streamflix.utils.LocalVideoPickerDialog.show(
+                requireContext(), viewLifecycleOwner,
+            ) { requestLocalVideoAccess() }
+        }
+    }
+
+    /**
+     * 2026-07-28 : donne l'accès aux vidéos locales sur box TV. Priorité à « Accès à tous les
+     * fichiers » (MANAGE_EXTERNAL_STORAGE) — la méthode des explorateurs de fichiers, qui lit
+     * clé USB / carte SD sans app tierce ni sélecteur. Repli sur le sélecteur de dossier SAF si
+     * l'écran de réglages n'existe pas.
+     */
+    private fun requestLocalVideoAccess() {
+        val ctx = requireContext()
+        // 1) Android 11+ sans « accès à tous les fichiers » : on tente d'ouvrir l'écran de réglages
+        //    (meilleure option : lecture complète USB/SD ensuite). Beaucoup de box TV n'ont PAS cet
+        //    écran → si aucune activité ne le gère, on retombe sur l'explorateur intégré.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            !android.os.Environment.isExternalStorageManager()
+        ) {
+            val tries = listOf(
+                android.content.Intent(
+                    android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    android.net.Uri.parse("package:" + ctx.packageName),
+                ),
+                android.content.Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+            )
+            for (intent in tries) {
+                // On ne lance QUE si une activité gère l'intent (sinon exception sur box TV).
+                if (intent.resolveActivity(ctx.packageManager) != null) {
+                    try {
+                        ctx.startActivity(intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                        android.widget.Toast.makeText(
+                            ctx,
+                            "Active « Accès à tous les fichiers » pour ONYX, puis reviens sur « Vidéos locales ». Sinon utilise l'explorateur.",
+                            android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                        return
+                    } catch (_: Throwable) {}
+                }
+            }
+        }
+        // 2) Repli universel : explorateur de fichiers INTÉGRÉ (navigation directe → clé USB).
+        com.streamflixreborn.streamflix.utils.LocalVideoFolderBrowser.show(ctx, viewLifecycleOwner)
     }
 
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
@@ -344,6 +408,20 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             true
         }
 
+        // 2026-07-25 : vidéos locales (interne / carte SD / clé USB) — utile sur box TV avec USB.
+        //   2026-07-28 : si la permission vidéo est refusée/indisponible (fréquent sur box TV) ET
+        //   qu'aucun dossier SAF n'a encore été choisi → on ouvre le sélecteur de dossier. Sinon on
+        //   affiche directement la liste (MediaStore + dossier SAF fusionnés).
+        findPreference<Preference>("p_settings_local_videos")?.setOnPreferenceClickListener {
+            // Le dialog liste MediaStore + dossier SAF ; s'il ne trouve rien (clé USB non indexée
+            //   par MediaStore sur box TV) il ouvre le sélecteur de dossier via ce callback. Un
+            //   bouton « 📁 Dossier USB » reste aussi disponible en haut pour (re)pointer la clé.
+            com.streamflixreborn.streamflix.utils.LocalVideoPickerDialog.show(
+                requireContext(), viewLifecycleOwner,
+            ) { requestLocalVideoAccess() }
+            true
+        }
+
         // 2026-06-10 (user "ajouter les playlists dans paramètres") : gestion
         //   des sources World TV (style Wiseplay).
         findPreference<Preference>("world_live_sources")?.setOnPreferenceClickListener {
@@ -366,12 +444,26 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         }
 
         // 2026-06-09 : fond d'écran personnalisé.
+        //   2026-07-29 (bug testeur MiBox : le picker système ne lit pas la clé USB) : on ouvre
+        //   le sélecteur d'image INTÉGRÉ (même méthode que les vidéos : MediaStore tous volumes +
+        //   scan des volumes amovibles) au lieu du SAF/DocumentsUI absent sur box. Repli SAF si KO.
         findPreference<Preference>("WALLPAPER_PICK")?.setOnPreferenceClickListener {
             try {
-                wallpaperPickerLauncher.launch(arrayOf("image/*"))
+                com.streamflixreborn.streamflix.utils.LocalImagePickerDialog.show(
+                    requireContext(), viewLifecycleOwner,
+                ) { uri ->
+                    com.streamflixreborn.streamflix.utils.AppearanceManager.setWallpaperUri(requireContext(), uri)
+                    Toast.makeText(
+                        requireContext(),
+                        "Fond personnalisé appliqué. Reviens à l'accueil pour voir le résultat.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
             } catch (e: Throwable) {
-                Toast.makeText(requireContext(),
-                    "Picker indisponible : ${e.message}", Toast.LENGTH_LONG).show()
+                try { wallpaperPickerLauncher.launch(arrayOf("image/*")) } catch (_: Throwable) {
+                    Toast.makeText(requireContext(),
+                        "Picker indisponible : ${e.message}", Toast.LENGTH_LONG).show()
+                }
             }
             true
         }

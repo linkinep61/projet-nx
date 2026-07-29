@@ -203,8 +203,17 @@ class HomeMobileFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         if (_binding == null) return
-        // 2026-06-09 : applique le fond d'écran personnalisé.
-        com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(binding.root)
+        // 2026-07-25 (user « pas décalé ») : le wallpaper plein écran est posé au niveau ACTIVITÉ
+        //   (derrière les barres). En mode original on garde le fond du fragment TRANSPARENT (un seul
+        //   calque). Les modes noir/carrousel restent gérés par updateMobileBackground.
+        run {
+            val prefs = com.streamflixreborn.streamflix.utils.UserPreferences
+            if (!prefs.blackBackground && !prefs.carouselAsBackground) {
+                com.bumptech.glide.Glide.with(this).clear(binding.ivHomeBackground)
+                binding.ivHomeBackground.setImageDrawable(null)
+                binding.ivHomeBackground.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            }
+        }
         // 2026-06-09 (user "bouton carrousel mobile désactive pas") : refresh
         //   adapter pour que displayMobileSwiper soit re-bind avec nouvelle
         //   valeur de carouselAsBackground.
@@ -587,10 +596,12 @@ class HomeMobileFragment : Fragment() {
                     .into(binding.ivHomeBackground)
                 return
             }
-            // Mode original : NE PAS TOUCHER au fond. AppearanceManager.applyTo
-            //   a déjà appliqué le custom wallpaper user (ou default si rien).
-            //   Si on revient de carrousel/noir → on RE-applique pour restaurer.
-            com.streamflixreborn.streamflix.utils.AppearanceManager.applyTo(binding.root)
+            // Mode original : 2026-07-25 (user « pas décalé ») — le wallpaper plein écran est posé
+            //   au niveau ACTIVITÉ (derrière les barres, cadrage plein écran). Le fond DU FRAGMENT
+            //   reste TRANSPARENT → un SEUL calque, plus de décalage entre contenu et zone des barres.
+            com.bumptech.glide.Glide.with(ctx).clear(binding.ivHomeBackground)
+            binding.ivHomeBackground.setImageDrawable(null)
+            binding.ivHomeBackground.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         } catch (_: Throwable) {}
     }
 

@@ -160,6 +160,34 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         }
     }
 
+    // 2026-07-29 : ouvre « Accès à tous les fichiers » (MANAGE_EXTERNAL_STORAGE) pour que ONYX
+    //   scanne le disque et voie TOUTES les vidéos locales (même celles non indexées par MediaStore).
+    private fun requestAllFilesAccess(ctx: android.content.Context) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+            !android.os.Environment.isExternalStorageManager()
+        ) {
+            android.widget.Toast.makeText(
+                ctx,
+                "Active « Accès à tous les fichiers » pour ONYX, puis rouvre « Vidéos locales »",
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
+            val tries = listOf(
+                Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    android.net.Uri.parse("package:" + ctx.packageName)),
+                Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+                Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    android.net.Uri.parse("package:" + ctx.packageName)),
+            )
+            for (i in tries) {
+                if (i.resolveActivity(ctx.packageManager) != null) {
+                    try { ctx.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); return } catch (_: Throwable) {}
+                }
+            }
+        } else {
+            android.widget.Toast.makeText(ctx, "Accès à tous les fichiers déjà actif", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private val scanResolverQrLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -458,12 +486,26 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         }
 
         // 2026-06-09 : fond d'écran personnalisé.
+        //   2026-07-29 (bug testeur MiBox : le picker système ne lit pas la clé USB) : sélecteur
+        //   d'image INTÉGRÉ (même méthode que les vidéos : MediaStore tous volumes + scan des
+        //   volumes amovibles). Repli SAF si le picker interne échoue.
         findPreference<Preference>("WALLPAPER_PICK")?.setOnPreferenceClickListener {
             try {
-                wallpaperPickerLauncher.launch(arrayOf("image/*"))
+                com.streamflixreborn.streamflix.utils.LocalImagePickerDialog.show(
+                    requireContext(), viewLifecycleOwner,
+                ) { uri ->
+                    com.streamflixreborn.streamflix.utils.AppearanceManager.setWallpaperUri(requireContext(), uri)
+                    Toast.makeText(
+                        requireContext(),
+                        "Fond personnalisé appliqué. Reviens à l'accueil pour voir le résultat.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
             } catch (e: Throwable) {
-                Toast.makeText(requireContext(),
-                    "Picker indisponible : ${e.message}", Toast.LENGTH_LONG).show()
+                try { wallpaperPickerLauncher.launch(arrayOf("image/*")) } catch (_: Throwable) {
+                    Toast.makeText(requireContext(),
+                        "Picker indisponible : ${e.message}", Toast.LENGTH_LONG).show()
+                }
             }
             true
         }
@@ -978,6 +1020,40 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
                 (activity as? MainMobileActivity)?.updateImmersiveMode()
                 true
             }
+        }
+
+        // 2026-07-25 : Android Auto — bascule RADIO ↔ VIDÉO (exclusifs : un service média actif
+        // fait classer ONYX en app audio et supprime l'écran vidéo de la voiture).
+        // Juste sous la bascule : choisir une vidéo du téléphone (elle se projette aussi en voiture).
+        findPreference<Preference>("p_settings_local_videos")?.setOnPreferenceClickListener {
+            context?.let { ctx ->
+                // 2026-07-29 : le bouton « 📁 Tous les dossiers » ouvre « Accès à tous les fichiers »
+                //   → permet à ONYX de scanner le disque et de voir les vidéos qu'Android n'a PAS
+                //   indexées dans MediaStore (fichiers copiés à la main dans d'autres dossiers).
+                com.streamflixreborn.streamflix.utils.LocalVideoPickerDialog.show(ctx, viewLifecycleOwner) {
+                    requestAllFilesAccess(ctx)
+                }
+            }
+            true
+        }
+
+        findPreference<SwitchPreferenceCompat>(
+            com.streamflixreborn.streamflix.car.CarModeSwitcher.PREF_KEY,
+        )?.setOnPreferenceChangeListener { _, newValue ->
+            val videoMode = newValue as Boolean
+            context?.let { ctx ->
+                com.streamflixreborn.streamflix.car.CarModeSwitcher.apply(ctx, videoMode)
+                android.widget.Toast.makeText(
+                    ctx,
+                    if (videoMode) {
+                        "Mode VIDÉO : reconnectez Android Auto pour voir l'écran vidéo (la radio est désactivée)."
+                    } else {
+                        "Mode RADIO : reconnectez Android Auto pour retrouver la radio et les favoris."
+                    },
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
+            }
+            true
         }
 
         findPreference<SwitchPreferenceCompat>("ENABLE_TMDB")?.apply {

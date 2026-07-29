@@ -397,6 +397,14 @@
                 android:entryValues="@array/theme_values"
                 android:defaultValue="default" />
 
+            <ListPreference
+                android:key="APP_TEXT_COLOR"
+                android:title="Couleur du texte"
+                android:summary="%s"
+                android:entries="@array/text_color_names"
+                android:entryValues="@array/text_color_values"
+                android:defaultValue="white" />
+
             <!-- 2026-06-07 (user "il devrait être dans apparence sur TV
                  comme sur mobile") : PROFILE_PICKER_ENABLED déplacé ici
                  depuis la PreferenceCategory "Affichage" du screen_playback. -->
@@ -594,6 +602,12 @@
             android:icon="@drawable/ic_github"
             android:key="p_settings_github"
             android:title="@string/settings_github" />
+
+        <!-- 2026-07-25 (user : sur TV, une clé USB permet de lire ses vidéos locales). -->
+        <Preference
+            android:key="p_settings_local_videos"
+            android:title="Vidéos locales"
+            android:summary="Vidéos internes, carte SD ou clé USB (appui long = favori)" />
 
         <Preference
             android:key="p_settings_extractor_stats"

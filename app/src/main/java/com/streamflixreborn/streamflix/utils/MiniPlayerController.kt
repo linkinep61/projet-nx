@@ -2054,7 +2054,14 @@ object MiniPlayerController {
                 try {
                     val httpFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
                         .setAllowCrossProtocolRedirects(true)
-                    val resolving = androidx.media3.datasource.ResolvingDataSource.Factory(httpFactory) { dataSpec ->
+                    // 2026-07-25 (bug user « une musique de mon téléphone ne jouait pas ») :
+                    //   DefaultHttpDataSource ne sait lire QUE http(s) → les fichiers locaux
+                    //   (content:// de la médiathèque) échouaient. DefaultDataSource gère
+                    //   content://, file://, asset:// ET délègue le http à la factory ci-dessus.
+                    val baseFactory = appContext?.let {
+                        androidx.media3.datasource.DefaultDataSource.Factory(it, httpFactory)
+                    } ?: httpFactory
+                    val resolving = androidx.media3.datasource.ResolvingDataSource.Factory(baseFactory) { dataSpec ->
                         val u = dataSpec.uri.toString()
                         if (com.streamflixreborn.streamflix.providers.NewPipeAudio.isYouTubeUrl(u)) {
                             val real = com.streamflixreborn.streamflix.providers.NewPipeAudio.resolveAudioUrl(u)

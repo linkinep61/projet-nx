@@ -47,8 +47,8 @@ android {
         applicationId "com.streamfr.app"
         minSdk 23
         targetSdk 35
-        versionCode 10937
-        versionName "1.7.237"
+        versionCode 10938
+        versionName "1.7.238"
 
         // ABI pilotée par la propriété ABI_TARGET (local.properties, posée par la CI).
         //   APK par défaut = ARM (armeabi-v7a + arm64-v8a).
@@ -141,6 +141,7 @@ dependencies {
     implementation 'androidx.media3:media3-datasource-cronet:1.8.0'
     implementation 'com.google.android.gms:play-services-cronet:18.1.0'
     implementation 'androidx.appcompat:appcompat:1.7.1'
+    implementation 'androidx.documentfile:documentfile:1.0.1'
     implementation 'androidx.constraintlayout:constraintlayout:2.2.1'
     implementation 'androidx.navigation:navigation-fragment-ktx:2.8.8'
     implementation 'androidx.navigation:navigation-ui-ktx:2.8.8'

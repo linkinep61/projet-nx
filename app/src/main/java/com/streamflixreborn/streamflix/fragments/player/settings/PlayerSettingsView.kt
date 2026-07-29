@@ -1387,6 +1387,12 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
              *  Ex: "1080p", "720p", "4K". null = pas encore probé. */
             @Volatile var quality: String? = null
 
+            /** 2026-07-31 : langue RÉELLE du flux, lue dans le manifeste HLS pendant le
+             *  probe qualité (« VF », « VOSTFR », « VF+VO »). Permet de distinguer deux
+             *  liens d'un même hébergeur qui servent des langues différentes — info
+             *  absente de l'URL comme de l'API. null = inconnue. */
+            @Volatile var language: String? = null
+
             /** True si l'user a click la croix pour bannir ce server. Persisté
              *  dans IptvBannedServers + restauré au prochain ouverture. */
             var isBanned: Boolean = false

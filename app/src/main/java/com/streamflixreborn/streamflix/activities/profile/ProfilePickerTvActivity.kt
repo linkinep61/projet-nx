@@ -150,7 +150,7 @@ class ProfilePickerTvActivity : FragmentActivity() {
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
             hint = "PIN"
         }
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, com.streamflixreborn.streamflix.R.style.OnyxDialog)
             .setTitle("PIN requis pour ${profile.name}")
             .setView(input)
             .setPositiveButton("OK") { _, _ ->
@@ -190,7 +190,7 @@ class ProfilePickerTvActivity : FragmentActivity() {
             addView(TextView(this@ProfilePickerTvActivity).apply { setPadding(0, 24, 0, 0) })
             addView(emojiButton)
         }
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, com.streamflixreborn.streamflix.R.style.OnyxDialog)
             .setTitle("Nouveau profil")
             .setView(container)
             .setPositiveButton("Créer") { _, _ ->
@@ -222,7 +222,7 @@ class ProfilePickerTvActivity : FragmentActivity() {
         val items = profiles.map {
             "${ProfileEmojiArt.displayName(it.emoji)} — ${it.name}${if (it.isAdmin) " (admin)" else ""}"
         }.toTypedArray()
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, com.streamflixreborn.streamflix.R.style.OnyxDialog)
             .setTitle("Gérer les profils")
             .setItems(items) { _, idx -> openEditProfileDialog(profiles[idx]) }
             .setNegativeButton("Fermer", null)
@@ -233,7 +233,7 @@ class ProfilePickerTvActivity : FragmentActivity() {
         val options = mutableListOf("Renommer", "Changer avatar")
         if (profile.pinHash != null) options += "Supprimer PIN" else options += "Définir un PIN"
         options += "Supprimer ce profil"
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, com.streamflixreborn.streamflix.R.style.OnyxDialog)
             .setTitle("${ProfileEmojiArt.displayName(profile.emoji)} — ${profile.name}")
             .setItems(options.toTypedArray()) { _, idx ->
                 when (options[idx]) {
@@ -274,7 +274,7 @@ class ProfilePickerTvActivity : FragmentActivity() {
     }
 
     private fun confirmDelete(profile: Profile) {
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, com.streamflixreborn.streamflix.R.style.OnyxDialog)
             .setTitle("Supprimer ${profile.name} ?")
             .setMessage("Les favoris et l'historique de ce profil seront perdus.")
             .setPositiveButton("Supprimer") { _, _ ->
@@ -302,7 +302,7 @@ class ProfilePickerTvActivity : FragmentActivity() {
             setText(initial)
             this.inputType = inputType
         }
-        AlertDialog.Builder(this)
+        AlertDialog.Builder(this, com.streamflixreborn.streamflix.R.style.OnyxDialog)
             .setTitle(title)
             .setView(input)
             .setPositiveButton("OK") { _, _ -> onConfirm(input.text.toString().trim()) }

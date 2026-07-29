@@ -1,28 +1,42 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <string name="settings_doh_provider_title" tools:ignore="MissingTranslation">DNS over HTTPS (DoH)</string>
+    <string name="settings_doh_provider_title" tools:ignore="MissingTranslation">DNS chiffré (DoT / DoH)</string>
 
     <string-array name="doh_provider_names" tools:ignore="MissingTranslation">
-        <item>None</item>
-        <item>Google</item>
-        <item>Cloudflare</item>
-        <item>OpenDNS</item>
-        <item>Quad9</item>
-        <item>CleanBrowsing (Family Filter)</item>
-        <item>AdGuard</item>
-        <item>DNS4EU</item>
-        <item>FDN</item>
+        <item>Aucun (DNS système)</item>
+        <item>FDN — sans filtrage 🇫🇷 (DoT)</item>
+        <item>FDN secours — sans filtrage 🇫🇷 (DoT)</item>
+        <item>Mullvad — sans filtrage (DoT)</item>
+        <item>dns.sb — sans filtrage (DoT)</item>
+        <item>DNS4All — sans filtrage 🇳🇱 (DoT)</item>
+        <item>LibreDNS — sans filtrage (DoT)</item>
+        <item>ControlD — sans filtrage (DoT)</item>
+        <item>AdGuard — sans filtrage (DoT)</item>
+        <item>dns.sb — sans filtrage (DoH · anti-Bouygues)</item>
+        <item>Mullvad — sans filtrage (DoH · anti-Bouygues)</item>
+        <item>Cloudflare (DoH · censure FR partielle)</item>
+        <item>Google (DoH · censure FR partielle)</item>
+        <item>Quad9 — anti-malware (DoH)</item>
+        <item>AdGuard — anti-pub (DoT)</item>
+        <item>Mullvad — anti-pub (DoT)</item>
     </string-array>
 
     <string-array name="doh_provider_urls" translatable="false">
-        <item></item> <!-- Disabilitato -->
-        <item>https://dns.google/dns-query</item>
+        <item></item> <!-- Désactivé : DNS système -->
+        <item>dot://ns0.fdn.fr</item>
+        <item>dot://ns1.fdn.fr</item>
+        <item>dot://dns.mullvad.net</item>
+        <item>dot://dot.sb</item>
+        <item>dot://dot.dns4all.eu</item>
+        <item>dot://dot.libredns.gr</item>
+        <item>dot://p0.freedns.controld.com</item>
+        <item>dot://unfiltered.adguard-dns.com</item>
+        <item>https://doh.dns.sb/dns-query</item>
+        <item>https://dns.mullvad.net/dns-query</item>
         <item>https://cloudflare-dns.com/dns-query</item>
-        <item>https://doh.opendns.com/dns-query</item>
+        <item>https://dns.google/dns-query</item>
         <item>https://dns.quad9.net/dns-query</item>
-        <item>https://doh.cleanbrowsing.org/doh/family-filter/</item>
-        <item>https://dns.adguard-dns.com/dns-query</item>
-        <item>https://unfiltered.joindns4.eu/dns-query</item>
-        <item>https://ns0.fdn.fr/dns-query</item>
+        <item>dot://dns.adguard-dns.com</item>
+        <item>dot://adblock.dns.mullvad.net</item>
     </string-array>
 </resources>

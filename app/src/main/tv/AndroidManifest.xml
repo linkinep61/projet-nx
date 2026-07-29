@@ -12,6 +12,19 @@
         android:required="false" />
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 2026-07-25 : lire musiques + vidéos locales (interne / carte SD / clé USB) sur box TV. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- 2026-07-28 : IMAGES demandé AVEC VIDEO (même groupe visuel « Photos et vidéos ») pour que
+         le dialogue d'autorisation apparaisse sur box TV et couvre la vidéo. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- 2026-07-28 : « Accès à tous les fichiers » — seule voie fiable pour lire une clé USB / carte
+         SD sur box TV (MediaStore n'indexe pas l'USB, le sélecteur SAF est souvent absent). ONYX est
+         sideloadé (hors Play Store) → pas de restriction de policy. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- 2026-06-09 : audio radio en arrière-plan (écran éteint) -->
@@ -25,6 +38,39 @@
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <!-- Package visibility for PlanetVPN (= "VPN 2") -->
+        <package android:name="com.freevpnplanet" />
+        <!-- Package visibility for SmartTube (Stable & Beta) and YouTube -->
+        <package android:name="org.smarttube.stable" />
+        <package android:name="org.smarttube.beta" />
+        <package android:name="com.google.android.youtube" />
+        <package android:name="com.google.android.tv.youtube" />
+
+        <!-- 2026-07-31 : lecteurs vidéo externes (VLC…) — sans ces <queries>,
+             queryIntentActivities renvoie une liste VIDE sur Android 11+
+             (visibilité des paquets) → aucun lecteur externe trouvé sur TV/box. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="video/*" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/x-mpegURL" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/vnd.apple.mpegurl" />
+        </intent>
+
+        <!-- Intent queries for YouTube links -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" android:host="www.youtube.com" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" android:host="youtu.be" />
         </intent>
     </queries>
 
@@ -41,6 +87,21 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true">
+
+        <!-- 2026-07-25 : lecture des vidéos locales (interne / carte SD / clé USB) sur box TV. -->
+        <activity
+            android:name=".activities.LocalVideoPlayerActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+
+        <!-- Demande de permission média auto-enchaînée (transparente, navigable télécommande). -->
+        <activity
+            android:name=".activities.LocalMediaPermissionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <activity
             android:name=".activities.main.MainTvActivity"

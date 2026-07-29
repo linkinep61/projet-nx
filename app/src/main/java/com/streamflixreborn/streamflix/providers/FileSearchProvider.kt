@@ -100,11 +100,20 @@ object FileSearchProvider {
             "MULTI" in n -> "MULTI"
             "TRUEFRENCH" in n -> "TRUEFRENCH"
             Regex("\\bVFF\\b").containsMatchIn(n) -> "VFF"
-            "FRENCH" in n || Regex("\\bVF\\b").containsMatchIn(n) -> "FR"
-            "VOSTFR" in n -> "VOSTFR"
+            // Audio français : FRENCH + toutes les variantes de VF (VF, VFQ québécois, VFI, VF2, VOF).
+            "FRENCH" in n || Regex("\\bV(F|FQ|FI|F2|OF)\\b").containsMatchIn(n) -> "FR"
+            // Sous-titres français (audio VO mais sous-titré FR) → PAS « full anglais », on garde.
+            "VOSTFR" in n || "SUBFRENCH" in n || Regex("\\bST\\.?FR\\b").containsMatchIn(n) -> "VOSTFR"
             else -> ""
         }
     }
+
+    /** Un fichier est « exploitable en français » s'il porte un marqueur audio FR OU sous-titres FR.
+     *  Les open-directories de FileSearch sont internationaux : un fichier SANS aucun marqueur
+     *  français est presque toujours 100 % anglais → on le vire (demande user : « s'il n'y a que
+     *  l'audio anglais on vire le serveur »). Les releases FR sont quasi toujours taguées
+     *  (FRENCH/TRUEFRENCH/MULTI/VF…), donc ce filtre ne sacrifie pas de vrai contenu français. */
+    private fun isFrenchUsable(name: String): Boolean = langOf(name).isNotBlank()
 
     /** Classement : FR/MULTI d'abord, puis meilleure qualité. */
     private fun frenchScore(name: String): Int {
@@ -163,6 +172,10 @@ object FileSearchProvider {
                     val re = seRegex ?: continue
                     if (!re.containsMatchIn(nName) && !re.containsMatchIn(nCompact)) continue
                 }
+
+                // 3) FILTRE LANGUE : on écarte les fichiers 100 % anglais (aucun marqueur FR audio
+                //    ni sous-titre). Garde MULTI/TRUEFRENCH/FRENCH/VF* et VOSTFR (sous-titres FR).
+                if (!isFrenchUsable(rawName)) continue
 
                 val lang = langOf(rawName)
                 val qual = qualityOf(rawName)

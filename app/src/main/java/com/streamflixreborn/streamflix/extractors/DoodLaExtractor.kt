@@ -15,6 +15,17 @@ open class DoodLaExtractor : Extractor() {
 
     override val name = "DoodStream"
     override val mainUrl = "https://dood.la"
+
+    // 2026-08-01 (user : « j'essaye un serveur Dood et ça fonctionne pas ») : NE JAMAIS
+    //   METTRE EN CACHE le résultat de cet extracteur.
+    //   Diagnostic : l'extraction RÉUSSIT (log `Cache HIT for playmogo.com/e/…`) mais la
+    //   lecture échoue en ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED — ExoPlayer ne reçoit
+    //   pas une vidéo mais une page d'erreur du CDN.
+    //   Cause : l'URL produite est JETABLE. Elle porte `expiry=System.currentTimeMillis()`
+    //   (l'instant de l'extraction) et un `pass_md5` signé + horodaté. Resservie depuis le
+    //   cache quelques minutes plus tard, elle est déjà périmée → le CDN refuse.
+    //   Même piège que LuluVdo (corrigé pareil). Chaque lecture doit refaire le pass_md5.
+    override val cacheTtlMs: Long = 0L
     override val aliasUrls = listOf(
         "https://dsvplay.com",
         "https://myvidplay.com",
@@ -24,6 +35,10 @@ open class DoodLaExtractor : Extractor() {
         "https://dood.work",
         "https://doply.net",
         "https://doodstream.me",
+        // 2026-07-27 (audit domaines morts, vérifié dans Chrome) : doodstream.com est le
+        //   domaine VIVANT actuel (doply.net y redirige) — il manquait dans la reconnaissance,
+        //   donc un lien doodstream.com n'était pas routé (« No extractors found »).
+        "https://doodstream.com",
         // 2026-07-23 (audit serveurs Movix) : ds2video.com = domaine Doodstream vu chez Movix
         //   mais non routé (« No extractors found »). Même moteur pass_md5.
         "https://ds2video.com",
@@ -36,8 +51,14 @@ open class DoodLaExtractor : Extractor() {
 
     private val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
-    override suspend fun extract(link: String): Video {
-        android.util.Log.d("DoodExtractor", "extract() input link=$link")
+    override suspend fun extract(rawLink: String): Video {
+        // 2026-07-27 : dood.work / d000d.org sont MORTS (NXDOMAIN, vérifié dans Chrome). Les IDs
+        //   DoodStream sont PORTABLES entre domaines → on réécrit ces domaines morts vers le
+        //   domaine VIVANT (doodstream.com) AVANT de fetch, sinon dns-fail garanti (issue #93).
+        val link = rawLink
+            .replace("dood.work", "doodstream.com")
+            .replace("d000d.org", "doodstream.com")
+        android.util.Log.d("DoodExtractor", "extract() input link=$link (raw=$rawLink)")
         val linkBaseUrl = getBaseUrl(link)
         val retrofit = Retrofit.Builder()
             .baseUrl(linkBaseUrl)

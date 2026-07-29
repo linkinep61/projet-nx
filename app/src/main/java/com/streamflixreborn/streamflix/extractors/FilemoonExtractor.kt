@@ -86,7 +86,7 @@ open class FilemoonExtractor : Extractor() {
                         if(t)t.dispatchEvent(evt);
                     }catch(e){}
                 }
-                function schedule(){setTimeout(tryClick,600);setTimeout(tryClick,1800);setTimeout(tryClick,3500);}
+                function schedule(){var d=[600,1500,2500,3800,5200,7000,9000,11500,14000,17000,20000];for(var i=0;i<d.length;i++){setTimeout(tryClick,d[i]);}}
                 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',schedule);}
                 else{schedule();}
             })();
@@ -356,17 +356,19 @@ open class FilemoonExtractor : Extractor() {
         } catch (_: Throwable) { null }
         val parentOrigin = parentUrl?.trimEnd('/')
 
-        val result = withTimeoutOrNull(25_000L) {
+        val result = withTimeoutOrNull(30_000L) {
             suspendCancellableCoroutine<Video> { cont ->
                 val context = StreamFlixApp.instance.applicationContext
                 var resolved = false
                 lateinit var webView: WebView
+                var attachedRoot: android.view.ViewGroup? = null
 
                 fun cleanupAndResume(video: Video?) {
                     if (resolved) return
                     resolved = true
                     Handler(Looper.getMainLooper()).post {
                         try {
+                            try { attachedRoot?.removeView(webView) } catch (_: Throwable) {}
                             webView.stopLoading()
                             webView.loadUrl("about:blank")
                             webView.destroy()
@@ -456,11 +458,35 @@ open class FilemoonExtractor : Extractor() {
                     settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
                 }
 
-                // Real layout so the iframe renders with actual dimensions
-                val wSpec = android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY)
-                val hSpec = android.view.View.MeasureSpec.makeMeasureSpec(1920, android.view.View.MeasureSpec.EXACTLY)
-                webView.measure(wSpec, hSpec)
-                webView.layout(0, 0, 1080, 1920)
+                // 2026-07-27 : ATTACHER la WebView à la fenêtre (comme OnRegardeOu/upbolt). Sans
+                //   fenêtre réelle, la WebView ne raster pas et ne traite pas les vrais gestes → la
+                //   vérif humaine q8y5z (qui exige désormais un geste de confiance) ne passe plus et
+                //   l'auto-clic injecté reste sans effet → timeout 25s. Attachée invisible (alpha 0.02,
+                //   index 0, derrière l'UI), le player s'initialise et le m3u8 sort. Fallback = ancien
+                //   measure/layout si aucune activité courante.
+                try {
+                    val act = StreamFlixApp.currentActivity
+                    val root = act?.findViewById<android.view.ViewGroup>(android.R.id.content)
+                    if (root != null) {
+                        webView.alpha = 0.02f
+                        try { webView.settings.offscreenPreRaster = true } catch (_: Throwable) {}
+                        root.addView(webView, 0, android.view.ViewGroup.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT))
+                        attachedRoot = root
+                    } else {
+                        val wSpec = android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY)
+                        val hSpec = android.view.View.MeasureSpec.makeMeasureSpec(1920, android.view.View.MeasureSpec.EXACTLY)
+                        webView.measure(wSpec, hSpec); webView.layout(0, 0, 1080, 1920)
+                    }
+                } catch (_: Throwable) {
+                    try {
+                        val wSpec = android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY)
+                        val hSpec = android.view.View.MeasureSpec.makeMeasureSpec(1920, android.view.View.MeasureSpec.EXACTLY)
+                        webView.measure(wSpec, hSpec); webView.layout(0, 0, 1080, 1920)
+                    } catch (_: Throwable) {}
+                }
+                try { webView.onResume(); webView.resumeTimers() } catch (_: Throwable) {}
 
                 android.webkit.CookieManager.getInstance().setAcceptCookie(true)
                 android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
@@ -500,6 +526,7 @@ open class FilemoonExtractor : Extractor() {
                 cont.invokeOnCancellation {
                     Handler(Looper.getMainLooper()).post {
                         try {
+                            try { attachedRoot?.removeView(webView) } catch (_: Throwable) {}
                             webView.stopLoading()
                             webView.destroy()
                         } catch (_: Throwable) { /* ignore */ }
@@ -514,8 +541,35 @@ open class FilemoonExtractor : Extractor() {
 
                 Log.d(TAG, "[Filemoon-WV] loading $link (referer=$parentUrl)")
                 webView.loadUrl(link, loadHeaders)
+
+                // Vrai geste tactile au centre (là où est le bouton de vérif q8y5z, iframe centrée) :
+                //   un MotionEvent réel TRAVERSE l'iframe cross-origin (contrairement à un .click() JS)
+                //   → passe la vérif "humaine". Répété le temps que l'iframe charge.
+                // La vérif q8y5z exige PLUSIEURS clics (5-6, confirmé user sur le web) → on tape en
+                //   RAFALE toutes les 1,5s (~14 fois) jusqu'à ce que le m3u8 soit capté. Le vrai
+                //   MotionEvent traverse l'iframe cross-origin, contrairement au .click() JS.
+                val kickHandler = Handler(Looper.getMainLooper())
+                var kickCount = 0
+                val kick = object : Runnable {
+                    override fun run() {
+                        if (resolved) return
+                        kickCount++
+                        try {
+                            val w = if (webView.width > 0) webView.width else 1080
+                            val h = if (webView.height > 0) webView.height else 1920
+                            val x = w / 2f; val y = h / 2f
+                            val t = android.os.SystemClock.uptimeMillis()
+                            val down = android.view.MotionEvent.obtain(t, t, android.view.MotionEvent.ACTION_DOWN, x, y, 0)
+                            val up = android.view.MotionEvent.obtain(t, t + 60, android.view.MotionEvent.ACTION_UP, x, y, 0)
+                            webView.dispatchTouchEvent(down); webView.dispatchTouchEvent(up)
+                            down.recycle(); up.recycle()
+                        } catch (_: Throwable) {}
+                        if (!resolved && kickCount < 14) kickHandler.postDelayed(this, 1500)
+                    }
+                }
+                kickHandler.postDelayed(kick, 2000)
             }
-        } ?: throw Exception("Filemoon WebView fallback timed out (25s)")
+        } ?: throw Exception("Filemoon WebView fallback timed out (30s)")
 
         if (result.source.isBlank()) {
             throw Exception("Filemoon WebView fallback resolved empty source")

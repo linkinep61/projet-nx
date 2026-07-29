@@ -324,6 +324,15 @@ object FrenchStreamProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
 
     fun ignoreSource(source: String, href: String): Boolean {
         if (source.trim().equals("Dood.Stream", ignoreCase = true) && href.contains("/bigwar5/")) return true
+        // 2026-07-31 (décision user : « ça rejoue la pub de 18 secondes, supprime-moi ce
+        //   serveur ») : FSVid ne sert PLUS le film. Établi en direct : la page ne contient
+        //   jamais l'URL du film — seulement un leurre `/troll/master.m3u8`, et la charge
+        //   chiffrée (base64 + XOR) mène elle aussi à une publicité. Il n'y a donc RIEN à
+        //   extraire : l'hôte est devenu un diffuseur de pub. On le masque à la source
+        //   plutôt que de laisser l'utilisateur tomber dessus (ou l'extracteur se faire
+        //   blacklister). Retirer ces lignes suffira à le réactiver s'il redevient sain.
+        if (href.contains("fsvid.", ignoreCase = true)) return true
+        if (source.contains("fsvid", ignoreCase = true)) return true
         // 2026-07-13 : kakaflix.lol MORT mais le redirect proxy générique
         // (KakaflixExtractor) gère maintenant kokoflix + kakaflix + newPlayer.
         // On ne filtre plus kakaflix ici — l'extracteur essaiera et échouera

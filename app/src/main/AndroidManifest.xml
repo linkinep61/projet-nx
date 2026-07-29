@@ -15,6 +15,18 @@
         android:required="false" />
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- 2026-07-25 (demande user) : lire les MUSIQUES et VIDÉOS stockées sur le téléphone
+         (médiathèque MediaStore) pour les jouer dans ONYX et les mettre en favori. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- 2026-07-28 : IMAGES avec VIDEO (groupe visuel) → dialogue « Photos et vidéos » sur box TV. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- 2026-07-28 : « Accès à tous les fichiers » pour lire clé USB / carte SD (box TV). -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <!-- Android Auto : surface plein écran pour projeter la vidéo (technique app NAVIGATION, CarStream). -->
     <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
     <uses-permission android:name="androidx.car.app.NAVIGATION_TEMPLATES" />
@@ -90,6 +102,7 @@
     <application
         android:name=".StreamFlixApp"
         android:allowBackup="true"
+        android:appCategory="game"
         android:banner="@mipmap/ic_banner"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -103,6 +116,22 @@
         <!-- 2026-06-18 (user "la face de connexion pour M6 et TF1") :
              activité WebView fullscreen pour login TF1+ ou M6 6play.
              Intercepte les cookies de session après login. -->
+        <!-- 2026-07-25 : lecture des vidéos stockées sur le téléphone (publie au pont voiture,
+             donc elles se projettent aussi sur l'écran d'Android Auto). -->
+        <activity
+            android:name=".activities.LocalVideoPlayerActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+
+        <!-- Demande de permission média auto-enchaînée (transparente). -->
+        <activity
+            android:name=".activities.LocalMediaPermissionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <activity
             android:name=".activities.LoginWebViewActivity"
             android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden"
@@ -250,15 +279,41 @@
         <meta-data
             android:name="com.google.android.gms.car.application"
             android:resource="@xml/automotive_app_desc" />
-        <!-- 2026-07-24 : minCarApiLevel RETIRÉ en mode MÉDIA SEUL. C'est un marqueur d'app
-             TEMPLATE/projection ; le garder avec le CarAppService désactivé fait qu'Android Auto
-             tente d'ouvrir une app template inexistante → « Android Auto a reçu une erreur inconnue ».
-             Réactiver (value=7) si on remet le CarAppService (projection). -->
-        <!--
+        <!-- 2026-07-25 : marqueurs de la recette VIDÉO validée en vraie voiture (copiés d'AABrowser). -->
         <meta-data
             android:name="androidx.car.app.minCarApiLevel"
             android:value="7" />
-        -->
+        <meta-data android:name="distractionOptimized" android:value="true" />
+        <meta-data android:name="android.max_aspect" android:value="4.0" />
+
+        <!-- ÉCRAN VIDÉO VOITURE : activité projetée (pas de CarAppService, refusé hors Play Store).
+             Fonctionne grâce à android:appCategory="game" sur <application> : les jeux sont projetés
+             sur l'écran voiture. Entrée VOITURE uniquement (pas de category.LAUNCHER → l'icône du
+             téléphone reste celle de l'app ONYX normale). -->
+        <activity
+            android:name=".car.OnyxCarProjectionActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:resizeableActivity="true"
+            android:label="@string/app_name"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            <layout
+                android:defaultHeight="480dp"
+                android:defaultWidth="800dp"
+                android:gravity="fill"
+                android:minHeight="1dp"
+                android:minWidth="1dp" />
+            <meta-data android:name="distractionOptimized" android:value="true" />
+            <meta-data android:name="android.max_aspect" android:value="5.0" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.CAR_LAUNCHER" />
+                <category android:name="androidx.car.app.category.NAVIGATION" />
+                <category android:name="android.intent.category.APP_MAPS" />
+            </intent-filter>
+        </activity>
 
         <!-- 2026-07-24 : CarAppService (projection vidéo) RÉACTIVÉ — on le garde EN PLUS du
              MediaBrowserService (test user : média rend l'app visible, projection tente la vidéo).

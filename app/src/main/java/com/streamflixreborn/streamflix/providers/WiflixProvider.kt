@@ -1670,8 +1670,14 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                     if (isCloudflareChallenge(doc)) getDocument("${baseUrl}serie-en-streaming/$tvShowId") else doc
                 } catch (e: Exception) { getDocument("${baseUrl}serie-en-streaming/$tvShowId") }
 
-                document.select("div.$rel a").
-                    filter { ignoreSource(it.text().trim() ) == false }.
+                // 2026-07-31 : diagnostic — combien de lecteurs la page expose-t-elle vraiment,
+                //   et combien en perd-on au filtrage ? (user : « pourquoi les serveurs Wiflix
+                //   n'apparaissent pas ? » alors que le site en affiche une quinzaine).
+                val allAnchors = document.select("div.$rel a")
+                val keptAnchors = allAnchors.filter { ignoreSource(it.text().trim()) == false }
+                Log.i("WiflixProvider", "serveurs série: ${allAnchors.size} <a> trouvés, " +
+                    "${keptAnchors.size} après ignoreSource (rel=$rel)")
+                keptAnchors.
                     mapIndexedNotNull { index, it ->
                         val onclick = it.attr("onclick")
                         // 2026-06-03 (user "y a un WIFLIX SAVE Ça existe même pas
@@ -1696,8 +1702,14 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                             spanText.isNotEmpty() -> spanText
                             else -> "Lecteur ${index + 1}"
                         }
+                        // 2026-07-31 (user « pourquoi les serveurs Wiflix n'apparaissent pas ? ») :
+                        //   l'id valait le NOM DU SERVICE (« VOE », « Uqload »…). En aval,
+                        //   collectProgressiveServers déduplique par id → deux lecteurs Wiflix
+                        //   du même hébergeur (ou deux « vostfr N » sans service détecté)
+                        //   s'écrasaient mutuellement et un seul survivait. On suffixe donc
+                        //   par l'index pour garantir l'unicité (l'affichage, lui, ne change pas).
                         Video.Server(
-                            id = serviceName ?: spanText.ifEmpty { index.toString() },
+                            id = "${serviceName ?: spanText.ifEmpty { "lecteur" }}_$index",
                             name = displayName,
                             src = src,
                     )
@@ -1717,8 +1729,13 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                 } catch (e: Exception) { getDocument("${baseUrl}film-en-streaming/$id") }
                 Log.i("ServDiagT", "GETSERVERS document prêt à ${System.currentTimeMillis()-_tGS}ms")
 
-                document.select("div.tabs-sel a").
-                    filter { ignoreSource(it.text().trim() ) == false }.
+                // 2026-07-31 : même diagnostic que pour les séries (combien de lecteurs la page
+                //   expose vraiment vs combien survivent au filtrage).
+                val allMovieAnchors = document.select("div.tabs-sel a")
+                val keptMovieAnchors = allMovieAnchors.filter { ignoreSource(it.text().trim()) == false }
+                Log.i("WiflixProvider", "serveurs film: ${allMovieAnchors.size} <a> trouvés, " +
+                    "${keptMovieAnchors.size} après ignoreSource")
+                keptMovieAnchors.
                     mapIndexedNotNull { index, it ->
                         val onclick = it.attr("onclick")
                         // 2026-06-03 (user "y a un WIFLIX SAVE Ça existe même pas
@@ -1743,8 +1760,14 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
                             spanText.isNotEmpty() -> spanText
                             else -> "Lecteur ${index + 1}"
                         }
+                        // 2026-07-31 (user « pourquoi les serveurs Wiflix n'apparaissent pas ? ») :
+                        //   l'id valait le NOM DU SERVICE (« VOE », « Uqload »…). En aval,
+                        //   collectProgressiveServers déduplique par id → deux lecteurs Wiflix
+                        //   du même hébergeur (ou deux « vostfr N » sans service détecté)
+                        //   s'écrasaient mutuellement et un seul survivait. On suffixe donc
+                        //   par l'index pour garantir l'unicité (l'affichage, lui, ne change pas).
                         Video.Server(
-                            id = serviceName ?: spanText.ifEmpty { index.toString() },
+                            id = "${serviceName ?: spanText.ifEmpty { "lecteur" }}_$index",
                             name = displayName,
                             src = src,
                     )

@@ -28,6 +28,9 @@ open class VidMoLyExtractor : Extractor() {
         "https://vidmoly.net",
         "https://vidmoly.biz",
         "https://vidmoly.to",
+        // 2026-07-29 : ansembed.net = mirror Vidmoly (même player JWPlayer + CDN vmwesa.online),
+        //   utilisé par anime-sama (Lecteur 1). Même extraction m3u8 que Vidmoly.
+        "https://ansembed.net",
     )
 
     private val context = StreamFlixApp.instance.applicationContext

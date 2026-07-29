@@ -64,6 +64,8 @@ class SearchMobileFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        // 2026-07-30 : bouton retour flottant -> menu precedent
+        binding.btnBack.setOnClickListener { androidx.navigation.Navigation.findNavController(it).navigateUp() }
 
         initializeSearch()
 

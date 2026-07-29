@@ -72,19 +72,20 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     }
 
     override val name = "Movix"
-    // 2026-07-22 : movix.date + movix.cloud MORTS. `movix.online` (page de statut, vivante)
-    //   annonce **movix.show** comme domaine courant → défaut bumpé. L'auto-update (fetchActiveDomain
-    //   via <title> de movix.online) confirme movix.show en runtime, mais on met un défaut VIVANT
-    //   au cas où le cache serait vide (sinon api.movix.date mort = 0 catalogue au 1er boot).
-    override val defaultBaseUrl: String = "https://api.movix.show/"
+    // 2026-07-30 : movix.show + api.movix.show MORTS (NXDOMAIN). `movix.online` (page de statut,
+    //   vivante) annonce désormais **movix.fun** comme domaine courant (movix.show = « bloqué par
+    //   les FAI »). Défaut bumpé sur movix.fun / api.movix.fun (vérifié vivants). L'auto-update
+    //   (fetchActiveDomain via <title> de movix.online) confirme en runtime ; on garde un défaut
+    //   VIVANT au cas où le cache serait vide (sinon 0 catalogue au 1er boot).
+    override val defaultBaseUrl: String = "https://api.movix.fun/"
     override val baseUrl: String = defaultBaseUrl
         get() {
             val cacheURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_URL)
             // ignore un cache pointant sur un domaine mort connu → force le re-fallback/redécouverte.
-            val dead = listOf("movix.date", "movix.cloud")
+            val dead = listOf("movix.date", "movix.cloud", "movix.show")
             return if (cacheURL.isNotEmpty() && dead.none { cacheURL.contains(it) }) cacheURL else field
         }
-    override val defaultPortalUrl: String = "https://movix.show/"
+    override val defaultPortalUrl: String = "https://movix.fun/"
     override val portalUrl: String = defaultPortalUrl
         get() {
             val cachePortalURL = UserPreferences.getProviderCache(this, UserPreferences.PROVIDER_PORTAL_URL)
@@ -614,6 +615,35 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
         val error: String?
     )
 
+    // 2026-07-25 : nouvelles sources Movix (vues sur movix.show) que l'app n'intégrait pas.
+    //   j1f (1Jour1Film via Movix) : players.{vf,vostfr}[] = {name,url,type,label,source}.
+    data class J1fPlayer(
+        val name: String?,
+        val url: String?,
+        val type: String?,
+        val label: String?,
+        val source: String?,
+    )
+    data class J1fMovieResponse(
+        val success: Boolean?,
+        val players: Map<String, List<J1fPlayer>>?,
+        /** 2026-08-01 : fiche 1jour1film réellement utilisée — son slug porte l'ANNÉE
+         *  (ex. `/films/les-specialistes-vf-1985/`), seul moyen de détecter que l'API a
+         *  confondu deux films homonymes. */
+        @com.google.gson.annotations.SerializedName("j1f_url")
+        val j1fUrl: String? = null,
+    )
+    //   purstream : sources[] = {url,name,format} (source directe, pas de langue).
+    data class PurstreamSource(
+        val url: String?,
+        val name: String?,
+        val format: String?,
+    )
+    data class PurstreamMovieResponse(
+        val purstream_id: String?,
+        val sources: List<PurstreamSource>?,
+    )
+
     data class FstreamTvEpisode(
         val number: Int?,
         val title: String?,
@@ -976,6 +1006,25 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     private fun movixCatalogOriginalLanguage(): String? =
         com.streamflixreborn.streamflix.utils.CatalogFilter.originalLanguage(name)
 
+    // 2026-07-29 (user « Movix donne des films pas encore sortis → aucun serveur », ex
+    //   « Spider-Man: Brand New Day » 2026) : un film/série n'est gardé dans le catalogue que si sa
+    //   date de sortie est passée (≤ aujourd'hui). Comparaison lexicographique de dates ISO
+    //   (yyyy-MM-dd) = ordre chronologique, sans dépendre d'une API de date récente. Date absente =
+    //   gardé (vieux titres parfois sans date ; les non-sortis ont TOUJOURS une date future).
+    private fun isReleased(date: String?): Boolean {
+        if (date.isNullOrBlank()) return true
+        val d = date.trim().take(10)
+        if (d.length < 10) return true
+        val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+        return d <= today
+    }
+
+    // Surcharge pour les modèles ONYX (Movie.released / TvShow.released = Calendar?).
+    private fun isReleased(cal: java.util.Calendar?): Boolean {
+        if (cal == null) return true
+        return !cal.after(java.util.Calendar.getInstance())
+    }
+
     override suspend fun getHome(): List<Category> {
         initializeService()
         val categories = mutableListOf<Category>()
@@ -1258,9 +1307,24 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
             cat.copy(list = healthSorted)
         }
 
+        // 2026-07-29 (user, ex « Spider-Man: Brand New Day ») : on retire de TOUTES les rangées les
+        //   films/séries pas encore sortis (date future) — ils n'ont aucun serveur. Les rangées qui
+        //   deviennent vides sont supprimées.
+        val releasedOnly = sortedByHealth.map { cat ->
+            cat.copy(
+                list = cat.list.filter { item ->
+                    when (item) {
+                        is com.streamflixreborn.streamflix.models.Movie -> isReleased(item.released)
+                        is com.streamflixreborn.streamflix.models.TvShow -> isReleased(item.released)
+                        else -> true
+                    }
+                },
+            )
+        }.filter { it.list.isNotEmpty() }
+
         // 2026-07-11 : ordre d'insertion PRÉSERVÉ = réplique exacte de movix.chat
         //   (FEATURED déjà en tête). Plus de re-tri par nom (cassait l'ordre du site).
-        return sortedByHealth
+        return releasedOnly
     }
 
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
@@ -1322,7 +1386,9 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     override suspend fun getMovies(page: Int): List<Movie> {
         return try {
             val result = tmdbService.discoverMovies(apiKey = TMDB_API_KEY, page = page, withOriginalLanguage = movixCatalogOriginalLanguage())
-            result.results?.map { item ->
+            result.results
+                ?.filter { isReleased(it.release_date) } // pas de films non sortis (aucun serveur)
+                ?.map { item ->
                 Movie(
                     id = item.id.toString(),
                     title = item.title ?: "",
@@ -1341,7 +1407,9 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
     override suspend fun getTvShows(page: Int): List<TvShow> {
         return try {
             val result = tmdbService.discoverTvShows(apiKey = TMDB_API_KEY, page = page, withOriginalLanguage = movixCatalogOriginalLanguage())
-            result.results?.map { item ->
+            result.results
+                ?.filter { isReleased(it.first_air_date) } // pas de séries pas encore diffusées
+                ?.map { item ->
                 TvShow(
                     id = item.id.toString(),
                     title = item.name ?: "",
@@ -1777,7 +1845,11 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     val url = movixLinkUrl(el)
                                     if (!url.isNullOrBlank()) {
                                         val playerName = guessPlayerName(url)
-                                        list.add(Video.Server(id = "links-$index", name = "$playerName", src = url))
+                                        // 2026-07-31 : on précise la LANGUE quand on la connaît,
+                                        //   sinon « LuluVdo #2 » (VOSTFR) se confond avec les VF.
+                                        val lang = movixLinkLang(el, url)
+                                        val label = if (lang != null) "$playerName ($lang)" else playerName
+                                        list.add(Video.Server(id = "links-$index", name = label, src = url))
                                     }
                                 }
                             }
@@ -1799,7 +1871,12 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                         val url = source.url ?: return@forEach
                                         if (url.isBlank()) return@forEach
                                         if (isHiddenHost(url)) return@forEach
-                                        val playerName = source.name?.takeIf { it.isNotBlank() } ?: guessPlayerName(url)
+                                        // 2026-07-31 (user « il s'appelle toujours Jessica ») : l'API Movix
+                                        //   renvoie parfois un NOM DE DOMAINE comme nom de lecteur (ex.
+                                        //   « jessicayeahcatch.com » = un miroir rotatif de VOE). On affichait
+                                        //   ce domaine brut. Si le nom ressemble à un domaine, on lui préfère
+                                        //   le VRAI nom du service déduit de l'URL (→ « VOE »).
+                                        val playerName = prettyPlayerName(source.name, url)
                                         list.add(Video.Server(id = "wiflix-$lang-${list.size}", name = "Wiflix · $playerName ($displayLang)", src = url))
                                     }
                                 }
@@ -1864,22 +1941,69 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     // 2026-05-11 : Yflix + Moiflix partagent la même lookup TMDB
                     // (title+year). tmdbMovieDetailsDeferred est déclaré en haut du
                     // coroutineScope (avant fstreamDeferred qui en dépend).
-                    val yflixDeferred = async {
-                        runEndpoint("yflix-movie") {
-                            val movie = tmdbMovieDetailsDeferred.await() ?: return@runEndpoint emptyList()
-                            val title = movie.title ?: return@runEndpoint emptyList()
-                            val year = movie.release_date?.take(4)?.toIntOrNull()
-                            val watchPath = searchYflix(title, year, "Movie") ?: return@runEndpoint emptyList()
-                            buildYflixServers(watchPath)
+                    // 2026-07-25 : yflix/moiflix RETIRÉS (morts — yflix.to down/non-FR, moiflix.fans
+                    //   down sans successeur ; le SITE Movix ne les appelle plus non plus). Remplacés
+                    //   par 2 nouvelles sources Movix vues sur movix.show (structure inspectée en direct) :
+                    //   j1f (1Jour1Film via Movix) : players.{vf,vostfr}[] = {name,url,type,label,source}.
+                    val j1fDeferred = async {
+                        runEndpoint("j1f-movie") {
+                            val j1f = movixServiceInstance.getJ1fMovie(tmdbId)
+                            val list = mutableListOf<Video.Server>()
+                            // 2026-08-01 (user : « Movix VF FHD joue un mauvais film », durée
+                            //   mesurée 1 h 29 au lieu de 1 h 38) : l'API J1F MAPPE MAL les
+                            //   films homonymes. Preuve relevée en direct pour tmdb=1122573
+                            //   (« Les Spécialistes » / In the Grey, 2026) :
+                            //       j1f_url = …/films/les-specialistes-vf-1985/
+                            //   → elle renvoyait le film FRANÇAIS DE 1985, tout en affichant le
+                            //   bon `title`. Même piège que « Joker » 2019/2015 sur CoflixWiki.
+                            //   L'année est pourtant présente dans le slug : si elle contredit
+                            //   celle du film demandé, on REJETTE la source (principe user :
+                            //   « pas de serveur plutôt que le mauvais film »).
+                            val anneeDemandee = tmdbMovieDetailsDeferred.await()
+                                ?.release_date?.take(4)?.toIntOrNull()?.takeIf { it > 1800 }
+                            val anneeSlug = Regex("""-(\d{4})/?$""")
+                                .find(j1f.j1fUrl?.trimEnd('/') ?: "")?.groupValues?.get(1)?.toIntOrNull()
+                            if (anneeDemandee != null && anneeSlug != null &&
+                                kotlin.math.abs(anneeSlug - anneeDemandee) > 1
+                            ) {
+                                Log.w(
+                                    "MovixProvider",
+                                    "J1F REJETÉ : slug année=$anneeSlug ≠ film demandé=$anneeDemandee " +
+                                        "(homonyme → mauvais film)",
+                                )
+                                return@runEndpoint list
+                            }
+                            if (j1f.success == true) {
+                                j1f.players?.forEach { (lang, players) ->
+                                    val displayLang = formatLang(lang)
+                                    players.forEach { p ->
+                                        val url = p.url ?: return@forEach
+                                        if (url.isBlank()) return@forEach
+                                        val nm = p.name?.takeIf { it.isNotBlank() } ?: guessPlayerName(url)
+                                        val lbl = p.label?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""
+                                        list.add(Video.Server(
+                                            id = "j1f-$lang-${list.size}",
+                                            name = "J1F · $nm ($displayLang)$lbl",
+                                            src = url,
+                                        ))
+                                    }
+                                }
+                            }
+                            list
                         }
                     }
-                    val moiflixDeferred = async {
-                        runEndpoint("moiflix-movie") {
-                            val movie = tmdbMovieDetailsDeferred.await() ?: return@runEndpoint emptyList()
-                            val title = movie.title ?: return@runEndpoint emptyList()
-                            val year = movie.release_date?.take(4)?.toIntOrNull()
-                            val matchUrl = searchMoiflix(title, year, "Film") ?: return@runEndpoint emptyList()
-                            listOf(buildMoiflixServer(matchUrl))
+                    //   purstream : sources[] = {url,name,format} (source directe, sans langue).
+                    val purstreamDeferred = async {
+                        runEndpoint("purstream-movie") {
+                            val ps = movixServiceInstance.getPurstreamMovie(tmdbId)
+                            val list = mutableListOf<Video.Server>()
+                            ps.sources?.forEachIndexed { i, s ->
+                                val url = s.url ?: return@forEachIndexed
+                                if (url.isBlank()) return@forEachIndexed
+                                val nm = s.name?.takeIf { it.isNotBlank() } ?: "Purstream"
+                                list.add(Video.Server(id = "purstream-$i", name = "Purstream · $nm", src = url))
+                            }
+                            list
                         }
                     }
                     // 2026-07-16 : SwiftFlow — endpoint dédié Movix (api/swiftflow/movie/{id}).
@@ -1915,7 +2039,7 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                     // 2026-07-09 : fstream REMIS — le user préfère avoir les serveurs FS même si
                     //   le matching Movix API est parfois imprécis (ex: "FROM" → "From Dusk Till Dawn").
                     //   Mieux vaut quelques serveurs en trop que zéro FrenchStream.
-                    listOf(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, videasyDeferred, yflixDeferred, moiflixDeferred, swiftflowDeferred)
+                    listOf(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, videasyDeferred, j1fDeferred, purstreamDeferred, swiftflowDeferred)
                         .map { d -> async { val r = d.await(); if (r.isNotEmpty() && onPartial != null) onPartial(r); r } }
                         .awaitAll()
                 }
@@ -1964,7 +2088,10 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                                     val url = movixLinkUrl(el)
                                     if (!url.isNullOrBlank()) {
                                         val playerName = guessPlayerName(url)
-                                        list.add(Video.Server(id = "links-tv-$index", name = "$playerName", src = url))
+                                        // 2026-07-31 : langue affichée (parité avec les films)
+                                        val lang = movixLinkLang(el, url)
+                                        val label = if (lang != null) "$playerName ($lang)" else playerName
+                                        list.add(Video.Server(id = "links-tv-$index", name = label, src = url))
                                     }
                                 }
                             }
@@ -2124,30 +2251,10 @@ object MovixProvider : Provider, ProviderConfigUrl, ProviderPortalUrl, Progressi
                         try { tmdbService.getTvDetails(tmdbIdInt, TMDB_API_KEY) }
                         catch (_: Exception) { null }
                     }
-                    val yflixDeferred = async {
-                        runEndpoint("yflix-tv") {
-                            val tv = tmdbTvDetailsDeferred.await() ?: return@runEndpoint emptyList()
-                            val title = tv.name ?: return@runEndpoint emptyList()
-                            val year = tv.first_air_date?.take(4)?.toIntOrNull()
-                            val watchPath = searchYflix(title, year, "TV") ?: return@runEndpoint emptyList()
-                            buildYflixServers(watchPath, season = seasonNum, episode = episodeNum)
-                        }
-                    }
-                    val moiflixDeferred = async {
-                        runEndpoint("moiflix-tv") {
-                            val tv = tmdbTvDetailsDeferred.await() ?: return@runEndpoint emptyList()
-                            val title = tv.name ?: return@runEndpoint emptyList()
-                            val year = tv.first_air_date?.take(4)?.toIntOrNull()
-                            val matchUrl = searchMoiflix(title, year, "Show") ?: return@runEndpoint emptyList()
-                            listOf(buildMoiflixServer(matchUrl, season = seasonNum, episode = episodeNum))
-                        }
-                    }
-                    // 2026-05-11 : ROLLBACK lien VoirDrama-Movix. Le user veut garder
-                    // les providers séparés pour bien voir quelle source produit quel
-                    // serveur. VoirDrama reste accessible en standalone.
-                    // 2026-07-07 : émission progressive par endpoint (voir bloc film).
-                    // 2026-07-09 : fstream REMIS (user veut les serveurs FS même si matching imparfait).
-                    listOf(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, seriesDlDeferred, videasyDeferred, mazQuestDeferred, yflixDeferred, moiflixDeferred)
+                    // 2026-07-25 : yflix/moiflix RETIRÉS ici aussi (morts, cf bloc film). Les endpoints
+                    //   série j1f/purstream ne sont pas fiables (j1f/tv sans `players`, purstream/tv = 404)
+                    //   → non ajoutés pour les séries ; ils restent films uniquement.
+                    listOf(fstreamDeferred, linksDeferred, wiflixDeferred, cpasmalDeferred, tmdbMovixDeferred, seriesDlDeferred, videasyDeferred, mazQuestDeferred)
                         .map { d -> async { val r = d.await(); if (r.isNotEmpty() && onPartial != null) onPartial(r); r } }
                         .awaitAll()
                 }
@@ -3184,6 +3291,50 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
     // 2026-07-09 : extrait l'URL d'une entrée `links` Movix, qu'elle soit une chaîne
     //   (ancien format) ou un objet (nouveau format {"url":…} / {"link":…} / etc.). Pour un
     //   objet sans champ url explicite, on prend le 1er membre string qui ressemble à une URL.
+    /**
+     * 2026-07-31 (user : « il faut préciser que le #2 est VOSTFR, il va se mélanger avec les
+     * autres FR ») : l'endpoint `links` de Movix affichait juste « LuluVdo », « LuluVdo #2 »…
+     * sans la langue — impossible de distinguer un VOSTFR d'un VF dans la liste.
+     * On lit donc la langue si l'API la fournit (l'élément peut être un objet), et à défaut on
+     * la déduit des marqueurs présents dans l'URL. Retourne null si vraiment inconnue
+     * (on n'invente pas : mieux vaut pas de mention qu'une mention fausse).
+     */
+    private fun movixLinkLang(el: com.google.gson.JsonElement?, url: String?): String? {
+        // 2026-08-01 (user : Rpmvid, EmbedSeek ET VidHide annoncés « VF » jouent du VOSTFR) :
+        //   le champ de langue de Movix N'EST PAS FIABLE. Vérifié sur un même film : le lien
+        //   donné pour « Rpmvid (VF) » sert le fichier « In.the.Grey.2026.VOSTFR.1080p… ».
+        //   Annoncer un faux VF est pire que ne rien annoncer — `orderByFrenchBuckets` trie
+        //   par langue, donc ces serveurs passaient DEVANT les vrais VF.
+        //   → On n'accepte plus l'affirmation « VF » venant de Movix. Les mentions négatives
+        //     (VOSTFR/VO) et MULTI sont conservées : elles ne peuvent pas faire passer un
+        //     contenu étranger pour du français.
+        //   La vraie langue est renseignée ensuite par des sources FIABLES : le NOM DE FICHIER
+        //   réel remonté par l'extracteur, ou les balises LANGUAGE du manifeste HLS.
+        fun fiable(s: String?): String? = s?.takeIf { !it.equals("VF", ignoreCase = true) }
+        try {
+            if (el != null && !el.isJsonNull && el.isJsonObject) {
+                val obj = el.asJsonObject
+                for (k in listOf("lang", "language", "langue", "version", "audio", "vf", "type")) {
+                    val v = obj.get(k)
+                    if (v != null && v.isJsonPrimitive && v.asJsonPrimitive.isString) {
+                        val s = v.asString.trim()
+                        if (s.isNotBlank() && !s.startsWith("http")) return fiable(formatLang(s))
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        // Repli : marqueurs dans l'URL (ordre important, VOSTFR avant VF).
+        //   L'URL, elle, reste digne de confiance quand elle porte un marqueur explicite —
+        //   contrairement au champ déclaratif de l'API traité au-dessus.
+        val u = url?.lowercase().orEmpty()
+        return when {
+            u.contains("vostfr") || u.contains("vost") || u.contains("subfrench") -> "VOSTFR"
+            u.contains("truefrench") || u.contains("multi") -> "MULTI"
+            Regex("""[/._-]vff?[/._-]""").containsMatchIn(u) || u.contains("french") -> "VF"
+            else -> null
+        }
+    }
+
     private fun movixLinkUrl(el: com.google.gson.JsonElement?): String? {
         if (el == null || el.isJsonNull) return null
         try {
@@ -3222,6 +3373,26 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
 
     private fun isHiddenHost(url: String): Boolean =
         hiddenHosts.any { url.contains(it, ignoreCase = true) }
+
+    /**
+     * 2026-07-31 (user « il s'appelle toujours Jessica », VOE) : l'API Movix renvoie
+     * parfois un NOM DE DOMAINE en guise de nom de lecteur — typiquement un miroir
+     * rotatif de VOE (« jessicayeahcatch.com », « matthewhotelscience.com »…). Affiché
+     * tel quel, l'utilisateur ne reconnaît pas le service.
+     *
+     * Règle : si le nom fourni ressemble à un domaine, on lui préfère le VRAI nom du
+     * service déduit de l'URL (« VOE », « Uqload »…). Sinon on garde le nom de l'API
+     * (souvent plus précis, ex. « Uqload Premium »).
+     */
+    private fun prettyPlayerName(apiName: String?, url: String): String {
+        val raw = apiName?.trim()?.takeIf { it.isNotBlank() }
+        val looksLikeDomain = raw != null &&
+            Regex("""^[a-z0-9-]+(\.[a-z0-9-]+)+$""", RegexOption.IGNORE_CASE).matches(raw)
+        if (looksLikeDomain) {
+            Extractor.identifyServiceName(url)?.let { return it }
+        }
+        return raw ?: guessPlayerName(url)
+    }
 
     private fun guessPlayerName(url: String): String {
         // Try the accurate extractor-based detection first
@@ -3496,6 +3667,17 @@ val serverPattern = Regex("""onclick="loadVideo\('([^']+)'[^)]*\)"[^>]*>\s*<span
         suspend fun getSwiftflowMovie(
             @Path("tmdbId") tmdbId: String
         ): SwiftflowMovieResponse
+
+        // 2026-07-25 : nouvelles sources Movix.
+        @GET("api/j1f/movie/{tmdbId}")
+        suspend fun getJ1fMovie(
+            @Path("tmdbId") tmdbId: String
+        ): J1fMovieResponse
+
+        @GET("api/purstream/movie/{tmdbId}/stream")
+        suspend fun getPurstreamMovie(
+            @Path("tmdbId") tmdbId: String
+        ): PurstreamMovieResponse
 
         @GET("api/links/movie/{tmdbId}")
         suspend fun getLinksMovie(

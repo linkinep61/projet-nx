@@ -14,7 +14,15 @@ data class Video(
     val webViewUrl: String? = null,
     /** When true, the TV player must show a WebView overlay so the user can
      *  click the anti-bot play button before the M3U8 becomes accessible. */
-    val needsWebViewClick: Boolean = false
+    val needsWebViewClick: Boolean = false,
+    /**
+     * 2026-08-01 (user : « Movix Rpmvid VF est en réalité en VOSTFR ») : NOM DE FICHIER réel
+     * du flux, quand l'hébergeur le fournit (ex. « In.the.Grey.2026.VOSTFR.1080p.WEBRip.mp4 »).
+     * Beaucoup de sites étiquettent leurs liens « VF » sans vérifier, alors que le nom du
+     * fichier, lui, dit la vérité. Il sert donc à CORRIGER la langue affichée du serveur.
+     * null = l'hébergeur ne le donne pas.
+     */
+    val fileName: String? = null,
 ) : Serializable {
 
     sealed class Type : Parcelable, Serializable {
@@ -74,5 +82,15 @@ data class Video(
     ) : Serializable {
         var video: Video? = null
         @Volatile var quality: String? = null
+
+        /**
+         * 2026-07-31 (user : « le #2 est automatiquement VOSTFR alors que le #3 a bien 2
+         * langues, FR et anglais ») : langue(s) RÉELLE(S) du flux, lues dans le manifeste HLS
+         * pendant le sondage de qualité (aucune requête supplémentaire).
+         * Deux hébergeurs peuvent servir le même film sous des langues différentes sans que
+         * l'URL ou l'API ne le disent — seule la piste audio du manifeste fait foi.
+         * Ex. « VOSTFR » (audio anglais seul) ou « VF+VO » (deux pistes). null = inconnue.
+         */
+        @Volatile var language: String? = null
     }
 }

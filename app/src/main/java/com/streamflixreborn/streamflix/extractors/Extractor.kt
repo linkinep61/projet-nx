@@ -134,6 +134,7 @@ abstract class Extractor {
 
         private val extractors = listOf(
             AnonMp4Extractor(),
+            Embed4meExtractor(),
             OnRegardeOuExtractor(),
             RabbitstreamExtractor(),
             RabbitstreamExtractor.MegacloudExtractor(),
@@ -239,7 +240,12 @@ abstract class Extractor {
             YourUploadExtractor(),
             PlusPomlaExtractor(),
             OneuploadExtractor(),
-            FsvidExtractor(),
+            // 2026-07-31 (décision user) : FSVid RETIRÉ — l'hôte ne diffuse plus le film,
+            //   seulement de la publicité (leurre « /troll/ » + charge chiffrée menant elle
+            //   aussi à une pub de ~18 s). La classe est conservée : il suffit de remettre
+            //   cette ligne, et de retirer le filtre dans FrenchStreamProvider.ignoreSource,
+            //   si l'hôte redevient exploitable un jour.
+            // FsvidExtractor(),
             GoogleDriveExtractor(),
             PcloudExtractor(),
             AmazonDriveExtractor(),
