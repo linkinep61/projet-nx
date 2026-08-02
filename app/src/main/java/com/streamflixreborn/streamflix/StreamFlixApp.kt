@@ -34,6 +34,31 @@ class StreamFlixApp : Application() {
             private set
 
         /**
+         * 2026-08-03 — CRASH « Current provider is not set » (issues #176 et #182, deux box TV).
+         *
+         * Au démarrage à FROID (plus de 30 min d'inactivité), `onCreate` efface volontairement
+         * le provider — et le profil — pour que l'utilisateur reparte du sélecteur. Mais Android,
+         * lui, restaure la pile de navigation de la session précédente : si l'utilisateur était
+         * sur une fiche film, `MovieTvFragment` est recréé et attaque la base dès la création de
+         * son ViewModel (`AppDatabase.getInstance`, appelé par un `by lazy`). Le provider venant
+         * d'être effacé et `currentProviderName` étant nul dans un process neuf, `getInstance`
+         * lève `IllegalStateException` → plantage au lancement.
+         *
+         * Les deux décisions se contredisaient : on efface la session, puis on rouvre un écran
+         * qui en dépend. Ce drapeau permet aux activités hôtes d'ignorer l'état sauvegardé dans
+         * ce cas précis — on repart de la destination de départ, ce qui était déjà l'intention.
+         *
+         * ⚠ Ce n'est pas une course entre threads : l'effacement a lieu dans `Application.onCreate`,
+         * donc AVANT toute activité. Quand les deux conditions sont réunies, le crash est certain.
+         * C'est pourquoi le même appareil l'a remonté deux fois.
+         *
+         * Concerne les 23 fragments qui appellent `AppDatabase.getInstance` en `by lazy` — d'où un
+         * correctif à la racine plutôt qu'un garde-fou répété dans chacun.
+         */
+        @Volatile
+        var sessionEffaceeAuDemarrage: Boolean = false
+
+        /**
          * 2026-07-12 : Security init (Conscrypt + IsrgRootTrust + IptvTlsHelper +
          *   mergedKeyStore) déportée sur Dispatchers.IO pour libérer le main thread
          *   au boot (~3.5s sur Chromecast ARM). NetworkClient.buildClient() await
@@ -62,6 +87,46 @@ class StreamFlixApp : Application() {
          */
         @Volatile
         private var _cronetEngine: Any? = null
+
+        /**
+         * 2026-08-08 — MOTEUR CRONET AVEC ADRESSE IMPOSÉE, pour les hôtes bloqués au DNS.
+         *
+         * Le cas mesuré : `strm7.uqload.is`. Le FAI du user bloque `uqload.is` au DNS (vérifié :
+         * son PC ne résout pas ce nom non plus). L'application contournait en basculant sur son
+         * résolveur DoT — mais ce faisant elle changeait aussi de pile réseau, Cronet → OkHttp,
+         * et perdait la signature TLS de Chrome sur laquelle Uqload signe son jeton. Résultat,
+         * chaque pile n'avait que la moitié de ce qu'il faut :
+         *   OkHttp + DoT → le nom se résout, mais 403 (mauvais JA3)
+         *   Cronet       → bonne signature, mais code=-1 (nom non résolu)
+         *
+         * Chromium sait résoudre un nom vers une adresse imposée (`HostResolverRules`). On
+         * fabrique donc un moteur dédié à ces hôtes-là, avec l'adresse que le DoT a déjà trouvée :
+         * la poignée de main reste celle de Chrome, et le blocage DNS est contourné.
+         *
+         * Un moteur par hôte, mis en cache — sa construction coûte 300 à 800 ms sur Chromecast.
+         */
+        private val _cronetParHote = mutableMapOf<String, Any>()
+
+        fun getCronetEngineAvecAdresse(context: Context, hote: String, ip: String): Any? {
+            val cle = "$hote=$ip"
+            _cronetParHote[cle]?.let { return it }
+            return synchronized(this) {
+                _cronetParHote[cle] ?: try {
+                    val clz = Class.forName("org.chromium.net.CronetEngine\$Builder")
+                    val ctor = clz.getConstructor(Context::class.java)
+                    val builder = ctor.newInstance(context.applicationContext)
+                    clz.getMethod("setExperimentalOptions", String::class.java)
+                        .invoke(builder, """{"HostResolverRules":{"host_resolver_rules":"MAP $hote $ip"}}""")
+                    clz.getMethod("build").invoke(builder).also {
+                        _cronetParHote[cle] = it
+                        Log.d("StreamFlixApp", "CronetEngine dédié : $hote → $ip")
+                    }
+                } catch (e: Exception) {
+                    Log.w("StreamFlixApp", "CronetEngine dédié impossible pour $hote : ${e.message}")
+                    null
+                }
+            }
+        }
 
         fun getCronetEngine(context: Context): Any? {
             return _cronetEngine ?: synchronized(this) {
@@ -602,12 +667,14 @@ class StreamFlixApp : Application() {
             } else if (pickerEnabled) {
                 UserPreferences.currentProvider = null
                 ProfileStore.setCurrentProfileId(null)
+                sessionEffaceeAuDemarrage = true
                 Log.d("StreamFlixApp", "Cold start: profile + provider cleared (Netflix-style)")
             } else {
                 // ProfilePicker désactivé + pas de session récente → on garde
                 //   le profil principal, mais on clear le provider pour
                 //   atterrir sur le Home Fournisseur.
                 UserPreferences.currentProvider = null
+                sessionEffaceeAuDemarrage = true
                 Log.d("StreamFlixApp", "Cold start (picker disabled): provider cleared, profile kept")
             }
         } catch (e: Throwable) {

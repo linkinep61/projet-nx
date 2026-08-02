@@ -575,11 +575,47 @@ object NakiosProvider : Provider, ProviderConfigUrl {
      * « Enola Holmes », « h » ou « serie-h » ✓ pour « H », mais « harry-potter » ✗ pour « H »).
      * Principe projet : PAS DE SERVEUR plutôt que le mauvais film.
      */
+    /**
+     * Mots qu'un site ajoute au slug sans changer l'œuvre : langue, qualité, mention de
+     * saison, « serie »/« film »… Tout le reste (un vrai mot en plus) désigne une AUTRE œuvre.
+     */
+    private val JETONS_SLUG_NEUTRES = setOf(
+        "vf", "vostfr", "vost", "vo", "multi", "french", "fr", "truefrench",
+        "hd", "fhd", "sd", "uhd", "4k", "1080p", "720p",
+        "serie", "series", "saison", "season", "film", "movie",
+        "streaming", "complet", "complete", "integrale", "vf-vostfr",
+    )
+
     private fun slugMatchesTitle(slug: String, title: String): Boolean {
         val titleTokens = slugify(title).split("-").filter { it.isNotBlank() }
         if (titleTokens.isEmpty()) return false
-        val slugTokens = slug.split("-").filter { it.isNotBlank() }.toSet()
-        return titleTokens.all { it in slugTokens }
+        val slugTokens = slug.split("-").filter { it.isNotBlank() }
+        if (!titleTokens.all { it in slugTokens.toSet() }) return false
+
+        // 2026-08-08 (user : « celui-là aussi match pas sur le bon », capture Nakios sur
+        //   « Star Trek » S01E01) — RELEVÉ DANS LES LOGS DE LA CHROMECAST :
+        //     backup [LoiFlix]: …/episode/star-trek-starfleet-academy/1-1 → 6 serveurs
+        //     backup [LoiFlix]: …/episode/star-trek-starfleet-academy/1-1 → 8 serveurs
+        //   « star-trek-starfleet-academy » = Star Trek: Starfleet Academy (2026), PAS la
+        //   série de 1966. L'ancienne règle « tous les mots du titre sont dans le slug »
+        //   laissait passer n'importe quel nombre de mots EN PLUS — donc n'importe quel
+        //   spin-off partageant le début du titre.
+        //
+        //   Nouvelle règle : les jetons en trop doivent être du BRUIT — un nombre (année ou
+        //   numéro de suite) ou un mot de la liste neutre. Un vrai mot en plus = autre œuvre.
+        //     « enola-holmes-3 »              ✓ (3 = numéro)      pour « Enola Holmes »
+        //     « serie-h »                     ✓ (serie = neutre)  pour « H »
+        //     « star-trek-starfleet-academy » ✗ (starfleet/academy) pour « Star Trek »
+        //   Le vrai TOS reste atteignable : `knownTitles` contient « Star Trek: The Original
+        //   Series » et « Star Trek TOS », dont les slugs correspondent exactement.
+        //   Principe projet inchangé : PAS DE SERVEUR plutôt que le mauvais épisode.
+        val enTrop = slugTokens.toMutableList()
+        titleTokens.forEach { enTrop.remove(it) }
+        val ok = enTrop.all { j -> j.all { it.isDigit() } || j in JETONS_SLUG_NEUTRES }
+        if (!ok) {
+            Log.d(TAG, "slug '$slug' écarté pour '$title' : mots en trop $enTrop")
+        }
+        return ok
     }
 
     /**

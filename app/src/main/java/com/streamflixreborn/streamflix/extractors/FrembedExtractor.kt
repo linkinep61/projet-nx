@@ -241,17 +241,99 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
     )
     private val defaultReliability = 7
 
+    /**
+     * 2026-06-29 (REPAIR — restauré depuis la version riche) : sources VIP natives
+     *   (★ Frembed Premium sans pub + ★ Frembed Free VF) via `api/streaming/player`
+     *   → m3u8 directs senpai (pass-through). Elles passent en tête de liste.
+     *
+     * 2026-08-08 : extrait dans sa propre fonction pour pouvoir être lancé EN PARALLÈLE de
+     *   la résolution des redirections (il était exécuté après, en pure série).
+     */
+    private suspend fun recupererSourcesVip(videoType: Video.Type): List<Video.Server> = try {
+        val tmdb = when (videoType) {
+            is Video.Type.Movie -> videoType.id
+            is Video.Type.Episode -> videoType.tvShow.id
+        }
+        val type = if (videoType is Video.Type.Episode) "serie" else "movie"
+        val sa = (videoType as? Video.Type.Episode)?.season?.number
+        val ep = (videoType as? Video.Type.Episode)?.number
+        val resp = service.getStreamingPlayer(tmdb, type, sa, ep)
+        Log.d("FrembedExtractor", "Native VIP sources: ${resp.sources?.size ?: 0}")
+        resp.sources.orEmpty().mapNotNull { s ->
+            val u = s.url?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            Video.Server(id = "vip_${s.label}", name = "★ Frembed ${s.label ?: "VIP"} (French)", src = u)
+        }
+    } catch (e: Exception) {
+        Log.w("FrembedExtractor", "VIP fetch failed: ${e.message}"); emptyList()
+    }
+
     suspend fun servers(videoType: Video.Type): List<Video.Server> {
         Log.d("FrembedExtractor", "servers() called, mainUrl=$mainUrl, videoType=$videoType")
         return try {
-            val ret = when(videoType) { is Video.Type.Movie -> service.getMovieLinks( videoType.id)
-                                        is Video.Type.Episode -> service.getTvShowLinks(videoType.tvShow.id, videoType.season.number, videoType.number) }
-            Log.d("FrembedExtractor", "API response: link1=${ret.link1?.take(60)}, link2=${ret.link2?.take(60)}, link3=${ret.link3?.take(60)}")
-            val initialServers = ret.toServers()
+            // 2026-08-08 (user : « Frembed fonctionnait dans l'application comme sur le site,
+            //   je vois pas les serveurs natifs ») — CORRECTION D'ORDRE, PAS D'AJOUT.
+            //   `api/films` / `api/series` (les hébergeurs Voe/Uqload/Dood/Netu = bouton
+            //   « Lecteur Gratuit » du site) et `api/streaming/player` (les sources natives
+            //   ★ Premium / ★ Free VF = bouton « Lecteur VIP ») sont DEUX endpoints
+            //   INDÉPENDANTS. Le premier lançait une HttpException qui faisait sortir tout
+            //   le `try` — donc le VIP, pourtant déjà protégé par son propre catch, n'était
+            //   jamais appelé.
+            //   Mesuré sur Star Trek (tmdb 253) S1E1 :
+            //     api/series?id=253&sa=1&epi=1        → 404 {"error":"Series not found"}
+            //     api/streaming/player?tmdb=253&...   → 200, 2 sources : « Premium » et
+            //                                           « Free VF » (+ seasonData complet)
+            //   ⚠ CORRIGÉ LE JOUR MÊME : j'en avais conclu « Frembed A la série en VF ». FAUX —
+            //   ces deux sources étaient des entrées orphelines, cf. l'affinage ci-dessous.
+            //   Ce qui reste vrai et utile : les deux endpoints sont INDÉPENDANTS, et une panne
+            //   de l'un ne doit pas emporter l'autre.
+            // 2026-08-08, AFFINAGE (user : « donc j'ai des mauvais matchs, tu peux réparer ») —
+            //   ON DISTINGUE « ABSENT DU CATALOGUE » DE « ENDPOINT EN PANNE ».
+            //   Le correctif précédent gardait les sources natives QUELLE QUE SOIT la raison de
+            //   l'échec. Résultat sur Star Trek (1966) : deux serveurs ★ affichés pour une série
+            //   que Frembed n'a pas. Vérifié dans le navigateur du user : leur recherche ne rend
+            //   QUE des dérivées (Discovery, Picard, Voyager… 11 séries, aucune de 1966), la page
+            //   `/embed/serie/253` répond « Error 404 — Page Not Found », et les URLs annoncées
+            //   par `streaming/player` pointent sur un seau de stockage vide
+            //   (« Erreur 403 — Ce compartiment ne peut pas être consulté »).
+            //   Or Frembed le dit lui-même : `api/series` répond `404 Series not found`. C'est
+            //   sa façon d'annoncer « je n'ai pas cette œuvre » — et dans ce cas ses sources
+            //   natives sont des entrées orphelines.
+            //   Règle : 404 ⇒ absent du catalogue ⇒ on n'interroge MÊME PAS le VIP.
+            //           toute autre panne (réseau, 5xx, timeout) ⇒ on garde le VIP, qui est
+            //           indépendant — c'est la moitié utile du correctif précédent, conservée.
+            var absentDuCatalogue = false
+            val ret = try {
+                when (videoType) {
+                    is Video.Type.Movie -> service.getMovieLinks(videoType.id)
+                    is Video.Type.Episode -> service.getTvShowLinks(videoType.tvShow.id, videoType.season.number, videoType.number)
+                }
+            } catch (e: Exception) {
+                val code = (e as? retrofit2.HttpException)?.code()
+                absentDuCatalogue = code == 404
+                if (absentDuCatalogue) {
+                    Log.i("FrembedExtractor", "Frembed déclare ne pas avoir cette œuvre (404) → aucune source, VIP compris")
+                } else {
+                    Log.w("FrembedExtractor", "hébergeurs indisponibles (${e.javaClass.simpleName}: ${e.message}) → on poursuit avec les seules sources natives VIP")
+                }
+                null
+            }
+            if (absentDuCatalogue) return emptyList()
+            Log.d("FrembedExtractor", "API response: link1=${ret?.link1?.take(60)}, link2=${ret?.link2?.take(60)}, link3=${ret?.link3?.take(60)}")
+            val initialServers = ret?.toServers() ?: emptyList()
             Log.d("FrembedExtractor", "Initial servers: ${initialServers.size} found")
+            var vipEnAttente: List<Video.Server> = emptyList()
 
+            // 2026-08-08 (user : « les serveurs qui répondent rapidement doivent arriver
+            //   rapidement ») — L'APPEL VIP PASSE EN PARALLÈLE.
+            //   Mesuré sur « Obsession » (Chromecast) : l'API répond à T0+2,7 s, la résolution
+            //   des redirections se termine vers +5,8 s, PUIS seulement partait l'appel VIP,
+            //   qui coûtait encore ~2 s — le tout en série. Ces deux étapes ne dépendent pas
+            //   l'une de l'autre : la chaîne de redirections travaille sur les liens de
+            //   `toServers()`, l'appel VIP sur `api/streaming/player`. On les lance ensemble et
+            //   on ne paie plus que la plus longue des deux.
             val resolvedServers = coroutineScope {
-                initialServers.map { server ->
+                val vipDiffere = async(Dispatchers.IO) { recupererSourcesVip(videoType) }
+                val resolus = initialServers.map { server ->
                     async(Dispatchers.IO) {
                         try {
                             // 2026-06-29 (REPAIR) : la nouvelle API redirige en CHAÎNE
@@ -288,28 +370,10 @@ class FrembedExtractor (var newUrl: String = "") : Extractor() {
                         }
                     }
                 }.awaitAll()
+                vipEnAttente = vipDiffere.await()
+                resolus
             }
-
-            // 2026-06-29 (REPAIR — restauré depuis la version riche) : sources VIP
-            //   natives (★ Frembed Premium sans pub + ★ Frembed Free VF) via
-            //   api/streaming/player → m3u8 directs senpai (pass-through). En tête.
-            val vipServers = try {
-                val tmdb = when (videoType) {
-                    is Video.Type.Movie -> videoType.id
-                    is Video.Type.Episode -> videoType.tvShow.id
-                }
-                val type = if (videoType is Video.Type.Episode) "serie" else "movie"
-                val sa = (videoType as? Video.Type.Episode)?.season?.number
-                val ep = (videoType as? Video.Type.Episode)?.number
-                val resp = service.getStreamingPlayer(tmdb, type, sa, ep)
-                Log.d("FrembedExtractor", "Native VIP sources: ${resp.sources?.size ?: 0}")
-                resp.sources.orEmpty().mapNotNull { s ->
-                    val u = s.url?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                    Video.Server(id = "vip_${s.label}", name = "★ Frembed ${s.label ?: "VIP"} (French)", src = u)
-                }
-            } catch (e: Exception) {
-                Log.w("FrembedExtractor", "VIP fetch failed: ${e.message}"); emptyList()
-            }
+            val vipServers = vipEnAttente
 
             // 2026-06-29 (REPAIR) : on retire les hosters NON résolus (src toujours
             //   sur frembed/api/stream = injouables « No extractors found ») pour

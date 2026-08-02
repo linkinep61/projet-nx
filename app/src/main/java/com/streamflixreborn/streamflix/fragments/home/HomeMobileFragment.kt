@@ -818,7 +818,42 @@ class HomeMobileFragment : Fragment() {
      *  2026-05-13 (user "traduit l'anglais des catégories") : noms affichés
      *  via prettyCategoryName() — mapping anglais → français. Le nom RAW
      *  reste utilisé en interne pour le filtre. */
+    /**
+     * 2026-08-03 : ce bouton ouvre désormais le GESTIONNAIRE DE GROUPES — onglets TV/Films/Séries,
+     *   réordonnancement, masquage — au lieu de la simple liste plate d'avant. Le clic sur un
+     *   groupe conserve l'ancien comportement (poser le filtre et recharger l'accueil), donc rien
+     *   n'est perdu : on y a seulement ajouté le réglage.
+     */
     private fun showIptvCategoryPicker() {
+        val provider = com.streamflixreborn.streamflix.providers.MyIptvProvider
+        fun rafraichir() {
+            com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                requireContext().applicationContext, provider,
+            )
+            viewModel.getHome()
+            com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+        }
+        com.streamflixreborn.streamflix.utils.IptvGroupManagerDialog.show(
+            context = requireContext(),
+            onChanged = { rafraichir() },
+            onGroupeChoisi = { type, brut ->
+                when (type) {
+                    com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.LIVE ->
+                        provider.selectedCategoryLive = brut
+                    com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.MOVIE ->
+                        provider.selectedCategoryMovie = brut
+                    com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.SERIES ->
+                        provider.selectedCategorySeries = brut
+                    else -> {}
+                }
+                rafraichir()
+            },
+        )
+    }
+
+    /** Ancien sélecteur plat — remplacé par le gestionnaire ci-dessus. Plus appelé. */
+    @Suppress("unused")
+    private fun showIptvCategoryPickerLegacy() {
         val provider = com.streamflixreborn.streamflix.providers.MyIptvProvider
         val type = com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.LIVE
         val categoriesWithCount = provider.availableCategoriesWithCount(type)

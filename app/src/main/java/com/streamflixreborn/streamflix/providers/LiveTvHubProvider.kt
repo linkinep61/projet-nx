@@ -1068,6 +1068,33 @@ object LiveTvHubProvider : Provider, IptvProvider {
             if (name.startsWith("✕")) return true
             return false
         }
+        // ── 2026-08-09 (user « des chaînes en doublon dans plein de dossiers, faut les
+        //   fusionner ») : on retire les répétitions À L'INTÉRIEUR de chaque section, AVANT
+        //   que `sectionToFolder` et `folderContents` ne référencent les objets.
+        //
+        //   ⚠ La première tentative dédupliquait plus bas, au moment de remplir
+        //   `folderContents`, en recopiant la Category. Ça a cassé la navigation (« c'est
+        //   toujours Channel 3 qui s'ouvre ») : `sections` gardait l'objet d'origine pendant
+        //   que `folderContents` recevait la copie, et la résolution au clic ne retrouvait
+        //   plus son dossier. Ici on remplace l'entrée DANS `sections` lui-même, donc tout
+        //   le monde voit le même objet et rien ne diverge.
+        //
+        //   On ne déduplique QUE dans une même section : une chaîne présente à la fois dans
+        //   « Favoris » et dans « Généralistes » doit rester aux deux endroits.
+        @Suppress("NAME_SHADOWING")
+        val sections = sections.map { s ->
+            val vus = HashSet<String>()
+            val propre = s.list.filter { item ->
+                val cid = (item as? TvShow)?.id ?: return@filter true
+                vus.add(cid)
+            }
+            if (propre.size == s.list.size) s
+            else {
+                Log.d(TAG, "section « ${s.name} » : ${s.list.size - propre.size} doublon(s) retiré(s)")
+                s.copy(list = propre).also { n -> runCatching { n.itemType = s.itemType } }
+            }
+        }
+
         // Identifie quelles sections vont dans quels dossiers.
         //   Toute section non-visible-direct matche au moins le catch-all
         //   "Autres" (= Regex(".+")) en dernier recours.
@@ -1090,6 +1117,18 @@ object LiveTvHubProvider : Provider, IptvProvider {
         //   clés re-dérivées des sections ce tour-ci ; les clés lazy sont préservées.
         val sectionKeys = sectionToFolder.values.map { it.key }.toSet()
         for (k in sectionKeys) folderContents.remove(k)
+        // ⚠ 2026-08-09 — DÉDUPLICATION DES DOSSIERS RETIRÉE, NE PAS LA REFAIRE AINSI.
+        //   J'avais ajouté ici un filtrage par id qui reconstruisait chaque section via
+        //   `sec.copy(list = …)`. Résultat immédiat chez le user : « quand je clique sur des
+        //   dossiers, c'est Channel 3 qui s'ouvre tout le temps » — l'ouverture pointait
+        //   toujours sur le même contenu. La cause est le `copy()` : `sectionToFolder` et
+        //   `sections` continuent de référencer l'objet Category D'ORIGINE, alors que
+        //   `folderContents` recevait une COPIE. Les deux ne correspondaient plus, et
+        //   `Category` redéfinit `equals`, donc la résolution du dossier au clic partait
+        //   sur le mauvais objet.
+        //   Si on veut vraiment dédupliquer, il faudra le faire À LA CONSTRUCTION des
+        //   sections (en amont, là où la liste est encore mutable), jamais en recopiant une
+        //   Category déjà rangée dans les deux structures.
         for ((sec, def) in sectionToFolder) {
             val existing = folderContents.getOrDefault(def.key, emptyList())
             folderContents[def.key] = existing + sec
@@ -3605,6 +3644,47 @@ object LiveTvHubProvider : Provider, IptvProvider {
     private const val MUSIQUE_FALLBACK_URL =
         "https://iptv-org.github.io/iptv/categories/music.m3u"
 
+    // 2026-08-09 (user « les 22 chaînes de musique de cette playlist, j'aimerais les ajouter
+    //   à nos 855 ») : playlist FREETV Inspiration Links. On ne prend QUE son groupe
+    //   « Music ». Passer par `musicOnly = true` aurait été plus court mais faux : le filtre
+    //   par mots-clés y attrape aussi « HBO Hits », « Rock Entertainment », « Fit Dance » et
+    //   huit radios RFM — 15 intrus mesurés. On découpe donc le groupe à la source.
+    private const val FREETV_M3U_URL =
+        "https://raw.githubusercontent.com/iprtl/m/master/Freetv.m3u"
+
+    /**
+     * Ne garde d'un M3U que les entrées dont le `group-title` vaut [groupe] (espaces et casse
+     * ignorés). Conserve les `#EXTVLCOPT` de chaque entrée — ce sont eux qui portent
+     * l'User-Agent, le Referer et l'Origin dont dépend la lecture.
+     */
+    private fun extraireGroupeM3u(body: String, groupe: String): String {
+        if (body.isBlank() || "#EXTM3U" !in body) return ""
+        val sortie = StringBuilder("#EXTM3U\n")
+        val bloc = ArrayList<String>()
+        var garder = false
+        fun vider() { bloc.clear(); garder = false }
+        for (raw in body.lines()) {
+            val t = raw.trim()
+            when {
+                t.startsWith("#EXTINF:") -> {
+                    vider()
+                    val g = Regex("""group-title="([^"]*)"""").find(t)?.groupValues?.get(1).orEmpty()
+                    garder = g.trim().equals(groupe.trim(), ignoreCase = true)
+                    if (garder) bloc.add(t)
+                }
+                t.startsWith("#EXTVLCOPT:", ignoreCase = true) -> if (garder) bloc.add(t)
+                t.startsWith("http://") || t.startsWith("https://") -> {
+                    if (garder && bloc.isNotEmpty()) {
+                        bloc.forEach { sortie.append(it).append('\n') }
+                        sortie.append(t).append('\n')
+                    }
+                    vider()
+                }
+            }
+        }
+        return sortie.toString()
+    }
+
     // 2026-06-29 (REPAIR — re-appliqué) : dossier Stream4Free. M3U dédié
     //   (refs stream4free://<slug>, résolues à la lecture). Cache RAM 30 min.
     @Volatile private var stream4CacheSections: List<Category> = emptyList()
@@ -4019,6 +4099,18 @@ object LiveTvHubProvider : Provider, IptvProvider {
                 ingestMusiqueM3u(dl(MIX_FR_M3U_URL), musicOnly = true, seen, groups)
                 ingestMusiqueM3u(dl(WORLDWIDE_M3U_URL).ifBlank { dl("https://epg.pw/test_channels_all.m3u") },
                     musicOnly = true, seen, groups)
+                // 4) 2026-08-09 : groupe « Music » de la playlist FREETV (22 chaînes —
+                //    ONFM, Sol Musica, Rock TV, Total Music ×5, Ocko Star, Kiss TV…).
+                //    `musicOnly = false` parce que le découpage par groupe a déjà fait le
+                //    tri : ces 22-là SONT de la musique, inutile de repasser un filtre par
+                //    mots-clés qui n'ajouterait que du risque. Dédup par URL comme les autres.
+                run {
+                    val freetvMus = extraireGroupeM3u(dl(FREETV_M3U_URL), "Music")
+                    val avant = groups.values.sumOf { it.size }
+                    ingestMusiqueM3u(freetvMus, musicOnly = false, seen, groups)
+                    val apres = groups.values.sumOf { it.size }
+                    Log.d(TAG, "Musique : +${apres - avant} chaîne(s) depuis FREETV")
+                }
                 // 2026-06-29 (REPAIR — user "807 vs 790 : il manque les chaînes
                 //   hardcodées, ex '90 Is Good'") : ré-injecte les 17 radios Dric4rTv
                 //   hardcodées (RadioCatalog) + la chaîne musique custom "90 Is Good"

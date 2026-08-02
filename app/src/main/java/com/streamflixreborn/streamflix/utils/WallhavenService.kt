@@ -70,7 +70,17 @@ object WallhavenService {
                 .append("&sorting=")
                 .append(if (query.isBlank()) "toplist" else "relevance")
                 .append("&page=").append(page)
-            if (ratio != null) urlBuilder.append("&ratios=").append(ratio)
+            // 2026-08-04 (bug user : « les thèmes ne renvoient rien ») : `ratios` impose un format
+            //   STRICTEMENT exact. Sur TV, `ratios=16x9` écartait tout le 16:10, le 21:9 et le
+            //   1920x1200 — combiné à une requête déjà étroite, il ne restait plus rien.
+            //   `atleast` est le bon filtre ici : il garantit une définition suffisante pour un
+            //   téléviseur sans exiger une proportion au pixel près. Les autres appels (mobile,
+            //   ratio null) sont inchangés.
+            when (ratio) {
+                null -> {}
+                "16x9" -> urlBuilder.append("&atleast=1920x1080")
+                else -> urlBuilder.append("&ratios=").append(ratio)
+            }
             if (query.isNotBlank()) {
                 urlBuilder.append("&q=").append(java.net.URLEncoder.encode(query, "UTF-8"))
             }

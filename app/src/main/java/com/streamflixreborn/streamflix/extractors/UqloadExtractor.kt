@@ -31,8 +31,14 @@ class UqloadExtractor : Extractor() {
     override val aliasUrls = listOf(
         "https://uqload.cx",
         "https://uqload.co",
-        "https://uqload.to",
         "https://uqload.net",
+        // 2026-08-07 (audit DNS) : `uqload.to` retiré, il n'a plus d'enregistrement A.
+        //   Ces quatre-là répondent, et `.bz` est celui que sert FrenchAnime aujourd'hui
+        //   (relevé sur leurs fiches) — il nous manquait, donc ces liens échouaient.
+        "https://uqload.bz",
+        "https://uqload.io",
+        "https://uqload.com",
+        "https://uqload.ws",
     )
 
     override val cacheTtlMs: Long = 5L * 60L * 1000L

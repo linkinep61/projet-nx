@@ -258,7 +258,21 @@ class LoginWebViewActivity : AppCompatActivity() {
                 "&response_type=token" +
                 "&redirect_uri=https://www.rmcbfmplay.com" +
                 "&scope=openid"
-            else -> "https://www.6play.fr/connexion"
+            // 2026-08-02 (user : « quand on ouvre la page de reconnexion M6 on tombe sur un
+            //   500 ; en passant par Accueil puis Paramètres ça marche ») : REPRODUIT et
+            //   confirmé en direct —
+            //     6play.fr/connexion  →  redirige vers  www.m6.fr/connexion  →  HTTP 500
+            //     (« Erreur 500 - M6+ », aucun formulaire)
+            //   Ce n'est pas notre app : M6 a déplacé son authentification sur un domaine SSO
+            //   dédié. Le chemin qui fonctionne (celui du bouton « Mon Compte » de l'accueil,
+            //   = le contournement trouvé par l'utilisateur) aboutit à :
+            //     auth.m6.fr/connexion?redirect_uri=…&auth_flow_type=login
+            //   Vérifié : cette URL MINIMALE suffit (champs email + mot de passe présents) —
+            //   inutile de reproduire les paramètres de consentement/device_id, qui sont
+            //   régénérés par le site lui-même.
+            else -> "https://auth.m6.fr/connexion" +
+                "?redirect_uri=" + java.net.URLEncoder.encode("https://www.m6.fr/", "UTF-8") +
+                "&auth_flow_type=login"
         }
         title = when (service) {
             SERVICE_TF1 -> "Connexion TF1+"
@@ -1000,6 +1014,10 @@ class LoginWebViewActivity : AppCompatActivity() {
                 "https://www.m6.fr/", "https://m6.fr/",
                 "https://login.6play.fr/", "https://accounts.6play.fr/",
                 "https://login-gigya.m6.fr/", "https://compte.m6.fr/",
+                // 2026-08-02 : le formulaire de connexion vit désormais sur auth.m6.fr
+                //   (l'ancienne page m6.fr/connexion renvoie 500). Sans ce domaine dans la
+                //   liste, les cookies de session posés PENDANT le login n'étaient pas relus.
+                "https://auth.m6.fr/",
             )) {
                 val c = cm.getCookie(domain) ?: continue
                 c.split(";").forEach { kv ->
@@ -1254,6 +1272,10 @@ class LoginWebViewActivity : AppCompatActivity() {
                 "https://www.m6.fr/", "https://m6.fr/",
                 "https://login.6play.fr/", "https://accounts.6play.fr/",
                 "https://login-gigya.m6.fr/", "https://compte.m6.fr/",
+                // 2026-08-02 : le formulaire de connexion vit désormais sur auth.m6.fr
+                //   (l'ancienne page m6.fr/connexion renvoie 500). Sans ce domaine dans la
+                //   liste, les cookies de session posés PENDANT le login n'étaient pas relus.
+                "https://auth.m6.fr/",
             )) {
                 val c = cm.getCookie(domain) ?: continue
                 c.split(";").forEach { kv ->

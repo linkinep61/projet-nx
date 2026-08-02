@@ -6,11 +6,18 @@
     android:layout_height="match_parent"
     tools:context=".fragments.search.SearchMobileFragment">
 
+    <!-- 2026-08-06 (retour testeur : « la flèche retour est sur la loupe recherche ») :
+         le bouton retour flottant `btn_back` est posé à marginStart=10dp / marginTop=34dp,
+         et cette barre commençait AU MÊME ENDROIT — les deux se superposaient, la flèche
+         recouvrant la loupe.
+         On décale la barre pour lui laisser la place : 10dp de marge + 40dp de bouton
+         + 8dp de respiration = 58dp. Aucun élément n'est supprimé et tout tient toujours
+         sur une seule ligne. -->
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/cl_search"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginStart="10dp"
+        android:layout_marginStart="58dp"
         android:layout_marginTop="32dp"
         android:layout_marginEnd="10dp"
         android:background="@drawable/bg_search_edittext"

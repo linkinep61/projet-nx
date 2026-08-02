@@ -456,22 +456,52 @@ object ExtractorRanker {
      *  « AniCloud · Filemoon (VOSTFR) » ≠ « Filemoon (VOSTFR) » ≠ « Movix · Filemoon (VOSTFR) ».
      *  Avant, tous les serveurs du même extracteur partageaient la même clé →
      *  favoriser un Filemoon les favorisait TOUS. */
-    fun favKeyFor(server: Video.Server): String {
-        val parts = server.name.split(Regex("\\s[—–·-]\\s"), limit = 2)
-        val wrapperPrefix = if (parts.size == 2) parts[0].trim().lowercase() + "·" else ""
-        val extName = (resolveExtractorName(server) ?: server.name).lowercase()
-        val lang = serverLangBucket(server.name)
-        return "$wrapperPrefix$extName:$lang"
-    }
+    fun favKeyFor(server: Video.Server): String = favKeyFor(server.name)
 
     /** Construit la clé favori langue-aware depuis un nom de serveur. */
     fun favKeyFor(serverName: String): String {
         val parts = serverName.split(Regex("\\s[—–·-]\\s"), limit = 2)
         val wrapperPrefix = if (parts.size == 2) parts[0].trim().lowercase() + "·" else ""
-        val extName = (resolveExtractorName(Video.Server(id = "", name = serverName))
-            ?: serverName).lowercase()
         val lang = serverLangBucket(serverName)
-        return "$wrapperPrefix$extName:$lang"
+        return "$wrapperPrefix${libelleFavori(serverName)}:$lang"
+    }
+
+    /**
+     * 2026-08-08 (user : « j'ai mis un cœur, ça a ajouté 2 cœurs de la même catégorie ») :
+     *   la clé favori ne peut PAS se réduire au nom de l'extracteur.
+     *
+     *   `resolveExtractorName` ne garde que le PREMIER mot utile après le tiret. Résultat,
+     *   des serveurs bien distincts retombaient sur la même clé — prouvé dans les prefs de
+     *   l'appareil (`extractor_toggles.xml`, entrée `netmirror·netmirror:vf` unique) :
+     *     « NetMirror · NetMirror Netflix [VF] »      → netmirror
+     *     « NetMirror · NetMirror Prime Video [VF] »  → netmirror      ← même clé
+     *     « Nakios · Server #1/#2/#3/#4 HD (VF) »     → server         ← une clé pour 4
+     *     « Frembed · ★ Frembed Premium/Free VF »     → frembed        ← une clé pour 2
+     *   Un cœur sur l'un les cochait tous.
+     *
+     *   On garde donc le LIBELLÉ ENTIER (après le préfixe wrapper), normalisé :
+     *     - le contenu entre (…) / […] saute → « Voe (DEFAULT - HD) » == « Voe (HD) »,
+     *       ce qui préserve le comportement voulu à l'origine ;
+     *     - tout ce qui n'est ni lettre ni chiffre devient une espace (★, #, ., -) ;
+     *     - minuscules + espaces compactés.
+     *   La langue reste à part (suffixe `:vf`), donc VF ≠ VOSTFR comme avant.
+     *
+     *   Exemples : « NetMirror · NetMirror Prime Video [VF] » → netmirror·netmirror prime video:vf
+     *              « Nakios · Server #2 HD (VF) »             → nakios·server 2 hd:vf
+     */
+    private fun libelleFavori(name: String): String {
+        val parts = name.split(Regex("\\s[—–·-]\\s"), limit = 2)
+        val corps = if (parts.size == 2) parts[1] else name
+        val nettoye = corps
+            .replace(Regex("[(\\[][^)\\]]*[)\\]]"), " ")
+            .replace(Regex("[^\\p{L}\\p{N}]+"), " ")
+            .trim()
+            .lowercase()
+        // Si le libellé n'était QUE de la ponctuation / une mention de langue entre
+        // parenthèses, on ne renvoie pas une clé vide : on retombe sur le corps brut.
+        return nettoye.ifBlank {
+            corps.replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim().lowercase()
+        }
     }
 
     /**
@@ -540,8 +570,22 @@ object ExtractorRanker {
         val emDashSplit = name.split(Regex("\\s[—–·-]\\s"), limit = 2)
         val candidate = if (emDashSplit.size == 2) emDashSplit[1] else name
 
-        val first = candidate.split(Regex("[\\s\\-(\\[]"), limit = 2).firstOrNull()
-            ?.takeIf { it.length >= 3 }
+        // 2026-08-07 (user : « quand on met un cœur ça doit pas être un autre ailleurs ») :
+        //   on saute les jetons de LANGUE / QUALITÉ / drapeaux placés devant le nom de
+        //   l'hébergeur. Avant, « FR Vidara » butait sur « FR » (2 lettres → rejeté) et la
+        //   fonction rendait null : l'hébergeur était perdu et deux serveurs pouvaient
+        //   retomber sur la même clé favori. On veut « Vidara ».
+        val jetonsIgnores = setOf(
+            "fr", "vf", "vff", "vfq", "vfi", "vo", "vost", "vostfr", "multi", "french",
+            "francais", "français", "hd", "fhd", "sd", "uhd", "4k", "1080p", "720p", "480p",
+        )
+        val first = candidate.split(Regex("[\\s\\-(\\[]"))
+            .map { it.trim() }
+            .firstOrNull { jeton ->
+                jeton.length >= 3 &&
+                    jeton.lowercase() !in jetonsIgnores &&
+                    jeton.any { it.isLetter() }
+            }
             ?: return null
         // Normalise première lettre majuscule (le tracker stocke "Filemoon"
         // pas "filemoon" parce qu'Extractor.name est CamelCase).

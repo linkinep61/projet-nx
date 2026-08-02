@@ -537,4 +537,6 @@
     <string name="settings_parental_tmdb_disable_blocked">You must unlock parental controls before disabling TMDb.</string>
     <string name="settings_force_extra_buffer_title">Global Extra Buffering</string>
     <string name="settings_force_extra_buffer_summary">Enable extra buffering for all servers by default</string>
+    <string name="settings_adaptive_quality_title">Automatic quality reduction</string>
+    <string name="settings_adaptive_quality_summary">Off: always keep the highest available quality. On: temporarily lower the resolution when playback stutters, then restore it.</string>
 </resources>

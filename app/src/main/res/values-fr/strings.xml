@@ -425,6 +425,8 @@
 
     <string name="settings_force_extra_buffer_title">Mise en cache</string>
     <string name="settings_force_extra_buffer_summary">Activer la mise en cache supplémentaire par défaut</string>
+    <string name="settings_adaptive_quality_title">Baisse automatique de la qualité</string>
+    <string name="settings_adaptive_quality_summary">Désactivé : garde toujours la meilleure qualité disponible. Activé : baisse temporairement la définition quand la lecture saccade, puis la rétablit.</string>
     <string name="settings_category_poseidon">Paramètres Poseidonhd2</string>
     <string name="settings_category_poseidon_domain">Nom de domaine Poseidonhd2</string>
     <string name="settings_scan_resolver_qr_title">Scanner le QR de contournement TV</string>

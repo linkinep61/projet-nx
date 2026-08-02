@@ -50,6 +50,63 @@ object WorldLiveTvProvider : Provider, IptvProvider {
     override val language = "fr"
 
     private const val TAG = "WorldLiveTv"
+
+    /**
+     * Playlists servies TELLES QUELLES : une ligne `#EXTINF` = une chaîne, même si deux
+     * lignes partagent le même `tvg-id`. Voir le commentaire dans `fetchM3uChannels`.
+     */
+    // 2026-08-09 — VIDE, et volontairement. On a essayé de servir FREETV telle quelle pour
+    //   coller aux compteurs de Wiseplay (19 chaînes dans « News » au lieu de 15). Résultat
+    //   mesuré par le user : « une chaîne sur deux qui fonctionne dans les doublons » — les
+    //   deux versions s'affichaient côte à côte, la vivante et la morte. La fusion ne perd
+    //   rien : le doublon devient le SERVEUR DE SECOURS de l'autre, et c'est précisément ce
+    //   qui fait lire CNN Portugal (1ᵉʳ lien 404, 2ᵉ lien OK) et SIC Notícias.
+    //   Wiseplay affiche 19 parce qu'il ne teste rien. Ne pas remettre de source ici sans
+    //   avoir relu cette histoire.
+    private val SANS_FUSION_DOUBLONS = emptyList<String>()
+
+    /**
+     * Convertit un `license_key` ClearKey de M3U en RÉPONSE de licence prête pour ExoPlayer.
+     *
+     * Deux formes existent dans la nature, les deux sont dans la playlist FREETV :
+     *   `kid:key` en hexadécimal        → `f80351a1…c4:a2226def…1e`
+     *   objet JSON `{"kid":"key"}`      → `{"0e5b4f0f…49":"152408ad…bb"}`
+     *
+     * ExoPlayer attend, lui, le format « JSON Web Key » du W3C, avec les valeurs en
+     * base64url SANS padding — d'où la conversion hex → octets → base64url.
+     * Aucun réseau : la clé est dans le fichier, il n'y a pas de serveur à interroger.
+     */
+    private fun clearKeyJson(licenseKey: String): String? = try {
+        val paires = mutableListOf<Pair<String, String>>()
+        val brut = licenseKey.trim()
+        if (brut.startsWith("{")) {
+            val o = org.json.JSONObject(brut)
+            o.keys().forEach { k -> paires += k to o.getString(k) }
+        } else {
+            val p = brut.split(":")
+            if (p.size == 2) paires += p[0].trim() to p[1].trim()
+        }
+        fun hexB64(h: String): String {
+            val propre = h.trim().removePrefix("0x")
+            val octets = ByteArray(propre.length / 2) {
+                ((Character.digit(propre[it * 2], 16) shl 4) +
+                    Character.digit(propre[it * 2 + 1], 16)).toByte()
+            }
+            return android.util.Base64.encodeToString(
+                octets,
+                android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or
+                    android.util.Base64.NO_WRAP,
+            )
+        }
+        val cles = paires
+            .filter { it.first.matches(Regex("[0-9a-fA-F]{32}")) && it.second.matches(Regex("[0-9a-fA-F]{32}")) }
+            .joinToString(",") { (kid, k) ->
+                """{"kty":"oct","kid":"${hexB64(kid)}","k":"${hexB64(k)}"}"""
+            }
+        if (cles.isBlank()) null else """{"keys":[$cles],"type":"temporary"}"""
+    } catch (e: Exception) {
+        Log.w(TAG, "clé ClearKey illisible « ${licenseKey.take(60)} » : ${e.message}"); null
+    }
     // 2026-06-11 (user "mettre 3boxTv en priorité pour les nouveaux users") :
     //   défaut = 3boxTv v2 (mainteneur 3box-tv.tumblr.com, le plus actif et
     //   compatible avec notre GenericStreamResolver asm168). L'ancien URL
@@ -108,6 +165,15 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         val userAgent: String?,
         val referer: String?,
         val tvgLanguage: String?,  // capturé depuis tvg-language="xx" du M3U
+        // 2026-08-09 : `#EXTVLCOPT:http-origin`. On lisait déjà l'UA et le Referer, mais pas
+        //   l'Origin — et le CDN d'Impresa (SIC Notícias) le contrôle : sans lui, 403.
+        //   17 chaînes de FREETV en déclarent un.
+        val origin: String? = null,
+        // 2026-08-09 : DRM déclaré par le M3U via #KODIPROP (playlist FREETV).
+        //   drmType = "clearkey" | "widevine" ; drmLicense = réponse JSON prête (clearkey)
+        //   ou URL du serveur de licence (widevine). Voir Video.drmType.
+        val drmType: String? = null,
+        val drmLicense: String? = null,
         val isFolder: Boolean = false,  // 2026-06-10 (Wiseplay-style folders)
         val folderPath: String? = null,  // si isFolder, chemin pour lookup folderContents
         // 2026-06-15 (user "ajouter un 2e serveur en backup pour booster comme
@@ -343,6 +409,30 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                 if (ch.tvgLanguage != null) put("tvgLanguage", ch.tvgLanguage)
                 if (ch.isFolder) put("isFolder", true)
                 if (ch.folderPath != null) put("folderPath", ch.folderPath)
+                // ⚠ 2026-08-09 — LES SERVEURS DE SECOURS N'ÉTAIENT PAS SAUVEGARDÉS.
+                //   `extraServers` était rempli au parsing (fusion des doublons tvg-id +
+                //   URLs multiples d'un même #EXTINF) et lu par getServers, mais il ne
+                //   passait ni dans ce cache disque ni dans sa relecture. Résultat : la
+                //   playlist marchait au premier chargement, puis au redémarrage suivant
+                //   l'app repartait du cache et chaque chaîne se retrouvait avec UN SEUL
+                //   serveur. D'où « la chaîne fonctionnait tout à l'heure et là plus »
+                //   (RTP Memória : `Got 1 initial servers`, échec en 110 ms, rien derrière).
+                //   Le bug existait avant, mais il restait invisible tant que les chaînes
+                //   n'avaient qu'une URL.
+                if (ch.origin != null) put("origin", ch.origin)
+                if (ch.drmType != null) put("drmType", ch.drmType)
+                if (ch.drmLicense != null) put("drmLicense", ch.drmLicense)
+                if (ch.extraServers.isNotEmpty()) {
+                    put("extraServers", org.json.JSONArray().apply {
+                        ch.extraServers.forEach { (u, ua, ref) ->
+                            put(org.json.JSONObject().apply {
+                                put("url", u)
+                                if (ua != null) put("ua", ua)
+                                if (ref != null) put("ref", ref)
+                            })
+                        }
+                    })
+                }
             })
         }
         return arr
@@ -362,6 +452,23 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                 tvgLanguage = obj.optString("tvgLanguage").takeIf { it.isNotBlank() },
                 isFolder = obj.optBoolean("isFolder", false),
                 folderPath = obj.optString("folderPath").takeIf { it.isNotBlank() },
+                // Relecture des champs ajoutés au cache le 2026-08-09 — cf. le commentaire
+                //   dans `channelsToJsonArray`. Sans eux, un redémarrage vidait les serveurs
+                //   de secours, l'en-tête Origin et la clé DRM de chaque chaîne.
+                origin = obj.optString("origin").takeIf { it.isNotBlank() },
+                drmType = obj.optString("drmType").takeIf { it.isNotBlank() },
+                drmLicense = obj.optString("drmLicense").takeIf { it.isNotBlank() },
+                extraServers = obj.optJSONArray("extraServers")?.let { a ->
+                    (0 until a.length()).mapNotNull { j ->
+                        val o = a.optJSONObject(j) ?: return@mapNotNull null
+                        val u = o.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                        Triple(
+                            u,
+                            o.optString("ua").takeIf { it.isNotBlank() },
+                            o.optString("ref").takeIf { it.isNotBlank() },
+                        )
+                    }
+                }.orEmpty(),
             )
         }
     }
@@ -630,6 +737,9 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         var pendingExtinf: String? = null
         var pendingUa: String? = null
         var pendingReferer: String? = null
+        var pendingDrmType: String? = null
+        var pendingDrmLicense: String? = null
+        var pendingOrigin: String? = null
         // 2026-06-15 (user "ajouter 2e serveur backup pour booster") : map
         //   (tvgId, groupTitle) -> index dans out pour grouper les EXTINF en
         //   doublon (= même chaîne servie par plusieurs URLs). Le 2e/3e EXTINF
@@ -638,6 +748,14 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         //   Garde : seulement si tvg-id présent et non-vide. Sinon comportement
         //   actuel (= chId-suffix pour les doublons par nom).
         val dedupByTvgId = HashMap<Pair<String, String>, Int>()
+        // 2026-08-09 (user « tu laisses ma playlist telle quelle, doublons ou pas doublons ») :
+        //   certaines sources doivent apparaître À L'IDENTIQUE du fichier — une ligne du M3U,
+        //   une chaîne dans la liste. Mesuré : Wiseplay affiche 19 chaînes dans « News 🇵🇹🇧🇷 »,
+        //   nous 15, parce qu'on regroupait les `tvg-id` en double en serveurs de repli.
+        //   Le repli reste le bon défaut PARTOUT AILLEURS (il a rattrapé un 403 sur SIC
+        //   Notícias le soir même), donc on ne le coupe que pour les playlists listées ici.
+        val fusionnerDoublons = SANS_FUSION_DOUBLONS.none { g.url.contains(it, ignoreCase = true) }
+        if (!fusionnerDoublons) Log.d(TAG, "${g.name}: playlist affichée telle quelle (doublons conservés)")
 
         for (rawLine in body.lineSequence()) {
             val line = rawLine.trim()
@@ -646,18 +764,85 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                     pendingExtinf = line
                     pendingUa = null
                     pendingReferer = null
+                    pendingOrigin = null
+                    pendingDrmType = null
+                    pendingDrmLicense = null
+                }
+                // 2026-08-09 : DRM déclaré par la playlist (syntaxe Kodi/inputstream.adaptive).
+                //   Sans ça, les 61 chaînes chiffrées de FREETV s'affichaient et restaient
+                //   noires : on lisait le `.mpd` sans jamais donner la clé au lecteur.
+                line.startsWith("#KODIPROP:") -> {
+                    val kv = line.removePrefix("#KODIPROP:").split("=", limit = 2)
+                    if (kv.size == 2) when (kv[0].trim().lowercase()) {
+                        "inputstream.adaptive.license_type" -> {
+                            val t = kv[1].lowercase()
+                            pendingDrmType = when {
+                                t.contains("clearkey") -> "clearkey"
+                                t.contains("widevine") -> "widevine"
+                                else -> null
+                            }
+                        }
+                        "inputstream.adaptive.license_key" -> pendingDrmLicense = kv[1].trim()
+                    }
                 }
                 line.startsWith("#EXTVLCOPT:") -> {
                     val kv = line.removePrefix("#EXTVLCOPT:").split("=", limit = 2)
                     if (kv.size == 2) {
                         when (kv[0].lowercase()) {
+                            // 2026-08-09 : certaines playlists écrivent un ALIAS de navigateur
+                            //   là où on attend un vrai User-Agent — FREETV met littéralement
+                            //   « IE » sur quatre chaînes RTP. Les lecteurs Kodi traduisent cet
+                            //   alias ; nous, on envoyait `User-Agent: IE` et le CDN de la RTP
+                            //   refusait. On ignore donc les valeurs qui ne ressemblent pas à
+                            //   un UA (pas de « / », moins de 8 caractères) → l'UA par défaut
+                            //   reprend la main.
+                            // 2026-08-09 — FILTRAGE RÉTABLI, ET CETTE FOIS C'EST MESURÉ.
+                            //   J'avais annulé ce filtre en croyant qu'il cassait les RTP.
+                            //   Le journal dit l'inverse, à sept minutes d'intervalle et sur
+                            //   la même chaîne : avec le filtre, `RTP 2` → `Playback ready` ;
+                            //   sans lui, `RTP 2` → ses 3 serveurs échouent. Envoyer
+                            //   littéralement `User-Agent: IE` fait bien refuser le CDN.
+                            //   On ignore donc les valeurs qui ne sont pas un User-Agent
+                            //   plausible (pas de « / », moins de 8 caractères) et l'UA par
+                            //   défaut reprend la main.
                             "http-user-agent" -> pendingUa = kv[1]
+                                .takeIf { it.length >= 8 && it.contains('/') }
+                                ?: run {
+                                    Log.d(TAG, "UA « ${kv[1]} » ignoré (alias, pas un User-Agent)")
+                                    null
+                                }
                             "http-referrer", "http-referer" -> pendingReferer = kv[1]
+                            "http-origin" -> pendingOrigin = kv[1]
                         }
                     }
                 }
+                // ⚠ 2026-08-09 — UNE ligne #EXTINF peut être suivie de PLUSIEURS URLs.
+                //   Mesuré dans FREETV : « RTP 3 » en aligne QUATRE d'affilée, et le fichier
+                //   compte 481 URLs pour 403 #EXTINF. L'ancien code prenait la première et
+                //   remettait `pendingExtinf` à null : les 78 autres — qui sont les liens de
+                //   SECOURS de la chaîne — étaient jetées en silence. C'est ce qui faisait
+                //   qu'aucune chaîne portugaise ne lisait : un seul serveur, et s'il tombe,
+                //   plus rien derrière.
+                //   On exige `http` en tête (les alternatives sont parfois préfixées d'un
+                //   `+`), ce qui écarte au passage les bannières ASCII du fichier — elles
+                //   auraient été prises pour des URLs.
+                line.removePrefix("+").startsWith("http", ignoreCase = true) &&
+                    pendingExtinf == null && out.isNotEmpty() -> {
+                    val urlSup = line.removePrefix("+")
+                    val dernier = out[out.size - 1]
+                    out[out.size - 1] = dernier.copy(
+                        extraServers = dernier.extraServers +
+                            Triple(urlSup, dernier.userAgent, dernier.referer)
+                    )
+                }
                 line.isNotBlank() && !line.startsWith("#") -> {
                     // C'est une URL stream
+                    // ⚠ 2026-08-09 : le `+` de tête doit sauter ICI AUSSI. Je ne le retirais
+                    //   que sur la branche des URLs supplémentaires ; quand la PREMIÈRE URL
+                    //   d'une entrée en portait un, elle partait telle quelle au lecteur —
+                    //   vu dans le journal : `Playing … +http://streaming-live-app.rtp.pt/…`,
+                    //   échec garanti puisque ce n'est pas une URL valide.
+                    val line = line.removePrefix("+")
                     val extinf = pendingExtinf
                     if (extinf != null) {
                         val name = extinf.substringAfterLast(",").trim()
@@ -671,7 +856,8 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                         // 2026-06-15 : si tvg-id présent ET (tvg-id, group-title)
                         //   déjà parsé dans ce flux → ajouter en backup au lieu
                         //   de créer une nouvelle chaîne.
-                        val dedupKey = if (!tvgId.isNullOrBlank()) Pair(tvgId, groupTitle) else null
+                        val dedupKey = if (fusionnerDoublons && !tvgId.isNullOrBlank())
+                            Pair(tvgId, groupTitle) else null
                         val existingIdx = dedupKey?.let { dedupByTvgId[it] }
                         if (existingIdx != null) {
                             val cur = out[existingIdx]
@@ -696,6 +882,11 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                                     userAgent = pendingUa,
                                     referer = pendingReferer,
                                     tvgLanguage = tvgLanguage,
+                                    origin = pendingOrigin,
+                                    drmType = pendingDrmType?.takeIf { !pendingDrmLicense.isNullOrBlank() },
+                                    drmLicense = pendingDrmLicense?.let { lk ->
+                                        if (pendingDrmType == "clearkey") clearKeyJson(lk) else lk
+                                    },
                                 )
                             )
                             if (dedupKey != null) {
@@ -706,6 +897,9 @@ object WorldLiveTvProvider : Provider, IptvProvider {
                     pendingExtinf = null
                     pendingUa = null
                     pendingReferer = null
+                    pendingOrigin = null
+                    pendingDrmType = null
+                    pendingDrmLicense = null
                 }
             }
         }
@@ -1389,6 +1583,17 @@ object WorldLiveTvProvider : Provider, IptvProvider {
     )
 
     private fun isAdultChannelOrGroup(channelName: String?, groupName: String?): Boolean {
+        // 2026-08-09 (user : « je t'ai jamais demandé de mettre un filtre sur mon dossier ») —
+        //   FILTRE DÉSACTIVÉ. Il masquait le groupe « Erotic » de FreeTV Monde (10 chaînes),
+        //   et plus largement toute chaîne ou tout groupe dont le NOM contient un des mots
+        //   de la liste — sur l'ensemble des sources World Live.
+        //   Il avait été posé en juin après un signalement de contenu adulte apparaissant
+        //   sous des noms de chaînes classiques ; or filtrer par nom ne réglait pas ce
+        //   problème-là, puisqu'une chaîne mal étiquetée porte justement un nom anodin.
+        //   La liste ADULT_KEYWORDS et cette fonction sont conservées : réactiver revient à
+        //   supprimer la ligne ci-dessous.
+        if (true) return false
+        @Suppress("UNREACHABLE_CODE")
         val cName = " ${(channelName ?: "").lowercase().trim()} "
         val gName = " ${(groupName ?: "").lowercase().trim()} "
         return ADULT_KEYWORDS.any { kw ->
@@ -1401,8 +1606,18 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         val orderedGroupNames = groupsCache.map { it.name }
         val sections = mutableListOf<Category>()
         for (gName in orderedGroupNames) {
-            val list = byGroup[gName] ?: continue
-            if (list.isEmpty()) continue
+            val brut = byGroup[gName] ?: continue
+            if (brut.isEmpty()) continue
+            // 2026-08-09 (user « des chaînes en doublon dans plein de dossiers ») :
+            //   déduplication PAR ID à l'intérieur de chaque groupe. C'est ICI qu'il fallait
+            //   la mettre — mon premier essai était dans `LiveTvHubProvider`, qui ne
+            //   construit pas les dossiers de World Live : le journal ne montrait aucune
+            //   ligne « doublon », et le dossier Portugal restait inchangé, à juste titre.
+            val vus = HashSet<String>()
+            val list = brut.filter { vus.add(it.id) }
+            if (list.size != brut.size) {
+                Log.d(TAG, "groupe « $gName » : ${brut.size - list.size} doublon(s) retiré(s)")
+            }
             sections.add(Category(name = gName, list = list.map { channelToTvShow(it) }))
         }
         for ((gName, list) in byGroup) {
@@ -1507,11 +1722,24 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         //   tvg-id+group-title), les expose comme servers additionnels. Le
         //   mini lecteur enchaînera tryNextServer() automatiquement si le
         //   primary fail.
-        ch.extraServers.forEachIndexed { idx, (url, _, _) ->
+        // 2026-08-09 (user « tu mets en priorité les liens qui fonctionnent ») :
+        //   la playlist répète parfois la MÊME URL en secours — mesuré sur RTP1, dont les
+        //   serveurs [1] et [2] pointaient tous les deux sur `smil:rtp1HD.smil/playlist.m3u8`.
+        //   Rejouer un lien déjà tombé ne peut que rater une seconde fois et fait perdre
+        //   quelques centaines de millisecondes à chaque ouverture. On ne garde donc qu'une
+        //   occurrence de chaque URL, l'ordre de la playlist étant conservé.
+        val urlsVues = HashSet<String>().apply { add(ch.streamUrl) }
+        var rang = 0
+        ch.extraServers.forEach { (url, _, _) ->
+            if (!urlsVues.add(url)) {
+                Log.d(TAG, "secours en double ignoré pour « ${ch.name} » : ${url.take(70)}")
+                return@forEach
+            }
+            rang++
             servers.add(
                 Video.Server(
-                    id = "wltv-ch::${ch.id}::backup${idx + 1}",
-                    name = "${ch.name} [World Live TV backup ${idx + 1}]",
+                    id = "wltv-ch::${ch.id}::backup$rang",
+                    name = "${ch.name} [World Live TV backup $rang]",
                     src = url,
                 )
             )
@@ -1519,7 +1747,51 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         return servers
     }
 
+    /**
+     * 2026-08-09 : le DRM est déclaré par la SOURCE (`#KODIPROP` du M3U), pas deviné par un
+     * resolver. On le rattache APRÈS la résolution pour ne pas avoir à toucher aux vingt
+     * branches de `getVideoInterne` (Samsung, Pluto, Xtream, redirections…), dont chacune a
+     * son propre `return Video(...)`.
+     */
     override suspend fun getVideo(server: Video.Server): Video {
+        val video = getVideoInterne(server)
+        val chId = server.id.removePrefix("wltv-ch::").substringBefore("::backup")
+        val ch = channelById(chId)
+        // ⚠ Le MIME doit dire DASH, sinon le grand lecteur choisit le parser HLS et casse sur
+        //   « Input does not start with the #EXTM3U header ». Mesuré sur PBS Nature : l'URL
+        //   est `…/cenc.mpd?encoding=segmentBase` — le `.mpd` est bien là, mais la résolution
+        //   renvoyait `application/x-mpegURL`, et `isDash` teste d'abord `isHls`. Une seule
+        //   ligne de MIME faux suffisait à annuler tout le travail sur le DRM.
+        val estMpd = video.source.substringBefore('?').endsWith(".mpd", ignoreCase = true)
+        val corrige = if (estMpd && video.type != androidx.media3.common.MimeTypes.APPLICATION_MPD) {
+            Log.i(TAG, "MIME corrigé → DASH (l'URL est un .mpd, le type annonçait ${video.type})")
+            video.copy(type = androidx.media3.common.MimeTypes.APPLICATION_MPD)
+        } else video
+
+        // `Origin` : troisième en-tête que la playlist déclare et qu'on n'envoyait pas.
+        //   Le CDN d'Impresa (SIC Notícias) le contrôle — sans lui c'est 403, mesuré deux
+        //   fois d'affilée sur la Chromecast puis sur l'Oppo.
+        // ⚠ 2026-08-09 — EN-TÊTE `Origin` DÉSACTIVÉ, MESURÉ NUISIBLE.
+        //   Je l'avais ajouté en pensant débloquer les 403 de SIC Notícias. Le journal
+        //   montre le contraire sur les RTP : `RTP 2` lisait (`Playback ready`) tant que le
+        //   cache ne portait pas cet en-tête, et échoue sur ses trois serveurs dès que le
+        //   parsing frais l'envoie (`Origin: https://www.rtp.pt`). Le CDN de la RTP refuse
+        //   une requête qui se présente comme une page web.
+        //   Le champ reste lu et stocké ; il suffit de rétablir la ligne ci-dessous pour
+        //   réessayer, idéalement en second essai plutôt qu'en premier.
+        @Suppress("UNUSED_VARIABLE")
+        val originDispo = ch?.origin
+        val avecOrigin = corrige
+
+        val type = ch?.drmType
+        val licence = ch?.drmLicense
+        return if (type != null && !licence.isNullOrBlank()) {
+            Log.i(TAG, "DRM $type déclaré par la playlist pour « ${ch.name} » → transmis au lecteur")
+            avecOrigin.copy(drmType = type, drmLicense = licence)
+        } else avecOrigin
+    }
+
+    private suspend fun getVideoInterne(server: Video.Server): Video {
         ensureRegistry()
         // 2026-06-15 : server.id format "wltv-ch::<chId>" OU "wltv-ch::<chId>::backup<N>"
         //   pour les backup servers (= multi-URL avec dedup tvg-id). Parse les
@@ -1695,6 +1967,29 @@ object WorldLiveTvProvider : Provider, IptvProvider {
         channelRegistry.firstOrNull { it.id == id }?.let { return it }
         for (items in folderContents.values) {
             items.firstOrNull { it.id == id }?.let { return it }
+        }
+        // ⚠ 2026-08-09 (user : « une fois les chaînes en favoris, on dirait qu'elles
+        //   retrouvent pas le chemin ») — RATTRAPAGE D'IDENTIFIANT PÉRIMÉ.
+        //   L'id d'une chaîne contient le slug de sa SOURCE : `wltv::<source>::<chaîne>`.
+        //   Renommer la source réécrit donc l'id de toutes ses chaînes, et les favoris déjà
+        //   enregistrés pointent dans le vide. Mesuré en renommant « Freetv » →
+        //   « FreeTV Monde » : `wltv::freetv::onfm` ne trouvait plus rien, tandis que
+        //   `wltv::freetv_monde::onfm` jouait aussitôt — même chaîne, même flux.
+        //   Plutôt que de renuméroter tout le registre (ce qui aurait cassé les favoris de
+        //   TOUTES les autres sources), on rattrape ici : à défaut de correspondance exacte,
+        //   on cherche la même chaîne finale (`::<chaîne>`) dans le registre. Un favori
+        //   survit ainsi à n'importe quel renommage, passé ou futur.
+        val feuille = id.substringAfterLast("::").takeIf { it.isNotBlank() } ?: return null
+        val prefixe = id.substringBeforeLast("::")
+        if (prefixe.startsWith("wltv::")) {
+            val candidat = channelRegistry.firstOrNull { it.id.substringAfterLast("::") == feuille }
+                ?: folderContents.values.asSequence()
+                    .flatMap { it.asSequence() }
+                    .firstOrNull { it.id.substringAfterLast("::") == feuille }
+            if (candidat != null) {
+                Log.i(TAG, "id périmé « $id » → rattrapé sur « ${candidat.id} » (${candidat.name})")
+                return candidat
+            }
         }
         return null
     }

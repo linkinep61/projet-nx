@@ -108,9 +108,16 @@ object VidzyTmdbProvider {
             else -> return emptyList()
         }
 
+        // ── 2026-08-06 : UNE PISTE VF ANNONCÉE ⇒ ON AFFICHE « VF », POINT ────────────────
+        //   User, capture à l'appui : le picker montrait « Vidzy · VF/VOSTFR ». Ce libellé
+        //   énumère les pistes disponibles, mais il induit en erreur et, côté tri, le
+        //   serveur passait derrière de vrais VOSTFR alors qu'il a bien une piste française.
+        //   Décision user : « tu mets qu'il est VF, un point c'est tout ».
+        //   (Le classement interne est aligné dans PlayerViewModel.isVfServer.)
+        val languesAffichees = if (languages.contains("VF", ignoreCase = true)) "VF" else languages
         val label = buildString {
             append("Vidzy")
-            if (languages.isNotBlank()) append(" · ").append(languages)
+            if (languesAffichees.isNotBlank()) append(" · ").append(languesAffichees)
         }
         Log.i(TAG, "tmdb=$tmdbId ${if (isMovie) "film" else "S${season}E$episode"} → serveur Vidzy ($languages)")
         return listOf(Video.Server(id = "vidzy::$tmdbId::$season::$episode", name = label, src = src))

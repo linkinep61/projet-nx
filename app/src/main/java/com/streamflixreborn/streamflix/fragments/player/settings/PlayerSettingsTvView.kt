@@ -1223,7 +1223,15 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                 //   pour ne pas contaminer le VOSTFR quand on heart le VF.
                 binding.root.alpha = 1.0f
                 val providerName = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name ?: ""
-                val favKey = com.streamflixreborn.streamflix.utils.ExtractorRanker.favKeyFor(item.name)
+                // 2026-08-07 : clé calculée sur le SERVEUR (nom + URL), plus sur le nom seul.
+                //   Sans l'URL, deux serveurs dont le libellé ne laisse pas deviner
+                //   l'hébergeur (« FR Vidara ») retombaient sur la même clé → un cœur
+                //   s'allumait sur un autre serveur. Voir Settings.Server.src.
+                val favKey = com.streamflixreborn.streamflix.utils.ExtractorRanker.favKeyFor(
+                    com.streamflixreborn.streamflix.models.Video.Server(
+                        id = item.id, name = item.name, src = item.src,
+                    )
+                )
                 if (providerName.isNotEmpty()) {
                     val isFav = com.streamflixreborn.streamflix.utils.ExtractorToggleStore.isFavorite(favKey, providerName)
                     binding.ivSettingFavorite.visibility = View.VISIBLE
@@ -1265,11 +1273,24 @@ class PlayerSettingsTvView @JvmOverloads constructor(
                     }
                     // Long-press menu contextuel — isLongClickable AVANT
                     binding.root.isLongClickable = true
-                    // 2026-07-16 : le favori est déjà accessible par le cœur à droite (D-pad droite),
-                    //   donc l'appui long TV sert directement à SIGNALER le serveur (mauvais match).
-                    //   Le fragment affiche ensuite la confirmation.
+                    // 2026-08-06 : l'appui long DÉSACTIVE le lien (le signalement est supprimé).
+                    //   Même comportement que sur mobile ; réactivable dans « Gérer les sources ».
                     binding.root.setOnLongClickListener {
-                        settingsView.onServerReported?.invoke(item)
+                        // 2026-08-06, correction immédiate : le user a désactivé une source par un appui long
+                    //   involontaire. Une action destructive DOIT demander confirmation.
+                    androidx.appcompat.app.AlertDialog.Builder(
+                        binding.root.context,
+                        com.streamflixreborn.streamflix.R.style.OnyxDialog,
+                    )
+                        .setTitle("Désactiver ce lien ?")
+                        .setMessage("« ${item.name} » ne sera plus proposé.\n\nVous pourrez le réactiver dans Paramètres › Liens désactivés.")
+                        .setNegativeButton("Annuler", null)
+                        .setPositiveButton("Désactiver") { _, _ ->
+                            com.streamflixreborn.streamflix.utils.LiensDesactives
+                                .desactiver(binding.root.context, item.id, item.name)
+                            settingsView.onServerDisabled?.invoke(item)
+                        }
+                        .show()
                         true
                     }
                 } else {
@@ -1426,3 +1447,4 @@ class PlayerSettingsTvView @JvmOverloads constructor(
         }
     }
 }
+

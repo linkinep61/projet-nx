@@ -96,6 +96,30 @@ object UserPreferences {
         get() = if (::prefs.isInitialized) prefs.getBoolean(KEY_ALWAYS_EXTERNAL_PLAYER, false) else false
         set(value) { if (::prefs.isInitialized) prefs.edit().putBoolean(KEY_ALWAYS_EXTERNAL_PLAYER, value).apply() }
 
+    /** 2026-08-02 (user) : confirmation (double-appui « Appuyez à nouveau pour quitter ») avant de
+     *  quitter le lecteur. ON par défaut ; désactivable dans les réglages du lecteur (TV). */
+    var playerExitConfirm: Boolean
+        get() = if (::prefs.isInitialized) prefs.getBoolean("player_exit_confirm", true) else true
+        set(value) { if (::prefs.isInitialized) prefs.edit().putBoolean("player_exit_confirm", value).apply() }
+
+    /** 2026-08-06 : rangée « Pour vous » (suggestions d'après les derniers titres regardés),
+     *  juste sous « Continuer à regarder ». ON par défaut, masquable depuis les réglages
+     *  d'affichage — utile sur une télé partagée en famille, où voir ses habitudes affichées
+     *  peut gêner. Cf. SuggestionsPourVous. */
+    var suggestionsPourVous: Boolean
+        get() = if (::prefs.isInitialized) prefs.getBoolean("suggestions_pour_vous", true) else true
+        set(value) { if (::prefs.isInitialized) prefs.edit().putBoolean("suggestions_pour_vous", value).apply() }
+
+    /** 2026-08-06 : date de réinitialisation de « Pour vous ».
+     *  ⚠ Les suggestions ne sont PAS stockées : elles se recalculent à chaque affichage depuis
+     *    l'historique. « Réinitialiser » ne peut donc pas « vider » quelque chose sans effacer
+     *    aussi « Continuer à regarder », ce qui serait une mauvaise surprise. On mémorise donc
+     *    l'instant de la remise à zéro, et seuls les titres regardés APRÈS alimentent la
+     *    rangée — elle repart vide et se reconstruit naturellement. */
+    var suggestionsReinitialiseesLe: Long
+        get() = if (::prefs.isInitialized) prefs.getLong("suggestions_reset_at", 0L) else 0L
+        set(value) { if (::prefs.isInitialized) prefs.edit().putLong("suggestions_reset_at", value).apply() }
+
     // 2026-07-11 (user "sur émulateur x86 elle prend la version téléphone alors que le mieux
     //   c'est la TV → il faut un choix") : override manuel de l'interface. Le dispatcher
     //   (SplashActivity) le respecte AVANT l'auto-détection leanback. "auto" = détection device.
@@ -117,7 +141,7 @@ object UserPreferences {
     //   (ex: Coflix Boston), on bump ce compteur → la 1ère vérification ajoute les sources
     //   manquantes au set sauvé. L'user peut ensuite les désactiver dans les Paramètres.
     private const val KEY_BACKUP_MIGRATION_V = "BACKUP_MIGRATION_V"
-    private const val CUR_BACKUP_MIGRATION = 8 // bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream ; v6 : TV Hub ; v7 : FileSearch ; v8 : Vidzy par TMDB)
+    private const val CUR_BACKUP_MIGRATION = 12 // bump quand on ajoute de nouvelles sources (v3 : LoiFlix ; v4 : AfterDark ; v5 : Nabistream ; v6 : TV Hub ; v7 : FileSearch ; v8 : Vidzy par TMDB ; v9 : Yablom ; v10 : Vostfree ; v11 : iAnime ; v12 : Adkami + JetAnime)
 
     // 2026-07-13 (user "une option au-dessus de Gérer les sources pour activer/désactiver les
     //   backups — ça permet de tester si les sources natives du provider sont encore valables") :
@@ -636,6 +660,26 @@ object UserPreferences {
             Key.FORCE_EXTRA_BUFFERING.setBoolean(value)
         }
 
+    /**
+     * 2026-08-02 (user : « les serveurs sont marqués 1080p et en réalité c'est du 720p » puis
+     * « garde la méthode en mode désactivé, et sinon fais en sorte qu'on ait la meilleure qualité
+     * tout le temps ») : interrupteur de la baisse automatique de définition.
+     *
+     * Le régulateur (`AdaptiveQualityGovernor`) plafonne la définition après des rebufferings,
+     * puis la relève quand la lecture redevient stable. C'est ce qui faisait qu'un serveur
+     * annoncé 1080p se lisait en 720p — l'étiquette dit la définition MAXIMALE du flux, pas celle
+     * réellement jouée à l'instant T.
+     *
+     * DÉSACTIVÉ PAR DÉFAUT : on reste sur la meilleure variante disponible. La conséquence à
+     * connaître est l'inverse du réglage : sur une connexion ou un décodeur limite, la lecture
+     * peut saccader là où elle se serait auto-adaptée. D'où le maintien de l'option.
+     */
+    var baisseQualiteAuto: Boolean
+        get() = Key.ADAPTIVE_QUALITY.getBoolean() ?: false
+        set(value) {
+            Key.ADAPTIVE_QUALITY.setBoolean(value)
+        }
+
     var autoplayBuffer: Long
         get() = Key.AUTOPLAY_BUFFER.getLong() ?: 3L
         set(value) {
@@ -648,7 +692,16 @@ object UserPreferences {
         //   FALSE = laisse passer le flag `default=true` des subs extracteur
         //   (Vidzy/etc.) → ExoPlayer auto-sélectionne le sous-titre VOSTFR
         //   embarqué d'origine avec la vidéo (comme avant).
-        get() = Key.SERVER_AUTO_SUBTITLES_DISABLED.getBoolean() ?: false
+        // ── 2026-08-06 : DÉFAUT INVERSÉ, MAINTENANT **TRUE** ─────────────────────────────
+        //   User : « ça me choque qu'on mette automatiquement les sous-titres sur des films
+        //   français… il y a plein d'extracteurs où ça devrait désactiver au lancement.
+        //   Suffit de l'activer en permanence ; si quelqu'un veut vraiment les sous-titres,
+        //   il désactive. Par exemple Filemoon est d'office activé avec les sous-titres. »
+        //   Le réglage existait mais partait éteint, donc personne n'en profitait.
+        //   ⚠ Ça ne rend PAS le VOSTFR muet : `PlayerViewModel.reglerSousTitresSelonLangue`
+        //     réactive le sous-titre français quand le serveur n'est pas VF. Ce drapeau-ci
+        //     ne sert qu'à empêcher un serveur d'IMPOSER ses sous-titres.
+        get() = Key.SERVER_AUTO_SUBTITLES_DISABLED.getBoolean() ?: true
         set(value) {
             Key.SERVER_AUTO_SUBTITLES_DISABLED.setBoolean(value)
         }
@@ -847,14 +900,110 @@ object UserPreferences {
         SuperZoom(R.string.player_aspect_ratio_super_zoom, AspectRatioFrameLayout.RESIZE_MODE_FIT);
     }
 
-    var playerResize: PlayerResize
+    /**
+     * 2026-08-02 (demande d'un testeur, validée user : « chaque hébergeur a son propre format ») :
+     * le format d'image est mémorisé PAR HÉBERGEUR.
+     *
+     * Constat réel : les hébergeurs ne réencodent pas de la même façon — certains livrent des flux
+     * anamorphosés ou avec des bandes noires incrustées. Le réglage correct pour Vidmoly ne l'est
+     * donc pas pour Sibnet, et l'utilisateur devait rectifier à la main à chaque changement de lien.
+     *
+     * Mise en œuvre volontairement NON invasive : `playerResize` reste la seule propriété utilisée
+     * par les lecteurs (une quinzaine d'appels, mobile + TV + menus). C'est elle qui devient
+     * CONTEXTUELLE : elle lit et écrit la valeur de l'hébergeur courant quand il est connu, et
+     * retombe sur la valeur globale sinon. Aucun site d'appel n'a eu besoin d'être modifié, ce qui
+     * évite d'introduire des régressions dans le lecteur.
+     */
+    @Volatile
+    var currentPlayerHost: String? = null   // hébergeur en cours de lecture (mémoire, non persisté)
+
+    /** Table `hébergeur → nom de format`, persistée en JSON. */
+    private fun resizeParHote(): MutableMap<String, String> {
+        val brut = Key.PLAYER_RESIZE_BY_HOST.getString()
+        if (brut.isNullOrBlank()) return mutableMapOf()
+        return runCatching {
+            val o = org.json.JSONObject(brut)
+            val m = mutableMapOf<String, String>()
+            o.keys().forEach { k -> m[k] = o.getString(k) }
+            m
+        }.getOrDefault(mutableMapOf())
+    }
+
+    private fun enregistrerResizeParHote(m: Map<String, String>) {
+        runCatching {
+            val o = org.json.JSONObject()
+            m.forEach { (k, v) -> o.put(k, v) }
+            Key.PLAYER_RESIZE_BY_HOST.setString(o.toString())
+        }
+    }
+
+    /** Format global (celui d'avant), utilisé quand l'hébergeur n'a pas encore de préférence. */
+    private val playerResizeGlobal: PlayerResize
         get() = PlayerResize.entries.find { it.resizeMode == Key.PLAYER_RESIZE.getInt() && it.name == Key.PLAYER_RESIZE_NAME.getString() }
             ?: PlayerResize.entries.find { it.resizeMode == Key.PLAYER_RESIZE.getInt() }
             ?: PlayerResize.Fit
+
+    var playerResize: PlayerResize
+        get() {
+            val hote = currentPlayerHost
+            if (!hote.isNullOrBlank()) {
+                val nom = resizeParHote()[hote]
+                if (nom != null) {
+                    PlayerResize.entries.find { it.name == nom }?.let { return it }
+                }
+            }
+            return playerResizeGlobal
+        }
         set(value) {
+            // Le global suit toujours : il sert de valeur par défaut aux hébergeurs jamais réglés,
+            //   et garde le comportement d'origine pour qui ne change jamais de format.
             Key.PLAYER_RESIZE.setInt(value.resizeMode)
             Key.PLAYER_RESIZE_NAME.setString(value.name)
+            val hote = currentPlayerHost
+            if (!hote.isNullOrBlank()) {
+                val m = resizeParHote()
+                m[hote] = value.name
+                enregistrerResizeParHote(m)
+            }
         }
+
+    /**
+     * Identifiant d'hébergeur déduit d'un serveur et de l'URL réellement lue.
+     *
+     * On privilégie le marqueur `#lecteur=<nom>` (présent notamment chez FRAnime, où le libellé du
+     * serveur ne distingue pas les lecteurs), puis le nom d'hôte du flux, puis le libellé du
+     * serveur nettoyé. Le résultat est normalisé (minuscules, sans préfixe `www.`) pour que
+     * « Vidmoly », « vidmoly.to » et « Movix · Vidmoly · VF » retombent sur la même clé.
+     */
+    fun hebergeurDe(nomServeur: String?, urlSource: String?): String? {
+        urlSource?.let { u ->
+            Regex("""#lecteur=([a-z0-9_\-]+)""", RegexOption.IGNORE_CASE).find(u)?.let {
+                return it.groupValues[1].lowercase()
+            }
+        }
+        val libelle = nomServeur?.lowercase()?.trim()
+        // Marques connues : on les cherche dans le libellé du serveur, qui porte souvent un
+        //   préfixe de provider (« Movix · VidHide · VF ») dont il faut s'affranchir.
+        val marques = listOf(
+            "vidmoly", "sibnet", "filemoon", "vidhide", "voe", "doodstream", "dood", "uqload",
+            "streamtape", "netu", "savefiles", "luluvdo", "vidzy", "rpmvid", "anonmp4",
+            "sendvid", "mixdrop", "upstream", "streamwish", "lulustream", "embedseek",
+            "ansembed", "movearnpre", "bigwarp", "playerx", "smoothpre", "vudeo",
+        )
+        if (libelle != null) marques.firstOrNull { libelle.contains(it) }?.let { return it }
+        // À défaut : nom d'hôte du flux (utile pour les sources directes sans libellé parlant).
+        urlSource?.let { u ->
+            runCatching {
+                val hote = java.net.URI(u).host?.lowercase()?.removePrefix("www.")
+                if (!hote.isNullOrBlank()) {
+                    // on garde les 2 derniers segments (« abc.vidmoly.to » → « vidmoly.to »)
+                    val bouts = hote.split('.')
+                    return if (bouts.size >= 2) bouts.takeLast(2).joinToString(".") else hote
+                }
+            }
+        }
+        return libelle?.takeIf { it.isNotBlank() }
+    }
 
     var captionStyle: CaptionStyleCompat
         get() = CaptionStyleCompat(
@@ -1070,6 +1219,8 @@ object UserPreferences {
         CURRENT_PROVIDER,
         PLAYER_RESIZE,
         PLAYER_RESIZE_NAME,
+        PLAYER_RESIZE_BY_HOST, // 2026-08-02 : table JSON « hébergeur → format d'image »
+        ADAPTIVE_QUALITY,      // 2026-08-02 : baisse auto de définition (désactivée par défaut)
         CAPTION_TEXT_SIZE,
         CAPTION_STYLE_FONT_COLOR,
         CAPTION_STYLE_BACKGROUND_COLOR,

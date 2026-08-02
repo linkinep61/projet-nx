@@ -41,3 +41,47 @@ object LastWorkingServer {
         return prefs(context).getString(contentId, null)
     }
 }
+
+/**
+ * 2026-08-09 (user « les liens géobloqués, soit tu les mets en 2e, soit on les vire ») :
+ * mémoire des HÔTES qui viennent de refuser.
+ *
+ * Origine : cinq flux RTP différents, tous servis par `streaming-live.rtp.pt`, échouaient
+ * en bloc, tandis qu'un sixième sur un autre hôte lisait parfaitement. Quand un serveur
+ * ferme la porte, il la ferme pour tous ses flux — retenir le lien fautif ne suffit donc
+ * pas, il faut retenir l'hôte.
+ *
+ * Un hôte est déclaré fautif après [SEUIL] échecs, et le reste pendant [OUBLI_MS]. Ses liens
+ * passent alors EN DERNIER dans la liste des serveurs, sans jamais être supprimés : un
+ * blocage est presque toujours temporaire (quota, géo, VPN qu'on rallume), et supprimer
+ * priverait l'utilisateur d'un lien qui redeviendra bon.
+ *
+ * Mémoire volatile, en RAM : tout est oublié au redémarrage, ce qui donne une seconde chance
+ * gratuite à chaque lancement.
+ */
+object HotesEnEchec {
+    private const val SEUIL = 2
+    private const val OUBLI_MS = 15 * 60 * 1000L
+    private val echecs = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Long>>()
+
+    private fun hote(url: String): String? = try {
+        java.net.URI(url).host?.lowercase()
+    } catch (_: Throwable) { null }
+
+    /** À appeler quand un serveur échoue. */
+    fun signaler(url: String) {
+        val h = hote(url) ?: return
+        val maintenant = System.currentTimeMillis()
+        val (n, t) = echecs[h] ?: (0 to maintenant)
+        val compte = if (maintenant - t > OUBLI_MS) 1 else n + 1
+        echecs[h] = compte to maintenant
+    }
+
+    /** Vrai si cet hôte a assez échoué récemment pour être relégué en fin de liste. */
+    fun estFautif(url: String): Boolean {
+        val h = hote(url) ?: return false
+        val (n, t) = echecs[h] ?: return false
+        if (System.currentTimeMillis() - t > OUBLI_MS) { echecs.remove(h); return false }
+        return n >= SEUIL
+    }
+}

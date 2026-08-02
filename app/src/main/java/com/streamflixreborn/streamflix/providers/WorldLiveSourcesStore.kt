@@ -89,6 +89,28 @@ object WorldLiveSourcesStore {
         //   rsseverything). Contient TF1, France 2-5, M6, Canal+, BFM, etc.
         //   avec des URLs CDN officielles. Marche depuis Tahiti.
         Source("iptv-org FR", "https://iptv-org.github.io/iptv/countries/fr.m3u", isBuiltin = true),
+        // 2026-08-08 (user "ajoute une nouvelle source comme les autres") : playlist
+        //   InspirationLinks (dépôt iprtl/m), lien RAW permanent tenu à jour en amont —
+        //   donc MÊME MÉTHODE que « paradis » et « iptv-org FR » : on pointe le dépôt
+        //   d'origine, aucun miroir nx-data. Le miroir n'est là que pour les playlists
+        //   qu'on FABRIQUE nous-mêmes (data.m3u = notre mix, data-replay/-fast = générés
+        //   par nos scripts) ; recopier une playlist déjà maintenue n'ajouterait qu'un
+        //   délai de rafraîchissement.
+        //
+        //   Mesuré sur le fichier : 403 #EXTINF, 21 groupes, 100 % avec tvg-logo et
+        //   group-title. Majorité Portugal/Brésil + World News + All Sports + Radios.
+        //   ⚠ 118 entrées portent des `#KODIPROP:inputstream.adaptive.license_key`
+        //   (DRM ClearKey/Widevine) : notre parser ignore ces lignes, ces chaînes-là
+        //   seront donc listées mais ne liront pas. Les 285 autres sont du HLS/MPD nu.
+        //   Les `#EXTVLCOPT:http-user-agent`/`http-referrer` (55 + 32) sont, eux, déjà
+        //   gérés par le parser, et les doublons tvg-id deviennent des serveurs de repli.
+        //   Nom d'affichage : « FreeTV Monde ». Le fichier s'appelle « FREETV Inspiration
+        //   Links » dans son propre en-tête, mais l'appeler « FreeTV » tout court laissait
+        //   croire à une source FR comme ses voisines de liste. Mesuré : aucune chaîne
+        //   française — Portugal 38, World News 77, All Sports 50, Radios 44, Brésil 24,
+        //   Espagne 18, Tchéquie/Inde/Philippines 30. D'où « Monde », qui dit ce qu'on y
+        //   trouve avant de cliquer.
+        Source("FreeTV Monde", "https://raw.githubusercontent.com/iprtl/m/master/Freetv.m3u", isBuiltin = true),
         // 2026-06-14 (user "3tvbox a fermé, on nettoie sauf l'alias") :
         //   l'entree builtin 3boxTv est retiree. La pipeline generique
         //   (BoxXtemusProvider + GenericStreamResolver + WorldLiveTvProvider)

@@ -417,8 +417,12 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
     /** Called when the user toggles favorite on an IPTV server (★ button). */
     var onServerFavoriteToggled: ((Settings.Server) -> Unit)? = null
 
-    /** 2026-07-16 : appui LONG sur un serveur → signaler « mauvais serveur/épisode » (envoi GitHub). */
-    var onServerReported: ((Settings.Server) -> Unit)? = null
+    /**
+     * 2026-08-06 : appui LONG sur un serveur → DÉSACTIVER le lien.
+     * Remplace l'ancien signalement GitHub (`onServerReported`), supprimé à la demande du user.
+     * Le fragment doit retirer le serveur de la liste affichée et rafraîchir.
+     */
+    var onServerDisabled: ((Settings.Server) -> Unit)? = null
 
     protected var onChannelVariantSelected: ((Settings.ChannelVariant) -> Unit)? = null
     fun setOnChannelVariantSelectedListener(listener: (variant: Settings.ChannelVariant) -> Unit) {
@@ -1378,6 +1382,20 @@ abstract class PlayerSettingsView @JvmOverloads constructor(
         class Server(
             val id: String,
             val name: String,
+            /**
+             * 2026-08-07 (user : « quand tu mets un cœur à Vidara ça met aussi un cœur à
+             *   Rpmvid — quand on met un cœur ça doit pas être un autre ailleurs ») :
+             *   l'URL du serveur, indispensable pour identifier l'hébergeur SANS AMBIGUÏTÉ.
+             *   Le picker ne disposait que du NOM : `ExtractorRanker.favKeyFor(nom)` doit
+             *   alors deviner l'hébergeur en découpant le libellé, et sur un nom comme
+             *   « 1Jour1Film · FR Vidara » le 1ᵉʳ mot utile est « FR » (2 lettres, rejeté)
+             *   → l'hébergeur est perdu et deux serveurs différents peuvent retomber sur la
+             *   MÊME clé, donc sur le même cœur. Avec `src`, la clé vient de l'hôte de
+             *   l'URL : vidara.to ≠ rpmvid, collision impossible.
+             *   Bonus : le picker et le trieur (`orderByFrenchBuckets`) calculent enfin la
+             *   même clé — avant, le cœur posé par l'UI pouvait n'être jamais retrouvé au tri.
+             */
+            val src: String = "",
         ) : Item {
             var isSelected: Boolean = false
             /** 2026-05-16 : True quand ce serveur est en cours d'extraction.
