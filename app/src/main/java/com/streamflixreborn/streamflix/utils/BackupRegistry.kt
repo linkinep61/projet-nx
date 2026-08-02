@@ -15,6 +15,10 @@ import com.streamflixreborn.streamflix.providers.VoirDramaProvider
 import com.streamflixreborn.streamflix.providers.WebJsProvider
 import com.streamflixreborn.streamflix.providers.WebflixProvider
 import com.streamflixreborn.streamflix.providers.WiflixProvider
+import com.streamflixreborn.streamflix.providers.AdkamiProvider
+import com.streamflixreborn.streamflix.providers.IAnimeProvider
+import com.streamflixreborn.streamflix.providers.VostfreeProvider
+import com.streamflixreborn.streamflix.providers.YablomProvider
 import com.streamflixreborn.streamflix.extractors.VideasyExtractor
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
@@ -70,6 +74,10 @@ object BackupRegistry {
         "TV Hub" to "TV Hub (France.tv/Arte gratuit)",
         "FileSearch" to "FileSearch (fichiers directs)",
         "Webflix" to "Webflix",
+        "Yablom" to "Yablom (films FR)",
+        "Vostfree" to "Vostfree (animes VF/VOSTFR)",
+        "iAnime" to "iAnime (animes VF/VOSTFR)",
+        "Adkami" to "Adkami (animes VOSTFR, adulte)",
         "Coflix Boston" to "Coflix Boston",
         "CoflixWiki" to "CoflixWiki",
         "DessinAnimeNet" to "DessinAnime.net",
@@ -90,6 +98,26 @@ object BackupRegistry {
     /** Noms exacts (clé de gate) de toutes les sources de backup connues. */
     val BACKUP_SOURCE_KEYS: Set<String> = BACKUP_SOURCES.map { it.first }.toSet()
 
+    /**
+     * Pays dont on récupère les titres alternatifs TMDB pour nourrir `knownTitles`.
+     *
+     * 2026-08-07 — US/GB ajoutés. Cas prouvé, *House of the Dragon* (tmdbId 94997) : flemmix
+     *   indexe la fiche « Game Of Thrones: House of the Dragon », et TMDB connaît EXACTEMENT
+     *   ce titre… mais sous `US`. Filtrés sur FR+JP seuls, on ne l'avait pas dans
+     *   `knownTitles` → la comparaison stricte échouait et Wiflix rendait 0 serveur sur une
+     *   série qu'il possède bel et bien.
+     *   ⚠ On n'assouplit RIEN : la comparaison reste une ÉGALITÉ. On élargit seulement la
+     *   liste des titres OFFICIELS de la MÊME fiche TMDB — donc aucun risque de mauvais match.
+     */
+    private val ALT_COUNTRIES = setOf("FR", "JP", "US", "GB")
+
+    /**
+     * Sources dont chaque requête passe par un challenge Cloudflare : elles sont
+     * structurellement lentes, pas défaillantes. Elles ont droit à un budget de résolution
+     * plus large UNE FOIS la fiche identifiée (cf. `resolveAndFetchServers` plus bas).
+     */
+    private val SLOW_CF_SOURCES = setOf("Wiflix")
+
     // 2026-07-03 (user "optimiser pour la TV") : sur un device à faible RAM (Chromecast :
     //   largeHeap ≈146MB vs 512MB+ sur téléphone), lancer ~13 sources backup dont 6-7 à
     //   base de WebView EN MÊME TEMPS sature le heap → GC de 3s qui gèlent le thread
@@ -102,7 +130,32 @@ object BackupRegistry {
     private val HEAVY_SOURCES = setOf(
         "Coflix Boston", "CoflixWiki", "Nakios", "Moiflix", "DessinAnime", "FrenchAnime", "Wiflix", "Dramacool"
     )
-    private val heavyGate = Semaphore(if (LOW_RAM) 2 else 16)
+    // 2026-08-02 : 2 → 4 jetons sur les appareils à faible mémoire. Avec 8 sources lourdes et
+    //   seulement 2 places, une source lente formait immédiatement une file d'attente : les
+    //   suivantes ne pouvaient pas émettre « dans la foulée ». 4 reste prudent — le garde-fou
+    //   mémoire d'origine visait les WebView simultanées, or plusieurs de ces sources
+    //   (Nakios, CoflixWiki…) sont en réalité de simples appels HTTP, sans WebView.
+    private val heavyGate = Semaphore(if (LOW_RAM) 4 else 16)
+
+    // ── VAGUES DE LANCEMENT (2026-08-08) ────────────────────────────────────────────
+    //   Classement établi sur MESURE (film « Obsession », Chromecast), pas à l'intuition.
+    //   VAGUE 1 : répondent en 1 à 5 s — API ou id direct. Elles partent tout de suite.
+    //   VAGUE 3 : 19 à 31 s — scraping multi-pages derrière Cloudflare. Deux secondes de
+    //             retard ne changent rien pour elles et libèrent la machine pour la vague 1.
+    //   VAGUE 2 : tout le reste (5 à 10 s), léger décalage.
+    private val SOURCES_VAGUE_1 = setOf(
+        "NetMirror", "Vidzy", "Frembed", "Movix", "Embed", "Yablom",
+        "FileSearch", "Nabistream", "Webflix", "TV Hub", "CoflixWiki", "Nakios",
+    )
+    private val SOURCES_VAGUE_3 = setOf(
+        "aplouf", "FrenchStream", "1Jour1Film", "Papadustream V2", "Papadustream",
+        "Wiflix", "VoirDrama", "Moiflix", "Dramacool",
+    )
+    private fun retardDeVague(source: String): Long = when (source) {
+        in SOURCES_VAGUE_1 -> 0L
+        in SOURCES_VAGUE_3 -> 2_000L
+        else -> 700L
+    }
 
     /** 2026-07-21 — ANTI FAUX POSITIF sur la « casse silencieuse ».
      *  Ces sources renvoient LÉGITIMEMENT 0 hors de leur périmètre : un site d'animes ne trouvera
@@ -115,6 +168,16 @@ object BackupRegistry {
         "VoirAnime", "FrenchManga", "FrenchAnime", "FRAnime", "Franime",
     )
     private val DRAMA_ORIENTED_SOURCES = setOf("VoirDrama", "Dramacool", "DramaCool")
+
+    /** 2026-08-07 — Sites GÉNÉRALISTES de films et séries, écartés sur un contenu anime.
+     *  Constaté sur *Mashle* et *Katainaka no Ossan* : Coflix Boston remontait 6 puis 13 serveurs
+     *  dont un seul lisible. Ces sites indexent en titre français/commercial et accrochent
+     *  n'importe quelle œuvre dès qu'on leur présente des titres étrangers. Ils n'ont pas
+     *  vocation à couvrir un anime japonais — les sources anime et mixtes, elles, ne sont pas
+     *  touchées (le filtre large avait justement été retiré le 09/07 pour cette raison). */
+    private val GENERALIST_SOURCES = setOf(
+        "Coflix Boston", "CoflixWiki", "Moviebox", "Papadustream V2", "Webflix", "LoiFlix",
+    )
 
     /** 2026-07-21 : domaine représentatif d'une source de backup, pour que l'issue « provider
      *  cassé » indique un hôte exploitable (le reporter extrait l'hôte de l'URL fournie). */
@@ -133,6 +196,10 @@ object BackupRegistry {
         "Frembed" -> "https://frembed.icu"
         "Vidzy" -> "https://vidzy.org"
         "Papadustream V2" -> "https://papadustream.rip"
+        "Yablom" -> "https://yablom.com"
+        "Vostfree" -> "https://vostfree.ws"
+        "iAnime" -> "https://www.ianimes.eu"
+        "Adkami" -> "https://hentai.adkami.com"
         "DessinAnimeNet" -> "https://dessinanime.net"
         "AniCloud" -> "https://anicloud.to"
         "1Jour1Film" -> "https://1jour1film.pro"
@@ -157,7 +224,16 @@ object BackupRegistry {
     private val WEBVIEW_HEAVY_PROVIDERS = setOf(
         "aplouf", "FrenchStream", "Papadustream", "1Jour1Film"
     )
-    private const val CF_SECOND_WAVE_MS = 5000L
+    // ⚠ 2026-08-02 (user : « à chaque fois qu'un provider est appelé, le serveur doit être émis
+    //   dans la foulée — les serveurs doivent être instantanés ») : 5000 ms → 800 ms.
+    //   Ce délai servait à faire remonter les sources rapides AVANT les lourdes, faute de tri
+    //   fiable à l'époque. Ce n'est plus nécessaire : l'ordre est maintenant décidé par le tri
+    //   (langue → FileSearch → définition → débit), qui replace chaque serveur à sa place quelle
+    //   que soit son heure d'arrivée. Retarder l'arrivée pour influencer l'ordre revenait donc à
+    //   faire attendre l'utilisateur pour rien — c'était l'essentiel des ~5 s entre deux lots.
+    //   On garde 800 ms : de quoi laisser les sources instantanées (API) partir devant, sans que
+    //   ce soit perceptible.
+    private const val CF_SECOND_WAVE_MS = 800L
 
     // 2026-07-14 (user : « à la base on parlait QUE de Moviebox ») : le blocage films-only
     //   ne visait QUE Moviebox (qui ramenait la mauvaise saison sur les séries). Les autres
@@ -583,6 +659,72 @@ object BackupRegistry {
      * @param videoType type courant (Movie/Episode) — sert au lookup par titre + saison/épisode.
      * @param exclude noms de sources à SAUTER (le provider appelant + sources déjà couvertes).
      */
+    /**
+     * Lance la collecte À L'AVANCE, sans rien afficher, pour que le cache soit chaud quand
+     * l'utilisateur appuiera sur lecture.
+     *
+     * ── 2026-08-06 : POURQUOI ─────────────────────────────────────────────────────────────
+     *   Plainte user : « j'ai lancé une première fois la série, j'avais pas les serveurs que
+     *   je convoitais ; je relance dans la foulée, ils sont là ». Longtemps mis sur le compte
+     *   d'un rejet de serveurs — c'était faux. Le journal, deux lancements consécutifs sur la
+     *   même série, prouve que RIEN n'est écarté : seuls les délais changent.
+     *
+     *              1er lancement (à froid)      2e lancement (cache chaud)
+     *     FrenchStream   34,4 s → 8 serveurs        13,6 s → 8 serveurs
+     *     1Jour1Film     31,3 s → 3 serveurs        11,8 s → 3 serveurs
+     *     NetMirror       9,9 s → 2 serveurs         7,7 s → 2 serveurs
+     *
+     *   Chaque source doit d'abord CHERCHER le titre sur son site (13 à 29 s à froid) avant
+     *   de résoudre ses serveurs. Le lecteur, lui, démarre en quelques secondes : on regardait
+     *   une liste encore en train de se remplir.
+     *
+     *   D'où ce pré-chauffage, déclenché depuis la FICHE du film ou de la série — ces
+     *   quelques secondes où l'utilisateur choisit son épisode sont gratuites.
+     *   Sans effet visible, sans blocage : on consomme le flux et on jette, seul le cache
+     *   des sources nous intéresse. Une même clé n'est chauffée qu'une fois.
+     */
+    fun prechauffer(
+        tmdbId: String?,
+        videoType: Video.Type,
+        exclude: Set<String> = emptySet(),
+        titleHint: String? = null,
+        isAnimeProvider: Boolean = false,
+        episodeIdHint: String? = null,
+    ) {
+        // ⚠ 2026-08-06 : DÉSACTIVÉ le jour même de son ajout. L'idée reste bonne (les sources
+        //   mettent 30 s à froid, autant les lancer depuis la fiche), mais l'implémentation
+        //   ÉTRANGLE l'application : cette collecte de fond retient les jetons de `heavyGate`,
+        //   et la collecte réelle lancée par la lecture n'en obtient plus → écran sans serveurs,
+        //   HANGDUMP dans `CrossProviderResolver`. Constaté par le user : « plus rien ne marche ».
+        //   Pour le réactiver il faudra d'abord : soit sortir le pré-chauffage du sémaphore,
+        //   soit l'ANNULER dès qu'une vraie collecte démarre sur la même clé.
+        //   Les 4 appels depuis les fiches (série/film × mobile/TV) sont laissés en place :
+        //   ils deviennent inoffensifs, et la réactivation ne demandera que de retirer ce garde.
+        if (PRECHAUFFAGE_DESACTIVE) return
+
+        val cle = keyOf(videoType, titleHint, episodeIdHint).toString()
+        if (!prechauffes.add(cle)) return
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                android.util.Log.i(TAG, "pré-chauffage lancé pour « ${titleHint ?: tmdbId} »")
+                fetchAll(tmdbId, videoType, exclude, titleHint, isAnimeProvider, episodeIdHint)
+                    .collect { /* on ne veut que remplir les caches */ }
+                android.util.Log.i(TAG, "pré-chauffage terminé pour « ${titleHint ?: tmdbId} »")
+            } catch (e: Exception) {
+                // Un pré-chauffage qui échoue n'a aucune conséquence : la collecte normale
+                // repartira de zéro au moment de la lecture.
+                android.util.Log.w(TAG, "pré-chauffage interrompu : ${e.message}")
+                prechauffes.remove(cle)
+            }
+        }
+    }
+
+    /** Interrupteur du pré-chauffage — voir l'explication dans `prechauffer`. */
+    private const val PRECHAUFFAGE_DESACTIVE = true
+
+    /** Clés déjà pré-chauffées dans cette session — évite de relancer à chaque aller-retour. */
+    private val prechauffes = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     fun fetchAll(
         tmdbId: String?,
         videoType: Video.Type,
@@ -633,13 +775,57 @@ object BackupRegistry {
                     }
                     // 2026-07-07 : valider que le titre TMDB retourné matche bien la recherche
                     // (évite qu'un titre court/ambigu comme « Crash » résolve le mauvais film)
-                    val match = results.results.firstOrNull { item ->
-                        val itemTitle = when {
-                            wantMovie && item is TMDb3.Movie -> item.title
-                            !wantMovie && item is TMDb3.Tv -> item.name
-                            else -> null
-                        }
-                        itemTitle != null && (titleMatches(itemTitle, key.title) || subtitlePrefix(itemTitle))
+                    //
+                    // 2026-08-08 (user : « c'est pas le vrai Star Trek qui est diffusé »,
+                    //   « regarde tous les serveurs qui matchent pas sur le bon ») — RACINE DU
+                    //   MAUVAIS MATCH, vérifiée en direct sur l'API TMDB :
+                    //     /3/search/multi?query=Star Trek&language=fr-FR
+                    //       1. id=1855 « Star Trek: Voyager »  1995
+                    //       2. id=253  « Star Trek »           1966   ← le bon
+                    //   « Star Trek: Voyager » passait le test SOUS-TITRE, et comme on prenait le
+                    //   PREMIER candidat, tout le registre backup repartait sur tmdbId=1855 :
+                    //   Vidzy (qui travaille par id) servait Voyager, et Nakios / FrenchStream /
+                    //   1Jour1Film cherchaient « Star Trek: Voyager » comme titre alternatif.
+                    //   NetMirror, lui, reçoit tmdb=253 directement du lecteur — d'où le constat
+                    //   du user : « NetMirror lui est vraiment bon ».
+                    //
+                    //   Ordre de préférence désormais :
+                    //     1. titre EXACT (match dans LES DEUX SENS) **et** année à ±1 an
+                    //     2. titre EXACT seul
+                    //     3. année seule
+                    //     4. à défaut, le 1er candidat (comportement d'avant)
+                    //   Le sous-titre (« Mushoku Tensei » ⊂ « Mushoku Tensei: Jobless Reincarnation »)
+                    //   reste accepté, mais il ne peut plus DOUBLER un titre exact.
+                    val titreDe = fun(item: Any?): String? = when {
+                        wantMovie && item is TMDb3.Movie -> item.title
+                        !wantMovie && item is TMDb3.Tv -> item.name
+                        else -> null
+                    }
+                    val anneeDe = fun(item: Any?): Int? = when (item) {
+                        is TMDb3.Movie -> item.releaseDate?.toString()?.take(4)?.toIntOrNull()
+                        is TMDb3.Tv -> item.firstAirDate?.toString()?.take(4)?.toIntOrNull()
+                        else -> null
+                    }
+                    val anneeCible = key.year
+                    val candidats = results.results.filter { item ->
+                        val t = titreDe(item)
+                        t != null && (titleMatches(t, key.title) || subtitlePrefix(t))
+                    }
+                    val exacts = candidats.filter { item ->
+                        val t = titreDe(item) ?: return@filter false
+                        titleMatches(t, key.title) && titleMatches(key.title, t)
+                    }
+                    val bonneAnnee = fun(item: Any?): Boolean {
+                        if (anneeCible == null) return false
+                        val a = anneeDe(item) ?: return false
+                        return kotlin.math.abs(a - anneeCible) <= 1
+                    }
+                    val match = exacts.firstOrNull { bonneAnnee(it) }
+                        ?: exacts.firstOrNull()
+                        ?: candidats.firstOrNull { bonneAnnee(it) }
+                        ?: candidats.firstOrNull()
+                    if (match != null) {
+                        Log.i(TAG, "tmdbId résolu par recherche : '${key.title}' (${anneeCible ?: "?"}) → '${titreDe(match)}' ${anneeDe(match) ?: "?"} parmi ${candidats.size} candidat(s)")
                     }
                     val id = when (match) {
                         is TMDb3.Movie -> match.id.toString()
@@ -690,6 +876,31 @@ object BackupRegistry {
         //   append_to_response=alternative_titles = même requête, zéro appel API supplémentaire.
         val knownTitles = linkedSetOf<String>()
         if (key.title.isNotBlank()) knownTitles.add(key.title)
+        // 2026-08-07 — RATTRAPAGE ANILIST quand TMDB n'a pas résolu l'œuvre.
+        //   Mesuré sur la box, deux animes ouverts depuis AnimeSama :
+        //     Yani Neko    tmdbId RÉSOLU → knownTitles = 6 titres → iAnime rend 6 serveurs
+        //     Katainaka…   tmdbId = null → knownTitles = 1 titre  → les 14 sources rendent 0
+        //   AnimeSama indexe en ROMAJI ; quand TMDB ne reconnaît pas ce romaji, la liste se
+        //   réduit à ce seul titre et plus aucune source française ne peut aboutir — elles
+        //   rangent l'œuvre sous son titre français. AniList, lui, connaît le romaji et rend
+        //   l'anglais + le natif + les synonymes ; l'anglais est ensuite reconnu par TMDB.
+        //   ⚠ AJOUT SEULEMENT : le titre d'origine reste en tête et continue d'être essayé le
+        //   premier (« activer les 2 leviers plutôt », user 07/08).
+        //   ⚠ 2026-08-07, MÊME JOUR — user : « Coflix te ramène des serveurs mais y en a 0 qui
+        //   fonctionnent ». Diagnostic : sans tmdbId, `isAnimeContent` restait FAUX, donc le
+        //   garde-fou existant (sauter Coflix/Moviebox/Papadustream sur un anime) ne s'armait
+        //   pas — et mes 19 titres, dont des synonymes polonais/portugais/indonésiens, ont donné
+        //   à ces sites généralistes de quoi accrocher n'importe quelle œuvre. 13 faux serveurs.
+        //   Or si AniList RECONNAÎT l'œuvre, c'est par construction un anime : on arme donc le
+        //   garde-fou ici, sans attendre TMDB.
+        var animeSelonAniList = false
+        if (resolvedTmdbId.isNullOrBlank() && key.title.isNotBlank()) {
+            val alias = AniListTitres.titresPour(key.title)
+            if (alias.isNotEmpty()) {
+                alias.forEach { knownTitles.add(it) }
+                animeSelonAniList = true
+            }
+        }
         // 2026-07-23 : année EFFECTIVE. Certains providers (FrenchStream/slug) n'envoient
         //   PAS d'année (key.year=null) → les backups par TITRE d'un titre ultra-court (« H »)
         //   restent bloqués (le matcher a besoin de l'année comme discriminant). On la déduit
@@ -701,7 +912,11 @@ object BackupRegistry {
         //   Papadustream…) qui ne trouvent rien et polluent avec des faux positifs
         //   (ex: film "Apple" sur un anime "Chainsmoker Cat"). Fonctionne QUEL QUE
         //   SOIT le provider natif (NetMirror, AnimeSama, etc.).
-        var isAnimeContent = false
+        // 2026-08-07 : amorcé par AniList quand TMDB n'a rien résolu (voir plus haut). Une œuvre
+        //   reconnue par AniList EST un anime — le garde-fou s'arme donc sans attendre TMDB, et
+        //   les sources généralistes (Coflix, Moviebox, Papadustream…) sont écartées comme elles
+        //   doivent l'être. Sans ça, elles accrochent n'importe quoi sur un titre étranger.
+        var isAnimeContent = animeSelonAniList
         // 2026-07-12 (user « les providers dessins animés n'ont AUCUN film → pour un film non-anime
         //   on peut les sauter ; l'inverse n'est pas vrai car les providers films ont parfois des
         //   dessins animés ») : filtre À SENS UNIQUE. Si TMDB confirme que le contenu N'EST PAS de
@@ -709,6 +924,11 @@ object BackupRegistry {
         //   anime/dessins animés (ils n'auront jamais un film live-action) → ~5s de recherche en
         //   moins. On ne fait JAMAIS l'inverse.
         var notAnimationConfirmed = false
+        // 2026-08-08 (user : « on a pas mal de serveurs appelés pour rien alors qu'ils n'auront
+        //   jamais rien ») : la LANGUE D'ORIGINE TMDB sert à écarter les catalogues spécialisés
+        //   (dramas asiatiques…) sur un contenu qui n'en relève pas. null = inconnue → on ne
+        //   saute rien (filtre à sens unique, comme pour l'animation).
+        var langueOriginale: String? = null
         if (!resolvedTmdbId.isNullOrBlank()) {
             try {
                 val idInt = resolvedTmdbId.toIntOrNull()
@@ -724,13 +944,13 @@ object BackupRegistry {
                         // Titres alternatifs FR + JP (romaji pour anime, ex: "Yani Neko").
                         // 2026-07-09 : JP ajouté car VoirAnime/etc. indexent par romaji,
                         //   absent de knownTitles quand on filtre FR seul → 0 résultat.
-                        val altCountries = setOf("FR", "JP")
                         d.alternativeTitles?.all()
-                            ?.filter { (it.iso31661?.uppercase() ?: "") in altCountries }
-                            ?.mapNotNull { it.title?.takeIf { t -> t.isNotBlank() } }
+                            ?.filter { (it.iso31661?.uppercase() ?: "") in ALT_COUNTRIES }
+                            ?.mapNotNull { it.title?.takeIf { t -> t.length >= 3 } }
                             ?.forEach { knownTitles.add(it) }
                         // Détection anime : langue originale japonaise
                         if (d.originalLanguage == "ja") isAnimeContent = true
+                        langueOriginale = d.originalLanguage?.lowercase()
                         // Confirmé PAS de l'animation : genres connus ET genre 16 (Animation) absent
                         if (d.genres.isNotEmpty() && d.genres.none { it.id == 16 }) notAnimationConfirmed = true
                         // Année déduite si le provider n'en a pas fourni.
@@ -744,13 +964,13 @@ object BackupRegistry {
                         if (d.name.isNotBlank()) knownTitles.add(d.name)
                         if (d.originalName.isNotBlank()) knownTitles.add(d.originalName)
                         // Titres alternatifs FR + JP (romaji)
-                        val altCountries = setOf("FR", "JP")
                         d.alternativeTitles?.all()
-                            ?.filter { (it.iso31661?.uppercase() ?: "") in altCountries }
-                            ?.mapNotNull { it.title?.takeIf { t -> t.isNotBlank() } }
+                            ?.filter { (it.iso31661?.uppercase() ?: "") in ALT_COUNTRIES }
+                            ?.mapNotNull { it.title?.takeIf { t -> t.length >= 3 } }
                             ?.forEach { knownTitles.add(it) }
                         // Détection anime : langue originale japonaise
                         if (d.originalLanguage == "ja") isAnimeContent = true
+                        langueOriginale = d.originalLanguage?.lowercase()
                         if (d.genres.isNotEmpty() && d.genres.none { it.id == 16 }) notAnimationConfirmed = true
                         // Année déduite si le provider n'en a pas fourni.
                         if (effectiveYear == null) effectiveYear = d.firstAirDate?.take(4)?.toIntOrNull()
@@ -760,6 +980,54 @@ object BackupRegistry {
                 Log.w(TAG, "knownTitles TMDB details KO: ${e.message}")
             }
         }
+
+        // ═════════════════════════════════════════════════════════════════════
+        // 2026-08-04 (user : « pourquoi aucun serveur pour ce film ? ») — TITRE FRANÇAIS
+        //   DE SECOURS.
+        //
+        //   Constat sur « The Odyssey » (TMDB 1698863, 2026) : 1Jour1Film AVAIT le film, sous
+        //   le titre « L'ODYSSEE (2026) ». Rejeté — `sharesWord=false` — parce que
+        //   `knownTitles` ne contenait que « The Odyssey ». La fiche détaillée TMDB en fr-FR
+        //   n'avait rendu aucun titre français distinct pour ce film.
+        //
+        //   Recours : la même recherche que CoflixSourceProvider utilise déjà avec succès
+        //   (`Coflix fallback FR title TMDB: 'The Odyssey' -> 'L'Odyssée'` dans les logs).
+        //
+        //   ⚠ Élargir `knownTitles` assouplit le matcher — c'est ce mécanisme qui avait donné
+        //   le mauvais « Joker ». D'où DEUX sécurités indépendantes :
+        //     1. l'identifiant TMDB renvoyé doit être CELUI DU FILM DEMANDÉ (garantit la bonne
+        //        œuvre, pas un homonyme) ;
+        //     2. le gate d'année de `workMatches` reste actif — « L'Odyssée » de 2016 (Cousteau)
+        //        face à une cible 2026 est écarté sur l'écart de dix ans.
+        //
+        //   N'est tenté QUE si la fiche détaillée n'a rien apporté (un seul titre connu) :
+        //   aucune requête supplémentaire dans le cas normal.
+        if (knownTitles.size <= 1 && !resolvedTmdbId.isNullOrBlank() && key.title.isNotBlank()) {
+            try {
+                // Branches séparées : `Movie` et `TvShow` ne partagent pas de supertype
+                //   exposant `id`/`title`, un if/else unifié ne compile pas.
+                var idFr: String? = null
+                var titreFr = ""
+                if (key.isMovie) {
+                    TmdbUtils.getMovie(key.title, effectiveYear, language = "fr-FR")?.let {
+                        idFr = it.id; titreFr = it.title
+                    }
+                } else {
+                    TmdbUtils.getTvShow(key.title, effectiveYear, language = "fr-FR")?.let {
+                        idFr = it.id; titreFr = it.title
+                    }
+                }
+                if (idFr == resolvedTmdbId && titreFr.isNotBlank() &&
+                    knownTitles.none { it.equals(titreFr, ignoreCase = true) }
+                ) {
+                    knownTitles.add(titreFr)
+                    Log.i(TAG, "knownTitles + titre FR de secours : '${key.title}' → '$titreFr'")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "titre FR de secours KO: ${e.message}")
+            }
+        }
+
         // 2026-07-09 : si le contenu est japonais (anime), traiter comme anime
         //   QUEL QUE SOIT le provider natif. Évite CoflixWiki/Moviebox/Papadustream
         //   qui polluent avec des faux positifs sur du contenu anime.
@@ -782,11 +1050,51 @@ object BackupRegistry {
 
         suspend fun emit(source: String, fetch: suspend () -> List<Video.Server>) {
             if (source in exclude) return
+            // 2026-08-08 (user : « on peut pas se permettre de faire attendre des serveurs qui
+            //   ont répondu en un quart de seconde, ils doivent arriver en premier, et pendant
+            //   ce temps-là ça libère plein de choses ») — VAGUES DE LANCEMENT.
+            //
+            //   MESURE, film « Obsession » sur la Chromecast (T0 = départ du registre) :
+            //     Nabistream 1,7 s · Yablom 2,0 s · FileSearch 3,1 s · Vidzy 3,2 s
+            //     NetMirror 3,3 s · Webflix 3,4 s · CoflixWiki 3,6 s · Nakios 4,9 s
+            //     LoiFlix 7,3 s · Coflix Boston 8,7 s
+            //     Papadustream V2 19,4 s · aplouf 19,7 s · Frembed 20,8 s
+            //     FrenchStream 23,2 s · 1Jour1Film 31,4 s
+            //
+            //   Les 20,8 s de Frembed ne viennent PAS du réseau : son API répond à 2,7 s, puis
+            //   dix secondes s'écoulent entre deux `Log.d` séparés par un simple `map` sans
+            //   aucun appel. C'est de la FAMINE : une vingtaine de sources démarrent en même
+            //   temps sur un appareil à faible mémoire et se disputent CPU, sockets et DNS.
+            //   Retarder les lentes de deux secondes ne leur coûte rien (elles mettent 20 à
+            //   31 s de toute façon, et la lecture ne les attend pas) mais rend la machine aux
+            //   rapides pendant leur fenêtre utile.
+            val retard = retardDeVague(source)
+            if (retard > 0L) kotlinx.coroutines.delay(retard)
             // 2026-07-10 (user "pouvoir désactiver les backups UN PAR UN, pas tous d'un coup") :
             //   chaque source de backup a un toggle (Paramètres). Point de gate UNIQUE (tous les
             //   emit dédiés ET la boucle générique passent ici).
             if (!com.streamflixreborn.streamflix.utils.UserPreferences.isBackupSourceEnabled(source)) {
                 Log.i(TAG, "$source → DÉSACTIVÉ par l'utilisateur (skip)")
+                return
+            }
+            // 2026-08-07 (user : « les providers animes ne sont pas censés matcher avec des choses
+            //   non animes comme Coflix » — constaté sur Mashle : Coflix Boston remonte 6 serveurs,
+            //   et sur un autre anime 13 dont 1 seul lisible, « c'est de la pollution quand même »).
+            //   ⚠ Le filtre `effectiveAnime` de la boucle générique avait été RETIRÉ le 09/07 parce
+            //   qu'il était trop large (DessinAnime héberge du contenu mixte). On ne le rétablit
+            //   donc PAS en bloc : on écarte nommément les seuls sites GÉNÉRALISTES de films et
+            //   séries, qui n'ont pas vocation à couvrir un anime japonais. Les sources anime, les
+            //   sources mixtes et toutes les autres restent intactes.
+            //   ⚠ On teste `isAnimeContent`, PAS `effectiveAnime`. La différence compte :
+            //   `effectiveAnime` vaut aussi vrai dès que le provider natif s'appelle « …Anime »
+            //   ou « …Manga » (DessinAnime, AnimeSama…). Or DessinAnime est adossé à TMDB et
+            //   couvre TOUT le dessin animé, occidental compris — user, 07/08 : « c'est le seul
+            //   provider TMDB dessin animé qui doit tout avoir ». Couper Coflix sur un dessin
+            //   animé américain ouvert depuis DessinAnime lui retirerait des serveurs légitimes.
+            //   On ne coupe donc que sur du contenu RÉELLEMENT japonais (TMDB originalLanguage=ja,
+            //   ou œuvre reconnue par AniList).
+            if (isAnimeContent && source in GENERALIST_SOURCES) {
+                Log.i(TAG, "$source → SAUTÉ : source généraliste sur un contenu anime")
                 return
             }
             // 2026-07-21 (user : « comment ça se fait qu'on n'a pas reçu d'alerte pour ce genre de
@@ -800,9 +1108,43 @@ object BackupRegistry {
             //   (DNS/connect/SSL) = « provider cassé ». Dédup GitHub déjà gérée par le reporter.
             var failure: Throwable? = null
             val servers = try {
-                // 60s : ne pas couper une source lente. Sources LOURDES (WebView) via heavyGate.
+                // ⚠ 2026-08-02 (user : « à chaque fois qu'un provider est appelé, le serveur doit
+                //   être émis dans la foulée — je ne vois pas pourquoi il y a une attente ») :
+                //   DÉLAIS RAMENÉS À 25 s POUR LES SOURCES LOURDES.
+                //   Elles passent par un sémaphore limité à 2 jetons sur les appareils à faible
+                //   mémoire (Chromecast). Avec 60 s, un seul hôte muet — nakios.org, constaté
+                //   bloqué en lecture socket dans un HANGDUMP — confisquait un jeton une minute
+                //   entière, et les six autres sources lourdes attendaient leur tour : d'où les
+                //   serveurs qui arrivaient par paquets étalés sur ~20 s au lieu d'affluer.
+                //   25 s laisse largement le temps à une source WebView + Cloudflare (mesuré :
+                //   8 à 18 s dans le pire cas), tout en libérant vite la place quand l'hôte est
+                //   mort. Les sources LÉGÈRES (API) gardent 60 s : elles ne bloquent personne.
+                // ⚠ 2026-08-02, CORRECTION : 25 s était TROP COURT et cassait Wiflix.
+                //   Mesuré dans les logs : Wiflix répond en ~31 s, aplouf en ~33 s, 1Jour1Film en
+                //   ~32 s, FrenchStream en ~24 s. Ces sources scrapent plusieurs pages derrière
+                //   Cloudflare — elles sont lentes, mais elles RAMÈNENT des serveurs.
+                //   À 25 s, Wiflix passait de « serveurs VOE/Uqload » à « 0 (vide/timeout) ».
+                //   40 s : laisse finir les plus lentes tout en libérant le jeton bien avant les
+                //   60 s d'origine, qui étaient le vrai problème quand un hôte est mort.
+                // ⚠ 2026-08-06, MÊME CAUSE, TROISIÈME CORRECTION : 40 s restait trop court À
+                //   FROID. Ces sources doivent CHERCHER le titre (13 à 29 s la première fois,
+                //   avant que les caches soient chauds) PUIS résoudre les serveurs. Le budget
+                //   couvrait à peine la recherche. Mesuré : FrenchStream 34,4 s et 1Jour1Film
+                //   31,3 s au tout premier passage — donc au-delà du plafond, d'où des « 0
+                //   serveurs » alors que la fiche était trouvée.
+                //   Ces attentes ne bloquent personne : les serveurs arrivent au fil de l'eau et
+                //   la lecture démarre sans les attendre. Et depuis le pré-chauffage lancé
+                //   depuis la fiche, ce temps est de toute façon consommé avant la lecture.
+                // ⚠ 2026-08-06, ANNULÉ LE JOUR MÊME : j'avais monté ces plafonds à 75/90 s pour
+                //   laisser finir les sources lentes à froid. Combiné au pré-chauffage (qui
+                //   lance une collecte complète en arrière-plan), ça a FIGÉ l'application :
+                //   le pré-chauffage retenait les jetons de `heavyGate` pendant 75 s, donc la
+                //   collecte réelle déclenchée par la lecture n'en obtenait plus aucun.
+                //   Journal : HANGDUMP dans `CrossProviderResolver.resolveAndFetchServers`.
+                //   Retour aux valeurs éprouvées. Ne les remonter QUE si le pré-chauffage est
+                //   sorti du sémaphore ou annulé au démarrage d'une vraie collecte.
                 if (source in HEAVY_SOURCES) {
-                    heavyGate.withPermit { withTimeoutOrNull(60_000) { fetch() } ?: emptyList() }
+                    heavyGate.withPermit { withTimeoutOrNull(40_000) { fetch() } ?: emptyList() }
                 } else {
                     withTimeoutOrNull(60_000) { fetch() } ?: emptyList()
                 }
@@ -875,7 +1217,10 @@ object BackupRegistry {
         // 2026-07-14 : DessinAnime.net (dessins animés + animes FR). CMS turc, structure propre
         //   (saison/épisode dans l'URL → zéro devinette d'id). Résolution POST /ajax/embed →
         //   iframe (emmmmbed & co, extracteurs existants). Matching titre STRICT.
-        launch { emit("DessinAnimeNet") {
+        // 2026-08-08 : catalogue de DESSINS ANIMÉS → sauté quand TMDB confirme que le contenu
+        //   n'est pas de l'animation (mesuré sur Star Trek : lancé pour rien). Filtre à sens
+        //   unique, comme partout : si TMDB ne donne pas de genres, il part comme avant.
+        if (!(notAnimationConfirmed && !isAnimeContent)) launch { emit("DessinAnimeNet") {
             var result = emptyList<Video.Server>()
             for (titleTry in knownTitles) {
                 if (titleTry.isBlank()) continue
@@ -942,6 +1287,28 @@ object BackupRegistry {
         if (!resolvedTmdbId.isNullOrBlank()) {
             launch { emit("Movix") { MovixProvider.getServersAsBackup(resolvedTmdbId, videoType) } }
 
+            // ── NetMirror EN ACCÈS DIRECT ────────────────────────────────────────────
+            // 2026-08-08 (user : « fais en sorte que NetMirror arrive plus rapidement s'il est
+            //   le seul à fournir certaines vieilles séries ») — MESURÉ sur Star Trek (1966) :
+            //     10:08:20,3  départ de la collecte
+            //     10:08:26,6  « MATCH trouvé id=253 »   ← 6,3 s passées dans p.search()
+            //     10:08:34,9  serveur prêt
+            //   Il passait par la boucle générique, qui commence TOUJOURS par `p.search(titre)`.
+            //   Or la recherche de NetMirror est elle-même une recherche TMDB : on refaisait
+            //   donc, pour lui seul, un travail que le registre venait de terminer — on connaît
+            //   déjà `resolvedTmdbId`. En l'appelant directement, ces 6,3 s disparaissent.
+            //   Sûr : `INLINE_BACKUPS_DISABLED = true` ⇒ son `getServers` ne rend que ses
+            //   serveurs natifs et ne rappelle pas le registre (aucune récursion).
+            //   Il est ajouté à `dedicated` plus bas pour ne pas être relancé par la boucle.
+            if (!exclude.contains("NetMirror")) {
+                launch {
+                    emit("NetMirror") {
+                        com.streamflixreborn.streamflix.providers.NetMirrorProvider
+                            .getServers(resolvedTmdbId, videoType)
+                    }
+                }
+            }
+
             // ── SERVEUR EMBED TMDB — Videasy VOSTFR uniquement ──────────────
             // 2026-07-03 (user "serveurs quasiment illimités" → "que du VF/VOSTFR,
             //   le reste ça sert à rien") : seul Videasy "fr" sert du VOSTFR.
@@ -950,7 +1317,11 @@ object BackupRegistry {
                 //   premier ») : Videasy est 100% API → il gagne la course sur les serveurs VF natifs
                 //   (scrapés, plus lents). On lui donne une longueur de retard pour que les VF sortent
                 //   d'abord ; il reste dispo, juste plus en tête.
-                kotlinx.coroutines.delay(5_000L)
+                // 2026-08-02 : 5 s → 1 s. Videasy est en VOSTFR et arrivait trop tôt ; on le
+                //   retardait pour qu'il ne prenne pas la tête. C'est désormais le tri par langue
+                //   qui s'en charge (les VOSTFR passent derrière les VF), donc plus besoin de
+                //   pénaliser son arrivée — et donc de faire patienter l'utilisateur.
+                kotlinx.coroutines.delay(1_000L)
                 val tmdbVt: Video.Type = if (key.isMovie) {
                     Video.Type.Movie(
                         id = resolvedTmdbId,
@@ -1067,7 +1438,40 @@ object BackupRegistry {
             launch {
                 emit("FileSearch") {
                     com.streamflixreborn.streamflix.providers.FileSearchProvider
-                        .fetchFileSearchBackupServers(videoType, key.season, key.episode, key.year, knownTitles.toList())
+                        // 2026-08-08 : on transmet « l'œuvre est française » (langue d'origine TMDB).
+                    //   FileSearch lève alors l'exigence d'un marqueur FR dans le nom du fichier —
+                    //   voir le commentaire de fetchFileSearchBackupServers (cas Radarr).
+                    .fetchFileSearchBackupServers(
+                        videoType, key.season, key.episode, key.year, knownTitles.toList(),
+                        oeuvreFrancaise = langueOriginale.equals("fr", ignoreCase = true),
+                    )
+                }
+            }
+
+            // ── OK.RU (par titre) — vieilles séries et films FR introuvables ailleurs ──
+            // 2026-08-08 (user : « je viens de trouver un site qu'il faudrait absolument
+            //   ajouter, avec une recherche stricte car il y a pas mal de mauvaises choses ») :
+            //   ok.ru avait « Star Trek » (1966) en VF le soir où AUCUN des neuf sites FR de
+            //   l'app ne l'avait. Matching strict à cinq filtres, dont la durée TMDB — voir
+            //   le commentaire de OkRuProvider.retenir.
+            //   Le titre FR de l'épisode sert de 2ᵉ preuve de version française quand le nom
+            //   du fichier ne porte pas de tag (beaucoup d'uploads n'en ont pas).
+            launch {
+                emit("ok.ru") {
+                    com.streamflixreborn.streamflix.providers.OkRuProvider
+                        .fetchOkRuBackupServers(
+                            titres = knownTitles.toList(),
+                            saison = key.season,
+                            episode = key.episode,
+                            annee = effectiveYear,
+                            // 1ʳᵉ version : le runtime TMDB n'est pas encore remonté jusqu'ici.
+                            //   `null` ⇒ le provider applique son garde-fou de durée interne
+                            //   (plancher 15 min pour un épisode, 55 min pour un film), qui
+                            //   suffit déjà à écarter bandes-annonces et extraits. À affiner
+                            //   en passant le vrai runtime quand on l'aura sous la main.
+                            runtimeS = null,
+                            titreEpisodeFr = null,
+                        )
                 }
             }
 
@@ -1326,26 +1730,63 @@ object BackupRegistry {
             // 2026-07-08 : Cloudstream RETIRÉ du set dedicated — il utilise l'API MovieBox+
             //   (aoneroom.com), PAS la même API que Movix. Ses serveurs NE sont PAS des doublons.
             //   Le remettre dans la boucle générique (recherche par titre via findSubjectId).
-            val dedicated = setOf("CoflixWiki", "Coflix Boston", "Moviebox", "Nakios", "Movix", "Frembed")
+            // 2026-08-08 : NetMirror rejoint les sources dédiées — il est désormais appelé
+            //   directement avec `resolvedTmdbId` (voir plus haut), la boucle générique ne
+            //   doit plus le relancer via `p.search()`.
+            val dedicated = setOf("CoflixWiki", "Coflix Boston", "Moviebox", "Nakios", "Movix", "Frembed", "NetMirror")
             // 2026-07-12 (user) : providers SPÉCIALISÉS anime/dessins animés qui n'hébergent AUCUN
             //   film live-action → à sauter quand le contenu est confirmé non-animation. DessinAnime
             //   EXCLU de cette liste (user « dessin animé lui doit recevoir tout » = contenu mixte).
             val animeOnlyProviders = setOf("AnimeSama", "VoirAnime", "FrenchManga", "FrenchAnime", "FRAnime", "Franime")
             val skipAnimeOnly = notAnimationConfirmed && !isAnimeContent
             if (skipAnimeOnly) Log.i(TAG, "fetchAll contenu NON-animation confirmé (genre 16 absent) → skip providers anime-only")
+
+            // 2026-08-08 (user : « on a pas mal de serveurs appelés pour rien alors qu'ils
+            //   n'auront jamais rien ») — DEUX FAMILLES DE PLUS, mesurées sur Star Trek (1966,
+            //   série américaine live-action) où elles ont toutes rendu 0 serveur :
+            //     VoirDrama   24 703 ms   → catalogue de dramas asiatiques
+            //     DessinAnime  6 528 ms   → catalogue de dessins animés
+            //   Elles ne trouveront JAMAIS une série américaine live-action des années 60.
+            //   Même principe qu'au-dessus, filtre à sens unique : on ne saute que sur une
+            //   information POSITIVE de TMDB (langue d'origine connue / genres connus).
+            //   Si TMDB ne dit rien, tout part comme avant.
+            val LANGUES_ASIATIQUES = setOf("ko", "ja", "zh", "cn", "th", "vi", "id", "tl")
+            val dramaAsiatiqueProviders = setOf("VoirDrama")
+            val skipDramaAsiatique = langueOriginale != null && langueOriginale !in LANGUES_ASIATIQUES
+            if (skipDramaAsiatique) Log.i(TAG, "fetchAll langue d'origine '$langueOriginale' non asiatique → skip VoirDrama")
+            // Dessins animés : même règle que l'anime (genre 16 absent = jamais chez eux).
+            val dessinAnimeProviders = setOf("DessinAnime")
+            if (skipAnimeOnly) Log.i(TAG, "fetchAll → skip providers dessins animés")
             Provider.providers.keys
                 .filter { p ->
                     // 2026-07-12 : providers orientés FILMS → sautés pour les séries/épisodes.
                     !(!key.isMovie && p.name in FILM_ONLY_PROVIDERS) &&
                     // Filtre à sens unique : non-animation → on saute les providers anime purs.
                     !(skipAnimeOnly && p.name in animeOnlyProviders) &&
+                    // … et les catalogues de dessins animés, pour la même raison.
+                    !(skipAnimeOnly && p.name in dessinAnimeProviders) &&
+                    // Contenu non asiatique → on saute les catalogues de dramas asiatiques.
+                    !(skipDramaAsiatique && p.name in dramaAsiatiqueProviders) &&
                     p.name !in exclude && p.name !in dedicated &&
                         // 2026-07-09 (user « remets aplouf dans les backups ») : aplouf RÉACTIVÉ
                         //   comme source de backup (recherche par titre via la boucle générique).
                         // 2026-07-09 (user "retire les serveurs Cloudstream des backups, qu'il soit
-                        //   que sur son propre provider") : Cloudstream ne fournit PLUS de backup aux
-                        //   autres providers → disponible uniquement sur le provider Cloudstream.
-                        !p.name.equals("Cloudstream", ignoreCase = true) &&
+                        //   que sur son propre provider") : Cloudstream ne fournissait PLUS de backup
+                        //   aux autres providers → disponible uniquement sur le provider Cloudstream.
+                        // 2026-08-08 (décision user — EXCLUSION LEVÉE) : mesuré sur Star Trek (1966,
+                        //   tmdb 253) avec Movix en provider actif. Les 9 sources FR interrogées ne
+                        //   l'ont PAS (vérifié à la main sur flemmix, coflix, nakios, 1jour1film,
+                        //   fs16 : elles n'ont que les films et les séries dérivées), et Cloudstream
+                        //   n'apparaissait dans AUCUNE ligne du log — non pas parce qu'il ne trouvait
+                        //   rien, mais parce que cette ligne l'écartait avant l'appel.
+                        //   API MovieBox+ interrogée en direct (api6.aoneroom.com, signature HMAC-MD5
+                        //   reproduite) : subjectId 4465955628443386568, « Star Trek » 1966-09-08,
+                        //   subjectType 2 (série), saison 1 / 30 épisodes, flux MP4 DIRECTS en
+                        //   360-480-720-1080p + sous-titres FR (get-ext-captions lan="fr").
+                        //   → seule source, avec NetMirror, à avoir cette série, et la seule en 1080p.
+                        //   Si ça ramène trop de bruit sur d'autres titres, remettre la ligne
+                        //   ci-dessous plutôt que de bricoler ailleurs.
+                        // !p.name.equals("Cloudstream", ignoreCase = true) &&
                         // 2026-07-23 (décision user — RÉACTIVATION de l'exclusion du 09/07) :
                         //   NetMirror REMIS dans les backups pour en faire profiter les autres
                         //   providers (il est peu utilisé en solo). Vérifié : il joue films ET
@@ -1569,7 +2010,31 @@ object BackupRegistry {
                         val matchId = (match as? com.streamflixreborn.streamflix.models.Movie)?.id
                             ?: (match as? com.streamflixreborn.streamflix.models.TvShow)?.id ?: "?"
                         Log.i(TAG, "DIAG [${p.name}] MATCH trouvé: '$matchTitle' id=$matchId → résolution serveurs…")
-                        val servers = CrossProviderResolver.resolveAndFetchServers(p, match, videoType, timeoutMs = 30_000)
+                        // ── 2026-08-06 (user : « est-ce qu'on ferme trop tôt les portes pour
+                        //   l'arrivée des serveurs ? ») — OUI, et c'était bien vu ─────────────
+                        //   Journal de deux collectes successives sur la même série :
+                        //     1re passe : FrenchStream « MATCH trouvé » puis → 0 serveurs (22,0 s)
+                        //                 1Jour1Film  « MATCH trouvé » puis → 0 serveurs (23,2 s)
+                        //     2e passe  : FrenchStream → 8 serveurs (13,6 s)
+                        //                 1Jour1Film  → 3 serveurs (11,8 s)
+                        //   Ces sources n'étaient pas bredouilles : elles avaient trouvé la bonne
+                        //   fiche et se faisaient couper PENDANT la résolution des serveurs.
+                        //   Or une source qui a déjà identifié le titre est précisément celle
+                        //   qu'il faut le moins interrompre — on sait qu'elle a le contenu.
+                        //   La recherche du titre, elle, garde ses plafonds : c'est là qu'il faut
+                        //   renoncer vite quand une source ne connaît pas l'œuvre.
+                        // ⚠ Remis à 30 s le 2026-08-06 avec les plafonds ci-dessus : la hausse à
+                        //   45 s participait au blocage. Ne pas la refaire isolément.
+                        // 2026-08-07 (user : « il devrait pas être coupé ») — budget ÉLARGI pour
+                        //   les seules sources derrière Cloudflare. Journal du jour, House of the
+                        //   Dragon S3E3 : Wiflix a rendu ses 3 serveurs à 41 747 ms… soit 2 ms
+                        //   APRÈS la coupure. Une source qui a déjà identifié la fiche est celle
+                        //   qu'il faut le moins interrompre. ⚠ Ciblé : les autres restent à 30 s,
+                        //   la hausse GLOBALE à 45 s du 06/08 avait aggravé le blocage.
+                        //   La mémoire de slug côté WiflixProvider fait tomber les passages
+                        //   suivants sous les 30 s de toute façon — ceci ne sert qu'au 1er.
+                        val budget = if (p.name in SLOW_CF_SOURCES) 50_000L else 30_000L
+                        val servers = CrossProviderResolver.resolveAndFetchServers(p, match, videoType, timeoutMs = budget)
                         Log.i(TAG, "DIAG [${p.name}] → ${servers.size} serveurs (total ${System.currentTimeMillis()-t0}ms)")
                         servers
                     } }
@@ -1581,12 +2046,94 @@ object BackupRegistry {
         //   DÉLAI 8s pour que les sources rapides (Movix/CoflixWiki/Nakios/1J1F) émettent
         //   leurs serveurs en premier. Webflix arrive en renfort tardif, ne bloque rien.
         if (!resolvedTmdbId.isNullOrBlank()) launch { emit("Webflix") {
-            delay(8000)
+            // 2026-08-02 : 8 s → 1,5 s (même raison : c'est le tri qui ordonne, pas l'horloge).
+            delay(1500)
             WebflixProvider.fetchWebflixBackupServers(resolvedTmdbId, videoType, key.season, key.episode)
+        } }
+        // ── JetAnime : RETIRÉ le 07/08, à la demande du user, le jour même de son ajout.
+        //   La mécanique fonctionnait (recherche par slug, page d'épisode, résolution AJAX
+        //   WordPress `doo_player_ajax`), mais le seul lecteur du site renvoyait un lien MORT :
+        //   `down-paradise.com/v/pym-jtme63wly35` redirige vers l'accueil de l'hébergeur, et
+        //   l'API JetAnime resservait exactement la même URL — donc pas une expiration, c'est
+        //   ce qu'ils stockent. Un seul lecteur par épisode, mort : aucun intérêt.
+        //   Le provider reste dans `Desktop\streamflix_backups\` si on veut le reprendre.
+        // ── Adkami (NATIF, par TITRE STRICT) — animes VOSTFR, catalogue adulte (demande du user).
+        // 2026-08-07 : ⚠ leur extension lit `div[data-url]`, périmé — l'URL chiffrée est sur le
+        //   `data-src` de l'iframe. Chiffrement maison (base64 + XOR 175 + soustraction de clé).
+        // 2026-08-08 (user : « je vois pas pourquoi eux sont appelés pour des séries et films,
+        //   ils devraient rester du côté des animes ») — GARDE-FOU INVERSÉ.
+        //
+        //   Adkami, iAnime et Vostfree sont des catalogues EXCLUSIVEMENT anime. Ils étaient
+        //   lancés sur tout, y compris Star Trek (1966), où ils ont tourné pour rien en
+        //   monopolisant réseau et threads pendant que NetMirror attendait son tour.
+        //
+        //   J'avais d'abord posé le garde-fou habituel (« sauter si TMDB CONFIRME que ce n'est
+        //   pas de l'animation ») : trop faible, il laissait passer tous les cas où TMDB ne
+        //   renvoie pas de genres. Ces trois-là ne sont pas des sources généralistes, la règle
+        //   doit donc être l'inverse — ils ne partent QUE si le contenu est reconnu anime :
+        //     • provider natif anime (`isAnimeProvider`), ou
+        //     • langue d'origine japonaise chez TMDB, ou
+        //     • œuvre reconnue par AniList
+        //   = exactement `effectiveAnime`, déjà calculé plus haut.
+        //   Les providers de dessins animés (DessinAnime, DessinAnimeNet), eux, ne bougent pas :
+        //   leur catalogue est mixte (décision user du 09/07).
+        if (key.title.length >= 2 && effectiveAnime) launch { emit("Adkami") {
+            var result = emptyList<Video.Server>()
+            for (titleTry in knownTitles) {
+                if (titleTry.isBlank()) continue
+                result = AdkamiProvider.fetchAdkamiBackup(titleTry, key.episode, videoType)
+                if (result.isNotEmpty()) break
+            }
+            result
+        } }
+        // ── iAnime (NATIF, par TITRE STRICT) — animes VF/VOSTFR, fiches séparées par langue.
+        // 2026-08-07 : issu d'Aniyomi. ⚠ La correspondance DOIT rester stricte : une recherche
+        //   « naruto » sur ce site ne remonte que des « Boruto: Naruto Next Generations ».
+        if (key.title.length >= 2 && effectiveAnime) launch { emit("iAnime") {
+            var result = emptyList<Video.Server>()
+            for (titleTry in knownTitles) {
+                if (titleTry.isBlank()) continue
+                result = IAnimeProvider.fetchIAnimeBackup(titleTry, key.episode, videoType)
+                if (result.isNotEmpty()) break
+            }
+            result
+        } }
+        // ── Vostfree (NATIF, par TITRE) — animes VF/VOSTFR, films ET séries.
+        // 2026-08-07 : venu de l'écosystème Aniyomi, pas de Cloudstream. Moteur DLE, donc même
+        //   mécanique que Wiflix/FrenchStream. ⚠ Numérotation ABSOLUE des épisodes (One Piece
+        //   747, pas S15E12) — le provider compare au numéro brut.
+        if (key.title.length >= 2 && effectiveAnime) launch { emit("Vostfree") {
+            var result = emptyList<Video.Server>()
+            for (titleTry in knownTitles) {
+                if (titleTry.isBlank()) continue
+                result = VostfreeProvider.fetchVostfreeBackup(titleTry, key.season, key.episode, videoType)
+                if (result.isNotEmpty()) break
+            }
+            result
+        } }
+        // ── Yablom (NATIF, par TITRE) — petit catalogue FR, FILMS UNIQUEMENT, lecteur ShareCloudy.
+        // 2026-08-06 : seul provider français absent de chez nous après le balayage des 26 dépôts
+        //   Cloudstream officiels. API JSON, pas de Cloudflare, une seule requête de recherche
+        //   puis une page → très peu coûteux. Essaie les titres alternatifs comme Papadustream.
+        if (key.title.length >= 2 && key.isMovie) launch { emit("Yablom") {
+            var result = emptyList<Video.Server>()
+            for (titleTry in knownTitles) {
+                if (titleTry.isBlank()) continue
+                result = YablomProvider.fetchYablomBackup(titleTry, key.year, videoType)
+                if (result.isNotEmpty()) break
+            }
+            result
         } }
         // ── PapadustreamV2 (NATIF, par TITRE strict) — nouvelle version du site (films+séries).
         // 2026-07-08 : essaie tous les titres connus (alt TMDB inclus).
-        if (key.title.length >= 2 && key.isMovie) launch { kotlinx.coroutines.delay(CF_SECOND_WAVE_MS); emit("Papadustream V2") {  // CF → 2ᵉ vague, FILMS uniquement
+        // 2026-08-08 (user : « regarde … papadustream ») — BRIDE FILMS LEVÉE.
+        //   Le commentaire d'en-tête annonçait « films+séries » alors que la condition portait
+        //   `key.isMovie` : sur une série, Papadustream V2 n'était jamais lancé (constaté sur
+        //   Star Trek — aucune ligne dans le log). Or `fetchPapadustreamV2Backup` reçoit déjà
+        //   `key.season` / `key.episode` et sait donc traiter un épisode : c'est la condition
+        //   qui était en retard sur le provider, pas l'inverse. Il reste en 2ᵉ vague (CF).
+        //   Si les séries se révèlent bruyantes chez lui, remettre `&& key.isMovie`.
+        if (key.title.length >= 2) launch { kotlinx.coroutines.delay(CF_SECOND_WAVE_MS); emit("Papadustream V2") {  // CF → 2ᵉ vague
             var result = emptyList<Video.Server>()
             for (titleTry in knownTitles) {
                 if (titleTry.isBlank()) continue
@@ -1625,6 +2172,8 @@ object BackupRegistry {
             "Nabistream" -> com.streamflixreborn.streamflix.providers.NabistreamProvider.getVideo(orig)
             "FileSearch" -> com.streamflixreborn.streamflix.providers.FileSearchProvider.getVideo(orig)
             "Papadustream V2" -> PapadustreamV2Provider.getVideo(orig)
+            // 2026-08-08 : ok.ru — flux résolu À LA LECTURE (URLs liées à l'IP + `expires`).
+            "ok.ru" -> com.streamflixreborn.streamflix.providers.OkRuProvider.getVideo(server)
             else -> {
                 // Backup web DYNAMIQUE (manifeste hébergé) → son getVideo (WebJsProvider).
                 dynamicBackups[source]?.let { dyn ->

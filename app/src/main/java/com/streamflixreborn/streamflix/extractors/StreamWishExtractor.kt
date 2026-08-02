@@ -39,7 +39,6 @@ open class StreamWishExtractor : Extractor() {
         "https://abkrzkr.sbs",
         "https://abkrzkz.sbs",
         "https://wishembed.pro",
-        "https://mwish.pro",
         "https://strmwis.xyz",
         "https://awish.pro",
         "https://dwish.pro",
@@ -95,21 +94,24 @@ open class StreamWishExtractor : Extractor() {
         "https://ultpreplayer.com",
         "https://hglink.to",
         "https://haxloppd.com",
-        "https://streamwish.club",
-        "https://streamwish.cc",
-        "https://streamwish.biz",
-        "https://swish.site",
-        "https://wishon.site",
-        "https://vidwish.site",
         "https://awish.top",
-        "https://dwish.top",
-        "https://mwish.top",
-        "https://streamwish.info",
-        "https://streamwish.net",
-        "https://streamwish.org",
-        "https://streamwish.live",
-        "https://streamwish.me",
         "https://hgcloud.to",
+        // ── 2026-08-07 : AUDIT DNS DE NOS PROPRES DOMAINES ───────────────────────────
+        //   StreamWish s'appelle désormais **StreamHG** (streamwish.com affiche le titre
+        //   « StreamHG »). La marque a migré, et 9 TLD `streamwish.*` sont tombés :
+        //   .biz .cc .club .info .live .me .net .org .site — retirés ci-dessus, tout comme
+        //   `swish.site`, `wishon.site`, `vidwish.site`, `dwish.top`, `mwish.top`.
+        //   Vérifiés un par un en DNS (NXDOMAIN). Un alias mort n'est pas neutre : le
+        //   `Domain fallback` les essaie en série et paie un timeout à chaque fois.
+        //   ⚠ On ne supprime QU'APRÈS avoir cherché le remplaçant (consigne du user).
+        //   Remplaçants trouvés vivants et ajoutés :
+        "https://vidwish.live",   // remplace vidwish.site (mort)
+        "https://hgplaycdn.com",  // nouveau CDN StreamHG, absent de chez nous
+        //   Le reste de la famille (embedwish, cdnwish, flaswish, hlswish, sfastwish,
+        //   strwish, jodwish, obeywish, asnwish, awish.pro/.top, dwish.pro, wishembed.pro,
+        //   wishfast.top, wishonly.site, swishsrv, strmwis, playerwish, swiftplayers,
+        //   ghbrisk, hglink, hgcloud, stbhg, gradehgplus, streamhg, streamwish.fun/.to)
+        //   répond toujours — la migration n'a coupé que ces TLD-là.
         // 2026-07-09 (user « FROM S2E2 sur Wiflix : hanerix pas lu ») : hanerix.com = clone
         //   StreamWish (page /e/<id> → JS packé jwplayer → m3u8 sur CDN premilkyway.com).
         //   Vérifié en direct : JsUnpacker + la regex file/hls captent le m3u8 → alias suffit.

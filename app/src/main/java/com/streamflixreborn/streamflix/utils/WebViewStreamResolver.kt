@@ -102,9 +102,15 @@ object WebViewStreamResolver {
         //   timers/rendu) → le flux n'est jamais demandé. Si true, on l'attache (invisible, alpha
         //   0.02) le temps de la résolution — comme les extracteurs Filemoon/upbolt.
         attach: Boolean = false,
+        // 2026-08-02 : certains lecteurs transforment le clic « play » en NAVIGATION qui quitte la
+        //   page et tue le player avant qu'il n'ait demandé son flux (upbolt : le bouton play est un
+        //   lien vers /dl, la page de téléchargement — constaté en direct dans le navigateur).
+        //   Ces motifs de chemin sont donc refusés à la navigation : le clic garde son effet sur le
+        //   player, mais la page reste en place et le m3u8 part bien en XHR.
+        cheminsBloques: List<String> = emptyList(),
     ): Resolved? = withContext(Dispatchers.Main) {
         withTimeoutOrNull(timeoutMs) {
-            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach)
+            doResolve(entryUrl, referer, userAgent, extraHeaders, captureMp4, clickPlay, attach, cheminsBloques)
         }
     }
 
@@ -129,6 +135,7 @@ object WebViewStreamResolver {
         captureMp4: Boolean,
         clickPlay: Boolean,
         attach: Boolean,
+        cheminsBloques: List<String> = emptyList(),
     ): Resolved? = suspendCancellableCoroutine { cont ->
         val context = StreamFlixApp.instance.applicationContext
         var resolved = false
@@ -169,11 +176,25 @@ object WebViewStreamResolver {
                 val act = StreamFlixApp.currentActivity
                 val root = act?.findViewById<android.view.ViewGroup>(android.R.id.content)
                 if (root != null) {
-                    webView.alpha = 0.02f
-                    // Taille RÉELLE (pas 1×1) : sinon des players modernes (vidstack) ne s'initialisent
-                    //   pas → jamais de requête flux. Invisible via alpha, retirée à la résolution.
+                    // ⚠ 2026-08-02 (user : « le carré gris qui apparaît de temps en temps et qui
+                    //   gâche vraiment tout ») : C'ÉTAIT ICI. Un rectangle de 320×180 dp était
+                    //   ajouté SANS index, donc PAR-DESSUS l'interface, avec alpha 0.02 — assez
+                    //   pour qu'une page d'hébergeur au fond clair forme un carré gris visible
+                    //   par-dessus la vidéo, le temps de l'extraction.
+                    //   Corrections : posée DERRIÈRE (index 0), opacité au minimum utile (0.004),
+                    //   et non interactive pour ne jamais voler un clic.
+                    //   La taille RÉELLE est conservée : en 1×1 les players modernes (vidstack) ne
+                    //   s'initialisent pas et ne demandent jamais leur flux.
+                    webView.alpha = 0.004f
+                    webView.isEnabled = false
+                    webView.isClickable = false
+                    webView.isFocusable = false
                     val d = context.resources.displayMetrics.density
-                    root.addView(webView, android.view.ViewGroup.LayoutParams((320 * d).toInt(), (180 * d).toInt()))
+                    root.addView(
+                        webView,
+                        0,
+                        android.view.ViewGroup.LayoutParams((320 * d).toInt(), (180 * d).toInt()),
+                    )
                     attachedParent = root
                 }
             } catch (_: Throwable) {}
@@ -193,6 +214,13 @@ object WebViewStreamResolver {
                 request: WebResourceRequest?,
             ): Boolean {
                 val host = request?.url?.host ?: return true
+                // Navigation « piège » (ex. upbolt → /dl) : on la refuse pour garder le player en
+                //   vie. Sans ça, le clic play quitte la page et aucun flux n'est jamais demandé.
+                val urlNav = request?.url?.toString().orEmpty()
+                if (cheminsBloques.any { urlNav.contains(it, ignoreCase = true) }) {
+                    android.util.Log.d("WebViewStreamResolver", "navigation bloquée (piège): ${urlNav.takeLast(40)}")
+                    return true
+                }
                 // Bloque uniquement les pubs ; tout le reste passe (= peut-être
                 // un redirect vers le vrai host CDN qu'on veut suivre).
                 return BLOCKED_HOSTS.any { host.contains(it) }

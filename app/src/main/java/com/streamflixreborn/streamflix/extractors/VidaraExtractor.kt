@@ -49,9 +49,29 @@ class VidaraExtractor : Extractor() {
     override val aliasUrls = listOf(
         "https://viewdara.com",
         "https://vidara.so",
-        "https://vidara.cc",
-        "https://vidara.net",
+        // 2026-08-07 : nouveau front relevé sur CoflixWiki — noter le DOUBLE « a ».
+        //   Vérifié en direct : `vidaraa.cc/e/<filecode>` répond au MÊME `/api/stream`
+        //   (payload filecode+device, réponse streaming_url/subtitles/title). C'est donc
+        //   bien Vidara, mais aucun de nos alias ne matchait « vidaraa » → ces serveurs
+        //   tombaient en « aucun extracteur ». 4 occurrences sur 20 épisodes sondés.
+        "https://vidaraa.cc",
+        // 2026-08-07 (audit DNS) : `vidara.cc` et `vidara.net` retirés — plus d'enregistrement A.
+        //   `vidaraa.com` répond, on le prend au passage : même famille, même /api/stream.
+        "https://vidaraa.com",
     )
+
+    /**
+     * 2026-08-07 (user : « VIDARA HS ») — PAS DE CACHE.
+     *   Journal : `Cache HIT for vidara.to/e/gsqQk68VixKRG` juste avant l'échec, alors que
+     *   le même serveur avait parfaitement joué 9 minutes plus tôt. L'URL rendue par
+     *   `/api/stream` est signée :
+     *     …/master.m3u8?token=<hash>-<expiration>-<IP du client>-<signature>
+     *   Elle porte donc une date de péremption ET l'adresse IP. Resservie depuis le cache,
+     *   elle est déjà refusée par le CDN — l'extracteur n'y est pour rien.
+     *   Vidara héritait du défaut de 10 minutes ; on tombait pile dans la fenêtre.
+     *   Même piège que DoodLa et LuluVdo, qui mettent 0L pour cette raison exacte.
+     */
+    override val cacheTtlMs: Long = 0L
 
     private val userAgent =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +

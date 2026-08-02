@@ -106,7 +106,31 @@ class MovieMobileFragment : Fragment() {
         }
     }
 
+    /**
+     * Pré-chauffe la recherche des serveurs de secours dès l'ouverture de la fiche.
+     * Voir `TvShowMobileFragment` pour le détail : à froid, plusieurs sources dépassent les
+     * 30 s avant de rendre leurs serveurs, alors que le lecteur démarre en quelques secondes.
+     * Sur un film, le temps de lecture du synopsis suffit souvent à tout ramener.
+     */
+    private fun prechaufferServeurs(movie: Movie) {
+        com.streamflixreborn.streamflix.utils.BackupRegistry.prechauffer(
+            tmdbId = movie.id.takeIf { id -> id.all { it.isDigit() } },
+            videoType = com.streamflixreborn.streamflix.models.Video.Type.Movie(
+                id = movie.id,
+                title = movie.title,
+                releaseDate = movie.released?.let {
+                    java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(it.time)
+                } ?: "",
+                poster = movie.poster ?: "",
+                imdbId = null,
+            ),
+            titleHint = movie.title,
+        )
+    }
+
     private fun displayMovie(movie: Movie) {
+        prechaufferServeurs(movie)
+
         binding.ivMovieBanner.loadMovieBanner(movie) {
             transition(DrawableTransitionOptions.withCrossFade())
         }

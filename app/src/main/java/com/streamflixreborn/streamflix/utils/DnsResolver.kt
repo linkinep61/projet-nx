@@ -29,6 +29,19 @@ object DnsResolver : Dns {
     private const val CACHE_TTL_MS = 5 * 60 * 1000L
     private data class CachedAddr(val addresses: List<InetAddress>, val expiresAt: Long)
     private val cache = ConcurrentHashMap<String, CachedAddr>()
+
+    /**
+     * 2026-08-08 — adresse déjà résolue pour [hostname], ou null.
+     *
+     * Sert à imposer l'adresse à Cronet sur les hôtes bloqués au DNS par le FAI (cas
+     * `strm7.uqload.is`) : Cronet apporte la bonne signature TLS mais ne sait pas résoudre le
+     * nom, le DoT sait résoudre mais change de pile et se fait refuser en 403. En lisant ici
+     * l'adresse que le DoT a DÉJÀ trouvée pendant l'extraction, le lecteur n'a plus besoin
+     * d'une seconde tentative pour démarrer.
+     */
+    fun adresseEnCache(hostname: String): String? =
+        cache[hostname]?.takeIf { it.expiresAt > System.currentTimeMillis() }
+            ?.addresses?.firstOrNull()?.hostAddress
     private val logging = HttpLoggingInterceptor().setLevel(HttpLoggingInterceptor.Level.BASIC)
 
     private val trustAllCerts = arrayOf<TrustManager>(
@@ -66,6 +79,38 @@ object DnsResolver : Dns {
     private var _internalDoh: Dns? = null
     private fun currentDoh(): Dns = _internalDoh ?: buildDoh(_url).also { _internalDoh = it }
 
+    /**
+     * 2026-08-08 (user : « ça peut sûrement être contourné ») — CDN hakunaymatata :
+     * ON FORCE LA BRANCHE CLOUDFRONT.
+     *
+     * Symptôme : tous les serveurs Cloudstream/MovieBox+ tombaient en `Response code: 428
+     * Precondition Required`, sur la Chromecast comme dans le navigateur du user, avec ou
+     * sans VPN (testé en IP résidentielle Orange 128.79.17.77 ET en IP NordVPN Allemagne
+     * 5.253.115.33 — même refus). Ce n'était donc ni le jeton, ni les en-têtes, ni l'IP.
+     *
+     * Cause : `hcdn3.hakunaymatata.com` est servi par DEUX CDN selon la région, et les
+     * en-têtes de réponse le disent noir sur blanc —
+     *   côté user   : `server: Google-Edge-Cache`, `cdn-cache-status: par;bypassed`
+     *                 → 428 sur TOUT, y compris un chemin inexistant et /robots.txt ;
+     *   ailleurs    : `Server: CloudFront`, `X-Amz-Cf-Pop: JFK50-P13`
+     *                 → 403 sans signature (normal), 206 video/mp4 avec.
+     * La chaîne complète est :
+     *   hcdn3.hakunaymatata.com → …bplslb.com → …cdn48.com → d2gvsznh03y059.cloudfront.net
+     * Vérifié en imposant l'IP CloudFront avec l'en-tête Host : 403, plus jamais 428.
+     *
+     * Correctif : quand on nous demande un hôte hakunaymatata, on résout à la place le
+     * nom CloudFront de la distribution. On reste donc sur le CDN d'origine du service,
+     * simplement pas sur la branche Google Edge qui nous ferme la porte.
+     *
+     * Filet : si cette résolution échoue, on retombe sur la résolution normale de l'hôte
+     * demandé — jamais de régression, au pire on revient au comportement d'avant.
+     */
+    private const val CLOUDFRONT_HAKUNA = "d2gvsznh03y059.cloudfront.net"
+    private fun cibleContournement(hostname: String): String? =
+        if (hostname.endsWith(".hakunaymatata.com", ignoreCase = true) &&
+            !hostname.equals(CLOUDFRONT_HAKUNA, ignoreCase = true)
+        ) CLOUDFRONT_HAKUNA else null
+
     override fun lookup(hostname: String): List<InetAddress> {
         // Check cache d'abord
         val now = System.currentTimeMillis()
@@ -74,6 +119,21 @@ object DnsResolver : Dns {
                 return cached.addresses
             }
             cache.remove(hostname)
+        }
+        // Renvoi vers la branche CloudFront (voir le commentaire de cibleContournement).
+        cibleContournement(hostname)?.let { cible ->
+            try {
+                val addrs = currentDoh().lookup(cible)
+                if (addrs.isNotEmpty()) {
+                    Log.i(TAG, "hakunaymatata : $hostname → branche CloudFront ($cible) = " +
+                        addrs.joinToString { it.hostAddress ?: "" })
+                    cache[hostname] = CachedAddr(addrs, now + CACHE_TTL_MS)
+                    return addrs
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "hakunaymatata : bascule CloudFront impossible pour $hostname " +
+                    "(${e.message}) → résolution normale")
+            }
         }
         val providerName = if (_url.isEmpty()) "SYSTEM" else _url
         Log.d(TAG, "Resolving host: $hostname using provider: $providerName")

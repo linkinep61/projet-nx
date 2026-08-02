@@ -45,6 +45,8 @@ class SeekPlayerExtractor : Extractor() {
                     "Referer" to origin,
                     "Origin" to origin.trimEnd('/'),
                 ),
+                // 2026-08-02 : nom de fichier réel (titre du lecteur) → corrige la langue annoncée.
+                fileName = OnlyFlixResolver.dernierTitre,
             )
         }
         // Fallback : ancien overlay WebView (toujours câblé dans les fragments).

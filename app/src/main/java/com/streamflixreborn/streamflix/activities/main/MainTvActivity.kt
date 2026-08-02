@@ -315,8 +315,19 @@ class MainTvActivity : FragmentActivity() {
             android.util.Log.e("MainTvActivity", "setTheme failed: ${e.message}")
         }
 
-        super.onCreate(savedInstanceState)
-        savedStateForDeferredInit = savedInstanceState
+        // 2026-08-03 — CRASH « Current provider is not set » (issues #176/#182, box TV).
+        //   Au démarrage à froid, `StreamFlixApp` efface le provider pour renvoyer l'utilisateur
+        //   au sélecteur. Si on laisse Android restaurer la pile de la session précédente, une
+        //   fiche film/série est rouverte et attaque `AppDatabase.getInstance` avec un provider
+        //   nul → IllegalStateException au lancement. On IGNORE donc l'état sauvegardé dans ce
+        //   cas : on repart de la destination de départ, ce qui était déjà l'intention.
+        val etatRestaurable = if (com.streamflixreborn.streamflix.StreamFlixApp.sessionEffaceeAuDemarrage) {
+            android.util.Log.i("MainTvActivity", "Démarrage à froid : pile de navigation ignorée (session effacée)")
+            null
+        } else savedInstanceState
+
+        super.onCreate(etatRestaurable)
+        savedStateForDeferredInit = etatRestaurable
 
         // 2026-05-12 (user "fameux changement de profil TV", inflate fail
         // Chromecast) : l'ancien design postDelayait l'inflate de ~200ms total
@@ -606,12 +617,24 @@ class MainTvActivity : FragmentActivity() {
             Log.d("MainTv", "RESELECT item=${menuItem.title} id=${menuItem.itemId} provider=${UserPreferences.currentProvider?.name}")
             when (menuItem.itemId) {
                 R.id.movies, R.id.tv_shows -> {
-                    val supported = com.streamflixreborn.streamflix.utils.GenreFilter.isSupported(
-                        UserPreferences.currentProvider?.name
-                    )
-                    Log.d("MainTv", "Genre supported=$supported")
+                    val nom = UserPreferences.currentProvider?.name
+                    // ⚠ 2026-08-04 (user : « Wiflix, du coup tu ne l'as toujours pas mis
+                    //   l'option ») — ce test ne portait QUE sur le filtre par genre. Wiflix
+                    //   n'ayant pas de genres, le second clic n'ouvrait rien du tout : le
+                    //   filtre d'année existait dans le code mais restait inatteignable.
+                    //   Il faut donc ouvrir dès que l'UN OU L'AUTRE des deux filtres existe.
+                    val supported = com.streamflixreborn.streamflix.utils.GenreFilter.isSupported(nom) ||
+                        com.streamflixreborn.streamflix.utils.YearFilter.estSupporte(nom)
+                    Log.d("MainTv", "Filtres disponibles=$supported (provider=$nom)")
                     if (supported) {
-                        showGenreFilterPicker()
+                        // 2026-08-04 : on transmet l'onglet d'où vient le re-clic — le filtre
+                        //   d'ANNÉE est mémorisé séparément pour les films et les séries.
+                        showGenreFilterPicker(
+                            if (menuItem.itemId == R.id.tv_shows)
+                                com.streamflixreborn.streamflix.utils.YearFilter.Type.SERIES
+                            else
+                                com.streamflixreborn.streamflix.utils.YearFilter.Type.FILMS
+                        )
                     }
                 }
             }
@@ -1094,35 +1117,39 @@ class MainTvActivity : FragmentActivity() {
 
     /** 2026-05-26 : filtre par genre TMDB (Action, Comédie, Drame…).
      *  Sauve le genre PAR provider et notifie pour rafraîchir Films/Séries. */
-    fun showGenreFilterPicker() {
+    fun showGenreFilterPicker(
+        type: com.streamflixreborn.streamflix.utils.YearFilter.Type =
+            com.streamflixreborn.streamflix.utils.YearFilter.Type.FILMS,
+    ) {
         val provider = UserPreferences.currentProvider ?: return
-        showGenreFilterPickerInner(provider)
+        showGenreFilterPickerInner(provider, type)
     }
 
-    private fun showGenreFilterPickerInner(provider: com.streamflixreborn.streamflix.providers.Provider) {
-        val entries = com.streamflixreborn.streamflix.utils.GenreFilter.genresForProvider()
-        val current = com.streamflixreborn.streamflix.utils.GenreFilter.get(provider.name)
-        // "Tous" en 1ère position (= pas de filtre), puis les genres
-        val labels = arrayOf("Tous les genres") + entries.map { it.name }.toTypedArray()
-        val currentIdx = if (current == null) 0 else entries.indexOfFirst { it.id == current.id } + 1
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Filtrer par genre")
-            .setSingleChoiceItems(labels, currentIdx.coerceAtLeast(0)) { dlg, idx ->
-                val newGenre = if (idx == 0) null else entries[idx - 1]
-                val changed = newGenre?.id != current?.id
-                if (changed) {
-                    com.streamflixreborn.streamflix.utils.GenreFilter.set(provider.name, newGenre)
-                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
-                    Toast.makeText(
-                        applicationContext,
-                        if (newGenre != null) "Genre : ${newGenre.name}" else "Genre : tous",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
-                dlg.dismiss()
-            }
-            .setNegativeButton("Annuler", null)
-            .show()
+    private fun showGenreFilterPickerInner(
+        provider: com.streamflixreborn.streamflix.providers.Provider,
+        type: com.streamflixreborn.streamflix.utils.YearFilter.Type =
+            com.streamflixreborn.streamflix.utils.YearFilter.Type.FILMS,
+    ) {
+        // 2026-08-04 (user : « quand on clique sur Films, l'affichage n'est pas le même que
+        //   celui quand on clique sur Trier par année ») — cette liste était un AlertDialog
+        //   système, dont l'apparence tranchait avec la feuille sombre du sélecteur d'années
+        //   qu'elle ouvre juste après. Les deux passent désormais par OnyxChoixDialog.
+        //   Bénéfice au passage : plus besoin de forcer le défilement en tête ni de compenser
+        //   la position de la coche — la feuille affiche tout depuis le haut.
+        //   ⚠ L'année reste la PREMIÈRE ligne (le user avait demandé à ne pas devoir traverser
+        //     les dix-neuf genres), donc les index sont DÉCALÉS DE UN quand elle est présente :
+        //     0 = année, 1 = « Tous les genres », 2+ = les genres.
+        com.streamflixreborn.streamflix.utils.GenreYearPicker.show(
+            context = this,
+            providerName = provider.name,
+            type = type,
+            onGenre = {
+                com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+            },
+            onAnnee = {
+                com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+            },
+        )
     }
 
     /** 2026-05-26 : filtre langue VF/VOSTFR pour AnimeSama (TV). */
@@ -1175,50 +1202,28 @@ class MainTvActivity : FragmentActivity() {
             triggerSourceReloadAndShowPicker(menuItemId, type)
             return
         }
-        val totalCount = categoriesWithCount.sumOf { it.second }
-        // 2026-05-13 (user "traduit l'anglais des catégories") : applique
-        // prettyCategoryName() pour traduire les tags iptv-org (General →
-        // Général, News → Actualités, etc.). Les noms RAW restent utilisés
-        // en interne comme valeur de filtre.
-        // 2026-05-13 (user "CHARGE MAL[E]") : étiquette "Toutes les catégories"
-        // sans "FR" — le picker liste TOUTES les catégories (ARABIC, ALBANIA,
-        // FRANCE HD, etc.), pas que les françaises. Le filtre langue FR est
-        // géré séparément via le bouton Pays/langue.
-        val displayItems = arrayOf("Toutes les catégories ($totalCount)") +
-            categoriesWithCount.map { (name, count) ->
-                "${provider.prettyCategoryName(name)}  ($count)"
-            }.toTypedArray()
-        // Garde les noms bruts pour le filtre (sans le compteur)
-        val rawNames = arrayOf<String?>(null) + categoriesWithCount.map { it.first }.toTypedArray()
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Choisir une catégorie")
-            .setItems(displayItems) { _, idx ->
-                val selected = rawNames[idx]
-                when (type) {
-                    com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.LIVE -> provider.selectedCategoryLive = selected
-                    com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.MOVIE -> provider.selectedCategoryMovie = selected
-                    com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.SERIES -> provider.selectedCategorySeries = selected
-                }
-                // 2026-05-13 (user "quand on clique sur une catégorie il faut
-                // que le Home change") : invalide le HomeCacheStore (sinon
-                // TTL 5 min skip le refresh réseau et le filtre n'est pas
-                // appliqué visuellement).
-                com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
-                    applicationContext,
-                    provider,
-                )
-                // 2026-05-14 (user "tu cliques une fois il se passe rien") :
-                // toast immédiat + notif flow. Sans le toast, l'user pense que
-                // son click n'est pas pris en compte pendant les 2-3s de fetch.
-                android.widget.Toast.makeText(
-                    this,
-                    "Chargement…",
-                    android.widget.Toast.LENGTH_SHORT,
-                ).show()
+        // 2026-08-03 : le picker plat cède la place au GESTIONNAIRE DE GROUPES (onglets
+        //   TV/Films/Séries, réordonnancement, masquage). Le clic sur un groupe garde le
+        //   comportement d'origine — poser le filtre et recharger — donc aucune perte.
+        //   Le rechargement automatique de la source (ci-dessus) reste inchangé.
+        com.streamflixreborn.streamflix.utils.IptvGroupManagerDialog.show(
+            context = this,
+            onChanged = {
+                com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(applicationContext, provider)
                 com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
-            }
-            .setNegativeButton("Annuler", null)
-            .show()
+            },
+            onGroupeChoisi = { t, brut ->
+                when (t) {
+                    com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.LIVE -> provider.selectedCategoryLive = brut
+                    com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.MOVIE -> provider.selectedCategoryMovie = brut
+                    com.streamflixreborn.streamflix.utils.IptvClassifier.ContentType.SERIES -> provider.selectedCategorySeries = brut
+                    else -> {}
+                }
+                com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(applicationContext, provider)
+                android.widget.Toast.makeText(this, "Chargement…", android.widget.Toast.LENGTH_SHORT).show()
+                com.streamflixreborn.streamflix.utils.ProviderChangeNotifier.notifyProviderChanged()
+            },
+        )
     }
 
     /** v62 : charge la(les) source(s) IPTV en background puis re-ouvre le

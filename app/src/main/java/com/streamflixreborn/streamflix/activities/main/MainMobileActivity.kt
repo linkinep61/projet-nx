@@ -106,7 +106,16 @@ class MainMobileActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         setTheme(ThemeManager.mobileThemeRes(UserPreferences.selectedTheme))
 
-        super.onCreate(savedInstanceState)
+        // 2026-08-03 — même correctif que MainTvActivity (crash « Current provider is not set »,
+        //   issues #176/#182). Au démarrage à froid le provider est volontairement effacé ; si
+        //   Android restaure la pile de la session précédente, l'écran rouvert attaque la base
+        //   sans provider → plantage. On ignore l'état sauvegardé dans ce cas précis.
+        val etatRestaurable = if (com.streamflixreborn.streamflix.StreamFlixApp.sessionEffaceeAuDemarrage) {
+            android.util.Log.i("MainMobileActivity", "Démarrage à froid : pile de navigation ignorée (session effacée)")
+            null
+        } else savedInstanceState
+
+        super.onCreate(etatRestaurable)
 
         WiflixProvider.init(this)
         AnimeSamaProvider.init(this)
@@ -282,6 +291,38 @@ class MainMobileActivity : FragmentActivity() {
         viewModel.checkUpdate()
 
         binding.bnvMain.setupWithNavController(navController)
+
+        // 2026-08-04 (user : « l'option est sur mobile aussi, le 2e clic pour afficher la
+        //   liste ») — MÊME GESTE QUE SUR TV : un re-clic sur « Films » ou « Séries TV »
+        //   ouvre le sélecteur (genre, avec l'année en première ligne).
+        //   ⚠ NE PAS remplacer par une barre de boutons dans les fragments : essayé le jour
+        //     même et retiré — sur les providers TMDB cette barre n'existe pas, l'afficher
+        //     décale la mise en page et recouvre le contenu (« tes boutons ils vont écraser
+        //     des choses »).
+        binding.bnvMain.setOnItemReselectedListener { menuItem ->
+            when (menuItem.itemId) {
+                R.id.movies, R.id.tv_shows -> {
+                    val nom = UserPreferences.currentProvider?.name
+                    val dispo =
+                        com.streamflixreborn.streamflix.utils.GenreFilter.isSupported(nom) ||
+                            com.streamflixreborn.streamflix.utils.YearFilter.estSupporte(nom)
+                    if (dispo) {
+                        // Le fragment courant porte déjà son sélecteur : on le lui délègue,
+                        //   il connaît son ViewModel et sait recharger sa propre liste.
+                        val hote = supportFragmentManager
+                            .findFragmentById(R.id.nav_main_fragment) as? NavHostFragment
+                        when (val f = hote?.childFragmentManager?.primaryNavigationFragment) {
+                            is com.streamflixreborn.streamflix.fragments.movies.MoviesMobileFragment ->
+                                f.ouvrirFiltres()
+                            is com.streamflixreborn.streamflix.fragments.tv_shows.TvShowsMobileFragment ->
+                                f.ouvrirFiltres()
+                            else -> {}
+                        }
+                    }
+                }
+            }
+        }
+
         updateNavigationVisibility()
         updateBottomNavigationVisibility(navController.currentDestination?.id)
 

@@ -2343,7 +2343,53 @@ object LiveHubFolderDialog {
                 ch.id.removePrefix("livehub::").contains("::")
             val isCurated = ch.id.startsWith("livehub::") &&
                 !isReplay && !isDynamic && !ch.id.startsWith("livehub::folder::")
-            if (isReplay || isDynamic) {
+            // 2026-08-09 (user, 3ᵉ demande : « j'ai mis un favori dans World Live, il se met
+            //   pas dans son propre favori, ni sur son home ») — LE BUG ÉTAIT ICI.
+            //   Une chaîne World Live a un id `livehub::worldlivetv::wltv::…`, donc elle
+            //   tombait dans `isDynamic` et partait dans ReplayFavoritesStore, c'est-à-dire
+            //   la section « Favoris Replay » du TV Hub. Or World Live a SON magasin :
+            //   `WorldLiveFolderDialog` écrit, lui, dans IptvFavoritesStore sous le nom de
+            //   provider « World Live », plus les métadonnées dans `world_live_fav_meta`.
+            //   Deux chemins pour la même action écrivaient à deux endroits différents.
+            //   On aligne celui-ci sur l'autre, à l'identique.
+            val estWorldLive = ch.id.startsWith("livehub::worldlivetv::")
+            if (estWorldLive) {
+                val nowFav = com.streamflixreborn.streamflix.utils.IptvFavoritesStore
+                    .toggle("World Live", ch.id)
+                try {
+                    val canonical = "wl" + ch.id.substringAfterLast("::").lowercase().trim()
+                    val prefs = ctx.getSharedPreferences(
+                        "world_live_fav_meta", android.content.Context.MODE_PRIVATE,
+                    )
+                    prefs.edit().apply {
+                        if (nowFav) {
+                            putString("${canonical}_name", ch.title)
+                            putString("${canonical}_logo", ch.poster ?: "")
+                        } else {
+                            remove("${canonical}_name"); remove("${canonical}_logo")
+                        }
+                        apply()
+                    }
+                } catch (_: Throwable) {}
+                LiveTvHubProvider.clearHomeCache()
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.HomeCacheStore.clear(
+                        ctx, com.streamflixreborn.streamflix.providers.LiveTvHubPlusProvider,
+                    )
+                }
+                kotlin.runCatching {
+                    com.streamflixreborn.streamflix.utils.ProviderChangeNotifier
+                        .notifyProviderChanged(forceRelaunch = true)
+                }
+                android.widget.Toast.makeText(
+                    ctx,
+                    if (nowFav) "★ ${ch.title} ajouté aux favoris"
+                    else "☆ ${ch.title} retiré des favoris",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                gridAdapter.notifyDataSetChanged()
+                true
+            } else if (isReplay || isDynamic) {
                 val store = com.streamflixreborn.streamflix.utils.ReplayFavoritesStore
                 val nowFav = store.toggle(
                     id = ch.id, title = ch.title,

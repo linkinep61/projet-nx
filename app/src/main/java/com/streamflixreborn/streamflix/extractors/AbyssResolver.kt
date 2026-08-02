@@ -92,7 +92,7 @@ object AbyssResolver {
                     try {
                         val root = StreamFlixApp.currentActivity?.findViewById<android.view.ViewGroup>(android.R.id.content)
                         if (root != null) {
-                            webView.alpha = 0.02f
+                            webView.alpha = 0.004f   // 2026-08-02 : voile gris visible a 0.02 (WebView d'extraction)
                             root.addView(webView, 0, android.view.ViewGroup.LayoutParams(
                                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                                 android.view.ViewGroup.LayoutParams.MATCH_PARENT))

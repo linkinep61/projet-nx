@@ -79,18 +79,24 @@
         app:layout_constraintTop_toBottomOf="@id/tv_episode_title"
         tools:text="Release date" />
 
+    <!-- 2026-08-06 (user : « l'écriture survole une autre écriture » dans la liste des
+         épisodes d'une saison, constaté sur Movix) : ce résumé était ancré sous
+         `tv_episode_title`, EXACTEMENT comme `tv_episode_released` juste au-dessus. Les deux
+         se dessinaient donc au même endroit, la date par-dessus le résumé.
+         On l'ancre désormais sous la DATE, ce qui les empile correctement. -->
     <TextView
         android:id="@+id/tv_episode_overview"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginStart="12dp"
         android:layout_marginEnd="10dp"
+        android:layout_marginTop="4dp"
         android:textSize="12sp"
         android:ellipsize="end"
         android:scrollHorizontally="false"
         android:singleLine="false"
         android:maxLines="4"
-        app:layout_constraintTop_toBottomOf="@id/tv_episode_title"
+        app:layout_constraintTop_toBottomOf="@id/tv_episode_released"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         tools:text="Overview" />

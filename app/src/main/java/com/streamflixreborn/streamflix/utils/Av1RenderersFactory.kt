@@ -22,6 +22,24 @@ import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
 @UnstableApi
 class Av1RenderersFactory(context: Context) : NextRenderersFactory(context) {
 
+    /**
+     * 2026-08-08 : autorise le décodage « hérité » des sous-titres EXTERNES (.srt greffés sur
+     * un flux HLS, cf. NetMirror VOSTFR). Détail du pourquoi dans
+     * [SousTitresExternesRenderersFactory] — sans ça le TextRenderer lève IllegalStateException
+     * dès la 1re image et le serveur passe rouge alors qu'il est parfaitement bon.
+     */
+    override fun buildTextRenderers(
+        context: Context,
+        output: androidx.media3.exoplayer.text.TextOutput,
+        outputLooper: android.os.Looper,
+        extensionRendererMode: Int,
+        out: ArrayList<Renderer>,
+    ) {
+        val avant = out.size
+        super.buildTextRenderers(context, output, outputLooper, extensionRendererMode, out)
+        activerDecodageHeriteSurTextRenderers(out, avant)
+    }
+
     override fun buildVideoRenderers(
         context: Context,
         extensionRendererMode: Int,

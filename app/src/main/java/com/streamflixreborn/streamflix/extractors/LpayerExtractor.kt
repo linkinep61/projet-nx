@@ -1,6 +1,7 @@
 package com.streamflixreborn.streamflix.extractors
 
 import android.annotation.SuppressLint
+import android.util.Log
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -56,15 +57,28 @@ class LpayerExtractor : Extractor() {
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun interceptVideoFromWebView(url: String): String? =
         withContext(Dispatchers.Main) {
-            withTimeoutOrNull(30_000) {
+            // 2026-08-02 : 30 s → 18 s. L'extraction sert désormais de 1re tentative devant un
+            //   repli WebView (cf. Embed4meExtractor) : au-delà, mieux vaut rendre la main vite
+            //   plutôt que de laisser l'utilisateur devant un écran de chargement.
+            withTimeoutOrNull(18_000) {
                 suspendCancellableCoroutine { cont ->
                     var resolved = false
 
+                    // ⚠ 2026-08-02 (user : « une sorte de carré gris derrière, pas très joli ») :
+                    //   le NETTOYAGE est fait ICI, dans le point de sortie unique. Il n'était
+                    //   effectué que sur UNE des quatre branches de résolution — celle du pont JS.
+                    //   Les trois autres (interception réseau du m3u8, du mp4, d'un segment .ts),
+                    //   qui sont les chemins les plus fréquents, laissaient la WebView accrochée
+                    //   à la fenêtre : elle restait visible par-dessus le lecteur.
+                    //   `nettoyer` est renseigné après la création de la vue.
+                    var nettoyer: (() -> Unit)? = null
                     fun resolve(value: String?) {
                         if (!resolved && cont.isActive) {
                             resolved = true
                             cont.resume(value)
                         }
+                        nettoyer?.invoke()
+                        nettoyer = null
                     }
 
                     val webView = WebView(context).apply {
@@ -84,6 +98,54 @@ class LpayerExtractor : Extractor() {
                     // Give offscreen WebView a layout size so touch events work
                     webView.layout(0, 0, 1080, 1920)
 
+                    // ⚠ 2026-08-02 : ATTACHER la WebView à la fenêtre. Sans ça, le player ne
+                    //   démarre JAMAIS — Chromium ne fait tourner ni les timers ni le rendu d'une
+                    //   WebView détachée, donc le flux n'est jamais demandé et les MotionEvent ne
+                    //   produisent aucun clic exploitable. C'est le piège déjà rencontré sur
+                    //   Filemoon, AfterDark et OnlyFlix. Confirmé par les logs : l'extraction
+                    //   partait en timeout à 18 s sans jamais voir passer le moindre média.
+                    //   Vue quasi invisible (alpha 0.02, 1×1 px) et posée derrière l'interface.
+                    var parentAttache: android.view.ViewGroup? = null
+                    try {
+                        val act = StreamFlixApp.currentActivity
+                        val racine = act?.findViewById<android.view.ViewGroup>(android.R.id.content)
+                        if (racine != null) {
+                            // ⚠ 2026-08-02 (user : « une sorte de carré gris derrière, pas très
+                            //   joli ») : la vue doit être posée DERRIÈRE l'interface (index 0) et
+                            //   rendue non interactive. Ajoutée en dernier, elle se retrouvait
+                            //   AU-DESSUS du lecteur et se voyait — c'est la manière dont
+                            //   OnlyFlixResolver procède depuis le début, je ne l'avais pas suivie.
+                            webView.alpha = 0.01f
+                            webView.isEnabled = false
+                            webView.visibility = android.view.View.VISIBLE // requis : INVISIBLE fige le rendu
+                            racine.addView(
+                                webView,
+                                0,
+                                android.view.ViewGroup.LayoutParams(1, 1),
+                            )
+                            parentAttache = racine
+                        }
+                    } catch (_: Exception) {}
+
+                    fun detacher() {
+                        val p = parentAttache ?: return
+                        parentAttache = null
+                        try { p.removeView(webView) } catch (_: Exception) {}
+                    }
+
+                    // Branche le nettoyage sur le point de sortie unique : quelle que soit la
+                    //   branche qui trouve le flux, la vue est retirée de l'écran puis détruite.
+                    //   Toujours sur le thread principal (contrainte WebView).
+                    nettoyer = {
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            try {
+                                webView.stopLoading()
+                                detacher()
+                                webView.destroy()
+                            } catch (_: Exception) {}
+                        }
+                    }
+
                     // Track cookies for the final Video headers
                     var capturedCookies = ""
 
@@ -91,6 +153,17 @@ class LpayerExtractor : Extractor() {
                     webView.addJavascriptInterface(object {
                         @JavascriptInterface
                         fun onSourceFound(sourceUrl: String) {
+                            // 2026-08-02 : le JS injecté émet une trentaine de messages de
+                            //   diagnostic (LP_HOOK_START, LP_KEY, LP_CRYPTO_OK, LP_JSON_KEYS…)
+                            //   pour dire OÙ il en est. Ils étaient tous jetés en silence, ce qui
+                            //   rendait tout échec impossible à analyser : on ne voyait qu'un
+                            //   « timeout » sans savoir si la page chargeait, si les hooks se
+                            //   posaient ou si le déchiffrement échouait. On les journalise.
+                            if (!sourceUrl.startsWith("http")) {
+                                Log.d(TAG, "pont JS → $sourceUrl")
+                                return
+                            }
+                            Log.d(TAG, "pont JS → média candidat (${sourceUrl.take(60)}…)")
                             if (sourceUrl.startsWith("http")
                                 && (sourceUrl.contains(".m3u8") || sourceUrl.contains(".mp4"))
                                 && !sourceUrl.contains("preload.m3u8")
@@ -100,14 +173,24 @@ class LpayerExtractor : Extractor() {
                                     capturedCookies = CookieManager.getInstance()
                                         .getCookie("https://lpayer.embed4me.com") ?: ""
                                 } catch (_: Exception) {}
+                                // `resolve` se charge désormais du nettoyage (point de sortie unique).
                                 resolve(sourceUrl)
-                                webView.post {
-                                    webView.stopLoading()
-                                    webView.destroy()
-                                }
                             }
                         }
                     }, "LpayerBridge")
+
+                    // Erreurs JS de la page : sans elles, un hook qui explose passe inaperçu.
+                    webView.webChromeClient = object : android.webkit.WebChromeClient() {
+                        override fun onConsoleMessage(
+                            cm: android.webkit.ConsoleMessage?,
+                        ): Boolean {
+                            val m = cm?.message().orEmpty()
+                            if (cm?.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.ERROR ||
+                                m.startsWith("LP_")
+                            ) Log.d(TAG, "console: ${m.take(160)}")
+                            return true
+                        }
+                    }
 
                     webView.webViewClient = object : WebViewClient() {
 
@@ -194,6 +277,7 @@ class LpayerExtractor : Extractor() {
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
                             try {
                                 webView.stopLoading()
+                                detacher()   // ne jamais laisser la vue accrochée à l'écran
                                 webView.destroy()
                             } catch (_: Exception) {}
                         }
@@ -226,6 +310,8 @@ class LpayerExtractor : Extractor() {
     }
 
     companion object {
+        private const val TAG = "LpayerExtractor"
+
         private val BLOCKED_HOSTS = listOf(
             "googlesyndication", "google-analytics", "doubleclick",
             "adservice", "mc.yandex.ru", "cloudflareinsights",

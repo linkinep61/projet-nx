@@ -272,7 +272,17 @@ class PlayerMobileFragment : Fragment() {
         //   preload.m3u8 ; startLoading() + play() lancent la vraie lecture).
         private const val SEEKPLAYER_PLAY_JS = """
             (function(){
-                try { window.open=function(){return null;}; }catch(e){}
+                // ⚠ 2026-08-04 — FAUSSE FENÊTRE, PAS `return null`.
+                //   Ce lecteur compte les popups RÉELLEMENT ouvertes avant de libérer la
+                //   lecture (les « trois ou quatre clics » côté utilisateur). Renvoyer `null`
+                //   signifie « popup bloquée » : la porte ne s'ouvre jamais et l'overlay reste
+                //   en « media not ready ». On renvoie une fausse fenêtre — la page croit la
+                //   pub ouverte, rien ne s'ouvre réellement.
+                //   Même correction que dans OnlyFlixResolver, où c'était LA cause du blocage.
+                try { window.open=function(){return {closed:false,focus:function(){},blur:function(){},
+                    close:function(){},postMessage:function(){},
+                    document:{write:function(){},close:function(){}},
+                    location:{href:'',replace:function(){},assign:function(){}}};}; }catch(e){}
                 try {
                     var css=document.createElement('style');
                     css.textContent='html,body{margin:0!important;padding:0!important;background:#000!important;'
@@ -657,6 +667,9 @@ class PlayerMobileFragment : Fragment() {
     // 2026-06-30 : empêche le re-lancement auto du lecteur externe à chaque
     //   displayVideo() (switch de serveur) → une seule fois par ouverture.
     private var didAutoLaunchExternal = false
+
+    /** Horodatage du 1er appui sur « quitter » — cf. la double confirmation plus bas. */
+    private var dernierAppuiQuitter = 0L
 
     private fun resolveExternalSourceUri(video: Video): Uri {
         val initialSource = video.source
@@ -1336,47 +1349,11 @@ class PlayerMobileFragment : Fragment() {
                             }
 
                             // 2026-07-16 : appui LONG sur un serveur → le signaler comme « mauvais »
-                            //   (mauvaise saison/épisode/langue). Envoi GitHub (onyx-crash-reports),
-                            //   dédup 1×/serveur. Pour les bêtatesteurs.
-                            binding.settings.onServerReported = { server ->
-                                val vt = args.videoType
-                                val title = when (vt) {
-                                    is com.streamflixreborn.streamflix.models.Video.Type.Episode -> vt.tvShow.title
-                                    is com.streamflixreborn.streamflix.models.Video.Type.Movie -> vt.title
-                                } ?: "?"
-                                val episode = (vt as? com.streamflixreborn.streamflix.models.Video.Type.Episode)?.number ?: 0
-                                // Saison RÉELLE depuis l'id (« …/saisonN/… ») car AnimeSama met la langue
-                                //   dans season.number ; fallback = season.number.
-                                val season = Regex("(?i)saison\\s*(\\d+)").find(args.id)?.groupValues?.get(1)?.toIntOrNull()
-                                    ?: (vt as? com.streamflixreborn.streamflix.models.Video.Type.Episode)?.season?.number ?: 0
-                                val source = when {
-                                    server.id.startsWith("bkreg::") -> server.id.removePrefix("bkreg::").substringBefore("::")
-                                    server.name.contains(" · ") -> server.name.substringBefore(" · ")
-                                    else -> server.name
-                                }
-                                androidx.appcompat.app.AlertDialog.Builder(requireContext())
-                                    .setTitle("Signaler ce serveur")
-                                    .setMessage("Signaler « ${server.name} » comme MAUVAIS (mauvaise saison/épisode/langue) pour « $title » ?")
-                                    .setNegativeButton("Annuler", null)
-                                    .setPositiveButton("Signaler") { _, _ ->
-                                        com.streamflixreborn.streamflix.utils.BrokenSourceReporter.reportBadMatch(
-                                            serverName = server.name,
-                                            sourceLabel = source,
-                                            resolvedUrl = args.id,
-                                            contentTitle = title,
-                                            season = season,
-                                            episode = episode,
-                                        ) { ok ->
-                                            view?.post {
-                                                android.widget.Toast.makeText(
-                                                    requireContext(),
-                                                    if (ok) "Serveur signalé, merci !" else "Échec du signalement",
-                                                    android.widget.Toast.LENGTH_SHORT
-                                                ).show()
-                                            }
-                                        }
-                                    }
-                                    .show()
+                            // 2026-08-06 : le SIGNALEMENT est supprimé (demande user). L'appui long
+                            //   désactive désormais le lien ; on retire le serveur de la liste affichée.
+                            binding.settings.onServerDisabled = { server ->
+                                servers = servers.filterNot { it.id == server.id }
+                                binding.settings.refreshServerList()
                             }
 
                             // 2026-06-03 v2 (user "Elles disparaissent") : ne CLEAR que sur
@@ -1764,7 +1741,7 @@ class PlayerMobileFragment : Fragment() {
                         })
                         .build()
                     PlayerSettingsView.Settings.Server.addUnique(
-                        PlayerSettingsView.Settings.Server(id = server.id, name = server.name)
+                        PlayerSettingsView.Settings.Server(id = server.id, name = server.name, src = server.src)
                     )
                     scheduleServerRefresh()
                     Log.d("PlayerMobileFragment", "Additional server added: ${server.name}")
@@ -1798,8 +1775,8 @@ class PlayerMobileFragment : Fragment() {
                 // 2026-07-31 : langue détectée dans le manifeste HLS (parité avec la vue TV).
                 val prevLanguages = PlayerSettingsView.Settings.Server.list.associate { it.id to it.language }
                 PlayerSettingsView.Settings.Server.list.clear()
-                PlayerSettingsView.Settings.Server.addAllUnique(nonOla.map {
-                    PlayerSettingsView.Settings.Server(id = it.id, name = it.name).apply {
+                PlayerSettingsView.Settings.Server.addAllUnique(nonOla.filterNot { s -> com.streamflixreborn.streamflix.utils.LiensDesactives.estDesactive(requireContext(), s.id) }.map {
+                    PlayerSettingsView.Settings.Server(id = it.id, name = it.name, src = it.src).apply {
                         isSelected = (it.id == prevSelectedId)
                         isLoading = (it.id == prevLoadingId)
                         quality = it.quality ?: prevQualities[it.id]
@@ -1988,6 +1965,9 @@ class PlayerMobileFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        // 2026-08-02 : on sort du lecteur → plus d'hébergeur courant. Sans ça, un changement de
+        //   format fait depuis les réglages généraux serait attribué au dernier hébergeur lu.
+        UserPreferences.currentPlayerHost = null
         // 2026-07-12 : retour au home/fiche → reprise du chargement des jaquettes (pause au play).
         try { com.bumptech.glide.Glide.with(requireActivity()).resumeRequestsRecursive() } catch (_: Throwable) {}
         hideWebViewOverlay()
@@ -2136,8 +2116,35 @@ class PlayerMobileFragment : Fragment() {
         }
         setupEpisodeNavigationButtons()
 
+        // 2026-08-02 (user : « le bouton quitter est trop radical, des gens appuient sans faire
+        //   exprès et ça quitte directement la vidéo ») : DOUBLE APPUI pour sortir.
+        //   Le 1er appui prévient, le 2ᵉ (dans les 3 s) quitte réellement. Passé ce délai on
+        //   repart de zéro — un appui isolé ne fait donc jamais perdre la lecture.
+        //   Un simple avertissement suffit : ni fenêtre de confirmation (qui coupe l'image et
+        //   demande un geste de plus), ni appui long (invisible pour qui ne le connaît pas).
+        //   ── 2026-08-06 (user : « le bouton "confirmer avant de quitter le lecteur" ne
+        //     fonctionne pas sur téléphone ; si on le désactive ça ne désactive rien ») ────
+        //     Exact : le réglage `playerExitConfirm` n'était lu QUE par `PlayerTvFragment`.
+        //     Côté mobile, le double appui était codé en dur, donc la case des réglages
+        //     n'avait aucun effet. Elle est désormais honorée des deux côtés.
         binding.pvPlayer.controller.binding.btnExoBack.setOnClickListener {
-            findNavController().navigateUp()
+            if (!UserPreferences.playerExitConfirm) {
+                findNavController().navigateUp()
+                return@setOnClickListener
+            }
+            val maintenant = System.currentTimeMillis()
+            if (maintenant - dernierAppuiQuitter < 3_000L) {
+                findNavController().navigateUp()
+            } else {
+                dernierAppuiQuitter = maintenant
+                Toast.makeText(
+                    requireContext(),
+                    "Appuyez à nouveau pour quitter la vidéo",
+                    Toast.LENGTH_SHORT,
+                ).show()
+                // On garde les contrôles affichés : le 2ᵉ appui doit rester possible.
+                runCatching { binding.pvPlayer.controllerShowTimeoutMs = binding.pvPlayer.controllerShowTimeoutMs }
+            }
         }
 
         updatePlayerHeader()
@@ -2737,96 +2744,159 @@ class PlayerMobileFragment : Fragment() {
     // 2026-06-20 : popup menu 3-dots — regroupe lock, cast, wireless,
     // PiP, record, ratio, external, paramètres.
     // ──────────────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────────
+    // 2026-08-06 (user, captures à l'appui : « remets ce menu au goût du jour avec le même
+    //   menu que ses confrères », « le menu paramètres tout en haut de la liste pour y
+    //   accéder sans défiler ») :
+    //   L'ancien `PopupMenu` système jurait avec le reste du lecteur — fond gris clair,
+    //   icônes forcées par réflexion (API privée, muette quand elle échoue), coins carrés.
+    //   Il est remplacé par une FEUILLE au style exact de la page Paramètres : fond #15171C
+    //   arrondi, en-tête titre + ✕, et lignes en cartes `item_setting_mobile` (le MÊME
+    //   gabarit que « Qualité / Audio / Sous-titres… », donc zéro divergence si ce style
+    //   évolue un jour).
+    //   « Paramètres » passe en PREMIER (c'est l'entrée la plus utilisée) ; « Lecteur
+    //   externe » reste en dernier comme décidé le 2026-06-29.
+    //   ⚠ Les actions sont INCHANGÉES, seule la présentation bouge.
+    // ──────────────────────────────────────────────────────────────────
     private fun showPlayerOverflowMenu(anchor: android.view.View) {
-        val popup = android.widget.PopupMenu(requireContext(), anchor)
-        popup.menuInflater.inflate(R.menu.menu_player_overflow_mobile, popup.menu)
+        val ctx = requireContext()
+        val dp = { v: Int -> (v * ctx.resources.displayMetrics.density).toInt() }
 
-        // Forcer l'affichage des icônes dans le PopupMenu (API privée)
-        try {
-            val method = popup.javaClass.getDeclaredMethod("setForceShowIcon", Boolean::class.javaPrimitiveType)
-            method.invoke(popup, true)
-        } catch (_: Throwable) {
-            // Fallback : on essaie via MenuPopupHelper
-            try {
-                val field = popup.javaClass.getDeclaredField("mPopup")
-                field.isAccessible = true
-                val menuPopupHelper = field.get(popup)
-                menuPopupHelper.javaClass.getDeclaredMethod("setForceShowIcon", Boolean::class.javaPrimitiveType)
-                    .invoke(menuPopupHelper, true)
-            } catch (_: Throwable) { /* icônes invisibles = fallback OK, titres restent */ }
-        }
+        val enregistreEnCours = com.streamflixreborn.streamflix.download.LiveRecorder.isRecording
 
-        // Adapter le titre "Enregistrer" si un enregistrement est en cours
-        if (com.streamflixreborn.streamflix.download.LiveRecorder.isRecording) {
-            popup.menu.findItem(R.id.menu_player_record)?.title = "Arrêter l'enregistrement"
-        }
-
-        popup.setOnMenuItemClickListener { item ->
-            when (item.itemId) {
-                R.id.menu_player_lock -> {
-                    engageScreenLock()
-                    true
-                }
-                R.id.menu_player_cast -> {
-                    // Déclenche le picker Chromecast via le MediaRouteButton caché
-                    binding.pvPlayer.findViewById<androidx.mediarouter.app.MediaRouteButton>(
-                        R.id.btn_exo_cast
-                    )?.performClick()
-                    true
-                }
-                R.id.menu_player_wireless -> {
-                    try {
-                        val intent = android.content.Intent("android.settings.CAST_SETTINGS")
+        // (icône, libellé, action) — l'ordre de cette liste EST l'ordre affiché.
+        val entrees = listOf<Triple<Int, String, () -> Unit>>(
+            Triple(R.drawable.exo_styled_controls_settings, "Paramètres") {
+                binding.settings.show()
+            },
+            Triple(R.drawable.exo_styled_controls_lock, "Verrouiller l'écran") {
+                engageScreenLock()
+            },
+            Triple(R.drawable.ic_cast_24dp, "Diffuser (Chromecast)") {
+                binding.pvPlayer.findViewById<androidx.mediarouter.app.MediaRouteButton>(
+                    R.id.btn_exo_cast
+                )?.performClick()
+            },
+            Triple(R.drawable.ic_screen_share, "Affichage sans fil (TV)") {
+                try {
+                    startActivity(
+                        android.content.Intent("android.settings.CAST_SETTINGS")
                             .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                        startActivity(intent)
+                    )
+                } catch (_: Throwable) {
+                    try {
+                        startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
                     } catch (_: Throwable) {
-                        try {
-                            startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
-                        } catch (_: Throwable) {
-                            Toast.makeText(requireContext(), "Impossible d'ouvrir les paramètres Cast", Toast.LENGTH_SHORT).show()
-                        }
+                        Toast.makeText(ctx, "Impossible d'ouvrir les paramètres Cast", Toast.LENGTH_SHORT).show()
                     }
-                    true
                 }
-                R.id.menu_player_pip -> {
-                    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O) {
-                        Toast.makeText(requireContext(), getString(R.string.player_picture_in_picture_not_supported), Toast.LENGTH_SHORT).show()
-                    } else {
-                        enterPIPMode()
-                    }
-                    true
+            },
+            Triple(R.drawable.exo_styled_controls_picture_in_picture, "Picture-in-Picture") {
+                if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O) {
+                    Toast.makeText(ctx, getString(R.string.player_picture_in_picture_not_supported), Toast.LENGTH_SHORT).show()
+                } else {
+                    enterPIPMode()
                 }
-                R.id.menu_player_record -> {
-                    val server = currentServer
-                    if (server != null) {
-                        handleLiveRecord(server)
-                        updateLiveRecordButton()
-                    }
-                    true
+            },
+            Triple(
+                android.R.drawable.ic_menu_save,
+                if (enregistreEnCours) "Arrêter l'enregistrement" else "Enregistrer"
+            ) {
+                currentServer?.let { serveur ->
+                    handleLiveRecord(serveur)
+                    updateLiveRecordButton()
                 }
-                R.id.menu_player_aspect_ratio -> {
-                    val newResize = UserPreferences.playerResize.next()
-                    zoomToast?.cancel()
-                    zoomToast = Toast.makeText(requireContext(), newResize.stringRes, Toast.LENGTH_SHORT)
-                    zoomToast?.show()
-                    UserPreferences.playerResize = newResize
-                    updatePlayerScale()
-                    true
-                }
-                R.id.menu_player_settings -> {
-                    binding.settings.show()
-                    true
-                }
-                R.id.menu_player_external -> {
-                    // 2026-06-29 : délègue au lancement fonctionnel (chooser) déjà câblé
-                    // sur btnExoExternalPlayer — l'utilisateur choisit son lecteur (VLC, MX…).
-                    binding.pvPlayer.controller.binding.btnExoExternalPlayer.performClick()
-                    true
-                }
-                else -> false
+            },
+            Triple(R.drawable.exo_styled_controls_aspect_ratio, "Ratio d'affichage") {
+                val nouveau = UserPreferences.playerResize.next()
+                zoomToast?.cancel()
+                zoomToast = Toast.makeText(ctx, nouveau.stringRes, Toast.LENGTH_SHORT)
+                zoomToast?.show()
+                UserPreferences.playerResize = nouveau
+                updatePlayerScale()
+            },
+            Triple(R.drawable.exo_styled_controls_external_player, "Lecteur externe") {
+                // 2026-06-29 : délègue au lancement fonctionnel (chooser) déjà câblé
+                // sur btnExoExternalPlayer — l'utilisateur choisit son lecteur (VLC, MX…).
+                binding.pvPlayer.controller.binding.btnExoExternalPlayer.performClick()
+            },
+        )
+
+        val feuille = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = dp(20).toFloat()
+                setColor(android.graphics.Color.parseColor("#15171C"))
+            }
+            setPadding(0, dp(14), 0, dp(10))
+        }
+
+        val dialogue = android.app.Dialog(ctx, android.R.style.Theme_Translucent_NoTitleBar)
+
+        // En-tête : titre à gauche, ✕ à droite — comme la page Paramètres.
+        val enTete = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(dp(18), 0, dp(10), dp(10))
+        }
+        enTete.addView(
+            android.widget.TextView(ctx).apply {
+                text = "Options"
+                setTextColor(android.graphics.Color.WHITE)
+                textSize = 18f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+            },
+            android.widget.LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        enTete.addView(
+            android.widget.ImageView(ctx).apply {
+                setImageResource(R.drawable.ic_player_settings_close)
+                setColorFilter(android.graphics.Color.WHITE)
+                setPadding(dp(6), dp(6), dp(6), dp(6))
+                setOnClickListener { dialogue.dismiss() }
+            },
+            android.widget.LinearLayout.LayoutParams(dp(34), dp(34))
+        )
+        feuille.addView(enTete)
+
+        val inflater = android.view.LayoutInflater.from(ctx)
+        entrees.forEach { (icone, libelle, action) ->
+            val ligne = inflater.inflate(R.layout.item_setting_mobile, feuille, false)
+            ligne.findViewById<android.widget.ImageView>(R.id.iv_setting_icon).apply {
+                setImageResource(icone)
+                visibility = View.VISIBLE
+            }
+            ligne.findViewById<View>(R.id.v_setting_color).visibility = View.GONE
+            ligne.findViewById<android.widget.TextView>(R.id.tv_setting_main_text).text = libelle
+            ligne.findViewById<View>(R.id.tv_setting_sub_text).visibility = View.GONE
+            ligne.findViewById<View>(R.id.iv_setting_is_selected).visibility = View.GONE
+            ligne.findViewById<View>(R.id.iv_setting_enter).visibility = View.VISIBLE
+            ligne.setOnClickListener {
+                dialogue.dismiss()
+                action()
+            }
+            feuille.addView(ligne)
+        }
+
+        val defilement = android.widget.ScrollView(ctx).apply {
+            isVerticalScrollBarEnabled = false
+            addView(feuille)
+        }
+
+        dialogue.setContentView(defilement)
+        dialogue.window?.apply {
+            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
+            // Ancré sous le bouton « ⋮ », comme le faisait l'ancien popup.
+            val pos = IntArray(2).also { anchor.getLocationOnScreen(it) }
+            attributes = attributes.apply {
+                gravity = android.view.Gravity.TOP or android.view.Gravity.END
+                width = dp(300)
+                height = ViewGroup.LayoutParams.WRAP_CONTENT
+                x = dp(8)
+                y = pos[1] + anchor.height
             }
         }
-        popup.show()
+        dialogue.show()
     }
 
     /** Active l'overlay verrou : intercepte tous les taps, bloque les
@@ -4083,10 +4153,15 @@ class PlayerMobileFragment : Fragment() {
                 } catch (_: Throwable) { /* WiTv lacks this method, ignore */ }
             }
         }
-        val variants = PlayerSettingsView.Settings.ChannelVariant.list
-        val removed = variants.removeAll { it.id == server.id }
-        if (removed && _binding != null) {
-            Log.d("PlayerMobileFragment", "Pruned broken variant: ${server.name}")
+        // ── 2026-08-06 (user : « on ne doit pas écarter les serveurs, le rouge c'est juste
+        //   visuel ») ────────────────────────────────────────────────────────────────────
+        //   On RETIRAIT la variante de la liste après un échec. Conséquence gênante et
+        //   signalée : la liste des serveurs n'était pas la même au premier lancement qu'au
+        //   second, sans que l'utilisateur comprenne pourquoi. Désormais on se contente de
+        //   la noter comme essayée — `TitleServerStatus` l'affiche en rouge, elle reste
+        //   visible et cliquable si l'utilisateur veut retenter.
+        if (_binding != null) {
+            Log.d("PlayerMobileFragment", "Variante en échec (conservée, marquée) : ${server.name}")
             binding.settings.refreshChannelVariantList()
         }
     }
@@ -4095,16 +4170,12 @@ class PlayerMobileFragment : Fragment() {
         val variants = PlayerSettingsView.Settings.ChannelVariant.list
         if (variants.isEmpty()) return false
 
-        // Mark the failed server's variant as tried AND remove it from the visible list
-        // so the user doesn't see broken entries piling up. Re-add happens automatically
-        // on the next session (Phase 3 will re-emit working variants).
+        // 2026-08-06 : la variante en échec est marquée comme essayée mais RESTE affichée
+        //   (décision user : « le rouge c'est juste visuel, on n'écarte pas »). Le choix du
+        //   repli ci-dessous s'appuie sur `triedChannelVariantIds`, pas sur le retrait.
         if (failedServer != null) {
             triedChannelVariantIds.add(failedServer.id)
-            val removed = variants.removeAll { it.id == failedServer.id }
-            if (removed && _binding != null) {
-                Log.d("PlayerMobileFragment", "Removed broken variant from Chaîne page: ${failedServer.name}")
-                binding.settings.refreshChannelVariantList()
-            }
+            if (_binding != null) binding.settings.refreshChannelVariantList()
         }
 
         // Find the first untried variant
@@ -4529,6 +4600,13 @@ class PlayerMobileFragment : Fragment() {
             adaptiveQualityGovernor?.reset()
         }
         currentServer = server
+        // 2026-08-02 (« chaque hébergeur a son propre format ») : on identifie l'hébergeur de ce
+        //   flux AVANT d'appliquer l'échelle, pour que `UserPreferences.playerResize` renvoie le
+        //   format mémorisé pour lui (et non le dernier format utilisé, tous serveurs confondus).
+        UserPreferences.currentPlayerHost =
+            UserPreferences.hebergeurDe(server.name, video.source)
+        Log.d("PlayerMobileFragment", "format d'image → hébergeur=${UserPreferences.currentPlayerHost} mode=${UserPreferences.playerResize.name}")
+        updatePlayerScale()
         updatePlayerHeader()
         updateLiveRecordButton()
 
@@ -4631,7 +4709,16 @@ class PlayerMobileFragment : Fragment() {
             // 2026-07-31 (parité TV) : VIDZY ajouté — l'extracteur Vidzy résout via WebView et
             //   renvoie un User-Agent ; sans cette exclusion on recréait un DefaultHttpDataSource
             //   qui CONTOURNAIT Cronet (exigé par needsCronet("vidzy.")) → 403 sur u<N>.vidzy.cc.
-            if (!videoUa.isNullOrBlank() && videoUa != NetworkClient.USER_AGENT &&
+            // ⚠⚠ 2026-08-05 (parité TV) — NE PAS RECRÉER LA FABRIQUE POUR LES HÔTES DoH.
+            //   Diagnostiqué sur OnRegardeOu/`r66nv9ed.com`, bloqué au niveau DNS par le FAI :
+            //   `needsDoH()` construisait bien une fabrique OkHttp + DNS-over-HTTPS, puis ce
+            //   bloc la remplaçait par un `DefaultHttpDataSource` (DNS système) dès que
+            //   l'extracteur fournissait un User-Agent → `UnknownHostException (no network)`.
+            //   Le garde-fou n'existait que pour les hôtes Cronet. Voir le commentaire
+            //   détaillé dans PlayerTvFragment. L'UA reste posé par
+            //   `setDefaultRequestProperties` plus bas.
+            val exigeDoh = needsDoH(video.source)
+            if (!videoUa.isNullOrBlank() && videoUa != NetworkClient.USER_AGENT && !exigeDoh &&
                 !(sourceHost.contains("uqload") || sourceHost.contains("abyssa") || sourceHost.contains("abysscdn")
                     || sourceHost.contains("citron-edge") || sourceHost.contains("vidzy"))) {
                 try {
@@ -4767,13 +4854,35 @@ class PlayerMobileFragment : Fragment() {
                     it.contains("plexvod_") || it.contains("plexep::") ||
                     it.contains("plutomovie_") || it.contains("plutoep::")
                 }
+                // ── 2026-08-06 : PAS DE SOUS-TITRES SUR UN SERVEUR VF ───────────────────
+                //   User, capture à l'appui (Filemoon 1080p sous-titré) : « ça me choque
+                //   qu'on mette automatiquement les sous-titres sur des films français… si
+                //   VOSTFR tu actives, si VF tu désactives. »
+                //   La règle posée dans `PlayerViewModel.reglerSousTitresSelonLangue` ne
+                //   suffisait pas ici : elle ne gouverne que la liste `video.subtitles`.
+                //   Or Filemoon rend un manifeste HLS avec les pistes EMBARQUÉES
+                //   (« …lang/fre/…,lang/eng/… ») ; c'est ExoPlayer qui les choisissait, et
+                //   c'est même nous qui l'y invitions par les deux lignes ci-dessous —
+                //   préférence FR + acceptation des pistes non étiquetées.
+                //   Sur un serveur VF, on coupe donc carrément le type « texte ».
+                val serveurVf = currentServer?.name?.lowercase()?.let { n ->
+                    when {
+                        Regex("""(^|[^a-z])vf([^a-z]|$)""").containsMatchIn(n) -> true
+                        n.contains("vostfr") || n.contains("sous-titr") -> false
+                        Regex("""(^|[^a-z])vo([^a-z]|$)""").containsMatchIn(n) -> false
+                        else -> true   // aucun marqueur : application française → VF présumé
+                    }
+                } ?: true
+
                 p.trackSelectionParameters = p.trackSelectionParameters
                     .buildUpon()
-                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, serveurVf)
                     .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                    .setPreferredTextLanguages("fr", "fre", "fra")
-                    .setSelectUndeterminedTextLanguage(true)
                     .apply {
+                        if (!serveurVf) {
+                            setPreferredTextLanguages("fr", "fre", "fra")
+                            setSelectUndeterminedTextLanguage(true)
+                        }
                         if (isPlexPlutoVod) {
                             setPreferredAudioLanguages("fr", "fre", "fra")
                         }
@@ -5332,6 +5441,9 @@ class PlayerMobileFragment : Fragment() {
                 binding.pvPlayer.keepScreenOn = isPlaying || UserPreferences.keepScreenOnWhenPaused
 
                 if (isPlaying) {
+                    // 2026-08-07 : lecture réellement démarrée (parité TV) — au-delà de ce
+                    //   point, le raccourci cœur ne coupe plus rien. Cf. PlayerViewModel.
+                    viewModel.signalerLectureDemarree()
                     startProgressHandler()
                 } else {
                     stopProgressHandler()
@@ -6589,14 +6701,45 @@ class PlayerMobileFragment : Fragment() {
 
     private fun showSkipIntroButton(show: Boolean) {
         val btnSkipIntro = binding.pvPlayer.controller.binding.btnSkipIntro
+        val c = binding.pvPlayer.controller.binding
         if (show && btnSkipIntro.isGone) {
             val fadeIn = android.view.animation.AnimationUtils.loadAnimation(requireContext(), R.anim.fade_in)
             btnSkipIntro.startAnimation(fadeIn)
             btnSkipIntro.isVisible = true
+            // 2026-08-02 (retour testeur, navigation à la TÉLÉCOMMANDE sur l'interface mobile) :
+            //   « Passer l'intro » doit s'intercaler sur l'axe VERTICAL entre Lecture/Pause et la
+            //   barre de progression, et le trajet doit être IDENTIQUE dans les deux sens :
+            //     Lecture/Pause --bas--> Passer l'intro --bas--> barre
+            //     barre --haut--> Passer l'intro --haut--> Lecture/Pause
+            //   Ce chaînage existait déjà côté TV (cf. PlayerTvFragment) mais pas ici : le layout
+            //   mobile ayant été pensé pour le tactile, il ne définit aucun `nextFocus`, et Android
+            //   devinait le trajet d'après la position des vues — d'où le parcours incohérent.
+            //   Ces attributs sont sans effet au doigt : le tactile n'est pas impacté.
+            val skipId = btnSkipIntro.id
+            c.exoPlayPause.nextFocusDownId = skipId
+            c.exoRew.nextFocusDownId = skipId
+            c.exoFfwd.nextFocusDownId = skipId
+            c.btnCustomPrev.nextFocusDownId = skipId
+            c.btnCustomNext.nextFocusDownId = skipId
+            c.exoProgress.nextFocusUpId = skipId
+            btnSkipIntro.nextFocusUpId = c.exoPlayPause.id
+            btnSkipIntro.nextFocusDownId = c.exoProgress.id
+            // Gauche/droite bouclent sur lui-même : le bouton est seul sur sa ligne, sortir
+            //   latéralement enverrait le focus dans un contrôle éloigné de l'autre bord.
+            btnSkipIntro.nextFocusLeftId = skipId
+            btnSkipIntro.nextFocusRightId = skipId
         } else if (!show && btnSkipIntro.isVisible) {
             val fadeOut = android.view.animation.AnimationUtils.loadAnimation(requireContext(), R.anim.fade_out)
             btnSkipIntro.startAnimation(fadeOut)
             btnSkipIntro.isGone = true
+            // Le bouton disparaît → on rétablit le trajet direct, sinon le focus filerait vers une
+            //   vue masquée et Android repartirait dans une recherche géométrique hasardeuse.
+            c.exoPlayPause.nextFocusDownId = R.id.exo_progress
+            c.exoRew.nextFocusDownId = R.id.exo_progress
+            c.exoFfwd.nextFocusDownId = R.id.exo_progress
+            c.btnCustomPrev.nextFocusDownId = R.id.exo_progress
+            c.btnCustomNext.nextFocusDownId = R.id.exo_progress
+            c.exoProgress.nextFocusUpId = c.exoPlayPause.id
         }
     }
 
@@ -7289,8 +7432,10 @@ class PlayerMobileFragment : Fragment() {
         //   qualité Auto (qualityHeight == null). Descend sur rebuffers répétés,
         //   remonte quand stable. Recréé à chaque rebuild de player.
         adaptiveQualityTicker?.cancel()
+        // 2026-08-02 : soumis au réglage `baisseQualiteAuto`, DÉSACTIVÉ par défaut (cf. TV).
         adaptiveQualityGovernor = com.streamflixreborn.streamflix.utils.AdaptiveQualityGovernor(player) {
-            !isLiveIptvHere && UserPreferences.qualityHeight == null
+            UserPreferences.baisseQualiteAuto &&
+                !isLiveIptvHere && UserPreferences.qualityHeight == null
         }
         adaptiveQualityTicker = viewLifecycleOwner.lifecycleScope.launch {
             while (_binding != null) {

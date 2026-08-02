@@ -53,6 +53,10 @@ class Category(
     companion object {
         const val FEATURED = ""
         const val CONTINUE_WATCHING = "Continue Watching"
+
+        /** 2026-08-06 : suggestions bâties sur les derniers titres regardés.
+         *  Placée JUSTE SOUS « Continuer à regarder ». Cf. SuggestionsPourVous. */
+        const val POUR_VOUS = "Pour vous"
         const val FAVORITE_MOVIES = "Favorite movies"
         const val FAVORITE_TV_SHOWS = "Favorite TV shows"
     }

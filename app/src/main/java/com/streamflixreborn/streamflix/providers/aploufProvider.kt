@@ -23,6 +23,7 @@ import com.streamflixreborn.streamflix.utils.TitleNormalizer
 import com.streamflixreborn.streamflix.utils.TmdbUtils
 import com.streamflixreborn.streamflix.utils.UserPreferences
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import android.util.Log
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -449,9 +450,88 @@ object aploufProvider : Provider, ProviderPortalUrl, ProviderConfigUrl {
      * This function is necessary because the provider's domain frequently changes.
      * We fetch the latest URL from a dedicated website that tracks these changes.
      */
+    /**
+     * 2026-08-07 — MIROIRS CONNUS, essayés AVANT la cascade de portails.
+     *
+     * Mesuré : la découverte historique enchaîne TROIS chargements de pages HTML (~300 Ko
+     *   chacune) en série — portail, puis lien « kidraz », puis `a#kidrazc` — avant la moindre
+     *   recherche. Relevé sur la box : `search('Spider-Man : No Way Home') → 1 résultat en
+     *   16 145 ms`, alors que l'API du site répond en 2 à 107 ms.
+     *
+     * Ce sont des FAÇADES de la même plateforme : aplouf, yablom, obrigoz, motomaz et dospiv
+     *   servent le même catalogue (vérifié : recherche « spider » → 8 titres identiques, même
+     *   ordre) et résolvent sur les mêmes IP Cloudflare. Aucun n'est plus rapide qu'un autre
+     *   (33 à 222 ms, trois mesures chacun) — l'intérêt de la liste n'est donc PAS la vitesse
+     *   mais la survie : ils se renomment en chaîne (dospiv → motomaz → obrigoz), et tant qu'un
+     *   seul répond la source continue de fonctionner.
+     *
+     * ⚠ Chaque façade a son PROPRE dossier (`zaxd03o2n0gfpub`, `euvcw7`, `2662df1`…), qui change
+     *   aussi. On ne le code donc jamais en dur : la racine redirige vers `/<dossier>/home/<nom>`
+     *   et c'est cette URL finale qu'on retient.
+     *
+     * La cascade de portails reste EN SECOURS, inchangée : si aucun miroir ne répond (tous
+     *   renommés d'un coup), on repart d'elle et on réapprend l'adresse.
+     */
+    private val MIROIRS_CONNUS = listOf(
+        "https://www.aplouf.com/",
+        "https://yablom.com/",
+        "https://obrigoz.com/",
+        "https://motomaz.com/",
+        "https://dospiv.com/",
+    )
+
+    /**
+     * Suit la racine d'un miroir et renvoie l'URL d'accueil réelle (`/<dossier>/home/<nom>`),
+     * ou null si le miroir ne répond pas ou n'est plus une vraie page du site.
+     */
+    private suspend fun essayerMiroir(racine: String): String? = runCatching {
+        // ⚠ 2026-08-07 — La racine NE redirige PAS (vérifié : 200, `redirected=false`, aucun
+        //   `/home/` dans le HTML). C'est du JavaScript qui compose l'adresse dans le navigateur.
+        //   Le dossier est cependant présent en clair dans un `<a href="…">` en tête de <body> :
+        //       <a id="aploufc"      href="zaxd03o2n0gfpub">     (aplouf)
+        //       <a href="2662df1"    id="acceuilda1ac">          (obrigoz)
+        //   L'`id` change d'un miroir à l'autre : on s'appuie donc sur la FORME du href — un
+        //   jeton nu, sans slash ni protocole. C'est la même mécanique que le `a#kidrazc` du
+        //   portail historique, en plus tolérant.
+        val url = racine.toHttpUrl()
+        val service = Service.buildAddressFetcher(url)
+        val doc = withTimeoutOrNull(4_000L) {
+            service.loadPage(url.encodedPath.removePrefix("/"))
+        } ?: return@runCatching null
+
+        val dossier = doc.select("body a[href]")
+            .map { it.attr("href").trim() }
+            .firstOrNull { it.matches(Regex("^[a-z0-9]{5,20}$")) }
+            ?: return@runCatching null
+
+        // « www.aplouf.com » → « aplouf » : le segment final de l'accueil porte le nom du site.
+        val nom = url.host.removePrefix("www.").substringBefore('.')
+        "${racine.trimEnd('/')}/$dossier/home/$nom"
+    }.getOrNull()
+
     override suspend fun onChangeUrl(forceRefresh: Boolean): String {
         changeUrlMutex.withLock {
+            // ── Voie rapide : un miroir connu répond-il ? (~150 ms contre ~16 s)
+            //   ⚠ NE PAS sortir d'ici par `return` : la fin de la fonction (Service.build,
+            //   homePath, serviceInitialized) DOIT s'exécuter. On pose juste un drapeau qui
+            //   désarme la cascade de portails.
+            var miroirTrouve = false
             if (forceRefresh || UserPreferences.getProviderCache(this,UserPreferences.PROVIDER_AUTOUPDATE) != "false") {
+                for (miroir in MIROIRS_CONNUS) {
+                    val accueil = essayerMiroir(miroir) ?: continue
+                    UserPreferences.setProviderCache(this, UserPreferences.PROVIDER_URL, accueil)
+                    UserPreferences.setProviderCache(
+                        this, UserPreferences.PROVIDER_LOGO,
+                        miroir.trimEnd('/') + "/favicon.png"
+                    )
+                    android.util.Log.i("aploufProvider", "miroir retenu : $accueil")
+                    miroirTrouve = true
+                    break
+                }
+                if (!miroirTrouve) android.util.Log.w(
+                    "aploufProvider", "aucun miroir connu ne répond → cascade de portails")
+            }
+            if (!miroirTrouve && (forceRefresh || UserPreferences.getProviderCache(this,UserPreferences.PROVIDER_AUTOUPDATE) != "false")) {
                 val url = portalUrl.toHttpUrl()
                 val addressService = Service.buildAddressFetcher(url)
                 try {

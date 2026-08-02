@@ -203,13 +203,55 @@ class TvShowMobileFragment : Fragment() {
         )
     }
 
+    /**
+     * Lance en sourdine la recherche des serveurs de secours, dès l'ouverture de la fiche.
+     *
+     * ── 2026-08-06 (user, deux fois de suite) : « le serveur que je convoite n'est pas encore
+     *   arrivé ; par contre si je quitte et je reviens, il arrive. » ──────────────────────
+     *   Vérifié au journal sur deux lancements consécutifs de la même série : rien n'est
+     *   écarté, tout est une question de DÉLAI. À froid, FrenchStream met 34 s à rendre ses
+     *   8 serveurs et 1Jour1Film 31 s pour les 3 que le user attendait ; au second passage,
+     *   caches chauds, 13 s et 11 s. Le lecteur, lui, démarre en quelques secondes.
+     *   Les secondes passées sur la fiche à choisir un épisode sont gratuites : on s'en sert.
+     *   Aucun effet visible, aucun blocage — on ne fait que remplir les caches.
+     */
+    private fun prechaufferServeurs(tvShow: TvShow) {
+        val saison = tvShow.seasons.firstOrNull() ?: return
+        com.streamflixreborn.streamflix.utils.BackupRegistry.prechauffer(
+            tmdbId = tvShow.id.takeIf { id -> id.all { it.isDigit() } },
+            videoType = com.streamflixreborn.streamflix.models.Video.Type.Episode(
+                id = "",
+                number = 1,
+                title = null,
+                poster = null,
+                overview = null,
+                season = com.streamflixreborn.streamflix.models.Video.Type.Episode.Season(
+                    number = saison.number,
+                    title = saison.title,
+                ),
+                tvShow = com.streamflixreborn.streamflix.models.Video.Type.Episode.TvShow(
+                    id = tvShow.id,
+                    title = tvShow.title,
+                    poster = tvShow.poster,
+                    banner = tvShow.banner,
+                    releaseDate = null,
+                    imdbId = null,
+                ),
+            ),
+            titleHint = tvShow.title,
+        )
+    }
+
     private fun displayTvShow(tvShow: TvShow) {
+        prechaufferServeurs(tvShow)
+
         binding.ivTvShowBanner.loadTvShowBanner(tvShow) {
             transition(DrawableTransitionOptions.withCrossFade())
         }
 
         appAdapter.submitList(listOfNotNull(
             tvShow.apply { itemType = AppAdapter.Type.TV_SHOW_MOBILE },
+
 
             tvShow.takeIf {
                     // 2026-05-04 : voir TvShowTvFragment pour le détail. On

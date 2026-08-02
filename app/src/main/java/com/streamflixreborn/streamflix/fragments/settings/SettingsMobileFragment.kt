@@ -687,13 +687,15 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             true
         }
 
-        findPreference<Preference>("p_settings_extractor_stats")?.setOnPreferenceClickListener {
-            findNavController().navigate(R.id.fragment_extractor_stats_mobile)
-            true
-        }
-
         findPreference<Preference>("p_settings_extractor_toggle")?.setOnPreferenceClickListener {
             showExtractorToggleDialog()
+            true
+        }
+        // 2026-08-06 : liens désactivés par appui long dans la liste des serveurs du lecteur.
+        //   Le testeur voulait pouvoir revenir en arrière ; sans cet écran la désactivation
+        //   serait irréversible. Réactivation à l'unité ou en bloc.
+        findPreference<Preference>("p_settings_liens_desactives")?.setOnPreferenceClickListener {
+            afficherLiensDesactives()
             true
         }
 
@@ -810,6 +812,17 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             isChecked = UserPreferences.serverAutoSubtitlesDisabled
             setOnPreferenceChangeListener { _, newValue ->
                 UserPreferences.serverAutoSubtitlesDisabled = newValue as Boolean
+                true
+            }
+        }
+
+        // 2026-08-06 : la case était bien affichée mais rien ne la reliait à la préférence
+        //   côté mobile (seul SettingsTvFragment faisait ce câblage). On l'ajoute, comme
+        //   pour la TV, afin que l'état affiché et l'état réel ne puissent pas diverger.
+        findPreference<SwitchPreference>("player_exit_confirm")?.apply {
+            isChecked = UserPreferences.playerExitConfirm
+            setOnPreferenceChangeListener { _, newValue ->
+                UserPreferences.playerExitConfirm = newValue as Boolean
                 true
             }
         }
@@ -1025,6 +1038,20 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
         // 2026-07-25 : Android Auto — bascule RADIO ↔ VIDÉO (exclusifs : un service média actif
         // fait classer ONYX en app audio et supprime l'écran vidéo de la voiture).
         // Juste sous la bascule : choisir une vidéo du téléphone (elle se projette aussi en voiture).
+        // 2026-08-06 : réinitialisation de la rangée « Pour vous ». On n'efface RIEN — on
+        //   mémorise l'instant présent, et seuls les titres regardés ensuite alimenteront les
+        //   suggestions. « Continuer à regarder » et les favoris sont intacts.
+        findPreference<Preference>("p_reset_suggestions")?.setOnPreferenceClickListener {
+            com.streamflixreborn.streamflix.utils.UserPreferences.suggestionsReinitialiseesLe =
+                System.currentTimeMillis()
+            android.widget.Toast.makeText(
+                context,
+                "« Pour vous » réinitialisé — la rangée se reconstruira au fil de vos prochains visionnages",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+            true
+        }
+
         findPreference<Preference>("p_settings_local_videos")?.setOnPreferenceClickListener {
             context?.let { ctx ->
                 // 2026-07-29 : le bouton « 📁 Tous les dossiers » ouvre « Accès à tous les fichiers »
@@ -2154,5 +2181,33 @@ class SettingsMobileFragment : PreferenceFragmentCompat() {
             )
             iv.alpha = if (isFav) 1.0f else 0.4f
         }
+    }
+
+    /**
+     * 2026-08-06 : écran de réactivation des liens désactivés par appui long dans la liste
+     *   des serveurs du lecteur. Sans lui, la désactivation serait sans retour — c'est
+     *   précisément ce que le testeur demandait d'éviter.
+     */
+    private fun afficherLiensDesactives() {
+        val ctx = requireContext()
+        val liens = com.streamflixreborn.streamflix.utils.LiensDesactives.tous(ctx)
+        if (liens.isEmpty()) {
+            android.widget.Toast.makeText(ctx, "Aucun lien désactivé", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        val ids = liens.keys.toList()
+        val noms = ids.map { liens[it] ?: it }.toTypedArray()
+        androidx.appcompat.app.AlertDialog.Builder(ctx, com.streamflixreborn.streamflix.R.style.OnyxDialog)
+            .setTitle("Liens désactivés (${ids.size})")
+            .setItems(noms) { _, position ->
+                com.streamflixreborn.streamflix.utils.LiensDesactives.reactiver(ctx, ids[position])
+                android.widget.Toast.makeText(ctx, "« ${noms[position]} » réactivé", android.widget.Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton("Tout réactiver") { _, _ ->
+                com.streamflixreborn.streamflix.utils.LiensDesactives.toutReactiver(ctx)
+                android.widget.Toast.makeText(ctx, "Tous les liens ont été réactivés", android.widget.Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Fermer", null)
+            .show()
     }
 }

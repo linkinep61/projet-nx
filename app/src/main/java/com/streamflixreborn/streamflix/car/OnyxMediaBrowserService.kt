@@ -147,9 +147,22 @@ class OnyxMediaBrowserService : MediaBrowserServiceCompat() {
                             items.add(playable("music::${m.uri}", m.title, m.artUri))
                         }
                     }
-                    FOLDER_MUSIC -> MusicFavoritesStore.all().forEach { t ->
-                        items.add(playable("music::${t.url}", t.title, null))
-                    }
+                    // 2026-08-02 : la playlist peut contenir des ARTISTES et des ALBUMS mis en
+                    //   favori depuis le téléphone. Ceux-là s'ouvrent (dossier) au lieu de se
+                    //   jouer : leur « url » stockée est en réalité leur identifiant.
+                    FOLDER_MUSIC -> MusicFavoritesStore.all()
+                        .filter { it.url.isNotBlank() }
+                        .forEach { t ->
+                            // Le libellé enregistré côté téléphone porte un emoji de type
+                            //   (🎤 artiste / 💿 album) : inutile en voiture, où l'icône du
+                            //   dossier joue déjà ce rôle et où la place est comptée.
+                            val titre = t.title.removePrefix("🎤 ").removePrefix("💿 ")
+                            when {
+                                t.url.startsWith(ZF_ARTIST_PREFIX) || t.url.startsWith(ZF_ALBUM_PREFIX) ->
+                                    items.add(browsable(t.url, titre))
+                                else -> items.add(playable("music::${t.url}", titre, null))
+                            }
+                        }
                     FOLDER_RADIO -> {
                         val favIds = runCatching { RadioFavoritesStore.all() }.getOrDefault(emptySet())
                         val favs = allStations().filter { it.id in favIds && !it.streamUrl.isNullOrBlank() }
@@ -168,7 +181,48 @@ class OnyxMediaBrowserService : MediaBrowserServiceCompat() {
                             .distinct().sorted()
                         letters.forEach { l -> items.add(browsable("$GRP_PREFIX$l", l)) }
                     }
-                    else -> if (parentId.startsWith(GRP_PREFIX)) {
+                    // ── Profondeur 1 : discographie d'un ARTISTE ──────────────────────
+                    else -> if (parentId.startsWith(ZF_ARTIST_PREFIX)) {
+                        val albums = runCatching {
+                            kotlinx.coroutines.runBlocking {
+                                com.streamflixreborn.streamflix.providers.ZeffyrMusicProvider
+                                    .getArtistAlbums(parentId.removePrefix(ZF_ARTIST_PREFIX))
+                            }
+                        }.getOrDefault(emptyList())
+                        albums.forEach { alb ->
+                            items.add(browsable("$ZF_ALBUM_PREFIX${alb.id}", alb.titre, artUri = alb.pochette))
+                        }
+                    } else if (parentId.startsWith(ZF_ALBUM_PREFIX)) {
+                        // ── Profondeur 2 : pistes de l'ALBUM, dans l'ordre du disque ──
+                        val pistes = runCatching {
+                            kotlinx.coroutines.runBlocking {
+                                com.streamflixreborn.streamflix.providers.ZeffyrMusicProvider
+                                    .getAlbumTracks(parentId.removePrefix(ZF_ALBUM_PREFIX))
+                            }
+                        }.getOrDefault(emptyList())
+                        // Contexte de ⏭/⏮ : l'album entier s'enchaîne du 1er au dernier titre.
+                        //   Mémorisé de DEUX façons — dans `lastMusicSearch` (chemin historique)
+                        //   et, surtout, dans l'identifiant de chaque piste, qui survit au cache
+                        //   d'Android Auto comme au redémarrage du service (cf. MUSIC_ALBUM_PREFIX).
+                        val idAlbum = parentId.removePrefix(ZF_ALBUM_PREFIX)
+                        val paires = pistes.map { it.url to it.title }
+                        lastMusicSearch = paires
+                        albumTracksCache = albumTracksCache + (idAlbum to paires)
+                        // 2026-08-05 (user : « la jaquette est bien sur l'album, mais une fois
+                        //   qu'on a mis play il n'y a pas la jaquette dans le petit carré du
+                        //   lecteur ») : la vignette n'existait QUE sur l'élément de liste.
+                        //   `albumTracksCache` ne retient que l'URL et le titre, donc
+                        //   `onPlayFromMediaId` n'avait rien à donner à `markPlaying` et passait
+                        //   `null`. On alimente donc `phoneArt` — la table « morceau → pochette »
+                        //   déjà utilisée par les favoris, la recherche et les fichiers locaux —
+                        //   ce qui rend la carte de lecture identique aux autres chemins.
+                        phoneArt = phoneArt + pistes.mapNotNull { p ->
+                            p.thumbnail?.takeIf { it.isNotBlank() }?.let { p.url to it }
+                        }
+                        pistes.forEach { p ->
+                            items.add(playable("$MUSIC_ALBUM_PREFIX$idAlbum::${p.url}", p.title, p.thumbnail))
+                        }
+                    } else if (parentId.startsWith(GRP_PREFIX)) {
                         val letter = parentId.removePrefix(GRP_PREFIX)
                         val grp = allStations()
                             .filter { !it.streamUrl.isNullOrBlank() && groupLetter(it.name) == letter }
@@ -206,6 +260,25 @@ class OnyxMediaBrowserService : MediaBrowserServiceCompat() {
             try {
                 val q = query.trim()
                 if (q.isNotBlank()) {
+                    // ⚠ 2026-08-02 (user : « on ne voit pas l'artiste arriver en tête, on a les
+                    //   dossiers Local qui passent en premier ») : Android Auto affiche les
+                    //   résultats DANS L'ORDRE D'AJOUT, sans les regrouper. Les artistes et les
+                    //   albums doivent donc être ajoutés EN PREMIER, avant les radios et les
+                    //   fichiers locaux — sinon ils se retrouvent noyés en bas de liste.
+                    runCatching {
+                        kotlinx.coroutines.runBlocking {
+                            com.streamflixreborn.streamflix.providers.ZeffyrMusicProvider.searchArtists(q)
+                        }
+                    }.getOrDefault(emptyList()).take(10).forEach { art ->
+                        items.add(browsable("$ZF_ARTIST_PREFIX${art.id}", art.nom, artUri = art.image))
+                    }
+                    runCatching {
+                        kotlinx.coroutines.runBlocking {
+                            com.streamflixreborn.streamflix.providers.ZeffyrMusicProvider.searchAlbums(q)
+                        }
+                    }.getOrDefault(emptyList()).take(20).forEach { alb ->
+                        items.add(browsable("$ZF_ALBUM_PREFIX${alb.id}", alb.titre, artUri = alb.pochette))
+                    }
                     // Radios : filtre le catalogue local par nom
                     val radioHits = allStations()
                         .filter { !it.streamUrl.isNullOrBlank() && it.name.contains(q, ignoreCase = true) }
@@ -266,11 +339,19 @@ class OnyxMediaBrowserService : MediaBrowserServiceCompat() {
      * Dossier de la barre du haut. Un `iconRes` facultatif remplace les emojis dans le titre :
      * Android Auto affiche alors une vraie icône + un libellé court (donc non tronqué).
      */
-    private fun browsable(id: String, title: String, iconRes: Int? = null): MediaBrowserCompat.MediaItem {
+    private fun browsable(
+        id: String,
+        title: String,
+        iconRes: Int? = null,
+        artUri: String? = null,
+    ): MediaBrowserCompat.MediaItem {
         val b = MediaDescriptionCompat.Builder().setMediaId(id).setTitle(title)
         if (iconRes != null) {
             runCatching { drawableToBitmap(iconRes) }.getOrNull()?.let { b.setIconBitmap(it) }
         }
+        // 2026-08-02 : portrait d'artiste / pochette d'album (ZeffyrMusic). Un dossier illustré
+        //   est bien plus lisible en voiture qu'une ligne de texte.
+        if (!artUri.isNullOrBlank()) runCatching { b.setIconUri(Uri.parse(artUri)) }
         return MediaBrowserCompat.MediaItem(b.build(), MediaBrowserCompat.MediaItem.FLAG_BROWSABLE)
     }
 
@@ -405,6 +486,58 @@ class OnyxMediaBrowserService : MediaBrowserServiceCompat() {
             val ctx = applicationContext
             try {
                 when {
+                    // ── Piste d'ALBUM : le contexte voyage dans l'identifiant ──────────
+                    //   `musalb::<idAlbum>::<url>` — on reconstitue l'album pour que ⏭/⏮
+                    //   enchaînent les titres du disque, même si Android Auto a servi la
+                    //   liste depuis son cache ou si le service vient de redémarrer.
+                    id.startsWith(MUSIC_ALBUM_PREFIX) -> {
+                        val reste = id.removePrefix(MUSIC_ALBUM_PREFIX)
+                        val idAlbum = reste.substringBefore("::")
+                        val url = reste.substringAfter("::")
+                        val connues = albumTracksCache[idAlbum]
+                        if (connues != null && connues.isNotEmpty()) {
+                            val i = connues.indexOfFirst { it.first == url }.coerceAtLeast(0)
+                            lastMusicSearch = connues
+                            CarRadioController.playPlaylist(ctx, connues, i, false)
+                            setNowPlayingMusic(url, connues[i].second)
+                            markPlaying(connues[i].second, "Album", phoneArt[url])
+                        } else {
+                            // Album inconnu de ce processus : on démarre la piste tout de
+                            //   suite (retour immédiat pour l'utilisateur) puis on recharge
+                            //   l'album EN TÂCHE DE FOND pour rétablir l'enchaînement.
+                            //   ⚠ Ne PAS charger ici de façon bloquante : `onPlayFromMediaId`
+                            //     s'exécute sur le fil principal, un appel réseau y gèlerait
+                            //     l'interface voiture.
+                            val titre = url.substringAfterLast('/').ifBlank { "Lecture" }
+                            CarRadioController.playPlaylist(ctx, listOf(url to titre), 0, false)
+                            setNowPlayingMusic(url, titre)
+                            Thread {
+                                val pistes = runCatching {
+                                    kotlinx.coroutines.runBlocking {
+                                        com.streamflixreborn.streamflix.providers.ZeffyrMusicProvider
+                                            .getAlbumTracks(idAlbum)
+                                    }
+                                }.getOrDefault(emptyList())
+                                if (pistes.isNotEmpty()) {
+                                    val paires = pistes.map { it.url to it.title }
+                                    albumTracksCache = albumTracksCache + (idAlbum to paires)
+                                    lastMusicSearch = paires
+                                    // Pochettes de l'album rechargé (cf. la note sur phoneArt
+                                    //   plus haut) — sinon la carte de lecture resterait nue
+                                    //   quand l'album n'était pas encore connu du processus.
+                                    phoneArt = phoneArt + pistes.mapNotNull { p ->
+                                        p.thumbnail?.takeIf { it.isNotBlank() }?.let { p.url to it }
+                                    }
+                                    val i = paires.indexOfFirst { it.first == url }.coerceAtLeast(0)
+                                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                        CarRadioController.playPlaylist(ctx, paires, i, false)
+                                        setNowPlayingMusic(url, paires[i].second)
+                                        markPlaying(paires[i].second, "Album", phoneArt[url])
+                                    }
+                                }
+                            }.start()
+                        }
+                    }
                     id.startsWith("music::") -> {
                         val url = id.removePrefix("music::")
                         val fav = MusicFavoritesStore.all().map { it.url to it.title }
@@ -530,5 +663,34 @@ class OnyxMediaBrowserService : MediaBrowserServiceCompat() {
         private const val FOLDER_PHONE = "onyx_phone_music"
         private const val FOLDER_PHONE_ALL = "onyx_phone_music_all" // toute la musique locale
         private const val PHONE_DIR_PREFIX = "onyx_phone_dir::"      // + dossier → morceaux du dossier
+        // 2026-08-02 : mêmes préfixes que dans l'application (RadioPickerDialog) — un favori posé
+        //   sur le téléphone doit rester ouvrable en voiture, et inversement.
+        private const val ZF_ARTIST_PREFIX = "zfartist::"            // + id → discographie
+        private const val ZF_ALBUM_PREFIX = "zfalbum::"              // + id → pistes de l'album
+
+        /**
+         * 2026-08-05 (bug user : « une fois qu'on a mis des albums en favoris, l'album s'affiche
+         * bien dans Android Auto, on peut cliquer sur la musique, mais on ne peut pas passer à
+         * la suivante de l'album »).
+         *
+         * Cause : le contexte de ⏭/⏮ n'existait QUE dans `lastMusicSearch`, rempli au moment où
+         * l'utilisateur ouvre le dossier de l'album. Or Android Auto met les dossiers en CACHE et
+         * ne rappelle pas forcément `onLoadChildren` — et le service média peut avoir été relancé
+         * entre-temps. Dans ces deux cas la mémoire était vide, la piste se jouait SEULE, et le
+         * bouton suivant n'avait nulle part où aller.
+         *
+         * Correctif : l'identifiant de l'album est désormais EMBARQUÉ dans l'identifiant de
+         * chaque piste. La lecture peut donc reconstituer l'album toute seule, sans dépendre
+         * d'un état volatile. Format : `musalb::<idAlbum>::<url>`.
+         *
+         * ⚠ L'ancien préfixe `music::` est CONSERVÉ tel quel pour tout le reste (favoris,
+         *   recherche, musiques du téléphone) : ne pas le remplacer, il est écrit en dur dans
+         *   plusieurs branches et dans les listes déjà mises en cache par Android Auto.
+         */
+        private const val MUSIC_ALBUM_PREFIX = "musalb::"
+
+        /** Pistes d'album déjà chargées, par identifiant d'album. Évite un appel réseau au
+         *  moment du clic (donc tout risque de blocage de l'interface voiture). */
+        @Volatile private var albumTracksCache: Map<String, List<Pair<String, String>>> = emptyMap()
     }
 }

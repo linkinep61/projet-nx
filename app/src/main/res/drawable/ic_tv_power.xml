@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-08-04 (user : « des logos super moches ») : version CONTOUR du bouton d'alimentation.
+     L'en-tête mélangeait deux familles graphiques — contours fins à gauche, glyphes pleins à
+     droite (alimentation, cadenas, télé). C'est ce contraste de poids qui salissait la barre,
+     pas la résolution. Style aligné sur les ic_hdr_* : trait 1.8, extrémités arrondies.
+     Fichier DÉDIÉ à l'en-tête : ic_power_off reste intact là où il sert déjà. -->
+<!-- 2026-08-04 : copie HAUTE DEFINITION pour l'en-tete TV. Dessin identique a ic_hdr_*, seule
+     la taille declaree passe de 24dp a 96dp : le vecteur est alors mis en cache a 96dp au lieu
+     d'etre etire depuis 24dp vers les 28dp affiches, ce qui supprime le crenelage des courbes.
+     Reserve aux vues de TAILLE FIXE (en-tete TV, 48dp) : sur une vue wrap_content, cette taille
+     declaree deviendrait la taille d'affichage et quadruplerait l'icone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M7,6a7.75,7.75 0 1 0 10,0" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M12,4l0,8" />
+</vector>

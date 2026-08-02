@@ -55,6 +55,33 @@ CREATE TABLE IF NOT EXISTS cf_bypass_sessions (
     expires_at INTEGER NOT NULL
 );
 
+-- ── SANTÉ DES EXTRACTEURS / SOURCES (télémétrie anti-faux-positifs) ──
+-- 2026-07-29 : un extracteur peut être bloqué dans UNE région et marcher ailleurs. On ne veut PAS
+-- de rapport tant que l'échec n'est pas confirmé sur PLUSIEURS pays/appareils. On stocke des
+-- événements bruts (léger, nettoyés > 7 jours par le cron) et le Worker décide « mort partout ».
+CREATE TABLE IF NOT EXISTS source_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,        -- nom extracteur/provider (ex "Filemoon", "Movix (natif)")
+    kind TEXT NOT NULL,          -- categorie : dead | blocked | streamdead | empty | source | provider
+    error_type TEXT,             -- parsing | dns-fail | 403 | head-fail | 0-source ...
+    ok INTEGER NOT NULL,         -- 1 = succes, 0 = echec
+    country TEXT,                -- pays (request.cf.country) — pose par le Worker
+    device_id TEXT NOT NULL,     -- id anonyme (UUID) pour compter les appareils distincts
+    app_version TEXT,
+    host TEXT,
+    ts INTEGER NOT NULL          -- epoch ms
+);
+CREATE INDEX IF NOT EXISTS idx_source_events_src_ts ON source_events(source, ts);
+CREATE INDEX IF NOT EXISTS idx_source_events_ts ON source_events(ts);
+
+-- Extracteurs déjà signalés (anti-doublon d'issue GitHub, cote Worker).
+CREATE TABLE IF NOT EXISTS source_reported (
+    source TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    reported_at INTEGER NOT NULL,
+    PRIMARY KEY (source, kind)
+);
+
 -- Index pour les requetes frequentes
 CREATE INDEX IF NOT EXISTS idx_rating_votes_key ON rating_votes(content_key);
 CREATE INDEX IF NOT EXISTS idx_language_votes_key ON language_votes(content_key);

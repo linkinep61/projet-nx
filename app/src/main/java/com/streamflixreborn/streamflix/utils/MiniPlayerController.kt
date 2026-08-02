@@ -626,6 +626,9 @@ object MiniPlayerController {
             }
             val serverName = availableServers.getOrNull(currentServerIndex)?.name ?: "?"
             Log.e(TAG, "Player error on server [$currentServerIndex] $serverName: ${error.message}")
+            // 2026-08-09 : on retient l'HÔTE fautif, pas seulement le lien. Voir
+            //   `HotesEnEchec` — un serveur qui refuse refuse en général tous ses flux.
+            availableServers.getOrNull(currentServerIndex)?.src?.let { HotesEnEchec.signaler(it) }
             cancelBufferingWatchdog()
             // v64 (user "Mon IPTV trop de crash retour home") : détecte 456
             //   Stalker rate-limit → STOP IMMÉDIATEMENT, pas de retry boucle.
@@ -832,6 +835,17 @@ object MiniPlayerController {
                     val chId = currentChannelId ?: return
                     val serverName = availableServers.getOrNull(currentServerIndex)?.name ?: ""
                     Log.d(TAG, "Playback ready on server [$currentServerIndex] $serverName")
+                    // 2026-08-09 : on MÉMORISE le serveur qui a réellement joué, pour le
+                    //   remonter en tête à la prochaine ouverture de cette chaîne. C'est le
+                    //   pendant de la relecture faite dans loadServers — sans cette ligne,
+                    //   la mémoire resterait vide et l'ordre du M3U reprendrait la main.
+                    runCatching {
+                        val ctxMem = appContext
+                        val sid = availableServers.getOrNull(currentServerIndex)?.id
+                        if (ctxMem != null && sid != null) {
+                            LastWorkingServer.save(ctxMem, chId, sid)
+                        }
+                    }
                     cancelBufferingWatchdog()
                     retryCycle = 0 // reset cycle counter on success
                     bufferingStartMs = 0L
@@ -2499,7 +2513,33 @@ object MiniPlayerController {
                 // qui ont récemment foiré (Vegeta server X down, OTF cert
                 // expiré, etc.) tombent au fond. La 1ère tentative tape
                 // donc le server le plus probable de marcher.
-                val servers = ExtractorRanker.rankServers(rawServers)
+                val classes = ExtractorRanker.rankServers(rawServers)
+                // 2026-08-09 (user : « dans ta fusion des liens t'as pas mis en priorité ce
+                //   qui fonctionnait ») — il a raison, et le mécanisme existait déjà :
+                //   `LastWorkingServer` mémorise le serveur qui a réellement joué. Le GRAND
+                //   lecteur s'en sert depuis longtemps, le mini lecteur ne le consultait pas
+                //   du tout — il prenait l'ordre du fichier M3U.
+                //   Conséquence mesurée sur CNN Portugal : lien mort en tête du M3U → 404 et
+                //   quelques secondes de noir À CHAQUE ouverture, alors que l'app savait déjà
+                //   lequel marchait. On remonte donc le dernier bon en première position.
+                val servers = try {
+                    // 2026-08-09 (user « les liens qui sont géobloqués, soit tu les mets en
+                    //   2e, soit on les vire ») — DÉCLASSEMENT PAR HÔTE.
+                    //   Mesuré sur les RTP : cinq flux différents, tous sur
+                    //   `streaming-live.rtp.pt`, échouent en bloc ; un sixième, sur un autre
+                    //   hôte, lit parfaitement. Quand un hôte refuse, il refuse TOUT — ce
+                    //   n'est pas le lien qui est mort, c'est le serveur qui nous ferme la
+                    //   porte. On repousse donc en fin de liste les liens des hôtes qui
+                    //   viennent d'échouer, au lieu de les réessayer en premier.
+                    //   Mémoire volontairement VOLATILE : un blocage est souvent temporaire
+                    //   (quota, géo, VPN qu'on rallume), donc tout s'oublie au redémarrage.
+                    val penalise = classes.sortedBy { s -> if (HotesEnEchec.estFautif(s.src)) 1 else 0 }
+                    val dernierBon = appContext?.let { LastWorkingServer.get(it, channelId) }
+                    if (dernierBon != null && penalise.any { it.id == dernierBon }) {
+                        Log.i(TAG, "serveur mémorisé remis en tête pour $channelName")
+                        penalise.sortedByDescending { it.id == dernierBon }
+                    } else penalise
+                } catch (_: Throwable) { classes }
 
                 // Start collecting progressive OLA TV servers (variants) — works for any
                 // IPTV provider since IptvProvider declares additionalServersFlow.
@@ -3006,9 +3046,50 @@ object MiniPlayerController {
                         .build(drmCallback)
                     dashFactory.setDrmSessionManagerProvider { drmSessionManager }
                 }
+                // ── 2026-08-09 : DRM DÉCLARÉ PAR LA PLAYLIST (#KODIPROP) ────────────────
+                //   Même bloc que dans PlayerTvFragment. Sans lui, le mini lecteur écrivait
+                //   « DRM=false » sur une chaîne ClearKey : le fournisseur transmettait bien
+                //   la clé, et c'est ici qu'elle se perdait. Le décodeur recevait alors des
+                //   images chiffrées et les jetait une par une (« discard bitstream »).
+                val drmDePlaylist = video.drmType != null && !video.drmLicense.isNullOrBlank()
+                if (drmDePlaylist) {
+                    val estClearKey = video.drmType == "clearkey"
+                    val rappel: androidx.media3.exoplayer.drm.MediaDrmCallback = if (estClearKey) {
+                        androidx.media3.exoplayer.drm.LocalMediaDrmCallback(
+                            video.drmLicense!!.toByteArray(Charsets.UTF_8)
+                        )
+                    } else {
+                        androidx.media3.exoplayer.drm.HttpMediaDrmCallback(
+                            video.drmLicense!!,
+                            androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                        )
+                    }
+                    // ⚠ `securityLevel=L3` est une propriété WIDEVINE. L'imposer à ClearKey
+                    //   fait échouer l'ouverture de session — mesuré sur l'Oppo :
+                    //   `DrmHalAidl: Failed to get vendor from drm plugin: -1010` puis
+                    //   Source error immédiate sur RTP Notícias. ClearKey n'a ni vendeur ni
+                    //   niveau de sécurité : on lui laisse le fournisseur par défaut.
+                    val fournisseur = if (estClearKey)
+                        androidx.media3.exoplayer.drm.FrameworkMediaDrm.DEFAULT_PROVIDER
+                    else androidx.media3.exoplayer.drm.ExoMediaDrm.Provider { u ->
+                        val drm = androidx.media3.exoplayer.drm.FrameworkMediaDrm.newInstance(u)
+                        try { drm.setPropertyString("securityLevel", "L3") } catch (_: Exception) {}
+                        drm
+                    }
+                    val gestionnaire = androidx.media3.exoplayer.drm.DefaultDrmSessionManager.Builder()
+                        .setUuidAndExoMediaDrmProvider(
+                            if (estClearKey) androidx.media3.common.C.CLEARKEY_UUID
+                            else androidx.media3.common.C.WIDEVINE_UUID,
+                            fournisseur,
+                        )
+                        .setMultiSession(false)
+                        .build(rappel)
+                    dashFactory.setDrmSessionManagerProvider { gestionnaire }
+                    Log.i(TAG, "Mini DRM playlist: ${video.drmType} → session DRM armée")
+                }
                 val dashSource = dashFactory.createMediaSource(mediaItem)
                 p.setMediaSource(dashSource)
-                Log.d(TAG, "Using DashMediaSource (DRM=${widevineUrl != null})")
+                Log.d(TAG, "Using DashMediaSource (DRM=${widevineUrl != null || drmDePlaylist})")
             } else {
                 // v65 (user "ça rame sur Mon IPTV") :
                 //   Pour les streams progressifs TS (Stalker, Xtream sans HLS),

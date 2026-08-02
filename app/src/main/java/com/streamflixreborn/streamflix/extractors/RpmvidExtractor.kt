@@ -15,6 +15,24 @@ import javax.crypto.spec.SecretKeySpec
 
 class RpmvidExtractor : Extractor() {
     override val name = "Rpmvid"
+
+    /**
+     * 2026-08-05 — PAS DE MISE EN CACHE. Ne pas retirer.
+     *
+     * Ce player sert des manifestes SIGNÉS ET DATÉS, sur des hôtes tiers :
+     *   `…/v4/il/1hrz5g/cf-master.1767614617.txt?t=<jeton>&e=<expiration>`
+     * Le lien est donc périssable par construction. Or l'extracteur héritait du cache par
+     * défaut — dix minutes — et rejouait un résultat périmé :
+     *   `[EXTRACTOR] -> Cache HIT for https://doremifasol.ezplayer.me/#bdwzb`
+     *   `DIAG-403 code=404 uri=…/cf-master.1776655035.txt` (sans jeton) → lecture impossible
+     * Un lien valide relevé le même jour portait bien `?t=…&e=…` et répondait, lui.
+     *
+     * ⚠ Même piège que Vidzy, LuluVdo, DoodStream et EmbedSeek, tous corrigés de la même
+     *   façon : quand un extracteur produit une URL à durée de vie limitée, le cache n'apporte
+     *   rien et transforme un succès en échec dès que le jeton expire.
+     */
+    override val cacheTtlMs: Long = 0L
+
     override val mainUrl = "https://rpmvid.com"
     override val aliasUrls = listOf("https://cubeembed.rpmvid.com", "https://bummi.upns.xyz", "https://loadm.cam", "https://anibum.playerp2p.online", "https://pelisplus.upns.pro", "https://pelisplus.rpmstream.live", "https://pelisplus.strp2p.com", "https://flemmix.upns.pro", "https://moflix.rpmplay.xyz", "https://moflix.upns.xyz", "https://flix2day.xyz", "https://primevid.click",
         "https://totocoutouno.rpmlive.online", "https://dismoiceline.uns.bio", "https://doremifasol.ezplayer.me", "https://marcus.p2pstream.vip","https://animeav1.uns.bio",
@@ -94,7 +112,57 @@ class RpmvidExtractor : Extractor() {
             }
             !cfPath.isNullOrEmpty() -> {
                 cfPath = buildCloudFlareUrl(cfPath, cfExpire, json)
-                toAbsoluteUrl(mainLink, cfPath ?: "") to enTetesLecteur
+                val urlCf = toAbsoluteUrl(mainLink, cfPath ?: "")
+                // ── 2026-08-05 — MANIFESTE NON SIGNÉ → ON LAISSE LA PAGE LE SIGNER ────────
+                //   Constaté sur « The Yeti » (flemmix.upns.pro), même film et même minute :
+                //     · Rpmvid  → `…/v4/us/ocqvf6/cf-master.1775818354.txt`  SANS paramètre → 403
+                //     · EmbedSeek → `…/v4/vz1/hz6vf/cf-master.1782521317.txt?k=…&kx=…` → lit
+                //   La sonde a montré pourquoi : `adjust` ne contient plus que `[Tiktok, Google]`,
+                //   le bloc `Cloudflare` (d'où sortaient les paramètres de signature) a disparu
+                //   de la configuration. `buildCloudFlareUrl` n'a donc plus rien à poser.
+                //
+                //   Or ces deux hôtes tournent sur LE MÊME lecteur (vidstack + `ima3.js` + les
+                //   mêmes chaînes « Adblock Detected » / « /cf-master. » dans le bundle). Plutôt
+                //   que de rejouer une signature obfusquée en Kotlin — table de chaînes indexée,
+                //   donc fragile et à refaire à chaque rotation — on demande l'URL au lecteur
+                //   lui-même, par le chemin déjà éprouvé sur EmbedSeek.
+                //
+                //   ⚠ Ce repli ne se déclenche QUE si l'URL n'a aucun paramètre. Les hôtes dont
+                //     la configuration porte encore le jeton gardent la voie native (~1,7 s).
+                if (!urlCf.contains("?")) {
+                    val signee = try {
+                        OnlyFlixResolver.resolveMasterM3u8(link)
+                    } catch (e: Exception) {
+                        android.util.Log.w("RpmvidExtractor", "repli headless KO: ${e.message}")
+                        null
+                    }
+                    if (!signee.isNullOrBlank()) {
+                        android.util.Log.d("RpmvidExtractor", "manifeste sans jeton → URL signée obtenue via le lecteur")
+                        val origine = try {
+                            val u = java.net.URL(link); "${u.protocol}://${u.host}"
+                        } catch (_: Exception) { mainLink }
+                        signee to mapOf(
+                            "User-Agent" to com.streamflixreborn.streamflix.utils.WebViewResolver.STEALTH_UA,
+                            "Referer" to "$origine/",
+                            "Origin" to origine,
+                        )
+                    } else {
+                        // ⚠⚠ 2026-08-06 — NE JAMAIS RENVOYER UN MANIFESTE NON SIGNÉ.
+                        //   Symptôme user sur `totocoutouno.rpmlive.online` : « il dure 12
+                        //   secondes et se coupe complètement ». CloudFront sert le manifeste
+                        //   depuis son cache quelques secondes, puis refuse les segments faute
+                        //   de signature — la lecture meurt en pleine scène.
+                        //   Un échec franc vaut mieux : le lecteur bascule aussitôt sur un
+                        //   serveur qui marche, au lieu de faire croire que ça démarre.
+                        //   (Le repli headless avait bien tourné ici, mais il a été ANNULÉ par
+                        //   un changement de serveur avant d'aboutir — d'où l'URL nue.)
+                        android.util.Log.w(
+                            "RpmvidExtractor",
+                            "manifeste sans signature et repli infructueux → serveur déclaré mort"
+                        )
+                        throw Exception("Rpmvid: manifeste non signé (lecture impossible)")
+                    }
+                } else urlCf to enTetesLecteur
             }
             else -> throw Exception("Missing hls, hlsVideoTiktok or cf in response")
         }
@@ -220,6 +288,10 @@ class RpmvidExtractor : Extractor() {
             }
         } catch (_: Exception) { }
 
+        // Sonde du 5 août retirée : elle a répondu. Sur `flemmix.upns.pro`, la configuration
+        //   déchiffrée ne contient plus que `adjust = [Tiktok, Google]` — le bloc `Cloudflare`,
+        //   d'où venaient `t` et `e`, a disparu. D'où un manifeste sans signature, refusé par le
+        //   CDN. Le repli est en place plus haut, dans la branche `cf` d'`extract()`.
         return when {
             !e.isNullOrEmpty() && !t.isNullOrEmpty() -> "$cfPath?t=$t&e=$e"
             !cfExpire.isNullOrEmpty() -> {

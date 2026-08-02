@@ -108,6 +108,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
         val searchPath: String,
         val postPath: String,
         val episodesPath: String,
+        val playlistPath: String,
         val posterPrefix: String,
         val bannerPrefix: String,
         val epImgPrefix: String,
@@ -118,6 +119,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             searchPath = "/mobile/search.php",
             postPath = "/mobile/post.php",
             episodesPath = "/mobile/episodes.php",
+            playlistPath = "/playlist.php",
             posterPrefix = "/poster/v/",
             bannerPrefix = "/poster/h/",
             epImgPrefix = "/epimg/150/",
@@ -128,6 +130,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             searchPath = "/mobile/pv/search.php",
             postPath = "/mobile/pv/post.php",
             episodesPath = "/mobile/pv/episodes.php",
+            playlistPath = "/pv/playlist.php",
             posterPrefix = "/pv/v/",
             bannerPrefix = "/pv/h/",
             epImgPrefix = "/pvepimg/",
@@ -138,6 +141,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             searchPath = "/mobile/hs/search.php",
             postPath = "/mobile/hs/post.php",
             episodesPath = "/mobile/hs/episodes.php",
+            playlistPath = "/hs/playlist.php",
             posterPrefix = "/hs/v/",
             bannerPrefix = "/hs/h/",
             epImgPrefix = "/hsepimg/150/",
@@ -148,6 +152,7 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             searchPath = "/mobile/hs/search.php",
             postPath = "/mobile/hs/post.php",
             episodesPath = "/mobile/hs/episodes.php",
+            playlistPath = "/hs/playlist.php",
             posterPrefix = "/hs/v/",
             bannerPrefix = "/hs/h/",
             epImgPrefix = "/hsepimg/150/",
@@ -794,9 +799,16 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
 
     override suspend fun getMovies(page: Int): List<Movie> {
         return runCatching {
+            // 2026-08-04 — filtre d'année (second clic sur « Films », cf. YearFilter).
+            val plage = com.streamflixreborn.streamflix.utils.YearFilter
+                .get(name, com.streamflixreborn.streamflix.utils.YearFilter.Type.FILMS)
             TMDb3.Discover.movie(
                 page = page, language = language, region = "FR",
                 sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
+                primaryReleaseDate = TMDb3.Params.Range(
+                    gte = com.streamflixreborn.streamflix.utils.YearFilter.borneBasse(plage),
+                    lte = com.streamflixreborn.streamflix.utils.YearFilter.borneHaute(plage),
+                ),
                 watchRegion = "FR",
                 withWatchProviders = nmWatchProviders(),
                 withOriginalLanguage = nmOriginalLanguageBuilder(),
@@ -806,9 +818,15 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
         return runCatching {
+            val plage = com.streamflixreborn.streamflix.utils.YearFilter
+                .get(name, com.streamflixreborn.streamflix.utils.YearFilter.Type.SERIES)
             TMDb3.Discover.tv(
                 page = page, language = language,
                 sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
+                firstAirDate = TMDb3.Params.Range(
+                    gte = com.streamflixreborn.streamflix.utils.YearFilter.borneBasse(plage),
+                    lte = com.streamflixreborn.streamflix.utils.YearFilter.borneHaute(plage),
+                ),
                 watchRegion = "FR",
                 withWatchProviders = nmWatchProviders(),
                 withOriginalLanguage = nmOriginalLanguageBuilder(),
@@ -819,7 +837,9 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
         if (query.isBlank()) {
             if (page > 1) return emptyList()
-            return listOf(
+            // 2026-08-04 (demande user) : plateformes + Nouveautés AVANT les genres.
+            //   Logique partagée avec Cloudstream et Movix — cf. VodCategories.
+            return com.streamflixreborn.streamflix.utils.VodCategories.enTete() + listOf(
                 Genre(id = "28", name = "Action"),
                 Genre(id = "12", name = "Aventure"),
                 Genre(id = "16", name = "Animation"),
@@ -956,6 +976,10 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
     }
 
     override suspend fun getGenre(id: String, page: Int): Genre {
+        // 2026-08-04 : catégories plateformes/Nouveautés — traitées avant la logique de genre.
+        if (com.streamflixreborn.streamflix.utils.VodCategories.estCategorieSpeciale(id)) {
+            return com.streamflixreborn.streamflix.utils.VodCategories.charger(id, page, language)
+        }
         val originCountry = when (id.lowercase()) {
             "k-drama", "drama-coreen" -> "KR"
             else -> null
@@ -965,11 +989,22 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             val withOrigin: TMDb3.Params.WithBuilder<String>? = originCountry?.let {
                 TMDb3.Params.WithBuilder(it)
             }
+            // 2026-08-05 — le genre ne doit plus écraser le filtre d'année (cf. le commentaire
+            //   détaillé dans MovixProvider.getGenre). On reprend ici les mêmes bornes que
+            //   `getMovies()`/`getTvShows()`, mémorisées séparément pour films et séries.
+            val plageFilmsG = com.streamflixreborn.streamflix.utils.YearFilter
+                .get(name, com.streamflixreborn.streamflix.utils.YearFilter.Type.FILMS)
+            val plageSeriesG = com.streamflixreborn.streamflix.utils.YearFilter
+                .get(name, com.streamflixreborn.streamflix.utils.YearFilter.Type.SERIES)
             val moviesD = coroutineScope {
                 async {
                     TMDb3.Discover.movie(
                         page = page, language = language,
                         sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
+                        primaryReleaseDate = TMDb3.Params.Range(
+                            gte = com.streamflixreborn.streamflix.utils.YearFilter.borneBasse(plageFilmsG),
+                            lte = com.streamflixreborn.streamflix.utils.YearFilter.borneHaute(plageFilmsG),
+                        ),
                         withGenres = tmdbGenreId?.let { TMDb3.Params.WithBuilder(TMDb3.Genre.Movie.entries.find { g -> g.id == it } ?: return@async emptyList()) },
                         withOriginCountry = withOrigin,
                         watchRegion = "FR",
@@ -983,6 +1018,10 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                     TMDb3.Discover.tv(
                         page = page, language = language,
                         sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
+                        firstAirDate = TMDb3.Params.Range(
+                            gte = com.streamflixreborn.streamflix.utils.YearFilter.borneBasse(plageSeriesG),
+                            lte = com.streamflixreborn.streamflix.utils.YearFilter.borneHaute(plageSeriesG),
+                        ),
                         withGenres = tmdbGenreId?.let { TMDb3.Params.WithBuilder(TMDb3.Genre.Tv.entries.find { g -> g.id == it } ?: return@async emptyList()) },
                         withOriginCountry = withOrigin,
                         watchRegion = "FR",
@@ -1090,9 +1129,52 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
      * Recherche un titre sur le backend NetMirror pour une plateforme donnée.
      * Retourne l'ID NetMirror ou null si pas trouvé.
      */
+    /** Un résultat de search.php, avec ce qu'on sait de lui. */
+    private data class NmCandidat(
+        val id: String,
+        val titre: String,
+        /** Année (champ `y`) — absent du catalogue Netflix. */
+        val annee: Int?,
+        /** `true` = série, `false` = film, `null` = inconnu (champ `r` absent). */
+        val estSerie: Boolean?,
+    )
+
+    /**
+     * Fiche post.php réduite à ce qui sert au désambiguïsage : (année, estSerie).
+     * Utilisé uniquement quand search.php ne renvoie ni `y` ni `r` (cas Netflix).
+     */
+    private suspend fun ficheAnneeEtType(
+        platform: OttPlatform,
+        netmirrorId: String,
+    ): Pair<Int?, Boolean?>? = withContext(Dispatchers.IO) {
+        runCatching {
+            val ts = System.currentTimeMillis() / 1000
+            val req = Request.Builder()
+                .url("$MAIN_URL${platform.postPath}?id=$netmirrorId&t=$ts")
+                .header("Cookie", buildCookies(platform))
+                .header("User-Agent", NM_UA)
+                .header("Referer", "$MAIN_URL/")
+                .build()
+            val body = httpClientFollowRedirects.newCall(req).execute().use { it.body?.string() }
+                ?: return@runCatching null
+            val j = JSONObject(body)
+            val annee = j.optString("year").takeIf { it.isNotBlank() }?.take(4)?.toIntOrNull()
+            val estSerie = when (j.optString("type").lowercase()) {
+                "s", "t", "tv", "series" -> true
+                "m", "movie" -> false
+                else -> null
+            }
+            annee to estSerie
+        }.getOrNull()
+    }
+
     private suspend fun searchOnPlatform(
         platform: OttPlatform,
         searchTitle: String,
+        /** Année attendue (TMDB) — sert à écarter les homonymes. */
+        anneeAttendue: Int? = null,
+        /** `true` si on cherche une série, `false` pour un film. */
+        serieAttendue: Boolean? = null,
         retry: Boolean = true,
     ): String? = withContext(Dispatchers.IO) {
         val ts = System.currentTimeMillis() / 1000
@@ -1124,27 +1206,92 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             if (retry && (body.contains("Top Searches") || body.contains("Enter Some Words to Search"))) {
                 Log.w(TAG, "searchOnPlatform ${platform.label} '$searchTitle' : cookie périmé (réponse bidon) → re-harvest + retry")
                 invalidateCookie()
-                return@withContext searchOnPlatform(platform, searchTitle, retry = false)
+                return@withContext searchOnPlatform(
+                    platform, searchTitle, anneeAttendue, serieAttendue, retry = false,
+                )
             }
             val json = runCatching { JSONObject(body) }.getOrNull() ?: return@withContext null
             val searchResults = json.optJSONArray("searchResult") ?: return@withContext null
 
-            // 2026-07-07 : matching strict via BackupRegistry.titleMatches
-            // (remplace contains bidir + fallback single-result aveugle)
-            var foundId: String? = null
+            // 2026-08-08 (user : « c'est pas le vrai Star Trek qui est diffusé — on a un
+            //   problème de mauvais match ») : on ne peut PAS prendre le 1er homonyme.
+            //
+            //   Cas réel, relevé en direct sur net52 : l'user regarde « Star Trek » S01E01
+            //   (la série de 1966). search.php répond :
+            //     pv → [ Star Trek 2009 (r="2h 1m"), Section 31 2025, Lower Decks 2021 (r="Series"), … ]
+            //     nf → [ 70101276 "Star Trek", 70136140 "Star Trek", … ]  (ni année ni type)
+            //   L'ancien code prenait le PREMIER titre qui matche → le FILM de 2009 côté
+            //   Prime Video, alors que l'app NetMirror officielle, elle, joue le bon épisode.
+            //
+            //   Nouvelle sélection, du signal le plus sûr au moins sûr :
+            //     1. `r` == "Series" → série, sinon film (présent sur pv/hs/dp)
+            //     2. `y` == année TMDB à ±1 an
+            //     3. si search.php ne dit rien (Netflix), on demande la fiche post.php de
+            //        chaque candidat (`type` m/s + `year`) — 1 requête par homonyme, borné à 4.
+            //   Si RIEN ne colle, on renvoie null : pas de serveur vaut mieux qu'un serveur
+            //   qui diffuse un autre film.
+            val candidats = mutableListOf<NmCandidat>()
             for (i in 0 until searchResults.length()) {
                 val item = searchResults.optJSONObject(i) ?: continue
                 val resultTitle = item.optString("t")
                 val resultId = item.optString("id").takeIf { it.isNotBlank() } ?: continue
-                if (com.streamflixreborn.streamflix.utils.BackupRegistry.titleMatches(resultTitle, searchTitle)) {
-                    foundId = resultId
-                    break
+                if (!com.streamflixreborn.streamflix.utils.BackupRegistry.titleMatches(resultTitle, searchTitle)) continue
+                val r = item.optString("r")
+                candidats += NmCandidat(
+                    id = resultId,
+                    titre = resultTitle,
+                    annee = item.optString("y").takeIf { it.isNotBlank() }?.take(4)?.toIntOrNull(),
+                    estSerie = if (r.isBlank()) null else r.equals("Series", ignoreCase = true),
+                )
+            }
+            if (candidats.isEmpty()) return@withContext null
+
+            var restants: List<NmCandidat> = candidats
+            // 1) type (série / film) quand search.php le donne
+            if (serieAttendue != null && restants.any { it.estSerie != null }) {
+                val f = restants.filter { it.estSerie == null || it.estSerie == serieAttendue }
+                if (f.isEmpty()) {
+                    Log.d(TAG, "searchOnPlatform ${platform.label} '$searchTitle' : ${candidats.size} homonyme(s), aucun du bon type (série=$serieAttendue) → écarté")
+                    return@withContext null
                 }
+                restants = f
             }
-            if (foundId != null) {
-                Log.d(TAG, "searchOnPlatform ${platform.label} '$searchTitle' → ID $foundId")
+            // 2) année quand search.php la donne
+            if (anneeAttendue != null && restants.any { it.annee != null }) {
+                val f = restants.filter {
+                    it.annee == null || kotlin.math.abs(it.annee - anneeAttendue) <= 1
+                }
+                if (f.isEmpty()) {
+                    Log.d(TAG, "searchOnPlatform ${platform.label} '$searchTitle' : homonymes ${restants.map { "${it.titre} ${it.annee}" }} ≠ $anneeAttendue → écarté")
+                    return@withContext null
+                }
+                restants = f
             }
-            foundId
+
+            // 3) rien d'exploitable dans search.php (Netflix) → fiche post.php par candidat
+            val besoinDeVerif = (anneeAttendue != null || serieAttendue != null) &&
+                restants.any { it.annee == null && it.estSerie == null }
+            if (besoinDeVerif) {
+                for (c in restants.take(4)) {
+                    if (c.annee != null || c.estSerie != null) {
+                        Log.d(TAG, "searchOnPlatform ${platform.label} '$searchTitle' → ID ${c.id} (${c.titre})")
+                        return@withContext c.id
+                    }
+                    val fiche = ficheAnneeEtType(platform, c.id) ?: continue
+                    val (annee, estSerie) = fiche
+                    val typeOk = serieAttendue == null || estSerie == null || estSerie == serieAttendue
+                    val anneeOk = anneeAttendue == null || annee == null ||
+                        kotlin.math.abs(annee - anneeAttendue) <= 1
+                    Log.d(TAG, "searchOnPlatform ${platform.label} fiche ${c.id} '${c.titre}' : année=$annee série=$estSerie (attendu $anneeAttendue/$serieAttendue) → ${if (typeOk && anneeOk) "OK" else "écarté"}")
+                    if (typeOk && anneeOk) return@withContext c.id
+                }
+                Log.d(TAG, "searchOnPlatform ${platform.label} '$searchTitle' : aucun homonyme ne correspond à $anneeAttendue/série=$serieAttendue → écarté")
+                return@withContext null
+            }
+
+            val choisi = restants.first()
+            Log.d(TAG, "searchOnPlatform ${platform.label} '$searchTitle' → ID ${choisi.id} (${choisi.titre} ${choisi.annee ?: "?"})")
+            choisi.id
         }
     }
 
@@ -1166,12 +1313,15 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             val cacheKey = normalizeTitle(ids.title) + (ids.year?.let { "_$it" } ?: "")
             val cachedAll = idCache[cacheKey]
             val netmirrorId = cachedAll?.get(platform) ?: run {
+                // 2026-08-08 : on transmet année + type pour écarter les homonymes
+                //   (« Star Trek » série 1966 vs film 2009). cf. searchOnPlatform.
+                val serieAttendue = ids.seasonNum != null && ids.episodeNum != null
                 // Essai 1 : titre français (TMDB fr-FR)
-                var foundId = searchOnPlatform(platform, ids.title)
+                var foundId = searchOnPlatform(platform, ids.title, ids.year, serieAttendue)
                 // Essai 2 : titre original anglais (fallback si FR ne matche pas)
                 if (foundId == null && ids.originalTitle != null) {
                     Log.d(TAG, "${platform.label} : titre FR '${ids.title}' non trouvé, essai EN '${ids.originalTitle}'")
-                    foundId = searchOnPlatform(platform, ids.originalTitle)
+                    foundId = searchOnPlatform(platform, ids.originalTitle, ids.year, serieAttendue)
                 }
                 foundId
             } ?: return@withContext emptyList()
@@ -1181,11 +1331,36 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                 fetchLanguageInfos(platform, netmirrorId)
             } ?: emptyList()
 
+            // 2 bis) 2026-08-08 (user, capture de LEUR lecteur à l'appui : « S1 • E1 —
+            //   Star Trek – Pilot: The Cage ») — NUMÉROTATION D'ÉPISODES DIFFÉRENTE.
+            //   Netflix compte « The Cage » (le pilote inédit de 1965) comme S1E1 de Star Trek,
+            //   donc leur saison 1 fait 30 épisodes là où TMDB en compte 29 et démarre à
+            //   « The Man Trap ». En demandant S1E1 on jouait donc l'épisode d'AVANT — tout est
+            //   décalé d'un cran. Même problème sur toutes les vieilles séries où un pilote est
+            //   inséré, ou deux parties fusionnées.
+            //   Parade : on emporte le TITRE ORIGINAL (anglais) de l'épisode ; resolveEpisodeId
+            //   le cherche d'abord par titre, et ne retombe sur le numéro que s'il ne trouve pas.
+            //   NetMirror libelle ses épisodes en anglais, d'où `language = "en-US"`.
+            val titreEpisodeVo: String? =
+                if (ids.seasonNum != null && ids.episodeNum != null) {
+                    runCatching {
+                        val tvId = ids.tmdbId.toIntOrNull() ?: return@runCatching null
+                        TMDb3.TvSeasons.details(
+                            seriesId = tvId,
+                            seasonNumber = ids.seasonNum,
+                            language = "en-US",
+                        ).episodes?.firstOrNull { it.episodeNumber == ids.episodeNum }?.name
+                    }.getOrNull()?.takeIf { it.isNotBlank() }
+                } else null
+
             // 3) Construire les serveurs — un PAR LANGUE, VF en premier
             val baseSrc = buildString {
                 append("nm::${platform.ottCookie}::$netmirrorId")
                 if (ids.seasonNum != null && ids.episodeNum != null) {
                     append("::s${ids.seasonNum}::e${ids.episodeNum}")
+                    titreEpisodeVo?.let {
+                        append("::titre").append(java.net.URLEncoder.encode(it, "UTF-8"))
+                    }
                 }
             }
 
@@ -1215,7 +1390,25 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                         src = langSrc,
                     ))
                 }
-            } else {
+            }
+            // 2026-08-08 (user : « prends le serveur VOSTFR aussi », « faudra qu'ils soient bien
+            //   marqués VOSTFR ») — SOUS-TITRES FRANÇAIS.
+            //   `post.php` ne liste que les pistes AUDIO (champ `lang`) : c'est pour ça qu'on ne
+            //   proposait que du VF ou du VO. Les sous-titres, eux, sont dans `playlist.php`
+            //   (champ `tracks`). VÉRIFIÉ en direct sur Star Trek S1 (id 70109436) : 27 pistes
+            //   `captions`, dont `70109436-fr.srt` libellée « French ».
+            //   On ajoute donc UN serveur VOSTFR, marqué explicitement `[VOSTFR]`, placé après
+            //   le VF. Le marqueur `::subfr` dit à getVideo d'aller chercher la piste française
+            //   dans `tracks` et de l'attacher ; s'il n'y en a pas pour ce contenu, getVideo
+            //   échoue franchement plutôt que de servir de la VO en la faisant passer pour du
+            //   sous-titré (principe projet : pas de serveur plutôt qu'un serveur menteur).
+            servers.add(Video.Server(
+                id = "netmirror_${platform.ottCookie}_${netmirrorId}_subfr",
+                name = "NetMirror ${platform.label} [VOSTFR]",
+                src = "$baseSrc::subfr",
+            ))
+
+            if (frLangs.isEmpty()) {
                 // Pas de FR → UN SEUL serveur [VO] en dernier recours
                 // (prend la 1re langue dispo pour le langId)
                 val fallbackLang = langInfos.firstOrNull()
@@ -1700,18 +1893,25 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
         var seasonNum: Int? = null
         var episodeNum: Int? = null
         var langId: String? = null
+        var titreEpisodeVo: String? = null
+        // 2026-08-08 : `::subfr` = serveur VOSTFR (audio d'origine + sous-titres français).
+        var vostfrDemande = false
         for (p in parts.drop(3)) {
             when {
+                p == "subfr" -> vostfrDemande = true
+                p.startsWith("titre") -> titreEpisodeVo = runCatching {
+                    java.net.URLDecoder.decode(p.removePrefix("titre"), "UTF-8")
+                }.getOrNull()
+                p.startsWith("lang") -> langId = p.removePrefix("lang")
                 p.startsWith("s") && p.drop(1).toIntOrNull() != null -> seasonNum = p.drop(1).toInt()
                 p.startsWith("e") && p.drop(1).toIntOrNull() != null -> episodeNum = p.drop(1).toInt()
-                p.startsWith("lang") -> langId = p.removePrefix("lang")
             }
         }
 
         // Construire l'ID de contenu pour le player
         val contentId = if (seasonNum != null && episodeNum != null) {
             // Pour les séries : d'abord récupérer l'ID de l'épisode via le backend
-            val episodeId = resolveEpisodeId(ottCode, netmirrorId, seasonNum, episodeNum)
+            val episodeId = resolveEpisodeId(ottCode, netmirrorId, seasonNum, episodeNum, titreEpisodeVo)
             episodeId ?: netmirrorId
         } else {
             netmirrorId
@@ -1763,7 +1963,21 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
         val session = ensureCookie()
         val langCookie = if (langId != null) "; lang=$langId" else ""
         val fullCookie = "$session; ott=$ottCode; hd=on$langCookie"
-        val playlistUrl = "$MAIN_URL/playlist.php?id=$contentId&t=${System.currentTimeMillis()}"
+        // 2026-08-08 (user : « on a un serveur à réparer, NetMirror Prime Video ») :
+        //   playlist.php est PAR PLATEFORME, comme search.php / post.php / episodes.php.
+        //   La racine /playlist.php ne connaît QUE le catalogue Netflix ; avec un id Prime
+        //   Video elle répond 200 + le texte « Video ID not found! » → getVideo jetait et
+        //   ONYX basculait aussitôt sur un autre serveur.
+        //   VÉRIFIÉ EN DIRECT (Star Trek 2009, id 0KN466ML8YRT1CXIABHR9N2L9T, cookie
+        //   t_hash_t de l'appareil) :
+        //     /playlist.php?id=<pv>      → 200, 19 o, « Video ID not found! »   ✗
+        //     /pv/playlist.php?id=<pv>   → 200, sources[0].file=/pv/hls/<id>.m3u8?in=…  ✓
+        //     ce m3u8 → 200 #EXTM3U avec les pistes audio dont 2× French (fra).
+        //   hs/dp suivent le même schéma que leurs searchPath/postPath (/hs/…), non
+        //   vérifiés en direct faute d'id sous la main.
+        val plateforme = OttPlatform.entries.find { it.ottCookie == ottCode }
+        val playlistPath = plateforme?.playlistPath ?: "/playlist.php"
+        val playlistUrl = "$MAIN_URL$playlistPath?id=$contentId&t=${System.currentTimeMillis()}"
         val req = Request.Builder()
             .url(playlistUrl)
             .header("User-Agent", NM_UA)
@@ -1800,6 +2014,50 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             // 1re source = meilleure qualité (Full HD).
             val file = sources.optJSONObject(0)?.optString("file")?.takeIf { it.isNotBlank() }
                 ?: throw IllegalStateException("NetMirror playlist.php: pas de file")
+
+            // 2026-08-08 — SOUS-TITRES. `tracks` = [{kind:"captions", file, label, language}, …]
+            //   Les chemins sont protocol-relative (`//subscdn.top/…`) → on préfixe en https.
+            //
+            //   2026-08-08, 2ᵉ passe (user : « sur NetMirror on devrait être capable d'avoir
+            //   TOUTES les langues et toutes les traductions possibles, leur site est vraiment
+            //   complet là-dessus » + capture du menu montrant une piste nommée « Inconnu ») :
+            //     • on ne gardait QUE le français → 26 pistes jetées ;
+            //     • le libellé passé au lecteur venait tel quel de leur JSON (« French »), et
+            //       la piste ressortait « Inconnu » dans le menu. On envoie donc un nom FR
+            //       explicite, tiré du code langue ISO, avec repli sur leur libellé.
+            //   Vérifié en direct sur l'épisode (id 70109436) : 27 pistes `captions`
+            //   (ar, da, de, el, en[CC], es-ES, es, fi, fr, he, id, it, ja, ko, nb, nl, pl,
+            //   pt-BR, pt, ro, ru, sv, th, tr, vi, zh-Hans, zh-Hant) + 1 `thumbnails` ignorée.
+            //   Le français est marqué `default` UNIQUEMENT sur le serveur [VOSTFR] : sur le
+            //   serveur [VF] les pistes restent disponibles mais aucune n'est activée d'office.
+            val sousTitres = mutableListOf<Video.Subtitle>()
+            var aDuFrancais = false
+            entry.optJSONArray("tracks")?.let { tr ->
+                for (i in 0 until tr.length()) {
+                    val t = tr.optJSONObject(i) ?: continue
+                    if (!t.optString("kind").equals("captions", ignoreCase = true)) continue
+                    var f = t.optString("file")
+                    if (f.isBlank()) continue
+                    if (f.startsWith("//")) f = "https:$f"
+                    val lg = t.optString("language").lowercase()
+                    val estFr = lg == "fr" || lg.startsWith("fr-") || lg.startsWith("fr.")
+                    if (estFr) aDuFrancais = true
+                    sousTitres.add(
+                        Video.Subtitle(
+                            label = nomLangueSousTitre(lg, t.optString("label")),
+                            file = f,
+                            default = estFr && vostfrDemande,
+                        )
+                    )
+                }
+            }
+            if (vostfrDemande && !aDuFrancais) {
+                // Pas de piste FR ici → on échoue au lieu de servir de la VO étiquetée VOSTFR.
+                throw IllegalStateException("NetMirror: aucun sous-titre français pour ce contenu")
+            }
+            // Français EN PREMIER dans la liste, puis les autres par ordre alphabétique.
+            sousTitres.sortWith(compareBy({ if (it.default || it.label.startsWith("Français")) 0 else 1 }, { it.label }))
+            Log.d(TAG, "sous-titres : ${sousTitres.size} piste(s)${if (aDuFrancais) " (dont FR)" else ""}, vostfr=$vostfrDemande → ${sousTitres.take(4).joinToString { it.label }}")
             // 2026-07-08 (fix « pub sur la vidéo ») : le champ `file` est RELATIF (/hls/<id>…).
             //   VÉRIFIÉ en direct : sur net77 le m3u8 = 200 #EXTM3U (vrai CDN freecdn200), alors
             //   que sur net52 (notre ancien MAIN_URL) le /hls/ sert la page « STOP Abuse ». Le
@@ -1832,7 +2090,16 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             val realUri = runCatching { reconstructRealFilm(absUrl, vidHeaders) }.getOrNull()
             if (realUri != null) {
                 Log.d(TAG, "getVideo OK (VRAI film reconstruit token-free): $realUri")
-                return@use Video(source = realUri, headers = vidHeaders)
+                return@use Video(
+                    source = realUri,
+                    headers = vidHeaders,
+                    // 2026-08-08 : les 27 pistes sont attachées au serveur [VOSTFR] uniquement,
+                    //   français EN TÊTE et marqué `default` (user : « pour le VOSTFR on choisit
+                    //   d'abord et en priorité VOSTFR »). On ne les met PAS sur le serveur [VF] :
+                    //   le lecteur force la sélection de la 1ʳᵉ piste dès qu'il y en a une, on
+                    //   allumerait donc des sous-titres sur une lecture déjà doublée.
+                    subtitles = if (vostfrDemande) sousTitres else emptyList(),
+                )
             }
             // 2026-07-09 (user "pas le droit à l'échec, pas le droit à la pub") : si la
             //   reconstruction échoue, on NE renvoie PLUS le master masqué (audio+pub). On lève une
@@ -2236,11 +2503,54 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
      * Si post.php n'a pas les épisodes (certains providers les paginent via
      * episodes.php), on tombe en fallback sur episodes.php.
      */
+    /**
+     * Nom FRANÇAIS d'une piste de sous-titres à partir de son code ISO.
+     *
+     * 2026-08-08 : sans ça le menu du lecteur affichait « Inconnu » (capture user) — il se base
+     *   sur le libellé qu'on lui passe, et « French » brut ne lui suffisait pas. On garde le
+     *   suffixe éventuel de leur libellé ([CC], Brésil, Simplifié…) pour distinguer les
+     *   variantes d'une même langue.
+     */
+    private fun nomLangueSousTitre(code: String, libelleSource: String): String {
+        val base = code.substringBefore('-').substringBefore('.').lowercase()
+        val nom = when (base) {
+            "fr" -> "Français"; "en" -> "Anglais"; "es" -> "Espagnol"; "de" -> "Allemand"
+            "it" -> "Italien"; "pt" -> "Portugais"; "nl" -> "Néerlandais"; "pl" -> "Polonais"
+            "ru" -> "Russe"; "ar" -> "Arabe"; "he" -> "Hébreu"; "tr" -> "Turc"
+            "el" -> "Grec"; "da" -> "Danois"; "sv" -> "Suédois"; "nb", "no" -> "Norvégien"
+            "fi" -> "Finnois"; "ro" -> "Roumain"; "cs" -> "Tchèque"; "hu" -> "Hongrois"
+            "ja" -> "Japonais"; "ko" -> "Coréen"; "zh" -> "Chinois"; "th" -> "Thaï"
+            "vi" -> "Vietnamien"; "id" -> "Indonésien"; "ms" -> "Malais"; "hi" -> "Hindi"
+            "ta" -> "Tamoul"; "te" -> "Télougou"; "ca" -> "Catalan"; "eu" -> "Basque"
+            "tl", "fil" -> "Filipino"; "uk" -> "Ukrainien"; "bg" -> "Bulgare"; "hr" -> "Croate"
+            "sr" -> "Serbe"; "sk" -> "Slovaque"; "sl" -> "Slovène"; "et" -> "Estonien"
+            "lv" -> "Letton"; "lt" -> "Lituanien"; "fa" -> "Persan"; "bn" -> "Bengali"
+            else -> libelleSource.takeIf { it.isNotBlank() } ?: code.uppercase()
+        }
+        // Variante régionale ou mention entre crochets → on la garde pour ne pas avoir
+        // deux entrées « Espagnol » indiscernables (es / es-ES) ou « Anglais » / « [CC] ».
+        val precision = when {
+            libelleSource.contains("[CC]", ignoreCase = true) -> " [CC]"
+            code.contains('-') -> " (" + code.substringAfter('-').uppercase() + ")"
+            else -> ""
+        }
+        return nom + precision
+    }
+
+    /** Normalise un titre d'épisode pour la comparaison (casse, ponctuation, accents). */
+    private fun cleTitreEpisode(t: String): String =
+        java.text.Normalizer.normalize(t, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{Mn}+"), "")
+            .lowercase()
+            .replace(Regex("[^a-z0-9]+"), "")
+
     private suspend fun resolveEpisodeId(
         ottCode: String,
         showId: String,
         seasonNum: Int,
         episodeNum: Int,
+        /** Titre original (anglais) de l'épisode côté TMDB — prioritaire sur le numéro. */
+        titreVo: String? = null,
     ): String? = withContext(Dispatchers.IO) {
         val platform = OttPlatform.entries.find { it.ottCookie == ottCode } ?: return@withContext null
         try {
@@ -2265,6 +2575,23 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             if (episodes != null) {
                 val targetS = "S$seasonNum"
                 val targetE = "E$episodeNum"
+                // 2026-08-08 : TITRE D'ABORD. Sur Star Trek (1966) leur S1E1 = « Pilot: The Cage »
+                //   alors que TMDB S01E01 = « The Man Trap » → tout décalé d'un cran. On cherche
+                //   donc l'épisode par son titre original, dans la bonne saison, avant de se
+                //   rabattre sur le numéro.
+                if (!titreVo.isNullOrBlank()) {
+                    val cible = cleTitreEpisode(titreVo)
+                    for (i in 0 until episodes.length()) {
+                        val ep = episodes.optJSONObject(i) ?: continue
+                        if (ep.optString("s", "").uppercase() != targetS) continue
+                        val t = ep.optString("t", "")
+                        if (t.isBlank() || cleTitreEpisode(t) != cible) continue
+                        val id = ep.optString("id").takeIf { it.isNotBlank() } ?: continue
+                        Log.d(TAG, "resolveEpisodeId via TITRE: '$titreVo' → $id (${ep.optString("s")}${ep.optString("ep")})")
+                        return@withContext id
+                    }
+                    Log.d(TAG, "resolveEpisodeId : titre '$titreVo' introuvable dans $targetS → repli sur le numéro")
+                }
                 for (i in 0 until episodes.length()) {
                     val ep = episodes.optJSONObject(i) ?: continue
                     val s = ep.optString("s", "").uppercase()
@@ -2293,6 +2620,9 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
             }
 
             // 2) Fallback : episodes.php (paginé, pour les providers qui séparent)
+            // Repli par NUMÉRO gardé de côté : on ne s'en sert que si aucune page ne contient
+            // le titre recherché (sinon on renverrait le mauvais épisode dès la 1ʳᵉ page).
+            var replliParNumero: String? = null
             val seasonData = postJson.optJSONArray("season")
             if (seasonData != null) {
                 for (i in 0 until seasonData.length()) {
@@ -2314,11 +2644,33 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                             val epBody = epResp.use { it.body?.string() } ?: break
                             val epJson = runCatching { JSONObject(epBody) }.getOrNull() ?: break
                             val epArr = epJson.optJSONArray("episodes") ?: break
+                            // 2026-08-08 (2ᵉ passe) : le TITRE d'abord, ici aussi.
+                            //   Relevé dans les logs : « titre 'The Man Trap' introuvable dans S1
+                            //   → repli sur le numéro ». La recherche par titre n'existait que sur
+                            //   la branche post.php ; or sur Star Trek les épisodes ne sont PAS
+                            //   dans post.php (`episodes` vide) — ils arrivent par episodes.php,
+                            //   qui n'avait droit qu'au numéro. D'où le pilote joué à la place du
+                            //   1er épisode, malgré le correctif.
+                            //   Les pages étant paginées, on mémorise le repli par numéro et on
+                            //   ne le rend QU'À LA FIN, une fois toutes les pages parcourues
+                            //   sans avoir trouvé le titre.
+                            if (!titreVo.isNullOrBlank()) {
+                                val cible = cleTitreEpisode(titreVo)
+                                for (j in 0 until epArr.length()) {
+                                    val ep = epArr.optJSONObject(j) ?: continue
+                                    val t = ep.optString("t", "")
+                                    if (t.isBlank() || cleTitreEpisode(t) != cible) continue
+                                    val id = ep.optString("id").takeIf { it.isNotBlank() } ?: continue
+                                    Log.d(TAG, "resolveEpisodeId via TITRE (episodes.php): '$titreVo' → $id (${ep.optString("s")}${ep.optString("ep")})")
+                                    return@withContext id
+                                }
+                            }
                             for (j in 0 until epArr.length()) {
                                 val ep = epArr.optJSONObject(j) ?: continue
                                 val eNum = ep.optString("ep", "").uppercase().removePrefix("E")
                                 if (eNum == episodeNum.toString()) {
-                                    return@withContext ep.optString("id").takeIf { it.isNotBlank() }
+                                    val id = ep.optString("id").takeIf { it.isNotBlank() }
+                                    if (id != null && replliParNumero == null) replliParNumero = id
                                 }
                             }
                             val next = epJson.optString("nextPageShow")
@@ -2329,7 +2681,11 @@ object NetMirrorProvider : Provider, ProgressiveServersProvider {
                     }
                 }
             }
-            null
+            if (replliParNumero != null) {
+                Log.d(TAG, "resolveEpisodeId via NUMÉRO (episodes.php): S${seasonNum}E$episodeNum → $replliParNumero" +
+                    if (!titreVo.isNullOrBlank()) " — titre '$titreVo' introuvable" else "")
+            }
+            replliParNumero
         } catch (e: Exception) {
             Log.w(TAG, "resolveEpisodeId error: ${e.message}")
             null

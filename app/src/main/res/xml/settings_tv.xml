@@ -128,6 +128,13 @@
                 android:title="Gérer les sources"
                 android:summary="Activer/désactiver les extracteurs vidéo, mettre en favori" />
 
+
+            <!-- 2026-08-06 : liens désactivés par appui long dans la liste des serveurs du
+                 lecteur. Voir utils/LiensDesactives.kt. -->
+            <Preference
+                android:key="p_settings_liens_desactives"
+                android:title="Liens désactivés"
+                android:summary="Réactiver les liens que vous avez désactivés par appui long" />
             <Preference
                 android:key="refresh_provider_caches"
                 android:title="Rafraîchir les caches des providers"
@@ -142,12 +149,7 @@
                 android:entryValues="@array/backup_source_keys"
                 android:defaultValue="@array/backup_source_keys" />
 
-            <!-- 2026-07-13 (user : rapport auto des sources cassées vers GitHub, 1 fois par URL). -->
-            <SwitchPreferenceCompat
-                android:key="pref_report_broken_sources"
-                android:title="Signaler les sources cassées"
-                android:summary="Quand une source échoue parce que son URL/domaine a changé (dns, ssl, 404, parsing), envoie automatiquement UNE notification GitHub pour la réparer. Sans spam : 1 seule fois par source+domaine."
-                android:defaultValue="true" />
+            <!-- 2026-08-06 : « Signaler les sources cassées » RETIRÉ de l'interface. Le signalement par appui long a été remplacé par la DÉSACTIVATION du lien (cf. LiensDesactives). La préférence reportBrokenSources reste lue par CrashActivity, on ne la supprime donc pas du code. -->
 
         </PreferenceCategory>
 
@@ -291,6 +293,13 @@
                 android:title="@string/settings_force_extra_buffer_title"
                 android:summary="@string/settings_force_extra_buffer_summary"
                 android:defaultValue="false" />
+
+            <!-- 2026-08-02 : désactivé par défaut → meilleure définition conservée (cf. mobile). -->
+            <SwitchPreference
+                android:key="ADAPTIVE_QUALITY"
+                android:title="@string/settings_adaptive_quality_title"
+                android:summary="@string/settings_adaptive_quality_summary"
+                android:defaultValue="false" />
         </PreferenceCategory>
 
         <PreferenceCategory android:title="Affichage">
@@ -383,6 +392,19 @@
 
         <PreferenceCategory
             android:title="@string/settings_category_appearance">
+
+            <!-- 2026-08-06 : rangée « Pour vous » (cf. SuggestionsPourVous). Masquable, car
+                 sur une télé partagée en famille voir ses habitudes affichées peut gêner. -->
+            <SwitchPreference
+                android:key="suggestions_pour_vous"
+                android:title="Rangée « Pour vous »"
+                android:summary="Suggestions d'après ce que vous avez regardé, juste sous « Continuer à regarder »"
+                android:defaultValue="true" />
+
+            <Preference
+                android:key="p_reset_suggestions"
+                android:title="Réinitialiser « Pour vous »"
+                android:summary="Repart de zéro : seuls les titres regardés ensuite alimenteront la rangée" />
 
             <ListPreference
                 android:key="APP_LANGUAGE"
@@ -501,6 +523,16 @@
                 android:min="-250"
                 android:max="250" />
         </PreferenceCategory>
+
+        <PreferenceCategory
+            android:title="Lecteur">
+
+            <SwitchPreference
+                android:key="player_exit_confirm"
+                android:title="Confirmer avant de quitter le lecteur"
+                android:summary="Demande un 2e appui sur Retour pour quitter la vidéo (évite les sorties accidentelles)"
+                android:defaultValue="true" />
+        </PreferenceCategory>
     </PreferenceScreen>
 
     <PreferenceScreen
@@ -608,11 +640,6 @@
             android:key="p_settings_local_videos"
             android:title="Vidéos locales"
             android:summary="Vidéos internes, carte SD ou clé USB (appui long = favori)" />
-
-        <Preference
-            android:key="p_settings_extractor_stats"
-            android:title="Extracteurs"
-            android:summary="Liste des extracteurs ayant échoué (rapport bug)" />
 
         <SwitchPreference
             android:key="UPDATE_CHECK_ENABLED"

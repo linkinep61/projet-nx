@@ -1869,7 +1869,28 @@ object TMDb3 {
             HULU(15),
             MICROSOFT_STORE(68),
             NETFLIX(8),
-            PARAMOUNT(531);
+            PARAMOUNT(531),
+
+            // 2026-08-04 (demande user : catégories par plateforme dans la recherche VOD) :
+            //   ajout des services présents en France, absents de la liste d'origine qui était
+            //   centrée sur le marché américain. Identifiants TMDB officiels.
+            CANAL_PLUS(381),
+            OCS(56),
+            CRUNCHYROLL(283),
+            ARTE(234),
+            FRANCE_TV(2278),
+
+            // 2026-08-04 — IDENTIFIANTS RÉELLEMENT VALIDES EN FRANCE.
+            //   Vérifié en direct sur /watch/providers/movie?watch_region=FR : les trois
+            //   identifiants ci-dessus renvoient ZÉRO résultat sur le catalogue français.
+            //     OCS(56)        → service dissous, remplacé par « Ciné+ OCS » (685)
+            //     HBO_MAX(384)   → identifiant du marché américain ; en France c'est 1899
+            //     FRANCE_TV(2278)→ absent du catalogue FR ; l'entrée réelle est 2535
+            //   Les anciennes valeurs sont CONSERVÉES telles quelles (d'autres écrans peuvent
+            //   s'y référer) ; seules les catégories VOD pointent désormais sur celles-ci.
+            CINE_OCS_FR(685),
+            MAX_FR(1899),
+            FRANCE_TV_FR(2535);
 
             override fun toString() = id.toString()
         }

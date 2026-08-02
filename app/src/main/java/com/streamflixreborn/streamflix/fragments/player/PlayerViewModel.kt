@@ -17,15 +17,14 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import com.streamflixreborn.streamflix.utils.SubDL
@@ -316,6 +315,7 @@ class PlayerViewModel(
                             //   dont le fichier s'appelle « In.the.Grey.2026.VOSTFR.1080p… ».
                             //   Le nom de fichier ne ment pas — on corrige l'affichage.
                             langueDepuisNomFichier(result.fileName)?.let { vraie ->
+                                val avant = server.language
                                 if (!server.name.contains(vraie, ignoreCase = true)) {
                                     Log.w(
                                         "ServDiag",
@@ -324,6 +324,25 @@ class PlayerViewModel(
                                     )
                                 }
                                 server.language = vraie
+                                // 2026-08-02 (user : « vaut mieux l'écarter direct avant la
+                                //   lecture ; si c'est de l'auto-lecture on l'écarte, mais si
+                                //   l'utilisateur clique dessus volontairement, il ne s'écarte
+                                //   pas ») : ce démasquage a lieu pendant le PRÉ-EXTRACT, donc
+                                //   AVANT toute lecture. On re-trie alors la liste : le serveur
+                                //   rétrogradé passe derrière les vrais VF, et l'auto-play — qui
+                                //   prend le premier — ne le choisit plus.
+                                //   Il n'est PAS supprimé : il reste sélectionnable à la main,
+                                //   simplement plus bas. Le choix explicite reste donc respecté,
+                                //   sans avoir à distinguer les deux cas dans le code.
+                                if (avant != vraie &&
+                                    (vraie.equals("VOSTFR", true) || vraie.equals("VO", true))
+                                ) {
+                                    Log.i(
+                                        "ServDiag",
+                                        "'${server.name}' rétrogradé ($vraie) → re-tri groupé",
+                                    )
+                                    demanderRetri()
+                                }
                             }
                             // 2026-06-30 : probe qualité IMMÉDIATEMENT après extraction,
                             // AVANT le HEAD check qui peut invalider le cache via
@@ -347,6 +366,15 @@ class PlayerViewModel(
                                         Log.w("QualityProbe", "pre-extract[$idx]: ${server.name} → $finalQ (${durationMs}ms)")
                                     } else {
                                         Log.w("QualityProbe", "pre-extract[$idx]: ${server.name} → no quality (isHls=$isHls, url=${extractedUrl.take(60)})")
+                                        // 2026-08-03 (user : « on va virer ça, ça va pas servir ») :
+                                        //   le sondage de POIDS par requête HEAD est SUPPRIMÉ.
+                                        //   Il ne pouvait toucher que les 4 serveurs pré-extraits,
+                                        //   et parmi eux les seuls fichiers directs restés sans
+                                        //   qualité — soit zéro à un serveur par ouverture. Coût
+                                        //   négligeable, mais rendement quasi nul : on retire.
+                                        //   Le classement s'appuie sur les définitions MESURÉES
+                                        //   (manifeste HLS) ou ÉCRITES dans le nom du fichier, et
+                                        //   sur `debitKbps` lu gratuitement dans le manifeste.
                                     }
                                 } catch (e: Exception) {
                                     Log.w("QualityProbe", "pre-extract[$idx]: ${server.name} quality probe error: ${e.message?.take(60)}")
@@ -403,15 +431,73 @@ class PlayerViewModel(
     )
 
     /**
-     * Lance le probe qualité en background pour TOUS les serveurs.
-     * IDEMPOTENT : si déjà en cours, ne relance PAS (les lots progressifs
-     * mettent à jour allKnownServers, la passe les relira automatiquement).
+     * 2026-08-03 — REGROUPEMENT DES LOTS (user : diagnostic « les serveurs sont bloqués »).
      *
-     * Timing (user 2026-06-30) :
-     *   - Passe 1 à T+40s  : lecture du cache d'extraction sur TOUS les
-     *                         serveurs connus (allKnownServers). Les lots
-     *                         progressifs ont le temps d'arriver.
-     *   - Passe 2 à T+120s : extraction ACTIVE des serveurs restants.
+     * Constat mesuré sur un lancement réel : 14 serveurs arrivés en 7 lots ⇒ 7 tris complets,
+     * dont un `rankServers(7)` à **6 324 ms** alors que le travail utile (filtrage) prenait
+     * 82 ms. Le tri n'est pas lourd : il est AFFAMÉ. Une vingtaine de sources de backup
+     * interrogées en parallèle saturent l'appareil, et chaque nouveau lot relance un tri qui
+     * entre en concurrence avec le précédent — jusqu'à dépasser le plafond de 5 s et afficher
+     * la liste NON TRIÉE.
+     *
+     * Remède : ne plus trier à chaque arrivée. Le PREMIER lot passe immédiatement (c'est lui
+     * qui déclenche l'affichage, il ne doit jamais attendre) ; les suivants sont accumulés et
+     * remis en UN SEUL lot au plus toutes les [fenetreMs]. On supprime ainsi la majorité des
+     * tris concurrents, donc la contention qui les faisait durer des secondes.
+     *
+     * L'aval reste appelé séquentiellement (un seul collecteur), donc la sérialisation de
+     * `handleBatch` — dont dépend l'absence de mutation concurrente de `accumulated`/`seenIds` —
+     * est préservée.
+     */
+    private fun Flow<List<Video.Server>>.lotsGroupes(
+        fenetreMs: Long,
+    ): Flow<List<Video.Server>> = kotlinx.coroutines.flow.channelFlow {
+        val tampon = mutableListOf<Video.Server>()
+        val verrou = kotlinx.coroutines.sync.Mutex()
+        var premierPasse = false
+        var vidange: Job? = null
+
+        this@lotsGroupes.collect { lot ->
+            if (!premierPasse) {
+                premierPasse = true
+                send(lot)   // affichage immédiat : jamais retardé
+                return@collect
+            }
+            verrou.withLock { tampon.addAll(lot) }
+            // Une seule vidange programmée à la fois : les lots qui arrivent pendant la
+            //   fenêtre rejoignent le tampon au lieu de déclencher leur propre tri.
+            if (vidange?.isActive == true) return@collect
+            vidange = launch {
+                delay(fenetreMs)
+                val groupe = verrou.withLock { val c = tampon.toList(); tampon.clear(); c }
+                if (groupe.isNotEmpty()) {
+                    Log.d("ServDiag", "PROG lots regroupés → ${groupe.size} serveurs en 1 tri")
+                    send(groupe)
+                }
+            }
+        }
+        // Amont terminé : on évacue ce qui reste en tampon, rien ne doit être perdu.
+        vidange?.join()
+        val reste = verrou.withLock { val c = tampon.toList(); tampon.clear(); c }
+        if (reste.isNotEmpty()) send(reste)
+    }
+
+    /**
+     * Sonde la qualité de tous les serveurs, en arrière-plan, en UNE SEULE PASSE.
+     *
+     * IDEMPOTENT : si un sondage tourne déjà, on ne relance pas — les lots progressifs
+     * alimentent `allKnownServers`, que la passe lira au moment venu.
+     *
+     * Déroulé (2026-08-03, user : « on va effectuer qu'une seule passe ») :
+     *   1. attendre la fin de la pré-extraction (le cache est alors rempli — sans quoi
+     *      certains serveurs étaient extraits DEUX fois en parallèle) ;
+     *   2. attendre la fin de la collecte progressive, plafonnée à 45 s, pour que la
+     *      liste soit complète ;
+     *   3. une seule vague, 4 serveurs en parallèle, 10 s par serveur — puis terminé.
+     *
+     * L'ancienne version bouclait toutes les 3 s pendant toute la collecte (une dizaine
+     * de tours), consommant réseau et CPU PENDANT la lecture. Couverture identique,
+     * mais une salve unique au lieu d'un réveil permanent.
      */
     private fun probeServerQualities(servers: List<Video.Server>) {
         val providerName = UserPreferences.currentProvider?.name.orEmpty()
@@ -425,32 +511,36 @@ class PlayerViewModel(
         }
 
         qualityProbeJob = viewModelScope.launch(Dispatchers.IO) {
-            // 2026-07-04 : UNE seule boucle avec marquage `treated`. Chaque serveur traité 1 fois.
-            // 2026-07-06 : ATTENDRE que preExtractJob finisse AVANT de boucler.
+            // 2026-07-06 : ATTENDRE que preExtractJob finisse AVANT de sonder.
             //   Sibnet (et d'autres) étaient extraits 2× en parallèle : la pre-extract lançait
             //   l'extraction avec 15s timeout, et le probe (après 4s) trouvait le cache vide
             //   → relançait une DEUXIÈME extraction identique. En attendant que preExtract finisse,
             //   le cache est garanti rempli → peekCachedVideo hit → zéro double extraction.
             preExtractJob?.join()   // attend la fin de la pré-extraction (cache rempli)
-            val treated = java.util.Collections.synchronizedSet(HashSet<String>())
-            var idleRounds = 0
-            while (isActive) {
-                // Skip serveurs déjà traités OU qui ont déjà une qualité (assignée par nom)
-                val batch = allKnownServers.filter { it.src.isNotBlank() && it.src !in treated && it.quality == null }
-                if (batch.isEmpty()) {
-                    // Rien de neuf : si le progressif a fini de collecter, on s'arrête après 2 tours.
-                    if (!progressiveStillCollecting && ++idleRounds >= 2) break
-                    delay(3_000L)
-                    continue
-                }
-                idleRounds = 0
+            // 2026-08-03 (user : « on va effectuer qu'une seule passe ») : AVANT, la boucle
+            //   `while (isActive)` se réveillait toutes les 3 s et relançait une vague à chaque
+            //   nouvelle arrivée de serveurs — soit une dizaine de tours étalés sur toute la
+            //   collecte, donc du réseau et du CPU consommés PENDANT la lecture (concurrence
+            //   directe avec le décodage sur Chromecast).
+            //   Maintenant : on attend que la collecte progressive soit TERMINÉE (liste
+            //   complète), puis on fait UNE seule vague, puis on s'arrête. Même couverture,
+            //   une seule salve au lieu d'un harcèlement continu.
+            //   Plafond d'attente : si la collecte s'éternise, on sonde quand même ce qu'on a.
+            kotlinx.coroutines.withTimeoutOrNull(45_000L) {
+                while (progressiveStillCollecting) delay(1_000L)
+            }
+            run {
+                // Une seule passe : tous les serveurs encore sans qualité, dédupliqués par src.
+                val batch = allKnownServers
+                    .filter { it.src.isNotBlank() && it.quality == null }
+                    .distinctBy { it.src }
+                Log.w("QualityProbe", "passe unique : ${batch.size} serveurs à sonder")
                 val sem = kotlinx.coroutines.sync.Semaphore(4)
                 batch.map { server ->
                     launch {
                         sem.acquire()
                         try {
-                            treated.add(server.src)   // MARQUÉ traité (une seule tentative par serveur)
-                            // Captcha (Papadustream) : non probable → marqué mais pas extrait.
+                            // Captcha (Papadustream) : non sondable sans clic humain → écarté.
                             if (server.src.contains("papadustream", ignoreCase = true) ||
                                 server.src.contains("#xf=")) return@launch
                             // 2026-07-04 : 3 sources de Video (du plus rapide au plus lent) :
@@ -471,7 +561,6 @@ class PlayerViewModel(
                         } finally { sem.release() }
                     }
                 }.joinAll()
-                Log.w("QualityProbe", "qualité : traités ${treated.size}/${allKnownServers.size}")
             }
             val total = allKnownServers.count { it.quality != null }
             Log.w("QualityProbe", "Probe terminé — $total/${allKnownServers.size} qualités détectées")
@@ -523,10 +612,63 @@ class PlayerViewModel(
     /** VRAI FR (bucket 0) = pas VOSTFR, pas VO, pas langue étrangère. */
     private fun isVfServer(s: Video.Server): Boolean {
         val n = s.name.lowercase()
+        // ── 2026-08-06 : UN SERVEUR QUI ANNONCE LES DEUX EST UN VF ───────────────────────
+        //   User, capture à l'appui : « Vidzy · VF/VOSTFR » arrivait en tête en 360p.
+        //   Cette fonction lit le nom ENTIER et rejetait tout libellé contenant « vostfr » —
+        //   y compris ceux qui annoncent AUSSI du VF. Trois effets, tous mauvais :
+        //     · le serveur échappait au tri par résolution réservé aux VF, d'où un 360p en
+        //       première position ;
+        //     · il ne comptait pas comme « un VF est arrivé », donc la période de grâce
+        //       attendait pour rien ;
+        //     · il passait derrière de vrais VOSTFR alors qu'il propose bien du français.
+        //   Décision user : « tu mets qu'il est VF, un point c'est tout ». C'est le bon
+        //   arbitrage — la piste française EXISTE, et le choix de la piste se fait ensuite
+        //   dans le lecteur.
+        if (Regex("""(^|[^a-z])vf([^a-z]|$)""").containsMatchIn(n)) return true
         if (n.contains("vostfr") || n.contains("sous-titr")) return false
         if (Regex("""(^|[^a-z])vo([^a-z]|$)""").containsMatchIn(n)) return false
         if (n.contains(Regex("\\b(raw|eng|english|spa|ita|german|deu|jap)\\b"))) return false
         return true
+    }
+
+    /**
+     * Décide de l'affichage des sous-titres d'après la langue du serveur.
+     *
+     * ── 2026-08-06 (user : « ça me choque qu'on mette automatiquement les sous-titres sur
+     *   des films français… on les active sur du VOSTFR et on les désactive sur du VF ») ──
+     *   Il existait bien un réglage manuel (« sous-titres automatiques du serveur »), mais il
+     *   fallait y penser et il s'appliquait indistinctement. Or l'information est déjà là :
+     *   `isVfServer` sait dire si la piste est française. On s'en sert.
+     *
+     *   · Serveur VF → aucun sous-titre par défaut. Un film français sous-titré en français
+     *     n'a aucun sens, c'est ce qui gênait.
+     *   · Serveur VOSTFR / VO → on active le sous-titre FRANÇAIS s'il existe ; sinon on
+     *     laisse ce que la source avait prévu, plutôt que de tout couper.
+     *
+     *   ⚠ `isVfServer` considère « VF » par défaut quand aucun marqueur n'est présent :
+     *     c'est volontaire pour une application française, et ça va dans le bon sens ici —
+     *     dans le doute, pas de sous-titres imposés. L'utilisateur garde la main dans le
+     *     menu du lecteur, et le réglage manuel reste prioritaire quand il est actif.
+     */
+    private fun reglerSousTitresSelonLangue(server: Video.Server, video: Video) {
+        if (video.subtitles.isEmpty()) return
+        // ⚠ On n'interroge PAS `serverAutoSubtitlesDisabled` ici : ce drapeau empêche un
+        //   serveur d'imposer ses sous-titres, il ne doit pas priver le VOSTFR des siens.
+        //   C'est la LANGUE qui tranche, comme demandé : « si VOSTFR tu actives, si VF tu
+        //   désactives ». Cette règle passe donc en dernier et a le dernier mot.
+        if (isVfServer(server)) {
+            video.subtitles.forEach { it.default = false }
+            Log.d("PlayerViewModel", "sous-titres : serveur VF → aucun par défaut (${server.name})")
+            return
+        }
+
+        val fr = video.subtitles.firstOrNull {
+            val l = it.label.lowercase()
+            l.contains("fr") || l.contains("français") || l.contains("french")
+        } ?: return
+        video.subtitles.forEach { it.default = false }
+        fr.default = true
+        Log.d("PlayerViewModel", "sous-titres : serveur VOSTFR/VO → « ${fr.label} » activé (${server.name})")
     }
 
     /** Rang de qualité pour le tri (plus haut = meilleure résolution).
@@ -650,6 +792,17 @@ class PlayerViewModel(
                 }
             }
 
+            // 2026-08-02 : on MÉMORISE le débit du manifeste (aucune requête de plus, le corps est
+            //   déjà là). Il sert ensuite à départager deux serveurs affichant la même définition —
+            //   à « 1080p » égal, le mieux encodé est celui qui a le plus gros débit.
+            val bwPattern = Regex("""BANDWIDTH=(\d+)""")
+            val bandwidths = bwPattern.findAll(body).mapNotNull { it.groupValues[1].toLongOrNull() }
+            val maxBw = bandwidths.maxOrNull()
+            if (server != null && maxBw != null && maxBw > 0) {
+                server.debitKbps = (maxBw / 1000).toInt()
+                Log.d("QualityProbe", "débit ${server.name} → ${server.debitKbps} kb/s")
+            }
+
             // 1) Parse RESOLUTION=<W>x<H> — prendre la hauteur max
             val resPattern = Regex("""RESOLUTION=\d+x(\d+)""")
             val heights = resPattern.findAll(body).mapNotNull { it.groupValues[1].toIntOrNull() }
@@ -657,9 +810,6 @@ class PlayerViewModel(
             if (maxHeight != null) return@withContext heightToLabel(maxHeight)
 
             // 2) Fallback : estimer via BANDWIDTH (bits/s)
-            val bwPattern = Regex("""BANDWIDTH=(\d+)""")
-            val bandwidths = bwPattern.findAll(body).mapNotNull { it.groupValues[1].toLongOrNull() }
-            val maxBw = bandwidths.maxOrNull()
             if (maxBw != null) {
                 val estimated = when {
                     maxBw >= 8_000_000 -> "1080p"
@@ -749,7 +899,17 @@ class PlayerViewModel(
         // 2026-07-07 DIAGNOSTIC : si getServers n'a pas rendu la main en 12s (= HANG), on
         //   dumpe les piles de tous les threads app/OkHttp/coroutines dans le logcat pour
         //   voir EXACTEMENT où ça coince (mutex ? HTTP sans timeout ? autre ?).
-        run {
+        // 2026-08-03 : ce guetteur criait au loup à CHAQUE lancement. Sur un provider
+        //   progressif, `collectProgressiveServers` s'exécute DANS cette même coroutine et
+        //   collecte jusqu'à COLLECT_TIMEOUT_MS (120 s) : le job est donc forcément encore
+        //   actif à 12 s, sans le moindre blocage. Le dump partait alors en plein milieu de
+        //   l'arrivée des serveurs — or `Thread.getAllStackTraces()` fige la VM et parcourt
+        //   la pile de TOUS les threads (~490 lignes de log mesurées), exactement quand
+        //   l'appareil est le plus chargé.
+        //   Il visait à l'origine un blocage sur le chemin NON-progressif (cf. « fix probable
+        //   blocage aplouf/non-progressif » ci-dessus) → on le CONSERVE là, et on le désarme
+        //   en entrant dans le chemin progressif, où sa condition n'a aucun sens.
+        val hangWatcher = run {
             val selfJob = coroutineContext[kotlinx.coroutines.Job]
             viewModelScope.launch(Dispatchers.IO) {
                 delay(12_000L)
@@ -812,6 +972,11 @@ class PlayerViewModel(
             //   mesure, on prend le chemin progressif (1er lot affiché tout de
             //   suite, le reste s'ajoute sans bloquer).
             if (provider is com.streamflixreborn.streamflix.providers.ProgressiveServersProvider) {
+                // 2026-08-03 : ici la collecte dure LÉGITIMEMENT jusqu'à 120 s → le guetteur
+                //   de blocage à 12 s ne peut que produire un faux positif coûteux. On le
+                //   désarme. Il reste armé sur le chemin non-progressif, celui pour lequel
+                //   il avait été écrit.
+                hangWatcher.cancel()
                 collectProgressiveServers(provider, id, videoType)
                 return@launch
             }
@@ -969,6 +1134,7 @@ class PlayerViewModel(
         //   Le dedup par id ne les attrape pas → doublon visible dans le picker.
         //   Ce Set filtre par langue+URL normalisée (host+path, sans token/signature).
         val seenSrcKeys = HashSet<String>()
+        reinitialiserLecture()   // 2026-08-07 : nouvelle collecte → le cœur redevient prioritaire
         var firstEmitted = false
         // 2026-07-07 : découplage AFFICHAGE / AUTO-PLAY. firstEmitted = « affiché » ;
         //   autoPlayEmitted = « lecture auto autorisée » (VF présent, ou 12s écoulées).
@@ -1036,11 +1202,15 @@ class PlayerViewModel(
                 isAnimeProvider = isAnimeProvider,
                 episodeIdHint = id,
             )
-            // 2026-07-04 : porte de démarrage des backups (registre). Ouverte APRÈS le 1er
-            //   tri natif (fait device au repos) → le natif s'affiche vite, PUIS le registre
-            //   démarre. Sinon le registre (~20 sources //) saturait la TV et affamait le tri
-            //   orderByFrenchBuckets du 1er lot (mesuré 11s au lieu de <100ms).
-            val backupGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            // 2026-08-03 (user : « retire le code mort ») : la PORTE DE DÉMARRAGE des backups
+            //   (`backupGate`) est SUPPRIMÉE. Elle ne s'appliquait qu'aux `WebJsProvider`
+            //   (contention WebView), or plus aucun provider sélectionnable n'en est un depuis
+            //   que FrenchAnime et DessinAnime sont repassés en natif Kotlin : la condition
+            //   `provider is WebJsProvider` était toujours fausse, la branche jamais empruntée.
+            //   Les `WebJsProvider` restants ne sont que des sources de BACKUP dynamiques, qui
+            //   ne passent pas par ici. Les backups démarrent donc à t=0, comme c'était déjà
+            //   le cas en pratique. Si un provider WebJS redevenait sélectionnable un jour,
+            //   c'est la contention WebView qu'il faudrait traiter, pas cette porte.
             // handler PARTAGÉ (lot natif OU backup) : filtre/accumule/tri par langue/émet
             //   avec la grâce FR (attend un VF avant l'auto-play, sinon fallback VOSTFR/VO).
             suspend fun handleBatch(batch: List<Video.Server>) {
@@ -1096,6 +1266,51 @@ class PlayerViewModel(
                     if (srv.quality == null) srv.quality = inferQualityFromText(srv.name)
                 }
                 accumulated.addAll(fresh)
+
+                // ═══════════════════════════════════════════════════════════════════════
+                // 2026-08-07 (user : « s'il y a aucune lecture et qu'un cœur rouge apparaît,
+                //   faudrait que ça parte dessus instantanément — s'il le met en rouge, c'est
+                //   qu'il y a une raison : soit il est de qualité, soit il est rapide »)
+                //   → RACCOURCI CŒUR.
+                //   Un serveur mis en favori par l'utilisateur est un choix DÉJÀ FAIT : il n'y
+                //   a plus rien à arbitrer. On court-circuite donc tout ce qui suit dès qu'il
+                //   apparaît — le tri complet (jusqu'à 5 s), la stabilisation adaptative
+                //   (1,2 à 4 s) et la grâce FR (jusqu'à 12 s). Le favori passe en tête et
+                //   l'auto-play part immédiatement.
+                //   Règles : n'importe lequel des cœurs fait l'affaire (le premier arrivé), et
+                //   ⚠ UNIQUEMENT si aucune lecture n'a encore démarré — `autoPlayEmitted`
+                //   garantit qu'on ne coupe jamais une lecture en cours.
+                //   Coût : `favKeyFor` n'est calculé que si l'utilisateur a réellement des
+                //   favoris sur ce provider (sinon `favorisDuProvider()` rend un set vide).
+                // 2026-08-07 (2ᵉ passe) : la condition n'est PLUS `!autoPlayEmitted` mais
+                //   `!lectureDemarree`. Un serveur lent déjà lancé mais qui n'affiche encore
+                //   rien ne doit pas priver l'utilisateur de son cœur. Le raccourci reste donc
+                //   actif sur les lots SUIVANTS, jusqu'à la première image. Une fois que ça
+                //   joue pour de vrai, on ne coupe plus jamais.
+                if (!lectureDemarree) {
+                    val favoris = favorisDuProvider()
+                    val coeur = if (favoris.isEmpty()) null else fresh.firstOrNull {
+                        com.streamflixreborn.streamflix.utils.ExtractorRanker.favKeyFor(it) in favoris
+                    }
+                    if (coeur != null) {
+                        // Lot tardif (un serveur a déjà été choisi) → il faut un jeton pour
+                        //   que le fragment accepte de basculer malgré `initialServerPicked`.
+                        if (firstEmitted) raccourciCoeurEnAttente = true
+                        autoPlayEmitted = true
+                        firstEmitted = true
+                        val liste = listOf(coeur) + accumulated.filter { it.id != coeur.id }
+                        allKnownServers = liste
+                        Log.i(
+                            "ServDiag",
+                            "PROG RACCOURCI CŒUR : '${coeur.name}' favori → lecture immédiate " +
+                                "(ni tri, ni stabilisation, ni grâce FR)",
+                        )
+                        _state.emit(State.SuccessLoadingServers(collapseIdenticalServers(liste), autoPlay = true))
+                        preExtractTopServersInBackground(liste)
+                        return
+                    }
+                }
+
                 Log.d("ServDiag", "PROG avant orderByFrenchBuckets accumulated=${accumulated.size}")
                 // 2026-07-05 : timeout RÉEL (thread Java, pas coopératif) pour empêcher
                 //   orderByFrenchBuckets de bloquer indéfiniment. Le bug : parfois
@@ -1104,12 +1319,18 @@ class PlayerViewModel(
                 //   bloquant → le spinner tourne indéfiniment. Avec un executor + future.get(5s),
                 //   on a un vrai deadline. Si ça bloque → fallback unsorted → l'user a ses serveurs.
                 val accSnapshot = accumulated.toList() // snapshot immuable pour le thread
+                // 2026-07-05 : executor PARTAGÉ (companion ofbExecutor) au lieu de
+                //   créer/détruire un newSingleThreadExecutor par appel (thread leak).
+                // 2026-08-03 : `future` SORTI du try — sans référence dessus, on ne pouvait pas
+                //   l'annuler au timeout. Or `ofbExecutor` est un pool NON BORNÉ : le tri
+                //   abandonné continuait de tourner pendant que le lot suivant en démarrait un
+                //   autre sur un thread neuf (deux « ofb-worker » simultanés dans les logs),
+                //   chacun ralentissant l'autre. On l'annule désormais explicitement.
+                val future = ofbExecutor.submit(java.util.concurrent.Callable { orderByFrenchBuckets(accSnapshot) })
                 val ordered: List<Video.Server> = try {
-                    // 2026-07-05 : executor PARTAGÉ (companion ofbExecutor) au lieu de
-                    //   créer/détruire un newSingleThreadExecutor par appel (thread leak).
-                    val future = ofbExecutor.submit(java.util.concurrent.Callable { orderByFrenchBuckets(accSnapshot) })
                     future.get(5, java.util.concurrent.TimeUnit.SECONDS)
                 } catch (e: java.util.concurrent.TimeoutException) {
+                    future.cancel(true)   // libère le thread au lieu de le laisser courir
                     Log.e("ServDiag", "!! PROG orderByFrenchBuckets TIMEOUT 5s !! accumulated=${accumulated.size} — fallback unsorted")
                     accSnapshot // fallback : serveurs non triés
                 } catch (e: java.util.concurrent.ExecutionException) {
@@ -1120,12 +1341,6 @@ class PlayerViewModel(
                     accSnapshot
                 }
                 Log.i("ServDiagT", "PROG orderByFrenchBuckets(${accumulated.size}) fait en ${System.currentTimeMillis()-_tHB}ms")
-                // 2026-07-04 : le 1er tri natif est fait (device au repos) → on OUVRE la porte
-                //   du registre. Les backups démarrent maintenant, sans avoir affamé ce tri.
-                if (!backupGate.isCompleted) {
-                    Log.i("ServDiag", "PROG backupGate ouvert après traitement 1er lot natif")
-                    backupGate.complete(Unit)
-                }
                 if (ordered.isEmpty()) {
                     Log.d("ServDiag", "PROG lot reçu mais ordered=0, on attend le suivant")
                     return
@@ -1151,9 +1366,41 @@ class PlayerViewModel(
                     if (gracePeriodStartedAt.isEmpty()) {
                         gracePeriodStartedAt.add(System.currentTimeMillis())
                         viewModelScope.launch {
-                            // Attendre la stabilisation (4s) — les faux serveurs ont le temps
-                            //   d'être évincés et les bons d'arriver.
-                            kotlinx.coroutines.delay(STABILIZE_MS)
+                            // 2026-08-03 (user : « fais le premier levier ») : la stabilisation
+                            //   n'est plus une attente FERME de 4 s, elle devient ADAPTATIVE.
+                            //   Avant, une liste déjà propre à la 1ʳᵉ seconde patientait autant
+                            //   qu'une liste douteuse — 4 s perdues à chaque lancement.
+                            //   Désormais on sort dès que les DEUX conditions sont réunies :
+                            //     • un VF est présent (sinon la grâce FR ci-dessous s'applique) ;
+                            //     • la liste n'a pas bougé pendant une tranche entière
+                            //       (= plus aucun lot en vol, donc plus rien à évincer).
+                            //   Garde-fous : jamais avant STABILIZE_FLOOR_MS (on laisse toujours
+                            //   passer au moins un lot supplémentaire, sinon on repart sur le
+                            //   tout premier arrivé — exactement ce qu'on voulait éviter), et
+                            //   jamais au-delà de STABILIZE_MS (le plafond d'avant, inchangé).
+                            //   Cas propre : ~1,2 s au lieu de 4 s. Cas douteux : 4 s comme avant.
+                            val STABILIZE_FLOOR_MS = 1_200L
+                            val TRANCHE_MS = 400L
+                            var attendu = 0L
+                            var tailleAvant = allKnownServers.size
+                            while (attendu < STABILIZE_MS) {
+                                kotlinx.coroutines.delay(TRANCHE_MS)
+                                attendu += TRANCHE_MS
+                                val tailleMaintenant = allKnownServers.size
+                                val listeStable = tailleMaintenant == tailleAvant
+                                tailleAvant = tailleMaintenant
+                                if (attendu >= STABILIZE_FLOOR_MS && listeStable &&
+                                    allKnownServers.any { isVf(it) }
+                                ) {
+                                    Log.i(
+                                        "ServDiag",
+                                        "PROG stabilisation ANTICIPÉE à ${attendu}ms " +
+                                            "(liste stable à $tailleMaintenant serveurs, VF présent) " +
+                                            "— ${STABILIZE_MS - attendu}ms économisées",
+                                    )
+                                    break
+                                }
+                            }
                             // Puis appliquer la grâce FR si pas de VF
                             val hasVfNow = allKnownServers.any { isVf(it) }
                             if (!hasVfNow && FR_GRACE_MS > STABILIZE_MS) {
@@ -1203,62 +1450,18 @@ class PlayerViewModel(
                 }
             }
 
-            // 2026-07-04 (user "les backups ne doivent PAS empêcher les natifs de se charger" +
-            //   "arrivée des natifs = départ des backups ; sinon au bout de 10s les backups
-            //   démarrent quand même" + "en moyenne les natifs mettent quelques secondes s'ils
-            //   sont pas freinés") : PORTE de démarrage des backups.
-            //   Le natif charge et s'AFFICHE d'abord (tri device au repos), PUIS la porte
-            //   s'ouvre (dans handleBatch, après le 1er tri natif) → le registre démarre.
-            //   Filet : si le natif est muet, la porte s'ouvre au bout de 10s.
-            //   merge() → handleBatch sérialisé (aucune mutation concurrente des collections).
+            // merge() → handleBatch sérialisé (aucune mutation concurrente des collections).
             val _tNat = System.currentTimeMillis()
             val nativeFlow = provider.getServersProgressive(id, videoType)
                 .onEach { Log.i("ServDiagT", "NATIVE flow a ÉMIS size=${it.size} à ${System.currentTimeMillis()-_tNat}ms") }
-                // 2026-07-04 (user "Cloudstream met 20s") : si le natif FINIT sans rien émettre
-                //   (ex Cloudstream search API down → 0 serveur), on OUVRE la porte des backups
-                //   TOUT DE SUITE au lieu d'attendre le timeout de 20s. Sinon un provider dont le
-                //   natif rend 0 vite faisait quand même patienter 20s avant les backups.
-                .onCompletion {
-                    if (!backupGate.isCompleted) {
-                        Log.i("ServDiag", "PROG backupGate ouvert par FIN du flux natif")
-                        backupGate.complete(Unit)
-                    }
-                }
                 // 2026-07-04 : forcer l'exécution du flow natif sur IO — sinon
                 //   withContext(IO) dans channelFlow reprend sur Main (viewModelScope),
                 //   et si le main-thread est occupé (Glide/UI), l'émission est retardée
                 //   de 10+ secondes voire indéfiniment.
                 .flowOn(kotlinx.coroutines.Dispatchers.IO)
-            // 2026-07-04 : PORTE RESTAURÉE (user "en enlevant le blocage 10s, Wiflix ne s'est pas
-            //   chargé"). Les natifs WebJS (Wiflix) tournent dans le MÊME WebView que les backups
-            //   WebView-lourds → sans porte, les backups démarrent à t=0 et entrent en CONTENTION
-            //   sur le WebView avec le natif Wiflix → le natif ne se charge plus. La porte ouvre
-            //   les backups après le 1er tri natif (instantané pour les providers à natif rapide)
-            //   OU à la fin du flux natif OU au bout de 12s (filet si natif muet). 20s→12s pour
-            //   réduire l'attente sur les natifs vraiment lents sans casser la protection Wiflix.
-            //   2026-07-04 : la porte NE S'APPLIQUE QU'AUX WebJsProvider (contention WebView).
-            //   Les providers natifs Kotlin (FrenchAnime, Papadustream, FrenchManga, Franime,
-            //   VoirAnime, AnimeSama, etc.) démarrent les backups IMMÉDIATEMENT en parallèle.
-            val isWebJsProvider = provider is com.streamflixreborn.streamflix.providers.WebJsProvider
-            // 2026-07-07 (user « on met les backups en PRIORITÉ sur DessinAnime ») :
-            //   DessinAnime a un natif WebView CF LENT et souvent en échec (challenge
-            //   Cloudflare 12-45s). Le gater derrière ce natif retenait les backups
-            //   (mesuré : « backupGate ouvert par FIN du flux natif » = les backups
-            //   attendaient le timeout 45s du WebView). → On NE GATE PAS DessinAnime :
-            //   ses backups partent à t=0 comme un provider natif Kotlin. Les autres
-            //   WebJS gardent la gate anti-famine, mais cap réduit 12s→4s (les serveurs
-            //   ne doivent jamais rester bloqués si le natif est muet/coincé sur CF).
-            val isDessinAnime = com.streamflixreborn.streamflix.utils.UserPreferences
-                .currentProvider?.name?.equals("DessinAnime", ignoreCase = true) ?: false
-            val gatedBackupFlow = if (isWebJsProvider && !isDessinAnime) {
-                backupFlow.onStart {
-                    val opened = kotlinx.coroutines.withTimeoutOrNull(4_000L) { backupGate.await() }
-                    if (opened == null) Log.i("ServDiag", "PROG backupGate ouvert par TIMEOUT 4s (natif muet)")
-                }
-            } else {
-                Log.i("ServDiag", "PROG ${if (isDessinAnime) "DessinAnime → backups PRIORITAIRES" else "provider natif Kotlin"} → backups IMMÉDIATS (pas de gate)")
-                backupFlow // pas de porte → backups démarrent à t=0
-            }
+            // 2026-08-03 : backups à t=0, en parallèle du natif (cf. suppression de `backupGate`
+            //   plus haut). C'était déjà le comportement réel pour TOUS les providers actifs.
+            val gatedBackupFlow = backupFlow
             // 2026-07-04 TEST (user "désactive le pack serveur, on teste avec QUE les natifs
             //   Wiflix") : si false, on collecte UNIQUEMENT le flux natif (aucun registre, aucun
             //   merge, aucune porte) → isole si le trou de 15s vient du merge/registre ou du natif.
@@ -1272,14 +1475,20 @@ class PlayerViewModel(
             //   au 1er 0-serveur → pas besoin d'attendre longtemps. 45s suffit pour
             //   les sources lentes sans bloquer l'écran inutilement.
             val COLLECT_TIMEOUT_MS = 120_000L
+            // 2026-08-03 : `lotsGroupes` — 1er lot immédiat, suivants regroupés par fenêtres
+            //   de 500 ms (cf. doc de l'opérateur). Divise le nombre de tris, donc la
+            //   contention CPU qui les faisait déborder du plafond de 5 s.
+            val COALESCE_MS = 500L
             if (REGISTRY_BACKUPS_ENABLED) {
                 kotlinx.coroutines.withTimeoutOrNull(COLLECT_TIMEOUT_MS) {
-                    kotlinx.coroutines.flow.merge(nativeFlow, gatedBackupFlow).collect { handleBatch(it) }
+                    kotlinx.coroutines.flow.merge(nativeFlow, gatedBackupFlow)
+                        .lotsGroupes(COALESCE_MS)
+                        .collect { handleBatch(it) }
                 } ?: Log.w("ServDiag", "PROG collecte stoppée après ${COLLECT_TIMEOUT_MS/1000}s (plafond atteint)")
             } else {
                 Log.i("ServDiag", "PROG TEST natifs-seuls (registre désactivé)")
                 kotlinx.coroutines.withTimeoutOrNull(COLLECT_TIMEOUT_MS) {
-                    nativeFlow.collect { handleBatch(it) }
+                    nativeFlow.lotsGroupes(COALESCE_MS).collect { handleBatch(it) }
                 }
             }
         } catch (e: Exception) {
@@ -1339,6 +1548,18 @@ class PlayerViewModel(
      */
     // 2026-07-04 : classifie la langue d'un serveur depuis son nom
     private fun serverLang(s: Video.Server): String {
+        // ⚠ 2026-08-02 : la LANGUE CORRIGÉE prime sur le nom. `server.language` est renseigné par
+        //   le pré-extract à partir du NOM DE FICHIER réel (« …VOSTFR 1080p… »), qui fait autorité
+        //   sur l'étiquette du site. Sans cette priorité, un serveur démasqué VOSTFR mais toujours
+        //   nommé « EmbedSeek (VF) » restait trié comme un VF : il gardait sa place en tête et
+        //   l'auto-play continuait de le choisir — le démasquage ne servait donc à rien.
+        s.language?.lowercase()?.trim()?.takeIf { it.isNotBlank() }?.let { l ->
+            when {
+                l.contains("vostfr") || l.contains("subfrench") -> return "vostfr"
+                l == "vo" || l.contains("vostf") -> return "vo"
+                l.contains("vf") || l.contains("multi") || l.contains("french") -> return "vf"
+            }
+        }
         val n = s.name.lowercase()
         return when {
             n.contains("vostfr") || n.contains("sous-titr") -> "vostfr"
@@ -1348,6 +1569,60 @@ class PlayerViewModel(
                 || n.contains(Regex("\\b(raw|eng|english|spa|ita|german|deu|jap)\\b")) -> "vo"
             else -> "unknown"
         }
+    }
+
+    /**
+     * Clés « cœur » (favoris d'extracteur) enregistrées pour le provider courant.
+     * Set vide si aucun provider ou aucun favori — auquel cas les appelants évitent
+     * de calculer `favKeyFor`, qui parcourt tous les extracteurs.
+     */
+    /**
+     * Vraie lecture en cours : posé par le fragment quand le player passe à `isPlaying`.
+     *
+     * 2026-08-07 (user : « un cœur rouge apparaissait alors qu'une lecture a commencé sur un
+     *   serveur super long, il ne switche pas dessus — le cœur est censé être prioritaire
+     *   TANT QUE LA LECTURE N'A PAS COMMENCÉ ») — il a raison, et mon garde-fou était faux.
+     *   `autoPlayEmitted` signifie « on a DEMANDÉ une lecture », pas « ça joue ». Un serveur
+     *   qui met 20 s à extraire bloquait donc le cœur arrivé à la 5ᵉ seconde, alors qu'il n'y
+     *   avait toujours aucune image à l'écran. On distingue désormais les deux : tant que
+     *   ce drapeau est faux, un favori qui apparaît prend la main.
+     */
+    @Volatile private var lectureDemarree = false
+
+    /** Appelé par les fragments sur `onIsPlayingChanged(true)`. */
+    fun signalerLectureDemarree() {
+        if (!lectureDemarree) {
+            lectureDemarree = true
+            Log.i("ServDiag", "PROG lecture RÉELLEMENT démarrée → le raccourci cœur ne s'applique plus")
+        }
+    }
+
+    /**
+     * Jeton posé quand le raccourci cœur se déclenche sur un lot TARDIF, c'est-à-dire après
+     * qu'un premier serveur a déjà été choisi. Le fragment garde `initialServerPicked` pour
+     * ne pas relancer `getVideo` à chaque vague ; sans ce jeton, le cœur arrivé en retard
+     * serait simplement ignoré — exactement ce que le user a constaté. Consommé une fois.
+     */
+    @Volatile private var raccourciCoeurEnAttente = false
+
+    /** True UNE seule fois, si un cœur attend d'être joué. Remet le jeton à zéro. */
+    fun consommerRaccourciCoeur(): Boolean {
+        if (!raccourciCoeurEnAttente) return false
+        raccourciCoeurEnAttente = false
+        return true
+    }
+
+    /** Remis à zéro à chaque nouvelle collecte de serveurs (nouvel épisode / nouveau titre). */
+    private fun reinitialiserLecture() {
+        lectureDemarree = false
+        raccourciCoeurEnAttente = false
+    }
+
+    private fun favorisDuProvider(): Set<String> {
+        val providerName = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name
+        return if (!providerName.isNullOrEmpty())
+            com.streamflixreborn.streamflix.utils.ExtractorToggleStore.getFavorites(providerName)
+        else emptySet()
     }
 
     private fun orderByFrenchBuckets(list: List<Video.Server>): List<Video.Server> {
@@ -1406,9 +1681,7 @@ class PlayerViewModel(
         //   aux serveurs cœur → toujours en tête, quelle que soit la langue.
         Log.d("OFB", "E avant currentProvider")
         val providerName = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name
-        Log.d("OFB", "F currentProvider=$providerName")
-        val favorites = if (!providerName.isNullOrEmpty())
-            com.streamflixreborn.streamflix.utils.ExtractorToggleStore.getFavorites(providerName) else emptySet()
+        val favorites = favorisDuProvider()
         Log.d("OFB", "F2 favorites=${favorites.size} ${favorites.take(3)}")
 
         fun isFav(s: Video.Server): Boolean {
@@ -1445,16 +1718,62 @@ class PlayerViewModel(
             com.streamflixreborn.streamflix.utils.CatalogFilter.isSupported(providerName) &&
             com.streamflixreborn.streamflix.utils.CatalogFilter.get(providerName) ==
                 com.streamflixreborn.streamflix.utils.CatalogFilter.Mode.POPULAR_INTL
+        // Buckets calculés UNE FOIS ici, réutilisés par le filtre ET par le tri (cf. plus bas).
+        val bucketsPreCalcules = HashMap<String, Int>(ranked.size * 2)
+        ranked.forEach { bucketsPreCalcules[it.id] = bucket(it) }
         val filtered = if (hideVo) {
             ranked.filter { s ->
-                val b = bucket(s)
+                val b = bucketsPreCalcules[s.id] ?: 999
                 b < 999 || frRegex.containsMatchIn(s.name)
             }
         } else ranked
 
         Log.d("OFB", "G avant sort filtered=${filtered.size}")
         Log.i("ServDiagT", "  avant sort à ${System.currentTimeMillis()-_t}ms (curLang=$curLang hideVo=$hideVo)")
-        val sorted = filtered.sortedBy { bucket(it) }
+        // 2026-08-02 (user : « fais en sorte que les serveurs FileSearch montent en priorité, ce
+        //   sont les meilleurs niveaux de qualité ») : FileSearch sert des FICHIERS DIRECTS
+        //   (.mkv/.mp4 d'open-directories, souvent 1080p MULTi de 1,5 à 4 Go) — pas de
+        //   ré-encodage, pas d'extracteur, pas de lecteur web : c'est la meilleure image
+        //   disponible et la lecture la plus fiable quand l'hôte répond.
+        //   ⚠ La LANGUE reste le critère premier : on n'ordonne qu'À L'INTÉRIEUR de chaque
+        //   bucket, sinon un FileSearch VOSTFR passerait devant un vrai VF.
+        fun rangSource(s: Video.Server): Int =
+            if (s.id.startsWith("bkreg::FileSearch::") || s.name.startsWith("FileSearch")) 0 else 1
+
+        // 2026-08-02 (user : « faire remonter les serveurs de qualité au classement ») : à langue et
+        //   origine égales, on classe par DÉFINITION décroissante puis par DÉBIT décroissant.
+        //   Le débit départage ce que le label ne distingue pas — deux « 1080p » n'ont pas le même
+        //   encodage — et rattrape les serveurs sans définition connue grâce au poids mesuré.
+        //   Valeur inconnue = 0 : le serveur n'est pas rétrogradé pour autant, il garde son rang
+        //   naturel derrière ceux qu'on a pu mesurer.
+        fun rangQualite(s: Video.Server): Int = when (s.quality?.lowercase()?.trim()) {
+            "2160p", "4k" -> 0
+            "1440p" -> 1
+            "1080p" -> 2
+            "720p" -> 3
+            "480p" -> 4
+            "360p", "sd" -> 5
+            else -> 6   // inconnue → après les qualités établies
+        }
+        // ⚠ 2026-08-02 (user : « le tri VF/VOSTFR ne doit aucunement retarder l'arrivée des
+        //   serveurs ») : les CLÉS SONT CALCULÉES UNE SEULE FOIS, avant de trier.
+        //   `sortedWith` appelle le comparateur O(n log n) fois ; comme `bucket()` reconstruit à
+        //   chaque appel une clé de favori et repasse des expressions régulières sur le nom, le
+        //   même travail était refait des centaines de fois. Mesuré : 1,6 à 2,9 s pour 29 à 53
+        //   serveurs — à chaque lot, donc plusieurs fois par ouverture.
+        //   Trier sur des valeurs déjà calculées donne EXACTEMENT le même ordre, sans le coût.
+        val clés = HashMap<String, IntArray>(filtered.size * 2)
+        filtered.forEach { s ->
+            val b = bucketsPreCalcules[s.id] ?: bucket(s)   // déjà calculé au-dessus
+            clés[s.id] = intArrayOf(b, rangSource(s), rangQualite(s), -s.debitKbps)
+        }
+        fun clé(s: Video.Server): IntArray = clés[s.id] ?: intArrayOf(9, 9, 9, 0)
+        val sorted = filtered.sortedWith { a, b ->
+            val x = clé(a); val y = clé(b)
+            var r = 0
+            for (i in 0..3) { r = x[i].compareTo(y[i]); if (r != 0) break }
+            r
+        }
         Log.d("OFB", "H sorted=${sorted.size} ${System.currentTimeMillis()-_t}ms → RETURN")
 
         // 2026-07-04 : MASQUAGE langue opposée + VO sur épisode à langue explicite
@@ -1484,6 +1803,27 @@ class PlayerViewModel(
      * Re-trie les serveurs courants et ré-émet serversReordered.
      * Appelé depuis le Fragment quand l'user toggle un cœur VOD.
      */
+    /**
+     * 2026-08-02 (user : « j'ai trouvé l'arrivée des serveurs un peu longue, t'as pas créé un truc
+     * qui ralentit ? ») — oui, et c'était ceci.
+     *
+     * Chaque langue corrigée déclenchait un `resortServers()` immédiat. Or un tri complet coûte
+     * 1,5 à 2,8 s (mesuré : `orderByFrenchBuckets(53) fait en 2852ms`) : avec plusieurs faux VF
+     * démasqués, on empilait autant de tris pendant l'arrivée des serveurs.
+     *
+     * On REGROUPE donc les demandes : plusieurs corrections rapprochées ne produisent qu'UN seul
+     * tri, déclenché une fois le calme revenu. Le résultat affiché est identique, le coût divisé.
+     */
+    private var retriJob: kotlinx.coroutines.Job? = null
+
+    private fun demanderRetri() {
+        retriJob?.cancel()
+        retriJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(1_200L)   // laisse les corrections voisines s'accumuler
+            resortServers()
+        }
+    }
+
     fun resortServers() {
         val current = allKnownServers
         if (current.isEmpty()) return
@@ -1631,6 +1971,8 @@ class PlayerViewModel(
                         ?.default = true
 		}
             }
+
+            reglerSousTitresSelonLangue(server, video)
 
             Log.d("PlayerViewModel", "Estrazione video completata con successo")
             // 2026-07-04 (user "le serveur en lecture n'a même pas la qualité marquée") :

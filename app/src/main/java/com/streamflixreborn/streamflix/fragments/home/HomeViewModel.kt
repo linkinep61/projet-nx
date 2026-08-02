@@ -239,6 +239,33 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                 val moviesMap = moviesDb.associateBy { it.id }
                 val tvShowsMap = tvShowsDb.associateBy { it.id }
 
+                // Suggestions « Pour vous » — calculées à partir des titres les plus récents
+                //   de « Continuer à regarder », en excluant tout ce qui est déjà affiché
+                //   ailleurs sur l'accueil (rien n'entame plus la confiance qu'une
+                //   « suggestion » qu'on a déjà sous les yeux ou déjà terminée).
+                val recentsTries = continueWatching.sortedByDescending {
+                    when (it) {
+                        is Episode -> it.watchHistory?.lastEngagementTimeUtcMillis ?: 0L
+                        is Movie -> it.watchHistory?.lastEngagementTimeUtcMillis ?: 0L
+                        else -> 0L
+                    }
+                }
+                val dejaAffiches = buildSet {
+                    continueWatching.forEach {
+                        when (it) {
+                            is Movie -> add(it.id)
+                            is Episode -> it.tvShow?.id?.let(::add)
+                            else -> {}
+                        }
+                    }
+                    favoritesMovies.forEach { if (it is Movie) add(it.id) }
+                    favoriteTvShows.forEach { if (it is TvShow) add(it.id) }
+                }
+                val suggestionsPourVous = runCatching {
+                    com.streamflixreborn.streamflix.utils.SuggestionsPourVous
+                        .construire(recentsTries, dejaAffiches)
+                }.getOrDefault(emptyList())
+
                 fun mergeItem(item: AppAdapter.Item): AppAdapter.Item {
                     return when (item) {
                         is Movie -> moviesMap[item.id]
@@ -291,6 +318,20 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                                 }
                             },
                     ),
+
+                    // ── « POUR VOUS » (2026-08-06) ───────────────────────────────────────
+                    //   Demande d'un testeur, arbitrée avec le user : une rangée qui se
+                    //   construit d'elle-même au fil des visionnages, placée JUSTE SOUS
+                    //   « Continuer à regarder ». Elle n'existe pas tant qu'on n'a rien
+                    //   regardé, donc un nouvel utilisateur ne voit aucun changement.
+                    //   Le calcul (recommandations TMDB des derniers titres, entrelacées) vit
+                    //   dans `SuggestionsPourVous` ; ici on ne fait que la poser au bon
+                    //   endroit — donc valable d'un coup sur TV et sur mobile.
+                    //   ⚠ `suggestionsPourVous` (réglages d'affichage) peut la masquer, et sa
+                    //     réinitialisation vide l'historique de lecture qui l'alimente.
+                    suggestionsPourVous
+                        .takeIf { it.isNotEmpty() }
+                        ?.let { Category(name = Category.POUR_VOUS, list = it) },
 
                     // FAVORITES
                     Category(
@@ -747,13 +788,17 @@ class HomeViewModel(database: AppDatabase) : ViewModel() {
                         .toMutableSet()
 
                     // 4. Ajout des chunks enrichment EN SUFFIXE (skip si nom déjà présent)
-                    val seriesNames = listOf("Séries Récentes", "Séries Populaires", "Encore plus de Séries", "Séries à Découvrir")
-                    val filmNames = listOf("Films Récents", "Films Populaires", "Encore plus de Films", "Films à Découvrir")
+                    val seriesNames = listOf("Séries Récentes", "Séries Populaires", "Encore plus de Séries")
+                    val filmNames = listOf("Films Récents", "Films Populaires", "Encore plus de Films")
                     val tvChunks = uniqueTvShows.chunked(20)
                     val movieChunks = uniqueMovies.chunked(20)
                     // 2026-07-03 : cappé à 4 chunks max (= les 4 noms nommés).
                     // Au-delà on obtenait "Films #5", "Séries #5"… inutile.
-                    val maxChunks = minOf(maxOf(tvChunks.size, movieChunks.size), 4)
+                    // 2026-08-04 (user : « tu me vires la catégorie Films à découvrir et Séries
+                    //   à découvrir, ça va alléger un peu le home ») — ramené à 3. Ces deux
+                    //   rangées fermaient l'accueil avec le reliquat des chunks, sans critère
+                    //   propre : ni récence ni popularité, juste ce qui n'était pas encore casé.
+                    val maxChunks = minOf(maxOf(tvChunks.size, movieChunks.size), 3)
 
                     for (i in 0 until maxChunks) {
                         if (i < movieChunks.size) {

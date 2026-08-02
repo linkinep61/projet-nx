@@ -484,10 +484,26 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
 
             // Download button — visible only for non-IPTV server items
             if (item is Settings.Server) {
-                // 2026-07-16 : appui LONG sur un serveur → le signaler comme « mauvais » (mauvais
-                //   épisode/saison/langue). Envoi GitHub géré par le fragment (qui a le videoType).
+                // ── 2026-08-06 : L'APPUI LONG DÉSACTIVE LE LIEN (il ne le signale plus) ──────
+                //   Demande d'un testeur, arbitrée par le user : le signalement est supprimé,
+                //   l'appui long désactive le serveur. Pas de menu ni de dialogue — un appui
+                //   long suffit. Le lien reste récupérable dans « Paramètres → Gérer les sources ».
                 binding.root.setOnLongClickListener {
-                    settingsView.onServerReported?.invoke(item)
+                    // 2026-08-06, correction immédiate : le user a désactivé une source par un appui long
+                    //   involontaire. Une action destructive DOIT demander confirmation.
+                    androidx.appcompat.app.AlertDialog.Builder(
+                        binding.root.context,
+                        com.streamflixreborn.streamflix.R.style.OnyxDialog,
+                    )
+                        .setTitle("Désactiver ce lien ?")
+                        .setMessage("« ${item.name} » ne sera plus proposé.\n\nVous pourrez le réactiver dans Paramètres › Liens désactivés.")
+                        .setNegativeButton("Annuler", null)
+                        .setPositiveButton("Désactiver") { _, _ ->
+                            com.streamflixreborn.streamflix.utils.LiensDesactives
+                                .desactiver(binding.root.context, item.id, item.name)
+                            settingsView.onServerDisabled?.invoke(item)
+                        }
+                        .show()
                     true
                 }
                 val knownBad = isKnownWebViewOnlyServer(item.name)
@@ -556,7 +572,12 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
                     //   pour ne pas contaminer le VOSTFR quand on heart le VF.
                     binding.root.alpha = 1.0f
                     val providerName = com.streamflixreborn.streamflix.utils.UserPreferences.currentProvider?.name ?: ""
-                    val favKey = com.streamflixreborn.streamflix.utils.ExtractorRanker.favKeyFor(item.name)
+                    // 2026-08-07 : clé sur le SERVEUR (nom + URL) — cf. PlayerSettingsTvView.
+                    val favKey = com.streamflixreborn.streamflix.utils.ExtractorRanker.favKeyFor(
+                        com.streamflixreborn.streamflix.models.Video.Server(
+                            id = item.id, name = item.name, src = item.src,
+                        )
+                    )
                     if (providerName.isNotEmpty()) {
                         val isFav = com.streamflixreborn.streamflix.utils.ExtractorToggleStore.isFavorite(favKey, providerName)
                         binding.ivSettingFavorite.visibility = View.VISIBLE
@@ -1042,3 +1063,4 @@ class PlayerSettingsMobileView @JvmOverloads constructor(
         }
     }
 }
+
