@@ -487,7 +487,18 @@ class TmdbProvider(override val language: String) : Provider, ProgressiveServers
     }
 
     override suspend fun getMovies(page: Int): List<Movie> {
-        val movies = TMDb3.Discover.movie(page = page, language = language, sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC, withOriginalLanguage = tmdbCatalogOriginalLanguage()).results.map { movie ->
+        // 2026-08-04 — filtre d'année (second clic sur « Films », cf. YearFilter).
+        val plage = com.streamflixreborn.streamflix.utils.YearFilter
+            .get(name, com.streamflixreborn.streamflix.utils.YearFilter.Type.FILMS)
+        val movies = TMDb3.Discover.movie(
+            page = page, language = language,
+            sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
+            primaryReleaseDate = TMDb3.Params.Range(
+                gte = com.streamflixreborn.streamflix.utils.YearFilter.borneBasse(plage),
+                lte = com.streamflixreborn.streamflix.utils.YearFilter.borneHaute(plage),
+            ),
+            withOriginalLanguage = tmdbCatalogOriginalLanguage(),
+        ).results.map { movie ->
             Movie(
                 id = movie.id.toString(),
                 title = movie.title,
@@ -503,7 +514,17 @@ class TmdbProvider(override val language: String) : Provider, ProgressiveServers
     }
 
     override suspend fun getTvShows(page: Int): List<TvShow> {
-        val tvShows = TMDb3.Discover.tv(page = page, language = language, sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC, withOriginalLanguage = tmdbCatalogOriginalLanguage()).results.map { tv ->
+        val plage = com.streamflixreborn.streamflix.utils.YearFilter
+            .get(name, com.streamflixreborn.streamflix.utils.YearFilter.Type.SERIES)
+        val tvShows = TMDb3.Discover.tv(
+            page = page, language = language,
+            sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
+            firstAirDate = TMDb3.Params.Range(
+                gte = com.streamflixreborn.streamflix.utils.YearFilter.borneBasse(plage),
+                lte = com.streamflixreborn.streamflix.utils.YearFilter.borneHaute(plage),
+            ),
+            withOriginalLanguage = tmdbCatalogOriginalLanguage(),
+        ).results.map { tv ->
             TvShow(
                 id = tv.id.toString(),
                 title = tv.name,
@@ -704,9 +725,19 @@ class TmdbProvider(override val language: String) : Provider, ProgressiveServers
             id = id,
             name = "",
 
+            // 2026-08-05 — le genre ne doit plus écraser le filtre d'année choisi au second
+            //   clic sur l'onglet (cf. le commentaire détaillé dans MovixProvider.getGenre).
             shows = TMDb3.Discover.movie(
                 page = page,
                 withGenres = TMDb3.Params.WithBuilder(id),
+                primaryReleaseDate = com.streamflixreborn.streamflix.utils.YearFilter
+                    .get(name, com.streamflixreborn.streamflix.utils.YearFilter.Type.FILMS)
+                    .let { p ->
+                        TMDb3.Params.Range(
+                            gte = com.streamflixreborn.streamflix.utils.YearFilter.borneBasse(p),
+                            lte = com.streamflixreborn.streamflix.utils.YearFilter.borneHaute(p),
+                        )
+                    },
                 language = language
             ).results.map { movie ->
                 Movie(
@@ -721,6 +752,14 @@ class TmdbProvider(override val language: String) : Provider, ProgressiveServers
             }.mix(TMDb3.Discover.tv(
                 page = page,
                 withGenres = TMDb3.Params.WithBuilder(id),
+                firstAirDate = com.streamflixreborn.streamflix.utils.YearFilter
+                    .get(name, com.streamflixreborn.streamflix.utils.YearFilter.Type.SERIES)
+                    .let { p ->
+                        TMDb3.Params.Range(
+                            gte = com.streamflixreborn.streamflix.utils.YearFilter.borneBasse(p),
+                            lte = com.streamflixreborn.streamflix.utils.YearFilter.borneHaute(p),
+                        )
+                    },
                 language = language
             ).results.map { tv ->
                 TvShow(

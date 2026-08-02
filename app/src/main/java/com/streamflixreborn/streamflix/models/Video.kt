@@ -92,5 +92,21 @@ data class Video(
          * Ex. « VOSTFR » (audio anglais seul) ou « VF+VO » (deux pistes). null = inconnue.
          */
         @Volatile var language: String? = null
+
+        /**
+         * Indice de qualité CHIFFRÉ, en kilobits par seconde, qui sert à départager deux serveurs
+         * affichant la même définition : à « 1080p » égal, le mieux encodé a le plus gros débit.
+         *
+         * Origine UNIQUE : `BANDWIDTH` du manifeste HLS, déjà en mémoire pendant le sondage de
+         * qualité — donc gratuit, jamais une requête de plus.
+         *
+         * ⚠ 2026-08-03 : la seconde origine (poids d'un fichier direct mesuré en HEAD) a été
+         * RETIRÉE à la demande du user. Elle ne pouvait atteindre que les 4 serveurs pré-extraits,
+         * et parmi eux les seuls fichiers directs restés sans qualité — rendement quasi nul.
+         * Ne pas la réintroduire sans élargir la couverture, sinon elle ne servira pas davantage.
+         *
+         * 0 = inconnu : le serveur garde alors sa place, il n'est jamais rétrogradé pour ça.
+         */
+        @Volatile var debitKbps: Int = 0
     }
 }

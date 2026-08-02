@@ -439,8 +439,28 @@ object AoneroomClient {
      *   pour lire le manifeste DASH + ses segments).
      */
     suspend fun streamPlaybackHeaders(streamUrl: String? = null): Map<String, String> {
+        // 2026-08-08 (user : « regarde Cloudstream 429 ») — REFERER RETIRÉ.
+        //   Constaté sur « Cocorico » (subjectId 826759171835052664) : le serveur
+        //   « Cloudstream [1080p] [VF] » passait au ROUGE avec, dans le log,
+        //   `InvalidResponseCode: Response code: 428` puis `DIAG-403 … en-têtes de
+        //   l'extracteur = {Referer=https://moviebox.ph/, User-Agent=…, Authorization=Bearer …}`.
+        //   Le flux, lui, est parfaitement vivant. Test en isolant UN SEUL en-tête à la fois
+        //   sur la MÊME URL (play-info fraîche, hcdn3.hakunaymatata.com) :
+        //     aucun en-tête .................... 206  video/mp4   ✅
+        //     User-Agent (celui-ci) seul ....... 206  video/mp4   ✅
+        //     Authorization Bearer seule ....... 206  video/mp4   ✅
+        //     Referer: https://moviebox.ph/ .... 429              ❌
+        //     User-Agent + Referer ............. 429              ❌
+        //     User-Agent + Referer + Bearer .... 429              ❌
+        //   Le Referer est le seul en-tête qui fasse refuser le CDN, et son retrait suffit :
+        //   la requête nue rend la vidéo immédiatement. Même famille que le piège upbolt
+        //   (`; charset=utf-8` en trop) — un en-tête superflu qu'un serveur refuse.
+        //   ⚠ Le Cookie CloudFront (plus bas) reste indispensable pour les contenus qui en
+        //   fournissent un : c'est SON absence qui donne les vrais 428 (contenu premium
+        //   verrouillé). Les deux causes sont distinctes, ne pas les confondre.
+        //   Pour revenir en arrière : décommenter la ligne ci-dessous.
         val hdrs = mutableMapOf(
-            "Referer" to "https://moviebox.ph/",
+            // "Referer" to "https://moviebox.ph/",
             "User-Agent" to USER_AGENT,
         )
         val token = bearerToken ?: try { ensureBearer() } catch (_: Exception) { null }

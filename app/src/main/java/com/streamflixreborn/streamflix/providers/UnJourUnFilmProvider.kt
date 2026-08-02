@@ -1089,9 +1089,30 @@ object UnJourUnFilmProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Pr
                     }
 
                     if (url.isNotEmpty() && !ignoreSource("", url)) {
+                        // ── 2026-08-05 — ROUTAGE OnRegardeOu ÉLARGI AUX ALIAS ─────────────
+                        //   Bug user : DEUX serveurs « 1Jour1Film · VF HD (OnRegardeOu) »
+                        //   au libellé IDENTIQUE, dont un mort.
+                        //   Cause : ce test n'acceptait que les URLs commençant par
+                        //   `onregardeou.site`. Or le site livre maintenant les miroirs EN
+                        //   DIRECT (`bysezoxexe.com`, `dismoiceline.uns.bio`). Le test
+                        //   échouait, les deux tombaient dans la branche générique ci-dessous,
+                        //   et `identifyServiceName` les reconnaissant tous deux via les alias
+                        //   de l'extracteur, ils recevaient LE MÊME nom.
+                        //   Pire : ils ne passaient donc jamais par `expand()`, qui est le seul
+                        //   endroit où `DISABLED_MIRROR_HOSTS` écarte `uns.bio` — un lecteur
+                        //   vidstack à PoW « Verifying human… », injouable en mode invisible,
+                        //   volontairement désactivé depuis juillet.
+                        //   On route désormais vers `expand()` dès que l'URL appartient à
+                        //   l'extracteur, alias compris : les miroirs retrouvent des noms
+                        //   distincts (leur hôte réel) et le filtre s'applique.
+                        val estOnRegardeOu = url.startsWith(onregadeou.mainUrl, ignoreCase = true) ||
+                            onregadeou.aliasUrls.any { a ->
+                                val hote = try { android.net.Uri.parse(a).host?.lowercase().orEmpty() } catch (_: Exception) { "" }
+                                hote.isNotBlank() && url.contains(hote, ignoreCase = true)
+                            }
                         if (url.startsWith(apivoirfilm.mainUrl)) {
                             apiUrls.add(url)
-                        } else if (url.startsWith(onregadeou.mainUrl)) {
+                        } else if (estOnRegardeOu) {
                             onregardeUrls.add(url)
                         } else {
                             val serviceName = Extractor.identifyServiceName(url)

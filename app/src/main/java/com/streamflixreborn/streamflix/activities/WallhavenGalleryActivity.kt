@@ -53,14 +53,19 @@ class WallhavenGalleryActivity : AppCompatActivity() {
     private var loading: Boolean = false
 
     // Catégories intégrées : libellé → requête (vide = suggérés/top).
+    // 2026-08-04 (bug user : « les thèmes sont morts, rien du tout, mais Black oui ») :
+    //   les requêtes étaient MULTI-MOTS (« dark amoled minimal », « movie cinematic »). Wallhaven
+    //   exige que TOUS les termes correspondent : demander trois tags simultanés ne renvoie
+    //   quasiment rien. « Black », mot unique et tag répandu, en trouvait des milliers — d'où
+    //   l'écart constaté. Un seul mot-clé par thème, choisi parmi les tags courants du site.
     private val builtInCategories = listOf(
         "Suggérés" to "",
-        "Cinéma" to "movie cinematic",
-        "Nature" to "nature landscape",
+        "Cinéma" to "movie",
+        "Nature" to "nature",
         "Anime" to "anime",
-        "Espace" to "space galaxy",
-        "Ville" to "city night",
-        "Sombre" to "dark amoled minimal",
+        "Espace" to "space",
+        "Ville" to "city",
+        "Sombre" to "dark",
         "Abstrait" to "abstract",
     )
     private var activeCategory: String = "Suggérés"

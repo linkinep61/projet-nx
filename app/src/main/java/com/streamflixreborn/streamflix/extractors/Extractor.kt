@@ -134,6 +134,9 @@ abstract class Extractor {
 
         private val extractors = listOf(
             AnonMp4Extractor(),
+            // 2026-08-02 : playmate.to (provider J1F). Les logs disaient « No extractors found » —
+            //   il n'était pas cassé, il n'existait pas. Extraction purement HTTP (POST /api/s).
+            PlaymateExtractor(),
             Embed4meExtractor(),
             OnRegardeOuExtractor(),
             RabbitstreamExtractor(),
@@ -278,6 +281,10 @@ abstract class Extractor {
             // Transformé en handler proxy générique : kokoflix + kakaflix + newPlayer.php.
             // Suit le redirect HTTP → délègue à l'extracteur du domaine résolu.
             KakaflixExtractor(),
+            // 2026-08-07 : FireStream (firestream.to) — « Lecteur 1 » de certains épisodes
+            //   Wiflix/flemmix. API maison : page embed → token-blob → POST /resolve → m3u8
+            //   signé. Recette vérifiée en direct dans le navigateur.
+            FireStreamExtractor(),
             NetuExtractor(),
             SeekPlaysExtractor(),
             // 2026-07-09 : nouveau domaine + chiffrement de SeekStreaming (seekplayer.vip/.me)
@@ -655,6 +662,37 @@ abstract class Extractor {
         /** Applique les redirections domaine mémorisées sur un lien.
          *  Si le host du lien a un redirect connu (succès précédent sur un alias),
          *  on réécrit directement le lien pour éviter de retenter le domaine mort. */
+        /** Préfixe `http(s)://www.` — compilé UNE fois (il l'était à chaque comparaison). */
+        private val PREFIXE_URL = Regex("^(https?://)?(www\\.)?")
+
+        /** Même chose pour la forme « domaine sans extension » du second passage. */
+        private val PREFIXE_ET_EXTENSION = Regex("^(https?://)?(www\\.)?(.*?)(\\.[a-z]+)")
+
+        /**
+         * Index `préfixe normalisé → extracteur`, construit UNE seule fois.
+         *   L'ordre de déclaration est conservé (LinkedHashMap) et une entrée déjà présente
+         *   n'est jamais écrasée : deux extracteurs revendiquant le même domaine gardent donc
+         *   exactement la priorité qu'ils avaient avec les anciennes boucles.
+         */
+        private val indexPrefixes: Map<String, Extractor> by lazy {
+            val m = LinkedHashMap<String, Extractor>()
+            for (e in extractors) {
+                m.putIfAbsent(e.mainUrl.lowercase().replace(PREFIXE_URL, ""), e)
+                for (a in e.aliasUrls) m.putIfAbsent(a.lowercase().replace(PREFIXE_URL, ""), e)
+            }
+            m
+        }
+
+        /** Même index, mais sur le domaine PRIVÉ de son extension (second passage historique). */
+        private val indexRacines: Map<String, Extractor> by lazy {
+            val m = LinkedHashMap<String, Extractor>()
+            for (e in extractors) {
+                m.putIfAbsent(e.mainUrl.lowercase().replace(PREFIXE_ET_EXTENSION, "$3"), e)
+                for (a in e.aliasUrls) m.putIfAbsent(a.lowercase().replace(PREFIXE_ET_EXTENSION, "$3"), e)
+            }
+            m
+        }
+
         private fun applyDomainRedirect(url: String): String {
             val host = extractHost(url) ?: return url
             val redirectTo = domainRedirects[host] ?: return url
@@ -674,7 +712,68 @@ abstract class Extractor {
             } catch (_: Exception) { link }
         }
 
+        /** Résultat tout frais, uniquement destiné aux appels CONCURRENTS du même lien. */
+        private val resultatImmediat = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Video>>()
+
+        /** Fenêtre volontairement très courte : on ne veut pas d'un cache, juste éviter que
+         *  deux demandes simultanées fassent deux fois le même travail. */
+        private const val FENETRE_DOUBLON_MS = 4_000L
+
+        /**
+         * ── 2026-08-06 : LA MÊME EXTRACTION ÉTAIT LANCÉE DEUX FOIS ───────────────────────
+         *   Mesuré sur EmbedSeek : première page chargée à 31,5 s, ABANDONNÉE, seconde à
+         *   37,1 s — **cinq secondes et demie jetées**. Le lecteur demande l'extraction une
+         *   première fois (choix automatique du serveur), puis une seconde (sélection
+         *   effective), et les deux partaient chacune ouvrir leur propre WebView.
+         *   Sur une box, deux moteurs Chromium concurrents, c'est aussi ce qui faisait tuer
+         *   le nôtre par le système.
+         *
+         *   Corrigé ICI plutôt que dans le lecteur : aucune logique de sélection de serveur
+         *   n'est touchée, donc aucun risque de régression sur le choix des sources.
+         *   La seconde demande attend simplement le résultat de la première.
+         *
+         *   ⚠ Ce n'est PAS un cache : la fenêtre est de quatre secondes et ne sert qu'aux
+         *     appels simultanés. Les extracteurs à `cacheTtlMs = 0` (EmbedSeek, Rpmvid…)
+         *     gardent leur comportement — une extraction demandée plus tard est bien refaite.
+         */
+        /**
+         * ── 2026-08-06 : TENTATIVE DE DÉDOUBLONNAGE DÉTACHÉE — ANNULÉE ───────────────────
+         *   Le lecteur annule sa première demande d'extraction puis en relance une (mesuré :
+         *   première page à 38,7 s, annulée, seconde à 42,0 s → 3 à 5 s jetées). J'ai essayé
+         *   de faire SURVIVRE l'extraction à cette annulation, via une portée indépendante
+         *   (`SupervisorJob` + `async`), pour que la seconde demande attende le résultat de
+         *   la première.
+         *   ⚠ ÇA A EMPIRÉ LES CHOSES, ne pas refaire tel quel. En détachant le travail, plus
+         *     RIEN ne l'annulait : à chaque changement de serveur, l'ancienne extraction
+         *     gardait sa WebView ouverte. Les moteurs Chromium s'accumulaient et la box
+         *     étouffait — mesuré : `/api/v1/info` passé de 4 s à 13 s après le chargement,
+         *     échecs de validation de certificat dans la WebView, `Pipe closed`, puis repli
+         *     overlay. L'annulation était brutale, mais elle libérait les ressources.
+         *   → Si on y revient un jour, il FAUT borner : annuler le travail détaché dès que
+         *     plus personne ne l'attend (compteur d'appelants + délai de grâce court).
+         *   On ne garde donc que la mémorisation très courte ci-dessous, qui sert le résultat
+         *   d'une extraction TERMINÉE à une seconde demande quasi simultanée. Sans risque.
+         */
         suspend fun extract(link: String, server: Video.Server? = null): Video {
+            resultatImmediat[link]?.let { (instant, video) ->
+                if (System.currentTimeMillis() - instant < FENETRE_DOUBLON_MS) {
+                    Log.d("Extractor", "extraction toute fraîche → réutilisée ($link)")
+                    return video
+                }
+                resultatImmediat.remove(link)
+            }
+            val video = extraireInterne(link, server)
+            resultatImmediat[link] = System.currentTimeMillis() to video
+            return video
+        }
+
+        private suspend fun extraireInterne(link: String, server: Video.Server? = null): Video {
+            // 2026-08-06 : la sonde de chronométrage a été retirée après avoir rempli son
+            //   office. Elle avait révélé 9,5 s perdues à CHERCHER l'extracteur (parcours
+            //   linéaire de toute la liste, à chaque appel) ; les index par préfixe et par
+            //   racine construits paresseusement ont ramené cette étape de 4-6 s à 2-25 ms.
+            //   `tDebut` est conservé : plusieurs messages d'erreur s'en servent.
+            val tDebut = System.currentTimeMillis()
             Log.d("Extractor", "extract() called with link=$link server=${server?.name}")
 
             // A: cache hit?
@@ -690,6 +789,7 @@ abstract class Extractor {
             // (un domaine mort qui a déjà été résolu vers un alias vivant).
             // Ceci évite de re-tenter le domaine mort à chaque extraction.
             var finalLink = applyDomainRedirect(decodeBase64Link(link))
+
 
             // 1. RISOLUZIONE BRIDGE UNIVERSALE (StreamHG/Sync/Cuevana)
             // Facciamo questo PRIMA di cercare l'estrattore perché il link bridge (es. mysync.mov)
@@ -722,52 +822,34 @@ abstract class Extractor {
                 }
             }
 
-            val urlRegex = Regex("^(https?://)?(www\\.)?")
+
+            val urlRegex = PREFIXE_URL
             val compareUrl = finalLink.lowercase().replace(urlRegex, "")
 
             var foundExtractor: Extractor? = null
 
-            for (extractor in extractors) {
-                if (compareUrl.startsWith(extractor.mainUrl.replace(urlRegex, ""))) {
-                    foundExtractor = extractor
-                    break
-                } else {
-                    for (aliasUrl in extractor.aliasUrls) {
-                        if (compareUrl.startsWith(aliasUrl.lowercase().replace(urlRegex, ""))) {
-                            foundExtractor = extractor
-                            break
-                        }
-                    }
-                }
-                if (foundExtractor != null) break
+            // ── 2026-08-06 : RECHERCHE PRÉ-CALCULÉE (gain mesuré : 4 à 6 s PAR extraction) ──
+            //   La sonde de chronométrage a montré que tout le temps perdu était ICI :
+            //     `après cache+redirect : 1 ms` → `avant recherche : 17 ms` →
+            //     **`extracteur trouvé : 6205 ms`**
+            //   Et pas seulement pour EmbedSeek : Vidzy 4 595 ms, LuluVdo 5 048 ms. Chaque
+            //   extraction payait ce prix, sur tous les hébergeurs.
+            //   La cause : 114 extracteurs parcourus jusqu'à QUATRE fois, et à chaque
+            //   comparaison une `Regex` RECOMPILÉE — y compris la seconde, construite dans la
+            //   boucle elle-même, donc des milliers de compilations par appel.
+            //   On construit désormais deux tables une seule fois, au premier usage, et la
+            //   recherche devient une poignée de consultations de dictionnaire.
+            //   ⚠ L'ORDRE d'origine est préservé : `indexPrefixes` est rempli dans l'ordre de
+            //     déclaration et on ne remplace jamais une entrée existante. C'est
+            //     indispensable — OnRegardeOu doit continuer de gagner sur Filemoon pour
+            //     `bysezoxexe`, comme le veut le commentaire de son extracteur.
+            for ((prefixe, extracteur) in indexPrefixes) {
+                if (compareUrl.startsWith(prefixe)) { foundExtractor = extracteur; break }
             }
 
             if (foundExtractor == null) {
-                for (extractor in extractors) {
-                    if (compareUrl.startsWith(
-                            extractor.mainUrl.replace(
-                                Regex("^(https?://)?(www\\.)?(.*?)(\\.[a-z]+)"),
-                                "$3"
-                            )
-                        )
-                    ) {
-                        foundExtractor = extractor
-                        break
-                    } else {
-                        for (aliasUrl in extractor.aliasUrls) {
-                            if (compareUrl.startsWith(
-                                    aliasUrl.replace(
-                                        Regex("^(https?://)?(www\\.)?(.*?)(\\.[a-z]+)"),
-                                        "$3"
-                                    )
-                                )
-                            ) {
-                                foundExtractor = extractor
-                                break
-                            }
-                        }
-                    }
-                    if (foundExtractor != null) break
+                for ((racine, extracteur) in indexRacines) {
+                    if (compareUrl.startsWith(racine)) { foundExtractor = extracteur; break }
                 }
             }
 
@@ -790,6 +872,7 @@ abstract class Extractor {
             }
 
             if (foundExtractor != null) {
+
                 Log.i("StreamFlixES", "[EXTRACTOR] -> Starting: ${foundExtractor.name} (URL: $finalLink)")
                 val name = foundExtractor.name
                 // 2026-05-09 : mesure de latence d'extraction (Option B du plan
@@ -925,6 +1008,55 @@ abstract class Extractor {
                 return enforceFrenchSubtitlesOnly(direct)
             }
             Log.e("Extractor", "No extractors found for URL: $finalLink (original: $link)")
+            // 2026-08-07 (user : lien `ijs155l.cloudatacdn.com/<hash>/<hash>?token=…&expiry=…`,
+            //   « regarde si notre extracteur est toujours à jour ») — NON, et voici pourquoi.
+            //   Ce lien EST un MP4 : vérifié en direct, HTTP 206, `Content-Type: video/mp4`,
+            //   signature `ftypisom` sur les premiers octets. Mais son chemin ne porte AUCUNE
+            //   extension — la garde ci-dessus, purement textuelle, ne pouvait pas le voir, et
+            //   le fichier partait à la poubelle avec « No extractors found ».
+            //   On demande donc l'avis du SERVEUR avant de renoncer : un GET de 1 octet
+            //   (Range: bytes=0-0) suffit à lire le Content-Type. Si c'est un média, on passe
+            //   l'URL telle quelle à ExoPlayer, qui sait la lire seul.
+            //   Générique par construction : couvre tous les CDN « propres » sans extension,
+            //   présents et à venir, sans avoir à les recenser un par un.
+            runCatching {
+                val sonde = okhttp3.Request.Builder()
+                    .url(finalLink)
+                    .header("Range", "bytes=0-0")
+                    .header("User-Agent", DEFAULT_USER_AGENT)
+                    .build()
+                sharedClient.newCall(sonde).execute().use { r ->
+                    val ct = r.header("Content-Type")?.lowercase().orEmpty()
+                    val estMedia = r.isSuccessful && (
+                        ct.startsWith("video/") ||
+                        ct.startsWith("audio/") ||
+                        ct.contains("mpegurl") ||
+                        ct.contains("dash+xml")
+                    )
+                    if (estMedia) ct else null
+                }
+            }.getOrNull()?.let { ct ->
+                Log.i("Extractor", "Aucun extracteur, mais le serveur annonce '$ct' → passe-plat: $finalLink")
+                val direct = com.streamflixreborn.streamflix.models.Video(
+                    source = finalLink,
+                    type = if (ct.contains("mpegurl")) androidx.media3.common.MimeTypes.APPLICATION_M3U8 else null,
+                    headers = mapOf("User-Agent" to DEFAULT_USER_AGENT),
+                )
+                return enforceFrenchSubtitlesOnly(direct)
+            }
+
+            // 2026-08-07 (user : « regarde s'il y a d'autres nouveaux lecteurs sortis ») —
+            //   DÉTECTEUR PERMANENT D'HÉBERGEUR INCONNU. Balayer les sites à la main ne
+            //   trouve que ce qu'on pense à chercher : FireStream n'est sorti que parce que
+            //   le user est tombé dessus par hasard. Ici on est au SEUL endroit du code où
+            //   l'on sait, avec certitude, qu'aucun extracteur ne couvre une URL. On le note
+            //   donc explicitement, avec le HOST isolé pour que la ligne soit greppable :
+            //     adb logcat | grep "HOTE NON COUVERT"
+            //   Chaque titre ouvert alimente ainsi le recensement, sans effort.
+            val hoteInconnu = try {
+                android.net.Uri.parse(finalLink).host ?: "?"
+            } catch (e: Exception) { "?" }
+            Log.w("Extractor", "HOTE NON COUVERT: $hoteInconnu (aucun extracteur) — $finalLink")
             throw Exception("No extractors found for URL: $finalLink")
         }
 

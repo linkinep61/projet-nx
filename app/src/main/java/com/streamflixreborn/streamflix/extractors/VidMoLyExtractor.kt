@@ -28,6 +28,8 @@ open class VidMoLyExtractor : Extractor() {
         "https://vidmoly.net",
         "https://vidmoly.biz",
         "https://vidmoly.to",
+        // 2026-08-07 : relevé dans les logs (FrenchAnime sert `vidmoly.org/embed-…`).
+        "https://vidmoly.org",
         // 2026-07-29 : ansembed.net = mirror Vidmoly (même player JWPlayer + CDN vmwesa.online),
         //   utilisé par anime-sama (Lecteur 1). Même extraction m3u8 que Vidmoly.
         "https://ansembed.net",
@@ -36,8 +38,15 @@ open class VidMoLyExtractor : Extractor() {
     private val context = StreamFlixApp.instance.applicationContext
 
     override suspend fun extract(link: String): Video {
+        // 2026-08-07 : PORTE CANONIQUE, même principe que VoeExtractor → voe.sx/e/<id>.
+        //   Vidmoly balade ses visiteurs sur des sous-domaines pub jetables
+        //   (`ww547.vidmoly.to` relevé dans le navigateur : ne résout plus du tout).
+        //   L'ancien remplacement ne couvrait que le TLD : `ww547.vidmoly.to` devenait
+        //   `ww547.vidmoly.biz`, tout aussi mort. On réécrit maintenant l'hôte ENTIER,
+        //   sous-domaine compris. Auto-réparant : un provider qui code en dur un vieux
+        //   domaine n'a plus d'impact, seule cette constante compte.
         val target = if (link.contains("vidmoly"))
-            link.replace(Regex("vidmoly\\.(to|me|net)"), "vidmoly.biz")
+            link.replace(Regex("(?:[\\w-]+\\.)*vidmoly\\.\\w+"), HOTE_CANONIQUE)
         else link
 
         // 2026-07-06 v3 : FAST-PATH OkHttp — le m3u8 est dans le HTML source brut
@@ -393,6 +402,10 @@ open class VidMoLyExtractor : Extractor() {
     }
 
     companion object {
+        // 2026-08-07 : hôte canonique Vidmoly. Seul point à changer le jour où
+        //   `.biz` tombe — toutes les URL entrantes y sont réécrites (cf. extract()).
+        private const val HOTE_CANONIQUE = "vidmoly.biz"
+
         // UA Android Chrome — matche le runtime de la WebView Android, donc
         // moins de chance que Cloudflare le flag comme bot vs un UA Windows
         // qui crée un mismatch suspect.

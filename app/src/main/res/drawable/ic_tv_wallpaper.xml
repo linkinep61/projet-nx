@@ -1,0 +1,21 @@
+<!-- 2026-08-04 : copie HAUTE DEFINITION pour l'en-tete TV. Dessin identique a ic_hdr_*, seule
+     la taille declaree passe de 24dp a 96dp : le vecteur est alors mis en cache a 96dp au lieu
+     d'etre etire depuis 24dp vers les 28dp affiches, ce qui supprime le crenelage des courbes.
+     Reserve aux vues de TAILLE FIXE (en-tete TV, 48dp) : sur une vue wrap_content, cette taille
+     declaree deviendrait la taille d'affichage et quadruplerait l'icone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp" android:height="96dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="1.8"
+        android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="#00000000"
+        android:pathData="M5,4h14a2,2 0 0 1 2,2v12a2,2 0 0 1 -2,2h-14a2,2 0 0 1 -2,-2v-12a2,2 0 0 1 2,-2z"/>
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="1.8"
+        android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="#00000000"
+        android:pathData="M8.5,10m-1.5,0a1.5,1.5 0 1 0 3,0a1.5,1.5 0 1 0 -3,0"/>
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="1.8"
+        android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="#00000000"
+        android:pathData="M4,17l4,-4c0.8,-0.8 1.8,-0.8 2.6,0l3.4,3.4"/>
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="1.8"
+        android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="#00000000"
+        android:pathData="M14,15l1.5,-1.5c0.8,-0.8 1.8,-0.8 2.6,0l2.4,2.4"/>
+</vector>

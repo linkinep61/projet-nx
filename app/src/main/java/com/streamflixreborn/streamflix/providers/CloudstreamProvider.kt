@@ -171,6 +171,14 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
      *  (pas le bordel multi-langue qu'affiche Cloudstream officiel). */
     private val frenchCaptionsCache = ConcurrentHashMap<String, List<String>>()
 
+    /** 2026-08-05 — Signature CloudFront par identifiant de serveur, relevée dans
+     *  `streams[].signCookie` au moment de `getServers` et reposée en cookie à la lecture.
+     *  Indispensable : sans elle le CDN répond 403 « MissingKey ». */
+    private val signaturesCloudFront = ConcurrentHashMap<String, String>()
+
+    /** Format annoncé par l'API (`DASH` en pratique), pour déclarer le bon type à ExoPlayer. */
+    private val formatsFlux = ConcurrentHashMap<String, String>()
+
     /** Cache des streams MP4/HLS par subjectId, populé avant unification, lu au
      *  getVideo pour construire un master m3u8 multi-quality. Liste de
      *  (resolution, url, linkType) où linkType=1 HLS, =2 MP4. Permet à ExoPlayer
@@ -394,6 +402,10 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                     }.build()
                 val resp = httpClient.newCall(req).execute()
                 anyHostResponded = true
+                // Sondes du 5 août retirées : question tranchée. Le CDN
+                //   `sacdn.hakunaymatata.com` est du CloudFront signé, et la signature ne
+                //   passe NI par l'URL NI par un Set-Cookie de réponse — elle est livrée dans
+                //   le corps JSON, champ `streams[].signCookie`. Voir getServers/getVideo.
                 resp.use {
                     val code = it.code
                     if (code == 441 || code == 477) {
@@ -554,6 +566,29 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             .trim()
         // Strip leading articles for fuzzy matching
         n = n.replace(Regex("^(le|la|les|l|un|une|des|the|a|an)\\s+"), "")
+
+        // 2026-08-05 (user : « pourquoi je n'ai pas de serveur Cloudstream alors qu'avant il y
+        //   en avait sur ce film ») — CONJONCTIONS ÉQUIVALENTES À L'ESPERLUETTE.
+        //
+        //   La ligne du dessus remplace toute ponctuation par une espace : « & » disparaît donc,
+        //   mais le mot « and » reste. Deux écritures du MÊME titre cessent alors de se
+        //   ressembler, et comme le rapprochement se fait par inclusion de chaînes, aucune ne
+        //   contient l'autre — le mot parasite est AU MILIEU :
+        //     « Asterix & Obelix: The Middle Kingdom »   → asterix obelix the middle kingdom
+        //     « Astérix and Obélix: The Middle Kingdom » → asterix and obelix the middle kingdom
+        //   Score 10, rejet, et Cloudstream ne rend aucun serveur pour ce film. Constaté en
+        //   direct sur Astérix : MovieBox renvoyait bien 22 candidats dont le bon, refusé deux
+        //   fois de suite.
+        //
+        //   On aligne donc les conjonctions sur le sort de l'esperluette : elles disparaissent.
+        //   ⚠ C'est une correction d'ÉQUIVALENCE ORTHOGRAPHIQUE, pas un assouplissement du
+        //     rapprochement. Le seuil `titleScore <= 3` du 10 juillet reste intact — il protège
+        //     des faux appariements sur titres courts, et le principe « pas de serveur plutôt
+        //     que le mauvais film » n'est pas entamé : après nettoyage les deux titres sont
+        //     STRICTEMENT identiques, donc acceptés par le test d'égalité, sans approximation.
+        n = n.replace(Regex("\\b(and|et|und|y|e)\\b"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
         return n
     }
 
@@ -839,42 +874,125 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
     private fun TMDb3.Movie.notAnim(): Boolean = 16 !in genresIds
     private fun TMDb3.Tv.notAnim(): Boolean = 16 !in genresIds
 
+    // ════════════════════════════════════════════════════════════════════════
+    //  DISPONIBILITÉ — les mêmes règles que l'accueil Movix
+    // ════════════════════════════════════════════════════════════════════════
+    /**
+     * 2026-08-04 (user : « est-ce que tout ça s'applique aussi à Cloudstream ? »).
+     *
+     * Réponse : non. Cloudstream construit son propre accueil et n'avait AUCUNE de ces
+     * règles — ni délai après sortie, ni exclusion des films encore à l'affiche, ni
+     * vérification d'une distribution française. Il affichait donc exactement les fiches
+     * sans serveur que l'on venait de chasser côté Movix.
+     *
+     * Trois critères, identiques à ceux de l'accueil Movix :
+     *   1. sorti depuis au moins une semaine — le temps que les hébergeurs publient ;
+     *   2. plus à l'affiche en France — aucune copie correcte avant la fenêtre vidéo ;
+     *   3. réellement distribué en France si la sortie est récente — un film que personne
+     *      n'a sorti ici n'aura jamais de source française.
+     *
+     * Les deux listes de référence sont mises en cache six heures par `VodCategories`,
+     * donc cet appel ne coûte rien au-delà du premier chargement.
+     */
+    private const val DELAI_SOURCES_JOURS = 7
+
+    /** Onglet de catalogue : pages TMDB agrégées par chargement (compense le filtrage). */
+    private const val PAGES_TMDB_PAR_CHARGEMENT = 3
+
+    /** Seuil de notoriété — indissociable du tri par date, cf. getMovies. */
+    private const val VOTES_MINIMUM_ONGLET = 15
+
+    /**
+     * @param delaiJours délai exigé depuis la sortie. **Zéro pour les rangées de plateforme** :
+     *   figurer au catalogue d'un service, c'est y être disponible le jour même (décision user :
+     *   « Canal, Amazon, Paramount, Disney, tout ça c'est des sorties instantanées »).
+     */
+    private suspend fun filtrerFilmsDisponibles(
+        items: List<TMDb3.Movie>,
+        delaiJours: Int = DELAI_SOURCES_JOURS,
+    ): List<TMDb3.Movie> {
+        val vod = com.streamflixreborn.streamflix.utils.VodCategories
+        val enSalles = runCatching { vod.enSalles() }.getOrDefault(emptySet())
+        val sortiesFr = runCatching { vod.sortiesFrancaises() }.getOrDefault(emptySet())
+        return items.filter { m ->
+            val id = m.id.toString()
+            sortiDepuis(m.releaseDate, delaiJours) &&
+                id !in enSalles &&
+                (!vod.dansLaFenetreFrancaise(m.releaseDate) || id in sortiesFr)
+        }
+    }
+
+    /** Vrai si la date est antérieure d'au moins [jours] jours à aujourd'hui. */
+    private fun sortiDepuis(date: String?, jours: Int): Boolean {
+        if (date.isNullOrBlank()) return true
+        val limite = java.util.Calendar.getInstance()
+            .apply { add(java.util.Calendar.DAY_OF_YEAR, -jours) }.time
+        return runCatching {
+            java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+                .parse(date.trim().take(10))?.before(limite) ?: true
+        }.getOrDefault(true)
+    }
+
     private suspend fun discoverMoviesOnProvider(
         watchProviderId: Int, mapMovie: (TMDb3.Movie) -> Movie,
     ): List<Movie> = runCatching { coroutineScope {
-        val p1 = async { TMDb3.Discover.movie(
-            page = 1, language = language, region = "FR", watchRegion = "FR",
-            sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
-            withWatchProviders = TMDb3.Params.WithBuilder(watchProviderId),
-            withOriginalLanguage = csOriginalLanguageBuilder(),
-        ).results }
-        val p2 = async { runCatching { TMDb3.Discover.movie(
-            page = 2, language = language, region = "FR", watchRegion = "FR",
-            sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
-            withWatchProviders = TMDb3.Params.WithBuilder(watchProviderId),
-            withOriginalLanguage = csOriginalLanguageBuilder(),
-        ).results }.getOrDefault(emptyList()) }
-        (p1.await() + p2.await()).distinctBy { it.id }
-            .filter { it.posterPath != null && it.notAnim() }.take(20).map(mapMovie)
+        // 2026-08-04 : quatre pages au lieu de deux. Entre le filtre de disponibilité et le
+        //   plafond par franchise, deux pages ne laissaient plus de quoi garnir la rangée.
+        // 2026-08-04 (user : « sur le home Cloudstream, les catégories Canal, Netflix, OCS…
+        //   ce qui serait bien c'est d'afficher les NOUVEAUTÉS, pas des trucs de 1960 ») —
+        //   ces rangées triaient par popularité sur tout le catalogue de la plateforme, d'où
+        //   les classiques. Passées en date décroissante : une rangée « Sur Netflix » doit
+        //   montrer ce qui vient d'arriver sur Netflix.
+        //   Le seuil de notoriété accompagne le tri par date, comme partout ailleurs.
+        val pages = (1..4).map { p ->
+            async {
+                runCatching {
+                    TMDb3.Discover.movie(
+                        page = p, language = language, region = "FR", watchRegion = "FR",
+                        sortBy = TMDb3.Params.SortBy.Movie.PRIMARY_RELEASE_DATE_DESC,
+                        voteCount = TMDb3.Params.Range(VOTES_MINIMUM_ONGLET, null),
+                        // Borne à AUJOURD'HUI, sans délai : le titre est déjà au catalogue de
+                        //   la plateforme, donc disponible. On écarte seulement le futur.
+                        primaryReleaseDate = TMDb3.Params.Range(lte = java.util.Calendar.getInstance()),
+                        withWatchProviders = TMDb3.Params.WithBuilder(watchProviderId),
+                        withOriginalLanguage = csOriginalLanguageBuilder(),
+                    ).results
+                }.getOrDefault(emptyList())
+            }
+        }.flatMap { it.await() }
+        com.streamflixreborn.streamflix.utils.VodCategories.limiterFranchises(
+            filtrerFilmsDisponibles(
+                pages.distinctBy { it.id }.filter { it.posterPath != null && it.notAnim() },
+                delaiJours = 0,
+            )
+        ) { it.title }.take(25).map(mapMovie)
     } }.getOrDefault(emptyList())
 
     private suspend fun discoverTvOnProvider(
         watchProviderId: Int, mapTv: (TMDb3.Tv) -> TvShow,
     ): List<TvShow> = runCatching { coroutineScope {
-        val p1 = async { TMDb3.Discover.tv(
-            page = 1, language = language, watchRegion = "FR",
-            sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
-            withWatchProviders = TMDb3.Params.WithBuilder(watchProviderId),
-            withOriginalLanguage = csOriginalLanguageBuilder(),
-        ).results }
-        val p2 = async { runCatching { TMDb3.Discover.tv(
-            page = 2, language = language, watchRegion = "FR",
-            sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
-            withWatchProviders = TMDb3.Params.WithBuilder(watchProviderId),
-            withOriginalLanguage = csOriginalLanguageBuilder(),
-        ).results }.getOrDefault(emptyList()) }
-        (p1.await() + p2.await()).distinctBy { it.id }
-            .filter { it.posterPath != null && it.notAnim() }.take(20).map(mapTv)
+        // Mêmes rangées de plateforme que pour les films : ce sont des NOUVEAUTÉS, donc tri
+        //   par date de première diffusion, pas par popularité. Ici la date de première
+        //   diffusion est le bon critère — il s'agit de montrer ce qui vient d'arriver au
+        //   catalogue, pas de faire remonter une série ancienne dont une saison repart.
+        val pages = (1..4).map { p ->
+            async {
+                runCatching {
+                    TMDb3.Discover.tv(
+                        page = p, language = language, watchRegion = "FR",
+                        sortBy = TMDb3.Params.SortBy.Tv.FIRST_AIR_DATE_DESC,
+                        voteCount = TMDb3.Params.Range(VOTES_MINIMUM_ONGLET, null),
+                        // Sans délai, comme les films de plateforme : une série au catalogue
+                        //   d'un service y est diffusée. Seul le futur est écarté.
+                        firstAirDate = TMDb3.Params.Range(lte = java.util.Calendar.getInstance()),
+                        withWatchProviders = TMDb3.Params.WithBuilder(watchProviderId),
+                        withOriginalLanguage = csOriginalLanguageBuilder(),
+                    ).results
+                }.getOrDefault(emptyList())
+            }
+        }.flatMap { it.await() }
+        pages.distinctBy { it.id }
+            .filter { it.posterPath != null && it.notAnim() }.take(25).map(mapTv)
     } }.getOrDefault(emptyList())
 
     /** 2026-05-20 — langue d'origine TMDB à appliquer selon le filtre catalogue
@@ -1055,7 +1173,11 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         val paramountMoviesD   = async { discoverMoviesOnProvider(531, mapMovie) }
         val paramountTvD       = async { discoverTvOnProvider(531, mapTv) }
         val canalMoviesD       = async { discoverMoviesOnProvider(381, mapMovie) }   // Canal+ FR
-        val ocsMoviesD         = async { discoverMoviesOnProvider(56, mapMovie) }    // OCS FR
+        // ⚠ 2026-08-04 : l'identifiant 56 (OCS) ne renvoie plus RIEN sur le catalogue
+        //   français — le service a été absorbé. Vérifié sur /watch/providers/movie
+        //   watch_region=FR : la bonne entrée est 685, « Ciné+ OCS ». La rangée « Sur OCS »
+        //   était donc vide depuis la disparition du service.
+        val ocsMoviesD         = async { discoverMoviesOnProvider(685, mapMovie) }   // Ciné+ OCS FR
         val maxMoviesD         = async { discoverMoviesOnProvider(1899, mapMovie) }  // Max FR
 
         val sections = mutableListOf<Category>()
@@ -1065,8 +1187,17 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         if (featured.isNotEmpty()) sections.add(Category(name = Category.FEATURED, list = featured))
 
         // Nouveautés FR (films + séries séparés, pas de section mixte doublon)
-        val newMovies = newMoviesD.await().filter { it.posterPath != null && it.notAnim() }.map(mapMovie)
-        val newTv = newTvD.await().filter { it.posterPath != null && it.notAnim() }.map(mapTv)
+        val newMovies = com.streamflixreborn.streamflix.utils.VodCategories.limiterFranchises(
+            filtrerFilmsDisponibles(
+                newMoviesD.await().filter { it.posterPath != null && it.notAnim() }
+            )
+        ) { it.title }.map(mapMovie)
+        // Séries : ni salles ni distribution à vérifier, mais une série annoncée et non
+        //   diffusée n'a aucun épisode — donc aucun serveur. Seul le délai s'applique.
+        val newTv = newTvD.await()
+            .filter { it.posterPath != null && it.notAnim() }
+            .filter { sortiDepuis(it.firstAirDate, DELAI_SOURCES_JOURS) }
+            .map(mapTv)
         if (newMovies.isNotEmpty()) sections.add(Category(name = "Nouveaux films", list = newMovies))
         if (newTv.isNotEmpty()) sections.add(Category(name = "Nouvelles séries", list = newTv))
 
@@ -1083,7 +1214,7 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         addPlatformRow("Sur Canal+",         canalMoviesD.await(),     emptyList())
         addPlatformRow("Sur Paramount+",     paramountMoviesD.await(), paramountTvD.await())
         addPlatformRow("Sur Apple TV+",      appleTvMoviesD.await(),   appleTvTvD.await())
-        addPlatformRow("Sur OCS",            ocsMoviesD.await(),       emptyList())
+        addPlatformRow("Sur Ciné+ OCS",      ocsMoviesD.await(),       emptyList())
         addPlatformRow("Sur Max",            maxMoviesD.await(),       emptyList())
 
         // 3) Catégories de fond (toutes plateformes) — anime exclu
@@ -1093,11 +1224,58 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
         val topTv = topTvD.await().filter { it.posterPath != null && it.notAnim() }.map(mapTv)
         if (topTv.isNotEmpty()) sections.add(Category(name = "Séries les mieux notées", list = topTv))
 
-        val popularMovies = popularMoviesD.await().filter { it.posterPath != null && it.notAnim() }.map(mapMovie)
+        val popularMovies = com.streamflixreborn.streamflix.utils.VodCategories.limiterFranchises(
+            filtrerFilmsDisponibles(
+                popularMoviesD.await().filter { it.posterPath != null && it.notAnim() }
+            )
+        ) { it.title }.map(mapMovie)
         if (popularMovies.isNotEmpty()) sections.add(Category(name = "Films populaires", list = popularMovies))
 
-        val topMovies = topMoviesD.await().filter { it.posterPath != null && it.notAnim() }.map(mapMovie)
+        val topMovies = com.streamflixreborn.streamflix.utils.VodCategories.limiterFranchises(
+            filtrerFilmsDisponibles(
+                topMoviesD.await().filter { it.posterPath != null && it.notAnim() }
+            )
+        ) { it.title }.map(mapMovie)
         if (topMovies.isNotEmpty()) sections.add(Category(name = "Films les mieux notés", list = topMovies))
+
+        // ════════════════════════════════════════════════════════════════════
+        //  ANTI-DOUBLON GLOBAL
+        // ════════════════════════════════════════════════════════════════════
+        // 2026-08-04 (user : « le problème c'est pas que ce soit sur Max, c'est que
+        //   Spider-Man il est dans au moins 7 catégories différentes »).
+        //
+        //   Cloudstream n'avait AUCUN anti-doublon — contrairement à Movix, qui en a un
+        //   depuis juillet. Or ses rangées se recoupent par construction : un blockbuster
+        //   est à la fois sur une plateforme, populaire ET bien noté, donc il sortait dans
+        //   trois ou quatre rangées, décliné sur toute sa franchise.
+        //
+        //   Chaque rangée est servie dans son ordre d'affichage et « consomme » ses films ;
+        //   la suivante ne montre que ce qui n'a pas encore été vu. Le carrousel FEATURED
+        //   est exempté : c'est une mise en avant, pas une rangée de parcours.
+        //   Une rangée descendue sous six jaquettes est retirée plutôt qu'affichée à moitié
+        //   vide — les rangées ont été élargies en amont (quatre pages) pour l'éviter.
+        run {
+            fun cleDe(item: AppAdapter.Item): String? = when (item) {
+                is Movie -> "m:${item.id}"
+                is TvShow -> "s:${item.id}"
+                else -> null
+            }
+            val vues = HashSet<String>()
+            val propres = mutableListOf<Category>()
+            for (section in sections) {
+                if (section.name == Category.FEATURED) {
+                    propres.add(section)
+                    continue
+                }
+                val gardes = section.list.filter { item ->
+                    val cle = cleDe(item) ?: return@filter true
+                    vues.add(cle)
+                }
+                if (gardes.size >= 6) propres.add(section.copy(list = gardes.take(40)))
+            }
+            sections.clear()
+            sections.addAll(propres)
+        }
 
         Log.d(TAG, "getHome Cloudstream : ${sections.size} sections — featured=${featured.size}, nouveauxFilms=${newMovies.size}, nouvellesSeries=${newTv.size}")
         sections
@@ -1107,11 +1285,46 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
     override suspend fun getMovies(page: Int): List<Movie> {
         // 2026-05-07 : strict FR original — withOriginalLanguage="fr"
         return runCatching {
-            TMDb3.Discover.movie(
-                page = page, language = language, region = "FR",
-                sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
-                withOriginalLanguage = csOriginalLanguageBuilder(),
-            ).results.map { m ->
+            // 2026-08-04 — DATE + FILTRE DE NOTORIÉTÉ, arbitré par le user après deux essais
+            //   ratés (cf. le commentaire détaillé dans MovixProvider.getMovies).
+            //   Le tri est demandé au SERVEUR, seule façon d'obtenir un ordre cohérent sur
+            //   tout le catalogue ; le seuil de votes écarte les productions que personne n'a
+            //   notées ; et l'on agrège plusieurs pages TMDB par chargement pour compenser le
+            //   volume perdu au filtrage. Les pages venant déjà triées, les mettre bout à
+            //   bout préserve l'ordre chronologique global.
+            //   ⚠ Les SÉRIES gardent la popularité (demande explicite du user) : une nouvelle
+            //   saison d'une série ancienne doit pouvoir rester en tête d'affiche.
+            // 2026-08-04 — FILTRE D'ANNÉE (second clic sur « Films », cf. YearFilter).
+            //   Borne haute = la plus proche des deux : le délai de sortie ou la fin de
+            //   l'année choisie.
+            val plage = com.streamflixreborn.streamflix.utils.YearFilter
+                .get(name, com.streamflixreborn.streamflix.utils.YearFilter.Type.FILMS)
+            val delai = java.util.Calendar.getInstance()
+                .apply { add(java.util.Calendar.DAY_OF_YEAR, -DELAI_SOURCES_JOURS) }
+            val finAnnee = com.streamflixreborn.streamflix.utils.YearFilter.borneHaute(plage)
+            val borne = TMDb3.Params.Range(
+                gte = com.streamflixreborn.streamflix.utils.YearFilter.borneBasse(plage),
+                lte = if (finAnnee != null && finAnnee.before(delai)) finAnnee else delai,
+            )
+            val brut = coroutineScope {
+                (0 until PAGES_TMDB_PAR_CHARGEMENT).map { decalage ->
+                    async {
+                        runCatching {
+                            TMDb3.Discover.movie(
+                                page = (page - 1) * PAGES_TMDB_PAR_CHARGEMENT + decalage + 1,
+                                language = language, region = "FR",
+                                sortBy = TMDb3.Params.SortBy.Movie.PRIMARY_RELEASE_DATE_DESC,
+                                voteCount = TMDb3.Params.Range(VOTES_MINIMUM_ONGLET, null),
+                                primaryReleaseDate = borne,
+                                withOriginalLanguage = csOriginalLanguageBuilder(),
+                            ).results
+                        }.getOrDefault(emptyList())
+                    }
+                }.awaitAll().flatten()
+            }
+            filtrerFilmsDisponibles(brut.distinctBy { it.id })
+                // ⚠ AUCUN tri ici : l'ordre vient du serveur et doit rester intact.
+                .map { m ->
                 Movie(
                     id = m.id.toString(),
                     title = m.title,
@@ -1131,8 +1344,23 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
             TMDb3.Discover.tv(
                 page = page, language = language,
                 sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
+                // Filtre d'année, mémorisé séparément des films (cf. YearFilter.Type).
+                firstAirDate = com.streamflixreborn.streamflix.utils.YearFilter
+                    .get(name, com.streamflixreborn.streamflix.utils.YearFilter.Type.SERIES)
+                    .let { p ->
+                        TMDb3.Params.Range(
+                            gte = com.streamflixreborn.streamflix.utils.YearFilter.borneBasse(p),
+                            lte = com.streamflixreborn.streamflix.utils.YearFilter.borneHaute(p),
+                        )
+                    },
                 withOriginalLanguage = csOriginalLanguageBuilder(),
-            ).results.map { t ->
+            // ⚠ Tri par POPULARITÉ conservé volontairement (user : « je touche pas aux séries,
+            //   où il peut y avoir des nouvelles saisons en tête d'affiche »). Une série
+            //   ancienne qui repart mérite sa place en haut ; la date de PREMIÈRE diffusion
+            //   la reléguerait au fond.
+            ).results
+                .filter { sortiDepuis(it.firstAirDate, DELAI_SOURCES_JOURS) }
+                .map { t ->
                 TvShow(
                     id = t.id.toString(),
                     title = t.name,
@@ -1153,8 +1381,12 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
     override suspend fun search(query: String, page: Int): List<AppAdapter.Item> {
         if (query.isBlank()) {
             if (page > 1) return emptyList()
-            // Genres TMDB (mêmes IDs que Movix pour cohérence)
-            return listOf(
+            // 2026-08-04 (demande user : « une catégorie uniquement avec Netflix, Amazon…
+            //   avant les genres, et une catégorie Nouveautés avec les sorties de l'année ») :
+            //   ces entrées se comportent comme des genres — mêmes tuiles, même navigation —
+            //   mais leur identifiant porte un préfixe que getGenre() sait reconnaître.
+            //   Elles passent EN TÊTE, avant les genres classiques.
+            return com.streamflixreborn.streamflix.utils.VodCategories.enTete() + listOf(
                 Genre(id = "28", name = "Action"),
                 Genre(id = "12", name = "Aventure"),
                 Genre(id = "16", name = "Animation"),
@@ -1446,6 +1678,12 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
      *  - id numérique (TMDB genre id) → Discover par genre
      *  - id "k-drama" → Discover par origin_country=KR (mêmes specialGenres que Movix) */
     override suspend fun getGenre(id: String, page: Int): Genre {
+        // 2026-08-04 : catégories ajoutées en tête de la recherche (plateformes + Nouveautés).
+        //   Traitées AVANT la logique de genre TMDB : leur identifiant n'est pas un genre.
+        //   Logique partagée avec Movix et NetMirror — cf. VodCategories.
+        if (com.streamflixreborn.streamflix.utils.VodCategories.estCategorieSpeciale(id)) {
+            return com.streamflixreborn.streamflix.utils.VodCategories.charger(id, page, language)
+        }
         // Genres spéciaux basés sur pays d'origine
         val originCountry = when (id.lowercase()) {
             "k-drama", "drama-coreen" -> "KR"
@@ -1472,15 +1710,44 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                     TMDb3.Genre.Tv.entries.find { it.id == gid }
                         ?.let { TMDb3.Params.WithBuilder(it) }
                 }
-            // Films
+            // ── 2026-08-05 — LE GENRE N'ÉCRASE PLUS L'ANNÉE NI LE TRI ────────────────────
+            //   Même défaut que sur Movix (cf. le commentaire détaillé dans MovixProvider) :
+            //   choisir un genre faisait quitter `getMovies()` pour cette branche, qui
+            //   ignorait le filtre d'année, le seuil de notoriété, le tri par date et la
+            //   lecture multi-pages. On y reprend la recette de l'onglet Films.
+            //   ⚠ Les SÉRIES gardent le tri par POPULARITÉ, décision du user : « je touche
+            //     pas aux séries, où il peut y avoir des nouvelles saisons en tête d'affiche ».
+            //     Seul le filtre d'année leur est ajouté.
+            val plageFilms = com.streamflixreborn.streamflix.utils.YearFilter
+                .get(name, com.streamflixreborn.streamflix.utils.YearFilter.Type.FILMS)
+            val delaiG = java.util.Calendar.getInstance()
+                .apply { add(java.util.Calendar.DAY_OF_YEAR, -DELAI_SOURCES_JOURS) }
+            val finFilms = com.streamflixreborn.streamflix.utils.YearFilter.borneHaute(plageFilms)
+            val borneFilms = TMDb3.Params.Range(
+                gte = com.streamflixreborn.streamflix.utils.YearFilter.borneBasse(plageFilms),
+                lte = if (finFilms != null && finFilms.before(delaiG)) finFilms else delaiG,
+            )
+            // Films — année + tri par date + notoriété + plusieurs pages
             val movies = if (genreFilterMovie != null || tmdbGenreId == null) {
-                TMDb3.Discover.movie(
-                    language = language, page = page,
-                    withOriginCountry = withOrigin,
-                    withOriginalLanguage = langFilter,
-                    withGenres = genreFilterMovie,
-                    sortBy = TMDb3.Params.SortBy.Movie.POPULARITY_DESC,
-                ).results.map { m ->
+                val brutG = coroutineScope {
+                    (0 until PAGES_TMDB_PAR_CHARGEMENT).map { decalage ->
+                        async {
+                            runCatching {
+                                TMDb3.Discover.movie(
+                                    page = (page - 1) * PAGES_TMDB_PAR_CHARGEMENT + decalage + 1,
+                                    language = language, region = "FR",
+                                    sortBy = TMDb3.Params.SortBy.Movie.PRIMARY_RELEASE_DATE_DESC,
+                                    voteCount = TMDb3.Params.Range(VOTES_MINIMUM_ONGLET, null),
+                                    primaryReleaseDate = borneFilms,
+                                    withOriginCountry = withOrigin,
+                                    withOriginalLanguage = langFilter,
+                                    withGenres = genreFilterMovie,
+                                ).results
+                            }.getOrDefault(emptyList())
+                        }
+                    }.awaitAll().flatten()
+                }
+                filtrerFilmsDisponibles(brutG.distinctBy { it.id }).map { m ->
                     Movie(
                         id = m.id.toString(), title = m.title, overview = m.overview,
                         released = m.releaseDate, rating = m.voteAverage.toDouble(),
@@ -1488,13 +1755,21 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                     )
                 }
             } else emptyList()  // genre ID existe côté TV mais pas Movie → skip
-            // Séries TV
+            // Séries TV — popularité conservée, filtre d'année ajouté
             val tvShows = if (genreFilterTv != null || tmdbGenreId == null) {
                 TMDb3.Discover.tv(
                     language = language, page = page,
                     withOriginCountry = withOrigin,
                     withOriginalLanguage = langFilter,
                     withGenres = genreFilterTv,
+                    firstAirDate = com.streamflixreborn.streamflix.utils.YearFilter
+                        .get(name, com.streamflixreborn.streamflix.utils.YearFilter.Type.SERIES)
+                        .let { p ->
+                            TMDb3.Params.Range(
+                                gte = com.streamflixreborn.streamflix.utils.YearFilter.borneBasse(p),
+                                lte = com.streamflixreborn.streamflix.utils.YearFilter.borneHaute(p),
+                            )
+                        },
                     sortBy = TMDb3.Params.SortBy.Tv.POPULARITY_DESC,
                 ).results.map { t ->
                     TvShow(
@@ -1504,14 +1779,10 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                     )
                 }
             } else emptyList()  // genre ID existe côté Movie mais pas TV → skip
-            // Tri par popularité desc (les plus populaires en haut)
-            val combined = (movies + tvShows).sortedByDescending {
-                when (it) {
-                    is Movie -> it.rating ?: 0.0
-                    is TvShow -> it.rating ?: 0.0
-                    else -> 0.0
-                }
-            }
+            // ⚠ Les films arrivent déjà triés par date côté serveur : on ne les retrie PAS
+            //   par note, sinon on reperdrait l'ordre qu'on vient de rétablir. Les films
+            //   d'abord (ordonnés), les séries ensuite (par popularité, comme demandé).
+            val combined = movies + tvShows
             Genre(id = id, name = "", shows = combined)
         }.getOrDefault(Genre(id = id, name = "", shows = emptyList()))
     }
@@ -1691,6 +1962,27 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                 val resp = apiGet(PLAY_INFO_PATH, params)
                 val data = resp?.optJSONObject("data")
                 val streamArr = data?.optJSONArray("streams")
+                // ── 2026-08-05 — LE 403 CLOUDFRONT EST RÉSOLU ────────────────────────────
+                //   La sonde a répondu. `streams[]` contient NEUF champs, dont deux que le
+                //   code ignorait totalement — il n'en lisait que `url` et `resolutions` :
+                //
+                //     · **signCookie** = `CloudFront-Policy=…` (+ Signature + Key-Pair-Id)
+                //       → la signature n'est PAS dans l'URL, elle est fournie séparément et
+                //         CloudFront l'attend en **COOKIE**. Sans elle : 403 « MissingKey ».
+                //         C'était toute la cause du « serveur Cloudstream illisible ».
+                //     · **format** = `DASH`, l'URL étant un `index_web.mpd` (codec HEVC).
+                //       Il faut donc déclarer le type MPD à ExoPlayer, pas le laisser devenir.
+                //
+                //   ⚠ FAUSSE PISTE ÉCARTÉE (ne pas y revenir) : l'implémentation de référence
+                //     (dépôt Megix, `CineStreamExtractors.kt`) utilise l'API **web**
+                //     `h5-api.aoneroom.com/wefeed-h5api-bff` avec un `detailPath` et un
+                //     `X-Client-Info` au fuseau kenyan. Vérifié en direct depuis la France :
+                //     cette API répond **403 « invalid region »**, en-tête de fuseau ou non.
+                //     Notre API **mobile** (`api*.aoneroom.com/wefeed-mobile-bff`), elle,
+                //     répond normalement. Il ne faut donc PAS migrer vers la voie web.
+                //
+                //   `resolutions` valait `"1080,720,480"` → `toIntOrNull()` renvoyait null,
+                //   d'où le serveur affiché « Cloudstream [0p] ». On prend la première valeur.
                 if (streamArr != null) {
                     val existingResolutions = servers.map { s ->
                         s.name.let { n ->
@@ -1701,13 +1993,27 @@ object CloudstreamProvider : Provider, ProgressiveServersProvider {
                     val list = (0 until streamArr.length()).mapNotNull { i ->
                         val s = streamArr.optJSONObject(i) ?: return@mapNotNull null
                         val u = s.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                        val res = s.optString("resolutions").ifEmpty { s.optString("resolution") }
-                        (res.toIntOrNull() ?: 0) to u
+                        // `resolutions` est une LISTE (« 1080,720,480 ») : on garde la plus haute,
+                        //   qui vient en premier. `resolution` (singulier) reste géré en repli.
+                        val res = s.optString("resolutions").substringBefore(',').trim()
+                            .ifEmpty { s.optString("resolution") }
+                        Triple(
+                            res.toIntOrNull() ?: 0,
+                            u,
+                            s.optString("signCookie") to s.optString("format"),
+                        )
                     }.sortedByDescending { it.first }
                     for ((idx, t) in list.withIndex()) {
+                        val idServeur = "cs_playinfo_${sid}_${se}_${ep}_${t.first}_$idx"
+                        val (cookie, format) = t.third
+                        // La signature CloudFront et le format sont mémorisés ici : `getVideo`
+                        //   ne reçoit que l'identifiant du serveur et son URL, il ne peut pas
+                        //   les redemander à l'API sans un appel réseau supplémentaire.
+                        if (cookie.isNotBlank()) signaturesCloudFront[idServeur] = cookie
+                        if (format.isNotBlank()) formatsFlux[idServeur] = format
                         servers.add(
                             Video.Server(
-                                id = "cs_playinfo_${sid}_${se}_${ep}_${t.first}_$idx",
+                                id = idServeur,
                                 name = "Cloudstream [${t.first}p]",
                                 src = t.second,
                             )
@@ -2428,18 +2734,38 @@ $url
         }
         // 2026-07-08 : le CDN bcdn.hakunaymatata.com renvoie 429 sans Bearer.
         // On ajoute le token JWT aux headers de lecture, comme pour les appels API.
+        // 2026-08-08 (user : « regarde Cloudstream 429 ») — REFERER RETIRÉ, même mesure que
+        //   dans AoneroomClient.streamPlaybackHeaders (voir le détail là-bas). Sur la MÊME URL,
+        //   en isolant un en-tête à la fois : sans rien / UA seul / Bearer seul → 206 video/mp4 ;
+        //   dès que `Referer: https://moviebox.ph/` est présent → refus du CDN. Le Bearer, lui,
+        //   reste utile (note du 2026-07-08 ci-dessus) et n'a jamais posé problème seul.
+        //   Pour revenir en arrière : décommenter la ligne.
         val hdrs = mutableMapOf(
-            "Referer" to "https://moviebox.ph/",
+            // "Referer" to "https://moviebox.ph/",
             "User-Agent" to USER_AGENT,
         )
         val token = bearerToken ?: try { ensureBearer() } catch (_: Exception) { null }
         if (token != null) {
             hdrs["Authorization"] = "Bearer $token"
         }
+        // ── 2026-08-05 — SIGNATURE CLOUDFRONT (corrige le 403 « MissingKey ») ────────────
+        //   `streams[].signCookie` porte `CloudFront-Policy` / `CloudFront-Signature` /
+        //   `CloudFront-Key-Pair-Id`. CloudFront ne les lit QUE dans un en-tête `Cookie` :
+        //   sans lui, le manifeste répond 403 et le lecteur basculait sur un autre serveur.
+        val signature = signaturesCloudFront[server.id]
+        if (!signature.isNullOrBlank()) {
+            hdrs["Cookie"] = signature
+            Log.d(TAG, "getVideo ${server.id} : signature CloudFront posée en cookie")
+        }
+        // Le flux est un manifeste DASH (`index_web.mpd`). L'extension ne suffit pas
+        //   toujours à le faire reconnaître : on déclare le type explicitement.
+        val estDash = formatsFlux[server.id]?.equals("DASH", ignoreCase = true) == true ||
+            source.contains(".mpd", ignoreCase = true)
         return Video(
             source = source,
             subtitles = subtitles,
             headers = hdrs,
+            type = if (estDash) androidx.media3.common.MimeTypes.APPLICATION_MPD else null,
         )
     }
 

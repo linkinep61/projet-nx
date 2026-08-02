@@ -412,6 +412,20 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
         //   2026-07-28 : si la permission vidéo est refusée/indisponible (fréquent sur box TV) ET
         //   qu'aucun dossier SAF n'a encore été choisi → on ouvre le sélecteur de dossier. Sinon on
         //   affiche directement la liste (MediaStore + dossier SAF fusionnés).
+        // 2026-08-06 (parité mobile) : réinitialisation de la rangée « Pour vous ». On
+        //   n'efface rien — on mémorise l'instant présent, et seuls les titres regardés
+        //   ensuite alimenteront les suggestions. Continuer à regarder et favoris intacts.
+        findPreference<Preference>("p_reset_suggestions")?.setOnPreferenceClickListener {
+            com.streamflixreborn.streamflix.utils.UserPreferences.suggestionsReinitialiseesLe =
+                System.currentTimeMillis()
+            android.widget.Toast.makeText(
+                context,
+                "« Pour vous » réinitialisé — la rangée se reconstruira au fil de vos prochains visionnages",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+            true
+        }
+
         findPreference<Preference>("p_settings_local_videos")?.setOnPreferenceClickListener {
             // Le dialog liste MediaStore + dossier SAF ; s'il ne trouve rien (clé USB non indexée
             //   par MediaStore sur box TV) il ouvre le sélecteur de dossier via ce callback. Un
@@ -478,6 +492,15 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
                 requireContext(), newValue as String
             )
             true
+        }
+        // 2026-08-02 (user) : « Confirmer avant de quitter le lecteur » (double-appui Retour).
+        //   UserPreferences a son propre SharedPreferences → on synchronise à la main.
+        findPreference<androidx.preference.SwitchPreference>("player_exit_confirm")?.apply {
+            isChecked = com.streamflixreborn.streamflix.utils.UserPreferences.playerExitConfirm
+            setOnPreferenceChangeListener { _, newValue ->
+                com.streamflixreborn.streamflix.utils.UserPreferences.playerExitConfirm = newValue as Boolean
+                true
+            }
         }
         // 2026-06-09 : slider opacité sidebar TV. La pref est sauvée par la
         //   SeekBarPreference ; MainTvActivity.onResume re-applique au retour.
@@ -681,14 +704,15 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             true
         }
 
-        findPreference<Preference>("p_settings_extractor_stats")?.setOnPreferenceClickListener {
-            androidx.navigation.fragment.NavHostFragment.findNavController(this)
-                .navigate(com.streamflixreborn.streamflix.R.id.fragment_extractor_stats_tv)
-            true
-        }
-
         findPreference<Preference>("p_settings_extractor_toggle")?.setOnPreferenceClickListener {
             showExtractorToggleDialog()
+            true
+        }
+        // 2026-08-06 : liens désactivés par appui long dans la liste des serveurs du lecteur.
+        //   Le testeur voulait pouvoir revenir en arrière ; sans cet écran la désactivation
+        //   serait irréversible. Réactivation à l'unité ou en bloc.
+        findPreference<Preference>("p_settings_liens_desactives")?.setOnPreferenceClickListener {
+            afficherLiensDesactives()
             true
         }
 
@@ -2649,5 +2673,33 @@ class SettingsTvFragment : LeanbackPreferenceFragmentCompat() {
             )
             iv.alpha = if (isFav) 1.0f else 0.4f
         }
+    }
+
+    /**
+     * 2026-08-06 : écran de réactivation des liens désactivés par appui long dans la liste
+     *   des serveurs du lecteur. Sans lui, la désactivation serait sans retour — c'est
+     *   précisément ce que le testeur demandait d'éviter.
+     */
+    private fun afficherLiensDesactives() {
+        val ctx = requireContext()
+        val liens = com.streamflixreborn.streamflix.utils.LiensDesactives.tous(ctx)
+        if (liens.isEmpty()) {
+            android.widget.Toast.makeText(ctx, "Aucun lien désactivé", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        val ids = liens.keys.toList()
+        val noms = ids.map { liens[it] ?: it }.toTypedArray()
+        androidx.appcompat.app.AlertDialog.Builder(ctx, com.streamflixreborn.streamflix.R.style.OnyxDialog)
+            .setTitle("Liens désactivés (${ids.size})")
+            .setItems(noms) { _, position ->
+                com.streamflixreborn.streamflix.utils.LiensDesactives.reactiver(ctx, ids[position])
+                android.widget.Toast.makeText(ctx, "« ${noms[position]} » réactivé", android.widget.Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton("Tout réactiver") { _, _ ->
+                com.streamflixreborn.streamflix.utils.LiensDesactives.toutReactiver(ctx)
+                android.widget.Toast.makeText(ctx, "Tous les liens ont été réactivés", android.widget.Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Fermer", null)
+            .show()
     }
 }

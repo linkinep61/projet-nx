@@ -217,31 +217,29 @@ class MoviesMobileFragment : Fragment() {
             .show()
     }
 
+    /**
+     * 2026-08-04 — point d'entrée appelé par `MainMobileActivity` au SECOND CLIC sur
+     * l'élément de menu « Films ». Même geste que sur TV.
+     */
+    fun ouvrirFiltres() {
+        if (!isAdded) return
+        showGenreFilterPicker()
+    }
+
     /** 2026-05-26 : filtre par genre TMDB (Action, Comédie…) pour les providers TMDB. */
     private fun showGenreFilterPicker() {
         val provider = UserPreferences.currentProvider ?: return
-        val entries = com.streamflixreborn.streamflix.utils.GenreFilter.genresForProvider()
-        val current = com.streamflixreborn.streamflix.utils.GenreFilter.get(provider.name)
-        val labels = arrayOf("Tous les genres") + entries.map { it.name }.toTypedArray()
-        val currentIdx = if (current == null) 0 else entries.indexOfFirst { it.id == current.id } + 1
-        androidx.appcompat.app.AlertDialog.Builder(requireContext())
-            .setTitle("Filtrer par genre")
-            .setSingleChoiceItems(labels, currentIdx.coerceAtLeast(0)) { dlg, idx ->
-                val newGenre = if (idx == 0) null else entries[idx - 1]
-                val changed = newGenre?.id != current?.id
-                if (changed) {
-                    com.streamflixreborn.streamflix.utils.GenreFilter.set(provider.name, newGenre)
-                    viewModel.setGenreFilter(newGenre?.id)
-                    android.widget.Toast.makeText(
-                        requireContext(),
-                        if (newGenre != null) "Genre : ${newGenre.name}" else "Genre : tous",
-                        android.widget.Toast.LENGTH_SHORT,
-                    ).show()
-                }
-                dlg.dismiss()
-            }
-            .setNegativeButton("Annuler", null)
-            .show()
+        // 2026-08-04 — même sélecteur que sur TV, même feuille sombre (le user avait relevé
+        //   que la liste des genres et celle des années n'avaient pas la même apparence).
+        //   Toute la logique vit dans GenreYearPicker ; ici on ne fournit que de quoi
+        //   recharger la liste.
+        com.streamflixreborn.streamflix.utils.GenreYearPicker.show(
+            context = requireContext(),
+            providerName = provider.name,
+            type = com.streamflixreborn.streamflix.utils.YearFilter.Type.FILMS,
+            onGenre = { viewModel.setGenreFilter(it) },
+            onAnnee = { viewModel.getMovies() },
+        )
     }
 
     /** 2026-05-26 : filtre langue VF/VOSTFR pour AnimeSama */
@@ -331,6 +329,13 @@ class MoviesMobileFragment : Fragment() {
                 }
             }
         }
+        // ⚠ 2026-08-04 — NE PAS AJOUTER DE BARRE DE BOUTONS ICI.
+        //   Essayé le jour même (« Genre » / « Année », puis « Filtrer ») puis RETIRÉ :
+        //   sur les providers TMDB cette barre n'existe pas, donc l'afficher décale la mise
+        //   en page et écrase ce qui est en dessous. Le user l'a dit clairement :
+        //   « tes boutons ils vont écraser des choses ».
+        //   Le point d'entrée mobile est le SECOND CLIC sur l'élément de menu du bas
+        //   (Films / Séries TV), câblé dans MainMobileActivity — même geste que sur TV.
     }
 
     private fun selectTab(selected: android.widget.TextView, other: android.widget.TextView) {

@@ -296,6 +296,19 @@ class PlayerTvFragment : Fragment() {
     private var vodCurrentStreamHasWorked = false
     private var vodStickyRetryCount = 0
 
+    /**
+     * 2026-08-08 (user : « fais attention, à la fin il reste bloqué sur le lecteur ») —
+     * la règle du 2026-07-07 reste entière : un serveur qui A DÉJÀ joué ne part JAMAIS tout seul,
+     * c'est l'utilisateur qui quitte. Mais « rester » ne veut pas dire « boucler » : on re-préparait
+     * le même flux toutes les 5 s indéfiniment, sans jamais avancer d'une image (vu sur upbolt :
+     * `seg-2` refusé en boucle). Au bout de [MAX_REPREP_SANS_PROGRES] re-préparations qui ne font
+     * gagner AUCUNE seconde de lecture, on arrête d'insister et on laisse le lecteur à l'arrêt —
+     * toujours sur le même serveur, sans bascule automatique.
+     */
+    private var vodReprepSansProgres = 0
+    private var vodPositionDerniereReprep = -1L
+    private val MAX_REPREP_SANS_PROGRES = 3
+
     // 2026-07-11 : freeze detection → proposition lecteur externe.
     //   Évite de re-proposer si déjà proposé pendant cette session player.
     private var didProposeExternalThisSession = false
@@ -340,6 +353,17 @@ class PlayerTvFragment : Fragment() {
     //   barre de contrôle abyss/Hydrax. overlayIsPlayer4me = ce flux Player4me ;
     //   player4meStarted = la lecture a démarré (curseur caché, barre prend le relais).
     private var overlayIsPlayer4me = false
+
+    /** Horodatage du 1er appui sur « quitter » — double confirmation (cf. btnExoBack). */
+    private var dernierAppuiQuitter = 0L
+
+    // 2026-08-02 (user : « l'interface n'est pas censée rester affichée en permanence, elle doit se
+    //   masquer automatiquement ») : en mode MIROIR, la vidéo tourne dans la WebView et l'ExoPlayer
+    //   sous-jacent n'a AUCUN média. Or PlayerView ne masque ses contrôles que lorsqu'un média est
+    //   effectivement en lecture — sans ça il les considère « à afficher indéfiniment ». D'où des
+    //   contrôles collés à l'écran. On programme donc nous-mêmes le masquage.
+    private val masquageMiroirHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var masquageMiroirRunnable: Runnable? = null
     // 2026-07-09 : seekplayer TV = contrôles NATIFS (miroir), PAS le curseur. Quand ce
     //   flag est vrai, handleOverlayKey NE consomme PAS les touches → le D-pad pilote
     //   le controller ExoPlayer (navigation entre play/pause, seek, etc.).
@@ -886,7 +910,12 @@ class PlayerTvFragment : Fragment() {
                 binding.pvPlayer.controllerHideOnTouch = true
                 binding.pvPlayer.controllerAutoShow = true
                 binding.pvPlayer.setControllerVisibilityListener(
-                    androidx.media3.ui.PlayerView.ControllerVisibilityListener { vis -> if (vis == View.VISIBLE) wireCenterFocus() }
+                    androidx.media3.ui.PlayerView.ControllerVisibilityListener { vis ->
+                        if (vis == View.VISIBLE) {
+                            wireCenterFocus()
+                            programmerMasquageMiroir()
+                        }
+                    }
                 )
             }
             // 2026-05-17 : la 2e seek bar (live_secondary_progress) est dans
@@ -1141,6 +1170,7 @@ class PlayerTvFragment : Fragment() {
                                         PlayerSettingsView.Settings.Server(
                                             id = replacement.id,
                                             name = replacement.name,
+                                            src = replacement.src,
                                         )
                                     )
                                 }
@@ -1275,6 +1305,17 @@ class PlayerTvFragment : Fragment() {
                                 //   Le ViewModel ré-émet SuccessLoadingServers(autoPlay=true) dès qu'un VF
                                 //   arrive (ou au fallback 12s). PAS de initialServerPicked=true ici.
                                 Log.d("PlayerTvFragment", "Serveurs affichés — Player en attente d'un VF (grâce)")
+                            }
+                        } else if (viewModel.consommerRaccourciCoeur()) {
+                            // 2026-08-07 (user : « un cœur rouge apparaissait alors qu'une lecture
+                            //   a commencé sur un serveur super long, il ne switche pas dessus »).
+                            //   Le ViewModel n'arme ce jeton que si la lecture n'a PAS encore
+                            //   réellement démarré (aucune image). Le cœur est en tête de liste.
+                            val coeur = state.servers.firstOrNull()
+                            if (coeur != null) {
+                                Log.i("PlayerTvFragment", "RACCOURCI CŒUR tardif → bascule sur '${coeur.name}'")
+                                currentServer = coeur
+                                viewModel.getVideo(coeur)
                             }
                         } else {
                             Log.d("PlayerTvFragment", "SuccessLoadingServers (lot suivant) — picker MAJ, pas de re-getVideo (initialServerPicked)")
@@ -1521,7 +1562,7 @@ class PlayerTvFragment : Fragment() {
                             })
                             .build()
                         PlayerSettingsView.Settings.Server.addUnique(
-                            PlayerSettingsView.Settings.Server(id = server.id, name = server.name)
+                            PlayerSettingsView.Settings.Server(id = server.id, name = server.name, src = server.src)
                         )
                         scheduleServerRefresh()
                         Log.d("PlayerTvFragment", "Additional server added: ${server.name}")
@@ -1586,8 +1627,8 @@ class PlayerTvFragment : Fragment() {
                     // 2026-07-31 : idem pour la LANGUE détectée dans le manifeste HLS.
                     val prevLanguages = PlayerSettingsView.Settings.Server.list.associate { it.id to it.language }
                     PlayerSettingsView.Settings.Server.list.clear()
-                    PlayerSettingsView.Settings.Server.addAllUnique(nonOla.map {
-                        PlayerSettingsView.Settings.Server(id = it.id, name = it.name).apply {
+                    PlayerSettingsView.Settings.Server.addAllUnique(nonOla.filterNot { s -> com.streamflixreborn.streamflix.utils.LiensDesactives.estDesactive(requireContext(), s.id) }.map {
+                        PlayerSettingsView.Settings.Server(id = it.id, name = it.name, src = it.src).apply {
                             isSelected = (it.id == prevSelectedId)
                             isLoading = (it.id == prevLoadingId)
                             quality = it.quality ?: prevQualities[it.id]
@@ -1619,43 +1660,11 @@ class PlayerTvFragment : Fragment() {
             }
 
             // 2026-07-16 : appui LONG sur un serveur (TV) → signaler « mauvais » (envoi GitHub).
-            binding.settings.onServerReported = { server ->
-                val vt = args.videoType
-                val title = when (vt) {
-                    is com.streamflixreborn.streamflix.models.Video.Type.Episode -> vt.tvShow.title
-                    is com.streamflixreborn.streamflix.models.Video.Type.Movie -> vt.title
-                } ?: "?"
-                val episode = (vt as? com.streamflixreborn.streamflix.models.Video.Type.Episode)?.number ?: 0
-                val season = Regex("(?i)saison\\s*(\\d+)").find(args.id)?.groupValues?.get(1)?.toIntOrNull()
-                    ?: (vt as? com.streamflixreborn.streamflix.models.Video.Type.Episode)?.season?.number ?: 0
-                val source = when {
-                    server.id.startsWith("bkreg::") -> server.id.removePrefix("bkreg::").substringBefore("::")
-                    server.name.contains(" · ") -> server.name.substringBefore(" · ")
-                    else -> server.name
-                }
-                androidx.appcompat.app.AlertDialog.Builder(requireContext())
-                    .setTitle("Signaler ce serveur")
-                    .setMessage("Signaler « ${server.name} » comme MAUVAIS (mauvaise saison/épisode/langue) pour « $title » ?")
-                    .setNegativeButton("Annuler", null)
-                    .setPositiveButton("Signaler") { _, _ ->
-                        com.streamflixreborn.streamflix.utils.BrokenSourceReporter.reportBadMatch(
-                            serverName = server.name,
-                            sourceLabel = source,
-                            resolvedUrl = args.id,
-                            contentTitle = title,
-                            season = season,
-                            episode = episode,
-                        ) { ok ->
-                            view?.post {
-                                android.widget.Toast.makeText(
-                                    requireContext(),
-                                    if (ok) "Serveur signalé, merci !" else "Échec du signalement",
-                                    android.widget.Toast.LENGTH_SHORT
-                                ).show()
-                            }
-                        }
-                    }
-                    .show()
+            // 2026-08-06 : le SIGNALEMENT est supprimé (demande user). L'appui long désactive
+            //   le lien ; on le retire de la liste affichée. Réactivable dans Gérer les sources.
+            binding.settings.onServerDisabled = { server ->
+                servers = servers.filterNot { it.id == server.id }
+                binding.settings.refreshServerList()
             }
 
             // 2026-06-30 : qualité vidéo détectée par le probe ExoPlayer headless.
@@ -1845,6 +1854,8 @@ class PlayerTvFragment : Fragment() {
 
         override fun onDestroyView() {
             super.onDestroyView()
+            // 2026-08-02 : sortie du lecteur → plus d'hébergeur courant (cf. PlayerMobileFragment).
+            UserPreferences.currentPlayerHost = null
             // 2026-07-12 : on quitte le player (retour au home/fiche) → on relance le chargement
             //   des jaquettes mis en pause à l'entrée (cf. onViewCreated).
             try { com.bumptech.glide.Glide.with(requireActivity()).resumeRequestsRecursive() } catch (_: Throwable) {}
@@ -1962,7 +1973,32 @@ class PlayerTvFragment : Fragment() {
             true
         }
 
-        else -> false
+        // 2026-08-02 (user : « à la télécommande, le retour quitte direct sans confirmation, alors
+        //   que le bouton à l'écran demande de confirmer ») : MÊME DOUBLE APPUI que btnExoBack — le
+        //   1er prévient, le 2ᵉ (sous 3 s) quitte. `dernierAppuiQuitter` est partagé avec le bouton
+        //   → cohérence télécommande / bouton. On CONSOMME toujours (true) pour ne jamais sortir au
+        //   1er appui.
+        else -> {
+            // 2026-08-02 (user) : la confirmation est désactivable (réglages du lecteur TV). Si OFF
+            //   → retour instantané (false = on laisse le back par défaut quitter).
+            if (!UserPreferences.playerExitConfirm) {
+                false
+            } else {
+                val maintenant = System.currentTimeMillis()
+                if (maintenant - dernierAppuiQuitter < 3_000L) {
+                    findNavController().navigateUp()
+                    true
+                } else {
+                    dernierAppuiQuitter = maintenant
+                    Toast.makeText(
+                        requireContext(),
+                        "Appuyez à nouveau pour quitter la vidéo",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    true
+                }
+            }
+        }
     }
 
     private fun handleMediaPrevious(): Boolean {
@@ -2245,7 +2281,34 @@ class PlayerTvFragment : Fragment() {
                     channelListVisible -> hideChannelListPanel()
                     webViewOverlay != null -> hideWebViewOverlay()
                     binding.settings.isVisible -> binding.settings.onBackPressed()
-                    else -> findNavController().navigateUp()
+                    // 2026-08-02 (user : « le bouton quitter est trop radical, des gens appuient
+                    //   sans faire exprès et ça quitte directement la vidéo ») : DOUBLE APPUI.
+                    //   Le 1er prévient, le 2ᵉ (sous 3 s) quitte. Passé ce délai on repart de zéro.
+                    //   D'autant plus utile à la télécommande, où le bouton se heurte facilement.
+                    //   ⚠ Ne s'applique QU'À LA SORTIE : fermer un panneau ou un overlay reste
+                    //   immédiat, ces gestes-là ne font rien perdre.
+                    else -> {
+                        // 2026-08-02 (user) : confirmation désactivable (réglages lecteur TV). OFF → sortie directe.
+                        if (!UserPreferences.playerExitConfirm) {
+                            findNavController().navigateUp()
+                        } else {
+                            val maintenant = System.currentTimeMillis()
+                            if (maintenant - dernierAppuiQuitter < 3_000L) {
+                                findNavController().navigateUp()
+                            } else {
+                                dernierAppuiQuitter = maintenant
+                                Toast.makeText(
+                                    requireContext(),
+                                    "Appuyez à nouveau pour quitter la vidéo",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                                runCatching {
+                                    binding.pvPlayer.controllerShowTimeoutMs =
+                                        binding.pvPlayer.controllerShowTimeoutMs
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -4516,10 +4579,11 @@ class PlayerTvFragment : Fragment() {
                     } catch (_: Throwable) { }
                 }
             }
-            val variants = PlayerSettingsView.Settings.ChannelVariant.list
-            val removed = variants.removeAll { it.id == server.id }
-            if (removed && _binding != null) {
-                Log.d("PlayerTvFragment", "Pruned broken variant: ${server.name}")
+            // 2026-08-06 (user : « on ne doit pas écarter les serveurs, le rouge c'est juste
+            //   visuel ») : on ne retire plus la variante en échec. C'est ce retrait qui
+            //   faisait qu'on n'avait pas la même liste au 1er et au 2ᵉ lancement.
+            if (_binding != null) {
+                Log.d("PlayerTvFragment", "Variante en échec (conservée, marquée) : ${server.name}")
                 binding.settings.refreshChannelVariantList()
             }
         }
@@ -4528,16 +4592,10 @@ class PlayerTvFragment : Fragment() {
             val variants = PlayerSettingsView.Settings.ChannelVariant.list
             if (variants.isEmpty()) return false
 
-            // Mark the failed variant as tried AND remove it from the Chaîne page so
-            // broken entries don't pile up. They reappear next session if Phase 3
-            // finds them again.
+            // 2026-08-06 : marquée essayée, mais CONSERVÉE dans la liste (cf. ci-dessus).
             if (failedServer != null) {
                 triedChannelVariantIds.add(failedServer.id)
-                val removed = variants.removeAll { it.id == failedServer.id }
-                if (removed && _binding != null) {
-                    Log.d("PlayerTvFragment", "Removed broken variant from Chaîne page: ${failedServer.name}")
-                    binding.settings.refreshChannelVariantList()
-                }
+                if (_binding != null) binding.settings.refreshChannelVariantList()
             }
 
             val nextVariant = variants.firstOrNull { it.id !in triedChannelVariantIds }
@@ -4656,10 +4714,18 @@ class PlayerTvFragment : Fragment() {
                 iptvCurrentStreamHasWorked = false
                 vodCurrentStreamHasWorked = false
                 vodStickyRetryCount = 0
+                vodReprepSansProgres = 0
+                vodPositionDerniereReprep = -1L
                 // 2026-05-21 : nouveau serveur → on repart en pleine qualité.
                 adaptiveQualityGovernor?.reset()
             }
             currentServer = server
+            // 2026-08-02 (« chaque hébergeur a son propre format ») : hébergeur identifié AVANT
+            //   d'appliquer l'échelle, pour que `playerResize` renvoie le format mémorisé pour lui.
+            UserPreferences.currentPlayerHost =
+                UserPreferences.hebergeurDe(server.name, video.source)
+            Log.d("PlayerTvFragment", "format d'image → hébergeur=${UserPreferences.currentPlayerHost} mode=${UserPreferences.playerResize.name}")
+            updatePlayerScale()
             updatePlayerHeader()
 
             // Clean up any existing WebView overlay (e.g. switching servers)
@@ -4702,6 +4768,18 @@ class PlayerTvFragment : Fragment() {
                 Log.d("PlayerNetwork", "WebView bypass: source is ${if (video.source.startsWith("data:")) "data URI" else "CDN URL"}, webViewDs=$needsWebViewDs, lulu=${isLuluVdoCdn(video)}, netu=${isNetuCfglobalcdn(video)}")
             }
 
+            // 2026-08-08 (user : « active le mode super-buffer pour lui ») — upbolt l'exige
+            //   par construction. Son jeton porte `sp=1000` : le CDN plafonne le débit à
+            //   1000 kbit/s et coupe (403) dès qu'on le dépasse, d'où le `LimiteurDebitUpbolt`
+            //   qui bride la lecture à 899 kbit/s. Mais bridé à 899 pour un flux qui en réclame
+            //   556, l'avance ne se constitue que ~1,6× plus vite que la lecture : au moindre
+            //   à-coup réseau, un buffer normal se vide. Le super-buffer donne la réserve qui
+            //   absorbe ça. Forcé pour upbolt, sans toucher au réglage de l'utilisateur
+            //   (on ne persiste rien : les autres hébergeurs gardent son choix).
+            //   RETIRÉ le 2026-08-08 : le super-buffer forcé faisait ouvrir à ExoPlayer plusieurs
+            //   chargements simultanés sur upbolt, chacun bridé séparément — le cumul dépassait
+            //   donc le plafond du CDN et la lecture est passée de 1 min 45 à zéro. On garde le
+            //   réglage de l'utilisateur, tel quel, pour tout le monde.
             val extraBuffering = PlayerSettingsView.Settings.ExtraBuffering.isEnabled
             val softwareDecoder = PlayerSettingsView.Settings.SoftwareDecoder.isEnabled
 
@@ -4878,13 +4956,29 @@ class PlayerTvFragment : Fragment() {
                         it.contains("plexvod_") || it.contains("plexep::") ||
                         it.contains("plutomovie_") || it.contains("plutoep::")
                     }
+                    // ── 2026-08-06 : PAS DE SOUS-TITRES SUR UN SERVEUR VF ───────────────
+                    //   Voir le commentaire détaillé dans PlayerMobileFragment. En résumé :
+                    //   Filemoon rend un HLS avec les pistes de sous-titres EMBARQUÉES, et
+                    //   les deux lignes ci-dessous demandaient justement à ExoPlayer de les
+                    //   choisir. Décision user : « si VOSTFR tu actives, si VF tu désactives ».
+                    val serveurVf = currentServer?.name?.lowercase()?.let { n ->
+                        when {
+                            Regex("""(^|[^a-z])vf([^a-z]|$)""").containsMatchIn(n) -> true
+                            n.contains("vostfr") || n.contains("sous-titr") -> false
+                            Regex("""(^|[^a-z])vo([^a-z]|$)""").containsMatchIn(n) -> false
+                            else -> true
+                        }
+                    } ?: true
+
                     player.trackSelectionParameters = player.trackSelectionParameters
                         .buildUpon()
-                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, serveurVf)
                         .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                        .setPreferredTextLanguages("fr", "fre", "fra")
-                        .setSelectUndeterminedTextLanguage(true)
                         .apply {
+                            if (!serveurVf) {
+                                setPreferredTextLanguages("fr", "fre", "fra")
+                                setSelectUndeterminedTextLanguage(true)
+                            }
                             if (isPlexPlutoVod) {
                                 setPreferredAudioLanguages("fr", "fre", "fra")
                             }
@@ -4908,10 +5002,30 @@ class PlayerTvFragment : Fragment() {
                 //   VIDZY ajouté. Depuis que l'extracteur Vidzy résout via WebView, il renvoie
                 //   un User-Agent → on recréait un DefaultHttpDataSource, ce qui CONTOURNAIT
                 //   Cronet (pourtant exigé par needsCronet("vidzy.")) → TLS Android → 403.
+                // 2026-08-02 : `upbolt` retiré (cf. needsCronet). Il doit au contraire recevoir un
+                //   DefaultHttpDataSource porteur des en-têtes du Video — dont le `Cookie` de
+                //   session DDoS-Guard, sans lequel le CDN répond 403.
                 val isJa3Host = sourceHost.contains("uqload") || sourceHost.contains("abyssa")
                     || sourceHost.contains("abysscdn") || sourceHost.contains("citron-edge")
-                    || sourceHost.contains("upbolt") || sourceHost.contains("vidzy")
-                if (!videoUa.isNullOrBlank() && videoUa != NetworkClient.USER_AGENT && !isJa3Host) {
+                    || sourceHost.contains("vidzy")
+                // ⚠⚠ 2026-08-05 — NE PAS RECRÉER LA FABRIQUE POUR LES HÔTES QUI EXIGENT DoH.
+                //   Bug constaté sur OnRegardeOu (user : « SON HS », deux serveurs 1Jour1Film
+                //   morts sur Chromecast, « ça a toujours marché ») :
+                //     1. `needsDoH()` reconnaît bien `r66nv9ed.com` → le lecteur construit une
+                //        fabrique OkHttp avec DNS-over-HTTPS (visible en log) ;
+                //     2. dix millisecondes plus tard, l'extracteur fournissant un User-Agent
+                //        personnalisé, CE bloc la remplaçait par un `DefaultHttpDataSource`,
+                //        qui résout via le **DNS système** — d'où l'absence totale de ligne
+                //        `DnsResolver` pour cet hôte dans le journal ;
+                //     3. or le FAI bloque désormais `r66nv9ed.com` au niveau DNS. Vérifié :
+                //        `ping` répond « unknown host » sur la box ET sur le PC, alors que
+                //        1.1.1.1 le résout en 185.248.171.163. D'où `UnknownHostException
+                //        (no network)` puis bascule automatique vers un autre serveur.
+                //   Le garde-fou `isJa3Host` existait déjà pour ne pas contourner Cronet ;
+                //   il manquait son pendant pour DoH. L'User-Agent n'est pas perdu :
+                //   `setDefaultRequestProperties`, juste en dessous, le pose de toute façon.
+                val exigeDoh = needsDoH(video.source)
+                if (!videoUa.isNullOrBlank() && videoUa != NetworkClient.USER_AGENT && !isJa3Host && !exigeDoh) {
                     try {
                         val customFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
                             .setUserAgent(videoUa)
@@ -4925,10 +5039,23 @@ class PlayerTvFragment : Fragment() {
                         Log.w("PlayerNetwork", "TV: Failed to rebuild factory with custom UA: ${e.message}")
                     }
                 }
+                // 2026-08-08 — upbolt : PAS DE COOKIE. Ils sont posés ici, en propriétés par
+                //   défaut de la fabrique, donc les filtrer sur le DataSpec ne servait à rien
+                //   (première tentative ratée : le log continuait d'afficher `Cookie=__ddg8_…`).
+                //   Pourquoi les retirer : le jeton est renouvelé en cours de lecture par
+                //   `JetonUpbolt`, alors que ces cookies DDoS-Guard restent ceux de l'extraction
+                //   initiale. Mesuré : cookies vieux de 38 s face à un jeton neuf → 403. Et ils
+                //   sont inutiles — vérifié dans Chrome, `fetch(segment, {credentials:'omit'})`
+                //   répond 200. Chaque requête reste ainsi cohérente avec le jeton qu'elle porte.
+                val enTetesVideo = (video.headers ?: emptyMap()).let { h ->
+                    if (video.source.contains("upbolt", ignoreCase = true))
+                        h.filterKeys { !it.equals("Cookie", ignoreCase = true) }
+                    else h
+                }
                 httpDataSource.setDefaultRequestProperties(
                     mapOf(
                         "User-Agent" to (videoUa ?: NetworkClient.USER_AGENT),
-                    ) + (video.headers ?: emptyMap())
+                    ) + enTetesVideo
                 )
             }
 
@@ -4948,7 +5075,10 @@ class PlayerTvFragment : Fragment() {
             } else if (dataSourceMismatch && !needsPlayerRebuild) {
                 // DataSource changed — create MediaSource with the updated factory
                 // instead of rebuilding the entire player (avoids 5-14s release() ANR).
-                val source = DefaultMediaSourceFactory(dataSourceFactory).createMediaSource(mediaItem)
+                // 2026-08-08 : même nettoyage de manifeste que sur les autres branches.
+                val source = DefaultMediaSourceFactory(
+                    com.streamflixreborn.streamflix.utils.FiltreManifesteHls.Fabrique(dataSourceFactory),
+                ).createMediaSource(mediaItem)
                 player.setMediaSource(source)
                 usingWebView = false
                 Log.d("PlayerNetwork", "DataSource hot-swap: explicit MediaSource (no player rebuild)")
@@ -5003,14 +5133,77 @@ class PlayerTvFragment : Fragment() {
                             dsFactory2, loadPolicy, parserFactory, cmcdConfig, 30.0
                         )
                     }
-                    val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(dsFactoryHls)
+                    // 2026-08-08 : le manifeste est nettoyé de ses pistes I-frame avant lecture
+                    //   (cf. FiltreManifesteHls). Sans ça, une piste déclarée mais non servie —
+                    //   upbolt : 403 sur `iframes-v1-a1.m3u8` — fait abandonner TOUTE la source,
+                    //   alors que le master et les trois qualités vidéo répondent 200.
+                    val dsFactoryHlsFiltre =
+                        com.streamflixreborn.streamflix.utils.FiltreManifesteHls.Fabrique(dsFactoryHls)
+                    val hlsSource = androidx.media3.exoplayer.hls.HlsMediaSource.Factory(dsFactoryHlsFiltre)
                         .setAllowChunklessPreparation(true)
                         .setExtractorFactory(hlsExtractorFactory)
+                        // 2026-08-08 (user, sur « J1F · upbolt.to (VF) » en rouge : « donc il
+                        //   fonctionne, pourquoi elle est tombée en échec chez nous ? »)
+                        //   — PISTE I-FRAME ABSENTE.
+                        //   VÉRIFIÉ EN DIRECT : upbolt.to/e/ovdb7pxvsoym lit le film sans
+                        //   problème (1 h 49, image nette). Ce qui échouait chez nous :
+                        //     DIAG-403 uri=…/iframes-v1-a1.m3u8
+                        //   Ce fichier n'est PAS la vidéo : c'est la piste I-frame, celle des
+                        //   vignettes de la barre de progression. Le master la déclare
+                        //   (EXT-X-I-FRAME-STREAM-INF) mais le serveur ne la sert pas. Leur
+                        //   lecteur ne la demande jamais ; ExoPlayer si, prend un 403, le
+                        //   retente 6 fois (~15 s perdues) puis déclare la SOURCE ENTIÈRE
+                        //   morte — alors que les variantes vidéo répondent parfaitement.
+                        //   Ici : aucun retry sur une piste I-frame, et on l'exclut au lieu de
+                        //   faire tomber le serveur. Vaut pour tout hébergeur qui déclare cette
+                        //   piste sans la servir, pas seulement upbolt.
+                        .setLoadErrorHandlingPolicy(
+                            com.streamflixreborn.streamflix.utils.PolitiqueIFrameTolerante(),
+                        )
                         .apply {
                             if (needsStuckTolerance30x) setPlaylistTrackerFactory(playlistTrackerFactory)
                         }
                         .createMediaSource(mediaItem)
-                    player.setMediaSource(hlsSource)
+                    // 2026-08-08 (user : « je n'ai toujours pas les sous-titres, et mis en
+                    //   français automatiquement pour un serveur VOSTFR ») — SOUS-TITRES
+                    //   EXTERNES PERDUS EN HLS.
+                    //
+                    //   Le log prouvait pourtant que tout arrivait au lecteur :
+                    //     displayVideo: video.subtitles.size=27, defaults=1,
+                    //       labels=Français(def=true), Allemand, Anglais [CC], Arabe…
+                    //   …et le menu n'affichait qu'une ligne, « Inconnu ».
+                    //
+                    //   Explication : le menu se construit depuis `player.currentTracks`, et
+                    //   `HlsMediaSource` IGNORE `MediaItem.subtitleConfigurations`. Seul
+                    //   `DefaultMediaSourceFactory` sait greffer des sous-titres externes, en
+                    //   fusionnant la source avec un `SingleSampleMediaSource` par piste. En
+                    //   construisant le HlsMediaSource à la main, on jetait donc les 27 SRT ;
+                    //   la seule piste visible venait du manifeste HLS lui-même, sans langue
+                    //   déclarée — d'où « Inconnu ».
+                    //   (C'est aussi la raison d'être de l'overlay externe Vidzy plus bas :
+                    //   un contournement du même symptôme.)
+                    //
+                    //   On refait donc ici ce que fait DefaultMediaSourceFactory : fusion de
+                    //   la source HLS et d'une source par sous-titre. Le drapeau `default`
+                    //   posé sur le français (serveur VOSTFR) est porté par la
+                    //   SubtitleConfiguration, donc la sélection automatique suit.
+                    val sousTitresExternes = mediaItem.localConfiguration?.subtitleConfigurations.orEmpty()
+                    val sourceFinale: androidx.media3.exoplayer.source.MediaSource =
+                        if (sousTitresExternes.isEmpty()) {
+                            hlsSource
+                        } else {
+                            val fabriqueSousTitre =
+                                androidx.media3.exoplayer.source.SingleSampleMediaSource.Factory(dataSourceFactory)
+                            val sources = sousTitresExternes.map { conf ->
+                                fabriqueSousTitre.createMediaSource(conf, androidx.media3.common.C.TIME_UNSET)
+                            }
+                            Log.d("PlayerDebug", "TV: HLS + ${sources.size} sous-titre(s) externe(s) fusionnés")
+                            androidx.media3.exoplayer.source.MergingMediaSource(
+                                hlsSource,
+                                *sources.toTypedArray(),
+                            )
+                        }
+                    player.setMediaSource(sourceFinale)
                     Log.d("PlayerDebug", "TV: HlsMediaSource (chunkless, stuckTolerance=${if (needsStuckTolerance30x) "30x" else "default"})")
                 } else if (isDash) {
                     // 2026-06-19 v36 (user "grand lecteur TV n'a pas les codecs
@@ -5087,7 +5280,16 @@ class PlayerTvFragment : Fragment() {
                     //   (= DefaultHttp, pas Cronet) → le CDN JA3-fingerprinted
                     //   redirige vers Telegram. On force l'explicit MediaSource
                     //   avec la dataSourceFactory courante (= Cronet/DoH).
-                    val source = DefaultMediaSourceFactory(dataSourceFactory).createMediaSource(mediaItem)
+                    // 2026-08-08 — LE FILTRE DOIT ÊTRE ICI AUSSI.
+                    //   J'avais posé le nettoyage du manifeste sur la branche HLS explicite
+                    //   (`TV: HlsMediaSource`). Le journal a montré qu'upbolt n'y passe pas :
+                    //     URL needs DoH for CNAME resolution (https://edge02.upbolt.to/…)
+                    //   → `usingDoH` est vrai, donc c'est CETTE branche qui construit la source,
+                    //   et le filtre n'était jamais appelé (aucune ligne « manifeste nettoyé »
+                    //   dans le log, alors que le 403 sur `iframes-v1-a1.m3u8` revenait).
+                    val source = DefaultMediaSourceFactory(
+                        com.streamflixreborn.streamflix.utils.FiltreManifesteHls.Fabrique(dataSourceFactory),
+                    ).createMediaSource(mediaItem)
                     player.setMediaSource(source)
                     Log.d("PlayerDebug", "TV: explicit MediaSource (Cronet=$usingCronet DoH=$usingDoH, preserving non-default DataSource)")
                 } else {
@@ -5809,6 +6011,10 @@ class PlayerTvFragment : Fragment() {
                     binding.pvPlayer.keepScreenOn = isPlaying || UserPreferences.keepScreenOnWhenPaused
 
                     if (isPlaying) {
+                        // 2026-08-07 : c'est ICI que la lecture commence VRAIMENT (première
+                        //   image). Tant que ce signal n'est pas passé, un cœur qui arrive dans
+                        //   un lot tardif doit pouvoir prendre la main — cf. PlayerViewModel.
+                        viewModel.signalerLectureDemarree()
                         startProgressHandler()
                         // 2026-07-12 (user « une fois qu'un film joue, arrêter ce qui charge en
                         //   fond ») : après ~10s de lecture STABLE, on coupe la recherche de
@@ -5935,6 +6141,25 @@ class PlayerTvFragment : Fragment() {
                     super.onPlayerError(error)
                     // 2026-05-21 : ce serveur a ÉCHOUÉ pour CE titre → DEAD (rouge) uniquement
                     //   pour ce titre (args.id). Pas de bave sur les autres épisodes.
+                    // 2026-08-08 (user : « il doit pas passer rouge à tort, ça c'est pas
+                    //   possible… ils seront rouges que si c'est VRAIMENT cassé ») :
+                    //   on ne condamne plus un serveur quand l'échec porte sur un fichier
+                    //   ANNEXE — piste I-frame des vignettes, sous-titre, miniatures. Ces
+                    //   fichiers ne disent rien de la santé du flux : upbolt.to lisait le
+                    //   film sans faute sur son propre site (vérifié, 1 h 49) pendant qu'on
+                    //   l'affichait en rouge, à cause d'un 403 sur `iframes-v1-a1.m3u8`.
+                    //   Le risque vient d'augmenter : on attache maintenant jusqu'à 27
+                    //   sous-titres externes par serveur NetMirror — sans ce garde-fou, un
+                    //   seul `.srt` en échec suffirait à condamner un serveur qui joue bien.
+                    // 2026-08-08, MÊME JOUR — RÈGLE RÉTABLIE. J'avais ajouté ici un garde-fou
+                    //   « ne pas marquer mort sur un fichier annexe ». Le user a tranché :
+                    //   « à partir du moment où il devient rouge c'est parce qu'il a pas marché
+                    //   et que ça a passé à la lecture suivante — là tu respectes les consignes
+                    //   de base ». Une pastille rouge doit dire la vérité : si le lecteur a
+                    //   abandonné et basculé, le serveur N'A PAS marché, point.
+                    //   Masquer l'échec ne réparait rien — ça cachait juste le symptôme. La vraie
+                    //   correction est en amont : on retire la piste I-frame du manifeste
+                    //   (cf. FiltreManifesteHls) pour que la lecture ne casse plus.
                     currentServer?.let {
                         com.streamflixreborn.streamflix.utils.TitleServerStatus.record(
                             it.id,
@@ -5972,7 +6197,11 @@ class PlayerTvFragment : Fragment() {
                                 )
                                 Log.e(
                                     "PlayerNetwork",
-                                    "DIAG-403 headers envoyés = ${currentVideo?.headers}",
+                                    // ⚠ Ce sont les en-têtes FABRIQUÉS par l'extracteur, PAS ceux
+                                    //   réellement envoyés sur le fil (le bocal à cookies et la
+                                    //   pile HTTP en ajoutent en dessous). M'a fait « corriger »
+                                    //   trois fois un `Cookie=` qui n'existait que dans ce texte.
+                                    "DIAG-403 en-têtes de l'extracteur (≠ ceux du fil) = ${currentVideo?.headers}",
                                 )
                                 break
                             }
@@ -6369,9 +6598,21 @@ class PlayerTvFragment : Fragment() {
                                 displayVideo(vid, server)
                                 try { player.seekTo(savedPos) } catch (_: Exception) {}
                             } else {
-                                Log.w("PlayerNetwork",
-                                    "VOD error APRÈS lecture sur ${server.name} ($errCodeName) — re-prepare même serveur (super-buffer déjà actif, PAS de switch)")
-                                try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
+                                // Progression réelle depuis la dernière re-préparation ?
+                                if (savedPos > vodPositionDerniereReprep + 1_000L) {
+                                    vodReprepSansProgres = 0
+                                } else {
+                                    vodReprepSansProgres++
+                                }
+                                vodPositionDerniereReprep = savedPos
+                                if (vodReprepSansProgres > MAX_REPREP_SANS_PROGRES) {
+                                    Log.w("PlayerNetwork",
+                                        "VOD error APRÈS lecture sur ${server.name} ($errCodeName) — $vodReprepSansProgres re-préparations SANS AUCUN progrès @${savedPos}ms : on arrête d'insister (serveur conservé, pas de bascule)")
+                                } else {
+                                    Log.w("PlayerNetwork",
+                                        "VOD error APRÈS lecture sur ${server.name} ($errCodeName) — re-prepare même serveur (super-buffer déjà actif, PAS de switch) [$vodReprepSansProgres/$MAX_REPREP_SANS_PROGRES sans progrès]")
+                                    try { player.prepare(); player.playWhenReady = true } catch (_: Exception) {}
+                                }
                             }
                             null
                         } else if (!isPermanentFailure) {
@@ -7896,7 +8137,12 @@ class PlayerTvFragment : Fragment() {
             }
 
             val baseBuilder = if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1 && !currentSoftwareDecoder) {
-                ExoPlayer.Builder(requireContext())
+                // 2026-08-08 : même `experimentalSetLegacyDecodingEnabled` que la branche
+                //   moderne — sinon les sous-titres externes (.srt NetMirror VOSTFR) plantent.
+                ExoPlayer.Builder(
+                    requireContext(),
+                    com.streamflixreborn.streamflix.utils.SousTitresExternesRenderersFactory(requireContext())
+                )
             } else {
                 // 2026-06-10 : toggle Settings "Forcer le décodeur logiciel".
                 //   OFF par défaut = HW prioritaire (= comportement v1.7.197
@@ -7960,10 +8206,21 @@ class PlayerTvFragment : Fragment() {
             //   capacités" (cas AV1 1080p sur sabrina : le c2.android.av1 logiciel refuse le 1080p
             //   dans ses capabilities, mais peut le décoder en soft comme dav1d/VLC). Sans ça, le
             //   track AV1 n'est jamais poussé au décodeur → écran noir / skip.
+            // 2026-08-08 (user : « le changement automatique ne doit pas avoir lieu anormalement,
+            //   l'option doit être désactivée de base et avoir la meilleure qualité. Si les gens
+            //   activent l'autre option c'est pour avoir une qualité moins bonne ») :
+            //   `baisseQualiteAuto` est OFF par défaut → on FIGE la meilleure variante et on ne
+            //   laisse plus ExoPlayer arbitrer. Il ne descend plus tout seul, et surtout il ne va
+            //   plus RÉCLAMER les autres qualités — ce qui, sur upbolt, faisait griller le jeton
+            //   du CDN dès la deuxième playlist demandée.
+            //   Option ON = comportement adaptatif d'avant (démarrage léger puis remontée).
+            val qualiteAdaptative = UserPreferences.baisseQualiteAuto
+            Log.d("PlayerTvFragment", "qualité : ${if (qualiteAdaptative) "adaptative (option activée)" else "meilleure variante figée (défaut)"}")
             val trackSelector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(requireContext()).apply {
                 parameters = buildUponParameters()
                     .setExceedRendererCapabilitiesIfNecessary(true)
                     .setExceedVideoConstraintsIfNecessary(true)
+                    .setForceHighestSupportedBitrate(!qualiteAdaptative)
                     .build()
             }
 
@@ -7974,8 +8231,11 @@ class PlayerTvFragment : Fragment() {
             //   démarrage lent/saccadé sur le Chromecast (device faible). On force une estimation
             //   INITIALE BASSE (≈700 Kbps) → il démarre sur la variante légère (lancement rapide)
             //   puis l'adaptatif remonte tout seul en quelques segments. Ne CAPE PAS la qualité max.
+            //   2026-08-08 : ce démarrage en variante légère n'a de sens QUE si l'adaptatif a le
+            //   droit de remonter. Option OFF (défaut) = meilleure qualité d'emblée, donc pas
+            //   d'estimation bridée — sinon on démarrerait bas et on y resterait.
             val startLowBandwidthMeter = androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.Builder(requireContext())
-                .setInitialBitrateEstimate(700_000L)
+                .apply { if (qualiteAdaptative) setInitialBitrateEstimate(700_000L) }
                 .build()
             val builtPlayer = baseBuilder
                 .setMediaSourceFactory(mediaSourceFactory)
@@ -8048,6 +8308,16 @@ class PlayerTvFragment : Fragment() {
         }
 
         /** Only vidzy.live requires Cronet (JA3 fingerprint bypass). */
+        /**
+         * 2026-08-08 — UA desktop pour upbolt, identique à celui de l'extraction.
+         *   Règle établie sur Uqload (même logiciel, même forme d'URL `,l,n,h,.urlset`) :
+         *   ce serveur filtre sur la COMBINAISON UA + Sec-Fetch, et c'est le Chrome desktop
+         *   qui passe. Le jeton étant obtenu avec cette identité, il doit être rejoué avec.
+         */
+        private val UA_UPBOLT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/148.0.0.0 Safari/537.36"
+
         private fun needsCronet(url: String): Boolean {
             // Cronet uses Chrome's TLS stack (JA3 fingerprint matches real browsers)
             // These CDNs reject non-Chromium TLS fingerprints (OkHttp → 404)
@@ -8093,9 +8363,14 @@ class PlayerTvFragment : Fragment() {
                 //   strict. DefaultHttpDataSource (TLS Java) → redirect Telegram (anti-hotlink).
                 //   Cronet (TLS Chrome) + Referer nakios.store → 206 OK.
                 || url.contains("citron-edge", ignoreCase = true)
-                // 2026-07-27 : upbolt CDN (edge0X.upbolt.to) = DataDome + JA3 → Cronet requis
-                //   (cookie + Referer + UA mobile passés via headers, sinon coupe).
-                || url.contains("upbolt", ignoreCase = true)
+                // 2026-08-02 : upbolt RETIRÉ d'ici (constaté en logs, DIAG-403).
+                //   Depuis que l'extracteur obtient le flux par un POST `/dl` (OkHttp), c'est CE
+                //   client qui reçoit la session DDoS-Guard (`__ddg1_`, `__ddg8_`, `__ddg9_`,
+                //   `__ddg10_`). Lire ensuite via Cronet revenait à présenter les cookies d'une
+                //   session ouverte avec une AUTRE pile TLS → 403 systématique, alors même que les
+                //   cookies étaient bien envoyés (vérifié dans les en-têtes du DIAG-403).
+                //   Le POST OkHttp répondant 200, son empreinte est acceptée : on lit donc avec le
+                //   même client que celui qui a ouvert la session.
         }
 
         private fun needsDoH(url: String): Boolean {
@@ -8124,10 +8399,30 @@ class PlayerTvFragment : Fragment() {
                 // 2026-07-30 : CDN Vidmoly (cert rejeté par vieux CA store) → OkHttp trust-all.
                 || url.contains("vmwesa", ignoreCase = true)
                 || url.contains("acek-cdn", ignoreCase = true)
+                // 2026-08-02 : upbolt → lecture via OKHTTP, comme l'extraction.
+                //   Constat décisif : le jeton obtenu par l'application est refusé (403) MÊME
+                //   rejoué dans un vrai navigateur, alors qu'un jeton obtenu par ce même navigateur
+                //   passe (200) — y compris sans aucun cookie. Le jeton est donc lié au CLIENT qui
+                //   l'a demandé. Or l'application en mélangeait trois : OkHttp pour le POST `/dl`,
+                //   puis HttpURLConnection (DefaultHttpDataSource) ou Cronet pour lire. En passant
+                //   par ce chemin, la lecture emprunte la même pile OkHttp que l'extraction.
+                || url.contains("upbolt", ignoreCase = true)
+                // 2026-08-08 : CDN hakunaymatata (Cloudstream / MovieBox+). Même famille que
+                //   `sprintcdn` juste au-dessus — le DNS système mène au MAUVAIS edge. Ici ce
+                //   n'est pas un jeton lié à l'edge mais carrément un autre CDN : Google Edge
+                //   Cache (Paris) au lieu de CloudFront, qui répond 428 « Precondition Required »
+                //   sur absolument tout. Il faut donc que la lecture passe par OkHttp+DoT, seule
+                //   pile qui utilise DnsResolver — lequel renvoie ces hôtes vers la branche
+                //   CloudFront. Déclaré ici pour que le lecteur ne reconstruise pas une source
+                //   système derrière notre dos (`dataSourceMismatch`).
+                || url.contains("hakunaymatata", ignoreCase = true)
         }
 
         // 2026-07-29 : hôtes de flux DNS-bloqués par le FAI (UnknownHost sous Cronet) →
         //   forcés en DoT-OkHttp par createHttpDataSourceFactory (résout via dot.sb).
+        /** Adresses trouvées par le DoT pour les hôtes bloqués au DNS, à imposer à Cronet. */
+        private val ipResolueParDoT = java.util.Collections.synchronizedMap(mutableMapOf<String, String>())
+
         private val dnsBlockedHosts = java.util.Collections.synchronizedSet(mutableSetOf<String>())
         private fun hostOf(url: String?): String? = runCatching { android.net.Uri.parse(url).host }.getOrNull()
 
@@ -8138,13 +8433,188 @@ class PlayerTvFragment : Fragment() {
          * - everything else → DefaultHttpDataSource (system DNS, most compatible)
          */
         private fun createHttpDataSourceFactory(videoUrl: String = ""): HttpDataSource.Factory {
+            // 2026-08-08 (user : « ça peut sûrement être contourné ») — CDN hakunaymatata
+            //   (Cloudstream / MovieBox+) : ON PASSE PAR NOTRE RÉSOLVEUR, PAS PAR CELUI DU SYSTÈME.
+            //
+            //   Ce nom est servi par DEUX CDN selon la région. Les en-têtes de réponse le disent :
+            //     ici    → `server: Google-Edge-Cache`, `cdn-cache-status: par;bypassed`
+            //              = 428 « Precondition Required » sur TOUT, même /robots.txt et un
+            //                chemin inexistant ;
+            //     dehors → `Server: CloudFront` = 403 sans signature (normal), 206 avec.
+            //   DnsResolver renvoie donc les hôtes hakunaymatata vers la branche CloudFront
+            //   (voir `cibleContournement` là-bas). Mais ce renvoi ne sert à rien si le lecteur
+            //   n'utilise pas ce résolveur : DefaultHttpDataSource et Cronet résolvent par la
+            //   pile SYSTÈME, et c'est ce qui s'est passé au premier essai — pas une seule ligne
+            //   « branche CloudFront » dans le journal, et toujours 428.
+            //   On force donc la source OkHttp+DoT, la seule qui passe par DnsResolver.
+            //   Les en-têtes ne sont pas en cause (mesuré : la requête nue rend 206), et le
+            //   Bearer continue d'être porté par le Video comme avant.
+            runCatching { android.net.Uri.parse(videoUrl).host }.getOrNull()
+                ?.takeIf { it.endsWith(".hakunaymatata.com", ignoreCase = true) }
+                ?.let { h ->
+                    Log.w("PlayerNetwork", "$h → OkHttp+DoT pour forcer la branche CloudFront (anti-428)")
+                    usingCronet = false
+                    usingDoH = true
+                    return createDoHOkHttpDataSourceFactory()
+                }
             // 2026-07-29 : hôte de flux dont le DNS FAI a échoué (UnknownHost) → DoT-OkHttp
             //   d'office (résout via dot.sb), même si needsCronet=true. Sinon Cronet (DNS
             //   système) reboucle en UnknownHost et le repli était écrasé par le re-pick.
             val vHost = runCatching { android.net.Uri.parse(videoUrl).host }.getOrNull()
             if (vHost != null && dnsBlockedHosts.contains(vHost)) {
-                Log.w("PlayerNetwork", "Forced DoT-OkHttp for DNS-blocked host $vHost")
-                return createDoHOkHttpDataSourceFactory()
+                // 2026-08-08 (user : « FrenchStream · Uqload passe au rouge alors qu'il
+                //   fonctionne clairement dans le navigateur ») — DEUX CONTOURNEMENTS QUI
+                //   S'ANNULENT.
+                //   Relevé au journal, à 4 secondes d'intervalle :
+                //     Forced DoT-OkHttp for DNS-blocked host strm7.uqload.is
+                //     403 sur .../,l,n,h,.urlset/master.m3u8
+                //   Le FAI bloque `uqload.is` au DNS (vérifié : le PC du user ne résout pas ce
+                //   nom non plus), donc on bascule sur le résolveur DoT. Ce faisant on change
+                //   AUSSI de pile réseau : Cronet → OkHttp. Or c'est précisément le piège noté
+                //   ici même le 2026-05-20 : « Uqload et Hydrax signent leur token sur le JA3
+                //   Chrome du fetch d'extraction (Cronet) ; en TLS Android → 403 ».
+                //   Le contournement DNS annulait donc le contournement JA3 : le nom se résolvait
+                //   bien (45.3.63.61), mais la poignée de main n'était plus celle de Chrome.
+                //   Et le flux, lui, est vivant — lu en direct dans le navigateur du user, 1 h 49,
+                //   sur ce même hôte `strm7.uqload.is`.
+                //   On garde donc Cronet quand l'hôte l'exige ; le repli DoT reste en place pour
+                //   tous les autres, et Cronet retombera de lui-même sur ce repli s'il échoue.
+                if (needsCronet(videoUrl)) {
+                    // On garde Cronet POUR LE JA3, et on lui impose l'adresse que le DoT connaît :
+                    //   Cronet seul répondait `code=-1` (nom non résolu), OkHttp+DoT répondait
+                    //   403 (mauvaise signature TLS). Il faut les deux moitiés.
+                    // On lit d'abord le cache du résolveur DoT : l'extraction vient de résoudre
+                    //   cet hôte, l'adresse y est déjà. Ça évite d'exiger une 2ᵉ tentative.
+                    val ip = ipResolueParDoT[vHost]
+                        ?: com.streamflixreborn.streamflix.utils.DnsResolver.adresseEnCache(vHost)
+                            ?.also { ipResolueParDoT[vHost] = it }
+                    if (ip != null) {
+                        val moteur = com.streamflixreborn.streamflix.StreamFlixApp
+                            .getCronetEngineAvecAdresse(requireContext(), vHost, ip)
+                        if (moteur != null) {
+                            Log.w("PlayerNetwork", "$vHost DNS-bloqué + exige Cronet → Cronet avec adresse imposée $ip")
+                            usingCronet = true
+                            usingDoH = false
+                            return CronetDataSource.Factory(moteur as CronetEngine, cronetExecutor)
+                                .setUserAgent(NetworkClient.USER_AGENT)
+                                .setConnectionTimeoutMs(30_000)
+                                .setReadTimeoutMs(30_000)
+                        }
+                    }
+                    // Adresse pas encore connue : on la fait résoudre en tâche de fond pour la
+                    //   prochaine tentative (le lecteur réessaie), et on ne bloque pas le fil
+                    //   principal. En attendant, comportement d'avant — au moins ça répond.
+                    Log.w("PlayerNetwork", "$vHost DNS-bloqué + exige Cronet, adresse inconnue → résolution en tâche de fond")
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        runCatching {
+                            com.streamflixreborn.streamflix.utils.DnsResolver.doh.lookup(vHost)
+                                .firstOrNull()?.hostAddress
+                        }.getOrNull()?.let {
+                            ipResolueParDoT[vHost] = it
+                            Log.d("PlayerNetwork", "$vHost résolu en tâche de fond → $it")
+                        }
+                    }
+                    Log.w("PlayerNetwork", "Forced DoT-OkHttp for DNS-blocked host $vHost")
+                    return createDoHOkHttpDataSourceFactory()
+                } else {
+                    Log.w("PlayerNetwork", "Forced DoT-OkHttp for DNS-blocked host $vHost")
+                    return createDoHOkHttpDataSourceFactory()
+                }
+            }
+            // 2026-08-08 — upbolt : on lit AVEC LE CLIENT DE L'EXTRACTION, pas un autre.
+            //   Mesuré sur l'appareil (sonde dans OnRegardeOuExtractor) :
+            //     • master demandé par `NetworkClient.default`   → 200
+            //     • VARIANTE demandée par `NetworkClient.default` → 200   ← le client sait le faire
+            //     • segment .ts demandé par le lecteur (OkHttp Multi-DoH) → 403
+            //   Le jeton d'upbolt est lié au client qui l'a obtenu (déjà constaté : rejoué depuis
+            //   Chrome il est refusé, alors qu'un jeton minté par Chrome passe). Or on mélangeait
+            //   deux piles : `NetworkClient.default` (DoT dot.sb) pour l'extraction, et le client
+            //   Multi-DoH trust-all pour la lecture — lequel résout `edge0X.upbolt.to` via
+            //   Cloudflare/Google/Quad9 et tombe donc potentiellement sur un AUTRE edge que celui
+            //   qui a émis le jeton. D'où 403 sur tout ce qui suit le master.
+            //   On rebranche : même client, même DNS, même session, du POST /dl au dernier segment.
+            if (videoUrl.contains("upbolt", ignoreCase = true)) {
+                usingCronet = false
+                usingDoH = true   // même case que la voie OkHttp : évite un hot-swap en boucle
+                Log.d("PlayerNetwork", "upbolt → OkHttpDataSource sur NetworkClient.default (client de l'extraction)")
+                // 2026-08-08 — le bocal à cookies est REMIS. Je l'avais coupé en croyant que des
+                //   `__ddg…` périmés causaient les 403 ; c'était une lecture erronée du journal
+                //   (la ligne affichait la table de l'extracteur, pas ce qui partait sur le fil).
+                //   Aucune mesure n'a jamais montré que les couper aidait — on ne garde donc pas.
+                return OkHttpDataSource.Factory(
+                    NetworkClient.default.newBuilder()
+                        // 2026-08-08 — OBSERVATEUR AU BON NIVEAU. La ligne `DIAG-403 headers
+                        //   envoyés` affiche `currentVideo.headers`, c'est-à-dire la table
+                        //   FABRIQUÉE par l'extracteur — pas ce qui part sur le fil. J'ai donc
+                        //   « corrigé » trois fois un `Cookie=` qui n'était qu'un texte de log
+                        //   figé. Un intercepteur RÉSEAU, lui, voit la requête finale, y compris
+                        //   les cookies ajoutés par le bocal en dessous des en-têtes applicatifs.
+                        // 2026-08-08 — EN-TÊTES POSÉS DANS UN INTERCEPTEUR, PAS SUR LA FABRIQUE.
+                        //   Constat de l'intercepteur précédent : la requête partait avec le SEUL
+                        //   `User-Agent`, même après les avoir posés via `setDefaultRequestProperties`
+                        //   sur cette fabrique. Quelque chose, plus loin dans le pipeline, rappelle
+                        //   `setDefaultRequestProperties` et REMPLACE la table au lieu de la compléter.
+                        //   Un intercepteur, lui, s'applique à chaque requête et ne peut pas être
+                        //   écrasé : c'est le seul endroit où ces en-têtes sont garantis.
+                        //   Ils ne sont pas décoratifs — c'est la seule différence entre ma sonde
+                        //   (200 systématique) et le lecteur (403 systématique) sur les MÊMES segments.
+                        .addNetworkInterceptor { chain ->
+                            // ROTATION DU JETON, ICI ET PAS DANS LE DATASOURCE : celui-ci ne voit
+                            //   que les playlists (157 Ko comptés quand la lecture en était à
+                            //   plusieurs Mo). Volume réel avant coupure, mesuré : ~4,1 Mo.
+                            //   On change de jeton AVANT d'y arriver, et jamais sur un 403.
+                            // Mêmes en-têtes QUE L'EXTRACTION, UA desktop compris : le jeton est
+                            //   obtenu avec cette identité, il doit être rejoué avec la même.
+                            //   Règle établie sur Uqload, même logiciel : le serveur filtre sur
+                            //   la combinaison UA + Sec-Fetch, et c'est le Chrome desktop qui passe.
+                            val requete = chain.request().newBuilder()
+                                .header("User-Agent", UA_UPBOLT)
+                                .header("Referer", "https://upbolt.to/")
+                                .header("Origin", "https://upbolt.to")
+                                .header("Accept", "*/*")
+                                .header("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
+                                .header("Sec-Fetch-Dest", "empty")
+                                .header("Sec-Fetch-Mode", "cors")
+                                .header("Sec-Fetch-Site", "same-site")
+                                .header("Sec-Ch-Ua", "\"Chromium\";v=\"148\", \"Google Chrome\";v=\"148\", \"Not_A Brand\";v=\"99\"")
+                                .header("Sec-Ch-Ua-Mobile", "?0")
+                                .header("Sec-Ch-Ua-Platform", "\"Windows\"")
+                                .build()
+                            val rep = chain.proceed(requete)
+                            // 2026-08-08 — COMPTAGE ICI, ET NULLE PART AILLEURS.
+                            //   Le compteur posé dans le DataSource annonçait 157 Ko au moment
+                            //   où la lecture atteignait le segment 27, soit plusieurs Mo de
+                            //   vidéo : les segments ne passent tout simplement pas par lui, il
+                            //   ne voit que les playlists. Mes réglages de débit successifs ne
+                            //   bridaient donc rien. L'intercepteur, lui, voit chaque requête —
+                            //   c'est prouvé, c'est lui qui rapporte les 403 sur les segments.
+                            if (rep.code == 403) {
+                                Log.e("PlayerNetwork",
+                                    "upbolt 403 sur ${requete.url.encodedPath.substringAfterLast('/')}")
+                            }
+                            rep
+                        }
+                        .build()
+                )
+                    .setUserAgent(UA_UPBOLT)
+                    // 2026-08-08 — LA CAUSE, enfin vue par l'intercepteur réseau :
+                    //     « UPBOLT 403 RÉEL sur seg-4 → en-têtes RÉELLEMENT envoyés =
+                    //       User-Agent: … »   ← et RIEN d'autre.
+                    //   Le lecteur demandait les segments TOUT NUS : ni Referer, ni Origin. En
+                    //   remplaçant la fabrique HTTP par ce client dédié à upbolt, j'avais perdu
+                    //   les en-têtes de l'extracteur, qui sont posés ailleurs (setDefault…).
+                    //   C'est LA différence que je cherchais depuis ce matin : ma sonde envoyait
+                    //   `Referer`/`Origin` — d'où ses 200 sur les segments mêmes où le lecteur se
+                    //   prenait 403. Je comparais deux requêtes que je croyais identiques.
+                    //   On les repose donc ici, à la source, indépendamment du reste du pipeline.
+                    .setDefaultRequestProperties(
+                        mapOf(
+                            "Referer" to "https://upbolt.to/",
+                            "Origin" to "https://upbolt.to",
+                            "Accept" to "*/*",
+                            "Accept-Language" to "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+                        )
+                    )
             }
             if (!needsCronet(videoUrl)) {
                 if (needsDoH(videoUrl)) {
@@ -8711,8 +9181,11 @@ class PlayerTvFragment : Fragment() {
             //   qualité Auto (qualityHeight == null). Descend sur rebuffers répétés,
             //   remonte quand stable. Recréé à chaque rebuild de player.
             adaptiveQualityTicker?.cancel()
+            // 2026-08-02 : soumis au réglage `baisseQualiteAuto`, DÉSACTIVÉ par défaut → on reste
+            //   sur la meilleure variante du flux au lieu de rétrograder après un rebuffering.
             adaptiveQualityGovernor = com.streamflixreborn.streamflix.utils.AdaptiveQualityGovernor(player) {
-                !isLiveIptvHere2 && UserPreferences.qualityHeight == null
+                UserPreferences.baisseQualiteAuto &&
+                    !isLiveIptvHere2 && UserPreferences.qualityHeight == null
             }
             adaptiveQualityTicker = viewLifecycleOwner.lifecycleScope.launch {
                 while (_binding != null) {
@@ -8742,6 +9215,9 @@ class PlayerTvFragment : Fragment() {
             //   native derrière nos contrôles + miroir + 2 boutons), PAS le curseur générique.
             // 2026-07-29 : embed4me = même player vidstack que seekplayer → il suit le MÊME miroir TV
             //   (contrôles natifs pilotent la WebView, curseur masqué), pas la souris.
+            // 2026-08-02 : upbolt N'EST PLUS ICI — il passe désormais en EXTRACTION NATIVE
+            //   (cf. OnRegardeOuExtractor.extraireUpbolt : POST /dl → m3u8 → ExoPlayer), donc il
+            //   n'atteint plus jamais l'overlay WebView.
             val isSeekPlayerTv = embedUrl.contains("seekplayer") || embedUrl.contains("embedseek") ||
                 embedUrl.contains("swiftflow") || embedUrl.contains("embed4me")
             val nativeVideoOverlay = binding.pvPlayer.overlayFrameLayout
@@ -8873,6 +9349,28 @@ class PlayerTvFragment : Fragment() {
                     view: WebView?, request: WebResourceRequest?
                 ): WebResourceResponse? {
                     val url = request?.url?.toString() ?: return null
+
+                    // ── 2026-08-02 (user : « le player affiche des pubs en arrière-plan ») ──
+                    //   Le blocage était déclaré hébergeur par hébergeur (seek / abyss / Player4me /
+                    //   DaddyLive) : tout lecteur hors de ces listes — upbolt notamment — affichait
+                    //   ses pubs sans filtre. Ce premier passage s'applique donc à TOUS les flux du
+                    //   miroir. Il ne vise que des domaines de régie connus et des chemins
+                    //   explicitement publicitaires, jamais le flux vidéo lui-même.
+                    run {
+                        val h = request?.url?.host ?: ""
+                        val estPub = AD_BLOCK_PATTERNS.any { h.contains(it, ignoreCase = true) } ||
+                            url.contains("/ads/") || url.contains("/ad.") ||
+                            url.contains("popunder") || url.contains("pop.js") ||
+                            url.contains("/vast") || url.contains("vpaid") ||
+                            url.contains("syndication") || url.contains("/banner") ||
+                            url.contains("prebid") || url.contains("adserver") ||
+                            url.contains("doubleclick") || url.contains("googlesyndication")
+                        if (estPub) {
+                            Log.d("PlayerTV", "PUB BLOQUÉE (générique): $h/${url.takeLast(45)}")
+                            return WebResourceResponse("text/plain", "UTF-8",
+                                java.io.ByteArrayInputStream("".toByteArray()))
+                        }
+                    }
 
                     // SeekStreaming / SwiftFlow / embed4me : coupe les pubs
                     if (isSeekPlayer || isSwiftFlow || isEmbed4me) {
@@ -9034,6 +9532,26 @@ class PlayerTvFragment : Fragment() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     Log.d("PlayerTV", "Overlay WebView loaded: ${url?.take(80)}")
+                    // ── 2026-08-02 : nettoyage anti-pub GÉNÉRIQUE, pour tous les flux du miroir ──
+                    //   Le filtrage réseau ne suffit pas : certaines pubs sont injectées par le
+                    //   script du lecteur lui-même. On neutralise donc les pop-ups et on retire les
+                    //   calques flottants. Garde-fou : un calque contenant une <video>, une <iframe>
+                    //   ou un <canvas> n'est JAMAIS touché — ce serait le lecteur.
+                    val nettoyage = "(function(){try{" +
+                        "window.open=function(){return {closed:false,focus:function(){},blur:function(){},close:function(){},location:{href:''}};};" +
+                        "var as=document.querySelectorAll('a[target=\"_blank\"]');" +
+                        "for(var i=0;i<as.length;i++){try{as[i].removeAttribute('href');as[i].onclick=null;}catch(e){}}" +
+                        "function balaye(){try{" +
+                        "var t=document.querySelectorAll('div,ins,aside,section');" +
+                        "for(var i=0;i<t.length;i++){var el=t[i];" +
+                        "try{var s=getComputedStyle(el);" +
+                        "if((s.position==='fixed'||s.position==='absolute')&&(parseInt(s.zIndex||'0',10)>=1000)){" +
+                        "if(!el.querySelector('video,iframe,canvas')){el.style.display='none';}}" +
+                        "}catch(e){}}" +
+                        "}catch(e){}}" +
+                        "balaye();var n=0;var tm=setInterval(function(){n++;balaye();if(n>15)clearInterval(tm);},1000);" +
+                        "}catch(e){}})();"
+                    view?.evaluateJavascript(nettoyage, null)
                     if (isAbyssEmbed) {
                         val tgt = overlayWebView
                         val ovw = webViewOverlay
@@ -9064,7 +9582,14 @@ class PlayerTvFragment : Fragment() {
                     //   via un clic RÉEL au centre (comme abyss). Le curseur TV permet aussi à
                     //   l'utilisateur de cliquer le bouton bleu à la télécommande. ──
                     if (isSeekPlayer) {
-                        val seekJs = "(function(){try{try{window.open=function(){return null;};}catch(e){}" +
+                        // ⚠ 2026-08-04 — FAUSSE FENÊTRE, PAS `return null`.
+                        //   Ce lecteur compte les popups RÉELLEMENT ouvertes avant de libérer
+                        //   la lecture (les « trois ou quatre clics » côté utilisateur).
+                        //   Renvoyer `null` = « popup bloquée » → la porte ne s'ouvre jamais et
+                        //   l'overlay reste en « media not ready » indéfiniment. On renvoie donc
+                        //   une fausse fenêtre : la page croit la pub ouverte, rien ne s'ouvre.
+                        //   Même correction que dans OnlyFlixResolver, où c'était LA cause.
+                        val seekJs = "(function(){try{try{window.open=function(){return {closed:false,focus:function(){},blur:function(){},close:function(){},postMessage:function(){},document:{write:function(){},close:function(){}},location:{href:'',replace:function(){},assign:function(){}}};};}catch(e){}" +
                             "try{var css=document.createElement('style');css.textContent='html,body{margin:0!important;padding:0!important;background:#000!important;width:100vw!important;height:100vh!important;overflow:hidden!important;}media-player,media-provider,video{width:100vw!important;height:100vh!important;position:fixed!important;top:0!important;left:0!important;object-fit:contain!important;z-index:2147483000!important;background:#000!important;}a[target=\"_blank\"],[class*=\"popup\"],[id*=\"popup\"]{display:none!important;pointer-events:none!important;}';(document.head||document.documentElement).appendChild(css);}catch(e){}" +
                             "function go(){try{var mp=document.querySelector('media-player');if(mp){try{mp.load='eager';mp.setAttribute('load','eager');}catch(e){}try{if(mp.startLoading)mp.startLoading();}catch(e){}try{if(mp.play)mp.play();}catch(e){}}var v=document.querySelector('video');if(v){try{v.play();}catch(e){}}document.querySelectorAll('a[target=\"_blank\"]').forEach(function(a){try{a.remove();}catch(e){}});document.querySelectorAll('button,a,[role=\"button\"]').forEach(function(b){var t=((b.textContent||b.innerText||'')+'').trim();if(t==='Reprendre'||t.indexOf('Reprendre')===0){try{b.click();}catch(e){}}});}catch(e){}}" +
                             "go();var n=0;var tm=setInterval(function(){n++;go();if(n>20)clearInterval(tm);},1000);}catch(e){}})();"
@@ -9500,6 +10025,9 @@ class PlayerTvFragment : Fragment() {
             overlayIsAbyss = false
             overlayIsPlayer4me = false
             overlayIsSeekNative = false
+            // Retour à la lecture native : PlayerView reprend la main sur le masquage.
+            masquageMiroirRunnable?.let { masquageMiroirHandler.removeCallbacks(it) }
+            masquageMiroirRunnable = null
             player4meStarted = false
             player4meQualityMode = false
             overlayHint = null
@@ -9604,6 +10132,23 @@ class PlayerTvFragment : Fragment() {
                 tv.setBackgroundColor(if (abyssRow == 1 && i == abyssBtnIndex) hl else Color.TRANSPARENT)
             }
         }
+        /**
+         * Masque les contrôles après 5 s d'inactivité quand on est en mode miroir (WebView).
+         * Sans média dans l'ExoPlayer, PlayerView ne le fait pas de lui-même. Reprogrammé à chaque
+         * réapparition des contrôles, donc toute interaction repousse le masquage.
+         */
+        private fun programmerMasquageMiroir() {
+            masquageMiroirRunnable?.let { masquageMiroirHandler.removeCallbacks(it) }
+            if (webViewOverlay == null) return // lecture native : PlayerView s'en charge déjà
+            val r = Runnable {
+                if (webViewOverlay != null && view != null) {
+                    runCatching { binding.pvPlayer.hideController() }
+                }
+            }
+            masquageMiroirRunnable = r
+            masquageMiroirHandler.postDelayed(r, 5000L)
+        }
+
         private fun showAbyssBar() {
             abyssBar?.visibility = View.VISIBLE
             abyssHideRunnable?.let { abyssHandler.removeCallbacks(it) }
@@ -10319,3 +10864,5 @@ class PlayerTvFragment : Fragment() {
 
 
     }
+
+

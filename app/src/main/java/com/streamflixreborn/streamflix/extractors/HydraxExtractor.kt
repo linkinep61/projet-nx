@@ -28,8 +28,6 @@ open class HydraxExtractor : Extractor() {
     override val mainUrl = "https://abysscdn.com"
     override val aliasUrls = listOf(
         "https://abyss.to",
-        "https://hls.abyssa.cc",
-        "https://abyssa.cc",
         "https://abyssplayer.com",
         "https://hydrax.net",
     )

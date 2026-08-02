@@ -206,7 +206,43 @@ class TvShowTvFragment : Fragment() {
         )
     }
 
+    /**
+     * Pré-chauffe la recherche des serveurs de secours dès l'ouverture de la fiche.
+     * Voir le commentaire détaillé dans `TvShowMobileFragment` : à froid, certaines sources
+     * mettent plus de 30 s à rendre leurs serveurs, alors que le lecteur démarre en quelques
+     * secondes — d'où « les serveurs que je convoite n'arrivent qu'au 2e lancement ».
+     * Les secondes passées à choisir un épisode sont mises à profit.
+     */
+    private fun prechaufferServeurs(tvShow: TvShow) {
+        val saison = tvShow.seasons.firstOrNull() ?: return
+        com.streamflixreborn.streamflix.utils.BackupRegistry.prechauffer(
+            tmdbId = tvShow.id.takeIf { id -> id.all { it.isDigit() } },
+            videoType = com.streamflixreborn.streamflix.models.Video.Type.Episode(
+                id = "",
+                number = 1,
+                title = null,
+                poster = null,
+                overview = null,
+                season = com.streamflixreborn.streamflix.models.Video.Type.Episode.Season(
+                    number = saison.number,
+                    title = saison.title,
+                ),
+                tvShow = com.streamflixreborn.streamflix.models.Video.Type.Episode.TvShow(
+                    id = tvShow.id,
+                    title = tvShow.title,
+                    poster = tvShow.poster,
+                    banner = tvShow.banner,
+                    releaseDate = null,
+                    imdbId = null,
+                ),
+            ),
+            titleHint = tvShow.title,
+        )
+    }
+
     private fun displayTvShow(tvShow: TvShow) {
+        prechaufferServeurs(tvShow)
+
         binding.ivTvShowBanner.loadTvShowBanner(tvShow) {
             transition(DrawableTransitionOptions.withCrossFade())
         }

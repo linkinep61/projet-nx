@@ -25,9 +25,7 @@ class UpzoneExtractor : Extractor() {
     override val name = "Upzone"
     override val mainUrl = "https://upzone.cc"
     override val aliasUrls = listOf(
-        "https://upzone.to",
         "https://upzone.net",
-        "https://upzone.link"
     )
 
     private val context: Context = StreamFlixApp.instance.applicationContext

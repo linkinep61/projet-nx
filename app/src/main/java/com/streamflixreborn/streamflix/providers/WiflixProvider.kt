@@ -989,6 +989,12 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             if (isCloudflareChallenge(doc)) getDocument("${baseUrl}film-en-streaming/page/$page") else doc
         } catch (e: Exception) { getDocument("${baseUrl}film-en-streaming/page/$page") }
 
+        // ⚠ 2026-08-04 — PAS DE FILTRE PAR ANNÉE ICI, et ne pas en remettre.
+        //   Tenté le jour même : le slug porte parfois l'année (`36373-supergirl-2026.html`),
+        //   mais le relevé sur la page de liste donne 4 fiches sur 20, soit 20 % seulement —
+        //   l'année n'y sert qu'à désambiguïser un titre. Filtrer devenait soit invisible
+        //   (en gardant les fiches sans année), soit destructeur (en les écartant : 80 % du
+        //   catalogue disparaissait). Détail complet dans YearFilter.estSupporte.
         val movies = document.select("div.mov").map {
             Movie(
                 id = it.selectFirst("a.mov-t")
@@ -1012,6 +1018,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             if (isCloudflareChallenge(doc)) getDocument("${baseUrl}serie-en-streaming/page/$page") else doc
         } catch (e: Exception) { getDocument("${baseUrl}serie-en-streaming/page/$page") }
 
+        // ⚠ Pas de filtre par année ici non plus — cf. le commentaire dans `getMovies`.
         val tvShows = document.select("div.mov").map {
             val rawTitle = it.selectFirst("a.mov-t")?.ownText()?.trim() ?: ""
             val season = it.selectFirst("span.block-sai")?.text()?.trim()?.takeIf { s -> s.isNotBlank() }
@@ -1505,7 +1512,62 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         return people
     }
 
+    /**
+     * Mémoire de session « titre|saison → slug flemmix ». Voir le commentaire dans
+     * `searchServersByTitle` : évite de repayer les ~23 s de recherche native derrière
+     * Cloudflare à chaque ouverture d'épisode d'une série déjà résolue.
+     */
+    private val slugCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     // 2026-07-07 : re-implémentation de searchServersByTitle (perdu au restore 08:43).
+    /**
+     * Tous les titres OFFICIELS de la fiche TMDB : titre FR, titre original, et les titres
+     * alternatifs des pays FR/JP/US/GB. Sert à comparer par ÉGALITÉ le libellé indexé par
+     * flemmix, qui préfixe souvent la franchise (« Game Of Thrones: House of the Dragon »).
+     * Ne lève jamais : en cas d'échec réseau on retombe sur le titre de base seul.
+     */
+    private suspend fun titresOfficielsTmdb(
+        tmdbId: String,
+        videoType: Video.Type,
+        base: String,
+    ): Set<String> {
+        val out = linkedSetOf(base)
+        val pays = setOf("FR", "JP", "US", "GB")
+        try {
+            if (videoType is Video.Type.Episode) {
+                val showId = videoType.tvShow.id.toIntOrNull()
+                    ?: tmdbId.substringBefore("/").toIntOrNull() ?: return out
+                val d = TMDb3.TvSeries.details(
+                    seriesId = showId,
+                    language = "fr-FR",
+                    appendToResponse = listOf(TMDb3.Params.AppendToResponse.Tv.ALTERNATIVE_TITLES),
+                )
+                if (d.name.isNotBlank()) out.add(d.name)
+                if (d.originalName.isNotBlank()) out.add(d.originalName)
+                d.alternativeTitles?.all()
+                    ?.filter { (it.iso31661?.uppercase() ?: "") in pays }
+                    ?.mapNotNull { it.title?.takeIf { t -> t.length >= 3 } }
+                    ?.forEach { out.add(it) }
+            } else {
+                val movieId = tmdbId.substringBefore("/").toIntOrNull() ?: return out
+                val d = TMDb3.Movies.details(
+                    movieId = movieId,
+                    language = "fr-FR",
+                    appendToResponse = listOf(TMDb3.Params.AppendToResponse.Movie.ALTERNATIVE_TITLES),
+                )
+                if (d.title.isNotBlank()) out.add(d.title)
+                if (d.originalTitle.isNotBlank()) out.add(d.originalTitle)
+                d.alternativeTitles?.all()
+                    ?.filter { (it.iso31661?.uppercase() ?: "") in pays }
+                    ?.mapNotNull { it.title?.takeIf { t -> t.length >= 3 } }
+                    ?.forEach { out.add(it) }
+            }
+        } catch (e: Exception) {
+            Log.w("Wiflix", "titres alternatifs TMDB KO: ${e.message?.take(80)}")
+        }
+        return out
+    }
+
     // Quand le backup envoie un id TMDB numérique (pas un slug Wiflix), on
     // résout via : TMDB titre → recherche NATIVE flemmix → slug → getServers(slug/tab).
     private suspend fun searchServersByTitle(
@@ -1545,6 +1607,29 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         }
         Log.d("Wiflix", "searchServersByTitle($tmdbId) titre='$title'")
 
+        // 2026-08-07 : TITRES OFFICIELS ALTERNATIFS de la MÊME fiche TMDB.
+        //   Cas prouvé (House of the Dragon, tmdbId 94997) : flemmix indexe la fiche sous
+        //   « Game Of Thrones: House of the Dragon ». Comparée par ÉGALITÉ au titre TMDB
+        //   « House of the Dragon », elle était rejetée → « 0 résultat natif » alors que
+        //   le site possède bel et bien la série. TMDB connaît ce titre exact, mais sous le
+        //   code pays US : d'où l'élargissement FR/JP → FR/JP/US/GB.
+        //   ⚠ Aucun assouplissement : la comparaison reste une ÉGALITÉ, on lui donne
+        //   seulement la liste complète des titres officiels de cette fiche.
+        val titresConnus = titresOfficielsTmdb(tmdbId, videoType, title)
+
+        // 2026-08-07 (user : « il devrait pas être coupé ») — MÉMOIRE DU SLUG.
+        //   Mesuré : la recherche native flemmix ci-dessous coûte à elle seule ~23 s
+        //   (15:24:35 → 15:24:58), Cloudflare oblige. Ajoutée aux ~9 s de la recherche TMDB
+        //   en amont, Wiflix rendait ses 3 serveurs à 31,7 s… pour un résolveur qui coupe à
+        //   30 s : ils arrivaient 2 ms trop tard et étaient jetés. Le slug d'une série ne
+        //   change pas pendant la session : on le mémorise et les passages suivants sautent
+        //   les 23 s. Clé = titre normalisé + saison (chaque saison a son propre slug).
+        val cleSlug = "${title.lowercase().trim()}|${targetSeasonPour(videoType)}"
+        slugCache[cleSlug]?.let { slugMemo ->
+            Log.d("Wiflix", "searchServersByTitle('$title') → slug MÉMORISÉ=$slugMemo")
+            return serveursDepuisSlug(slugMemo, title, videoType)
+        }
+
         // 2. Recherche NATIVE flemmix (POST search). CF → fallback getDocument.
         val searchDoc = try {
             val doc = service.search(title)
@@ -1573,7 +1658,7 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
             val linkTitle = a.selectFirst("span.title1, h3, .title")?.text()
                 ?: a.attr("title").ifBlank { null }
                 ?: a.text()
-            if (!com.streamflixreborn.streamflix.utils.BackupRegistry.titleMatches(linkTitle, title)) return@filter false
+            if (titresConnus.none { com.streamflixreborn.streamflix.utils.BackupRegistry.titleMatches(linkTitle, it) }) return@filter false
             if (videoType is Video.Type.Movie && targetYear != null) {
                 val href = a.attr("href")
                 val candYear = Regex("(19|20)\\d{2}").findAll(href).map { it.value.toInt() }.lastOrNull()
@@ -1601,8 +1686,20 @@ object WiflixProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progress
         val slug = matchedHref.substringAfterLast("/").takeIf { it.isNotBlank() }
             ?: return emptyList()
         Log.d("Wiflix", "searchServersByTitle('$title') → slug=$slug")
+        slugCache[cleSlug] = slug
+        return serveursDepuisSlug(slug, title, videoType)
+    }
 
-        // 4. Résoudre l'épisode ou le film
+    /** Saison visée, ou 0 pour un film. Sert de clé de cache (un slug par saison). */
+    private fun targetSeasonPour(videoType: Video.Type): Int =
+        (videoType as? Video.Type.Episode)?.season?.number ?: 0
+
+    /** Étape 4 : du slug flemmix aux serveurs. Isolée pour être réutilisable depuis le cache. */
+    private suspend fun serveursDepuisSlug(
+        slug: String,
+        title: String,
+        videoType: Video.Type,
+    ): List<Video.Server> {
         if (videoType is Video.Type.Movie) {
             return try { getServers(slug, videoType) } catch (e: Exception) {
                 Log.w("Wiflix", "searchServersByTitle getServers(movie/$slug) failed: ${e.message?.take(100)}")

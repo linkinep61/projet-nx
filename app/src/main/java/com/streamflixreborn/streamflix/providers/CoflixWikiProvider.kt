@@ -528,11 +528,36 @@ object CoflixWikiProvider {
 
             val hosterDomain = serverLink.substringAfter("://").substringBefore("/").lowercase()
             if (!seenUrls.add(serverLink.trim())) continue          // vrai doublon (URL identique)
-            val dupIndex = (perDomainCount[hosterDomain] ?: 0) + 1
-            perDomainCount[hosterDomain] = dupIndex
-            if (dupIndex > MAX_SERVERS_PER_DOMAIN) continue         // garde-fou anti-liste à rallonge
 
+            // 2026-08-07 (user : « j'ai lancé le 2, je sais pas comment le distinguer, il porte
+            //   pas le nom qu'il faudrait ») — KAKAFLIX N'EST PAS UN HÉBERGEUR, c'est un
+            //   emballage. `kakaflix.lol/<segment>/newPlayer.php?id=…` : le vrai hébergeur est
+            //   dans le SEGMENT de chemin, relevé en direct sur leurs pages —
+            //   `voe1`/`voe3` = VOE, `doood`/`doodz` = DoodStream, `moon2` = Filemoon.
+            //   Nommer les deux entrées « Kakaflix » et « Kakaflix #2 » ne dit donc rien : ce
+            //   sont deux hébergeurs DIFFÉRENTS. On lit le segment et on affiche le vrai nom.
+            //   Segment inconnu → on l'affiche tel quel (« Kakaflix tokyo »), ce qui reste
+            //   distinguable et nous signale au passage un emballage qu'on ne connaît pas.
+            //   Deux formes coexistent, relevées sur leur API : un DOSSIER
+            //   (`/voe3/newPlayer.php?id=…`) ou un FICHIER à la racine
+            //   (`/osaka_go.php?id=…`). On coupe donc la query AVANT de découper, sinon le
+            //   nom hérite du `?id=…`. Correspondances déjà documentées dans VoeExtractor :
+            //   `osaka_go.php` = VOE, `grandline_go.php` = Netu.
+            val segmentKaka = if (hosterDomain.contains("kakaflix") || hosterDomain.contains("kokoflix"))
+                serverLink.substringBefore('?').substringAfter("://").substringAfter("/")
+                    .substringBefore("/").removeSuffix(".php").removeSuffix("_go").lowercase()
+            else ""
             val hosterName = when {
+                segmentKaka.contains("voe") || segmentKaka == "osaka" -> "VOE"
+                // 2026-08-07 : `doo`, pas `dood` — le segment s'écrit « doood » avec TROIS o
+                //   (relevé dans le log : « Kakaflix doood »), et « doood » ne contient pas
+                //   « dood ». « doodz » passait, « doood » non.
+                segmentKaka.startsWith("doo") -> "Doodstream"
+                segmentKaka.contains("moon") -> "Filemoon"
+                segmentKaka.contains("uqload") -> "Uqload"
+                segmentKaka.contains("vidzy") -> "Vidzy"
+                segmentKaka == "grandline" -> "Netu"
+                segmentKaka.isNotBlank() && segmentKaka != "newplayer" -> "Kakaflix $segmentKaka"
                 hosterDomain.contains("vidzy") -> "Vidzy"
                 hosterDomain.contains("filemoon") -> "Filemoon"
                 hosterDomain.contains("lulustream") -> "Lulustream"
@@ -546,6 +571,13 @@ object CoflixWikiProvider {
             }
 
             // Miroirs supplémentaires du même hébergeur → numérotés pour rester distinguables.
+            // 2026-08-07 : le comptage se fait sur le NOM AFFICHÉ, plus sur le domaine. Sinon
+            //   deux emballages Kakaflix pointant sur des hébergeurs différents (VOE et
+            //   Doodstream) partagent le compteur du domaine `kakaflix.lol` et le second
+            //   s'affiche « Doodstream #2 » alors qu'il n'y a qu'un seul Doodstream.
+            val dupIndex = (perDomainCount[hosterName] ?: 0) + 1
+            perDomainCount[hosterName] = dupIndex
+            if (dupIndex > MAX_SERVERS_PER_DOMAIN) continue         // garde-fou anti-liste à rallonge
             val displayName = if (dupIndex > 1) "$hosterName #$dupIndex" else hosterName
             result.add(
                 Video.Server(

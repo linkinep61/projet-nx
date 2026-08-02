@@ -20,6 +20,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import com.streamflixreborn.streamflix.providers.FileSearchProvider
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -50,11 +51,41 @@ object RadioPickerDialog {
     private const val TXT_CHIP = "#DDE0E5"
     private const val AVATAR_BG = "#2A2E37"
 
-    private fun trackToStation(t: MusicFavoritesStore.Track): RadioCatalog.RadioStation =
-        RadioCatalog.RadioStation(id = "music::" + t.url, name = t.title, poster = null, streamUrl = t.url)
+    /**
+     * 2026-08-02 : un favori peut désormais être un ARTISTE ou un ALBUM, pas seulement un titre.
+     * Ces deux-là n'ont pas d'URL de flux : l'« url » stockée est en fait leur identifiant
+     * (`zfartist::…` / `zfalbum::…`). On le restitue tel quel comme id de ligne, sans streamUrl,
+     * pour qu'un clic redescende dans le niveau au lieu de tenter une lecture impossible.
+     */
+    /**
+     * Clé de favori d'une ligne musique.
+     *
+     * ⚠ 2026-08-02 (bug user : « si je mets l'artiste Imagine Dragons en favori, ça met carrément
+     * une dizaine d'artistes ») : un artiste et un album n'ont PAS de `streamUrl`. Le code se
+     * rabattait sur `""` → tous partageaient la même clé, donc mettre l'un en favori allumait
+     * l'étoile de tous les autres. On retombe désormais sur l'identifiant de la ligne, qui est
+     * unique (`zfartist::473`, `zfalbum::81491`…). Chaîne vide = ligne non favorisable.
+     */
+    private fun cleFavori(s: RadioCatalog.RadioStation): String =
+        s.streamUrl
+            ?: s.id.takeIf { it.startsWith("zfartist::") || it.startsWith("zfalbum::") }
+            ?: ""
 
+    private fun trackToStation(t: MusicFavoritesStore.Track): RadioCatalog.RadioStation {
+        val estEnsemble = t.url.startsWith("zfartist::") || t.url.startsWith("zfalbum::")
+        return RadioCatalog.RadioStation(
+            id = if (estEnsemble) t.url else "music::" + t.url,
+            name = t.title,
+            poster = null,
+            streamUrl = if (estEnsemble) null else t.url,
+        )
+    }
+
+    // 2026-08-02 : `poster` = pochette d'album quand la source en fournit une (ZeffyrMusic).
+    //   Pour un titre isolé (FileSearch / NewPipe) elle reste null → pastille d'initiale, comme
+    //   avant. La présence d'une pochette indique donc « album complet ».
     private fun audioToStation(a: FileSearchProvider.AudioResult): RadioCatalog.RadioStation =
-        RadioCatalog.RadioStation(id = "music::" + a.url, name = a.title, poster = null, streamUrl = a.url)
+        RadioCatalog.RadioStation(id = "music::" + a.url, name = a.title, poster = a.thumbnail, streamUrl = a.url)
 
     fun show(ctx: Context, lifecycleOwner: LifecycleOwner) {
         val d = ctx.resources.displayMetrics.density
@@ -84,9 +115,38 @@ object RadioPickerDialog {
                 pm.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TELEVISION) ||
                 !pm.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TOUCHSCREEN)
         }.getOrDefault(false)
+        /**
+         * Liseré de focus (télécommande) + RETOUR D'APPUI.
+         *
+         * 2026-08-02 (user : « une action comme quoi on a bien appuyé sur le bouton, peu importe
+         * l'endroit où on clique dans le système de la radio ») : sans retour, un appui sur une
+         * action lente (recherche réseau) donne l'impression que rien ne s'est passé. La touche
+         * s'enfonce donc légèrement et vibre brièvement, dès le doigt posé — pas à la fin de
+         * l'action. Le listener rend `false` : il observe sans consommer, les `setOnClickListener`
+         * existants continuent de fonctionner à l'identique.
+         */
         fun tvFocus(v: View) {
             if (isTv) v.foreground = androidx.core.content.ContextCompat.getDrawable(
                 ctx, com.streamflixreborn.streamflix.R.drawable.bg_focus_white_border)
+            v.isHapticFeedbackEnabled = true
+            v.setOnTouchListener { vue, ev ->
+                when (ev.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        vue.animate().scaleX(0.93f).scaleY(0.93f).alpha(0.72f)
+                            .setDuration(70).start()
+                        runCatching {
+                            vue.performHapticFeedback(
+                                android.view.HapticFeedbackConstants.VIRTUAL_KEY,
+                                android.view.HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING,
+                            )
+                        }
+                    }
+                    android.view.MotionEvent.ACTION_UP,
+                    android.view.MotionEvent.ACTION_CANCEL ->
+                        vue.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(110).start()
+                }
+                false // n'intercepte pas : le clic normal suit son cours
+            }
         }
 
         var all: List<RadioCatalog.RadioStation> = emptyList()
@@ -100,6 +160,30 @@ object RadioPickerDialog {
         var musicSearchJob: Job? = null
         var localMusicMode = false
         var localMusicDir: String? = null // dossier choisi (null = tout)
+
+        // 2026-08-02 (user : « fais-le en 3 profondeurs : on cherche → l'artiste avec sa jaquette →
+        //   ses albums → ses musiques », et « comme ça ça ne sature pas la limite de musiques
+        //   affichées ») : pile de navigation de la partie MUSIQUE. Chaque entrée mémorise
+        //   l'écran quitté (titre d'en-tête + liste) pour que « ⬅ Retour » revienne exactement
+        //   où on était, sans relancer de recherche réseau.
+        val pileMusique = ArrayDeque<Pair<String, List<RadioCatalog.RadioStation>>>()
+
+        /**
+         * 2026-08-04 (bug user : « je clique sur un album et je me retrouve sur la page où je
+         * venais de faire la recherche ; c'est pas à chaque fois mais ça peut arriver »).
+         *
+         * Numéro de la recherche en cours. Les sources répondent en parallèle et chacune
+         * réécrit la liste à son arrivée ; sans ce jeton, la réponse d'une recherche abandonnée
+         * — ou arrivée APRÈS que l'utilisateur soit descendu dans un artiste — venait écraser
+         * l'écran affiché. Toute réponse portant un numéro périmé est ignorée.
+         */
+        var generationRecherche = 0
+
+
+        // Titre du niveau courant (nom d'artiste, d'album, état de recherche…). Quand il est
+        //   renseigné il prime sur l'en-tête générique « Musique » — sinon `refresh()` l'écraserait
+        //   à chaque rafraîchissement et on perdrait le repère de navigation.
+        var titreNiveau: String? = null
 
         lifecycleOwner.lifecycleScope.launch {
 
@@ -308,6 +392,10 @@ object RadioPickerDialog {
             val playAllBtn = pill("▶ Tout lire").apply { visibility = View.GONE }
             val toggleBtn = pill("★ Favoris")
             val localBtn = pill("📁 Local").apply { visibility = View.GONE }
+            // 2026-08-02 (user : « tu aurais pu rester dans la simple recherche et en priorité
+            //   mettre les albums, ensuite les musiques, pour éviter d'avoir une icône
+            //   supplémentaire ») : PAS de bouton « Albums » dédié. Les albums apparaissent
+            //   directement EN TÊTE des résultats de recherche (voir runMusicSearch).
 
             val actionRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
             fun addCell(v: View) = actionRow.addView(
@@ -327,7 +415,11 @@ object RadioPickerDialog {
             fun computeVisible(): List<RadioCatalog.RadioStation> {
                 if (musicMode) {
                     if (showOnlyFavorites)
-                        return MusicFavoritesStore.all().map { trackToStation(it) }
+                        // `filter` : purge défensive de l'entrée à clé vide qu'a pu créer le bug
+                        //   de favori décrit sur `cleFavori` — sinon elle reste affichée à vie.
+                        return MusicFavoritesStore.all()
+                            .filter { it.url.isNotBlank() }
+                            .map { trackToStation(it) }
                     if (musicResults.isEmpty() && currentQuery.isBlank()) {
                         val hist = SearchHistory.getAll(ctx, "music")
                         if (hist.isEmpty()) return emptyList()
@@ -367,14 +459,42 @@ object RadioPickerDialog {
                     }
                     item ?: return row
                     val isHist = item.id.startsWith("hist")
-                    val isFav = if (musicMode) MusicFavoritesStore.isFavorite(item.streamUrl ?: "")
+                    val cle = cleFavori(item)
+                    val isFav = if (musicMode) cle.isNotEmpty() && MusicFavoritesStore.isFavorite(cle)
                         else RadioFavoritesStore.isFavorite(item.id)
                     val letter = item.name.trim().firstOrNull { it.isLetterOrDigit() }
                         ?.uppercaseChar()?.toString() ?: "•"
-                    val avatar = TextView(ctx).apply {
-                        text = letter; textSize = 14f; gravity = Gravity.CENTER
-                        setTextColor(Color.parseColor(if (isFav) "#FFFFFF" else TXT_CHIP))
-                        background = square(if (isFav) ACCENT else AVATAR_BG, 8)
+                    // 2026-08-02 (user : « affiche les jaquettes à la place du petit carré…
+                    //   comme ça quand il y aura une pochette d'album on saura que derrière
+                    //   c'est un album complet, pas une simple musique ») :
+                    //   si l'item porte une pochette (= piste issue d'un ALBUM ZeffyrMusic),
+                    //   on l'affiche à la place de la pastille d'initiale. Sinon → pastille
+                    //   habituelle, donc AUCUN changement pour les titres isolés
+                    //   (FileSearch / NewPipe / radios / musiques locales).
+                    val pochette = item.poster?.takeIf { it.isNotBlank() }
+                    val avatar: View = if (pochette != null) {
+                        android.widget.ImageView(ctx).apply {
+                            scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+                            clipToOutline = true
+                            background = square(AVATAR_BG, 8)
+                            outlineProvider = object : android.view.ViewOutlineProvider() {
+                                override fun getOutline(v: View, o: android.graphics.Outline) {
+                                    o.setRoundRect(0, 0, v.width, v.height, dp(8).toFloat())
+                                }
+                            }
+                            runCatching {
+                                com.bumptech.glide.Glide.with(ctx)
+                                    .load(pochette)
+                                    .centerCrop()
+                                    .into(this)
+                            }
+                        }
+                    } else {
+                        TextView(ctx).apply {
+                            text = letter; textSize = 14f; gravity = Gravity.CENTER
+                            setTextColor(Color.parseColor(if (isFav) "#FFFFFF" else TXT_CHIP))
+                            background = square(if (isFav) ACCENT else AVATAR_BG, 8)
+                        }
                     }
                     val name = TextView(ctx).apply {
                         text = item.name.removePrefix("🕘 ")
@@ -393,8 +513,10 @@ object RadioPickerDialog {
                             isFocusable = false; isClickable = true
                         }
                         star.setOnClickListener {
-                            if (musicMode) MusicFavoritesStore.toggle(item.streamUrl ?: "", item.name)
-                            else RadioFavoritesStore.toggle(item.id)
+                            if (musicMode) {
+                                if (cle.isEmpty()) return@setOnClickListener // ligne non favorisable
+                                MusicFavoritesStore.toggle(cle, item.name)
+                            } else RadioFavoritesStore.toggle(item.id)
                             if (musicMode && showOnlyFavorites) { radios = computeVisible(); clear(); addAll(radios) }
                             notifyDataSetChanged()
                         }
@@ -430,6 +552,7 @@ object RadioPickerDialog {
                 headerIcon.text = if (musicMode) "🎵" else "📻"
                 headerTitle.text = when {
                     musicMode && showOnlyFavorites -> "Ma playlist"
+                    musicMode && titreNiveau != null -> titreNiveau!!
                     musicMode -> "Musique"
                     else -> "Radios"
                 }
@@ -449,6 +572,43 @@ object RadioPickerDialog {
             nextBtn.setOnClickListener { try { mp.nextRadio() } catch (_: Throwable) {} }
             closeBtn.setOnClickListener { dialog.dismiss() }
 
+            // ── Navigation à 3 profondeurs (recherche → artiste → album) ───────────────
+            //   Une seule liste à l'écran à la fois : on n'empile pas des centaines de titres,
+            //   on descend d'un cran. La ligne « ⬅ Retour » (id `zfback::`) dépile.
+            fun albumEnLigne(alb: com.streamflixreborn.streamflix.providers.ZeffyrMusicProvider.Album):
+                RadioCatalog.RadioStation {
+                val detail = listOfNotNull(
+                    alb.artiste.takeIf { it.isNotBlank() },
+                    alb.nbPistes.takeIf { it > 0 }?.let { "$it titres" },
+                ).joinToString(" ")
+                return RadioCatalog.RadioStation(
+                    id = "zfalbum::${alb.id}",
+                    name = if (detail.isBlank()) "💿 ${alb.titre}" else "💿 ${alb.titre} — $detail",
+                    poster = alb.pochette,
+                    streamUrl = null,
+                )
+            }
+
+            fun ligneRetour() = RadioCatalog.RadioStation(
+                id = "zfback::", name = "⬅ Retour", poster = null, streamUrl = null)
+
+            fun ouvrirNiveau(titre: String, contenu: List<RadioCatalog.RadioStation>) {
+                pileMusique.addLast((titreNiveau ?: "Musique") to musicResults)
+                musicResults = listOf(ligneRetour()) + contenu
+                showOnlyFavorites = false
+                titreNiveau = titre
+                refresh()
+            }
+
+            /** Remonte d'un cran. `true` s'il y avait bien un niveau à quitter. */
+            fun remonterNiveau(): Boolean {
+                val precedent = pileMusique.removeLastOrNull() ?: return false
+                musicResults = precedent.second
+                titreNiveau = precedent.first
+                refresh()
+                return true
+            }
+
             fun runMusicSearch() {
                 val q = currentQuery.trim()
                 if (q.isBlank()) {
@@ -457,18 +617,131 @@ object RadioPickerDialog {
                 }
                 musicSearchJob?.cancel()
                 SearchHistory.add(ctx, q, "music")
-                headerTitle.text = "Recherche…"
-                musicSearchJob = lifecycleOwner.lifecycleScope.launch {
-                    val fs = try { FileSearchProvider.searchAudio(q) } catch (_: Throwable) { emptyList() }
-                    val yt = try {
-                        com.streamflixreborn.streamflix.providers.NewPipeAudio.search(q)
-                    } catch (_: Throwable) { emptyList() }
-                    val merged = (fs + yt).distinctBy { it.url }.take(300)
-                    musicResults = merged.map { audioToStation(it) }
-                    showOnlyFavorites = false
+                pileMusique.clear()
+                showOnlyFavorites = false
+
+                // 2026-08-02 (user : « affiche les résultats progressivement au fur et à mesure
+                //   qu'ils arrivent au lieu d'un bloc d'un coup… ça éviterait l'attente »).
+                //   Les sources sont interrogées EN PARALLÈLE et chacune s'affiche dès qu'elle
+                //   répond ; la liste est RE-TRIÉE à chaque arrivée dans l'ordre voulu :
+                //   ARTISTES puis ALBUMS puis TITRES. La plus rapide remplit donc l'écran tout
+                //   de suite, les autres viennent s'insérer à leur place sans tout réordonner.
+                var lignesArtistes: List<RadioCatalog.RadioStation> = emptyList()
+                var lignesAlbums: List<RadioCatalog.RadioStation> = emptyList()
+                val titresBruts = mutableListOf<FileSearchProvider.AudioResult>()
+                var enCours = true
+
+                // ⚠ 2026-08-04 — DEUX GARDE-FOUS AVANT TOUT RAFRAÎCHISSEMENT. Ne pas les retirer.
+                //   1. NUMÉRO DE RECHERCHE : une recherche plus récente invalide les réponses
+                //      de la précédente, qui sinon reviendraient s'afficher par-dessus.
+                //   2. PILE DE NAVIGATION : dès que l'utilisateur est descendu dans un artiste
+                //      ou un album, on ne touche plus à la liste. C'était la cause du retour
+                //      intempestif à l'écran de recherche — la source la plus lente répondait
+                //      après le clic et réécrivait `musicResults`.
+                val gen = ++generationRecherche
+                fun recomposer() {
+                    if (gen != generationRecherche || pileMusique.isNotEmpty()) return
+                    val titres = titresBruts.distinctBy { it.url }.take(300).map { audioToStation(it) }
+                    musicResults = lignesArtistes + lignesAlbums + titres
                     refresh()
-                    if (musicResults.isEmpty())
-                        Toast.makeText(ctx, "Aucun morceau trouvé pour « $q »", Toast.LENGTH_SHORT).show()
+                }
+
+                // Animation d'attente : tant qu'une source travaille, l'en-tête tourne. Sans ce
+                //   repère visuel, une recherche lente passe pour une application figée.
+                val roue = charArrayOf('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏')
+                var tick = 0
+                val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                val animation = object : Runnable {
+                    override fun run() {
+                        if (!enCours || gen != generationRecherche) return
+                        titreNiveau = "${roue[tick % roue.size]} Recherche « $q »…"
+                        headerTitle.text = titreNiveau
+                        tick++
+                        handler.postDelayed(this, 90L)
+                    }
+                }
+                handler.post(animation)
+
+                // 2026-08-04 (user : « pour optimiser la recherche, j'aimerais qu'en priorité
+                //   ce soit l'artiste avec ses albums qui soient trouvés, et ensuite seulement
+                //   on utilise FileSearch ou NewPipe ») — les quatre sources partaient jusqu'ici
+                //   toutes en même temps. Elles sont désormais ORDONNÉES EN TROIS ÉTAPES :
+                //     1. artiste + albums (les deux en parallèle entre eux) — c'est ce qu'on
+                //        veut voir en premier, et ce sont les requêtes les plus légères ;
+                //     2. les titres ZeffyrMusic, mieux qualifiés (album, durée) ;
+                //     3. le tout-venant FileSearch puis NewPipe, de loin les plus lents.
+                //   Bénéfice secondaire : on ne lance plus quatre requêtes réseau simultanées,
+                //   donc les deux premières répondent plus vite.
+                musicSearchJob = lifecycleOwner.lifecycleScope.launch {
+                    fun terminer() {
+                        if (gen != generationRecherche) return
+                        enCours = false
+                        handler.removeCallbacks(animation)
+                        if (pileMusique.isNotEmpty()) return   // l'utilisateur a navigué ailleurs
+                        titreNiveau = if (musicResults.isEmpty())
+                            "Aucun résultat pour « $q »" else "Résultats « $q »"
+                        headerTitle.text = titreNiveau
+                        if (musicResults.isEmpty())
+                            Toast.makeText(ctx, "Aucun morceau trouvé pour « $q »", Toast.LENGTH_SHORT).show()
+                    }
+
+                    // ── ÉTAPE 1 — ARTISTES + ALBUMS (prioritaires) ──────────────────────
+                    val artistesD = async {
+                        try { com.streamflixreborn.streamflix.providers.ZeffyrMusicProvider.searchArtists(q) }
+                        catch (_: Throwable) { emptyList() }
+                    }
+                    val albumsD = async {
+                        try { com.streamflixreborn.streamflix.providers.ZeffyrMusicProvider.searchAlbums(q) }
+                        catch (_: Throwable) { emptyList() }
+                    }
+                    lignesArtistes = artistesD.await().map { art ->
+                        RadioCatalog.RadioStation(
+                            id = "zfartist::${art.id}",
+                            name = "🎤 ${art.nom}",
+                            poster = art.image,
+                            streamUrl = null,
+                        )
+                    }
+                    lignesAlbums = albumsD.await().map { alb -> albumEnLigne(alb) }
+                    recomposer()
+
+                    // ── ÉTAPE 2 — titres ZeffyrMusic ────────────────────────────────────
+                    val zf = try {
+                        com.streamflixreborn.streamflix.providers.ZeffyrMusicProvider.searchAudio(q)
+                    } catch (_: Throwable) { emptyList() }
+                    titresBruts.addAll(0, zf)
+                    recomposer()
+
+                    // ── ÉTAPE 3 — FileSearch ────────────────────────────────────────────
+                    val fs = try { FileSearchProvider.searchAudio(q) } catch (_: Throwable) { emptyList() }
+                    titresBruts.addAll(fs)
+                    recomposer()
+
+                    // ── ÉTAPE 4 — NewPipe, EN DERNIER RECOURS SEULEMENT ─────────────────
+                    // 2026-08-04 (user : « la recherche NewPipe, je pense que le dernier site
+                    //   qu'on a trouvé est le meilleur, avec FileSearch »). Il a raison sur la
+                    //   RECHERCHE : ZeffyrMusic est éditorialisé (albums complets, ordonnés,
+                    //   durées) et FileSearch couvre le reste ; NewPipe est de loin le plus lent
+                    //   et n'ajoute quelque chose que sur ce que les deux autres n'ont pas.
+                    //   On ne l'interroge donc plus que si la récolte est maigre.
+                    //
+                    // ⚠⚠ NE PAS EN DÉDUIRE QU'ON PEUT RETIRER NewPipeAudio DU PROJET.
+                    //   Il a un SECOND rôle, lui indispensable : ZeffyrMusic n'héberge aucun
+                    //   son (son lecteur est une iframe YouTube, son API ne renvoie que des
+                    //   identifiants YouTube → liens `watch?v=`). C'est `resolveAudioUrl` qui
+                    //   les transforme en flux jouable à la lecture. Sans NewPipe, plus AUCUNE
+                    //   piste ZeffyrMusic ne se lit. Seule sa RECHERCHE est facultative.
+                    //   Décision user : on ne l'interroge QUE si les deux autres n'ont RIEN
+                    //   rendu. Un seuil intermédiaire avait été envisagé puis écarté — autant
+                    //   ne payer sa lenteur que lorsqu'il n'y a rien d'autre à montrer.
+                    if (titresBruts.isEmpty()) {
+                        val yt = try {
+                            com.streamflixreborn.streamflix.providers.NewPipeAudio.search(q)
+                        } catch (_: Throwable) { emptyList() }
+                        titresBruts.addAll(yt)
+                        recomposer()
+                    }
+                    terminer()
                 }
             }
 
@@ -569,6 +842,10 @@ object RadioPickerDialog {
                 currentQuery = ""
                 searchInput.setText("")
                 localMusicMode = false
+                // On repart d'un écran vierge : la pile de navigation d'un ancien artiste/album
+                //   n'aurait plus de sens dans l'autre mode.
+                pileMusique.clear()
+                titreNiveau = null
                 if (musicMode) {
                     searchInput.hint = "Artiste, titre…"
                     musicSearchBtn.text = "🔎 Rechercher"
@@ -750,6 +1027,17 @@ object RadioPickerDialog {
                 hd.show()
             }
             histBtn.setOnClickListener { showHistory() }
+
+            // 2026-08-02 (user : « ce qui manque c'est la possibilité de faire retour SANS
+            //   recommencer la recherche ») : le bouton RETOUR (téléphone ou télécommande)
+            //   remonte d'un niveau — album → artiste → résultats — en réutilisant les listes
+            //   déjà chargées, donc sans le moindre appel réseau. Il ne referme la fenêtre
+            //   qu'une fois revenu au premier écran.
+            dialog.setOnKeyListener { _, keyCode, event ->
+                if (keyCode == android.view.KeyEvent.KEYCODE_BACK &&
+                    event.action == android.view.KeyEvent.ACTION_UP
+                ) remonterNiveau() else false
+            }
             searchInput.setOnKeyListener { _, keyCode, event ->
                 if (event.action == android.view.KeyEvent.ACTION_DOWN && (
                         keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
@@ -766,8 +1054,19 @@ object RadioPickerDialog {
                 } else false
             }
 
-            listView.setOnItemClickListener { _, _, position, _ ->
+            listView.setOnItemClickListener { _, vueLigne, position, _ ->
                 val r = adapter.getItem(position) ?: return@setOnItemClickListener
+                // Retour d'appui sur la ligne elle-même (cf. `tvFocus`) : ouvrir un artiste ou un
+                //   album demande un aller-retour réseau, il faut voir que le clic a été pris.
+                runCatching {
+                    vueLigne?.performHapticFeedback(
+                        android.view.HapticFeedbackConstants.VIRTUAL_KEY,
+                        android.view.HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING,
+                    )
+                    vueLigne?.animate()?.alpha(0.55f)?.setDuration(70)?.withEndAction {
+                        vueLigne.animate().alpha(1f).setDuration(140).start()
+                    }?.start()
+                }
                 try {
                     if (musicMode) {
                         if (r.id == "histclear::") { SearchHistory.clear(ctx, "music"); refresh(); return@setOnItemClickListener }
@@ -777,10 +1076,65 @@ object RadioPickerDialog {
                             runMusicSearch()
                             return@setOnItemClickListener
                         }
+                        // ── Profondeur 0 → 1 : ARTISTE cliqué, on affiche sa discographie ──
+                        if (r.id.startsWith("zfartist::")) {
+                            val idArtiste = r.id.removePrefix("zfartist::")
+                            val nom = r.name.removePrefix("🎤 ")
+                            val ecranPrecedent = titreNiveau
+                            headerTitle.text = "Albums de $nom…"
+                            lifecycleOwner.lifecycleScope.launch {
+                                val albums = try {
+                                    com.streamflixreborn.streamflix.providers.ZeffyrMusicProvider
+                                        .getArtistAlbums(idArtiste)
+                                } catch (_: Throwable) { emptyList() }
+                                titreNiveau = ecranPrecedent // restauré AVANT l'empilement
+                                if (albums.isEmpty()) {
+                                    Toast.makeText(ctx, "Aucun album pour $nom", Toast.LENGTH_SHORT).show()
+                                    refresh()
+                                } else {
+                                    ouvrirNiveau("🎤 $nom", albums.map { albumEnLigne(it) })
+                                }
+                            }
+                            return@setOnItemClickListener
+                        }
+                        // ── Profondeur 1 → 2 : ALBUM cliqué, on affiche ses pistes DANS L'ORDRE.
+                        //   Pas de lecture immédiate : on voit d'abord le contenu, comme sur une
+                        //   fiche d'album ; « ▶ Tout lire » enchaîne ensuite l'album entier.
+                        if (r.id.startsWith("zfalbum::")) {
+                            val idAlbum = r.id.removePrefix("zfalbum::")
+                            val titreAlbum = r.name.removePrefix("💿 ").substringBefore(" — ")
+                            val ecranPrecedent = titreNiveau
+                            headerTitle.text = "Chargement de l'album…"
+                            lifecycleOwner.lifecycleScope.launch {
+                                val pistes = try {
+                                    com.streamflixreborn.streamflix.providers.ZeffyrMusicProvider
+                                        .getAlbumTracks(idAlbum)
+                                } catch (_: Throwable) { emptyList() }
+                                titreNiveau = ecranPrecedent
+                                if (pistes.isEmpty()) {
+                                    Toast.makeText(ctx, "Album indisponible", Toast.LENGTH_SHORT).show()
+                                    refresh()
+                                } else {
+                                    ouvrirNiveau("💿 $titreAlbum", pistes.map { audioToStation(it) })
+                                    Toast.makeText(
+                                        ctx,
+                                        "${pistes.size} titres — ▶ Tout lire pour l'album entier",
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                }
+                            }
+                            return@setOnItemClickListener
+                        }
+                        if (r.id == "zfback::") { remonterNiveau(); return@setOnItemClickListener }
+                        if (r.streamUrl == null) return@setOnItemClickListener // ligne non jouable
                         mp.initPlayer(ctx)
-                        val queue = radios.mapNotNull { st -> st.streamUrl?.let { it to st.name } }
+                        // ⚠ l'index de départ se calcule DANS LA FILE, pas dans la liste affichée :
+                        //   celle-ci contient désormais des lignes non jouables (⬅ Retour, artistes,
+                        //   albums) qui décaleraient la position et lanceraient le mauvais titre.
+                        val jouables = radios.filter { it.streamUrl != null }
+                        val queue = jouables.map { st -> st.streamUrl!! to st.name }
                         if (queue.isEmpty()) return@setOnItemClickListener
-                        val pos = radios.indexOfFirst { it.id == r.id }.coerceAtLeast(0)
+                        val pos = jouables.indexOfFirst { it.id == r.id }.coerceAtLeast(0)
                         mp.playMusicPlaylist(queue, pos, musicShuffle)
                     } else if (r.streamUrl != null) {
                         mp.initPlayer(ctx)
@@ -799,10 +1153,18 @@ object RadioPickerDialog {
             listView.setOnItemLongClickListener { _, _, position, _ ->
                 val r = adapter.getItem(position) ?: return@setOnItemLongClickListener false
                 if (r.id.startsWith("hist")) return@setOnItemLongClickListener false
+                if (r.id == "zfback::") return@setOnItemLongClickListener false
                 val added: Boolean
                 val label: String
                 if (musicMode) {
-                    added = MusicFavoritesStore.toggle(r.streamUrl ?: "", r.name)
+                    // 2026-08-02 (user : « n'importe quoi peut être mis en favori : si je mets
+                    //   l'artiste j'ai les albums dedans, si je mets l'album ou la musique, ainsi
+                    //   de suite ») : un artiste et un album n'ont pas d'URL de flux — on garde
+                    //   alors leur identifiant (`zfartist::…` / `zfalbum::…`) comme clé de favori.
+                    //   Rouvrir un tel favori redescend dans le niveau correspondant.
+                    val cle = cleFavori(r)
+                    if (cle.isEmpty()) return@setOnItemLongClickListener false
+                    added = MusicFavoritesStore.toggle(cle, r.name)
                     label = if (added) "ajouté à ma playlist" else "retiré de ma playlist"
                     if (showOnlyFavorites) refresh()
                 } else {

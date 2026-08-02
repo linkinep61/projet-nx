@@ -37,14 +37,74 @@ open class FilemoonExtractor : Extractor() {
         // 2026-07-16 : domaines de fallback. Si le TLS handshake échoue sur un domaine
         // (Cloudflare bloque certains domaines par IP/JA3, ex. bysebuho.com depuis Tahiti),
         // on retente le même video ID sur un autre domaine Byse — les IDs sont cross-domain.
-        private val FALLBACK_DOMAINS = listOf(
-            "https://filemoon.sx",
-            "https://filemoon.org",
-            "https://bysezoxexe.com",
-            "https://bysejikuar.com"
+        /** Temps maximal accordé à l'ensemble des domaines de repli. Au-delà, on rend la main :
+     *  le lecteur bascule sur un autre serveur, ce qui vaut mieux qu'une attente stérile. */
+    private const val BUDGET_REPLIS_MS = 12_000L
+
+    /**
+     * ── 2026-08-06 : LISTE RAMENÉE À UN SEUL DOMAINE ─────────────────────────────────────
+     *   User : « je t'ai dit de choisir un qui fonctionnait ». Vérification faite, il avait
+     *   raison : les quatre domaines répondaient EXACTEMENT la même chose (HTTP 428), parce
+     *   qu'ils partagent la même infrastructure. Les enchaîner ne pouvait rien donner — ça ne
+     *   faisait qu'allonger l'échec de plusieurs secondes.
+     *   On ne garde donc que `filemoon.sx`, le seul dont on ait la preuve DIRECTE qu'il
+     *   répond correctement : ouvert dans le navigateur, son `/api/videos/<id>/embed/details`
+     *   renvoie un HTTP 200 complet (« House Of The Dragon S02E01 … »).
+     *   `filemoon.org` est retiré en prime : il renvoyait du JSON malformé, donc une page qui
+     *   n'est pas l'API attendue.
+     */
+    private val FALLBACK_DOMAINS = listOf(
+            "https://filemoon.sx"
         )
 
         private val VIDEO_ID_REGEX = Regex("""/(e|d)/([a-zA-Z0-9]+)""")
+
+    /** Domaines dont la WebView ne peut pas résoudre le nom (blocage DNS du fournisseur) et
+     *  qu'on doit donc servir nous-mêmes via OkHttp + DNS-over-HTTPS. */
+    private val DOMAINES_A_SERVIR = listOf(
+        "filemoon", "bysebuho", "bysezoxexe", "bysejikuar", "q8y5z", "moflix-stream"
+    )
+
+    private fun estDomaineFilemoon(url: String): Boolean {
+        val hote = try { java.net.URL(url).host.lowercase() } catch (_: Exception) { return false }
+        return DOMAINES_A_SERVIR.any { hote.contains(it) }
+    }
+
+    /**
+     * Rejoue la requête avec `Extractor.sharedClient` (qui résout en DoH) et rend la réponse
+     * à la WebView. Celle-ci n'a alors plus aucun nom à résoudre elle-même.
+     * S'exécute sur le fil réseau de la WebView, jamais sur le fil principal.
+     */
+    private fun servirViaDoh(
+        url: String,
+        request: WebResourceRequest?
+    ): WebResourceResponse? = try {
+        val b = okhttp3.Request.Builder().url(url)
+        request?.requestHeaders?.forEach { (k, v) ->
+            // `Accept-Encoding` retiré : OkHttp gère la compression, et la réponse doit être
+            //   rendue en clair à la WebView.
+            if (!k.equals("Accept-Encoding", true)) b.header(k, v)
+        }
+        android.webkit.CookieManager.getInstance().getCookie(url)?.takeIf { it.isNotBlank() }
+            ?.let { b.header("Cookie", it) }
+        val rep = Extractor.sharedClient.newCall(b.build()).execute()
+        rep.headers("Set-Cookie").forEach {
+            android.webkit.CookieManager.getInstance().setCookie(url, it)
+        }
+        val typeComplet = rep.header("Content-Type") ?: "text/html"
+        val type = typeComplet.substringBefore(';').trim()
+        val charset = Regex("charset=([^;\\s]+)", RegexOption.IGNORE_CASE)
+            .find(typeComplet)?.groupValues?.get(1) ?: "utf-8"
+        val entetes = rep.headers.toMultimap()
+            .filterKeys { it.lowercase() !in setOf("content-encoding", "content-length", "transfer-encoding", "set-cookie") }
+            .mapValues { it.value.last() }
+            .toMutableMap()
+        entetes["Access-Control-Allow-Origin"] = "*"
+        WebResourceResponse(type, charset, rep.code, rep.message.ifBlank { "OK" }, entetes, rep.body?.byteStream())
+    } catch (e: Exception) {
+        Log.w(TAG, "[Filemoon-WV] relais DoH échoué pour ${url.take(80)} : ${e.message}")
+        null
+    }
 
         /** Vérifie si l'erreur est un problème réseau/SSL (pas un 404 côté serveur). */
         private fun isNetworkError(e: Exception): Boolean {
@@ -140,12 +200,29 @@ open class FilemoonExtractor : Extractor() {
 
             Log.w(TAG, "[Filemoon] Domain $originalDomain failed (${e.javaClass.simpleName}: $msg) — trying fallback domains")
 
+            // ── 2026-08-06 : BUDGET DE TEMPS GLOBAL ────────────────────────────────────────
+            //   User : « pourquoi il n'a pas réussi la lecture et met autant de temps ».
+            //   Mesuré : l'API répond **HTTP 428** (défi exigé), on bascule sur la WebView de
+            //   secours qui expire au bout de **30 s**… puis on recommence À L'IDENTIQUE sur
+            //   CHAQUE domaine de repli. Avec cette liste, l'échec se comptait en MINUTES,
+            //   pendant lesquelles le lecteur restait bloqué sur un serveur condamné.
+            //   Deux garde-fous :
+            //     · un budget total : passé ce délai, on abandonne et le lecteur bascule sur
+            //       un autre serveur — bien plus utile que d'attendre un miracle ;
+            //     · sur les domaines de repli, on ne relance PAS la WebView de 30 s. Un 428
+            //       est un refus de l'infrastructure, pas du domaine : le rejouer domaine par
+            //       domaine ne change rien, seul l'appel d'API rapide vaut d'être retenté.
+            val debutReplis = System.currentTimeMillis()
             for (fallback in FALLBACK_DOMAINS) {
                 if (fallback.equals(originalDomain, ignoreCase = true)) continue
+                if (System.currentTimeMillis() - debutReplis > BUDGET_REPLIS_MS) {
+                    Log.w(TAG, "[Filemoon] budget de replis épuisé — on rend la main au lecteur")
+                    break
+                }
                 val fallbackLink = "$fallback/$linkType/$videoId"
                 Log.d(TAG, "[Filemoon] Trying fallback domain: $fallbackLink")
                 try {
-                    return extractOnDomain(fallbackLink)
+                    return extractOnDomain(fallbackLink, autoriserWebView = false)
                 } catch (fe: Exception) {
                     val fMsg = fe.message.orEmpty()
                     if (fMsg.contains("link rot", ignoreCase = true) ||
@@ -163,7 +240,12 @@ open class FilemoonExtractor : Extractor() {
     }
 
     /** Extraction sur un seul domaine : API d'abord, puis WebView fallback. */
-    private suspend fun extractOnDomain(link: String): Video {
+    /**
+     * @param autoriserWebView la WebView de secours coûte 30 s en cas d'échec. On ne la joue
+     *   que sur le domaine D'ORIGINE : sur les domaines de repli, elle rejouerait le même
+     *   refus d'infrastructure (HTTP 428) pour le même prix. Cf. le budget dans `extract`.
+     */
+    private suspend fun extractOnDomain(link: String, autoriserWebView: Boolean = true): Video {
         return try {
             extractViaApi(link)
         } catch (e: Exception) {
@@ -174,6 +256,7 @@ open class FilemoonExtractor : Extractor() {
                 Log.w(TAG, "[Filemoon] Link rot detected — failing fast: $msg")
                 throw e
             }
+            if (!autoriserWebView) throw e
             Log.w(TAG, "[Filemoon] API failed (${e.javaClass.simpleName}: $msg) — trying WebView fallback")
             try {
                 extractViaWebView(link)
@@ -200,9 +283,23 @@ open class FilemoonExtractor : Extractor() {
         // per-video allowlist of embedding domains (e.g. weneverbeenfree.com — a
         // "Byse Frontend" SPA used by VoirAnime/VoirDrama). Without these headers,
         // the details endpoint returns 403 "embedding from this domain is not allowed".
-        val parentUrl = byseParentUrl(currentDomain) ?: try {
-            UserPreferences.currentProvider?.baseUrl
-        } catch (_: Throwable) { null }
+        // ── 2026-08-06 : NE PLUS INVENTER UN PARENT — LE 428 VENAIT DE LÀ ─────────────────
+        //   Preuve obtenue en ouvrant le MÊME lien dans le navigateur, une fois le DNS du PC
+        //   dé-filtré :
+        //     · navigateur → `/api/videos/<id>/embed/details` répond **HTTP 200** avec le JSON
+        //       complet (« House Of The Dragon S02E01 … ») ;
+        //     · l'app       → **HTTP 428** sur TOUS les domaines.
+        //   Le lien, le domaine et le réseau sont donc hors de cause. Seule différence : le
+        //   RÉFÉRENT. Le navigateur interroge l'API depuis la page elle-même, en MÊME ORIGINE.
+        //   Nous envoyions une origine ÉTRANGÈRE, prise faute de mieux sur
+        //   `currentProvider.baseUrl` — soit `api.movix.fun`, une API qui n'embarque rien.
+        //   Le pare-feu refusait, à juste titre.
+        //   ⚠ On ne garde donc QUE les parents explicitement connus (table `byseParentUrl`,
+        //     établie pour VoirAnime dont le WAF les EXIGE). Sinon on reste en même origine,
+        //     comme le navigateur — c'est ce que fait déjà la branche `else` plus bas.
+        //   ⚠⚠ NE PAS restaurer le repli `currentProvider.baseUrl` : l'adresse du provider
+        //     courant n'a aucune raison d'être une page qui intègre ce lecteur.
+        val parentUrl = byseParentUrl(currentDomain)
         val parentOrigin = parentUrl?.trimEnd('/')
 
         // X-Embed-* trio — required by the Byse SPA in embed mode (videoPagesBundle Lt/Nt).
@@ -219,7 +316,7 @@ open class FilemoonExtractor : Extractor() {
             "X-Embed-Parent" to embedParent,
             "X-Embed-Origin" to embedOrigin,
             "X-Embed-Referer" to embedReferer
-        )
+        ).also { it.putAll(entetesNavigateur()) }
         if (parentUrl != null) {
             detailsHeaders["Referer"] = parentUrl
             detailsHeaders["Origin"] = parentOrigin!!
@@ -237,6 +334,10 @@ open class FilemoonExtractor : Extractor() {
             if (e.code() == 404 && body?.contains("video not found", ignoreCase = true) == true) {
                 throw Exception("Filemoon: video expired (link rot) — $videoId")
             }
+            // 2026-08-06 : le 428 sur `details` a été résolu (en-têtes de navigateur manquants,
+            //   cf. `entetesNavigateur`). La sonde de diagnostic est retirée ; on garde une
+            //   ligne unique, utile si le refus revenait un jour.
+            if (e.code() == 428) Log.w(TAG, "[Filemoon] details refusé (428) : ${body?.take(120)}")
             throw e
         }
         val embedFrameUrl = details.embed_frame_url
@@ -277,18 +378,45 @@ open class FilemoonExtractor : Extractor() {
             headers["X-Embed-Referer"] = link
         }
 
-        // POST /api/videos/{id}/embed/playback with a fingerprint body. The server only
-        // validates that `fingerprint` is a JSON object with token/viewer_id/device_id/
-        // confidence keys; the actual values are not checked, so we send placeholders.
-        // Returns AES-256-GCM encrypted JSON with iv/payload/key_parts → decryptPlayback().
+        // POST /api/videos/{id}/embed/playback avec une empreinte d'appareil.
+        // ── 2026-08-06 : LES VALEURS BIDON NE PASSENT PLUS ───────────────────────────────
+        //   Le commentaire d'avril disait « le serveur ne vérifie pas les valeurs, des
+        //   remplisseurs suffisent ». Ce n'est PLUS vrai : il répond désormais
+        //   `428 {"error":"captcha_required"}`. Vérifié dans le navigateur du user, qui
+        //   reçoit EXACTEMENT le même refus si on lui fait envoyer une empreinte inventée —
+        //   le lien, le domaine et le réseau étaient donc hors de cause.
+        //   `ByseAcces` négocie une vraie identité (signature ECDSA P-256) puis franchit la
+        //   « vérification joueur », qui n'est pas une image mais une preuve de travail.
+        //   Le jeton obtenu voyage dans l'en-tête `X-Captcha-Token`.
+        //   Si la négociation échoue, on garde l'ancien corps : le repli WebView prendra le
+        //   relais comme avant, on ne perd rien.
+        val acces = ByseAcces.obtenir(playbackDomain, videoId, headers.filterKeys { it.startsWith("X-Embed-") })
+        val corpsEmpreinte = if (acces != null) {
+            headers["X-Captcha-Token"] = acces.jetonCaptcha
+            FingerprintBody(
+                Fingerprint(
+                    token = acces.token,
+                    viewer_id = acces.viewerId,
+                    device_id = acces.deviceId,
+                    confidence = acces.confiance,
+                )
+            )
+        } else {
+            FingerprintBody()
+        }
+
         val playbackUrl = "$playbackDomain/api/videos/$videoId/embed/playback"
         val playbackResponse = try {
-            service.getPlayback(playbackUrl, headers, FingerprintBody())
+            service.getPlayback(playbackUrl, headers, corpsEmpreinte)
         } catch (e: retrofit2.HttpException) {
             val body = try { e.response()?.errorBody()?.string() } catch (_: Throwable) { null }
             if (e.code() == 404 && body?.contains("video not found", ignoreCase = true) == true) {
                 throw Exception("Filemoon: video expired (link rot) — $videoId")
             }
+            // 2026-08-06 : un 428 ici signifie que `ByseAcces` n'a pas encore obtenu son jeton
+            //   (la preuve de travail tourne en arrière-plan). Le passage suivant réussira.
+            //   Une ligne suffit — la sonde de diagnostic complète a été retirée.
+            if (e.code() == 428) Log.w(TAG, "[Filemoon] playback en attente d'accès : ${body?.take(120)}")
             throw e
         }
         val playbackData = playbackResponse.playback
@@ -351,9 +479,23 @@ open class FilemoonExtractor : Extractor() {
     private suspend fun extractViaWebView(link: String): Video = withContext(Dispatchers.Main) {
         val currentDomain = Regex("""(https?://[^/]+)""").find(link)?.groupValues?.get(1)
             ?: throw Exception("Could not extract base URL")
-        val parentUrl = byseParentUrl(currentDomain) ?: try {
-            UserPreferences.currentProvider?.baseUrl
-        } catch (_: Throwable) { null }
+        // ── 2026-08-06 : NE PLUS INVENTER UN PARENT — LE 428 VENAIT DE LÀ ─────────────────
+        //   Preuve obtenue en ouvrant le MÊME lien dans le navigateur, une fois le DNS du PC
+        //   dé-filtré :
+        //     · navigateur → `/api/videos/<id>/embed/details` répond **HTTP 200** avec le JSON
+        //       complet (« House Of The Dragon S02E01 … ») ;
+        //     · l'app       → **HTTP 428** sur TOUS les domaines.
+        //   Le lien, le domaine et le réseau sont donc hors de cause. Seule différence : le
+        //   RÉFÉRENT. Le navigateur interroge l'API depuis la page elle-même, en MÊME ORIGINE.
+        //   Nous envoyions une origine ÉTRANGÈRE, prise faute de mieux sur
+        //   `currentProvider.baseUrl` — soit `api.movix.fun`, une API qui n'embarque rien.
+        //   Le pare-feu refusait, à juste titre.
+        //   ⚠ On ne garde donc QUE les parents explicitement connus (table `byseParentUrl`,
+        //     établie pour VoirAnime dont le WAF les EXIGE). Sinon on reste en même origine,
+        //     comme le navigateur — c'est ce que fait déjà la branche `else` plus bas.
+        //   ⚠⚠ NE PAS restaurer le repli `currentProvider.baseUrl` : l'adresse du provider
+        //     courant n'a aucune raison d'être une page qui intègre ce lecteur.
+        val parentUrl = byseParentUrl(currentDomain)
         val parentOrigin = parentUrl?.trimEnd('/')
 
         val result = withTimeoutOrNull(30_000L) {
@@ -468,7 +610,32 @@ open class FilemoonExtractor : Extractor() {
                     val act = StreamFlixApp.currentActivity
                     val root = act?.findViewById<android.view.ViewGroup>(android.R.id.content)
                     if (root != null) {
-                        webView.alpha = 0.02f
+                        // ⚠⚠⚠ 2026-08-06 — INVISIBLE PAR LA TAILLE, JAMAIS PAR L'OPACITÉ.
+                        //   Cette vue était à `alpha = 0.004f` (passé de 0.02 à 0.004 le 2 août
+                        //   pour masquer un voile gris). Or SOUS CE SEUIL, CHROMIUM SUSPEND LE
+                        //   RENDU : la page ne se dessine plus, le lecteur ne s'initialise
+                        //   jamais, et AUCUN clic — injecté ou réel — ne peut aboutir. D'où les
+                        //   30 s de silence puis l'abandon, alors que le défi ne demande qu'un
+                        //   simple clic (constat user : « il y a juste à cliquer »).
+                        //   Le diagnostic est le même que celui établi ce matin sur
+                        //   `OnlyFlixResolver` (EmbedSeek/SeekStreaming), où il avait cassé deux
+                        //   extracteurs pendant deux jours.
+                        //   Solution éprouvée : on sépare le GABARIT du DESSIN. Les
+                        //   LayoutParams restent MATCH_PARENT — la page garde un vrai viewport
+                        //   et s'initialise — et seule la transformation de dessin est réduite
+                        //   au centième, avec une opacité PLEINE. Chromium considère la vue
+                        //   comme visible et continue de rendre ; à l'écran il ne reste qu'une
+                        //   dizaine de pixels dans un coin, derrière l'interface.
+                        //   ⚠ Ne PAS remplacer par des LayoutParams minuscules : le viewport
+                        //     deviendrait réellement minuscule et le lecteur refuserait de
+                        //     s'initialiser. C'est l'échelle de DESSIN qu'il faut réduire.
+                        webView.alpha = 1f
+                        webView.pivotX = 0f
+                        webView.pivotY = 0f
+                        webView.scaleX = 0.01f
+                        webView.scaleY = 0.01f
+                        webView.isFocusable = false
+                        webView.isFocusableInTouchMode = false
                         try { webView.settings.offscreenPreRaster = true } catch (_: Throwable) {}
                         root.addView(webView, 0, android.view.ViewGroup.LayoutParams(
                             android.view.ViewGroup.LayoutParams.MATCH_PARENT,
@@ -498,6 +665,35 @@ open class FilemoonExtractor : Extractor() {
                     ): WebResourceResponse? {
                         val url = request?.url?.toString() ?: return null
 
+                        // 2026-08-06 : la journalisation intégrale des requêtes (posée pour
+                        //   diagnostiquer le silence de 30 s) a été RETIRÉE — elle avait donné
+                        //   sa réponse : `erreur -2` = ERROR_HOST_LOOKUP, d'où le relais DoH
+                        //   décrit juste en dessous. Elle noyait le journal (des centaines de
+                        //   lignes par lecture, jusqu'aux images de pages publicitaires).
+                        //   Ne la remettre que le temps d'un diagnostic, jamais durablement.
+
+                        // ══ 2026-08-06 : LA WEBVIEW N'ARRIVAIT PAS À RÉSOUDRE LE DOMAINE ══
+                        //   Diagnostic obtenu par la trace complète ci-dessus :
+                        //     [Filemoon-WV] REQ    https://bysebuho.com/e/…
+                        //     [Filemoon-WV] erreur -2  sur https://bysebuho.com/e/…
+                        //   Le code -2 est `ERROR_HOST_LOOKUP` : la page ne se charge JAMAIS.
+                        //   D'où les 30 s de silence, l'absence de toute requête derrière, et
+                        //   l'échec du défi — qui n'a jamais eu l'occasion de s'afficher.
+                        //   Cause : le fournisseur d'accès bloque Filemoon au niveau DNS. Nos
+                        //   appels d'API passent, eux, car ils utilisent `Extractor.sharedClient`
+                        //   qui résout en DNS-over-HTTPS ; mais une WebView utilise TOUJOURS le
+                        //   résolveur SYSTÈME, qu'on ne peut pas changer. Même mur que celui
+                        //   rencontré le matin même sur `edge1-waw-sprintcdn.r66nv9ed.com`.
+                        //   Correctif : on sert nous-mêmes les requêtes vers les domaines
+                        //   concernés, via OkHttp + DoH, et on rend la réponse à la WebView.
+                        //   Elle n'a alors plus rien à résoudre. L'extraction reste NORMALE :
+                        //   aucune page n'est montrée à l'utilisateur.
+                        //   ⚠ On ne détourne QUE le document et les scripts. Les flux (.m3u8,
+                        //     segments) sont captés plus bas et n'ont pas à transiter par ici.
+                        if (!resolved && !url.contains(".m3u8") && estDomaineFilemoon(url)) {
+                            servirViaDoh(url, request)?.let { return it }
+                        }
+
                         // 1. Intercept m3u8 requests → we have the video
                         if (url.contains(".m3u8") && !resolved) {
                             Log.i(TAG, "[Filemoon-WV] m3u8 captured: $url")
@@ -520,6 +716,29 @@ open class FilemoonExtractor : Extractor() {
                         }
 
                         return null
+                    }
+
+                    // Traces temporaires du même diagnostic : sait-on seulement si la page
+                    //   aboutit, si elle est redirigée, ou si elle échoue en silence ?
+                    override fun onPageFinished(view: WebView?, u: String?) {
+                        Log.d(TAG, "[Filemoon-WV] page chargée : ${u?.take(120)}")
+                    }
+
+                    override fun onReceivedError(
+                        view: WebView?, request: WebResourceRequest?,
+                        error: android.webkit.WebResourceError?
+                    ) {
+                        Log.w(TAG, "[Filemoon-WV] erreur ${error?.errorCode} sur ${request?.url?.toString()?.take(110)}")
+                    }
+
+                    override fun onRenderProcessGone(
+                        view: WebView?, detail: android.webkit.RenderProcessGoneDetail?
+                    ): Boolean {
+                        // ⚠ DOIT renvoyer true, sinon Android tue toute l'application quand le
+                        //   moteur de rendu disparaît (mémoire, trop de WebView simultanées).
+                        Log.w(TAG, "[Filemoon-WV] moteur de rendu supprimé (crash=${detail?.didCrash()})")
+                        cleanupAndResume(null)
+                        return true
                     }
                 }
 
@@ -584,21 +803,82 @@ open class FilemoonExtractor : Extractor() {
      *   est REFUSÉ par le WAF Filemoon → l'extraction échoue (serveur mort dans l'app alors que le
      *   flux marche dans le navigateur). On force donc le référer sur le vrai site embarquant.
      */
+    /**
+     * En-têtes que Chrome joint AUTOMATIQUEMENT à toute requête et qu'OkHttp, lui, n'envoie
+     * jamais. Ils manquaient : c'est la seule différence restante entre l'appel du navigateur
+     * (HTTP 200) et le nôtre (HTTP 428).
+     *
+     * ── 2026-08-06, établi par comparaison directe dans le Chrome du user ────────────────
+     *   J'ai rejoué `/api/videos/<id>/embed/details` depuis la page elle-même :
+     *     · sans aucun en-tête ..................... 200
+     *     · avec Accept, X-Embed-Parent/Origin/Referer  200
+     *     · sans cookies ........................... 200
+     *   Donc ni le domaine (bysebuho ET filemoon.sx répondent 200), ni nos en-têtes maison,
+     *   ni les cookies ne sont en cause — contrairement à VOE où c'était bien un miroir mort.
+     *   Reste ce que seul un vrai navigateur ajoute : les indices client `sec-ch-ua` et les
+     *   `sec-fetch-*`. Notre User-Agent annonce Chrome 131 sans jamais les accompagner —
+     *   incohérence classique que les pare-feu sanctionnent par un 428 « condition requise ».
+     *   Indice concordant dans le journal : la WebView de l'app (vrai navigateur) chargeait
+     *   la page sans souci ; seul l'appel OkHttp était refusé.
+     *   ⚠ Garder ces valeurs COHÉRENTES avec `Extractor.DEFAULT_USER_AGENT` : si un jour on
+     *     change la version de Chrome annoncée, il faut changer `sec-ch-ua` en même temps.
+     */
+    private fun entetesNavigateur(): Map<String, String> = mapOf(
+        "Accept-Language" to "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+        "sec-ch-ua" to "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
+        "sec-ch-ua-mobile" to "?0",
+        "sec-ch-ua-platform" to "\"Windows\"",
+        "Sec-Fetch-Dest" to "empty",
+        "Sec-Fetch-Mode" to "cors",
+        "Sec-Fetch-Site" to "same-origin",
+    )
+
     private fun byseParentUrl(currentDomain: String): String? = when {
         currentDomain.contains("gn1r5n", ignoreCase = true) ||
             currentDomain.contains("weneverbeenfree", ignoreCase = true) -> "https://voir-anime.to"
+        // ── 2026-08-06 : LE RÉFÉRENT ENVOYÉ ÉTAIT UNE **API**, PAS UN SITE ────────────────
+        //   User : « pourquoi il n'a pas réussi la lecture et met autant de temps ».
+        //   Le journal montrait `referer=https://api.movix.fun/` et une réponse **HTTP 428**
+        //   sur TOUS les domaines — bysebuho comme filemoon.sx. Ce n'est ni un domaine mort
+        //   (vérifié : les six domaines de la liste répondent en DNS) ni une panne réseau :
+        //   c'est le pare-feu de Filemoon qui refuse le référent.
+        //   Or `api.movix.fun` n'est pas une page qui intègre le lecteur, c'est l'API du
+        //   provider — le repli `currentProvider.baseUrl` l'avait prise faute de mieux, ce
+        //   domaine ne figurant pas dans cette table. On lui donne donc le vrai site.
+        //   ⚠ C'est exactement le cas décrit dans le commentaire ci-dessus : « le référer par
+        //     défaut est REFUSÉ par le WAF Filemoon → l'extraction échoue alors que le flux
+        //     marche dans le navigateur ». La table était simplement incomplète.
+        //   ⚠ Essai ANNULÉ le même jour : j'avais mappé bysebuho/bysezoxexe/bysejikuar sur
+        //     `https://movix.show`. Ça ne corrigeait rien — le 428 persistait — parce que le
+        //     problème n'est pas QUEL référent étranger on envoie, mais le fait d'en envoyer
+        //     un. Ces domaines doivent rester en MÊME ORIGINE, comme le navigateur.
         else -> null
     }
 
     private fun decryptPlayback(data: PlaybackData): String {
         val iv = Base64.decode(data.iv, Base64.URL_SAFE)
         val payload = Base64.decode(data.payload, Base64.URL_SAFE)
-        val p1 = Base64.decode(data.key_parts[0], Base64.URL_SAFE)
-        val p2 = Base64.decode(data.key_parts[1], Base64.URL_SAFE)
-        
-        val key = ByteArray(p1.size + p2.size)
-        System.arraycopy(p1, 0, key, 0, p1.size)
-        System.arraycopy(p2, 0, key, p1.size, p2.size)
+
+        // ── 2026-08-06 : LES DEUX PREMIERS MORCEAUX NE SONT PLUS LES BONS ────────────────
+        //   Erreur observée : « Unsupported key size: 48 bytes ». Le serveur envoie désormais
+        //   PLUSIEURS morceaux de clé accompagnés d'un champ `version` qui désigne lesquels
+        //   retenir — les positions `version` et `31 − version` (numérotées à partir de 1).
+        //   Les autres sont des leurres. Lu dans le bundle du site (fonctions `Ea`/`Qa`/`ws`),
+        //   pas deviné. Si `version` manque ou sort de la plage 1-20, le site retombe sur
+        //   « tous les morceaux » : on fait pareil, ce qui reproduit l'ancien comportement
+        //   quand il n'y en avait que deux.
+        val morceaux = data.key_parts
+        val v = data.version?.trim()?.toIntOrNull()
+        val retenus = if (v != null && v in 1..20 && v <= morceaux.size && (31 - v) in 1..morceaux.size) {
+            listOf(morceaux[v - 1], morceaux[31 - v - 1])
+        } else {
+            morceaux
+        }
+
+        val decodes = retenus.map { Base64.decode(it, Base64.URL_SAFE) }
+        val key = ByteArray(decodes.sumOf { it.size })
+        var pos = 0
+        decodes.forEach { System.arraycopy(it, 0, key, pos, it.size); pos += it.size }
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         val spec = GCMParameterSpec(128, iv)
@@ -634,7 +914,9 @@ open class FilemoonExtractor : Extractor() {
     data class PlaybackData(
         val iv: String,
         val payload: String,
-        val key_parts: List<String>
+        val key_parts: List<String>,
+        /** Indique QUELS morceaux de clé retenir — cf. `decryptPlayback`. */
+        val version: String? = null,
     )
 
     /**

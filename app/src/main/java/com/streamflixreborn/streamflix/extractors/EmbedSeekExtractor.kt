@@ -55,6 +55,21 @@ class EmbedSeekExtractor : Extractor() {
         Regex("""[a-z0-9-]+\.embedseek\.com"""),
     )
 
+    // 2026-08-04 (user : « le serveur EmbedSeek, vous n'avez pas fait en sorte qu'il ait une
+    //   extraction normale ? ») — SI, elle existe (résolution headless → m3u8 natif), mais elle
+    //   n'était plus JAMAIS rejouée : ce résultat était mis en cache.
+    //   Diagnostic dans les logs : aucune trace de l'extracteur, et l'overlay WebView apparaît
+    //   17 ms après le début de l'extraction — impossible pour une résolution WebView réelle.
+    //   Un ancien échec avait été mémorisé sous sa forme de REPLI (`needsWebViewClick`), puis
+    //   resservi pendant toute la durée du cache : l'overlay revenait donc systématiquement,
+    //   même une fois le vrai flux redevenu extractible.
+    //   Le résultat est de toute façon ÉPHÉMÈRE — le master.m3u8 est déchiffré en JS et lié à
+    //   la session — donc le cache n'apportait rien ici.
+    //   ⚠ Exactement le même piège que Vidzy, LuluVdo et DoodStream, corrigés pareil. Son
+    //   jumeau `SeekPlayerExtractor` (même player OnlyFlix) avait déjà ce garde-fou ; seul
+    //   celui-ci l'avait perdu.
+    override val cacheTtlMs: Long = 0L
+
     private val USER_AGENT = Extractor.DEFAULT_USER_AGENT
 
     override suspend fun extract(link: String): Video = withContext(Dispatchers.IO) {
@@ -76,6 +91,10 @@ class EmbedSeekExtractor : Extractor() {
                     "Referer" to origin,
                     "Origin" to origin.trimEnd('/'),
                 ),
+                // 2026-08-02 (user : « SeekStreaming joue du VOSTFR alors qu'il est annoncé VF ») :
+                //   le lecteur affiche le nom de fichier réel dans son <title>. On le remonte pour
+                //   que le player corrige l'étiquette de langue, Movix la posant sans vérifier.
+                fileName = OnlyFlixResolver.dernierTitre,
             )
         }
         Log.d(TAG, "headless resolve failed → WebView overlay fallback")

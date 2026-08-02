@@ -504,6 +504,21 @@ object FrembedProvider : Provider, ProviderPortalUrl, ProviderConfigUrl, Progres
             return try { CloudstreamProvider.getVideo(original) }
             catch (e: Exception) { Log.w("Frembed", "CS getVideo failed: ${e.message}"); Video(source = original.src) }
         }
+        // 2026-08-08 — ⚠ PISTE ABANDONNÉE, NE PAS LA REFAIRE.
+        //   J'ai cru que les sources natives ★ échouaient faute de cookie Cloudflare, et
+        //   j'allais poser un bypass WebView sur senpai-stream.club. FAUX. Le user a demandé
+        //   la vérification dans un vrai navigateur, et la page de refus dit :
+        //     « Erreur 403 — Ce compartiment ne peut pas être consulté.
+        //       Ce compartiment n'existe pas ou n'est pas accessible publiquement à cette URL. »
+        //   C'est une erreur de STOCKAGE OBJET (bucket S3/Backblaze), pas un challenge anti-bot ;
+        //   Cloudflare n'est que le proxy devant. Le fichier n'existe pas : l'API Frembed
+        //   annonce « Premium » et « Free VF » pour ce titre, mais le seau est vide ou privé.
+        //   Aucun cookie, aucun en-tête, aucune pile réseau n'y changera quoi que ce soit —
+        //   403 identique depuis l'app, depuis un curl externe et depuis le Chrome du user.
+        //   Le code correspondant (résolution cf_clearance + WebView headless sur le CDN) a
+        //   donc été RETIRÉ : il n'ajoutait qu'une résolution coûteuse (2 à 5 s) avant un
+        //   échec certain. À ne réécrire QUE si le CDN se remet à répondre autre chose
+        //   qu'une erreur de compartiment — le 403 ne vient pas d'un challenge anti-bot.
         return when {
             server.video != null -> server.video!!
             else -> Extractor.extract(server.src)
